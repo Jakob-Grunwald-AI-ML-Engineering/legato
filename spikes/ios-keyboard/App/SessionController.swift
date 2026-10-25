@@ -108,9 +108,19 @@ final class SessionController {
             } catch { log("setPreferredInput failed: \(describe(error))") }
             try s.setActive(true)
             logContext("session activated")
-            // From the background this fails with kAUStartIO 'what' in a process the user launched,
-            // and works in one the intent launched.
-            try startEngine()
+            // When activation interrupts Audible, the route briefly has no input (0 Hz, then
+            // kAUStartIO 'what'). Retry while the route settles.
+            var attempt = 0
+            while true {
+                do { try startEngine(); break } catch {
+                    attempt += 1
+                    log("startEngine attempt \(attempt) failed: \(describe(error)); route in=\(routeSummary(inputs: true))")
+                    if attempt >= 8 { throw error }
+                    engine.stop()
+                    try await Task.sleep(for: .milliseconds(150))
+                }
+            }
+            if attempt > 0 { log("startEngine ok after \(attempt) retries") }
         } catch {
             lastError = describe(error)
             log("START FAILED (\(source)): \(describe(error))")
