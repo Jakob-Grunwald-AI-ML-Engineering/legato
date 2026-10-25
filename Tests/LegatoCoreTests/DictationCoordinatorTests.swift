@@ -406,6 +406,67 @@ struct CoordinatorRig {
         #expect(r.activity.calls.count == after)
     }
 
+    // MARK: system stop
+
+    @Test func aSystemStopAfterAFinishedStopNeverStartsADictation() async throws {
+        // Our own setActive(false) on stop raises a route change with no inputs; the app's handler then
+        // asks for a stop while the coordinator is already idle. It must not start a new run.
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(await r.coordinator.stopIfRunning() == nil)
+        #expect(r.built.all.count == 1)
+        #expect(r.log.count("activity.request:starting") == 1)
+        #expect(r.log.count("engine.prepare") == 1)
+        #expect(r.log.count("idle") == 1)
+        // Still idle and usable: the next press starts.
+        #expect(await r.coordinator.toggle() == .started)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func aSystemStopWhileListeningStopsAndCopies() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(await r.coordinator.stopIfRunning() == .stopped("hello world"))
+        #expect(r.clipboard.written == ["hello world"])
+        #expect(await r.history.entries.map(\.text) == ["hello world"])
+        #expect(r.activity.ends.map(\.phase) == [.copied])
+        #expect(r.log.count("idle") == 1)
+        // A second system event for the same loss is a no-op.
+        #expect(await r.coordinator.stopIfRunning() == nil)
+        #expect(r.built.all.count == 1)
+    }
+
+    @Test func aSystemStopWhileIdleDoesNothing() async throws {
+        let r = CoordinatorRig()
+        #expect(await r.coordinator.stopIfRunning() == nil)
+        #expect(r.log.events.isEmpty)
+        #expect(r.built.all.isEmpty)
+    }
+
+    @Test func aSystemStopWhileStartingCancelsTheStart() async throws {
+        let r = CoordinatorRig()
+        r.engine.set(hangInPrepare: true)
+        let first = Task { await r.coordinator.toggle() }
+        #expect(await eventually { r.built.all.first?.runState == .preparing })
+        #expect(await r.coordinator.stopIfRunning() == .stopped(nil))
+        #expect(await first.value == .stopped(nil))
+        #expect(r.log.count("activate") == 0)
+        #expect(r.built.all.count == 1) // cancelled, not restarted
+        #expect(r.activity.ends.count == 1)
+    }
+
+    @Test func aSystemStopWhileStoppingIsIgnored() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        _ = await r.coordinator.toggle()
+        let stopping = Task { await r.coordinator.toggle() }
+        #expect(await eventually { r.log.count("activity.update:finishing") == 1 }) // the stop has begun
+        #expect(await r.coordinator.stopIfRunning() == nil) // nil whether it is still wrapping up or done
+        #expect(await stopping.value == .stopped("hello world"))
+        #expect(r.built.all.count == 1)
+        #expect(r.log.count("idle") == 1)
+    }
+
     // MARK: idle hook
 
     @Test func idleHookFiresOnlyAfterTheActivityEnded() async throws {

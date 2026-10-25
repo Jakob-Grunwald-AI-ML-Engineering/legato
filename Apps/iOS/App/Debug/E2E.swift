@@ -11,6 +11,8 @@ import os
 ///   Also reports the microphone and the speech model as ready.
 /// - `-LegatoFakeReadiness liveActivitiesDisabled|micPermission|assetsMissing`: report that issue.
 /// - `-LegatoForceTapToCopy YES|NO`: sets the `debugForceTapToCopy` setting.
+/// - `-LegatoFakeOtherAudio <ms>`: other audio "plays" for this long from each session's creation, so the
+///   start has to wait for it (`OtherAudioGate`).
 ///
 /// URLs: `legato://toggle` calls `AppController.toggle()`; `legato://interrupt` posts the notification
 /// the audio session sends on an interruption, so the real observer handles it.
@@ -44,13 +46,23 @@ enum E2E {
         }
     }()
 
+    static let fakeOtherAudio: Duration? = {
+        let ms = UserDefaults.standard.integer(forKey: "LegatoFakeOtherAudio")
+        return ms > 0 ? .milliseconds(ms) : nil
+    }()
+
     /// A session wired to the scripted engine, or nil when fake mode is off.
     @MainActor
     static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy) -> DictationSession? {
         guard let engine = fakeEngine else { return nil }
         log("session.make engine=\(engine.id)")
-        return DictationSession(
+        let playingUntil = fakeOtherAudio.map { ContinuousClock.now + $0 }
+        let gated = OtherAudioGate(
             engine: engine,
+            isOtherAudioPlaying: { playingUntil.map { ContinuousClock.now < $0 } ?? false },
+            report: OtherAudioGate.report)
+        return DictationSession(
+            engine: gated,
             source: E2EFakeAudioSource(),
             sessionControl: E2ENoopSessionControl(),
             history: history,

@@ -6,7 +6,7 @@
 # LegatoWidgets (sources: [Keyboard, Shared]), list it under the app's dependencies, and give it the
 # same App Group entitlement.
 #
-# TestFlight builds are Release builds that must keep the exit(0) workaround: pass
+# TestFlight builds are Release builds that keep the audio diagnostics and debug switches: pass
 # OTHER_SWIFT_FLAGS='$(inherited) -D LEGATO_INTERNAL' to xcodebuild (leg 5). App Store builds don't.
 name: Legato
 options:
@@ -44,7 +44,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # APP_TARGET gates the app-only parts of Shared/. LEGATO_INTERNAL marks builds that may carry
-        # the exit(0) workaround and its setting (Debug and TestFlight); App Store builds omit it.
+        # the audio diagnostics and debug switches (Debug and TestFlight); App Store builds omit it.
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_TARGET"
       configs:
         Debug:

@@ -22,7 +22,8 @@ import UIKit
 /// `toggle.end`, `session.step` (each AVAudioSession call: setCategory, setPreferredInput,
 /// setActiveTrue, setActiveFalse, with its own error), `session.activate` / `session.deactivate` /
 /// `session.deactivate.skipped` / `session.release` (the wrapper's view), and `mic.attempt` (one engine
-/// start attempt: index, input sample rate, error). `setActive(true)` and the engine start are separate
+/// start attempt: index, input sample rate, error) and `otherAudio.wait` (the start waited for other
+/// audio to stop: `waitedMs`, `finalOtherAudioPlaying`). `setActive(true)` and the engine start are separate
 /// events, so a failure in one is never attributed to the other. The file is cleared past 1 MB.
 enum AudioDiagnostics {
     static let fileName = "audio-diag.jsonl"
@@ -97,7 +98,6 @@ enum AudioDiagnostics {
             "sessionSampleRate": session.sampleRate,
             "liveActivities": Activity<DictationAttributes>.activities.count,
             "settings": [
-                "restartAfterBackgroundStop": Settings.restartAfterBackgroundStop,
                 "keepSessionActiveBetweenRuns": Settings.keepSessionActiveBetweenRuns,
                 "policy": Settings.audioPolicy.rawValue,
             ] as [String: Any],
@@ -176,6 +176,9 @@ final class AppSessionControl: AudioSessionControlling, Sendable {
 
     private let inner = AudioSessionController(observer: AudioDiagnostics.sessionStep)
     private let state = Mutex(State())
+
+    /// A normal stop skipped its deactivate and nothing has activated the session since.
+    var isHeld: Bool { state.withLock { $0.held } }
 
     var supportedPolicies: Set<AudioPolicy> { inner.supportedPolicies }
 

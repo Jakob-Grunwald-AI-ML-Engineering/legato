@@ -83,6 +83,20 @@ public final class DictationCoordinator {
         }
     }
 
+    /// For system events (interruption, lost input, engine change, media reset): only ever ends a run,
+    /// never begins one, so a late or duplicate event (e.g. the route change our own session
+    /// deactivation raises) cannot start a dictation. Listening: stops like `toggle()`. Starting:
+    /// cancels the start. Returns nil when there was nothing to stop (idle, or a stop or abort is
+    /// already wrapping up).
+    @discardableResult
+    public func stopIfRunning() async -> Outcome? {
+        switch phase {
+        case .starting: return await cancelStart()
+        case .listening: return await stop()
+        case .idle, .stopping, .aborting: return nil
+        }
+    }
+
     // MARK: Start
 
     private func start() async -> Outcome {

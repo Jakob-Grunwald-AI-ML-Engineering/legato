@@ -5,11 +5,10 @@ import LegatoAudio
 import LegatoCore
 import Observation
 import os
-import UIKit
 
 /// The app's single composition root: a thin adapter that wires the system ports into LegatoCore's
 /// `DictationCoordinator`. All dictation logic lives there; this type adds only app state for the UI,
-/// the one history store, and the optional quit-after-stop workaround.
+/// and the one history store.
 @MainActor @Observable
 final class AppController {
     static let shared = AppController()
@@ -60,12 +59,17 @@ final class AppController {
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
                 #if LEGATO_INTERNAL
                 let source = MicSource(onAttempt: AudioDiagnostics.micAttempt)
+                let isOtherAudioPlaying: @Sendable () -> Bool = {
+                    // A held session is already active: nothing is activated from the background.
+                    AVAudioSession.sharedInstance().isOtherAudioPlaying && !sessionControl.isHeld
+                }
                 #else
                 let source = MicSource()
                 let sessionControl = AudioSessionController()
+                let isOtherAudioPlaying: @Sendable () -> Bool = { AVAudioSession.sharedInstance().isOtherAudioPlaying }
                 #endif
                 return DictationSession(
-                    engine: engine,
+                    engine: OtherAudioGate(engine: engine, isOtherAudioPlaying: isOtherAudioPlaying, report: OtherAudioGate.report),
                     source: source,
                     sessionControl: sessionControl,
                     history: history,
@@ -91,6 +95,22 @@ final class AppController {
         AudioDiagnostics.log("toggle.begin", ["isDictating": isDictating])
         #endif
         let outcome = await coordinator.toggle()
+        await didFinish(outcome, finishedBefore: finishedBefore)
+        return outcome
+    }
+
+    /// Ends a running dictation (or cancels a start in progress) and does nothing otherwise; never
+    /// starts one. For system events only: a late event must not begin a new run. Nil when there was
+    /// nothing to stop.
+    @discardableResult
+    func stopIfRunning() async -> DictationCoordinator.Outcome? {
+        let finishedBefore = idleCount
+        guard let outcome = await coordinator.stopIfRunning() else { return nil }
+        await didFinish(outcome, finishedBefore: finishedBefore)
+        return outcome
+    }
+
+    private func didFinish(_ outcome: DictationCoordinator.Outcome, finishedBefore: Int) async {
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("toggle.end", ["outcome": Self.outcomeKind(outcome)])
         #endif
@@ -99,7 +119,6 @@ final class AppController {
         #if DEBUG
         E2E.log("outcome \(Self.describe(outcome))")
         #endif
-        return outcome
     }
 
     #if LEGATO_INTERNAL
@@ -130,29 +149,15 @@ final class AppController {
         idleCount += 1
         isDictating = false
         Task { await refreshLastTranscript() }
-        #if LEGATO_INTERNAL
-        quitIfBackgrounded()
-        #endif
     }
-
-    #if LEGATO_INTERNAL
-    /// The `restartAfterBackgroundStop` workaround (see `Settings`): after a run that ended in the
-    /// background, quit so the next intent press is a fresh launch. Absent from App Store builds.
-    private func quitIfBackgrounded() {
-        guard Settings.restartAfterBackgroundStop, UIApplication.shared.applicationState == .background else { return }
-        Task {
-            try? await Task.sleep(for: .milliseconds(600))
-            // The user may have opened the app in the meantime, or started again.
-            if UIApplication.shared.applicationState == .background, !isDictating { exit(0) }
-        }
-    }
-    #endif
 
     // MARK: Interruptions
 
     /// Stops a running dictation gracefully (committed text reaches clipboard and history) because the
-    /// system took the microphone away. A no-op when idle. If the session is already dead, the
-    /// coordinator's stop path falls into its abort path, which salvages the same text.
+    /// system took the microphone away. Goes through `stopIfRunning`, never `toggle`: our own
+    /// deactivation at the end of a stop raises a route change with no inputs, and that late event must
+    /// not start a new dictation. If the session is already dead, the coordinator's stop path falls into
+    /// its abort path, which salvages the same text.
     ///
     /// `releasesHeldSession`: also deactivate an audio session that the "keep session active" debug
     /// switch is holding between runs (interruption, media reset).
@@ -160,12 +165,17 @@ final class AppController {
         #if LEGATO_INTERNAL
         if releasesHeldSession || isDictating { sessionControl.release(reason: reason) }
         #endif
-        guard isDictating else { return }
-        Self.log.info("stopping dictation: \(reason, privacy: .public)")
-        #if DEBUG
-        E2E.log("system-stop reason=\(E2E.quote(reason))")
-        #endif
-        Task { _ = await toggle() }
+        Task {
+            #if DEBUG
+            E2E.log("system-event reason=\(E2E.quote(reason))")
+            #endif
+            if await stopIfRunning() != nil {
+                Self.log.info("stopped dictation: \(reason, privacy: .public)")
+                #if DEBUG
+                E2E.log("system-stop reason=\(E2E.quote(reason))")
+                #endif
+            }
+        }
     }
 
     /// Observers are installed once, from `init` of the singleton. Handlers run on the main queue; only

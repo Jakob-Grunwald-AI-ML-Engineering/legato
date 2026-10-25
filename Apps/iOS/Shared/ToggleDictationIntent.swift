@@ -9,6 +9,9 @@ import Foundation
 /// process that triggered it. `.foreground(.dynamic)` lets `perform()` ask for the foreground, which it
 /// does only when onboarding is needed; a successful dictation never leaves the background.
 ///
+/// Returns a `DictationState`, so a Shortcut can branch on it (Pause, Toggle Legato dictation, then
+/// "If Dictation State is Stopped" Play). The Action Button, the control and the Live Activity ignore it.
+///
 /// This file compiles into the app and the widget extension. Everything that touches LegatoKit sits
 /// inside `#if APP_TARGET`; the widget copy refuses to run.
 struct ToggleDictationIntent: AudioRecordingIntent, LiveActivityIntent {
@@ -27,8 +30,9 @@ struct ToggleDictationIntent: AudioRecordingIntent, LiveActivityIntent {
     }
 
     @MainActor
-    func perform() async throws -> some IntentResult {
+    func perform() async throws -> some IntentResult & ReturnsValue<DictationState> {
         guard Self.runsInApp else { throw ToggleDictationError.appRequired }
+        var state = DictationState.failed
         #if APP_TARGET
         switch await AppController.shared.toggle() {
         case .needsOnboarding:
@@ -37,12 +41,38 @@ struct ToggleDictationIntent: AudioRecordingIntent, LiveActivityIntent {
                 throw ToggleDictationError.setupRequired
             }
             try await continueInForeground(alwaysConfirm: false)
-        case .started, .stopped, .failed, .busy:
-            break
+            state = .needsSetup
+        case .started: state = .started
+        case .stopped: state = .stopped
+        case .failed: state = .failed
+        case .busy: state = .busy
         }
         #endif
-        return .result()
+        return .result(value: state)
     }
+}
+
+/// What a press did, as a Shortcuts value: "If Dictation State is Stopped".
+enum DictationState: String, AppEnum {
+    /// Listening now; the next press stops.
+    case started
+    /// The run is over (text copied, or nothing was recognized, or a start was cancelled).
+    case stopped
+    /// Not started: Legato needs setup (permission, Live Activities or the speech model).
+    case needsSetup
+    /// The start failed.
+    case failed
+    /// A stop was already wrapping up; this press did nothing.
+    case busy
+
+    static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Dictation State")
+    static let caseDisplayRepresentations: [DictationState: DisplayRepresentation] = [
+        .started: "Started",
+        .stopped: "Stopped",
+        .needsSetup: "Needs setup",
+        .failed: "Failed",
+        .busy: "Busy",
+    ]
 }
 
 enum ToggleDictationError: Error, CustomLocalizedStringResourceConvertible {

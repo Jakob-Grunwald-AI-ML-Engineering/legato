@@ -13,7 +13,6 @@ enum AppGroup {
 enum Settings {
     private enum Key {
         static let audioPolicy = "audioPolicy"
-        static let restartAfterBackgroundStop = "restartAfterBackgroundStop"
         static let keepSessionActiveBetweenRuns = "keepSessionActiveBetweenRuns"
         static let debugShowPauseOthers = "debugShowPauseOthers"
         static let debugForceTapToCopy = "debugForceTapToCopy"
@@ -33,28 +32,6 @@ enum Settings {
     /// Policies the picker offers: the package's list, plus `.pauseOthers` while the debug toggle is on.
     static var offeredPolicies: [AudioPolicy] {
         debugShowPauseOthers ? AudioPolicy.offeredPolicies + [.pauseOthers] : AudioPolicy.offeredPolicies
-    }
-
-    /// Workaround for a device finding (spikes/ios-keyboard/FINDINGS.md): a second background mic start
-    /// in the same process fails while other audio plays, so the app quits (`exit(0)`) shortly after a
-    /// background stop and every press is a fresh launch. Default on.
-    ///
-    /// Only builds with the `LEGATO_INTERNAL` compilation condition (Debug; TestFlight via
-    /// `OTHER_SWIFT_FLAGS='$(inherited) -D LEGATO_INTERNAL'`) contain the setting and the `exit(0)`
-    /// call. App Store builds compile both out and always read false.
-    static var restartAfterBackgroundStop: Bool {
-        get {
-            #if LEGATO_INTERNAL
-            AppGroup.defaults.object(forKey: Key.restartAfterBackgroundStop) as? Bool ?? true
-            #else
-            false
-            #endif
-        }
-        set {
-            #if LEGATO_INTERNAL
-            AppGroup.defaults.set(newValue, forKey: Key.restartAfterBackgroundStop)
-            #endif
-        }
     }
 
     /// Debug experiment (background second-start failure): a normal stop leaves the audio session active

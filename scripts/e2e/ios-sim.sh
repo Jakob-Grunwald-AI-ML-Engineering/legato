@@ -113,7 +113,7 @@ if [ "$mode" = release-check ]; then
   # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
-    AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns)
+    AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio otherAudio.wait)
   scan() { # every Mach-O file in the bundle
     find "$1" -type f \( -name Legato -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }
@@ -341,7 +341,7 @@ scenario_d() {
   assert_count "two fresh sessions" "session.make" 2
   assert_eq "history has both entries" "2" "$(history_texts | grep -c -x -F -- "$TEXT")"
   local pids; pids="$(sed -n 's/.*Legato\[\([0-9]*\):.*/\1/p' "$LOG" | sort -u | wc -l | tr -d ' ')"
-  assert_eq "same process throughout (no exit(0))" "1" "$pids"
+  assert_eq "same process throughout (the app never quits itself)" "1" "$pids"
 }
 
 scenario_e() {
@@ -377,8 +377,60 @@ scenario_f() {
   wait_log "e2e outcome kind=stopped" 10
 }
 
+waited_ms() { grep -F -- "otherAudio.wait" "$LOG" | head -1 | sed -n 's/.*waitedMs=\([0-9]*\).*/\1/p'; }
+
+scenario_g() {
+  # Other audio "plays" for a while after the session is built (-LegatoFakeOtherAudio <ms>): the start
+  # waits for it to stop (OtherAudioGate), but never longer than 1.2 s.
+  begin "g. waits for other audio" -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio 500 -LegatoForceTapToCopy NO || return
+  trigger toggle
+  wait_log "e2e outcome kind=started" 10
+  local w; w="$(waited_ms)"
+  if [ -n "$w" ] && [ "$w" -ge 400 ] && [ "$w" -le 1000 ]; then record PASS "short music: start waited ~500 ms ($w ms)"
+  else record FAIL "short music: start waited ~500 ms" "waited <${w:-none}> ms"; fi
+  assert_log "short music: it had stopped by then" "otherAudio.wait waitedMs=$w playing=false"
+  trigger toggle
+  wait_log "e2e outcome kind=stopped" 10
+  SCENARIO="g. gives up on other audio"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio 5000 -LegatoForceTapToCopy NO || return
+  trigger toggle
+  wait_log "e2e outcome kind=started" 10
+  w="$(waited_ms)"
+  if [ -n "$w" ] && [ "$w" -ge 1100 ] && [ "$w" -le 1900 ]; then record PASS "long music: start waited at most ~1.2 s ($w ms)"
+  else record FAIL "long music: start waited at most ~1.2 s" "waited <${w:-none}> ms"; fi
+  assert_log "long music: still playing, started anyway" "otherAudio.wait waitedMs=$w playing=true"
+  trigger toggle
+  wait_log "e2e outcome kind=stopped" 10
+}
+
+scenario_h() {
+  # Regression: the system event raised by our own session deactivation (route change, interruption)
+  # arrives after the stop finished. It must never start a new dictation.
+  begin "h. late system event after a stop" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
+  trigger toggle
+  wait_log "e2e outcome kind=started" 10
+  sleep 1.5
+  trigger toggle
+  wait_log "e2e outcome kind=stopped" 10
+  sleep 0.5
+  trigger interrupt
+  wait_log 'system-event reason="interruption began"' 10
+  sleep 1.5
+  assert_log "the late event reached the system-event path" 'system-event reason="interruption began"'
+  assert_no_log "no system-stop (nothing was running)" "system-stop"
+  assert_count "still exactly one outcome=started" "e2e outcome kind=started" 1
+  assert_count "still exactly one activity requested" "activity.request phase=starting" 1
+  assert_count "still exactly one session built" "session.make" 1
+  # Idle is idle: the next press is a normal start.
+  trigger toggle
+  wait_log_n "e2e outcome kind=started" 2 10
+  assert_count "the next press starts" "e2e outcome kind=started" 2
+  trigger toggle
+  wait_log_n "e2e outcome kind=stopped" 2 10
+}
+
 t_run=$SECONDS
-for s in a b c d e f; do "scenario_$s"; done
+for s in a b c d e f g h; do "scenario_$s"; done
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report
