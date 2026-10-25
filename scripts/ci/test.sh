@@ -17,5 +17,23 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
-echo "::error::$mode not wired yet: add the xcodebuild/swift build (quick) and test (full) commands here."
-exit 1
+select_xcode
+xcodebuild -version
+
+scheme=LegatoKit-Package
+
+if [ "$mode" = quick ]; then
+  swift build
+  xcodebuild build -quiet -scheme "$scheme" -destination 'generic/platform=iOS Simulator'
+  exit 0
+fi
+
+udid="$(pick_iphone_udid)"
+if [ -z "$udid" ]; then
+  echo "::error::No available iPhone simulator with an iOS 26+ runtime."
+  exit 1
+fi
+echo "Simulator: $udid"
+
+swift test
+xcodebuild test -quiet -scheme "$scheme" -destination "platform=iOS Simulator,id=$udid"

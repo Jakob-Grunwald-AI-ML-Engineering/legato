@@ -20,9 +20,8 @@ permissions:
 
 jobs:
   build-test:
-    # When the first Swift target lands, switch runs-on to a pinned macOS
-    # image and select Xcode from .xcode-version; the script enforces this.
-    runs-on: ubuntu-24.04
+    # Xcode is selected from .xcode-version by scripts/ci/lib.sh.
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
