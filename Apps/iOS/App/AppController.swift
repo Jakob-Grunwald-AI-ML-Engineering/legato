@@ -1,3 +1,4 @@
+import AVFAudio
 import Foundation
 import LegatoAppleSpeech
 import LegatoAudio
@@ -22,7 +23,8 @@ final class AppController {
     private(set) var status = ReadinessStatus()
 
     @ObservationIgnored let engine = AppleSpeechEngine()
-    @ObservationIgnored let history: JSONLHistoryStore
+    /// The one history store; views go through the methods below, never construct their own.
+    @ObservationIgnored private let history: JSONLHistoryStore
     @ObservationIgnored let pasteboard = PasteboardClient()
     @ObservationIgnored private let readiness = SystemReadiness()
     @ObservationIgnored private let coordinator: DictationCoordinator
@@ -54,6 +56,7 @@ final class AppController {
                     linger: .zero)
             })
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
+        installInterruptionObservers()
     }
 
     // MARK: Dictation
@@ -89,7 +92,65 @@ final class AppController {
     }
     #endif
 
+    // MARK: Interruptions
+
+    /// Stops a running dictation gracefully (committed text reaches clipboard and history) because the
+    /// system took the microphone away. A no-op when idle. If the session is already dead, the
+    /// coordinator's stop path falls into its abort path, which salvages the same text.
+    private func stopForSystemEvent(_ reason: String) {
+        guard isDictating else { return }
+        Self.log.info("stopping dictation: \(reason, privacy: .public)")
+        Task { _ = await toggle() }
+    }
+
+    /// Observers are installed once, from `init` of the singleton. Handlers run on the main queue; only
+    /// Sendable values (ints, strings) leave the notification before hopping to the MainActor.
+    private func installInterruptionObservers() {
+        let center = NotificationCenter.default
+
+        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
+            Task { @MainActor in self?.stopForSystemEvent("interruption began") }
+        }
+
+        center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            let previous = (note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)
+                .map { Set($0.inputs.map(\.uid)) } ?? []
+            let current = Set(AVAudioSession.sharedInstance().currentRoute.inputs.map(\.uid))
+            guard InputRoute.shouldStop(
+                reasonIsOldDeviceUnavailable: reason == .oldDeviceUnavailable,
+                previousInputs: previous,
+                currentInputs: current)
+            else { return }
+            Task { @MainActor in self?.stopForSystemEvent("input lost") }
+        }
+
+        center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.stopForSystemEvent("engine configuration change") }
+        }
+
+        center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.stopForSystemEvent("media services reset") }
+        }
+    }
+
     // MARK: State for the UI
+
+    func recentEntries(limit: Int = 100) async -> [DictationEntry] {
+        (try? await history.recent(limit: limit)) ?? []
+    }
+
+    func deleteEntry(id: UUID) async {
+        try? await history.delete(id: id)
+        await refreshLastTranscript()
+    }
+
+    func copy(_ text: String) {
+        pasteboard.forceWrite(text)
+    }
 
     func refreshReadiness() async {
         status = await readiness.snapshot()
@@ -105,5 +166,22 @@ final class AppController {
         guard let text = (try? await history.recent(limit: 1))?.first?.text else { return }
         pasteboard.forceWrite(text)
         lastTranscript = text
+    }
+}
+
+/// The "should this route change stop dictation?" decision, pure so it can be reasoned about.
+/// Input is pinned to the built-in mic, so output-only changes (headphones out) never stop; only losing
+/// the input does.
+enum InputRoute {
+    /// - Parameters:
+    ///   - reasonIsOldDeviceUnavailable: the change reason is `.oldDeviceUnavailable`.
+    ///   - previousInputs: port UIDs of the route's inputs before the change.
+    ///   - currentInputs: port UIDs of the route's inputs now.
+    /// - Returns: true when no input is available, or a device went away that had been an input.
+    static func shouldStop(
+        reasonIsOldDeviceUnavailable: Bool, previousInputs: Set<String>, currentInputs: Set<String>
+    ) -> Bool {
+        if currentInputs.isEmpty { return true }
+        return reasonIsOldDeviceUnavailable && !previousInputs.isEmpty && !previousInputs.isSubset(of: currentInputs)
     }
 }
