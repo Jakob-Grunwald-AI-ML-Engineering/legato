@@ -36,8 +36,8 @@ private func ensureInstalled(_ manager: ModelManager, _ id: String) async throws
 }
 
 /// Reads a fixture and resamples it to 16 kHz mono Float32.
-private func fixtureSamples(_ name: String) throws -> [Float] {
-    let url = try #require(Bundle.module.url(forResource: name, withExtension: "aiff", subdirectory: "Fixtures"))
+private func fixtureSamples(_ name: String, extension ext: String = "aiff") throws -> [Float] {
+    let url = try #require(Bundle.module.url(forResource: name, withExtension: ext, subdirectory: "Fixtures"))
     let file = try AVAudioFile(forReading: url)
     let inBuf = try #require(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)))
     try file.read(into: inBuf)
@@ -142,6 +142,26 @@ struct RealEngineTests {
         let hinted = try await dictate(pinned, samples: samples)
         print("NEMOTRON-DE de hint prepare \(hinted.prepare): \"\(hinted.text)\"")
         #expect(hinted.text.lowercased().contains("diktat"))
+    }
+
+    /// 19 alternating German and English sentences (`Sources/legato-bench/Clips/README.md`) on `auto`: every
+    /// sentence is committed. A session locale would pin one language and drop the other's sentences.
+    @Test(.enabled(if: realEngineEnabled, "set LEGATO_REAL_ENGINE=1 to run against the on-device models"))
+    func nemotronOnAutoKeepsEverySentenceOfTheMixedClip() async throws {
+        let manager = makeManager()
+        try await ensureInstalled(manager, FluidAudioModels.nemotronID(.multilingual, chunkMs: 1120))
+        // Trailing silence lets the endpointer commit the last sentence, as it would live.
+        let samples = try fixtureSamples("mixed-long", extension: "m4a") + [Float](repeating: 0, count: 16_000 * 2)
+
+        let engine = NemotronEngine(variant: .multilingual, chunkMs: 1120, models: manager)
+        let result = try await dictate(engine, samples: samples)
+        let finals = result.events.filter(\.isFinal)
+        print("NEMOTRON-MIXED \(finals.count) finals: \"\(result.text)\"")
+        #expect(finals.count == 19)
+        let lowered = result.text.lowercased()
+        for phrase in ["guten morgen", "backend", "ich schlage vor", "first milestone", "feierabend"] {
+            #expect(lowered.contains(phrase), "missing \"\(phrase)\"")
+        }
     }
 
     @Test(.enabled(if: realEngineEnabled, "set LEGATO_REAL_ENGINE=1 to run against the on-device models"))

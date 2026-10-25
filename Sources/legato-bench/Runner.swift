@@ -113,6 +113,14 @@ struct BenchConfig {
     var modelID: String?
     var tierMs: Int?
     var silenceMs: Int?
+
+    /// The engine name of Parakeet EOU configs (the `--engines` flag spells it `eou`).
+    static let eouName = "parakeet-eou"
+
+    /// Whether the engine can transcribe the clip: Parakeet EOU is English only.
+    func accepts(_ clip: Clip) -> Bool {
+        engine != Self.eouName || clip.languages == ["en"]
+    }
 }
 
 struct BenchRunner {
@@ -136,7 +144,7 @@ struct BenchRunner {
             if let id = config.modelID { try await ensureInstalled(id, models: models) }
             var result = Bench.ConfigResult(
                 engine: config.engine, model: config.modelID, tierMs: config.tierMs, silenceMs: config.silenceMs, runs: [])
-            let compatible = clips.filter { config.engine != "eou" || $0.languages == ["en"] }
+            let compatible = clips.filter(config.accepts)
             if let warm = compatible.first { await warmUp(config, clip: warm, models: models) }
             for clip in compatible {
                 for _ in 0..<options.runs {
@@ -175,7 +183,7 @@ struct BenchRunner {
                 for chunk in EouChunk.allCases where tierAllowed(chunk.rawValue) {
                     for silence in options.silences {
                         configs.append(BenchConfig(
-                            engine: "parakeet-eou", modelID: FluidAudioModels.eouID(chunk), tierMs: chunk.rawValue,
+                            engine: BenchConfig.eouName, modelID: FluidAudioModels.eouID(chunk), tierMs: chunk.rawValue,
                             silenceMs: silence))
                     }
                 }
@@ -216,16 +224,20 @@ struct BenchRunner {
 
     // MARK: playing a clip
 
-    func locale(for clip: Clip) -> Locale {
-        clip.name == "de" ? Locale(identifier: "de-DE") : Locale(identifier: "en-US")
+    /// The session locale for a clip: its language, or `nil` for a clip that mixes languages. A locale is a hard
+    /// language hint for the FluidAudio engines (Nemotron drops speech in the other language), and `nil` lets
+    /// them run on `auto`. Apple Speech takes one locale per session and falls back to the device locale.
+    func locale(for clip: Clip) -> Locale? {
+        guard clip.languages.count == 1, let language = clip.languages.first else { return nil }
+        return Locale(identifier: language == "de" ? "de-DE" : "en-US")
     }
 
     /// Prepares, installing Apple's assets once if they are missing.
-    func prepare(_ engine: any DictationEngine, locale: Locale) async throws {
+    func prepare(_ engine: any DictationEngine, locale: Locale?) async throws {
         do {
             _ = try await engine.prepare(locale: locale)
         } catch DictationError.assetsNotInstalled where engine.id == "apple-speech" {
-            log("  installing Apple Speech assets for \(locale.identifier) ...")
+            log("  installing Apple Speech assets for \(locale?.identifier ?? "the device locale") ...")
             for await _ in engine.installAssets(locale: locale) {}
             _ = try await engine.prepare(locale: locale)
         }

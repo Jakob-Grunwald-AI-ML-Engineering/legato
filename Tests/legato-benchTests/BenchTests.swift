@@ -204,3 +204,46 @@ private func tone(_ seconds: Double, amp: Float = 0.1) -> [Float] {
         #expect(lines[2].contains("500"))
     }
 }
+
+#if os(macOS)
+/// A clip with two languages must not pin one of them: a session locale is a hard language hint for the
+/// FluidAudio engines, and pinning en-US on the mixed clip made Nemotron drop or mangle the German sentences.
+@Suite struct SessionLocaleTests {
+    private let runner = BenchRunner(options: BenchCLI.Options())
+
+    private func clip(_ name: String) -> Clip {
+        Clip(name: name, languages: Clip.known[name] ?? [], samples: [])
+    }
+
+    @Test func mixedClipRunsWithoutALanguageHint() {
+        let locale: Locale? = runner.locale(for: clip("mixed-long"))
+        #expect(locale == nil)
+    }
+
+    @Test func singleLanguageClipsKeepTheirOwnLocale() {
+        let german: Locale? = runner.locale(for: clip("de"))
+        let english: Locale? = runner.locale(for: clip("en"))
+        #expect(german?.identifier == "de-DE")
+        #expect(english?.identifier == "en-US")
+    }
+}
+
+/// Parakeet EOU is English only: German or mixed clips through it produce garbage that skews its pooled latencies
+/// (a 6.7 s "first word" on the mixed clip made EOU-160 look like a 3.6 s engine).
+@Suite struct ClipCompatibilityTests {
+    private func clip(_ name: String) -> Clip { Clip(name: name, languages: Clip.known[name] ?? [], samples: []) }
+    private let eou = BenchConfig(engine: "parakeet-eou", modelID: "parakeet-eou-160", tierMs: 160, silenceMs: 800)
+    private let nemotron = BenchConfig(engine: "nemotron-multilingual", modelID: "nemotron-multilingual-560", tierMs: 560, silenceMs: 800)
+
+    @Test func eouOnlyPlaysEnglishClips() {
+        #expect(eou.accepts(clip("en")))
+        #expect(!eou.accepts(clip("de")))
+        #expect(!eou.accepts(clip("mixed-long")))
+    }
+
+    @Test func multilingualEnginesPlayEveryClip() {
+        for name in ["en", "de", "mixed-long"] { #expect(nemotron.accepts(clip(name))) }
+        #expect(BenchConfig(engine: "apple-speech").accepts(clip("mixed-long")))
+    }
+}
+#endif
