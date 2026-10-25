@@ -1,0 +1,50 @@
+{
+  "date" : "2026-10-25T15:11:04Z",
+  "fluidAudio" : "0.17.7",
+  "language" : "auto",
+  "macOS" : "Version 26.6.2 (Build 25G83)",
+  "me" : {
+    "chunkCount" : 13,
+    "firstTextS" : 1.92890202999115,
+    "lagMsMax" : 849.8660326004028,
+    "lagMsMean" : 440.3457183104295,
+    "partialUpdates" : 12,
+    "procMsMax" : 849.649916,
+    "procMsMean" : 440.09909592307696,
+    "stats" : {
+      "buffers" : 151,
+      "frames16k" : 241392,
+      "nativeFormat" : "48000.0 Hz, 1 ch",
+      "peak" : 0.29238325,
+      "sumSquares" : 455.0473359330182,
+      "zeroBuffers" : 0
+    },
+    "text" : "And it's still das ist ein festes System Audios. This is a test of the system audio capture. Das ist ein Test des Justinaudios Like I'm. This is a test of the system audio capture"
+  },
+  "micPermission" : "authorized",
+  "model" : "Nemotron multilingual 0.6B, latin\/1120ms",
+  "modelLoadSeconds" : 19.71017098426819,
+  "notes" : [
+
+  ],
+  "requestedSeconds" : 15,
+  "tapExcludedOwnProcess" : true,
+  "them" : {
+    "chunkCount" : 13,
+    "firstTextS" : 1.7395780086517334,
+    "lagMsMax" : 489.40205574035645,
+    "lagMsMean" : 327.7256305401142,
+    "partialUpdates" : 12,
+    "procMsMax" : 489.362666,
+    "procMsMean" : 327.67135561538464,
+    "stats" : {
+      "buffers" : 1421,
+      "frames16k" : 242512,
+      "nativeFormat" : "48000.0 Hz, 2 ch",
+      "peak" : 0.8680676,
+      "sumSquares" : 3397.526356301465,
+      "zeroBuffers" : 195
+    },
+    "text" : "And it's still das ist ein festes System Audios. This is a test of the system audio capture. Das ist ein Test des System audios. This is a test of the system audio capture"
+  }
+}

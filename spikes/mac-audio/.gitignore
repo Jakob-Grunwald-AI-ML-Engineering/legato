@@ -1,0 +1,6 @@
+*.xcodeproj
+build/
+selftest.log
+selftest-*.wav
+Info.plist
+LegatoSpike.entitlements

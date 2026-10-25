@@ -1,0 +1,38 @@
+name: LegatoSpike
+options:
+  bundleIdPrefix: de.gruenwald.legato
+  deploymentTarget:
+    macOS: "14.4"
+packages:
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio.git
+    exactVersion: 0.17.7
+targets:
+  LegatoSpike:
+    type: application
+    platform: macOS
+    sources: [Sources]
+    dependencies:
+      - package: FluidAudio
+        product: FluidAudio
+    entitlements:
+      path: LegatoSpike.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Legato Spike
+        LSMinimumSystemVersion: "14.4"
+        NSMicrophoneUsageDescription: Legato transcribes your microphone as the "Me" side of meeting notes.
+        NSAudioCaptureUsageDescription: Legato transcribes system audio (other call participants) as the "Them" side of meeting notes.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.spike3
+        PRODUCT_NAME: LegatoSpike
+        DEVELOPMENT_TEAM: XWSGN23W75
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
