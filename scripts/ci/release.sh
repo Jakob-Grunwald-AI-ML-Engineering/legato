@@ -3,7 +3,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-if ! has_swift_targets; then
+if ! has_app_targets; then
   echo "::warning::live moved, but there are no app targets yet — nothing shipped."
   exit 0
 fi
