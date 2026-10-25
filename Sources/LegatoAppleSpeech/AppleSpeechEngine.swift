@@ -25,31 +25,12 @@ public final class AppleSpeechEngine: DictationEngine {
     // MARK: Assets
 
     public func installAssets(locale: Locale?) -> AsyncStream<Double> {
-        AsyncStream { continuation in
-            let task = Task {
-                do {
-                    let resolved = try await Self.resolve(locale)
-                    try await Self.reserve(resolved)
-                    let transcriber = Self.makeTranscriber(resolved)
-                    if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                        let progress = request.progress
-                        let poll = Task {
-                            while !Task.isCancelled {
-                                continuation.yield(progress.fractionCompleted)
-                                try? await Task.sleep(for: .milliseconds(250))
-                            }
-                        }
-                        defer { poll.cancel() }
-                        try await request.downloadAndInstall()
-                    }
-                } catch {
-                    // The stream carries progress only; a failed install is visible to the
-                    // caller as a stream that ends below 1.0 and a following `prepare` error.
-                }
-                if !Task.isCancelled { continuation.yield(1.0) }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
+        AssetInstallProgress.stream {
+            let resolved = try await Self.resolve(locale)
+            try await Self.reserve(resolved)
+            let transcriber = Self.makeTranscriber(resolved)
+            guard let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) else { return nil }
+            return AssetInstall(progress: request.progress, run: { try await request.downloadAndInstall() })
         }
     }
 
@@ -89,8 +70,9 @@ public final class AppleSpeechEngine: DictationEngine {
             }
 
             let feeder = Task {
+                let packer = PCMStreamPacker(format: prepared.format)
                 for await chunk in input {
-                    if let buffer = PCMPacker.buffer(from: chunk, format: prepared.format) {
+                    if let buffer = packer.buffer(from: chunk) {
                         analyzerContinuation.yield(AnalyzerInput(buffer: buffer))
                     }
                 }
@@ -140,23 +122,14 @@ public final class AppleSpeechEngine: DictationEngine {
         SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
     }
 
-    /// Reserves `locale`; at the reservation cap, releases the oldest reservation and retries once.
+    /// Reserves `locale`; at the reservation cap, releases the oldest reservation first.
     private static func reserve(_ locale: Locale) async throws {
-        if (try? await AssetInventory.reserve(locale: locale)) == true { return }
-        let reserved = await AssetInventory.reservedLocales
-        if reserved.contains(where: { $0.identifier == locale.identifier }) { return }
-        if let oldest = reserved.first {
-            _ = await AssetInventory.release(reservedLocale: oldest)
-        }
-        do {
-            guard try await AssetInventory.reserve(locale: locale) else {
-                throw AppleSpeechError.reservationFailed(locale.identifier)
-            }
-        } catch let error as AppleSpeechError {
-            throw error
-        } catch {
-            throw AppleSpeechError.reservationFailed(locale.identifier)
-        }
+        try await LocaleReservation.reserve(
+            locale,
+            maximum: AssetInventory.maximumReservedLocales,
+            reserved: { await AssetInventory.reservedLocales },
+            attempt: { try await AssetInventory.reserve(locale: $0) },
+            release: { await AssetInventory.release(reservedLocale: $0) })
     }
 
     private static func seconds(_ range: CMTimeRange) -> Range<TimeInterval>? {

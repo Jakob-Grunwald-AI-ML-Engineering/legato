@@ -26,6 +26,10 @@ public protocol HistoryStore: Sendable {
 }
 
 /// One JSON object per line. Single writer (the app); extensions only read.
+///
+/// Share exactly one instance per file: the actor serializes access only within an instance, so a
+/// second instance (or process) writing the same file can interleave appends with `delete`'s
+/// read-modify-write and lose entries. There is no file locking.
 public actor JSONLHistoryStore: HistoryStore {
     public let fileURL: URL
 

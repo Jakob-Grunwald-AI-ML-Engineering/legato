@@ -3,7 +3,7 @@ import LegatoCore
 import Synchronization
 
 public enum MicSourceError: Error, Sendable, Equatable {
-    /// `route()` without a preceding `start(format:)`.
+    /// `route()` without a preceding `start(format:)`, or after the engine stopped.
     case notArmed
     /// The input node reported a zero sample rate or channel count (session not ready).
     case invalidInputFormat
@@ -64,7 +64,7 @@ public final class MicSource: AudioSource {
     }
 
     public func route() async throws -> AsyncStream<AudioChunk> {
-        guard state.withLock({ $0.engine != nil }) else { throw MicSourceError.notArmed }
+        guard state.withLock({ $0.engine?.isRunning == true }) else { throw MicSourceError.notArmed }
         return makeStream()
     }
 

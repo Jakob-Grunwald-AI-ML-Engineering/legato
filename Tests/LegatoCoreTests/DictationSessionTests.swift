@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import LegatoCore
 
@@ -13,17 +14,32 @@ struct Rig {
     let session: DictationSession
 
     init(linger: Duration = .zero, policy: AudioPolicy = .default,
-         script: [TranscriptEvent] = [.init(text: "hello", isFinal: false), .init(text: "hello world", isFinal: true)]) {
+         script: [TranscriptEvent] = [.init(text: "hello", isFinal: false), .init(text: "hello world", isFinal: true)],
+         sleep: (@Sendable (Duration) async throws -> Void)? = nil) {
         engine = FakeEngine(log: log)
         engine.set(script: script)
         source = FakeSource(log: log)
         control = FakeSessionControl(log: log)
         session = DictationSession(
             engine: engine, source: source, sessionControl: control, history: history,
-            policy: policy, linger: linger, sleep: clock.sleep,
+            policy: policy, linger: linger, sleep: sleep ?? clock.sleep,
             now: { Date(timeIntervalSince1970: 100) }
         )
     }
+}
+
+/// Collects everything a session publishes on `edits`.
+@MainActor
+final class EditRecorder {
+    private(set) var edits: [TranscriptEdit] = []
+    private var task: Task<Void, Never>?
+
+    init(_ stream: AsyncStream<TranscriptEdit>) {
+        task = Task { [weak self] in
+            for await e in stream { self?.edits.append(e) }
+        }
+    }
+    deinit { task?.cancel() }
 }
 
 @MainActor
@@ -143,6 +159,103 @@ struct Rig {
         #expect(r.session.runState == .idle && r.session.leaseState == .idle)
     }
 
+    // MARK: run isolation
+
+    @Test func finishFailureDoesNotLeakRunOneIntoRunTwo() async throws {
+        let r = Rig(script: [.init(text: "run1", isFinal: true)])
+        // Run 1: finish() throws while its results stream stays open and keeps emitting.
+        r.engine.set(finishError: TestError(tag: "fin"), holdStreamOpen: true)
+        try await r.session.start()
+        await #expect(throws: TestError(tag: "fin")) { _ = try await r.session.stop() }
+
+        r.engine.clearFinishError()
+        r.engine.set(script: [.init(text: "run2", isFinal: true)], holdStreamOpen: false)
+        try await r.session.start()
+        // Late traffic from run 1's stream: an event, then a failure.
+        r.engine.emit(.init(text: " LATE", isFinal: true), run: 0)
+        r.engine.failStream(with: TestError(tag: "late"), run: 0)
+        try? await Task.sleep(for: .milliseconds(50))
+
+        #expect(r.session.runState == .listening)
+        #expect(r.session.lastError == nil)
+        let entry = try await r.session.stop()
+        #expect(entry?.text == "run2")
+        #expect(await r.history.entries.map(\.text) == ["run2"])
+    }
+
+    @Test func startAfterCancelledStartIsNotShadowedByTheOldCallersDefer() async throws {
+        let r = Rig()
+        r.engine.set(hangInPrepare: true)
+        let a = Task { try await r.session.start() }
+        #expect(await eventually { r.session.runState == .preparing })
+        // B starts the moment A's run is idle again: after A's task completed, before A's caller
+        // (and its `defer`) resumes. Yielding keeps B's job ahead of A's resumption in the queue.
+        let b = Task {
+            while r.session.runState != .idle { await Task.yield() }
+            try? await r.session.start()
+        }
+        _ = try await r.session.stop() // cancels A
+        #expect(await eventually { r.session.runState == .preparing }) // B is now preparing
+        _ = try await r.session.stop() // must cancel B
+        let stateAfterSecondStop = r.session.runState
+        r.engine.set(hangInPrepare: false) // releases B if the stop failed to cancel it
+        await b.value
+        _ = await a.result
+        #expect(stateAfterSecondStop == .idle)
+        #expect(r.log.count("source.start") == 0)
+        if r.session.runState != .idle { _ = try? await r.session.stop() }
+    }
+
+    // MARK: volatile text never outlives a run
+
+    @Test func streamErrorAbortClearsVolatileText() async throws {
+        let r = Rig()
+        r.engine.set(script: [.init(text: "hello wor", isFinal: false)], streamError: TestError(tag: "stream"))
+        let rec = EditRecorder(r.session.edits)
+        try await r.session.start()
+        #expect(await eventually { r.session.runState == .idle })
+        #expect(await eventually { rec.edits.last == .replaceVolatile("") })
+        #expect(rec.edits == [.replaceVolatile("hello wor"), .replaceVolatile("")])
+    }
+
+    @Test func finishFailureClearsVolatileText() async throws {
+        let r = Rig(script: [.init(text: "hello wor", isFinal: false)])
+        r.engine.set(finishError: TestError(tag: "fin"), holdStreamOpen: true)
+        let rec = EditRecorder(r.session.edits)
+        try await r.session.start()
+        #expect(await eventually { rec.edits.count == 1 })
+        await #expect(throws: TestError(tag: "fin")) { _ = try await r.session.stop() }
+        #expect(await eventually { rec.edits.last == .replaceVolatile("") })
+        #expect(rec.edits == [.replaceVolatile("hello wor"), .replaceVolatile("")])
+    }
+
+    @Test func stopWithVolatileButNoFinalClearsVolatileText() async throws {
+        let r = Rig(script: [.init(text: "hello wor", isFinal: false)])
+        let rec = EditRecorder(r.session.edits)
+        try await r.session.start()
+        #expect(await eventually { rec.edits.count == 1 })
+        #expect(try await r.session.stop() == nil)
+        #expect(await eventually { rec.edits.last == .replaceVolatile("") })
+        #expect(rec.edits == [.replaceVolatile("hello wor"), .replaceVolatile("")])
+    }
+
+    // MARK: dead armed source
+
+    @Test func failingRouteReArmsTheLeaseAndRunGoesLive() async throws {
+        let r = Rig(linger: .seconds(30))
+        try await r.session.start(); _ = try await r.session.stop()
+        #expect(r.session.leaseState == .armed)
+        r.source.failRoute(with: TestError(tag: "route"))
+
+        try await r.session.start()
+        #expect(r.session.runState == .listening && r.session.leaseState == .armed)
+        #expect(r.log.count("source.route") == 1)
+        #expect(r.log.count("deactivate") == 1) // the dead lease was torn down
+        #expect(r.log.count("activate") == 2)
+        #expect(r.log.count("source.start") == 2)
+        #expect(try await r.session.stop()?.text == "hello world")
+    }
+
     // MARK: normal exit, linger == 0
 
     @Test func stopDeactivatesImmediatelyWhenLingerZero() async throws {
@@ -211,10 +324,21 @@ struct Rig {
     }
 
     @Test func startCancelsPendingLingerExpiry() async throws {
-        let r = Rig(linger: .seconds(30))
-        try await r.session.start(); _ = try await r.session.stop()
+        let clock = ManualClock()
+        let cancelledSleeps = Mutex(0)
+        let r = Rig(linger: .seconds(30), sleep: { duration in
+            try await withTaskCancellationHandler {
+                try await clock.sleep(duration)
+            } onCancel: {
+                cancelledSleeps.withLock { $0 += 1 }
+            }
+        })
+        try await r.session.start(); _ = try await r.session.stop() // linger sleeper pending
         try await r.session.start()
-        r.clock.tick() // would expire the first linger if it were still pending
+        // The pending expiry itself was cancelled (a bare tick can't tell: the cancelled sleeper eats it).
+        #expect(cancelledSleeps.withLock { $0 } == 1)
+        clock.tick() // would expire the first linger if it were still pending
+        clock.tick()
         try? await Task.sleep(for: .milliseconds(50))
         #expect(r.log.count("deactivate") == 0)
         #expect(r.session.leaseState == .armed)

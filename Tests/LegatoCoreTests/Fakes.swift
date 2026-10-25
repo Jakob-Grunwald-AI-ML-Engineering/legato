@@ -39,9 +39,11 @@ final class FakeSource: AudioSource {
     let log: EventLog
     private let continuation = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
     private let startError = Mutex<(any Error)?>(nil)
+    private let routeError = Mutex<(any Error)?>(nil)
 
     init(log: EventLog) { self.log = log }
     func failStart(with e: any Error) { startError.withLock { $0 = e } }
+    func failRoute(with e: any Error) { routeError.withLock { $0 = e } }
 
     private func makeStream() -> AsyncStream<AudioChunk> {
         let (stream, cont) = AsyncStream<AudioChunk>.makeStream()
@@ -59,6 +61,7 @@ final class FakeSource: AudioSource {
     }
     func route() async throws -> AsyncStream<AudioChunk> {
         log.add("source.route")
+        if let e = routeError.withLock({ $0 }) { throw e }
         return makeStream()
     }
     func detach() async {
@@ -81,13 +84,18 @@ final class FakeEngine: DictationEngine {
         var script: [TranscriptEvent] = []
         var streamError: (any Error)?
         var finishError: (any Error)?
+        /// Leave the results stream open after the input ends (a stream that outlives `finish()`).
+        var holdStreamOpen = false
     }
     private let config = Mutex(Config())
+    /// Results continuations in `transcribe` order, for `emit` / `failStream`.
+    private let streams = Mutex<[AsyncThrowingStream<TranscriptEvent, Error>.Continuation]>([])
 
     init(log: EventLog) { self.log = log }
 
     func set(installed: Bool? = nil, prepareError: (any Error)? = nil, hangInPrepare: Bool? = nil,
-             script: [TranscriptEvent]? = nil, streamError: (any Error)? = nil, finishError: (any Error)? = nil) {
+             script: [TranscriptEvent]? = nil, streamError: (any Error)? = nil, finishError: (any Error)? = nil,
+             holdStreamOpen: Bool? = nil) {
         config.withLock {
             if let installed { $0.installed = installed }
             if let prepareError { $0.prepareError = prepareError }
@@ -95,7 +103,22 @@ final class FakeEngine: DictationEngine {
             if let script { $0.script = script }
             if let streamError { $0.streamError = streamError }
             if let finishError { $0.finishError = finishError }
+            if let holdStreamOpen { $0.holdStreamOpen = holdStreamOpen }
         }
+    }
+
+    func clearFinishError() { config.withLock { $0.finishError = nil } }
+
+    /// Pushes `event` into the results stream of the `run`-th `transcribe` call (0-based), if still open.
+    func emit(_ event: TranscriptEvent, run: Int) {
+        let c = streams.withLock { run < $0.count ? $0[run] : nil }
+        c?.yield(event)
+    }
+
+    /// Fails the results stream of the `run`-th `transcribe` call, if still open.
+    func failStream(with error: any Error, run: Int) {
+        let c = streams.withLock { run < $0.count ? $0[run] : nil }
+        c?.finish(throwing: error)
     }
 
     func installAssets(locale: Locale?) -> AsyncStream<Double> {
@@ -107,8 +130,9 @@ final class FakeEngine: DictationEngine {
 
     func prepare(locale: Locale?) async throws -> AudioFormatSpec {
         log.add("engine.prepare")
+        // Polled so a test can release a held prepare (and so cancellation ends the hold).
+        while config.withLock({ $0.hangInPrepare }) { try await Task.sleep(for: .milliseconds(5)) }
         let cfg = config.withLock { $0 }
-        if cfg.hangInPrepare { try await Task.sleep(for: .seconds(600)) }
         if let e = cfg.prepareError { throw e }
         if !cfg.installed { throw DictationError.assetsNotInstalled }
         return testFormat
@@ -118,11 +142,12 @@ final class FakeEngine: DictationEngine {
         log.add("engine.transcribe")
         let cfg = config.withLock { $0 }
         let (stream, cont) = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
+        streams.withLock { $0.append(cont) }
         let task = Task {
             for e in cfg.script { cont.yield(e) }
             if let err = cfg.streamError { cont.finish(throwing: err); return }
             for await _ in input {}
-            cont.finish()
+            if !cfg.holdStreamOpen { cont.finish() }
         }
         cont.onTermination = { _ in task.cancel() }
         return stream

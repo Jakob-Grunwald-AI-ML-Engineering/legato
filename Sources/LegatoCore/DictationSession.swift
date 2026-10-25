@@ -32,6 +32,8 @@ public final class DictationSession {
     private var runStart = Date()
     private var runLocale: Locale?
     private var streamFailure: (any Error)?
+    /// Identifies the current run's consume task; events and errors from older runs are ignored.
+    private var generation = 0
 
     public init(
         engine: any DictationEngine,
@@ -66,7 +68,7 @@ public final class DictationSession {
         streamFailure = nil
         let task = Task { try await self.performStart(locale: locale) }
         startTask = task
-        defer { startTask = nil }
+        defer { if startTask == task { startTask = nil } } // a newer run may own the handle by now
         do {
             try await task.value
         } catch is CancellationError {
@@ -95,7 +97,6 @@ public final class DictationSession {
             await source.detach()
             try await engine.finish()
             await consumeTask?.value
-            consumeTask = nil
             if let streamFailure { throw streamFailure }
             let text = assembler.committedText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
@@ -113,6 +114,12 @@ public final class DictationSession {
             failure = error
         }
 
+        // Every exit ends this run's consumer, so nothing of it can reach a later run.
+        generation += 1
+        consumeTask?.cancel()
+        await consumeTask?.value
+        consumeTask = nil
+        clearVolatile()
         runState = .idle
         if let failure {
             await teardownLease()
@@ -132,12 +139,17 @@ public final class DictationSession {
 
             let input: AsyncStream<AudioChunk>
             if leaseState == .armed {
-                input = try await source.route()
+                do {
+                    input = try await source.route()
+                } catch let cancelled as CancellationError {
+                    throw cancelled
+                } catch {
+                    // The armed source is dead (e.g. its engine stopped): re-arm from scratch.
+                    await teardownLease()
+                    input = try await arm(format)
+                }
             } else {
-                leaseState = .arming
-                try sessionControl.activate(policy.sessionConfig)
-                input = try await source.start(format: format)
-                leaseState = .armed
+                input = try await arm(format)
             }
             try Task.checkCancellation()
 
@@ -146,7 +158,9 @@ public final class DictationSession {
             runLocale = locale
             let events = engine.transcribe(input)
             runState = .listening
-            consumeTask = Task { await self.consume(events) }
+            generation += 1
+            let gen = generation
+            consumeTask = Task { await self.consume(events, generation: gen) }
         } catch {
             await teardownLease()
             runState = .idle
@@ -154,16 +168,28 @@ public final class DictationSession {
         }
     }
 
-    private func consume(_ events: AsyncThrowingStream<TranscriptEvent, any Error>) async {
+    private func arm(_ format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
+        leaseState = .arming
+        try sessionControl.activate(policy.sessionConfig)
+        let input = try await source.start(format: format)
+        leaseState = .armed
+        return input
+    }
+
+    private func consume(_ events: AsyncThrowingStream<TranscriptEvent, any Error>, generation gen: Int) async {
         do {
             for try await event in events {
+                guard gen == generation else { return }
                 for edit in assembler.apply(event) { editsContinuation.yield(edit) }
             }
         } catch {
+            guard gen == generation else { return }
             lastError = error
             if runState == .listening {
                 runState = .finishing // blocks stop() while aborting
+                generation += 1
                 consumeTask = nil
+                clearVolatile()
                 await source.detach()
                 await teardownLease()
                 runState = .idle
@@ -171,6 +197,11 @@ public final class DictationSession {
                 streamFailure = error // stop() is in flight; it reports the failure
             }
         }
+    }
+
+    /// Removes tentative text from the sink; a run never leaves volatile text behind.
+    private func clearVolatile() {
+        for edit in assembler.apply(TranscriptEvent(text: "", isFinal: false)) { editsContinuation.yield(edit) }
     }
 
     /// Ends the lease: stops the mic, then deactivates the session. No-op when idle.
