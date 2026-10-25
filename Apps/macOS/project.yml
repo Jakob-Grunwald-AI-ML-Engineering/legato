@@ -1,0 +1,58 @@
+# Legato for macOS: a menu-bar dictation app. `xcodegen generate` (pinned in /.xcodegen-version) writes
+# LegatoMac.xcodeproj and Gen/; both are gitignored. Run it from this directory.
+#
+# Non-sandboxed on purpose (Accessibility writes into other apps, a global event tap, synthesized
+# paste), so distribution is Developer ID with the hardened runtime; the only entitlement is the
+# microphone. Signing, notarization and the release flow are leg 5.
+name: LegatoMac
+options:
+  bundleIdPrefix: de.gruenwald.legato
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: XWSGN23W75
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: NO
+packages:
+  LegatoKit:
+    path: ../..
+targets:
+  Legato:
+    type: application
+    platform: macOS
+    sources: [App]
+    dependencies:
+      - package: LegatoKit
+        product: LegatoCore
+      - package: LegatoKit
+        product: LegatoAudio
+      - package: LegatoKit
+        product: LegatoAppleSpeech
+      - package: LegatoKit
+        product: LegatoMac
+    settings:
+      base:
+        PRODUCT_NAME: Legato
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.mac
+    entitlements:
+      path: Gen/App.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+    info:
+      path: Gen/App-Info.plist
+      properties:
+        CFBundleDisplayName: Legato
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.productivity
+        NSMicrophoneUsageDescription: Legato records your voice to turn it into text.
+        NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this device.
