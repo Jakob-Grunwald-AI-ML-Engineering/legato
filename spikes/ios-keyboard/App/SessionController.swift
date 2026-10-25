@@ -181,9 +181,11 @@ final class SessionController {
         case "start":
             if !isActive { try? await start(source: "darwin-dictate") }
             guard isActive else { dictation.publishError("session not running"); return }
+            if d.bool(forKey: Spike.Key.pauseOthers) { setMixing(false, why: "dictation start") }
             await dictation.start(router: router, inputFormat: engine.inputNode.outputFormat(forBus: 0))
         case "stop":
             await dictation.stop()
+            if d.bool(forKey: Spike.Key.pauseOthers) { setMixing(true, why: "dictation stop") }
         default: break
         }
     }
@@ -234,6 +236,27 @@ final class SessionController {
         let t = type == AVAudioSession.InterruptionType.began.rawValue ? "BEGAN" : "ENDED"
         log("INTERRUPTION \(t) reason=\(reason) (1 appWasSuspended[deprecated], 2 builtInMicMuted, 4 routeDisconnected) shouldResume=\(options & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0)")
         if t == "ENDED" && isActive { restartEngine(why: "interruption ended") }
+    }
+
+    /// Non-mixable interrupts other audio (Audible pauses); going back to mixable deactivates with
+    /// notifyOthersOnDeactivation first, so the interrupted app gets `shouldResume`.
+    private func setMixing(_ mix: Bool, why: String) {
+        let s = AVAudioSession.sharedInstance()
+        log("setMixing(\(mix)) for \(why); otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint)")
+        do {
+            var opts: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP, .defaultToSpeaker]
+            if mix {
+                engine.stop()
+                try s.setActive(false, options: .notifyOthersOnDeactivation)
+                opts.insert(.mixWithOthers)
+            }
+            try s.setCategory(.playAndRecord, mode: .default, options: opts)
+            try s.setActive(true)
+            if !engine.isRunning { try startEngine() }
+            log("setMixing(\(mix)) ok; engineRunning=\(engine.isRunning)")
+        } catch {
+            log("SETMIXING(\(mix)) FAILED: \(error)")
+        }
     }
 
     private func restartEngine(why: String) {

@@ -59,6 +59,9 @@ struct ContentView: View {
                     }
                     Button("Prepare speech model") { Task { status = await session.dictation.prepareModel() } }
                 }.buttonStyle(.bordered)
+                Toggle("Pause other audio while dictating", isOn: Binding(
+                    get: { Spike.defaults.bool(forKey: Spike.Key.pauseOthers) },
+                    set: { Spike.defaults.set($0, forKey: Spike.Key.pauseOthers) }))
                 Text(status).font(.footnote)
                 TextField("Tap here, switch to the Legato keyboard", text: $testText, axis: .vertical)
                     .textFieldStyle(.roundedBorder)

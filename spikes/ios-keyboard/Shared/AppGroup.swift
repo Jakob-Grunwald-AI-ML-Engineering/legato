@@ -21,6 +21,7 @@ enum Spike {
         static let textSeq = "dict.textSeq"       // Int, increments on every update
         static let textFinal = "dict.final"       // Bool
         static let dictState = "dict.state"       // idle | listening | finishing | error:<msg>
+        static let pauseOthers = "audio.pauseOthers" // Bool: interrupt other audio while dictating, resume after
     }
 
     enum Note {
