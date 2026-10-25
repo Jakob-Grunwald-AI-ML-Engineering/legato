@@ -21,6 +21,8 @@ final class SleepLog: Sendable {
 @MainActor
 final class BuiltSessions {
     var all: [DictationSession] = []
+    /// The linger the factory was asked for, per session.
+    var lingers: [Duration] = []
 }
 
 @MainActor
@@ -42,17 +44,23 @@ struct CoordinatorRig {
     let time = TestTime()
     let sleeps = SleepLog()
     let built = BuiltSessions()
+    /// Drives the sessions' keep-alive window: one tick expires one lingering lease.
+    let lingerClock = ManualClock()
+    /// Not attached to the coordinator unless a test calls `attachSink()`.
+    let sink: FakeSink
     let coordinator: DictationCoordinator
 
     init(script: [TranscriptEvent] = []) {
         let log = self.log, history = self.history, time = self.time, built = self.built
         let heartbeat = self.heartbeat, throttle = self.throttle, sleeps = self.sleeps
+        let lingerClock = self.lingerClock
         let engine = FakeEngine(log: log)
         engine.set(script: script)
         let source = FakeSource(log: log)
         let control = FakeSessionControl(log: log)
         let activity = FakeActivity(log: log)
         let clipboard = FakeClipboard(log: log)
+        sink = FakeSink(log: log)
         self.engine = engine
         self.source = source
         self.control = control
@@ -60,12 +68,13 @@ struct CoordinatorRig {
         self.clipboard = clipboard
         coordinator = DictationCoordinator(
             activity: activity, clipboard: clipboard, readiness: readiness, startEnvironment: environment,
-            history: history, makeSession: {
+            history: history, makeSession: { linger in
                 let session = DictationSession(
                     engine: engine, source: source, sessionControl: control, history: history,
-                    now: { time.now }
+                    linger: linger, sleep: lingerClock.sleep, now: { time.now }
                 )
                 built.all.append(session)
+                built.lingers.append(linger)
                 return session
             },
             sleep: { duration in
@@ -80,6 +89,8 @@ struct CoordinatorRig {
         )
         coordinator.onIdle = { log.add("idle") }
     }
+
+    func attachSink() { coordinator.sink = sink }
 
     /// Phases in order with consecutive repeats collapsed (listening updates come and go with edits).
     var phaseTrail: [DictationPhase] {

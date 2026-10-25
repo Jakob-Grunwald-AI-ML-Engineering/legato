@@ -18,6 +18,11 @@ public final class DictationSession {
     /// after the run and lease are torn down. Not fired for failures `stop()` reports itself.
     /// The text recognized so far is still available from `partialEntry()`.
     public var onRunAborted: (@MainActor (any Error) -> Void)?
+    /// Fires once when a lease held between runs (`linger`) runs out and is torn down. Not fired for
+    /// `endLease()`, nor when there is no linger.
+    public var onLeaseExpired: (@MainActor () -> Void)?
+    /// How many edits have been published on `edits` so far; a consumer that has seen this many is caught up.
+    public private(set) var editCount = 0
 
     private let engine: any DictationEngine
     private let source: any AudioSource
@@ -190,7 +195,7 @@ public final class DictationSession {
         do {
             for try await event in events {
                 guard gen == generation else { return }
-                for edit in assembler.apply(event) { editsContinuation.yield(edit) }
+                for edit in assembler.apply(event) { publish(edit) }
             }
         } catch {
             guard gen == generation else { return }
@@ -210,9 +215,14 @@ public final class DictationSession {
         }
     }
 
+    private func publish(_ edit: TranscriptEdit) {
+        editCount += 1
+        editsContinuation.yield(edit)
+    }
+
     /// Removes tentative text from the sink; a run never leaves volatile text behind.
     private func clearVolatile() {
-        for edit in assembler.apply(TranscriptEvent(text: "", isFinal: false)) { editsContinuation.yield(edit) }
+        for edit in assembler.apply(TranscriptEvent(text: "", isFinal: false)) { publish(edit) }
     }
 
     /// Ends the lease: stops the mic, then deactivates the session. No-op when idle.
@@ -233,8 +243,17 @@ public final class DictationSession {
         lingerTask = Task {
             do { try await sleep(linger) } catch { return }
             guard !Task.isCancelled, runState == .idle else { return }
+            let held = leaseState != .idle
             await teardownLease()
+            if held { onLeaseExpired?() }
         }
+    }
+
+    /// Tears down a lease held between runs now. No-op during a run or without a lease.
+    public func endLease() async {
+        guard runState == .idle, leaseState != .idle else { return }
+        await cancelLinger()
+        await teardownLease()
     }
 
     private func cancelLinger() async {

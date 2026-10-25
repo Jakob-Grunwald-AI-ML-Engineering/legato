@@ -5,6 +5,7 @@ import SwiftUI
 struct SettingsView: View {
     let controller: AppController
     @State private var policy = Settings.audioPolicy
+    @State private var keepAlive = Settings.keepAlive
     @State private var showPauseOthers = Settings.debugShowPauseOthers
     #if LEGATO_INTERNAL
     @State private var keepSessionActive = Settings.keepSessionActiveBetweenRuns
@@ -29,6 +30,16 @@ struct SettingsView: View {
                 Text("How dictation treats music and other audio that is playing. iOS only lets an app record next to playing audio from the foreground, so with audio playing, Legato opens first when you start from the Action Button or Control Center.")
             }
 
+            Section {
+                Picker("Keep microphone ready", selection: $keepAlive) {
+                    ForEach(KeepAlive.allCases) { Text($0.title).tag($0) }
+                }
+            } header: {
+                Text("Keyboard")
+            } footer: {
+                Text("After a dictation with the Legato keyboard, the microphone stays ready for this long, so the next tap on the keyboard's mic key starts at once without opening Legato. While it is ready, the orange microphone indicator stays on. Off by default.")
+            }
+
             #if LEGATO_INTERNAL
             Section {
                 Toggle("Keep audio session active", isOn: $keepSessionActive)
@@ -43,6 +54,10 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .onChange(of: policy) { _, new in Settings.audioPolicy = new }
+        .onChange(of: keepAlive) { _, new in
+            Settings.keepAlive = new
+            if new == .off { Task { await controller.endKeepAlive() } }
+        }
         .onChange(of: showPauseOthers) { _, new in
             Settings.debugShowPauseOthers = new
             policy = Settings.audioPolicy // falls back to the default if the stored policy is no longer offered

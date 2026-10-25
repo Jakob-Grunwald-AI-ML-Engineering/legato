@@ -39,6 +39,8 @@ targets:
         product: LegatoAudio
       - package: LegatoKit
         product: LegatoAppleSpeech
+      - package: LegatoKit
+        product: LegatoKeyboardCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato

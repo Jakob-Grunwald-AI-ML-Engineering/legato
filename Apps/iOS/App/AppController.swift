@@ -3,6 +3,7 @@ import Foundation
 import LegatoAppleSpeech
 import LegatoAudio
 import LegatoCore
+import LegatoKeyboardCore
 import Observation
 import os
 
@@ -20,6 +21,12 @@ final class AppController {
     /// The newest history entry's text, for the home screen.
     private(set) var lastTranscript: String?
     private(set) var status = ReadinessStatus()
+    /// The hop screen is up: the keyboard sent the user here to dictate.
+    private(set) var showsKeyboardHop = false
+    /// The current run's text, committed plus tentative, for the hop screen.
+    private(set) var liveText = ""
+    /// A keyboard run is in progress (the hop screen shows Stop).
+    private(set) var keyboardRunActive = false
 
     @ObservationIgnored let engine = AppleSpeechEngine()
     /// The one history store; views go through the methods below, never construct their own.
@@ -28,6 +35,8 @@ final class AppController {
     @ObservationIgnored private let readiness = SystemReadiness()
     @ObservationIgnored private let startEnvironment: SystemStartEnvironment
     @ObservationIgnored private let coordinator: DictationCoordinator
+    /// The link to the keyboard extension; nil without the App Group.
+    @ObservationIgnored private let keyboardLink: KeyboardLinkHost?
     /// Counts finished runs, so `toggle()` can tell an abort that raced with its own start.
     @ObservationIgnored private var idleCount = 0
     #if LEGATO_INTERNAL
@@ -52,15 +61,17 @@ final class AppController {
         let startEnvironment = SystemStartEnvironment()
         #endif
         self.startEnvironment = startEnvironment
+        let keyboardLink = KeyboardLinkHost()
+        self.keyboardLink = keyboardLink
         coordinator = DictationCoordinator(
             activity: ActivityKitClient(),
             clipboard: pasteboard,
             readiness: readiness,
             startEnvironment: startEnvironment,
             history: history,
-            makeSession: {
+            makeSession: { linger in
                 #if DEBUG
-                if let fake = E2E.makeFakeSession(history: history, policy: Settings.audioPolicy) { return fake }
+                if let fake = E2E.makeFakeSession(history: history, policy: Settings.audioPolicy, linger: linger) { return fake }
                 #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
                 #if LEGATO_INTERNAL
@@ -75,9 +86,16 @@ final class AppController {
                     sessionControl: sessionControl,
                     history: history,
                     policy: Settings.audioPolicy,
-                    linger: .zero)
+                    linger: linger)
             })
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
+        if let keyboardLink {
+            coordinator.sink = keyboardLink
+            keyboardLink.onTranscript = { [weak self] committed, volatile in self?.liveText = committed + volatile }
+            keyboardLink.onRunActivity = { [weak self] active in self?.keyboardRunActive = active }
+            keyboardLink.link.onRequest = { [weak self] request in await self?.perform(request.command) }
+            keyboardLink.startListening()
+        }
         installInterruptionObservers()
         #if LEGATO_INTERNAL
         AudioDiagnostics.install()
@@ -91,16 +109,59 @@ final class AppController {
 
     /// The single entry point: Action Button, Control Center, Live Activity stop and the in-app button.
     ///
+    /// With the Legato keyboard on screen (it publishes a fresh presence) the text streams into its field,
+    /// the Live Activity is still required (iOS stops a recording intent without one) and the microphone
+    /// stays ready for the keep-alive setting. Otherwise: the clipboard, an activity, no linger.
+    ///
     /// `afterForegroundHop`: this press repeats one that returned `.needsForeground(reason)` and the
     /// system has since brought the app to the foreground, so the start is a foreground start.
     func toggle(afterForegroundHop reason: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
+        await run(Self.pressOptions(keyboardVisible: keyboardLink?.keyboardIsVisible ?? false), hopReason: reason)
+    }
+
+    /// What a press starts with, given whether the Legato keyboard is on screen.
+    static func pressOptions(keyboardVisible: Bool) -> StartOptions {
+        guard keyboardVisible else { return StartOptions() }
+        return StartOptions(activity: .required, keepAlive: Settings.keepAliveDuration, target: .keyboard)
+    }
+
+    /// The keyboard asked for this (a request over the link, or `legato://keyboard`).
+    func perform(_ command: RequestCommand) async {
+        #if DEBUG
+        E2E.log("keyboard.command \(command.rawValue)")
+        #endif
+        switch command {
+        case .start:
+            // A start never toggles: a second one while running must not stop the run.
+            guard coordinator.isIdle else { return }
+            _ = await run(StartOptions(activity: .bestEffort, keepAlive: Settings.keepAliveDuration, target: .keyboard))
+        case .stop:
+            await stopIfRunning()
+        case .endKeepAlive:
+            await endKeepAlive()
+        }
+    }
+
+    /// Releases the microphone kept ready between keyboard dictations.
+    func endKeepAlive() async {
+        await coordinator.endKeepAlive()
+    }
+
+    func dismissKeyboardHop() {
+        showsKeyboardHop = false
+    }
+
+    private func run(_ options: StartOptions, hopReason reason: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
         let finishedBefore = idleCount
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("toggle.begin", ["isDictating": isDictating])
         #endif
+        #if DEBUG
+        E2E.log("route target=\(options.target == .keyboard ? "keyboard" : "app") activity=\(options.activity == .required ? "required" : "bestEffort") keepAliveSeconds=\(Int(options.keepAlive.components.seconds))")
+        #endif
         startEnvironment.assumeForeground = reason != nil
         defer { startEnvironment.assumeForeground = false }
-        let outcome = await coordinator.toggle()
+        let outcome = await coordinator.toggle(options)
         await didFinish(outcome, hopReason: reason, finishedBefore: finishedBefore)
         return outcome
     }
@@ -188,6 +249,24 @@ final class AppController {
     }
     #endif
 
+    /// The keyboard opened the app. The hop screen shows for a start whether or not this id was already
+    /// acted on over the link; the command itself runs once per id.
+    private func handleKeyboard(_ command: RequestCommand, requestID: String) async {
+        if command == .start {
+            showsKeyboardHop = true
+            #if DEBUG
+            E2E.log("hop shown")
+            #endif
+        }
+        guard let keyboardLink, keyboardLink.link.admitURL(requestID: requestID) else {
+            #if DEBUG
+            E2E.log("keyboard.url duplicate req=\(requestID)")
+            #endif
+            return
+        }
+        await perform(command)
+    }
+
     private func runDidEnd() {
         idleCount += 1
         isDictating = false
@@ -209,6 +288,8 @@ final class AppController {
         if releasesHeldSession || isDictating { sessionControl.release(reason: reason) }
         #endif
         Task {
+            // The system took the microphone: a lease kept for the keyboard is dead too.
+            if releasesHeldSession { await endKeepAlive() }
             #if DEBUG
             E2E.log("system-event reason=\(E2E.quote(reason))")
             #endif
@@ -286,10 +367,15 @@ final class AppController {
     }
 
     /// `legato://copy-last`: the tapToCopy activity opened the app; copy the newest transcript.
+    /// `legato://keyboard?cmd=…&req=…`: the keyboard sent the user here.
     func handle(_ url: URL) async {
         #if DEBUG
         if await handleE2E(url) { return }
         #endif
+        if let request = KeyboardURL.parse(url) {
+            await handleKeyboard(request.command, requestID: request.requestID)
+            return
+        }
         guard url == DictationAttributes.copyLastURL else { return }
         guard let text = (try? await history.recent(limit: 1))?.first?.text else { return }
         pasteboard.forceWrite(text, source: "copy-last")

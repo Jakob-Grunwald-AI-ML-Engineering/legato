@@ -1,12 +1,15 @@
 import Foundation
 
-/// The decision logic behind one "dictate" button (Action Button, control, Live Activity stop):
-/// each `toggle()` starts a dictation or stops the running one, and keeps the Live Activity and the
-/// clipboard in step. Pure policy: ActivityKit, the pasteboard and the system checks are ports.
+/// The decision logic behind one "dictate" button (Action Button, control, Live Activity stop, the
+/// keyboard's mic key): each `toggle()` starts a dictation or stops the running one, and keeps the
+/// Live Activity, the transcript sink and the clipboard in step. Pure policy: ActivityKit, the
+/// pasteboard and the system checks are ports.
 ///
-/// Order matters. The activity is requested *before* the session starts, because iOS stops a
-/// recording intent that has no Live Activity. Every start builds a fresh `DictationSession` (and so
-/// a fresh mic); nothing stays armed between dictations.
+/// Order matters. With `.required` the activity is requested *before* the session starts, because iOS
+/// stops a recording intent that has no Live Activity. By default every start builds a fresh
+/// `DictationSession` (and so a fresh mic) and nothing stays armed afterwards. With a keep-alive the
+/// session's mic lease outlives the run: the next start inside the window reuses that session, and the
+/// consumer of its edits keeps running between the runs.
 ///
 /// A start is always attempted where the press arrived, also in the background next to other audio.
 /// Only a start the system refuses ends in `.needsForeground` with nothing left behind; the app
@@ -16,8 +19,8 @@ public final class DictationCoordinator {
     public enum Outcome: Sendable, Equatable {
         /// Listening; the next toggle stops.
         case started
-        /// Finished and idle again. The text now on the clipboard, or nil when nothing was recognized
-        /// (or the start was cancelled).
+        /// Finished and idle again. The run's text (on the clipboard unless the sink says it landed in
+        /// the target field), or nil when nothing was recognized (or the start was cancelled).
         case stopped(String?)
         /// Not started: resolve `ReadinessIssue` in the foreground first.
         case needsOnboarding(ReadinessIssue)
@@ -40,7 +43,52 @@ public final class DictationCoordinator {
     /// background). Not fired when a press ends in `.needsOnboarding`: no run happened.
     public var onIdle: (@MainActor () -> Void)?
 
+    /// Receives each run's text and the lease state; set once after `init`.
+    public var sink: (any TranscriptSink)?
+
+    /// No run is starting, listening or being wrapped up (a held lease doesn't count).
+    public var isIdle: Bool { phase == .idle }
+    /// A mic lease is held between runs (keep-alive), ready for the next start.
+    public var holdsLease: Bool { held != nil }
+
     private enum Phase { case idle, starting, listening, stopping, aborting }
+
+    /// Follows one session's edits for its whole life, across runs.
+    @MainActor
+    private final class EditFeed {
+        var task: Task<Void, Never>?
+        var consumed = 0
+        var finished = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func noteConsumed() {
+            consumed += 1
+            wake()
+        }
+
+        func finish() {
+            finished = true
+            wake()
+        }
+
+        /// Returns after the next edit was consumed, or when the feed ended.
+        func waitForProgress() async {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        private func wake() {
+            let pending = waiters
+            waiters = []
+            for waiter in pending { waiter.resume() }
+        }
+    }
+
+    /// A session whose mic lease is kept between runs.
+    private struct HeldLease {
+        let session: DictationSession
+        let feed: EditFeed
+        let linger: Duration
+    }
 
     private let activity: any ActivityClient
     private let clipboard: any Clipboard
@@ -53,16 +101,26 @@ public final class DictationCoordinator {
 
     private var phase = Phase.idle
     private var session: DictationSession?
+    private var feed: EditFeed?
+    private var held: HeldLease?
+    private var run: DictationRun?
+    private var options = StartOptions()
+    /// The current run has a Live Activity (always with `.required`, maybe not with `.bestEffort`).
+    private var activityLive = false
+    /// The lease end last reported to the sink, so it hears only changes.
+    private var reportedLease: Date?
     private var live = LiveTranscript()
     private var startedAt = Date()
     /// A press arrived while starting; the start flow ends the run as soon as it can.
     private var cancelRequested = false
-    private var consumer: Task<Void, Never>?
     private var heartbeat: Task<Void, Never>?
     /// Publishes an edit the throttle held back once its window ends, so the last words of a phrase
     /// followed by silence don't wait for the next heartbeat. At most one is pending.
     private var trailing: Task<Void, Never>?
     private var lastPublishAt: Date?
+    /// Activity updates in flight, so a stop can wait them out before it moves the activity on.
+    private var publishing = 0
+    private var quiesceWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(
         activity: any ActivityClient,
@@ -84,9 +142,11 @@ public final class DictationCoordinator {
         self.now = now
     }
 
-    public func toggle() async -> Outcome {
+    /// Idle: starts a run with `options`. Starting: cancels the start. Listening: stops the run (the
+    /// options are ignored).
+    public func toggle(_ options: StartOptions = StartOptions()) async -> Outcome {
         switch phase {
-        case .idle: return await start()
+        case .idle: return await start(options)
         case .starting: return await cancelStart()
         case .listening: return await stop()
         case .stopping, .aborting: return .busy
@@ -107,37 +167,53 @@ public final class DictationCoordinator {
         }
     }
 
+    /// Releases the mic lease kept between runs, now. Does nothing during a run or without a lease.
+    public func endKeepAlive() async {
+        guard phase == .idle, let lease = held else { return }
+        held = nil
+        await release(lease)
+    }
+
     // MARK: Start
 
-    private func start() async -> Outcome {
+    private func start(_ options: StartOptions) async -> Outcome {
         phase = .starting
         cancelRequested = false
+        self.options = options
         let issue = await readiness.check()
         if cancelRequested { return finishRun(.stopped(nil), ended: false) }
-        if let issue { return finishRun(.needsOnboarding(issue), ended: false) }
+        // With a best-effort activity, "Live Activities are off" is not a reason to stay out of the run.
+        if let issue, !(issue == .liveActivitiesDisabled && options.activity == .bestEffort) {
+            return finishRun(.needsOnboarding(issue), ended: false)
+        }
         // Always try the start where the press arrived, other audio or not; only a refusal hops.
         let context = startEnvironment.current()
 
         startedAt = now()
         live = LiveTranscript()
         lastPublishAt = nil
+        activityLive = false
         do {
             try await activity.request(content(.starting))
+            activityLive = true
         } catch {
-            return finishRun(.needsOnboarding(.liveActivitiesDisabled), ended: false)
+            if options.activity == .required { return finishRun(.needsOnboarding(.liveActivitiesDisabled), ended: false) }
         }
         if cancelRequested {
-            await activity.end(content(.failed))
+            await endActivity(content(.failed))
             return finishRun(.stopped(nil))
         }
 
-        let s = makeSession()
+        let thisRun = DictationRun(target: options.target)
+        run = thisRun
+        sink?.runStarted(thisRun)
+        let (s, sessionFeed) = await acquireSession(options)
         session = s
+        feed = sessionFeed
         s.onRunAborted = { [weak self, weak s] _ in
             guard let self, let s else { return }
             Task { _ = await self.abort(s) }
         }
-        startConsumer(of: s)
         do {
             try await s.start()
         } catch {
@@ -145,10 +221,15 @@ public final class DictationCoordinator {
             // The system refused a background start: tear down quietly and let the app retry in the
             // foreground. No `failed` activity (it would linger), no idle hook (no run happened).
             if context.inBackground, startEnvironment.isBackgroundRefusal(error) {
-                await activity.dismiss()
+                if activityLive {
+                    activityLive = false
+                    await activity.dismiss()
+                }
+                _ = await sink?.runEnded(thisRun, committed: "", text: nil) // a run that began always ends
                 return finishRun(.needsForeground(.backgroundStartRefused), ended: false)
             }
-            await activity.end(content(.failed))
+            await endActivity(content(.failed))
+            _ = await sink?.runEnded(thisRun, committed: "", text: nil)
             switch error {
             case DictationError.cancelled: return finishRun(.stopped(nil))
             case DictationError.assetsNotInstalled: return finishRun(.needsOnboarding(.assetsMissing))
@@ -160,8 +241,23 @@ public final class DictationCoordinator {
 
         phase = .listening
         startHeartbeat()
+        sink?.update(committed: live.committed, volatile: live.volatile)
         await publishListening(force: true)
         return .started
+    }
+
+    /// The held session when it fits `options` (same keep-alive), else a fresh one with its own edit feed.
+    private func acquireSession(_ options: StartOptions) async -> (DictationSession, EditFeed) {
+        if let lease = held {
+            held = nil
+            if options.keepAlive > .zero, lease.linger == options.keepAlive {
+                lease.session.onLeaseExpired = nil
+                return (lease.session, lease.feed)
+            }
+            await release(lease)
+        }
+        let s = makeSession(options.keepAlive)
+        return (s, startFeed(of: s))
     }
 
     /// A press while starting: stops through the session (which cancels a preparing start, so no
@@ -175,23 +271,41 @@ public final class DictationCoordinator {
     // MARK: Stop
 
     private func stop() async -> Outcome {
-        guard let s = session else { return .busy }
+        guard let s = session, let thisRun = run else { return .busy }
         phase = .stopping
-        await drainTasks()
+        await drainTimers()
         guard session === s else { return .busy }
-        await activity.update(content(.finishing, tail: live.tail()), staleDate: nil)
+        await quiesceActivity()
+        guard session === s else { return .busy }
+        await updateActivity(content(.finishing, tail: live.tail()), staleDate: nil)
         guard session === s else { return .busy }
 
         do {
             // The session saves the entry to history itself; it is not appended again here.
             let entry = try await s.stop()
             s.onRunAborted = nil
+            guard let sessionFeed = feed else { return .busy }
+            await flush(sessionFeed, of: s)
+            let committed = live.committed
+
+            let keep = options.keepAlive > .zero && s.leaseState == .armed
+            if keep {
+                held = HeldLease(session: s, feed: sessionFeed, linger: options.keepAlive)
+                s.onLeaseExpired = { [weak self, weak s] in
+                    guard let self, let s else { return }
+                    Task { await self.leaseExpired(s) }
+                }
+            }
+            let landed = await sink?.runEnded(thisRun, committed: committed, text: entry?.text) ?? false
+            if keep, held?.session === s { reportLease(now().addingTimeInterval(options.keepAlive.timeInterval)) }
+            if !keep { await retire(sessionFeed) }
+
             guard let entry else {
                 // Nothing final was recognized: nothing to copy, nothing to show but the failure.
-                await activity.end(content(.failed))
+                await endActivity(content(.failed))
                 return finishRun(.stopped(nil))
             }
-            await deliver(entry.text)
+            await deliver(entry.text, landed: landed)
             return finishRun(.stopped(entry.text))
         } catch {
             return await abort(s)
@@ -206,48 +320,102 @@ public final class DictationCoordinator {
         guard session === s else { return .busy }
         session = nil
         phase = .aborting
-        await drainTasks()
+        await drainTimers()
+        if let dying = feed {
+            await flush(dying, of: s)
+            await retire(dying)
+        }
+        feed = nil
+        await quiesceActivity()
         s.onRunAborted = nil
+        reportLease(nil) // a dead session keeps no lease
 
-        // The session's own text, not `live`: the edits consumer may still lag behind the abort.
-        guard let entry = s.partialEntry() else {
-            await activity.end(content(.failed))
+        // The session's own text: the feed may have been cut short by the failure itself.
+        let entry = s.partialEntry()
+        var landed = false
+        if let thisRun = run { landed = await sink?.runEnded(thisRun, committed: live.committed, text: entry?.text) ?? false }
+        guard let entry else {
+            await endActivity(content(.failed))
             return finishRun(.stopped(nil))
         }
         try? await history.append(entry) // the session never saved this run; losing the copy is worse
-        await deliver(entry.text)
+        await deliver(entry.text, landed: landed)
         return finishRun(.stopped(entry.text))
     }
 
     // MARK: Pieces
 
-    private func deliver(_ text: String) async {
+    /// `landed`: the sink confirmed the final text is in the target field, so the clipboard stays untouched.
+    private func deliver(_ text: String, landed: Bool) async {
+        if landed {
+            await endActivity(content(.copied, tail: LiveTranscript.tail(of: text)))
+            return
+        }
         let changed = clipboard.write(text)
-        await activity.end(content(changed ? .copied : .tapToCopy, tail: LiveTranscript.tail(of: text)))
+        await endActivity(content(changed ? .copied : .tapToCopy, tail: LiveTranscript.tail(of: text)))
     }
 
     private func finishRun(_ outcome: Outcome, ended: Bool = true) -> Outcome {
         phase = .idle
         session = nil
+        feed = nil
+        run = nil
         if ended { onIdle?() }
         return outcome
     }
 
+    /// A start failed: the session is gone (it tore its own lease down), and so is its feed.
     private func discard(_ s: DictationSession) async {
         session = nil
         s.onRunAborted = nil
-        await drainTasks()
+        await drainTimers()
+        if let dying = feed { await retire(dying) }
+        feed = nil
+        reportLease(nil)
+    }
+
+    /// Ends a held lease and its feed for good.
+    private func release(_ lease: HeldLease) async {
+        lease.session.onLeaseExpired = nil
+        await lease.session.endLease()
+        await retire(lease.feed)
+        reportLease(nil)
+    }
+
+    /// The kept lease ran out on its own.
+    private func leaseExpired(_ s: DictationSession) async {
+        guard let lease = held, lease.session === s else { return }
+        held = nil
+        await retire(lease.feed)
+        reportLease(nil)
+    }
+
+    private func reportLease(_ until: Date?) {
+        guard until != reportedLease else { return }
+        reportedLease = until
+        sink?.leaseChanged(until: until)
     }
 
     private func content(_ phase: DictationPhase, tail: String = "") -> DictationActivityContent {
         DictationActivityContent(startedAt: startedAt, tail: tail, phase: phase)
     }
 
+    private func updateActivity(_ content: DictationActivityContent, staleDate: Date?) async {
+        guard activityLive else { return }
+        await activity.update(content, staleDate: staleDate)
+    }
+
+    private func endActivity(_ content: DictationActivityContent) async {
+        guard activityLive else { return }
+        activityLive = false
+        await activity.end(content)
+    }
+
     /// Pushes the live tail to the activity while listening. Throttled unless `force`d; a throttled
     /// edit is published by the trailing task when the window ends. Returns whether it published.
     @discardableResult
     private func publishListening(force: Bool, fromTrailing: Bool = false) async -> Bool {
-        guard phase == .listening else { return false }
+        guard phase == .listening, activityLive else { return false }
         let t = now()
         guard let tail = live.publish(now: t, force: force) else {
             startTrailing()
@@ -256,8 +424,22 @@ public final class DictationCoordinator {
         lastPublishAt = t
         // This publish carries the latest tail; a pending trailing one would only repeat it.
         if !fromTrailing { trailing?.cancel(); trailing = nil }
+        publishing += 1
         await activity.update(content(.listening, tail: tail), staleDate: t.addingTimeInterval(Self.staleAfter))
+        publishing -= 1
+        if publishing == 0 { wakeQuiesceWaiters() }
         return true
+    }
+
+    /// Returns once no activity update is in flight.
+    private func quiesceActivity() async {
+        while publishing > 0 { await withCheckedContinuation { quiesceWaiters.append($0) } }
+    }
+
+    private func wakeQuiesceWaiters() {
+        let pending = quiesceWaiters
+        quiesceWaiters = []
+        for waiter in pending { waiter.resume() }
     }
 
     /// Schedules the trailing publish at `lastPublishAt + minPublishInterval`, unless one is pending.
@@ -282,16 +464,34 @@ public final class DictationCoordinator {
 
     private func clearTrailing() { trailing = nil }
 
-    /// One consumer per session instance, for that session's whole life.
-    private func startConsumer(of s: DictationSession) {
+    // MARK: Edit feed
+
+    /// One feed per session instance, for as long as the session lives: a held lease keeps its feed
+    /// between runs, because cancelling the iteration of a session's `edits` ends the stream for good.
+    private func startFeed(of s: DictationSession) -> EditFeed {
+        let sessionFeed = EditFeed()
         let edits = s.edits
-        consumer = Task { [weak self] in
+        sessionFeed.task = Task { [weak self, sessionFeed] in
             for await edit in edits {
                 guard let self else { return }
                 live.apply(edit)
+                sink?.update(committed: live.committed, volatile: live.volatile)
+                sessionFeed.noteConsumed()
                 await publishListening(force: false)
             }
         }
+        return sessionFeed
+    }
+
+    /// Returns once the feed has seen every edit the session published so far.
+    private func flush(_ sessionFeed: EditFeed, of s: DictationSession) async {
+        while !sessionFeed.finished, sessionFeed.consumed < s.editCount { await sessionFeed.waitForProgress() }
+    }
+
+    private func retire(_ sessionFeed: EditFeed) async {
+        sessionFeed.task?.cancel()
+        await sessionFeed.task?.value
+        sessionFeed.finish()
     }
 
     private func startHeartbeat() {
@@ -305,14 +505,19 @@ public final class DictationCoordinator {
         }
     }
 
-    /// Stops the consumer and heartbeat and waits out any update in flight, so nothing can land
-    /// after the activity has moved on.
-    private func drainTasks() async {
-        let tasks = [consumer, heartbeat, trailing].compactMap { $0 }
-        consumer = nil
+    /// Stops the heartbeat and the trailing publish and waits out any update they have in flight.
+    private func drainTimers() async {
+        let tasks = [heartbeat, trailing].compactMap { $0 }
         heartbeat = nil
         trailing = nil
         for task in tasks { task.cancel() }
         for task in tasks { await task.value }
+    }
+}
+
+private extension Duration {
+    var timeInterval: TimeInterval {
+        let parts = components
+        return TimeInterval(parts.seconds) + TimeInterval(parts.attoseconds) / 1e18
     }
 }

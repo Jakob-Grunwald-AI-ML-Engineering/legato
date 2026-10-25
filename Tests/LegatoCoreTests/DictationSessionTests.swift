@@ -431,3 +431,78 @@ final class EditRecorder {
         #expect(r.session.leaseState == .idle)
     }
 }
+
+// MARK: lease control for keep-alive
+
+extension DictationSessionTests {
+    @Test func endLeaseTearsDownAHeldLeaseAtOnce() async throws {
+        let r = Rig(linger: .seconds(30))
+        try await r.session.start()
+        _ = try await r.session.stop()
+        #expect(r.session.leaseState == .armed)
+        await r.session.endLease()
+        #expect(r.session.leaseState == .idle)
+        #expect(r.log.count("deactivate") == 1)
+        r.clock.tick() // the cancelled linger must not tear down a second time
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(r.log.count("deactivate") == 1)
+    }
+
+    @Test func endLeaseDuringARunLeavesItAlone() async throws {
+        let r = Rig(linger: .seconds(30))
+        try await r.session.start()
+        await r.session.endLease()
+        #expect(r.session.leaseState == .armed && r.session.runState == .listening)
+        #expect(r.log.count("deactivate") == 0)
+        _ = try await r.session.stop()
+    }
+
+    @Test func endLeaseWithNoLeaseDoesNothing() async throws {
+        let r = Rig(linger: .seconds(30))
+        await r.session.endLease()
+        #expect(r.log.events.isEmpty)
+    }
+
+    @Test func leaseExpiryFiresTheHookOnceAfterTeardown() async throws {
+        let r = Rig(linger: .seconds(30))
+        let fired = Fired()
+        r.session.onLeaseExpired = { fired.count += 1; fired.leaseWasIdle = r.session.leaseState == .idle }
+        try await r.session.start()
+        _ = try await r.session.stop()
+        #expect(fired.count == 0)
+        r.clock.tick()
+        #expect(await eventually { fired.count == 1 })
+        #expect(fired.leaseWasIdle)
+        #expect(r.log.count("deactivate") == 1)
+    }
+
+    @Test func theExpiryHookStaysQuietWhenTheLeaseIsEndedOrNeverHeld() async throws {
+        let ended = Rig(linger: .seconds(30))
+        let fired = Fired()
+        ended.session.onLeaseExpired = { fired.count += 1 }
+        try await ended.session.start()
+        _ = try await ended.session.stop()
+        await ended.session.endLease()
+        let plain = Rig()
+        plain.session.onLeaseExpired = { fired.count += 1 }
+        try await plain.session.start()
+        _ = try await plain.session.stop()
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(fired.count == 0)
+    }
+
+    @Test func editCountCountsEveryEditPublished() async throws {
+        let r = Rig()
+        let recorder = EditRecorder(r.session.edits)
+        try await r.session.start()
+        _ = try await r.session.stop()
+        #expect(await eventually { recorder.edits.count == r.session.editCount })
+        #expect(r.session.editCount > 0)
+    }
+}
+
+@MainActor
+private final class Fired {
+    var count = 0
+    var leaseWasIdle = false
+}

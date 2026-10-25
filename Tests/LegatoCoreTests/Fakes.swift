@@ -171,19 +171,57 @@ actor MemoryHistory: HistoryStore {
     func delete(id: UUID) async throws { entries.removeAll { $0.id == id } }
 }
 
-/// Manually driven sleep: each call to the returned closure waits for one `tick()`.
+/// Manually driven sleep: each call to the returned closure waits for one `tick()` (a tick sent before
+/// anyone waits is kept for the next sleeper). A cancelled sleeper throws and consumes nothing, and
+/// the clock stays usable afterwards (an `AsyncStream`-based clock would end for good once a
+/// cancelled task had been iterating it, so a second run's sleep would return at once).
 struct ManualClock: Sendable {
-    let ticks: AsyncStream<Void>
-    private let cont: AsyncStream<Void>.Continuation
-    init() { (ticks, cont) = AsyncStream<Void>.makeStream() }
-    func tick() { cont.yield(()) }
-    var sleep: @Sendable (Duration) async throws -> Void {
-        let ticks = self.ticks
-        return { _ in
-            var it = ticks.makeAsyncIterator()
-            _ = await it.next()
-            try Task.checkCancellation()
+    private final class Source: Sendable {
+        private struct State {
+            var pending = 0
+            var nextID = 0
+            var waiters: [Int: CheckedContinuation<Void, any Error>] = [:]
         }
+        private let state = Mutex(State())
+
+        func tick() {
+            let waiter = state.withLock { s -> CheckedContinuation<Void, any Error>? in
+                if let id = s.waiters.keys.min() { return s.waiters.removeValue(forKey: id) }
+                s.pending += 1
+                return nil
+            }
+            waiter?.resume()
+        }
+
+        func wait() async throws {
+            let id = state.withLock { s -> Int in s.nextID += 1; return s.nextID }
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, any Error>) in
+                    enum Next { case resume, cancel, wait }
+                    let next = state.withLock { s -> Next in
+                        if Task.isCancelled { return .cancel }
+                        if s.pending > 0 { s.pending -= 1; return .resume }
+                        s.waiters[id] = c
+                        return .wait
+                    }
+                    switch next {
+                    case .resume: c.resume()
+                    case .cancel: c.resume(throwing: CancellationError())
+                    case .wait: break
+                    }
+                }
+            } onCancel: {
+                let waiter = state.withLock { $0.waiters.removeValue(forKey: id) }
+                waiter?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private let source = Source()
+    func tick() { source.tick() }
+    var sleep: @Sendable (Duration) async throws -> Void {
+        let source = self.source
+        return { _ in try await source.wait() }
     }
 }
 
@@ -282,5 +320,38 @@ final class FakeStartEnvironment: StartEnvironment {
     func current() -> StartContext { context }
     func isBackgroundRefusal(_ error: any Error) -> Bool {
         (error as? TestError).map { refusalTags.contains($0.tag) } ?? false
+    }
+}
+
+/// Records what the coordinator tells its sink, and into the shared log (`sink.<call>`).
+@MainActor
+final class FakeSink: TranscriptSink {
+    let log: EventLog
+    private(set) var started: [DictationRun] = []
+    private(set) var updates: [(committed: String, volatile: String)] = []
+    private(set) var ended: [(run: DictationRun, committed: String, text: String?)] = []
+    /// `leaseChanged` calls in order: the lease end, or nil when it ended.
+    private(set) var leases: [Date?] = []
+    /// What `runEnded` reports: the final text landed in the field.
+    var finalApplied = false
+
+    init(log: EventLog) { self.log = log }
+
+    func runStarted(_ run: DictationRun) {
+        log.add("sink.runStarted:\(run.target)")
+        started.append(run)
+    }
+    func update(committed: String, volatile: String) {
+        log.add("sink.update")
+        updates.append((committed, volatile))
+    }
+    func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
+        log.add("sink.runEnded")
+        ended.append((run, committed, text))
+        return finalApplied
+    }
+    func leaseChanged(until: Date?) {
+        log.add(until == nil ? "sink.lease:nil" : "sink.lease:set")
+        leases.append(until)
     }
 }
