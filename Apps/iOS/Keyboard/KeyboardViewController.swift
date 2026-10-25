@@ -9,11 +9,11 @@ final class KeyboardViewController: UIInputViewController {
     private var controller: KeyboardController?
     private var heightConstraint: NSLayoutConstraint?
 
-    private static let portraitHeight: CGFloat = 260
-    private static let landscapeHeight: CGFloat = 200
+    private static let portraitHeight = KeyGeometry.height(landscape: false)
+    private static let landscapeHeight = KeyGeometry.height(landscape: true)
 
     override func loadView() {
-        let input = UIInputView(frame: .zero, inputViewStyle: .keyboard)
+        let input = KeyboardInputView(frame: .zero, inputViewStyle: .keyboard)
         input.allowsSelfSizing = true
         inputView = input
     }
@@ -70,4 +70,10 @@ final class KeyboardViewController: UIInputViewController {
         super.textDidChange(textInput)
         controller?.documentDidChange()
     }
+}
+
+/// The input view. Adopting `UIInputViewAudioFeedback` lets `UIDevice.playInputClick()` click (the system's
+/// Keyboard Clicks switch still applies; `KeyFeedback` calls it only with Full Access and the setting on).
+final class KeyboardInputView: UIInputView, UIInputViewAudioFeedback {
+    var enableInputClicksWhenVisible: Bool { true }
 }

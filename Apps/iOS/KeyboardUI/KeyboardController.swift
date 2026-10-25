@@ -19,6 +19,8 @@ final class KeyboardController {
     @ObservationIgnored var trace: (@MainActor (String) -> Void)?
     /// Where the globe key sends its touches (the extension's `UIInputViewController`).
     @ObservationIgnored weak var inputModeTarget: UIInputViewController?
+    /// The typing rules and the page the key grid shows.
+    @ObservationIgnored private(set) var typing: TypingModel!
 
     /// The app's last published state.
     private(set) var host: HostState?
@@ -27,8 +29,15 @@ final class KeyboardController {
     private(set) var isVisible = false
     private(set) var returnKeyType: UIReturnKeyType = .default
     private(set) var keyboardType: UIKeyboardType = .default
+    private(set) var autocapitalization: AutoCapitalizationType = .none
+    private(set) var enablesReturnKeyAutomatically = false
+    private(set) var hasText = false
+    /// The field's keyboard appearance as an interface style (`.unspecified`: follow the system).
+    private(set) var appearance: UIUserInterfaceStyle = .unspecified
     /// A line above the keys: the Full Access explainer, or the "tap again to open" fallback.
     private(set) var hint: String?
+    /// The three suggestion slots above the keys (the prediction engine fills them; empty for now).
+    var suggestions: [String] = []
     /// Whether to show the globe key (`needsInputModeSwitchKey`); set by the extension.
     var showsGlobe = false
     /// The id of the request the mic key's Link carries (the Darwin request uses the same id).
@@ -47,7 +56,10 @@ final class KeyboardController {
         cursor = link.readApplied()
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
+        typing = TypingModel(controller: self)
     }
+
+    var fullAccess: Bool { hasFullAccess() }
 
     // MARK: Visibility
 
@@ -55,6 +67,7 @@ final class KeyboardController {
     func appeared() {
         isVisible = true
         refreshTraits()
+        typing.appeared()
         link.writePresence(visible: true, notify: true)
         trace?("visible value=1")
         heartbeat?.cancel()
@@ -70,6 +83,7 @@ final class KeyboardController {
 
     func disappeared() {
         isVisible = false
+        typing.disappeared()
         heartbeat?.cancel()
         heartbeat = nil
         reapply?.cancel()
@@ -85,11 +99,26 @@ final class KeyboardController {
     /// The field or its traits changed (a new field, another return key).
     func documentDidChange() {
         refreshTraits()
+        typing.documentChanged()
     }
 
-    private func refreshTraits() {
-        returnKeyType = document.returnKeyType
-        keyboardType = document.keyboardType
+    /// Reads the field's traits; only changed values are stored, so the keys redraw only when needed.
+    func refreshTraits() {
+        if returnKeyType != document.returnKeyType { returnKeyType = document.returnKeyType }
+        if keyboardType != document.keyboardType { keyboardType = document.keyboardType }
+        let capitalization = AutoCapitalizationType(rawValue: document.autocapitalizationType.rawValue) ?? .none
+        if autocapitalization != capitalization { autocapitalization = capitalization }
+        if enablesReturnKeyAutomatically != document.enablesReturnKeyAutomatically {
+            enablesReturnKeyAutomatically = document.enablesReturnKeyAutomatically
+        }
+        if hasText != document.hasText { hasText = document.hasText }
+        let style: UIUserInterfaceStyle =
+            switch document.keyboardAppearance {
+            case .dark: .dark
+            case .light: .light
+            default: .unspecified
+            }
+        if appearance != style { appearance = style }
     }
 
     // MARK: Host state
@@ -130,6 +159,7 @@ final class KeyboardController {
             case .insert(let text): document.insert(text)
             }
         }
+        if !ops.isEmpty { typing.hostEdited() }
     }
 
     // MARK: Typing
@@ -226,6 +256,11 @@ final class KeyboardController {
         forcedOpenAppUntil = now.addingTimeInterval(5)
         openAppRequestID = UUID().uuidString
         show("Legato needs to open. Tap the mic again.")
+    }
+
+    /// The emoji key: the emoji panel lands later; for now it says so.
+    func emojiTapped() {
+        show("Emoji is coming soon.")
     }
 
     private func show(_ text: String) {

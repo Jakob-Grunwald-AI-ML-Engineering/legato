@@ -13,6 +13,10 @@ final class ProxyDocument: TextDocument {
     var contextBefore: String { proxy().documentContextBeforeInput ?? "" }
     var returnKeyType: UIReturnKeyType { proxy().returnKeyType ?? .default }
     var keyboardType: UIKeyboardType { proxy().keyboardType ?? .default }
+    var autocapitalizationType: UITextAutocapitalizationType { proxy().autocapitalizationType ?? .sentences }
+    var enablesReturnKeyAutomatically: Bool { proxy().enablesReturnKeyAutomatically ?? false }
+    var keyboardAppearance: UIKeyboardAppearance { proxy().keyboardAppearance ?? .default }
+    var hasText: Bool { proxy().hasText }
 
     func insert(_ text: String) { proxy().insertText(text) }
     func deleteBackward() { proxy().deleteBackward() }

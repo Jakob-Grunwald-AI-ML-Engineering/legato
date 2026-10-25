@@ -52,6 +52,19 @@ enum Settings {
 
     static var keepAliveDuration: Duration { .seconds(keepAliveSeconds) }
 
+    /// A light tap on every key of the Legato keyboard (needs Full Access). Default on. The keyboard reads
+    /// the same keys (`KeyboardPreferences`).
+    static var keyboardHaptics: Bool {
+        get { AppGroup.defaults.object(forKey: KeyboardPreferences.hapticsKey) as? Bool ?? true }
+        set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.hapticsKey) }
+    }
+
+    /// The keyboard click on every key (needs Full Access; the system's Keyboard Clicks switch also applies). Default on.
+    static var keyboardClicks: Bool {
+        get { AppGroup.defaults.object(forKey: KeyboardPreferences.clicksKey) as? Bool ?? true }
+        set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.clicksKey) }
+    }
+
     /// Debug experiment (background second-start failure): a normal stop leaves the audio session active
     /// instead of deactivating it, so the next run does not have to activate it from the background.
     /// Interruptions, media resets and lost inputs still deactivate. Default off.

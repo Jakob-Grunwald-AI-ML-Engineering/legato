@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The dictation key. What a tap does comes from `MicKeyMode` (see `KeyboardController.micTapped`):
 /// an explainer without Full Access, a `Link` that opens the app when it is not running, a request to
-/// the running app otherwise.
+/// the running app otherwise. It is the pill at the right of the top bar and fills the frame it is given.
 struct MicKey: View {
     let controller: KeyboardController
 
@@ -24,14 +24,17 @@ struct MicKey: View {
 
     private var capturing: Bool { controller.isCapturing }
 
-    private var fill: Color { capturing ? .red : Color.accentColor }
-
+    /// The pill of the top bar: an outlined capsule; while capturing, filled red with a pulsing stop glyph.
     private var label: some View {
-        Image(systemName: capturing ? "stop.fill" : "mic.fill")
-            .font(.system(size: 18, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, minHeight: KeyStyle.height)
-            .background(fill, in: RoundedRectangle(cornerRadius: KeyStyle.radius))
-            .contentShape(Rectangle())
+        ZStack {
+            Capsule().fill(capturing ? Color.red : Color.clear)
+            Capsule().strokeBorder(capturing ? Color.clear : Color.primary.opacity(0.22), lineWidth: 2)
+            Image(systemName: capturing ? "stop.fill" : "mic.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(capturing ? Color.white : Color.primary)
+                .symbolEffect(.pulse, isActive: capturing)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Capsule())
     }
 }

@@ -17,6 +17,7 @@
 #   LEGATO_E2E_UDID      use this (already created) simulator; it is shut down afterwards only if the script booted it
 #   LEGATO_E2E_DERIVED   DerivedData directory to reuse between runs (default: a temp dir, removed on exit)
 #   LEGATO_E2E_KEEP=1    keep the work directory (logs) and print its path
+#   LEGATO_E2E_SHOTS     directory for the keyboard screenshots (scenario s; default: inside the work directory)
 # Without LEGATO_E2E_UDID a simulator named "legato-e2e" is created once (iPhone, newest iOS 26+ runtime),
 # reused by later runs, and shut down at the end.
 set -uo pipefail
@@ -117,7 +118,8 @@ if [ "$mode" = release-check ]; then
     AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
     LegatoFakeBackground LegatoFakeBackgroundRefusal start.route toggle-after-hop
     E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd.apply "link.host phase="
-    KeyboardHarness LegatoKeyboardHarness harness-mic)
+    KeyboardHarness LegatoKeyboardHarness harness-mic harness-type harness-numbers LegatoHarnessAppearance
+    LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions)
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f \( -name 'Legato*' -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }
@@ -701,8 +703,85 @@ scenario_q() {
   assert_no_log "nothing started over the link" "e2e outcome kind=started"
 }
 
+scenario_t() {
+  # The typing engine through the keyboard's real commit path (TypingModel over the harness document):
+  # autocapitalization, shift and caps lock, double-space period, delete, pages. The expected texts are
+  # written here, not derived from the code under test.
+  begin "t. harness: typing rules" -LegatoKeyboardHarness YES || return
+  wait_log "e2e harness ready" 10
+  assert_eq "return key label (en)" "return" "$(log_field "harness ready" returnLabel)"
+  assert_eq "space key label (en)" "space" "$(log_field "harness ready" spaceLabel)"
+  assert_eq "letters page rows have 10, 9, 9 and 4 keys (no globe)" "10,9,9,4" "$(sed -n 's/.* keys=\([0-9,]*\).*/\1/p' "$LOG" | head -1)"
+  trigger harness-type
+  wait_log "harness typing case=double-space-after-punctuation " 10
+  sleep 0.3
+  local pair name expected
+  for pair in "autocap=Hi" "double-space=Hi. There" "single-space=Hi there" "shift=Hi Bye" "caps-lock=Hi ABc" \
+    "delete=Hello wor" "delete-recapitalizes=C" "numbers=Ab12c" "double-space-after-punctuation=Ok,  x"; do
+    name="${pair%%=*}"; expected="${pair#*=}"
+    assert_eq "typing: $name" "$expected" "$(log_field "harness typing case=$name " text)"
+  done
+
+  SCENARIO="t. harness: German labels, email and number fields"
+  relaunch -LegatoKeyboardHarness YES -LegatoHarnessReturn send -AppleLanguages "(de)" || return
+  wait_log "e2e harness ready" 10
+  assert_eq "return key label (de, send)" "Senden" "$(log_field "harness ready" returnLabel)"
+  assert_eq "space key label (de)" "Leerzeichen" "$(log_field "harness ready" spaceLabel)"
+  relaunch -LegatoKeyboardHarness YES -LegatoHarnessKeyboardType email -LegatoHarnessGlobe YES || return
+  wait_log "e2e harness ready" 10
+  assert_eq "email letters page: bottom row adds @ and . (globe shown)" "10,9,9,7" "$(sed -n 's/.* keys=\([0-9,]*\).*/\1/p' "$LOG" | head -1)"
+  relaunch -LegatoKeyboardHarness YES -LegatoHarnessKeyboardType phone || return
+  wait_log "e2e harness ready" 10
+  assert_eq "phone field: numpad rows (3 columns, bottom row + 0 delete)" "3,3,3,3" "$(sed -n 's/.* keys=\([0-9,]*\).*/\1/p' "$LOG" | head -1)"
+  relaunch -LegatoKeyboardHarness YES -LegatoHarnessKeyboardType numbers || return
+  wait_log "e2e harness ready" 10
+  assert_log "numbers-and-punctuation field starts on the numbers page" "page=numbers"
+}
+
+scenario_s() {
+  # Screenshots of the keyboard UI in the harness: light, dark, landscape and a few field types. Saved to
+  # $LEGATO_E2E_SHOTS (default: inside the work directory, so only the size is checked).
+  local dir="${LEGATO_E2E_SHOTS:-$WORK/shots}"
+  mkdir -p "$dir"
+  local name file
+  shot() { # shot <name> <launch args...>: relaunch the harness with the args, then take the screenshot
+    name="$1"; shift
+    file="$dir/keyboard-$name.png"
+    SCENARIO="s. screenshots"
+    relaunch -LegatoKeyboardHarness YES "$@" || return 1
+    wait_log "e2e harness ready" 10
+    sleep 1.2
+  }
+  take() {
+    xcrun simctl io "$UDID" screenshot "$file" > /dev/null 2>&1
+    local size; size="$(stat -f %z "$file" 2> /dev/null || echo 0)"
+    if [ "$size" -gt 20000 ]; then record PASS "screenshot $name ($size bytes)"; else record FAIL "screenshot $name" "no usable image at $file"; fi
+  }
+  begin "s. screenshots" -LegatoKeyboardHarness YES -LegatoHarnessAppearance light -LegatoHarnessSuggestions typ,type,tip || return
+  wait_log "e2e harness ready" 10
+  trigger harness-type   # leaves some text in the field
+  sleep 1.2
+  name=light; file="$dir/keyboard-light.png"; take
+  shot dark -LegatoHarnessAppearance dark -LegatoHarnessSuggestions typ,type,tip && take
+  shot landscape -LegatoHarnessAppearance light -LegatoHarnessLandscape YES && {
+    take
+    sips -r 90 "$file" --out "$file" > /dev/null 2>&1
+    local w h
+    w="$(sips -g pixelWidth "$file" 2> /dev/null | awk '/pixelWidth/ {print $2}')"
+    h="$(sips -g pixelHeight "$file" 2> /dev/null | awk '/pixelHeight/ {print $2}')"
+    if [ "${w:-0}" -gt "${h:-1}" ]; then record PASS "landscape screenshot is wider than tall (${w}x${h})"
+    else record FAIL "landscape screenshot is wider than tall" "${w}x${h}"; fi
+  }
+  shot landscape-dark -LegatoHarnessAppearance dark -LegatoHarnessLandscape YES && { take; sips -r 90 "$file" --out "$file" > /dev/null 2>&1; }
+  shot numbers -LegatoHarnessAppearance light && { trigger harness-numbers; sleep 1; take; }
+  shot email-send -LegatoHarnessAppearance light -LegatoHarnessKeyboardType email -LegatoHarnessReturn send -LegatoHarnessGlobe YES && take
+  shot german-go -LegatoHarnessAppearance dark -LegatoHarnessReturn go -AppleLanguages "(de)" && take
+  shot phone -LegatoHarnessAppearance light -LegatoHarnessKeyboardType phone -LegatoHarnessGlobe YES && take
+  [ "${LEGATO_E2E_SHOTS:-}" != "" ] && echo "Screenshots: $dir"
+}
+
 t_run=$SECONDS
-for s in a b c d e f g h i p j o k l m n q; do "scenario_$s"; done
+for s in a b c d e f g h i p j o k l m n q t s; do "scenario_$s"; done
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report

@@ -10,6 +10,11 @@ protocol TextDocument: AnyObject {
     var contextBefore: String { get }
     var returnKeyType: UIReturnKeyType { get }
     var keyboardType: UIKeyboardType { get }
+    var autocapitalizationType: UITextAutocapitalizationType { get }
+    var enablesReturnKeyAutomatically: Bool { get }
+    var keyboardAppearance: UIKeyboardAppearance { get }
+    /// Whether the field holds any text (not only before the insertion point).
+    var hasText: Bool { get }
     func insert(_ text: String)
     func deleteBackward()
 }

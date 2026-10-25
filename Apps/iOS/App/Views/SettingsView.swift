@@ -1,11 +1,14 @@
 import LegatoAudio
 import LegatoCore
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     let controller: AppController
     @State private var policy = Settings.audioPolicy
     @State private var keepAlive = Settings.keepAlive
+    @State private var haptics = Settings.keyboardHaptics
+    @State private var clicks = Settings.keyboardClicks
     @State private var showPauseOthers = Settings.debugShowPauseOthers
     #if LEGATO_INTERNAL
     @State private var keepSessionActive = Settings.keepSessionActiveBetweenRuns
@@ -40,6 +43,18 @@ struct SettingsView: View {
                 Text("After a dictation with the Legato keyboard, the microphone stays ready for this long, so the next tap on the keyboard's mic key starts at once without opening Legato. While it is ready, the orange microphone indicator stays on. Off by default.")
             }
 
+            Section {
+                Toggle("Haptic feedback", isOn: $haptics)
+                Toggle("Key clicks", isOn: $clicks)
+                Button("Keyboard settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            } header: {
+                Text("Typing")
+            } footer: {
+                Text("Haptics and clicks need Allow Full Access for the Legato keyboard (Settings > Legato > Keyboards). Clicks also follow the system's Keyboard Clicks switch in Settings > Sounds & Haptics.")
+            }
+
             #if LEGATO_INTERNAL
             Section {
                 Toggle("Keep audio session active", isOn: $keepSessionActive)
@@ -58,6 +73,8 @@ struct SettingsView: View {
             Settings.keepAlive = new
             if new == .off { Task { await controller.endKeepAlive() } }
         }
+        .onChange(of: haptics) { _, new in Settings.keyboardHaptics = new }
+        .onChange(of: clicks) { _, new in Settings.keyboardClicks = new }
         .onChange(of: showPauseOthers) { _, new in
             Settings.debugShowPauseOthers = new
             policy = Settings.audioPolicy // falls back to the default if the stored policy is no longer offered

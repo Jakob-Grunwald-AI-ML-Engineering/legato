@@ -65,6 +65,15 @@ struct OnboardingView: View {
                     Button("Open Settings", action: openSettings)
                 }
             }
+
+            Section {
+                Text("Settings > Legato > Keyboards: turn on Legato, then Allow Full Access.")
+                Button("Enable keyboard + Allow Full Access", action: openSettings)
+            } header: {
+                Text("Legato keyboard")
+            } footer: {
+                Text("Full Access lets the keyboard's mic key talk to Legato and play key haptics and clicks. The keyboard does not send anything off your device: typing and dictation stay on it.")
+            }
         }
         .task { await controller.refreshReadiness() }
     }

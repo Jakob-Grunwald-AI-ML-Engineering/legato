@@ -195,7 +195,7 @@ extension E2E {
         "toggle", "interrupt", "copy-last", "foreground", "background", "toggle-after-hop",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-start", "kbd-hop-start-url-first",
-        "harness-mic",
+        "harness-mic", "harness-type", "harness-numbers",
     ]
 
     /// Darwin notifications `de.gruenwald.legato.e2e.<command>`, posted from the host with
