@@ -52,7 +52,7 @@ final class SessionController {
     private var target: DictationTarget = .keyboard
 
     let dictation = Dictation()
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private let router = TapRouter()
     private var transitioning = false
     private var heartbeat: Task<Void, Never>?
@@ -165,8 +165,15 @@ final class SessionController {
     }
 
     private func startEngine() throws {
+        // Fresh engine after the session is configured: one created at launch (category
+        // SoloAmbient) caches an input format that installTap then rejects with an exception.
+        if !engine.isRunning { engine = AVAudioEngine() }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
+        SpikeLog.write("app", "input format \(format.sampleRate) Hz x\(format.channelCount)")
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "spike", code: 3, userInfo: [NSLocalizedDescriptionKey: "invalid input format \(format)"])
+        }
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 4096, format: format, block: Self.tapBlock(router))
         engine.prepare()
@@ -282,7 +289,7 @@ final class SessionController {
                 SessionController.shared.restartEngine(why: "media services reset")
             }
         })
-        tokens.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { _ in
+        tokens.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated {
                 SessionController.shared.log("engine configuration change; running=\(SessionController.shared.engine.isRunning)")
                 SessionController.shared.restartEngine(why: "configuration change")
