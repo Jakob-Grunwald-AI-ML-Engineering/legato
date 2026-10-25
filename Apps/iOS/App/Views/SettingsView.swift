@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var showPauseOthers = Settings.debugShowPauseOthers
     #if LEGATO_INTERNAL
     @State private var restartAfterBackgroundStop = Settings.restartAfterBackgroundStop
+    @State private var keepSessionActive = Settings.keepSessionActiveBetweenRuns
     @State private var forceTapToCopy = Settings.debugForceTapToCopy
     #endif
 
@@ -30,10 +31,15 @@ struct SettingsView: View {
             }
 
             #if LEGATO_INTERNAL
-            Section("Debug") {
+            Section {
                 Toggle("Restart after background stop", isOn: $restartAfterBackgroundStop)
+                Toggle("Keep audio session active", isOn: $keepSessionActive)
                 Toggle("Offer pause others", isOn: $showPauseOthers)
                 Toggle("Force tap-to-copy", isOn: $forceTapToCopy)
+            } header: {
+                Text("Debug")
+            } footer: {
+                Text("Keep audio session active: a stop leaves the session on, so music stays lowered (or paused) between dictations until an interruption or this switch ends it. Diagnostics: Library/Caches/audio-diag.jsonl in the app container.")
             }
             #endif
         }
@@ -46,6 +52,10 @@ struct SettingsView: View {
         #if LEGATO_INTERNAL
         .onChange(of: restartAfterBackgroundStop) { _, new in Settings.restartAfterBackgroundStop = new }
         .onChange(of: forceTapToCopy) { _, new in Settings.debugForceTapToCopy = new }
+        .onChange(of: keepSessionActive) { _, new in
+            Settings.keepSessionActiveBetweenRuns = new
+            if !new { controller.releaseHeldSession() }
+        }
         #endif
     }
 

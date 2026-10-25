@@ -112,7 +112,8 @@ if [ "$mode" = release-check ]; then
   debug_app="$DERIVED/Build/Products/Debug-iphonesimulator/Legato.app"
   # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
-    LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E)
+    LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
+    AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns)
   scan() { # every Mach-O file in the bundle
     find "$1" -type f \( -name Legato -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }

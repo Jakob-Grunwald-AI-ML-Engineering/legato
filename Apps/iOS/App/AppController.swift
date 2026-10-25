@@ -30,6 +30,10 @@ final class AppController {
     @ObservationIgnored private let coordinator: DictationCoordinator
     /// Counts finished runs, so `toggle()` can tell an abort that raced with its own start.
     @ObservationIgnored private var idleCount = 0
+    #if LEGATO_INTERNAL
+    /// One instance for the process: it remembers whether a session is being held between runs.
+    @ObservationIgnored private let sessionControl: AppSessionControl
+    #endif
 
     private init() {
         // The one writer of history.jsonl. Without the App Group container (misconfigured signing) fall
@@ -40,6 +44,10 @@ final class AppController {
         let history = JSONLHistoryStore(fileURL: directory.appending(path: "history.jsonl"))
         let engine = self.engine
         self.history = history
+        #if LEGATO_INTERNAL
+        let sessionControl = AppSessionControl()
+        self.sessionControl = sessionControl
+        #endif
         coordinator = DictationCoordinator(
             activity: ActivityKitClient(),
             clipboard: pasteboard,
@@ -50,16 +58,25 @@ final class AppController {
                 if let fake = E2E.makeFakeSession(history: history, policy: Settings.audioPolicy) { return fake }
                 #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
+                #if LEGATO_INTERNAL
+                let source = MicSource(onAttempt: AudioDiagnostics.micAttempt)
+                #else
+                let source = MicSource()
+                let sessionControl = AudioSessionController()
+                #endif
                 return DictationSession(
                     engine: engine,
-                    source: MicSource(),
-                    sessionControl: AudioSessionController(),
+                    source: source,
+                    sessionControl: sessionControl,
                     history: history,
                     policy: Settings.audioPolicy,
                     linger: .zero)
             })
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
         installInterruptionObservers()
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.install()
+        #endif
         #if DEBUG
         E2E.applyLaunchSettings()
         #endif
@@ -70,7 +87,13 @@ final class AppController {
     /// The single entry point: Action Button, Control Center, Live Activity stop and the in-app button.
     func toggle() async -> DictationCoordinator.Outcome {
         let finishedBefore = idleCount
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("toggle.begin", ["isDictating": isDictating])
+        #endif
         let outcome = await coordinator.toggle()
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("toggle.end", ["outcome": Self.outcomeKind(outcome)])
+        #endif
         if case .started = outcome, idleCount == finishedBefore { isDictating = true }
         if case .needsOnboarding = outcome { await refreshReadiness() }
         #if DEBUG
@@ -78,6 +101,18 @@ final class AppController {
         #endif
         return outcome
     }
+
+    #if LEGATO_INTERNAL
+    private static func outcomeKind(_ outcome: DictationCoordinator.Outcome) -> String {
+        switch outcome {
+        case .started: "started"
+        case .stopped(let text): text == nil ? "stopped(nil)" : "stopped"
+        case .needsOnboarding(let issue): "needsOnboarding(\(issue))"
+        case .failed(let error): "failed(\(error))"
+        case .busy: "busy"
+        }
+    }
+    #endif
 
     #if DEBUG
     private static func describe(_ outcome: DictationCoordinator.Outcome) -> String {
@@ -118,7 +153,13 @@ final class AppController {
     /// Stops a running dictation gracefully (committed text reaches clipboard and history) because the
     /// system took the microphone away. A no-op when idle. If the session is already dead, the
     /// coordinator's stop path falls into its abort path, which salvages the same text.
-    private func stopForSystemEvent(_ reason: String) {
+    ///
+    /// `releasesHeldSession`: also deactivate an audio session that the "keep session active" debug
+    /// switch is holding between runs (interruption, media reset).
+    private func stopForSystemEvent(_ reason: String, releasesHeldSession: Bool = false) {
+        #if LEGATO_INTERNAL
+        if releasesHeldSession || isDictating { sessionControl.release(reason: reason) }
+        #endif
         guard isDictating else { return }
         Self.log.info("stopping dictation: \(reason, privacy: .public)")
         #if DEBUG
@@ -135,7 +176,7 @@ final class AppController {
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-            Task { @MainActor in self?.stopForSystemEvent("interruption began") }
+            Task { @MainActor in self?.stopForSystemEvent("interruption began", releasesHeldSession: true) }
         }
 
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
@@ -157,8 +198,15 @@ final class AppController {
         }
 
         center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.stopForSystemEvent("media services reset") }
+            Task { @MainActor in self?.stopForSystemEvent("media services reset", releasesHeldSession: true) }
         }
+    }
+
+    /// The "keep session active" debug switch went off: end a session that was being held.
+    func releaseHeldSession() {
+        #if LEGATO_INTERNAL
+        sessionControl.releaseIfHeld()
+        #endif
     }
 
     // MARK: State for the UI

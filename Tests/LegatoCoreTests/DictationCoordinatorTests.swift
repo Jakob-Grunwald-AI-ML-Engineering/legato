@@ -36,6 +36,8 @@ struct CoordinatorRig {
     let clipboard: FakeClipboard
     let readiness = FakeReadiness()
     let heartbeat = ManualClock()
+    /// Drives the trailing publish: every injected sleep that is not the heartbeat's.
+    let throttle = ManualClock()
     let time = TestTime()
     let sleeps = SleepLog()
     let built = BuiltSessions()
@@ -43,7 +45,7 @@ struct CoordinatorRig {
 
     init(script: [TranscriptEvent] = []) {
         let log = self.log, history = self.history, time = self.time, built = self.built
-        let heartbeat = self.heartbeat, sleeps = self.sleeps
+        let heartbeat = self.heartbeat, throttle = self.throttle, sleeps = self.sleeps
         let engine = FakeEngine(log: log)
         engine.set(script: script)
         let source = FakeSource(log: log)
@@ -67,7 +69,11 @@ struct CoordinatorRig {
             },
             sleep: { duration in
                 sleeps.add(duration)
-                try await heartbeat.sleep(duration)
+                if duration == .seconds(10) { // the heartbeat
+                    try await heartbeat.sleep(duration)
+                } else {
+                    try await throttle.sleep(duration)
+                }
             },
             now: { time.now }
         )
@@ -306,6 +312,74 @@ struct CoordinatorRig {
         #expect(r.activity.updates.count == published + 1)
         #expect(r.activity.updates.allSatisfy { $0.content.phase == .listening })
         _ = await r.coordinator.toggle()
+    }
+
+    @Test func aThrottledEditIsPublishedWhenTheWindowEnds() async throws {
+        let r = CoordinatorRig()
+        _ = await r.coordinator.toggle() // first publish at T
+        let published = r.activity.updates.count
+        r.time.advance(0.4)
+        r.engine.emit(.init(text: "hello", isFinal: false), run: 0) // inside the window, then silence
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.activity.updates.count == published) // never faster than once a second
+        r.time.advance(0.6) // the window ends at T + 1 s
+        r.throttle.tick()
+        #expect(await eventually { r.activity.updates.last?.content.tail == "hello" })
+        #expect(r.activity.updates.count == published + 1)
+        #expect(r.activity.updates.last?.staleDate == r.time.now.addingTimeInterval(30))
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func theTrailingPublishWaitsOutTheRestOfTheWindowAndCarriesTheLatestTail() async throws {
+        let r = CoordinatorRig()
+        _ = await r.coordinator.toggle()
+        let published = r.activity.updates.count
+        r.time.advance(0.4)
+        r.engine.emit(.init(text: "hello", isFinal: false), run: 0)
+        r.engine.emit(.init(text: "hello wor", isFinal: false), run: 0)
+        #expect(await eventually {
+            r.sleeps.durations.contains { $0 > .milliseconds(590) && $0 < .milliseconds(610) }
+        })
+        r.time.advance(0.1)
+        r.engine.emit(.init(text: "hello world", isFinal: false), run: 0)
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.activity.updates.count == published) // one pending publish, not one per edit
+        r.time.advance(0.5)
+        r.throttle.tick()
+        #expect(await eventually { r.activity.updates.last?.content.tail == "hello world" })
+        #expect(r.activity.updates.count == published + 1)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func aPublishThatIsDueSupersedesThePendingTrailingOne() async throws {
+        let r = CoordinatorRig()
+        _ = await r.coordinator.toggle()
+        let published = r.activity.updates.count
+        r.time.advance(0.4)
+        r.engine.emit(.init(text: "hello", isFinal: false), run: 0) // held back; trailing pending
+        try? await Task.sleep(for: .milliseconds(50))
+        r.time.advance(0.7)
+        r.engine.emit(.init(text: "hello world", isFinal: false), run: 0) // window over: published now
+        #expect(await eventually { r.activity.updates.last?.content.tail == "hello world" })
+        r.throttle.tick() // the superseded trailing publish must not add a duplicate
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.activity.updates.count == published + 1)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func stoppingCancelsThePendingTrailingPublish() async throws {
+        let r = CoordinatorRig()
+        _ = await r.coordinator.toggle()
+        r.time.advance(0.4)
+        r.engine.emit(.init(text: "hello", isFinal: true), run: 0)
+        try? await Task.sleep(for: .milliseconds(50))
+        _ = await r.coordinator.toggle()
+        let after = r.activity.calls.count
+        r.time.advance(1)
+        r.throttle.tick()
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.activity.calls.count == after)
+        #expect(r.activity.ends.first?.phase == .copied)
     }
 
     @Test func heartbeatRefreshesTheStaleDateWhileListening() async throws {

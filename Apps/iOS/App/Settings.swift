@@ -14,6 +14,7 @@ enum Settings {
     private enum Key {
         static let audioPolicy = "audioPolicy"
         static let restartAfterBackgroundStop = "restartAfterBackgroundStop"
+        static let keepSessionActiveBetweenRuns = "keepSessionActiveBetweenRuns"
         static let debugShowPauseOthers = "debugShowPauseOthers"
         static let debugForceTapToCopy = "debugForceTapToCopy"
     }
@@ -52,6 +53,28 @@ enum Settings {
         set {
             #if LEGATO_INTERNAL
             AppGroup.defaults.set(newValue, forKey: Key.restartAfterBackgroundStop)
+            #endif
+        }
+    }
+
+    /// Debug experiment (background second-start failure): a normal stop leaves the audio session active
+    /// instead of deactivating it, so the next run does not have to activate it from the background.
+    /// Interruptions, media resets and lost inputs still deactivate. Default off.
+    ///
+    /// While the session is held, other apps' audio stays ducked (or paused, or mixed) as the policy
+    /// of the last run left it: music does not recover its volume between dictations. Absent from App
+    /// Store builds (`LEGATO_INTERNAL` only), where it always reads false.
+    static var keepSessionActiveBetweenRuns: Bool {
+        get {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.bool(forKey: Key.keepSessionActiveBetweenRuns)
+            #else
+            false
+            #endif
+        }
+        set {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.set(newValue, forKey: Key.keepSessionActiveBetweenRuns)
             #endif
         }
     }

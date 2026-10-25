@@ -51,6 +51,10 @@ public final class DictationCoordinator {
     private var cancelRequested = false
     private var consumer: Task<Void, Never>?
     private var heartbeat: Task<Void, Never>?
+    /// Publishes an edit the throttle held back once its window ends, so the last words of a phrase
+    /// followed by silence don't wait for the next heartbeat. At most one is pending.
+    private var trailing: Task<Void, Never>?
+    private var lastPublishAt: Date?
 
     public init(
         activity: any ActivityClient,
@@ -90,6 +94,7 @@ public final class DictationCoordinator {
 
         startedAt = now()
         live = LiveTranscript()
+        lastPublishAt = nil
         do {
             try await activity.request(content(.starting))
         } catch {
@@ -206,11 +211,44 @@ public final class DictationCoordinator {
         DictationActivityContent(startedAt: startedAt, tail: tail, phase: phase)
     }
 
-    /// Pushes the live tail to the activity while listening. Throttled unless `force`d.
-    private func publishListening(force: Bool) async {
-        guard phase == .listening, let tail = live.publish(now: now(), force: force) else { return }
-        await activity.update(content(.listening, tail: tail), staleDate: now().addingTimeInterval(Self.staleAfter))
+    /// Pushes the live tail to the activity while listening. Throttled unless `force`d; a throttled
+    /// edit is published by the trailing task when the window ends. Returns whether it published.
+    @discardableResult
+    private func publishListening(force: Bool, fromTrailing: Bool = false) async -> Bool {
+        guard phase == .listening else { return false }
+        let t = now()
+        guard let tail = live.publish(now: t, force: force) else {
+            startTrailing()
+            return false
+        }
+        lastPublishAt = t
+        // This publish carries the latest tail; a pending trailing one would only repeat it.
+        if !fromTrailing { trailing?.cancel(); trailing = nil }
+        await activity.update(content(.listening, tail: tail), staleDate: t.addingTimeInterval(Self.staleAfter))
+        return true
     }
+
+    /// Schedules the trailing publish at `lastPublishAt + minPublishInterval`, unless one is pending.
+    private func startTrailing() {
+        guard trailing == nil else { return }
+        let sleep = self.sleep
+        trailing = Task { [weak self] in
+            await self?.runTrailing(sleep: sleep)
+            // Cancelled means a publish superseded it or the run ended; the canceller owns the handle.
+            if !Task.isCancelled { self?.clearTrailing() }
+        }
+    }
+
+    private func runTrailing(sleep: @Sendable (Duration) async throws -> Void) async {
+        while !Task.isCancelled, phase == .listening, let last = lastPublishAt {
+            let wait = last.addingTimeInterval(LiveTranscript.minPublishInterval).timeIntervalSince(now())
+            do { try await sleep(.seconds(max(wait, 0))) } catch { return }
+            guard !Task.isCancelled else { return }
+            if await publishListening(force: false, fromTrailing: true) { return }
+        }
+    }
+
+    private func clearTrailing() { trailing = nil }
 
     /// One consumer per session instance, for that session's whole life.
     private func startConsumer(of s: DictationSession) {
@@ -238,9 +276,10 @@ public final class DictationCoordinator {
     /// Stops the consumer and heartbeat and waits out any update in flight, so nothing can land
     /// after the activity has moved on.
     private func drainTasks() async {
-        let tasks = [consumer, heartbeat].compactMap { $0 }
+        let tasks = [consumer, heartbeat, trailing].compactMap { $0 }
         consumer = nil
         heartbeat = nil
+        trailing = nil
         for task in tasks { task.cancel() }
         for task in tasks { await task.value }
     }

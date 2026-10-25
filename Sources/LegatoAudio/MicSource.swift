@@ -43,32 +43,73 @@ public final class MicSource: AudioSource {
         init(_ engine: AVAudioEngine) { self.engine = engine }
     }
 
+    /// The outcome of one engine start attempt, for diagnostics.
+    public struct Attempt: Sendable {
+        /// 0-based; at most `maxAttempts` per `start(format:)`.
+        public let index: Int
+        /// The input node's format on this attempt (0 when the route was not ready).
+        public let inputSampleRate: Double
+        public let inputChannelCount: Int
+        /// nil when the engine started.
+        public let error: (any Error)?
+    }
+
+    /// 8 attempts, 150 ms apart.
+    static let maxAttempts = 8
+    static let retryDelay: Duration = .milliseconds(150)
+
     private let state = Mutex(State())
     private let router = TapRouter()
+    private let onAttempt: (@Sendable (Attempt) -> Void)?
 
-    public init() {}
+    /// - Parameter onAttempt: called after every start attempt, success or failure (diagnostics only).
+    public init(onAttempt: (@Sendable (Attempt) -> Void)? = nil) {
+        self.onAttempt = onAttempt
+    }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         await stop()
-        // Fresh engine, created after the session is active: an engine made earlier caches an
-        // input format that installTap then rejects.
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let inFormat = input.outputFormat(forBus: 0)
-        guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else { throw MicSourceError.invalidInputFormat }
-        guard let converter = BufferConverter(from: inFormat, to: format) else { throw MicSourceError.converterUnavailable }
-
-        input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(router, converter))
-        engine.prepare()
-        do {
-            try await Self.startWithRetry(engine)
-        } catch {
-            input.removeTap(onBus: 0)
-            throw error
+        // The route can still be settling right after session activation (kAUStartIO 'what', or a
+        // zero input sample rate), and an engine that failed to start stays unusable. So every
+        // attempt builds a fresh engine, after the session is active (an engine made earlier caches
+        // an input format that installTap then rejects), and is gated on a valid input format.
+        var lastError: (any Error)?
+        for attempt in 0..<Self.maxAttempts {
+            if attempt > 0 { try await Task.sleep(for: Self.retryDelay) }
+            let engine = AVAudioEngine()
+            let input = engine.inputNode
+            let inFormat = input.outputFormat(forBus: 0)
+            let report = { [onAttempt] (error: (any Error)?) in
+                onAttempt?(Attempt(
+                    index: attempt, inputSampleRate: inFormat.sampleRate,
+                    inputChannelCount: Int(inFormat.channelCount), error: error))
+            }
+            guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
+                lastError = MicSourceError.invalidInputFormat
+                report(lastError)
+                continue
+            }
+            guard let converter = BufferConverter(from: inFormat, to: format) else {
+                report(MicSourceError.converterUnavailable)
+                throw MicSourceError.converterUnavailable
+            }
+            input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(router, converter))
+            engine.prepare()
+            do {
+                try engine.start()
+            } catch {
+                input.removeTap(onBus: 0)
+                engine.stop()
+                lastError = error
+                report(error)
+                continue
+            }
+            report(nil)
+            let box = EngineBox(engine)
+            state.withLock { $0.engine = box }
+            return makeStream()
         }
-        let box = EngineBox(engine)
-        state.withLock { $0.engine = box }
-        return makeStream()
+        throw lastError ?? MicSourceError.invalidInputFormat
     }
 
     public func route() async throws -> AsyncStream<AudioChunk> {
@@ -96,21 +137,6 @@ public final class MicSource: AudioSource {
         let (stream, continuation) = AsyncStream.makeStream(of: AudioChunk.self)
         router.setSink(continuation)
         return stream
-    }
-
-    /// The route can still be settling right after session activation (kAUStartIO 'what').
-    private static func startWithRetry(_ engine: AVAudioEngine) async throws {
-        var lastError: (any Error)?
-        for attempt in 0..<8 {
-            do {
-                try engine.start()
-                return
-            } catch {
-                lastError = error
-                if attempt < 7 { try await Task.sleep(for: .milliseconds(150)) }
-            }
-        }
-        throw lastError ?? MicSourceError.invalidInputFormat
     }
 
     /// Built outside any actor: a closure formed in an isolated context inherits that isolation,
