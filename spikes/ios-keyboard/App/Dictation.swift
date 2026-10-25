@@ -138,5 +138,6 @@ final class Dictation {
         d.set(st, forKey: Spike.Key.dictState)
         d.set(d.integer(forKey: Spike.Key.textSeq) + 1, forKey: Spike.Key.textSeq)
         DarwinObserver.post(Spike.Note.text)
+        SpikeLog.write("dict", "publish seq=\(d.integer(forKey: Spike.Key.textSeq)) state=\(st) final=\(final) len=\((finalized + volatile).count)")
     }
 }

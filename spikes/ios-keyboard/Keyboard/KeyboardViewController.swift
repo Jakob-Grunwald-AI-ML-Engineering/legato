@@ -78,11 +78,13 @@ final class KeyboardModel {
         // A new dictation (started by the intent, not by us) resets what we have inserted so far.
         let id = d.double(forKey: Spike.Key.dictId)
         if id != currentDictation { currentDictation = id; inserted = "" }
+        let st = d.string(forKey: Spike.Key.dictState) ?? "idle"
+        let text = d.string(forKey: Spike.Key.text) ?? ""
+        log("applyText seq=\(seq) target=\(d.string(forKey: Spike.Key.dictTarget) ?? "-") state=\(st) cachedState=\(dictState) len=\(text.count) proxy=\(proxy?() != nil)")
         guard d.string(forKey: Spike.Key.dictTarget) == "keyboard" else { return }
         guard let proxy = proxy?() else { return }
-        let text = d.string(forKey: Spike.Key.text) ?? ""
-        if dictState.hasPrefix("error") { log("dictation \(dictState)"); return }
-        guard dictState != "idle" || d.bool(forKey: Spike.Key.textFinal) else { return }
+        if st.hasPrefix("error") { log("dictation \(st)"); return }
+        guard st != "idle" || d.bool(forKey: Spike.Key.textFinal) else { return }
         for _ in 0..<inserted.count { proxy.deleteBackward() }
         proxy.insertText(text)
         inserted = d.bool(forKey: Spike.Key.textFinal) ? "" : text
