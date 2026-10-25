@@ -256,16 +256,13 @@ final class SessionController {
         let s = AVAudioSession.sharedInstance()
         log("setMixing(\(mix)) for \(why); otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint)")
         do {
-            // Spoken-audio interrupt stays mixable (music keeps playing, Audible/podcasts pause),
-            // so it is allowed from the background, unlike a non-mixable session.
+            // Navigation-app pattern (Google Maps does this from the background): duck music and
+            // interrupt spoken audio, applied by a fresh deactivate -> activate cycle; changing
+            // options on an already-active session fails with '!int'.
             var opts: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP, .defaultToSpeaker]
-            if mix {
-                engine.stop()
-                try s.setActive(false, options: .notifyOthersOnDeactivation)
-                opts.insert(.mixWithOthers)
-            } else {
-                opts.insert(.interruptSpokenAudioAndMixWithOthers)
-            }
+            opts.formUnion(mix ? [.mixWithOthers] : [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
+            engine.stop()
+            try s.setActive(false, options: .notifyOthersOnDeactivation)
             try s.setCategory(.playAndRecord, mode: .default, options: opts)
             try s.setActive(true)
             if !engine.isRunning { try startEngine() }
