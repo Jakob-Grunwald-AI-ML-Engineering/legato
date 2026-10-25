@@ -25,6 +25,7 @@ final class FakeSessionControl: AudioSessionControlling {
         self.supportedPolicies = supported
     }
     func failActivation(with e: any Error) { activateError.withLock { $0 = e } }
+    func clearActivationFailure() { activateError.withLock { $0 = nil } }
     var activatedConfigs: [SessionConfig] { configs.withLock { $0 } }
 
     func activate(_ config: SessionConfig) throws {
@@ -43,6 +44,7 @@ final class FakeSource: AudioSource {
 
     init(log: EventLog) { self.log = log }
     func failStart(with e: any Error) { startError.withLock { $0 = e } }
+    func clearStartFailure() { startError.withLock { $0 = nil } }
     func failRoute(with e: any Error) { routeError.withLock { $0 = e } }
 
     private func makeStream() -> AsyncStream<AudioChunk> {
@@ -213,6 +215,8 @@ final class FakeActivity: ActivityClient {
 
     let log: EventLog
     private(set) var calls: [Call] = []
+    /// How often `dismiss` was called (the run never began; the activity was removed at once).
+    private(set) var dismissals = 0
     /// Makes `request` throw (Live Activities refused).
     var requestError: (any Error)?
     /// Keeps `request` pending until cleared (polled, like `FakeEngine`'s prepare hold).
@@ -242,6 +246,10 @@ final class FakeActivity: ActivityClient {
         log.add("activity.end:\(content.phase.rawValue)")
         calls.append(.end(content))
     }
+    func dismiss() async {
+        log.add("activity.dismiss")
+        dismissals += 1
+    }
 }
 
 @MainActor
@@ -264,4 +272,15 @@ final class FakeClipboard: Clipboard {
 final class FakeReadiness: Readiness {
     var issue: ReadinessIssue?
     func check() async -> ReadinessIssue? { issue }
+}
+
+@MainActor
+final class FakeStartEnvironment: StartEnvironment {
+    var context = StartContext.unrestricted
+    /// `TestError.tag` values that count as "the system refused a background start".
+    var refusalTags: Set<String> = ["refused"]
+    func current() -> StartContext { context }
+    func isBackgroundRefusal(_ error: any Error) -> Bool {
+        (error as? TestError).map { refusalTags.contains($0.tag) } ?? false
+    }
 }

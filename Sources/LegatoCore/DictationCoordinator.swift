@@ -7,6 +7,10 @@ import Foundation
 /// Order matters. The activity is requested *before* the session starts, because iOS stops a
 /// recording intent that has no Live Activity. Every start builds a fresh `DictationSession` (and so
 /// a fresh mic); nothing stays armed between dictations.
+///
+/// Starting from the background works only while no other audio plays. So a start in the background
+/// next to other audio, or one the system refuses, ends in `.needsForeground` with nothing left
+/// behind; the app brings itself to the foreground and toggles again.
 @MainActor
 public final class DictationCoordinator {
     public enum Outcome: Sendable, Equatable {
@@ -17,6 +21,9 @@ public final class DictationCoordinator {
         case stopped(String?)
         /// Not started: resolve `ReadinessIssue` in the foreground first.
         case needsOnboarding(ReadinessIssue)
+        /// Not started, and nothing is left behind (no activity, no audio): the app must come to the
+        /// foreground and press again. The press in the foreground starts normally.
+        case needsForeground(ForegroundReason)
         /// The start failed (description of the error); the activity ended `failed`.
         case failed(String)
         /// A stop or abort is already being wrapped up; the press did nothing.
@@ -38,6 +45,7 @@ public final class DictationCoordinator {
     private let activity: any ActivityClient
     private let clipboard: any Clipboard
     private let readiness: any Readiness
+    private let startEnvironment: any StartEnvironment
     private let history: any HistoryStore
     private let makeSession: DictationSessionFactory
     private let sleep: @Sendable (Duration) async throws -> Void
@@ -60,6 +68,7 @@ public final class DictationCoordinator {
         activity: any ActivityClient,
         clipboard: any Clipboard,
         readiness: any Readiness,
+        startEnvironment: any StartEnvironment = UnrestrictedStartEnvironment(),
         history: any HistoryStore,
         makeSession: @escaping DictationSessionFactory,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
@@ -68,6 +77,7 @@ public final class DictationCoordinator {
         self.activity = activity
         self.clipboard = clipboard
         self.readiness = readiness
+        self.startEnvironment = startEnvironment
         self.history = history
         self.makeSession = makeSession
         self.sleep = sleep
@@ -105,6 +115,11 @@ public final class DictationCoordinator {
         let issue = await readiness.check()
         if cancelRequested { return finishRun(.stopped(nil), ended: false) }
         if let issue { return finishRun(.needsOnboarding(issue), ended: false) }
+        // Recording next to other audio only starts from the foreground: don't even try from here.
+        let context = startEnvironment.current()
+        if context.inBackground, context.otherAudioPlaying {
+            return finishRun(.needsForeground(.otherAudioPlaying), ended: false)
+        }
 
         startedAt = now()
         live = LiveTranscript()
@@ -130,6 +145,12 @@ public final class DictationCoordinator {
             try await s.start()
         } catch {
             await discard(s)
+            // The system refused a background start: tear down quietly and let the app retry in the
+            // foreground. No `failed` activity (it would linger), no idle hook (no run happened).
+            if context.inBackground, startEnvironment.isBackgroundRefusal(error) {
+                await activity.dismiss()
+                return finishRun(.needsForeground(.backgroundStartRefused), ended: false)
+            }
             await activity.end(content(.failed))
             switch error {
             case DictationError.cancelled: return finishRun(.stopped(nil))

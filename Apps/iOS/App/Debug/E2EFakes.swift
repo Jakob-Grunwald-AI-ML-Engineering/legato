@@ -79,6 +79,10 @@ final class E2EFakeAudioSource: AudioSource, Sendable {
     private let stream = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
 
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
+        if let refusal = E2E.refusal(at: .what) {
+            E2E.log("audio.start.refused code=\(refusal.code)")
+            throw refusal
+        }
         E2E.log("audio.start")
         return makeStream()
     }
@@ -109,7 +113,13 @@ final class E2EFakeAudioSource: AudioSource, Sendable {
 struct E2ENoopSessionControl: AudioSessionControlling {
     var supportedPolicies: Set<AudioPolicy> { Set(AudioPolicy.allCases) }
 
-    func activate(_ config: SessionConfig) throws { E2E.log("session.activate") }
+    func activate(_ config: SessionConfig) throws {
+        if let refusal = E2E.refusal(at: .pla) {
+            E2E.log("session.activate.refused code=\(refusal.code)")
+            throw refusal
+        }
+        E2E.log("session.activate")
+    }
     func deactivate() { E2E.log("session.deactivate") }
 }
 #endif

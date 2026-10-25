@@ -113,7 +113,8 @@ if [ "$mode" = release-check ]; then
   # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
-    AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio otherAudio.wait)
+    AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
+    LegatoFakeBackground LegatoFakeBackgroundRefusal start.route toggle-after-hop)
   scan() { # every Mach-O file in the bundle
     find "$1" -type f \( -name Legato -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }
@@ -377,30 +378,90 @@ scenario_f() {
   wait_log "e2e outcome kind=stopped" 10
 }
 
-waited_ms() { grep -F -- "otherAudio.wait" "$LOG" | head -1 | sed -n 's/.*waitedMs=\([0-9]*\).*/\1/p'; }
-
 scenario_g() {
-  # Other audio "plays" for a while after the session is built (-LegatoFakeOtherAudio <ms>): the start
-  # waits for it to stop (OtherAudioGate), but never longer than 1.2 s.
-  begin "g. waits for other audio" -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio 500 -LegatoForceTapToCopy NO || return
+  # Music plays while the app is in the background (-LegatoFakeOtherAudio YES -LegatoFakeBackground YES):
+  # iOS only allows recording next to other audio from the foreground, so the press must not try a
+  # background start at all. The intent then brings the app forward and presses again.
+  begin "g. music + background" -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio YES -LegatoFakeBackground YES -LegatoForceTapToCopy NO || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  trigger toggle
+  wait_log "e2e outcome kind=needsForeground" 10
+  sleep 1
+  assert_log "outcome needsForeground(otherAudioPlaying)" "outcome kind=needsForeground reason=otherAudioPlaying"
+  assert_log "start.route: foregroundHop, with the reason" "start.route route=foregroundHop reason=otherAudioPlaying outcome=needsForeground"
+  assert_no_log "no activity requested" "activity.request"
+  assert_no_log "no session built, no audio" "session.make"
+  assert_no_log "mic never started" "audio.start"
+  assert_no_log "audio session never activated" "session.activate"
+  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+  assert_eq "history empty" "0" "$(history_texts | grep -c .)"
+  # The app is in the foreground now: the next press is a normal start.
+  trigger foreground
+  wait_log "e2e command foreground" 10
   trigger toggle
   wait_log "e2e outcome kind=started" 10
-  local w; w="$(waited_ms)"
-  if [ -n "$w" ] && [ "$w" -ge 400 ] && [ "$w" -le 1000 ]; then record PASS "short music: start waited ~500 ms ($w ms)"
-  else record FAIL "short music: start waited ~500 ms" "waited <${w:-none}> ms"; fi
-  assert_log "short music: it had stopped by then" "otherAudio.wait waitedMs=$w playing=false"
+  assert_log "start.route: ran in the foreground" "start.route route=foreground reason=none outcome=started"
+  assert_log "activity requested first" "activity.request phase=starting"
+  assert_order "request before audio starts" "activity.request phase=starting" "audio.start"
+  sleep 1.5
   trigger toggle
   wait_log "e2e outcome kind=stopped" 10
-  SCENARIO="g. gives up on other audio"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio 5000 -LegatoForceTapToCopy NO || return
+  sleep 0.5
+  assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
+  assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
+  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  assert_count "exactly one activity requested" "activity.request phase=" 1
+  assert_count "exactly one session built" "session.make" 1
+
+  # The intent's second press: the system brought the app forward, whatever the app state still says.
+  SCENARIO="g. music + background, after the hop"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio YES -LegatoFakeBackground YES -LegatoForceTapToCopy NO || return
   trigger toggle
+  wait_log "e2e outcome kind=needsForeground" 10
+  trigger toggle-after-hop
   wait_log "e2e outcome kind=started" 10
-  w="$(waited_ms)"
-  if [ -n "$w" ] && [ "$w" -ge 1100 ] && [ "$w" -le 1900 ]; then record PASS "long music: start waited at most ~1.2 s ($w ms)"
-  else record FAIL "long music: start waited at most ~1.2 s" "waited <${w:-none}> ms"; fi
-  assert_log "long music: still playing, started anyway" "otherAudio.wait waitedMs=$w playing=true"
+  assert_log "start.route: ran as a foreground hop" "start.route route=foregroundHop reason=otherAudioPlaying outcome=started"
+  sleep 1.5
   trigger toggle
   wait_log "e2e outcome kind=stopped" 10
+  sleep 0.5
+  assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
+}
+
+scenario_i() {
+  # The system refuses a background start anyway (music the app did not see, a race): the same hop, with
+  # a clean teardown. The activity requested first must be gone at once, not left behind as "failed".
+  local step
+  for step in pla what; do
+    SCENARIO="i. background refused ($step)"
+    begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoFakeBackground YES -LegatoFakeBackgroundRefusal "$step" -LegatoForceTapToCopy NO || continue
+    xcrun simctl pbcopy "$UDID" <<< "sentinel"
+    trigger toggle
+    wait_log "e2e outcome kind=needsForeground" 10
+    sleep 1
+    assert_log "outcome needsForeground(backgroundStartRefused)" "outcome kind=needsForeground reason=backgroundStartRefused"
+    assert_log "start.route: foregroundHop, with the reason" "start.route route=foregroundHop reason=backgroundStartRefused outcome=needsForeground"
+    assert_log "the background start was attempted" "$([ "$step" = pla ] && echo session.activate.refused || echo audio.start.refused)"
+    assert_count "one activity requested" "activity.request phase=" 1
+    assert_log "activity dismissed at once, none left" "activity.dismiss live=0"
+    assert_no_log "no failed activity left behind" "activity.end"
+    if grep -qE 'e2e audio\.start *$' "$LOG"; then record FAIL "no audio ran" "audio.start logged"; else record PASS "no audio ran"; fi
+    assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+    assert_eq "history empty" "0" "$(history_texts | grep -c .)"
+    trigger foreground
+    wait_log "e2e command foreground" 10
+    trigger toggle
+    wait_log "e2e outcome kind=started" 10
+    sleep 1.5
+    trigger toggle
+    wait_log "e2e outcome kind=stopped" 10
+    sleep 0.5
+    assert_count "a fresh session for the foreground start" "session.make" 2
+    assert_count "second activity requested" "activity.request phase=" 2
+    assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
+    assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
+    assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  done
 }
 
 scenario_h() {
@@ -430,7 +491,7 @@ scenario_h() {
 }
 
 t_run=$SECONDS
-for s in a b c d e f g h; do "scenario_$s"; done
+for s in a b c d e f g h i; do "scenario_$s"; done
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report

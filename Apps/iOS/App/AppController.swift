@@ -26,6 +26,7 @@ final class AppController {
     @ObservationIgnored private let history: JSONLHistoryStore
     @ObservationIgnored let pasteboard = PasteboardClient()
     @ObservationIgnored private let readiness = SystemReadiness()
+    @ObservationIgnored private let startEnvironment: SystemStartEnvironment
     @ObservationIgnored private let coordinator: DictationCoordinator
     /// Counts finished runs, so `toggle()` can tell an abort that raced with its own start.
     @ObservationIgnored private var idleCount = 0
@@ -46,11 +47,16 @@ final class AppController {
         #if LEGATO_INTERNAL
         let sessionControl = AppSessionControl()
         self.sessionControl = sessionControl
+        let startEnvironment = SystemStartEnvironment(isSessionHeld: { sessionControl.isHeld })
+        #else
+        let startEnvironment = SystemStartEnvironment()
         #endif
+        self.startEnvironment = startEnvironment
         coordinator = DictationCoordinator(
             activity: ActivityKitClient(),
             clipboard: pasteboard,
             readiness: readiness,
+            startEnvironment: startEnvironment,
             history: history,
             makeSession: {
                 #if DEBUG
@@ -59,17 +65,12 @@ final class AppController {
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
                 #if LEGATO_INTERNAL
                 let source = MicSource(onAttempt: AudioDiagnostics.micAttempt)
-                let isOtherAudioPlaying: @Sendable () -> Bool = {
-                    // A held session is already active: nothing is activated from the background.
-                    AVAudioSession.sharedInstance().isOtherAudioPlaying && !sessionControl.isHeld
-                }
                 #else
                 let source = MicSource()
                 let sessionControl = AudioSessionController()
-                let isOtherAudioPlaying: @Sendable () -> Bool = { AVAudioSession.sharedInstance().isOtherAudioPlaying }
                 #endif
                 return DictationSession(
-                    engine: OtherAudioGate(engine: engine, isOtherAudioPlaying: isOtherAudioPlaying, report: OtherAudioGate.report),
+                    engine: engine,
                     source: source,
                     sessionControl: sessionControl,
                     history: history,
@@ -89,13 +90,18 @@ final class AppController {
     // MARK: Dictation
 
     /// The single entry point: Action Button, Control Center, Live Activity stop and the in-app button.
-    func toggle() async -> DictationCoordinator.Outcome {
+    ///
+    /// `afterForegroundHop`: this press repeats one that returned `.needsForeground(reason)` and the
+    /// system has since brought the app to the foreground, so the start is a foreground start.
+    func toggle(afterForegroundHop reason: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
         let finishedBefore = idleCount
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("toggle.begin", ["isDictating": isDictating])
         #endif
+        startEnvironment.assumeForeground = reason != nil
+        defer { startEnvironment.assumeForeground = false }
         let outcome = await coordinator.toggle()
-        await didFinish(outcome, finishedBefore: finishedBefore)
+        await didFinish(outcome, hopReason: reason, finishedBefore: finishedBefore)
         return outcome
     }
 
@@ -110,12 +116,17 @@ final class AppController {
         return outcome
     }
 
-    private func didFinish(_ outcome: DictationCoordinator.Outcome, finishedBefore: Int) async {
+    private func didFinish(
+        _ outcome: DictationCoordinator.Outcome, hopReason: ForegroundReason? = nil, finishedBefore: Int
+    ) async {
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("toggle.end", ["outcome": Self.outcomeKind(outcome)])
         #endif
         if case .started = outcome, idleCount == finishedBefore { isDictating = true }
         if case .needsOnboarding = outcome { await refreshReadiness() }
+        #if DEBUG || LEGATO_INTERNAL
+        logStartRoute(outcome, hopReason: hopReason)
+        #endif
         #if DEBUG
         E2E.log("outcome \(Self.describe(outcome))")
         #endif
@@ -127,6 +138,7 @@ final class AppController {
         case .started: "started"
         case .stopped(let text): text == nil ? "stopped(nil)" : "stopped"
         case .needsOnboarding(let issue): "needsOnboarding(\(issue))"
+        case .needsForeground(let reason): "needsForeground(\(reason.rawValue))"
         case .failed(let error): "failed(\(error))"
         case .busy: "busy"
         }
@@ -139,9 +151,39 @@ final class AppController {
         case .started: "kind=started"
         case .stopped(let text): "kind=stopped text=\(text.map(E2E.quote) ?? "nil")"
         case .needsOnboarding(let issue): "kind=needsOnboarding issue=\(issue)"
+        case .needsForeground(let reason): "kind=needsForeground reason=\(reason.rawValue)"
         case .failed(let error): "kind=failed error=\(E2E.quote(error))"
         case .busy: "kind=busy"
         }
+    }
+    #endif
+
+    #if DEBUG || LEGATO_INTERNAL
+    /// `start.route`: how a start was routed. `foregroundHop` (with the reason) when the start was
+    /// handed to the foreground or ran after the hop, `background` / `foreground` when it ran where
+    /// the press arrived. Logged for the decision (`needsForeground`) and for the start that ran.
+    /// Diagnostics only: internal and Debug builds.
+    private func logStartRoute(_ outcome: DictationCoordinator.Outcome, hopReason: ForegroundReason?) {
+        let route: String, reason: ForegroundReason?
+        switch outcome {
+        case .needsForeground(let why): (route, reason) = ("foregroundHop", why)
+        case .started, .failed:
+            if let hopReason { (route, reason) = ("foregroundHop", hopReason) }
+            else { (route, reason) = (startEnvironment.lastContext.inBackground ? "background" : "foreground", nil) }
+        default: return
+        }
+        let result: String
+        switch outcome {
+        case .started: result = "started"
+        case .needsForeground: result = "needsForeground"
+        default: result = "failed"
+        }
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.startRoute(route, reason: reason?.rawValue, outcome: result)
+        #endif
+        #if DEBUG
+        E2E.log("start.route route=\(route) reason=\(reason?.rawValue ?? "none") outcome=\(result)")
+        #endif
     }
     #endif
 

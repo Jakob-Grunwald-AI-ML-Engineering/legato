@@ -63,6 +63,19 @@ final class ActivityKitClient: ActivityClient {
         #endif
     }
 
+    func dismiss() async {
+        guard let id = activityID else { return }
+        activityID = nil
+        await Self.dismiss(id: id)
+        #if DEBUG
+        E2E.log("activity.dismiss live=\(Activity<DictationAttributes>.activities.count)")
+        #endif
+    }
+
+    nonisolated private static func dismiss(id: String) async {
+        await Activity<DictationAttributes>.activities.first { $0.id == id }?.end(nil, dismissalPolicy: .immediate)
+    }
+
     nonisolated private static func endAll() async {
         for activity in Activity<DictationAttributes>.activities {
             await activity.end(nil, dismissalPolicy: .immediate)

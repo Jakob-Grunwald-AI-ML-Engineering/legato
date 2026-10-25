@@ -35,6 +35,7 @@ struct CoordinatorRig {
     let activity: FakeActivity
     let clipboard: FakeClipboard
     let readiness = FakeReadiness()
+    let environment = FakeStartEnvironment()
     let heartbeat = ManualClock()
     /// Drives the trailing publish: every injected sleep that is not the heartbeat's.
     let throttle = ManualClock()
@@ -58,8 +59,8 @@ struct CoordinatorRig {
         self.activity = activity
         self.clipboard = clipboard
         coordinator = DictationCoordinator(
-            activity: activity, clipboard: clipboard, readiness: readiness, history: history,
-            makeSession: {
+            activity: activity, clipboard: clipboard, readiness: readiness, startEnvironment: environment,
+            history: history, makeSession: {
                 let session = DictationSession(
                     engine: engine, source: source, sessionControl: control, history: history,
                     now: { time.now }
@@ -118,6 +119,108 @@ struct CoordinatorRig {
         r.readiness.issue = nil
         #expect(await r.coordinator.toggle() == .started)
         _ = await r.coordinator.toggle()
+    }
+
+    // MARK: foreground hop
+
+    private let backgroundWithMusic = StartContext(inBackground: true, otherAudioPlaying: true)
+    private let foregroundWithMusic = StartContext(inBackground: false, otherAudioPlaying: true)
+
+    @Test func backgroundStartWithOtherAudioNeedsTheForegroundAndTouchesNothing() async throws {
+        let r = CoordinatorRig(script: [TranscriptEvent(text: "hello ", isFinal: true)])
+        r.environment.context = backgroundWithMusic
+        #expect(await r.coordinator.toggle() == .needsForeground(.otherAudioPlaying))
+        #expect(r.log.events.isEmpty) // no activity, no session, no audio, no idle hook
+        #expect(r.built.all.isEmpty)
+        // The app came to the foreground and the press is repeated: a normal start, then stop.
+        r.environment.context = foregroundWithMusic
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(r.phaseTrail == [.starting, .listening])
+        #expect(await r.coordinator.toggle() == .stopped("hello"))
+        #expect(r.clipboard.written == ["hello"])
+        #expect(r.phaseTrail.last == .copied)
+    }
+
+    @Test func foregroundStartWithOtherAudioJustStarts() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = foregroundWithMusic
+        #expect(await r.coordinator.toggle() == .started)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func backgroundStartWithoutOtherAudioJustStarts() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false)
+        #expect(await r.coordinator.toggle() == .started)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func missingSetupOutranksTheForegroundHop() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = backgroundWithMusic
+        r.readiness.issue = .micPermission
+        #expect(await r.coordinator.toggle() == .needsOnboarding(.micPermission))
+    }
+
+    @Test(arguments: ["activation", "source"])
+    func aRefusedBackgroundStartLeavesNoActivityAndNoAudioAndRetriesInTheForeground(failingStep: String) async throws {
+        let r = CoordinatorRig(script: [TranscriptEvent(text: "hello ", isFinal: true)])
+        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false)
+        if failingStep == "activation" {
+            r.control.failActivation(with: TestError(tag: "refused"))
+        } else {
+            r.source.failStart(with: TestError(tag: "refused"))
+        }
+        #expect(await r.coordinator.toggle() == .needsForeground(.backgroundStartRefused))
+        // The activity that came first is gone at once, not ended `failed`; the run never counted.
+        #expect(r.log.count("activity.request:starting") == 1)
+        #expect(r.log.count("activity.dismiss") == 1)
+        #expect(r.activity.ends.isEmpty)
+        #expect(r.log.count("idle") == 0)
+        #expect(r.clipboard.written.isEmpty)
+        #expect(await r.history.entries.isEmpty)
+        #expect(r.log.count("engine.transcribe") == 0)
+        let ev = r.log.events
+        let dismissed = try #require(ev.firstIndex(of: "activity.dismiss"))
+        #expect(try #require(ev.firstIndex(of: "activity.request:starting")) < dismissed)
+
+        // The foreground press: not wedged, a fresh session, one clipboard write, one history entry.
+        r.control.clearActivationFailure()
+        r.source.clearStartFailure()
+        r.environment.context = StartContext(inBackground: false, otherAudioPlaying: false)
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(r.built.all.count == 2)
+        #expect(r.log.count("activity.request:starting") == 2)
+        #expect(await r.coordinator.toggle() == .stopped("hello"))
+        #expect(r.clipboard.written == ["hello"])
+        #expect(await r.history.entries.count == 1)
+        #expect(r.log.count("idle") == 1)
+        #expect(r.phaseTrail.last == .copied)
+    }
+
+    @Test func aRefusalShapedErrorInTheForegroundIsAPlainFailure() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = foregroundWithMusic
+        r.control.failActivation(with: TestError(tag: "refused"))
+        guard case .failed = await r.coordinator.toggle() else {
+            Issue.record("expected .failed")
+            return
+        }
+        #expect(r.log.count("activity.dismiss") == 0)
+        #expect(r.phaseTrail == [.starting, .failed])
+    }
+
+    @Test func anyOtherErrorInTheBackgroundIsAPlainFailure() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false)
+        r.engine.set(prepareError: TestError(tag: "prep"))
+        guard case .failed = await r.coordinator.toggle() else {
+            Issue.record("expected .failed")
+            return
+        }
+        #expect(r.log.count("activity.dismiss") == 0)
+        #expect(r.phaseTrail == [.starting, .failed])
+        #expect(r.log.count("idle") == 1)
     }
 
     @Test func refusedActivityNeedsOnboardingAndNeverStartsAudio() async throws {

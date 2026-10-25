@@ -26,21 +26,7 @@ struct SettingsView: View {
             } header: {
                 Text("Audio")
             } footer: {
-                Text("How dictation treats music and other audio that is playing.")
-            }
-
-            Section {
-                ForEach(Self.musicSteps.indices, id: \.self) { index in
-                    Label {
-                        Text(Self.musicSteps[index])
-                    } icon: {
-                        Image(systemName: "\(index + 1).circle.fill").foregroundStyle(.tint)
-                    }
-                }
-            } header: {
-                Text("Use with music")
-            } footer: {
-                Text("iOS only lets an app start the microphone from the background while no other audio plays, and apps can't pause music from there. A Shortcut can. Build this one, then choose it for the Action Button in Settings.")
+                Text("How dictation treats music and other audio that is playing. iOS only lets an app record next to playing audio from the foreground, so with audio playing, Legato opens first when you start from the Action Button or Control Center.")
             }
 
             #if LEGATO_INTERNAL
@@ -69,15 +55,6 @@ struct SettingsView: View {
         }
         #endif
     }
-
-    /// The Shortcut recipe, in order. Pressing the Action Button again stops: the Shortcut pauses
-    /// nothing (already quiet), stops dictation, and resumes the music.
-    private static let musicSteps = [
-        "Pause: the Play/Pause action, set to Pause.",
-        "Toggle Legato dictation.",
-        "If the result is Stopped (the If action, choose Dictation State).",
-        "Play: the Play/Pause action, set to Play. Then End If.",
-    ]
 
     private static func title(for policy: AudioPolicy) -> String {
         switch policy {

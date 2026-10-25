@@ -34,6 +34,9 @@ public protocol ActivityClient: AnyObject {
     /// `staleDate`: when the system may treat the content as stale if no newer update arrived.
     func update(_ content: DictationActivityContent, staleDate: Date?) async
     func end(_ content: DictationActivityContent) async
+    /// Removes the activity at once, with no final state: the run never began (its start is being
+    /// retried in the foreground), so nothing may linger on the Lock Screen.
+    func dismiss() async
 }
 
 @MainActor
@@ -55,3 +58,45 @@ public protocol Readiness: AnyObject {
 
 /// Builds the session for one dictation. Called once per start, so no session or mic outlives a run.
 public typealias DictationSessionFactory = @MainActor () -> DictationSession
+
+/// What the app knows about the moment a start is requested.
+public struct StartContext: Sendable, Equatable {
+    /// The app is in the background (e.g. an Action Button press with the app not on screen).
+    public var inBackground: Bool
+    /// Another app's audio is playing.
+    public var otherAudioPlaying: Bool
+
+    public init(inBackground: Bool, otherAudioPlaying: Bool) {
+        self.inBackground = inBackground
+        self.otherAudioPlaying = otherAudioPlaying
+    }
+
+    /// Nothing restricts a start.
+    public static let unrestricted = StartContext(inBackground: false, otherAudioPlaying: false)
+}
+
+/// Why a start has to run in the foreground.
+public enum ForegroundReason: String, Sendable, Equatable {
+    /// Other audio plays: iOS only lets an app start recording alongside it from the foreground.
+    case otherAudioPlaying
+    /// A background start was tried and the system refused it.
+    case backgroundStartRefused
+}
+
+/// The system facts behind the foreground/background routing of a start. Keeps AVFoundation out of the core.
+@MainActor
+public protocol StartEnvironment: AnyObject {
+    /// A snapshot, taken as the start begins.
+    func current() -> StartContext
+    /// Whether `error`, thrown by a start that ran in the background, is the system refusing to record
+    /// from there (so the same start can succeed in the foreground).
+    func isBackgroundRefusal(_ error: any Error) -> Bool
+}
+
+/// The default environment: nothing is restricted, no error is a refusal.
+@MainActor
+public final class UnrestrictedStartEnvironment: StartEnvironment {
+    public init() {}
+    public func current() -> StartContext { .unrestricted }
+    public func isBackgroundRefusal(_ error: any Error) -> Bool { false }
+}

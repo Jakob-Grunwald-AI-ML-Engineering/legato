@@ -2,6 +2,7 @@
 import AVFAudio
 import Foundation
 import LegatoCore
+import Synchronization
 import os
 
 /// Hooks for the simulator end-to-end run (`scripts/e2e/ios-sim.sh`). Debug builds only.
@@ -11,8 +12,14 @@ import os
 ///   Also reports the microphone and the speech model as ready.
 /// - `-LegatoFakeReadiness liveActivitiesDisabled|micPermission|assetsMissing`: report that issue.
 /// - `-LegatoForceTapToCopy YES|NO`: sets the `debugForceTapToCopy` setting.
-/// - `-LegatoFakeOtherAudio <ms>`: other audio "plays" for this long from each session's creation, so the
-///   start has to wait for it (`OtherAudioGate`).
+/// - `-LegatoFakeOtherAudio YES|NO`: other audio is (not) playing, whatever the audio session says.
+/// - `-LegatoFakeBackground YES|NO`: the app is (not) in the background, whatever UIKit says. The
+///   `foreground` / `background` commands flip it, like the app coming forward.
+/// - `-LegatoFakeBackgroundRefusal pla|what`: while the fake background is on, the start fails like the
+///   device did: `pla` on the session activation ('!pla'), `what` on the mic start (kAUStartIO).
+///
+/// Darwin notifications (see `installTriggers`): `toggle`, `interrupt`, `copy-last`, `foreground`,
+/// `background`, `toggle-after-hop` (the press that repeats a `needsForeground` one after the hop).
 ///
 /// URLs: `legato://toggle` calls `AppController.toggle()`; `legato://interrupt` posts the notification
 /// the audio session sends on an interruption, so the real observer handles it.
@@ -46,23 +53,48 @@ enum E2E {
         }
     }()
 
-    static let fakeOtherAudio: Duration? = {
-        let ms = UserDefaults.standard.integer(forKey: "LegatoFakeOtherAudio")
-        return ms > 0 ? .milliseconds(ms) : nil
-    }()
+    /// The simulated system facts; nil keeps the real value.
+    private struct Fake {
+        var inBackground: Bool?
+        var otherAudioPlaying: Bool?
+    }
+
+    private static let fake = Mutex(Fake(
+        inBackground: launchFlag("LegatoFakeBackground"),
+        otherAudioPlaying: launchFlag("LegatoFakeOtherAudio")))
+
+    private static func launchFlag(_ key: String) -> Bool? {
+        UserDefaults.standard.string(forKey: key).map { ["YES", "TRUE", "1"].contains($0.uppercased()) }
+    }
+
+    static var fakeInBackground: Bool? { fake.withLock { $0.inBackground } }
+    static var fakeOtherAudioPlaying: Bool? { fake.withLock { $0.otherAudioPlaying } }
+    static func setFakeInBackground(_ value: Bool) { fake.withLock { $0.inBackground = value } }
+
+    enum Refusal: String {
+        case pla, what
+
+        /// 'pla' = `AVAudioSession.ErrorCode.cannotStartPlaying`, 'what' = kAUStartIO.
+        var error: NSError {
+            NSError(domain: NSOSStatusErrorDomain, code: self == .pla ? 561_015_905 : 2_003_329_396)
+        }
+    }
+
+    static let fakeRefusal: Refusal? = UserDefaults.standard.string(forKey: "LegatoFakeBackgroundRefusal").flatMap(Refusal.init)
+
+    /// The error a start should fail with now, when it is `step` that is refused.
+    static func refusal(at step: Refusal) -> NSError? {
+        guard fakeRefusal == step, fakeInBackground == true else { return nil }
+        return step.error
+    }
 
     /// A session wired to the scripted engine, or nil when fake mode is off.
     @MainActor
     static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy) -> DictationSession? {
         guard let engine = fakeEngine else { return nil }
         log("session.make engine=\(engine.id)")
-        let playingUntil = fakeOtherAudio.map { ContinuousClock.now + $0 }
-        let gated = OtherAudioGate(
-            engine: engine,
-            isOtherAudioPlaying: { playingUntil.map { ContinuousClock.now < $0 } ?? false },
-            report: OtherAudioGate.report)
         return DictationSession(
-            engine: gated,
+            engine: engine,
             source: E2EFakeAudioSource(),
             sessionControl: E2ENoopSessionControl(),
             history: history,
@@ -91,7 +123,7 @@ enum E2E {
             Settings.debugForceTapToCopy = ["YES", "TRUE", "1"].contains(flag.uppercased())
         }
         installTriggers()
-        log("launch fakeEngine=\(fakeEngine != nil) fakeReadiness=\(String(describing: fakeReadiness)) forceTapToCopy=\(Settings.debugForceTapToCopy)")
+        log("launch fakeEngine=\(fakeEngine != nil) fakeReadiness=\(String(describing: fakeReadiness)) forceTapToCopy=\(Settings.debugForceTapToCopy) fakeBackground=\(String(describing: fakeInBackground)) fakeOtherAudio=\(String(describing: fakeOtherAudioPlaying))")
     }
 }
 
@@ -105,7 +137,7 @@ extension AppController {
         return true
     }
 
-    /// `toggle`, `interrupt` or `copy-last`.
+    /// `toggle`, `interrupt`, `copy-last`, `foreground`, `background` or `toggle-after-hop`.
     func runE2E(_ command: String) async {
         E2E.log("command \(command)")
         switch command {
@@ -118,6 +150,13 @@ extension AppController {
                 userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
         case "copy-last":
             await handle(DictationAttributes.copyLastURL)
+        case "foreground":
+            E2E.setFakeInBackground(false)
+        case "background":
+            E2E.setFakeInBackground(true)
+        case "toggle-after-hop":
+            // What the intent does after `continueInForeground`, with the fake background still on.
+            _ = await toggle(afterForegroundHop: .otherAudioPlaying)
         default:
             E2E.log("command.unknown \(command)")
         }
@@ -125,7 +164,7 @@ extension AppController {
 }
 
 extension E2E {
-    static let commands = ["toggle", "interrupt", "copy-last"]
+    static let commands = ["toggle", "interrupt", "copy-last", "foreground", "background", "toggle-after-hop"]
 
     /// Darwin notifications `de.gruenwald.legato.e2e.<command>`, posted from the host with
     /// `xcrun simctl spawn <udid> notifyutil -p <name>`. `simctl openurl` with a custom scheme stops at
