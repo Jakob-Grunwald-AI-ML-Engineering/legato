@@ -18,11 +18,15 @@ struct ReadinessStatus: Equatable {
 final class SystemReadiness: Readiness {
     func snapshot() async -> ReadinessStatus {
         let mic = AVAudioApplication.shared.recordPermission
-        return ReadinessStatus(
+        var status = ReadinessStatus(
             micGranted: mic == .granted,
             micDenied: mic == .denied,
             activitiesEnabled: ActivityAuthorizationInfo().areActivitiesEnabled,
             assetsInstalled: await Self.assetsInstalled())
+        #if DEBUG
+        E2E.adjust(&status)
+        #endif
+        return status
     }
 
     func check() async -> ReadinessIssue? {

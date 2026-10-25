@@ -6,16 +6,25 @@ import UIKit
 @MainActor
 final class PasteboardClient: Clipboard {
     func write(_ text: String) -> Bool {
-        if Settings.debugForceTapToCopy { return false }
-        return forceWrite(text)
+        if Settings.debugForceTapToCopy {
+            #if DEBUG
+            E2E.log("clipboard.write source=coordinator changed=false forced=tapToCopy")
+            #endif
+            return false
+        }
+        return forceWrite(text, source: "coordinator")
     }
 
     /// Writes regardless of the debug override. For user-initiated copies in the foreground.
     @discardableResult
-    func forceWrite(_ text: String) -> Bool {
+    func forceWrite(_ text: String, source: String = "user") -> Bool {
         let pasteboard = UIPasteboard.general
         let before = pasteboard.changeCount
         pasteboard.string = text
-        return pasteboard.changeCount != before
+        let changed = pasteboard.changeCount != before
+        #if DEBUG
+        E2E.log("clipboard.write source=\(source) changed=\(changed) text=\(E2E.quote(text))")
+        #endif
+        return changed
     }
 }

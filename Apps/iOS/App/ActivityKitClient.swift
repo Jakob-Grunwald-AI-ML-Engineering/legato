@@ -24,16 +24,30 @@ final class ActivityKitClient: ActivityClient {
     func request(_ content: DictationActivityContent) async throws {
         // A previous process may have been killed mid-run; don't leave its activity behind.
         await Self.endAll()
-        let activity = try Activity.request(
-            attributes: DictationAttributes(),
-            content: ActivityContent(state: .init(content), staleDate: nil),
-            pushType: nil)
+        let activity: Activity<DictationAttributes>
+        do {
+            activity = try Activity.request(
+                attributes: DictationAttributes(),
+                content: ActivityContent(state: .init(content), staleDate: nil),
+                pushType: nil)
+        } catch {
+            #if DEBUG
+            E2E.log("activity.request.failed error=\(E2E.quote(String(describing: error)))")
+            #endif
+            throw error
+        }
         activityID = activity.id
+        #if DEBUG
+        E2E.log("activity.request phase=\(content.phase.rawValue) tail=\(E2E.quote(content.tail)) live=\(Activity<DictationAttributes>.activities.count)")
+        #endif
     }
 
     func update(_ content: DictationActivityContent, staleDate: Date?) async {
         guard let id = activityID else { return }
         await Self.update(id: id, ActivityContent(state: .init(content), staleDate: staleDate))
+        #if DEBUG
+        E2E.log("activity.update phase=\(content.phase.rawValue) tail=\(E2E.quote(content.tail)) stale=\(staleDate != nil)")
+        #endif
     }
 
     func end(_ content: DictationActivityContent) async {
@@ -44,6 +58,9 @@ final class ActivityKitClient: ActivityClient {
             id: id,
             ActivityContent(state: .init(content), staleDate: nil),
             dismissAt: Date().addingTimeInterval(after))
+        #if DEBUG
+        E2E.log("activity.end phase=\(content.phase.rawValue) tail=\(E2E.quote(content.tail))")
+        #endif
     }
 
     nonisolated private static func endAll() async {

@@ -46,8 +46,11 @@ final class AppController {
             readiness: readiness,
             history: history,
             makeSession: {
+                #if DEBUG
+                if let fake = E2E.makeFakeSession(history: history, policy: Settings.audioPolicy) { return fake }
+                #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
-                DictationSession(
+                return DictationSession(
                     engine: engine,
                     source: MicSource(),
                     sessionControl: AudioSessionController(),
@@ -57,6 +60,9 @@ final class AppController {
             })
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
         installInterruptionObservers()
+        #if DEBUG
+        E2E.applyLaunchSettings()
+        #endif
     }
 
     // MARK: Dictation
@@ -67,8 +73,23 @@ final class AppController {
         let outcome = await coordinator.toggle()
         if case .started = outcome, idleCount == finishedBefore { isDictating = true }
         if case .needsOnboarding = outcome { await refreshReadiness() }
+        #if DEBUG
+        E2E.log("outcome \(Self.describe(outcome))")
+        #endif
         return outcome
     }
+
+    #if DEBUG
+    private static func describe(_ outcome: DictationCoordinator.Outcome) -> String {
+        switch outcome {
+        case .started: "kind=started"
+        case .stopped(let text): "kind=stopped text=\(text.map(E2E.quote) ?? "nil")"
+        case .needsOnboarding(let issue): "kind=needsOnboarding issue=\(issue)"
+        case .failed(let error): "kind=failed error=\(E2E.quote(error))"
+        case .busy: "kind=busy"
+        }
+    }
+    #endif
 
     private func runDidEnd() {
         idleCount += 1
@@ -100,6 +121,9 @@ final class AppController {
     private func stopForSystemEvent(_ reason: String) {
         guard isDictating else { return }
         Self.log.info("stopping dictation: \(reason, privacy: .public)")
+        #if DEBUG
+        E2E.log("system-stop reason=\(E2E.quote(reason))")
+        #endif
         Task { _ = await toggle() }
     }
 
@@ -162,9 +186,12 @@ final class AppController {
 
     /// `legato://copy-last`: the tapToCopy activity opened the app; copy the newest transcript.
     func handle(_ url: URL) async {
+        #if DEBUG
+        if await handleE2E(url) { return }
+        #endif
         guard url == DictationAttributes.copyLastURL else { return }
         guard let text = (try? await history.recent(limit: 1))?.first?.text else { return }
-        pasteboard.forceWrite(text)
+        pasteboard.forceWrite(text, source: "copy-last")
         lastTranscript = text
     }
 }
