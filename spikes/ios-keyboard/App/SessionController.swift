@@ -178,6 +178,16 @@ final class SessionController {
         level = 0
         Spike.defaults.set(false, forKey: Spike.Key.active)
         logContext("stopped")
+        // Experiment: a second background start in the same process fails ('what' / 0 Hz) while
+        // other audio plays; a process freshly launched by the intent works. So end the process
+        // after a background stop, giving the next press a fresh launch.
+        if UIApplication.shared.applicationState == .background {
+            log("exiting process after background stop (fresh launch next time)")
+            Task {
+                try? await Task.sleep(for: .milliseconds(600))
+                exit(0)
+            }
+        }
     }
 
     private func dictationText(_ text: String) {
