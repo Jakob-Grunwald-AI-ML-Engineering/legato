@@ -69,7 +69,19 @@ final class SessionController {
                 try s.setPreferredInput(mic)
             }
             try s.setActive(true)
-            try startEngine()
+            log("activated mixable; otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint)")
+            do {
+                try startEngine()
+            } catch {
+                // Seen with Audible playing: kAUStartIO fails ('what') from the background while
+                // mixable. Retry non-mixable, which interrupts the other app; stop() resumes it.
+                log("mixable engine start failed (\(error)); retrying non-mixable")
+                try? s.setActive(false)
+                try s.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothA2DP, .defaultToSpeaker])
+                try s.setActive(true)
+                try startEngine()
+                log("non-mixable start ok; other audio interrupted")
+            }
             isActive = true
             Spike.defaults.set(true, forKey: Spike.Key.active)
             startActivity()
