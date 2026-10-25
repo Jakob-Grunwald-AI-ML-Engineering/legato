@@ -1,15 +1,27 @@
 # Spike #1: keyboard dictation with no app hop
 
-**Status:** the toggle rework builds for iOS 26 (Swift 6 strict concurrency). It has not been installed on the device yet (phone was locked, CoreDeviceError 4016).
+**Status:** done. Verified on an iPhone 17 running iOS 26.6.1 on 2026-10-25. Seven Action Button dictations in a row succeeded, with Spotify or Audible playing.
 
-## Device findings so far
+## Verdict
 
-- `StartSessionIntent: AudioRecordingIntent, LiveActivityIntent` (`supportedModes .background`), run from the Action Button, starts mic recording from the background **when the intent launches the process**.
-- In a process the user launched and then backgrounded, `engine.start()` fails with kAUStartIO 'what' (2003329396).
-- From the background, changing category options on an already-active session to interrupt others fails with '!int' (560557684). The planned fix, untested on device, is the Google Maps pattern: engine.stop, `setActive(false, .notifyOthersOnDeactivation)`, setCategory with `[.duckOthers, .interruptSpokenAudioAndMixWithOthers]`, setActive(true), engine.start.
-- Keyboard and app talk over App Group defaults plus Darwin notifications.
-- Dictation with `SpeechTranscriber` (de_DE) streams text into the host field through `textDocumentProxy`.
-- The mic tap block must be built outside the MainActor (`tapBlock(_:)`). Swift 6 traps otherwise.
+- **Action Button: no hop.** `ToggleDictationIntent` (`AudioRecordingIntent` + `LiveActivityIntent`) starts mic recording from the background.
+  - If our keyboard is visible, text streams live into the host field through `textDocumentProxy`.
+  - Otherwise the Scratch screen opens.
+- **Keyboard button: a hop is unavoidable when no session is running.** `Button(intent:)` in a keyboard runs `perform()` inside the keyboard process, never in the app. Every shipping app (Wispr Flow, Dictus, VivaDicta, Raycast) uses the "open the app once, then signal a live session" pattern. v1 plan: hop when nothing is running, then keep the session for a configurable time (0 = off).
+
+## Device findings
+
+- **Only an intent-launched process can start the mic from the background while other audio plays.** The second start in the same process fails with kAUStartIO 'what' (2003329396). This also happens in a process the user opened. **Workaround:** `exit(0)` about 0.6 s after a background stop, so every press is a fresh launch. It is reliable (7 of 7), but quitting itself is an App Review grey area. Revisit before any App Store release.
+- **Other audio:**
+  - `.mixWithOthers` works with Spotify and Audible.
+  - `.duckOthers` works with both, and lowers their volume.
+  - `.interruptSpokenAudioAndMixWithOthers` pauses Audible, but the input route then disappears (format 0 Hz), so recording fails. **Use ducking, not pausing.**
+  - Changing options on an already-active session from the background fails with '!int' (560557684). Options are set before activation.
+- **Engine:** create a fresh `AVAudioEngine` after the session is configured. One created at launch caches an invalid input format, and `installTap` throws an ObjC exception.
+- **Swift 6:** build the mic tap block outside the MainActor (`tapBlock(_:)`), otherwise it traps on the realtime thread.
+- **SpeechTranscriber:** `reportingOptions: [.volatileResults]` alone produced nothing until finalize. `preset: .progressiveTranscription` streams live.
+- **Keyboard ↔ app:** App Group defaults plus Darwin notifications work. Read state fresh on every notification, never cached.
+- **Logs:** they must live under the App Group `Library/` for `devicectl device copy from` to reach them.
 
 ## Built
 
