@@ -63,8 +63,13 @@ final class SessionController {
         if isActive { log("start ignored: already active"); return }
         do {
             let s = AVAudioSession.sharedInstance()
+            // Experiment: can an intent-launched start interrupt spoken audio (Audible), when a
+            // later in-session switch from the background fails with '!int'?
+            let interrupt = Spike.defaults.bool(forKey: Spike.Key.pauseOthers) && source == "StartSessionIntent"
             try s.setCategory(.playAndRecord, mode: .default,
-                              options: [.mixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker])
+                              options: [interrupt ? .interruptSpokenAudioAndMixWithOthers : .mixWithOthers,
+                                        .allowBluetoothA2DP, .defaultToSpeaker])
+            log("category set; interruptSpokenAudio=\(interrupt)")
             if let mic = s.availableInputs?.first(where: { $0.portType == .builtInMic }) {
                 try s.setPreferredInput(mic)
             }
