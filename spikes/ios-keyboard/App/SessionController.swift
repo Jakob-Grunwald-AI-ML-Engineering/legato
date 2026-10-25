@@ -102,11 +102,15 @@ final class SessionController {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [router] buffer, _ in
-            router.handle(buffer)
-        }
+        input.installTap(onBus: 0, bufferSize: 4096, format: format, block: Self.tapBlock(router))
         engine.prepare()
         try engine.start()
+    }
+
+    /// Built outside the MainActor: a closure formed inside a @MainActor method inherits that
+    /// isolation, and Swift 6 traps when AVFAudio calls it on the realtime thread.
+    nonisolated private static func tapBlock(_ router: TapRouter) -> AVAudioNodeTapBlock {
+        { buffer, _ in router.handle(buffer) }
     }
 
     private func startActivity() {
