@@ -42,6 +42,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # APP_TARGET gates the app-only parts of Shared/. LEGATO_INTERNAL marks builds that may carry
         # the exit(0) workaround and its setting (Debug and TestFlight); App Store builds omit it.
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_TARGET"
