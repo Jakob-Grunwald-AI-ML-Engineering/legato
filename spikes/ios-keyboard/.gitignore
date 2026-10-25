@@ -1,0 +1,5 @@
+*.xcodeproj
+Gen/
+build/
+DerivedData/
+*.log
