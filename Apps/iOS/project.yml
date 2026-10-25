@@ -1,0 +1,89 @@
+# Legato for iOS. `xcodegen generate` (pinned in /.xcodegen-version) writes Legato.xcodeproj and Gen/;
+# both are gitignored. Run it from this directory.
+#
+# Layout: Shared/ compiles into every target and must not import LegatoKit. Only the app links the
+# package. To add the keyboard (leg 3): add a `LegatoKeyboard` app-extension target mirroring
+# LegatoWidgets (sources: [Keyboard, Shared]), list it under the app's dependencies, and give it the
+# same App Group entitlement.
+#
+# TestFlight builds are Release builds that must keep the exit(0) workaround: pass
+# OTHER_SWIFT_FLAGS='$(inherited) -D LEGATO_INTERNAL' to xcodebuild (leg 5). App Store builds don't.
+name: Legato
+options:
+  bundleIdPrefix: de.gruenwald.legato
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: XWSGN23W75
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: NO
+    TARGETED_DEVICE_FAMILY: "1"
+packages:
+  LegatoKit:
+    path: ../..
+targets:
+  Legato:
+    type: application
+    platform: iOS
+    sources: [App, Shared]
+    dependencies:
+      - target: LegatoWidgets
+      - package: LegatoKit
+        product: LegatoCore
+      - package: LegatoKit
+        product: LegatoAudio
+      - package: LegatoKit
+        product: LegatoAppleSpeech
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato
+        # APP_TARGET gates the app-only parts of Shared/. LEGATO_INTERNAL marks builds that may carry
+        # the exit(0) workaround and its setting (Debug and TestFlight); App Store builds omit it.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_TARGET"
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_TARGET LEGATO_INTERNAL"
+    entitlements:
+      path: Gen/App.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato]
+    info:
+      path: Gen/App-Info.plist
+      properties:
+        CFBundleDisplayName: Legato
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [audio]
+        NSSupportsLiveActivities: true
+        NSMicrophoneUsageDescription: Legato records your voice to turn it into text.
+        NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this device.
+        CFBundleURLTypes:
+          - CFBundleURLName: de.gruenwald.legato
+            CFBundleURLSchemes: [legato]
+
+  LegatoWidgets:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.widgets
+    entitlements:
+      path: Gen/Widgets.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato]
+    info:
+      path: Gen/Widgets-Info.plist
+      properties:
+        CFBundleDisplayName: Legato Widgets
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

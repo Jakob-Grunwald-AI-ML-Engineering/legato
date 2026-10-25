@@ -22,9 +22,19 @@ xcodebuild -version
 
 scheme=LegatoKit-Package
 
+# Generate the iOS app project and build it (app + widget extension) for the simulator, unsigned.
+build_ios_app() {
+  has_ios_app || return 0
+  ensure_xcodegen
+  (cd Apps/iOS && "$XCODEGEN" generate)
+  xcodebuild build -quiet -project Apps/iOS/Legato.xcodeproj -scheme Legato \
+    -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+}
+
 if [ "$mode" = quick ]; then
   swift build
   xcodebuild build -quiet -scheme "$scheme" -destination 'generic/platform=iOS Simulator'
+  build_ios_app
   exit 0
 fi
 
@@ -37,3 +47,4 @@ echo "Simulator: $udid"
 
 swift test
 xcodebuild test -quiet -scheme "$scheme" -destination "platform=iOS Simulator,id=$udid"
+build_ios_app
