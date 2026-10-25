@@ -29,6 +29,31 @@ final class BufferConverter: @unchecked Sendable {
     }
 }
 
+/// Counts buffers yielded to the analyzer and results received; logs at most once per second.
+/// Called from the audio tap thread and the results task, hence the lock.
+final class StreamStats: @unchecked Sendable {
+    private let lock = NSLock()
+    private let t0 = Date()
+    private var buffers = 0, results = 0
+    private var firstBuffer: TimeInterval?, firstResult: TimeInterval?
+    private var lastLog = Date.distantPast
+
+    func bufferYielded() { note { buffers += 1; if firstBuffer == nil { firstBuffer = Date().timeIntervalSince(t0) } } }
+    func resultReceived() { note { results += 1; if firstResult == nil { firstResult = Date().timeIntervalSince(t0) } } }
+
+    private func note(_ bump: () -> Void) {
+        let line: String? = lock.withLock {
+            bump()
+            let now = Date()
+            guard now.timeIntervalSince(lastLog) >= 1 else { return nil }
+            lastLog = now
+            func f(_ v: TimeInterval?) -> String { v.map { String(format: "%.2fs", $0) } ?? "-" }
+            return "stream t=\(String(format: "%.1f", now.timeIntervalSince(t0)))s buffers=\(buffers) results=\(results) firstBuffer=\(f(firstBuffer)) firstResult=\(f(firstResult))"
+        }
+        if let line { SpikeLog.write("dict", line) }
+    }
+}
+
 /// On-device transcription with SpeechAnalyzer/SpeechTranscriber, fed from the always-on engine tap.
 /// Publishes the full dictation text (finalized + volatile) to the App Group after every result.
 @MainActor @Observable
@@ -76,20 +101,28 @@ final class Dictation {
                 throw NSError(domain: "spike", code: 1, userInfo: [NSLocalizedDescriptionKey:
                     "speech model not installed (\(status)); open app and tap 'Prepare speech model'"])
             }
-            let a = SpeechAnalyzer(modules: [t])
+            // Explicit priority: the default can inherit a low priority from the intent/background task.
+            let a = SpeechAnalyzer(modules: [t], options: .init(priority: .userInitiated, modelRetention: .lingering))
             guard let fmt = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [t]),
                   let conv = BufferConverter(from: inputFormat, to: fmt) else {
                 throw NSError(domain: "spike", code: 2, userInfo: [NSLocalizedDescriptionKey: "no analyzer format/converter"])
             }
+            // Resources load lazily by default; preheat so the first buffers are analyzed live
+            // (https://developer.apple.com/documentation/speech/speechanalyzer "Improve responsiveness").
+            let prepStart = Date()
+            try await a.prepareToAnalyze(in: fmt)
+            log("prepareToAnalyze took \(String(format: "%.2f", Date().timeIntervalSince(prepStart)))s")
+            let stats = StreamStats()
             let (stream, cont) = AsyncStream.makeStream(of: AnalyzerInput.self)
-            router.setSink { buf in
-                if let c = conv.convert(buf) { cont.yield(AnalyzerInput(buffer: c)) }
-            }
             try await a.start(inputSequence: stream)
+            router.setSink { buf in
+                if let c = conv.convert(buf) { cont.yield(AnalyzerInput(buffer: c)); stats.bufferYielded() }
+            }
             analyzer = a; continuation = cont; self.router = router; isRunning = true
             resultsTask = Task { [weak self] in
                 do {
                     for try await r in t.results {
+                        stats.resultReceived()
                         let text = String(r.text.characters)
                         guard let self else { return }
                         if r.isFinal {
