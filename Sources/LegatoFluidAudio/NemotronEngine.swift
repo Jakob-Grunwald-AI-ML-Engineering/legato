@@ -38,8 +38,9 @@ public func releaseCachedNemotronModels() async {
 /// Live dictation with Nemotron multilingual streaming (FluidAudio): partials while speaking, a final
 /// segment after `silenceMs` of silence.
 ///
-/// - One locale (from `preferredLocales`, or the session's `locale`) is that language hint; several run on
-///   `auto` and narrow to the first preferred one when the detected language falls outside the set.
+/// - `preferredLocales` wins over the session's `locale`, which only counts when none are configured. One
+///   locale is that language hint; several run on `auto` and narrow to the first preferred one when the
+///   detected language falls outside the set.
 /// - `prepare` throws ``DictationError/assetsNotInstalled`` unless the model is installed in `models`.
 public final class NemotronEngine: DictationEngine {
     public let id: String
@@ -92,7 +93,7 @@ public final class NemotronEngine: DictationEngine {
         // Per-session state only: the heavy models come from the cache.
         let manager = StreamingNemotronMultilingualAsrManager(configuration: FluidAudioCompute.configuration())
         try await manager.loadFromShared(shared)
-        var clamp = LanguageClamp(preferred: locale.map { [$0] } ?? preferredLocales)
+        var clamp = LanguageClamp(preferred: LanguageClamp.preferred(configured: preferredLocales, session: locale))
         clamp.beginSession()
         await manager.setLanguage(clamp.hint)
         let box = PartialBox()

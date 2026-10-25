@@ -305,6 +305,16 @@ struct LanguageClampTests {
         #expect(LanguageClamp(preferred: []).hint == "auto")
     }
 
+    @Test func configuredLocalesWinOverTheSessionLocale() {
+        #expect(LanguageClamp.preferred(configured: [de, en], session: en) == [de, en])
+        #expect(LanguageClamp.preferred(configured: [de], session: en) == [de])
+    }
+
+    @Test func theSessionLocaleIsTheHintWhenNothingIsConfigured() {
+        #expect(LanguageClamp.preferred(configured: [], session: de) == [de])
+        #expect(LanguageClamp.preferred(configured: [], session: nil) == [])
+    }
+
     @Test func aBareLanguageLocaleUsesTheBareCode() {
         #expect(LanguageClamp(preferred: [Locale(identifier: "de")]).hint == "de")
     }

@@ -101,6 +101,12 @@ struct LanguageClamp: Sendable {
         self.hint = Self.initialHint(preferred)
     }
 
+    /// The locales a session expects: the configured set, or the session's locale when none is configured.
+    static func preferred(configured: [Locale], session: Locale?) -> [Locale] {
+        if !configured.isEmpty { return configured }
+        return session.map { [$0] } ?? []
+    }
+
     /// The locale a FluidAudio language tag such as "en-US" or "es-419" names.
     static func locale(fromTag tag: String) -> Locale {
         Locale(identifier: tag.replacingOccurrences(of: "-", with: "_"))
