@@ -116,9 +116,10 @@ if [ "$mode" = release-check ]; then
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
     AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
     LegatoFakeBackground LegatoFakeBackgroundRefusal start.route toggle-after-hop
-    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd.apply "link.host phase=")
-  scan() { # every Mach-O file in the bundle
-    find "$1" -type f \( -name Legato -o -name '*.dylib' \) -print0 | xargs -0 strings -a
+    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd.apply "link.host phase="
+    KeyboardHarness LegatoKeyboardHarness harness-mic)
+  scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
+    find "$1" -type f \( -name 'Legato*' -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }
   scan "$app" > "$WORK/release.strings"
   fail=0
@@ -650,8 +651,58 @@ scenario_n() {
   assert_eq "history has one entry per hop run (two in all)" "2" "$(history_texts | grep -c -x -F -- "$TEXT")"
 }
 
+scenario_q() {
+  # The keyboard's own UI code (KeyboardController, KeyboardRootView, MicKey) in the app's harness, over a
+  # UITextView document, on the real App Group values and Darwin notes: the keyboard-side planner types
+  # the fake engine's text into the harness document, and the mic key talks to the real app.
+  begin "q. harness: Action Button streams into the keyboard UI" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeyboardHarness YES || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  wait_log "e2e harness visible value=1" 10
+  assert_log "the harness keyboard beats presence" "harness visible value=1"
+  run_once 1
+  assert_log "press routes to the keyboard" "route target=keyboard activity=required keepAliveSeconds=0"
+  assert_eq "harness document == script" "$TEXT " "$(log_field "harness apply final=1" doc)"
+  assert_eq "final link.host committed == script" "$TEXT " "$(log_field "link.host phase=idle final=1" committed)"
+  assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
+  assert_no_log "clipboard not written" "clipboard.write source=coordinator"
+  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+
+  # The mic key with the microphone held (keep-alive): a request over the link, no hop.
+  SCENARIO="q. harness: mic key, remote start and stop"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 -LegatoKeyboardHarness YES || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  trigger harness-mic
+  wait_log "harness mic mode=remote-start" 10
+  wait_log_n "e2e outcome kind=started" 2 10
+  assert_log "the mic key asked the running app to start" "harness mic mode=remote-start"
+  assert_log "the app acked accepted" "harness ack result=accepted"
+  assert_log "remote start: keyboard target, best-effort activity" "route target=keyboard activity=bestEffort keepAliveSeconds=30"
+  sleep 1.5
+  trigger harness-mic
+  wait_log "harness mic mode=remote-stop" 10
+  wait_log_n "e2e outcome kind=stopped" 2 10
+  sleep 0.5
+  assert_log "the mic key asked the running app to stop" "harness mic mode=remote-stop"
+  assert_count "both requests acked accepted" "harness ack result=accepted" 2
+  assert_count "still one session" "session.make" 1
+  assert_eq "harness document == script twice" "$TEXT $TEXT " "$(log_field_last "harness apply final=1" doc)"
+
+  # No running app to ask: the mic key is an open-app key; the request goes out all the same and the
+  # idle app answers hop (the URL, which the Link opens, is what starts the run).
+  SCENARIO="q. harness: mic key, app not running a lease"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeyboardHarness YES || return
+  wait_log "e2e harness visible value=1" 10
+  trigger harness-mic
+  wait_log "harness ack" 5
+  sleep 0.5
+  assert_log "no lease: the mic key opens the app" "harness mic mode=openApp"
+  assert_log "the idle app answers hop" "harness ack result=hop"
+  assert_no_log "nothing started over the link" "e2e outcome kind=started"
+}
+
 t_run=$SECONDS
-for s in a b c d e f g h i p j o k l m n; do "scenario_$s"; done
+for s in a b c d e f g h i p j o k l m n q; do "scenario_$s"; done
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report

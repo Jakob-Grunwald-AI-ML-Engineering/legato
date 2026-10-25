@@ -22,9 +22,22 @@ struct LegatoApp: App {
         LegatoShortcuts.updateAppShortcutParameters()
     }
 
+    @ViewBuilder
+    private var content: some View {
+        #if DEBUG
+        if E2E.showsKeyboardHarness {
+            KeyboardHarness()
+        } else {
+            RootView(controller: controller)
+        }
+        #else
+        RootView(controller: controller)
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
-            RootView(controller: controller)
+            content
                 .onOpenURL { url in Task { await controller.handle(url) } }
         }
     }

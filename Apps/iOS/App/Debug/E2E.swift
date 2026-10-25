@@ -24,6 +24,9 @@ import os
 /// - `-LegatoFakeKeyboardApply YES|NO`: whether the fake keyboard types the streamed text into its
 ///   document and confirms it (default YES). NO leaves the final text unconfirmed.
 ///
+/// - `-LegatoKeyboardHarness YES`: show the keyboard harness (the keyboard's UI over a text view in the
+///   app) instead of the app's screens. Its command is `harness-mic` (a tap on the mic key).
+///
 /// URLs: `legato://toggle` calls `AppController.toggle()`; `legato://interrupt` posts the notification
 /// the audio session sends on an interruption, so the real observer handles it.
 ///
@@ -45,6 +48,8 @@ enum E2E {
     static func quote(_ text: String) -> String {
         "\"" + text.replacingOccurrences(of: "\"", with: "'").replacingOccurrences(of: "\n", with: " ") + "\""
     }
+
+    static let showsKeyboardHarness = UserDefaults.standard.bool(forKey: "LegatoKeyboardHarness")
 
     static let fakeEngine: E2EScriptedEngine? = {
         guard let text = UserDefaults.standard.string(forKey: "LegatoFakeEngine"), !text.isEmpty else { return nil }
@@ -158,6 +163,10 @@ extension AppController {
             await E2EFakeKeyboard.shared.run(command)
             return
         }
+        if command.hasPrefix("harness-") {
+            KeyboardHarnessModel.shared.run(command)
+            return
+        }
         switch command {
         case "toggle":
             _ = await toggle()
@@ -186,6 +195,7 @@ extension E2E {
         "toggle", "interrupt", "copy-last", "foreground", "background", "toggle-after-hop",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-start", "kbd-hop-start-url-first",
+        "harness-mic",
     ]
 
     /// Darwin notifications `de.gruenwald.legato.e2e.<command>`, posted from the host with
