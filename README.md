@@ -1,4 +1,4 @@
-# dictate (working name)
+# Legato
 
 Open-source, on-device dictation and meeting notes for iOS and macOS.
 
