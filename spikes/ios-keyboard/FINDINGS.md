@@ -1,66 +1,51 @@
 # Spike #1: keyboard dictation with no app hop
 
-**Status:** builds unsigned for iOS 26. It has not been installed or tested on a device yet.
+**Status:** the toggle rework builds for iOS 26 (Swift 6 strict concurrency). It has not been installed on the device yet (phone was locked, CoreDeviceError 4016).
+
+## Device findings so far
+
+- `StartSessionIntent: AudioRecordingIntent, LiveActivityIntent` (`supportedModes .background`), run from the Action Button, starts mic recording from the background **when the intent launches the process**.
+- In a process the user launched and then backgrounded, `engine.start()` fails with kAUStartIO 'what' (2003329396).
+- From the background, changing category options on an already-active session to interrupt others fails with '!int' (560557684). The planned fix, untested on device, is the Google Maps pattern: engine.stop, `setActive(false, .notifyOthersOnDeactivation)`, setCategory with `[.duckOthers, .interruptSpokenAudioAndMixWithOthers]`, setActive(true), engine.start.
+- Keyboard and app talk over App Group defaults plus Darwin notifications.
+- Dictation with `SpeechTranscriber` (de_DE) streams text into the host field through `textDocumentProxy`.
+- The mic tap block must be built outside the MainActor (`tapBlock(_:)`). Swift 6 traps otherwise.
 
 ## Built
 
-Three targets, generated from `project.yml`. Bundle IDs use the `de.gruenwald.legato.spike1` prefix, and the App Group is `group.de.gruenwald.legato`.
+Three targets generated from `project.yml`. Bundle IDs use the `de.gruenwald.legato.spike1` prefix, the App Group is `group.de.gruenwald.legato`. There is no idle session: one action toggles everything.
 
-- **App.** The recording session uses `.playAndRecord` with `.mixWithOthers`, `.allowBluetoothA2DP` and `.defaultToSpeaker`, and prefers the built-in mic. It transcribes with `SpeechTranscriber` (de_DE). It writes a heartbeat and mic level to the App Group every second, and logs to `spike.log`.
-- **`StartSessionIntent` / stop intent.** They conform to `AudioRecordingIntent` and `LiveActivityIntent`, so `perform()` runs in the app process, with `openAppWhenRun = false`. They are exposed through App Shortcuts, which makes them available to the Action Button and to Shortcuts automations.
-- **Widgets.** A Live Activity (required while recording) and Control Center start and stop controls.
-- **Keyboard** (`RequestsOpenAccess`). It shows whether the session is alive. Each start path has its own button:
-  - **A:** `Button(intent:)` inside the keyboard
-  - **B:** a Darwin notification
-  - **C:** opening a URL into the app (the baseline that hops)
-
-  It also has a Dictate button, which streams volatile and final text through `textDocumentProxy`, and an "Insert test" button.
-
-## Verified by command
-
-- **Device:** iPhone 17 on iOS 26.6.1, paired, Developer Mode on.
-- **Build:** `xcodebuild` with `CODE_SIGNING_ALLOWED=NO` gives `BUILD SUCCEEDED`, with only an interface-orientation warning.
-- **Built plists:** the keyboard has `RequestsOpenAccess=true`. The app has `NSSupportsLiveActivities` and `UIBackgroundModes=[audio]`.
-- **Intent metadata:** `StartSessionIntent` carries the `AudioRecording` and `SessionStarting` protocols, with `openAppWhenRun=False`.
-
-## Blocker
-
-Team signing fails with "PLA Update available". The Program License Agreement on developer.apple.com/account has to be accepted first.
+- **`ToggleDictationIntent`** (`AudioRecordingIntent` + `LiveActivityIntent`, `supportedModes [.background, .foreground(.dynamic)]`, `source` parameter for logging). `perform()` runs in the app process.
+  - **First press:** activates `.playAndRecord` with `[.duckOthers, .interruptSpokenAudioAndMixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker]`, prefers the built-in mic, starts the engine, the Live Activity and `SpeechTranscriber` dictation. Music ducks and Audible pauses (always on).
+  - **Second press:** stops dictation, ends the Live Activity, stops the engine, then `setActive(false, .notifyOthersOnDeactivation)`.
+  - **Target choice at start:** if the keyboard wrote `kbd.visibleAt` within the last 2 s (and `kbd.visible` is true), text streams to the keyboard. Otherwise the app opens a Scratch screen via `continueInForeground(alwaysConfirm: false)` ([docs](https://developer.apple.com/documentation/appintents/appintent/continueinforeground(_:alwaysconfirm:))). Scratch is a focused TextEditor with Copy / Share / Clear.
+- **Entry points:** App Shortcut "Toggle dictation" (Action Button), Control Center control, Live Activity stop button, keyboard `Button(intent:)`. All run the same intent. The old start/stop intents are gone.
+- **Keyboard** (`RequestsOpenAccess`): the Dictate button is `Button(intent: ToggleDictationIntent(source: "keyboard"))` (path A, unproven in keyboard extensions) and logs the tap. One fallback button posts a Darwin notification (works only while the app process is alive). `viewWillAppear` / `viewDidDisappear` write `kbd.visible`, with a 1 s `kbd.visibleAt` heartbeat while visible.
+- **Logging** (`Library/spike.log` in the App Group): toggle source, pid, appState, `isOtherAudioPlaying`, `secondaryAudioShouldBeSilencedHint`, category and options, interruptions, route changes, the keyboard-vs-Scratch branch, and every failure with domain, code and four-char code.
 
 ## Run
 
 ```
 xcodegen generate
-xcodebuild -project LegatoSpike.xcodeproj -scheme LegatoSpike -destination 'id=<UDID>' -derivedDataPath build -allowProvisioningUpdates build
+xcodebuild -project LegatoSpike.xcodeproj -scheme LegatoSpike -destination 'generic/platform=iOS' -derivedDataPath build -allowProvisioningUpdates DEVELOPMENT_TEAM=XWSGN23W75 build
 xcrun devicectl device install app --device <UDID> build/Build/Products/Debug-iphoneos/LegatoSpike.app
-xcrun devicectl device copy from --device <UDID> --domain-type appGroupDataContainer --domain-identifier group.de.gruenwald.legato --source spike.log --destination spike.log
+xcrun devicectl device copy from --device <UDID> --domain-type appGroupDataContainer --domain-identifier group.de.gruenwald.legato --source Library/spike.log --destination spike.log
 ```
 
-## Device checklist
+## Test list
 
-**Setup:** grant the mic permission, tap "Prepare speech model", enable the keyboard with Full Access, bind the Action Button to "Start session", and add the control to Control Center.
+**Setup:** mic permission, "Prepare speech model", enable the keyboard with Full Access, bind the Action Button to "Toggle dictation", add the control to Control Center. Force-quit the app before each start test. Note **hop / no hop / error** and the log line.
 
-For each test, note **hop / no hop / error** and the log line.
-
-1. Action Button, with the app force-quit and the phone unlocked.
-2. Action Button, with the phone locked.
-3. Control Center control.
-4. Shortcuts personal automation, with "Ask Before Running" off.
-5. Keyboard path A. Did `perform()` run in the app process?
-6. Keyboard path B, once with the app in recents and once with it force-quit.
-7. Keyboard path C. Note which open method worked.
-8. Dictate in Notes: is the volatile text replaced cleanly? Use "Insert test" to tell keyboard problems from app problems.
-9. Idle lifetime: check the heartbeat log after 1, 5 and 30 minutes.
-10. Dismiss the Live Activity while recording. Does the session die?
-11. Music on the iPhone speaker (Spotify, then Apple Music) while dictating.
-12. Music on AirPods. Does it stay on A2DP with no drop in quality?
-13. Interrupt with a call, Siri or an alarm, then check the `INTERRUPTION` log lines.
-14. Battery drop over 30 minutes with a session running, compared with no session.
+1. **Keyboard toggle via intent** (Notes, our keyboard up, app force-quit): hop or no hop? Is `perform()` logged with an app pid? Does text stream? With Audible playing: pauses on start, resumes on stop? With Spotify: ducks, then unducks?
+2. **Action Button, our keyboard visible:** log shows the KEYBOARD branch, text streams, no app switch.
+3. **Action Button, no keyboard visible** (e.g. Home Screen): log shows the SCRATCH branch and the `continueInForeground` result. Scratch opens with the cursor active and text streaming. Is a confirmation prompt shown?
+4. **Second press stops everything**, from each source: Action Button, Control Center, Live Activity button, keyboard. Check: Live Activity gone, mic indicator off, music unducked, Audible resumed, `setActive(false) ok` in the log.
+5. **Fallback Darwin button:** works only if the app process is alive; compare with test 1.
 
 ## Open risks
 
-- **Starting from the background may fail.** One forum thread reports a "Target is not foreground" error when an `AudioRecordingIntent` starts a Live Activity and recording together; the only answer, from a community member, says the first start must be in the foreground ([815725](https://developer.apple.com/forums/thread/815725)). Apple has said elsewhere that privacy rules block starting a recording from the background ([698253](https://developer.apple.com/forums/thread/698253)). Superwhisper's Action Button behaviour suggests this can work anyway.
-- **Path A is unproven.** I found no documentation of `Button(intent:)` working inside a keyboard extension.
-- **Path B needs the app running.** Darwin notifications only reach a live process.
-- **Returning to the host app.** Looking up the host app has been broken since iOS 26.4 ([836168](https://developer.apple.com/forums/thread/836168)), which matters if path C is used.
-- **Always-on mic.** The mic indicator stays visible the whole time. The battery cost and the App Review risk haven't been assessed.
+- `.foreground(.dynamic)` is added to the supported modes. It might change how the system launches the intent's process (the background-only version is the one that worked on device). If the Action Button start regresses, compare against `.background` alone.
+- `continueInForeground` may show a confirmation despite `alwaysConfirm: false`.
+- Path A is undocumented inside keyboard extensions.
+- The duck / interrupt cycle on a fresh session is untested from the background.
+- The mic indicator is on during dictation only; battery cost and App Review risk are not assessed.

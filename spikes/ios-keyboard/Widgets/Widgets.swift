@@ -7,8 +7,7 @@ import WidgetKit
 struct LegatoWidgets: WidgetBundle {
     var body: some Widget {
         SessionLiveActivity()
-        StartSessionControl()
-        StopSessionControl()
+        ToggleDictationControl()
     }
 }
 
@@ -18,11 +17,11 @@ struct SessionLiveActivity: Widget {
             HStack {
                 Image(systemName: "mic.fill").foregroundStyle(.red)
                 VStack(alignment: .leading) {
-                    Text("Legato session listening").font(.headline)
+                    Text("Legato dictating").font(.headline)
                     Text(context.state.startedAt, style: .timer).font(.caption.monospacedDigit())
                 }
                 Spacer()
-                Button(intent: StopSessionIntent()) { Image(systemName: "stop.circle.fill").font(.title) }
+                Button(intent: ToggleDictationIntent(source: "live-activity")) { Image(systemName: "stop.circle.fill").font(.title) }
                     .buttonStyle(.plain)
             }
             .padding()
@@ -31,7 +30,7 @@ struct SessionLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.leading) { Image(systemName: "mic.fill").foregroundStyle(.red) }
                 DynamicIslandExpandedRegion(.center) { Text(context.state.startedAt, style: .timer) }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Button(intent: StopSessionIntent()) { Image(systemName: "stop.circle.fill") }
+                    Button(intent: ToggleDictationIntent(source: "live-activity")) { Image(systemName: "stop.circle.fill") }
                 }
             } compactLeading: {
                 Image(systemName: "mic.fill").foregroundStyle(.red)
@@ -44,25 +43,14 @@ struct SessionLiveActivity: Widget {
     }
 }
 
-struct StartSessionControl: ControlWidget {
+struct ToggleDictationControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
-        StaticControlConfiguration(kind: "de.gruenwald.legato.spike1.start") {
-            ControlWidgetButton(action: StartSessionIntent()) {
-                Label("Start session", systemImage: "mic.fill")
+        StaticControlConfiguration(kind: "de.gruenwald.legato.spike1.toggle") {
+            ControlWidgetButton(action: ToggleDictationIntent(source: "control-center")) {
+                Label("Toggle dictation", systemImage: "mic.fill")
             }
         }
-        .displayName("Legato: start session")
-        .description("Starts the Legato mic session without opening the app.")
-    }
-}
-
-struct StopSessionControl: ControlWidget {
-    var body: some ControlWidgetConfiguration {
-        StaticControlConfiguration(kind: "de.gruenwald.legato.spike1.stop") {
-            ControlWidgetButton(action: StopSessionIntent()) {
-                Label("Stop session", systemImage: "mic.slash.fill")
-            }
-        }
-        .displayName("Legato: stop session")
+        .displayName("Legato: toggle dictation")
+        .description("Starts dictation, or stops it when already running.")
     }
 }

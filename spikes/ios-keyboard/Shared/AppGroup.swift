@@ -3,7 +3,6 @@ import Foundation
 /// Shared constants, App Group defaults and the shared log file. Compiled into all three targets.
 enum Spike {
     static let groupID = "group.de.gruenwald.legato"
-    static let urlScheme = "legato-spike"
 
     static var defaults: UserDefaults { UserDefaults(suiteName: groupID) ?? .standard }
     static var containerURL: URL? {
@@ -15,18 +14,18 @@ enum Spike {
         static let level = "hb.level"             // Float 0...1
         static let pid = "hb.pid"                 // Int
         static let active = "session.active"      // Bool
-        static let command = "dict.cmd"           // "start" | "stop"
-        static let commandSeq = "dict.cmdSeq"     // Double, unix seconds; identifies a dictation
+        static let dictId = "dict.id"             // Double, unix seconds; identifies one dictation
+        static let dictTarget = "dict.target"     // "keyboard" | "scratch": where the text goes
         static let text = "dict.text"             // full text of current dictation (finalized + volatile)
         static let textSeq = "dict.textSeq"       // Int, increments on every update
         static let textFinal = "dict.final"       // Bool
         static let dictState = "dict.state"       // idle | listening | finishing | error:<msg>
-        static let pauseOthers = "audio.pauseOthers" // Bool: interrupt other audio while dictating, resume after
+        static let kbdVisible = "kbd.visible"     // Bool, written by the keyboard
+        static let kbdVisibleAt = "kbd.visibleAt" // Double, unix seconds; refreshed every 1 s while visible
     }
 
     enum Note {
-        static let startSession = "de.gruenwald.legato.spike1.startSession"  // keyboard -> app (path b)
-        static let command = "de.gruenwald.legato.spike1.command"            // keyboard -> app
+        static let toggle = "de.gruenwald.legato.spike1.toggle"              // keyboard -> app (fallback path)
         static let text = "de.gruenwald.legato.spike1.text"                  // app -> keyboard
     }
 }

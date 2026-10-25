@@ -30,80 +30,138 @@ final class TapRouter: @unchecked Sendable {
     }
 }
 
+enum DictationTarget: String, Sendable { case keyboard, scratch }
+enum ToggleOutcome: Sendable { case started(DictationTarget), stopped, ignored }
+
 @MainActor @Observable
 final class SessionController {
     static let shared = SessionController()
+
+    /// Always on: duck music, interrupt spoken audio (Audible), keep A2DP and speaker routing.
+    static let dictationOptions: AVAudioSession.CategoryOptions =
+        [.duckOthers, .interruptSpokenAudioAndMixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker]
 
     private(set) var isActive = false
     private(set) var level: Float = 0
     private(set) var lastError: String?
 
+    // Scratch screen state: dictated text streams into `scratchText` after `scratchPrefix`.
+    var scratchVisible = false
+    var scratchText = ""
+    private var scratchPrefix = ""
+    private var target: DictationTarget = .keyboard
+
     let dictation = Dictation()
     private let engine = AVAudioEngine()
     private let router = TapRouter()
+    private var transitioning = false
     private var heartbeat: Task<Void, Never>?
     private var activity: Activity<SessionAttributes>?
     private var tokens: [NSObjectProtocol] = []
     private var darwin: [DarwinObserver] = []
-    private var lastCommandSeq: Double = 0
 
     private func log(_ msg: String) { SpikeLog.write("app", msg) }
 
     private init() {
         Spike.defaults.set(false, forKey: Spike.Key.active)
         log("process launched (SessionController init)")
+        dictation.onUpdate = { [weak self] text in self?.dictationText(text) }
         observeSystem()
         observeDarwin()
     }
 
-    // MARK: Start / stop
+    // MARK: Toggle
 
-    func start(source: String) async throws {
-        log("start requested by \(source); appState=\(UIApplication.shared.applicationState.rawValue) (0 active, 1 inactive, 2 background)")
-        if isActive { log("start ignored: already active"); return }
-        do {
-            let s = AVAudioSession.sharedInstance()
-            // Experiment: can an intent-launched start interrupt spoken audio (Audible), when a
-            // later in-session switch from the background fails with '!int'?
-            let interrupt = Spike.defaults.bool(forKey: Spike.Key.pauseOthers) && source == "StartSessionIntent"
-            try s.setCategory(.playAndRecord, mode: .default,
-                              options: [interrupt ? .interruptSpokenAudioAndMixWithOthers : .mixWithOthers,
-                                        .allowBluetoothA2DP, .defaultToSpeaker])
-            log("category set; interruptSpokenAudio=\(interrupt)")
-            if let mic = s.availableInputs?.first(where: { $0.portType == .builtInMic }) {
-                try s.setPreferredInput(mic)
-            }
-            try s.setActive(true)
-            log("activated mixable; otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint)")
-            // From the background this fails with kAUStartIO 'what' in a process the user launched,
-            // and works in one the intent launched. A non-mixable retry fails with '!int'.
-            try startEngine()
-            isActive = true
-            Spike.defaults.set(true, forKey: Spike.Key.active)
-            startActivity()
-            startHeartbeat()
-            log("SESSION STARTED via \(source); route in=\(routeSummary(inputs: true)) out=\(routeSummary(inputs: false))")
-        } catch {
-            lastError = "\(error)"
-            log("SESSION START FAILED via \(source): \(error)")
-            throw error
+    /// The single entry point: Action Button, Control Center, Live Activity, keyboard and in-app UI.
+    func toggle(source: String) async throws -> ToggleOutcome {
+        logContext("TOGGLE source=\(source) isActive=\(isActive) transitioning=\(transitioning)")
+        guard !transitioning else { log("toggle ignored: a start/stop is still in progress"); return .ignored }
+        transitioning = true
+        defer { transitioning = false }
+        if isActive {
+            await stopAll(source: source)
+            return .stopped
         }
+        return .started(try await startAll(source: source))
     }
 
-    func stop(reason: String) async {
-        log("SESSION STOP (\(reason))")
+    private func keyboardVisibleRecently() -> Bool {
+        let d = Spike.defaults
+        let visible = d.bool(forKey: Spike.Key.kbdVisible)
+        let age = Date().timeIntervalSince1970 - d.double(forKey: Spike.Key.kbdVisibleAt)
+        let recent = visible && age < 2.0
+        log("keyboard visible=\(visible) visibleAge=\(String(format: "%.2f", age))s -> \(recent ? "KEYBOARD branch" : "SCRATCH branch")")
+        return recent
+    }
+
+    private func startAll(source: String) async throws -> DictationTarget {
+        let chosen: DictationTarget = keyboardVisibleRecently() ? .keyboard : .scratch
+        let s = AVAudioSession.sharedInstance()
+        do {
+            engine.stop()
+            try s.setCategory(.playAndRecord, mode: .default, options: Self.dictationOptions)
+            logContext("category set")
+            do {
+                if let mic = s.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                    try s.setPreferredInput(mic)
+                }
+            } catch { log("setPreferredInput failed: \(describe(error))") }
+            try s.setActive(true)
+            logContext("session activated")
+            // From the background this fails with kAUStartIO 'what' in a process the user launched,
+            // and works in one the intent launched.
+            try startEngine()
+        } catch {
+            lastError = describe(error)
+            log("START FAILED (\(source)): \(describe(error))")
+            engine.stop()
+            do { try s.setActive(false, options: .notifyOthersOnDeactivation) } catch {
+                log("cleanup setActive(false) failed: \(describe(error))")
+            }
+            throw error
+        }
+        isActive = true
+        lastError = nil
+        target = chosen
+        Spike.defaults.set(true, forKey: Spike.Key.active)
+        Spike.defaults.set(Date().timeIntervalSince1970, forKey: Spike.Key.dictId)
+        Spike.defaults.set(chosen.rawValue, forKey: Spike.Key.dictTarget)
+        if chosen == .scratch {
+            scratchPrefix = scratchText.isEmpty || scratchText.hasSuffix(" ") || scratchText.hasSuffix("\n") ? scratchText : scratchText + " "
+            scratchVisible = true
+        }
+        startActivity()
+        startHeartbeat()
+        log("ENGINE STARTED via \(source); target=\(chosen); route in=\(routeSummary(inputs: true)) out=\(routeSummary(inputs: false))")
+        await dictation.start(router: router, inputFormat: engine.inputNode.outputFormat(forBus: 0))
+        logContext("dictation started")
+        return chosen
+    }
+
+    private func stopAll(source: String) async {
+        log("STOP via \(source)")
         heartbeat?.cancel(); heartbeat = nil
         if dictation.isRunning { await dictation.stop() }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        isActive = false
-        level = 0
-        Spike.defaults.set(false, forKey: Spike.Key.active)
         for a in Activity<SessionAttributes>.activities {
             await a.end(nil, dismissalPolicy: .immediate)
         }
         activity = nil
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            log("setActive(false, notifyOthersOnDeactivation) ok")
+        } catch {
+            log("setActive(false) FAILED: \(describe(error))")
+        }
+        isActive = false
+        level = 0
+        Spike.defaults.set(false, forKey: Spike.Key.active)
+        logContext("stopped")
+    }
+
+    private func dictationText(_ text: String) {
+        if target == .scratch { scratchText = scratchPrefix + text }
     }
 
     private func startEngine() throws {
@@ -138,7 +196,7 @@ final class SessionController {
                 }
             }
         } catch {
-            log("LIVE ACTIVITY REQUEST FAILED: \(error)")
+            log("LIVE ACTIVITY REQUEST FAILED: \(describe(error))")
         }
     }
 
@@ -163,43 +221,37 @@ final class SessionController {
         }
     }
 
+    private func logContext(_ tag: String) {
+        let s = AVAudioSession.sharedInstance()
+        log("\(tag): pid=\(ProcessInfo.processInfo.processIdentifier) appState=\(UIApplication.shared.applicationState.rawValue) (0 active, 1 inactive, 2 background) otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint) category=\(s.category.rawValue) options=\(Self.optionNames(s.categoryOptions)) engineRunning=\(engine.isRunning)")
+    }
+
+    private static func optionNames(_ o: AVAudioSession.CategoryOptions) -> String {
+        let all: [(AVAudioSession.CategoryOptions, String)] = [
+            (.mixWithOthers, "mixWithOthers"), (.duckOthers, "duckOthers"),
+            (.interruptSpokenAudioAndMixWithOthers, "interruptSpokenAudio"), (.allowBluetoothHFP, "bluetoothHFP"),
+            (.allowBluetoothA2DP, "bluetoothA2DP"), (.defaultToSpeaker, "defaultToSpeaker"), (.allowAirPlay, "airPlay"),
+        ]
+        let names = all.filter { o.contains($0.0) }.map(\.1)
+        return "[\(names.joined(separator: ","))]"
+    }
+
     private func routeSummary(inputs: Bool) -> String {
         let r = AVAudioSession.sharedInstance().currentRoute
         return (inputs ? r.inputs : r.outputs).map { "\($0.portType.rawValue)" }.joined(separator: ",")
     }
 
-    // MARK: Dictation commands from the keyboard
+    // MARK: Fallback path: keyboard -> Darwin notification (only works while this process is alive)
 
     private func observeDarwin() {
-        darwin.append(DarwinObserver(name: Spike.Note.startSession) {
+        darwin.append(DarwinObserver(name: Spike.Note.toggle) {
             Task { @MainActor in
-                SessionController.shared.log("Darwin startSession received (process alive)")
-                try? await SessionController.shared.start(source: "darwin")
+                SessionController.shared.log("Darwin toggle received (process alive)")
+                do { _ = try await SessionController.shared.toggle(source: "keyboard-darwin-fallback") } catch {
+                    SessionController.shared.log("darwin toggle failed: \(describe(error))")
+                }
             }
         })
-        darwin.append(DarwinObserver(name: Spike.Note.command) {
-            Task { @MainActor in await SessionController.shared.handleCommand() }
-        })
-    }
-
-    private func handleCommand() async {
-        let d = Spike.defaults
-        let seq = d.double(forKey: Spike.Key.commandSeq)
-        guard seq != lastCommandSeq else { return }
-        lastCommandSeq = seq
-        let cmd = d.string(forKey: Spike.Key.command) ?? ""
-        log("command from keyboard: \(cmd)")
-        switch cmd {
-        case "start":
-            if !isActive { try? await start(source: "darwin-dictate") }
-            guard isActive else { dictation.publishError("session not running"); return }
-            if d.bool(forKey: Spike.Key.pauseOthers) { setMixing(false, why: "dictation start") }
-            await dictation.start(router: router, inputFormat: engine.inputNode.outputFormat(forBus: 0))
-        case "stop":
-            await dictation.stop()
-            if d.bool(forKey: Spike.Key.pauseOthers) { setMixing(true, why: "dictation stop") }
-        default: break
-        }
     }
 
     // MARK: Interruptions, route changes, lifecycle (all logged)
@@ -219,6 +271,10 @@ final class SessionController {
             MainActor.assumeIsolated {
                 SessionController.shared.log("route change reason=\(reason) in=\(SessionController.shared.routeSummary(inputs: true)) out=\(SessionController.shared.routeSummary(inputs: false))")
             }
+        })
+        tokens.append(nc.addObserver(forName: AVAudioSession.silenceSecondaryAudioHintNotification, object: s, queue: .main) { note in
+            let type = (note.userInfo?[AVAudioSessionSilenceSecondaryAudioHintTypeKey] as? UInt) ?? 99
+            MainActor.assumeIsolated { SessionController.shared.log("silenceSecondaryAudioHint type=\(type) (1 begin, 0 end)") }
         })
         tokens.append(nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: s, queue: .main) { _ in
             MainActor.assumeIsolated {
@@ -250,28 +306,6 @@ final class SessionController {
         if t == "ENDED" && isActive { restartEngine(why: "interruption ended") }
     }
 
-    /// Interrupting spoken audio pauses Audible; going back to plain mixing deactivates with
-    /// notifyOthersOnDeactivation first, so the interrupted app gets `shouldResume`.
-    private func setMixing(_ mix: Bool, why: String) {
-        let s = AVAudioSession.sharedInstance()
-        log("setMixing(\(mix)) for \(why); otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint)")
-        do {
-            // Navigation-app pattern (Google Maps does this from the background): duck music and
-            // interrupt spoken audio, applied by a fresh deactivate -> activate cycle; changing
-            // options on an already-active session fails with '!int'.
-            var opts: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP, .defaultToSpeaker]
-            opts.formUnion(mix ? [.mixWithOthers] : [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
-            engine.stop()
-            try s.setActive(false, options: .notifyOthersOnDeactivation)
-            try s.setCategory(.playAndRecord, mode: .default, options: opts)
-            try s.setActive(true)
-            if !engine.isRunning { try startEngine() }
-            log("setMixing(\(mix)) ok; engineRunning=\(engine.isRunning)")
-        } catch {
-            log("SETMIXING(\(mix)) FAILED: \(error)")
-        }
-    }
-
     private func restartEngine(why: String) {
         guard isActive else { return }
         do {
@@ -279,7 +313,7 @@ final class SessionController {
             if !engine.isRunning { try startEngine() }
             log("engine restart ok (\(why))")
         } catch {
-            log("ENGINE RESTART FAILED (\(why)): \(error)")
+            log("ENGINE RESTART FAILED (\(why)): \(describe(error))")
         }
     }
 }

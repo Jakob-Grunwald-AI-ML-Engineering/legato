@@ -39,9 +39,6 @@ targets:
         NSSupportsLiveActivities: true
         NSMicrophoneUsageDescription: Spike records speech to test keyboard dictation.
         NSSpeechRecognitionUsageDescription: Spike transcribes speech on device.
-        CFBundleURLTypes:
-          - CFBundleURLName: de.gruenwald.legato.spike1
-            CFBundleURLSchemes: [legato-spike]
 
   LegatoWidgets:
     type: app-extension

@@ -22,18 +22,19 @@ struct KeyboardView: View {
 
             Grid(horizontalSpacing: 8, verticalSpacing: 8) {
                 GridRow {
-                    // Path (a): AppIntent button inside the keyboard.
-                    Button(intent: StartSessionIntent()) { label("A: Button(intent:)") }
-                        .simultaneousGesture(TapGesture().onEnded { model.log("A: tapped Button(intent:)") })
-                    Button { model.startViaDarwin() } label: { label("B: Darwin note") }
-                    Button { model.startViaURL() } label: { label("C: URL (hop)") }
-                }
-                GridRow {
-                    Button { model.toggleDictation() } label: {
+                    // Path A, the critical test: an AppIntent button inside the keyboard extension.
+                    Button(intent: ToggleDictationIntent(source: "keyboard")) {
                         label(model.dictState == "listening" ? "Stop dictating" : "Dictate", tint: .blue)
                     }
+                    .simultaneousGesture(TapGesture().onEnded {
+                        model.log("A: tapped Button(intent: ToggleDictationIntent) dictState=\(model.dictState)")
+                    })
                     .gridCellColumns(2)
+                    Button { model.toggleViaDarwin() } label: { label("Fallback: Darwin") }
+                }
+                GridRow {
                     Button { model.insertTestString() } label: { label("Insert test") }
+                        .gridCellColumns(3)
                 }
             }
             .buttonStyle(.plain)

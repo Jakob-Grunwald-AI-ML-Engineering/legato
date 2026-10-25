@@ -11,9 +11,9 @@ final class KeyboardModel {
     var lastEvent = "-"
 
     var proxy: (() -> UITextDocumentProxy)?
-    var openURL: ((URL) -> Void)?
 
     private var timer: Timer?
+    private var visibleTimer: Timer?
     private var observer: DarwinObserver?
     private var handledSeq = -1
     private var currentDictation: Double = 0
@@ -33,6 +33,7 @@ final class KeyboardModel {
             Task { @MainActor in self?.applyText() }
         }
         handledSeq = Spike.defaults.integer(forKey: Spike.Key.textSeq)
+        currentDictation = Spike.defaults.double(forKey: Spike.Key.dictId)
     }
 
     func poll() {
@@ -45,33 +46,27 @@ final class KeyboardModel {
         applyText()
     }
 
-    // MARK: start paths (b) and (c); path (a) is Button(intent:) in the view
+    // MARK: visibility (read by ToggleDictationIntent to choose keyboard vs Scratch)
 
-    func startViaDarwin() {
-        log("B: posted Darwin startSession")
-        DarwinObserver.post(Spike.Note.startSession)
-    }
-
-    func startViaURL() {
-        log("C: opening \(Spike.urlScheme)://start")
-        openURL?(URL(string: "\(Spike.urlScheme)://start")!)
-    }
-
-    // MARK: dictation
-
-    func toggleDictation() {
+    /// While visible, refresh `kbd.visibleAt` every second so a killed extension goes stale within ~2 s.
+    func setVisible(_ visible: Bool) {
         let d = Spike.defaults
-        let starting = !(dictState == "listening")
-        if starting {
-            currentDictation = Date().timeIntervalSince1970
-            inserted = ""
-            d.set(currentDictation, forKey: Spike.Key.commandSeq)
-        } else {
-            d.set(Date().timeIntervalSince1970, forKey: Spike.Key.commandSeq)
+        d.set(visible, forKey: Spike.Key.kbdVisible)
+        d.set(Date().timeIntervalSince1970, forKey: Spike.Key.kbdVisibleAt)
+        visibleTimer?.invalidate(); visibleTimer = nil
+        if visible {
+            visibleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                Spike.defaults.set(Date().timeIntervalSince1970, forKey: Spike.Key.kbdVisibleAt)
+            }
         }
-        d.set(starting ? "start" : "stop", forKey: Spike.Key.command)
-        DarwinObserver.post(Spike.Note.command)
-        log("dictate \(starting ? "start" : "stop") sent")
+        SpikeLog.write("kbd", "visible=\(visible)")
+    }
+
+    // MARK: Darwin fallback path (only works while the app process is alive)
+
+    func toggleViaDarwin() {
+        log("FALLBACK: posted Darwin toggle")
+        DarwinObserver.post(Spike.Note.toggle)
     }
 
     /// Replace the previously inserted (volatile) text with the latest full text.
@@ -80,6 +75,10 @@ final class KeyboardModel {
         let seq = d.integer(forKey: Spike.Key.textSeq)
         guard seq != handledSeq else { return }
         handledSeq = seq
+        // A new dictation (started by the intent, not by us) resets what we have inserted so far.
+        let id = d.double(forKey: Spike.Key.dictId)
+        if id != currentDictation { currentDictation = id; inserted = "" }
+        guard d.string(forKey: Spike.Key.dictTarget) == "keyboard" else { return }
         guard let proxy = proxy?() else { return }
         let text = d.string(forKey: Spike.Key.text) ?? ""
         if dictState.hasPrefix("error") { log("dictation \(dictState)"); return }
@@ -102,7 +101,6 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         model.proxy = { [unowned self] in self.textDocumentProxy }
-        model.openURL = { [unowned self] url in self.open(url) }
         model.start()
         SpikeLog.write("kbd", "keyboard loaded; hasFullAccess=\(hasFullAccess)")
 
@@ -121,28 +119,13 @@ final class KeyboardViewController: UIInputViewController {
         host.didMove(toParent: self)
     }
 
-    /// Path (c): extensionContext.open first (documented but usually refused for keyboards),
-    /// then the responder-chain UIApplication fallback.
-    private func open(_ url: URL) {
-        extensionContext?.open(url) { [weak self] ok in
-            Task { @MainActor in
-                self?.model.log("C: extensionContext.open ok=\(ok)")
-                if !ok { self?.openViaResponderChain(url) }
-            }
-        }
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        model.setVisible(true)
     }
 
-    private func openViaResponderChain(_ url: URL) {
-        var r: UIResponder? = self
-        while let x = r {
-            if let app = x as? UIApplication {
-                app.open(url, options: [:]) { [weak self] ok in
-                    Task { @MainActor in self?.model.log("C: responder-chain open ok=\(ok)") }
-                }
-                return
-            }
-            r = x.next
-        }
-        model.log("C: no UIApplication in responder chain")
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        model.setVisible(false)
     }
 }

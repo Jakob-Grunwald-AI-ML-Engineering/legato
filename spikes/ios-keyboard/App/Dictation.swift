@@ -1,5 +1,6 @@
 import AVFAudio
 import Foundation
+import Observation
 import Speech
 
 /// Converts tap buffers to the analyzer's format. Only touched from the audio tap thread.
@@ -30,11 +31,14 @@ final class BufferConverter: @unchecked Sendable {
 
 /// On-device transcription with SpeechAnalyzer/SpeechTranscriber, fed from the always-on engine tap.
 /// Publishes the full dictation text (finalized + volatile) to the App Group after every result.
-@MainActor
+@MainActor @Observable
 final class Dictation {
     static let locale = Locale(identifier: "de_DE")
 
     private(set) var isRunning = false
+    private(set) var state = "idle"
+    /// Called with the full text (finalized + volatile) after every result.
+    @ObservationIgnored var onUpdate: (@MainActor (String) -> Void)?
     private var analyzer: SpeechAnalyzer?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     private var resultsTask: Task<Void, Never>?
@@ -55,7 +59,7 @@ final class Dictation {
             log("model status: \(st)")
             return "model status: \(st)"
         } catch {
-            log("prepareModel failed: \(error)")
+            log("prepareModel failed: \(describe(error))")
             return "prepare failed: \(error)"
         }
     }
@@ -125,11 +129,13 @@ final class Dictation {
         publish(final: true, state: "error:\(msg)")
     }
 
-    private func publish(final: Bool, state: String, force: Bool = false) {
+    private func publish(final: Bool, state st: String, force: Bool = false) {
         let d = Spike.defaults
+        state = st
+        onUpdate?(finalized + volatile)
         d.set(finalized + volatile, forKey: Spike.Key.text)
         d.set(final, forKey: Spike.Key.textFinal)
-        d.set(state, forKey: Spike.Key.dictState)
+        d.set(st, forKey: Spike.Key.dictState)
         d.set(d.integer(forKey: Spike.Key.textSeq) + 1, forKey: Spike.Key.textSeq)
         DarwinObserver.post(Spike.Note.text)
     }

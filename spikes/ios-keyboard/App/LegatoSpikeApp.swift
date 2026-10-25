@@ -5,37 +5,80 @@ import SwiftUI
 
 struct SpikeShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
-        AppShortcut(intent: StartSessionIntent(),
-                    phrases: ["Start \(.applicationName) session"],
-                    shortTitle: "Start session", systemImageName: "mic.fill")
-        AppShortcut(intent: StopSessionIntent(),
-                    phrases: ["Stop \(.applicationName) session"],
-                    shortTitle: "Stop session", systemImageName: "mic.slash.fill")
+        AppShortcut(intent: ToggleDictationIntent(),
+                    phrases: ["Toggle \(.applicationName) dictation"],
+                    shortTitle: "Toggle dictation", systemImageName: "mic.fill")
     }
 }
 
 @main
 struct LegatoSpikeApp: App {
     init() {
-        // Registers the Darwin observers as early as possible, including on background launches.
+        // Registers the Darwin observer as early as possible, including on background launches.
         _ = SessionController.shared
         SpikeShortcuts.updateAppShortcutParameters()
     }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .onOpenURL { url in
-                    // Path (c), the hop baseline: the keyboard opened us via URL.
-                    SpikeLog.write("app", "opened via URL \(url) (this is a visible hop)")
-                    Task { try? await SessionController.shared.start(source: "url") }
-                }
-        }
+        WindowGroup { ContentView() }
     }
 }
 
 struct ContentView: View {
-    private let session = SessionController.shared
+    @Bindable private var session = SessionController.shared
+
+    var body: some View {
+        if session.scratchVisible {
+            ScratchView(session: session)
+        } else {
+            DebugView(session: session)
+        }
+    }
+}
+
+/// Opened by ToggleDictationIntent when no Legato keyboard is visible: dictated text streams here.
+struct ScratchView: View {
+    @Bindable var session: SessionController
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Scratch").font(.title2.bold())
+                Spacer()
+                Text(session.isActive ? "dictating (\(session.dictation.state))" : "stopped")
+                    .font(.footnote.monospaced())
+                Button("Close") { session.scratchVisible = false }
+            }
+            TextEditor(text: $session.scratchText)
+                .focused($focused)
+                .padding(6)
+                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+            if let e = session.lastError { Text(e).foregroundStyle(.red).font(.footnote) }
+            HStack {
+                Button("Copy") { UIPasteboard.general.string = session.scratchText }
+                ShareLink(item: session.scratchText)
+                Button("Clear") { session.scratchText = "" }
+                Spacer()
+                Button(session.isActive ? "Stop" : "Dictate") {
+                    Task { _ = try? await session.toggle(source: "scratch-ui") }
+                }.buttonStyle(.borderedProminent)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding()
+        .onAppear {
+            SpikeLog.write("app", "Scratch screen appeared; appState=\(UIApplication.shared.applicationState.rawValue)")
+            Task {
+                try? await Task.sleep(for: .milliseconds(400))
+                focused = true
+            }
+        }
+    }
+}
+
+struct DebugView: View {
+    let session: SessionController
     @State private var log = ""
     @State private var status = ""
     @State private var testText = ""
@@ -50,8 +93,10 @@ struct ContentView: View {
                     .font(.footnote.monospaced())
                 if let e = session.lastError { Text(e).foregroundStyle(.red).font(.footnote) }
                 HStack {
-                    Button("Start (foreground)") { Task { try? await session.start(source: "ui") } }
-                    Button("Stop") { Task { await session.stop(reason: "ui") } }
+                    Button("Toggle dictation (in-app)") {
+                        Task { do { _ = try await session.toggle(source: "ui") } catch { status = describe(error) } }
+                    }
+                    Button("Scratch") { session.scratchVisible = true }
                 }.buttonStyle(.borderedProminent)
                 HStack {
                     Button("Mic permission") {
@@ -59,9 +104,6 @@ struct ContentView: View {
                     }
                     Button("Prepare speech model") { Task { status = await session.dictation.prepareModel() } }
                 }.buttonStyle(.bordered)
-                Toggle("Pause other audio while dictating", isOn: Binding(
-                    get: { Spike.defaults.bool(forKey: Spike.Key.pauseOthers) },
-                    set: { Spike.defaults.set($0, forKey: Spike.Key.pauseOthers) }))
                 Text(status).font(.footnote)
                 TextField("Tap here, switch to the Legato keyboard", text: $testText, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
