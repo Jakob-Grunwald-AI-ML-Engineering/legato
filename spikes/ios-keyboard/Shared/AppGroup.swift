@@ -33,7 +33,8 @@ enum Spike {
 enum SpikeLog {
     private static let lock = NSLock()
 
-    static var fileURL: URL? { Spike.containerURL?.appendingPathComponent("spike.log") }
+    // Under Library/ so `devicectl device copy from` can read it.
+    static var fileURL: URL? { Spike.containerURL?.appendingPathComponent("Library/spike.log") }
 
     static func write(_ source: String, _ message: String) {
         let f = DateFormatter()
