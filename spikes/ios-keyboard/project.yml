@@ -1,0 +1,86 @@
+name: LegatoSpike
+options:
+  bundleIdPrefix: de.gruenwald.legato.spike1
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: XWSGN23W75
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: NO
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  LegatoSpike:
+    type: application
+    platform: iOS
+    sources: [App, Shared]
+    dependencies:
+      - target: LegatoWidgets
+      - target: LegatoKeyboard
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.spike1
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_TARGET"
+    entitlements:
+      path: Gen/App.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato]
+    info:
+      path: Gen/App-Info.plist
+      properties:
+        CFBundleDisplayName: Legato Spike
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [audio]
+        NSSupportsLiveActivities: true
+        NSMicrophoneUsageDescription: Spike records speech to test keyboard dictation.
+        NSSpeechRecognitionUsageDescription: Spike transcribes speech on device.
+        CFBundleURLTypes:
+          - CFBundleURLName: de.gruenwald.legato.spike1
+            CFBundleURLSchemes: [legato-spike]
+
+  LegatoWidgets:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.spike1.widgets
+    entitlements:
+      path: Gen/Widgets.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato]
+    info:
+      path: Gen/Widgets-Info.plist
+      properties:
+        CFBundleDisplayName: Legato Spike Widgets
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  LegatoKeyboard:
+    type: app-extension
+    platform: iOS
+    sources: [Keyboard, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.spike1.keyboard
+    entitlements:
+      path: Gen/Keyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato]
+    info:
+      path: Gen/Keyboard-Info.plist
+      properties:
+        CFBundleDisplayName: Legato Spike Keyboard
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrefersRightToLeft: false
+            PrimaryLanguage: de-DE
+            RequestsOpenAccess: true
