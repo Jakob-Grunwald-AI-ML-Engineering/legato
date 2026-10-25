@@ -38,8 +38,18 @@ final class SessionController {
     static let shared = SessionController()
 
     /// Always on: duck music, interrupt spoken audio (Audible), keep A2DP and speaker routing.
-    static let dictationOptions: AVAudioSession.CategoryOptions =
-        [.duckOthers, .interruptSpokenAudioAndMixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker]
+    /// Test matrix, picked in the debug screen (App Group key "audio.mode").
+    static let audioModes: [(id: String, label: String, options: AVAudioSession.CategoryOptions)] = [
+        ("mix", "Mix (keep playing)", [.mixWithOthers]),
+        ("duck", "Duck music", [.duckOthers]),
+        ("spoken", "Pause spoken audio", [.interruptSpokenAudioAndMixWithOthers]),
+        ("both", "Duck + pause spoken", [.duckOthers, .interruptSpokenAudioAndMixWithOthers]),
+    ]
+    static var dictationOptions: AVAudioSession.CategoryOptions {
+        let id = Spike.defaults.string(forKey: "audio.mode") ?? "mix"
+        let base = audioModes.first { $0.id == id }?.options ?? [.mixWithOthers]
+        return base.union([.allowBluetoothA2DP, .defaultToSpeaker])
+    }
 
     private(set) var isActive = false
     private(set) var level: Float = 0

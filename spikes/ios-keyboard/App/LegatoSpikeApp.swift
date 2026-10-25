@@ -104,6 +104,11 @@ struct DebugView: View {
                     }
                     Button("Prepare speech model") { Task { status = await session.dictation.prepareModel() } }
                 }.buttonStyle(.bordered)
+                Picker("Other audio", selection: Binding(
+                    get: { Spike.defaults.string(forKey: "audio.mode") ?? "mix" },
+                    set: { Spike.defaults.set($0, forKey: "audio.mode") })) {
+                    ForEach(SessionController.audioModes, id: \.id) { Text($0.label).tag($0.id) }
+                }.pickerStyle(.segmented)
                 Text(status).font(.footnote)
                 TextField("Tap here, switch to the Legato keyboard", text: $testText, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
