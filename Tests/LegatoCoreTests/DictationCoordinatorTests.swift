@@ -1,0 +1,347 @@
+import Foundation
+import Synchronization
+import Testing
+@testable import LegatoCore
+
+/// A settable "now" shared by the session and the coordinator.
+final class TestTime: Sendable {
+    private let value = Mutex(Date(timeIntervalSince1970: 1_000))
+    var now: Date { value.withLock { $0 } }
+    func advance(_ seconds: TimeInterval) { value.withLock { $0 = $0.addingTimeInterval(seconds) } }
+}
+
+/// The durations the coordinator asked its injected sleep for.
+final class SleepLog: Sendable {
+    private let store = Mutex<[Duration]>([])
+    func add(_ d: Duration) { store.withLock { $0.append(d) } }
+    var durations: [Duration] { store.withLock { $0 } }
+}
+
+/// The sessions the factory built, in order.
+@MainActor
+final class BuiltSessions {
+    var all: [DictationSession] = []
+}
+
+@MainActor
+struct CoordinatorRig {
+    typealias Outcome = DictationCoordinator.Outcome
+
+    let log = EventLog()
+    let engine: FakeEngine
+    let source: FakeSource
+    let control: FakeSessionControl
+    let history = MemoryHistory()
+    let activity: FakeActivity
+    let clipboard: FakeClipboard
+    let readiness = FakeReadiness()
+    let heartbeat = ManualClock()
+    let time = TestTime()
+    let sleeps = SleepLog()
+    let built = BuiltSessions()
+    let coordinator: DictationCoordinator
+
+    init(script: [TranscriptEvent] = []) {
+        let log = self.log, history = self.history, time = self.time, built = self.built
+        let heartbeat = self.heartbeat, sleeps = self.sleeps
+        let engine = FakeEngine(log: log)
+        engine.set(script: script)
+        let source = FakeSource(log: log)
+        let control = FakeSessionControl(log: log)
+        let activity = FakeActivity(log: log)
+        let clipboard = FakeClipboard(log: log)
+        self.engine = engine
+        self.source = source
+        self.control = control
+        self.activity = activity
+        self.clipboard = clipboard
+        coordinator = DictationCoordinator(
+            activity: activity, clipboard: clipboard, readiness: readiness, history: history,
+            makeSession: {
+                let session = DictationSession(
+                    engine: engine, source: source, sessionControl: control, history: history,
+                    now: { time.now }
+                )
+                built.all.append(session)
+                return session
+            },
+            sleep: { duration in
+                sleeps.add(duration)
+                try await heartbeat.sleep(duration)
+            },
+            now: { time.now }
+        )
+        coordinator.onIdle = { log.add("idle") }
+    }
+
+    /// Phases in order with consecutive repeats collapsed (listening updates come and go with edits).
+    var phaseTrail: [DictationPhase] {
+        var out: [DictationPhase] = []
+        for p in activity.phases where p != out.last { out.append(p) }
+        return out
+    }
+}
+
+@MainActor
+@Suite struct DictationCoordinatorTests {
+    typealias Outcome = DictationCoordinator.Outcome
+
+    // MARK: start
+
+    @Test func activityIsRequestedBeforeTheSessionStartsThenGoesListening() async throws {
+        let r = CoordinatorRig()
+        #expect(await r.coordinator.toggle() == .started)
+        let ev = r.log.events
+        let request = try #require(ev.firstIndex(of: "activity.request:starting"))
+        let prepare = try #require(ev.firstIndex(of: "engine.prepare"))
+        let listening = try #require(ev.firstIndex(of: "activity.update:listening"))
+        #expect(request < prepare && prepare < listening)
+        #expect(r.phaseTrail == [.starting, .listening])
+        #expect(r.activity.calls.first?.content.startedAt == r.time.now)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test(arguments: ReadinessIssue.allCases)
+    func notReadyNeedsOnboardingWithNoActivityAndNoAudio(issue: ReadinessIssue) async throws {
+        let r = CoordinatorRig()
+        r.readiness.issue = issue
+        #expect(await r.coordinator.toggle() == .needsOnboarding(issue))
+        #expect(r.log.events.isEmpty) // no activity, no engine, no audio, no idle hook
+        #expect(r.built.all.isEmpty)
+        // Once the app fixed it, the next press starts normally.
+        r.readiness.issue = nil
+        #expect(await r.coordinator.toggle() == .started)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func refusedActivityNeedsOnboardingAndNeverStartsAudio() async throws {
+        let r = CoordinatorRig()
+        r.activity.requestError = TestError(tag: "activities")
+        #expect(await r.coordinator.toggle() == .needsOnboarding(.liveActivitiesDisabled))
+        #expect(r.log.count("engine.prepare") == 0)
+        #expect(r.built.all.isEmpty)
+        #expect(r.activity.ends.isEmpty)
+    }
+
+    @Test func startFailureEndsTheActivityFailed() async throws {
+        let r = CoordinatorRig()
+        r.engine.set(prepareError: TestError(tag: "prep"))
+        guard case .failed = await r.coordinator.toggle() else {
+            Issue.record("expected .failed")
+            return
+        }
+        #expect(r.phaseTrail == [.starting, .failed])
+        #expect(r.activity.ends.count == 1)
+        #expect(r.log.count("activate") == 0)
+        let ev = r.log.events
+        #expect(try #require(ev.firstIndex(of: "activity.end:failed")) < ev.firstIndex(of: "idle")!)
+        // Not wedged: the next press builds a fresh session.
+        r.engine.clearPrepareError()
+        #expect(await r.coordinator.toggle() == .started)
+    }
+
+    @Test func missingAssetsAtStartEndTheActivityAndAskForOnboarding() async throws {
+        let r = CoordinatorRig()
+        r.engine.set(installed: false)
+        #expect(await r.coordinator.toggle() == .needsOnboarding(.assetsMissing))
+        #expect(r.phaseTrail == [.starting, .failed])
+    }
+
+    @Test func pressWhileStartingGoesThroughSessionStopAndEndsTheActivity() async throws {
+        let r = CoordinatorRig()
+        r.engine.set(hangInPrepare: true)
+        let first = Task { await r.coordinator.toggle() }
+        #expect(await eventually { r.built.all.first?.runState == .preparing })
+        #expect(await r.coordinator.toggle() == .stopped(nil))
+        #expect(await first.value == .stopped(nil))
+        #expect(r.phaseTrail == [.starting, .failed])
+        #expect(r.activity.ends.count == 1) // no phantom activity, none ended twice
+        #expect(r.log.count("activate") == 0)
+        #expect(r.log.count("idle") == 1)
+        // Back to idle: a later press starts again.
+        r.engine.set(hangInPrepare: false)
+        #expect(await r.coordinator.toggle() == .started)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func pressWhileTheActivityIsBeingRequestedNeverStartsAudio() async throws {
+        let r = CoordinatorRig()
+        r.activity.holdRequest = true
+        let first = Task { await r.coordinator.toggle() }
+        #expect(await eventually { r.log.count("activity.request:starting") == 1 })
+        #expect(await r.coordinator.toggle() == .stopped(nil))
+        r.activity.holdRequest = false
+        #expect(await first.value == .stopped(nil))
+        #expect(r.log.count("engine.prepare") == 0)
+        #expect(r.built.all.isEmpty)
+        #expect(r.phaseTrail == [.starting, .failed])
+        #expect(r.activity.ends.count == 1)
+    }
+
+    // MARK: stop
+
+    @Test func stopCopiesTheEntryTextAndEndsCopied() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(r.clipboard.written == ["hello world"])
+        #expect(await r.history.entries.map(\.text) == ["hello world"]) // the session's append, not doubled
+        let end = try #require(r.activity.ends.first)
+        #expect(r.activity.ends.count == 1)
+        #expect(end.phase == .copied && end.tail == "hello world")
+        #expect(r.phaseTrail == [.starting, .listening, .finishing, .copied])
+        let ev = r.log.events
+        #expect(try #require(ev.firstIndex(of: "clipboard.write")) < ev.firstIndex(of: "activity.end:copied")!)
+    }
+
+    @Test func clipboardThatDidNotChangeEndsTapToCopy() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.clipboard.changes = false
+        _ = await r.coordinator.toggle()
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        let end = try #require(r.activity.ends.first)
+        #expect(end.phase == .tapToCopy && end.tail == "hello world")
+    }
+
+    @Test func stopWithNothingRecognizedEndsFailedAndLeavesTheClipboard() async throws {
+        let r = CoordinatorRig(script: [.init(text: "um", isFinal: false)])
+        _ = await r.coordinator.toggle()
+        #expect(await r.coordinator.toggle() == .stopped(nil))
+        #expect(r.clipboard.written.isEmpty)
+        #expect(r.activity.ends.map(\.phase) == [.failed])
+        #expect(await r.history.entries.isEmpty)
+    }
+
+    @Test func finalStateUsesTheEntryTextNotTheThrottledBuffer() async throws {
+        let r = CoordinatorRig()
+        _ = await r.coordinator.toggle()
+        r.time.advance(1)
+        r.engine.emit(.init(text: "hello", isFinal: true), run: 0)
+        #expect(await eventually { r.activity.updates.last?.content.tail == "hello" })
+        r.engine.emit(.init(text: " world", isFinal: true), run: 0) // inside the window: not published
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.activity.updates.last?.content.tail == "hello")
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(r.activity.ends.first?.tail == "hello world")
+    }
+
+    @Test func eachStartBuildsAFreshSession() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        for _ in 0..<2 {
+            #expect(await r.coordinator.toggle() == .started)
+            #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        }
+        #expect(r.built.all.count == 2)
+        #expect(r.built.all.count == 2 && r.built.all.first !== r.built.all.last)
+        #expect(await r.history.entries.count == 2)
+        #expect(r.activity.ends.count == 2)
+    }
+
+    // MARK: abort
+
+    @Test func abortCopiesCommittedTextAppendsHistoryOnceAndEndsTheActivity() async throws {
+        let r = CoordinatorRig(script: [
+            .init(text: "partial text", isFinal: true), .init(text: "tentative", isFinal: false),
+        ])
+        r.engine.set(streamError: TestError(tag: "stream"))
+        _ = await r.coordinator.toggle()
+        #expect(await eventually { !r.activity.ends.isEmpty })
+        #expect(await eventually { r.log.count("idle") == 1 })
+        #expect(r.clipboard.written == ["partial text"]) // committed only, no volatile tail
+        #expect(await r.history.entries.map(\.text) == ["partial text"])
+        #expect(r.activity.ends.map(\.phase) == [.copied])
+        #expect(r.activity.ends.first?.tail == "partial text")
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(await r.history.entries.count == 1) // still once
+        #expect(r.log.count("idle") == 1)
+    }
+
+    @Test func nextStartAfterAnAbortBuildsAFreshSession() async throws {
+        let r = CoordinatorRig(script: [.init(text: "partial text", isFinal: true)])
+        r.engine.set(streamError: TestError(tag: "stream"))
+        _ = await r.coordinator.toggle()
+        #expect(await eventually { r.log.count("idle") == 1 })
+        r.engine.clearStreamError()
+        #expect(await r.coordinator.toggle() == .started) // a start, not a stop of the dead session
+        #expect(r.built.all.count == 2)
+        #expect(await r.coordinator.toggle() == .stopped("partial text"))
+    }
+
+    @Test func abortWithoutCommittedTextEndsFailed() async throws {
+        let r = CoordinatorRig(script: [.init(text: "tentative", isFinal: false)])
+        r.engine.set(streamError: TestError(tag: "stream"))
+        _ = await r.coordinator.toggle()
+        #expect(await eventually { r.log.count("idle") == 1 })
+        #expect(r.activity.ends.map(\.phase) == [.failed])
+        #expect(r.clipboard.written.isEmpty)
+        #expect(await r.history.entries.isEmpty)
+    }
+
+    @Test func stopThatFailsSalvagesTheCommittedText() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.engine.set(finishError: TestError(tag: "fin"))
+        _ = await r.coordinator.toggle()
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(r.clipboard.written == ["hello world"])
+        #expect(await r.history.entries.map(\.text) == ["hello world"]) // stop() threw before saving: once
+        #expect(r.activity.ends.map(\.phase) == [.copied])
+        #expect(r.log.count("idle") == 1)
+    }
+
+    // MARK: live updates
+
+    @Test func editsReachTheActivityAtMostOncePerSecond() async throws {
+        let r = CoordinatorRig()
+        _ = await r.coordinator.toggle()
+        r.time.advance(1)
+        r.engine.emit(.init(text: "hello", isFinal: false), run: 0)
+        #expect(await eventually { r.activity.updates.last?.content.tail == "hello" })
+        let published = r.activity.updates.count
+        r.engine.emit(.init(text: "hello wor", isFinal: false), run: 0) // same instant: held back
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.activity.updates.count == published)
+        r.time.advance(1)
+        r.engine.emit(.init(text: "hello world", isFinal: false), run: 0)
+        #expect(await eventually { r.activity.updates.last?.content.tail == "hello world" })
+        #expect(r.activity.updates.count == published + 1)
+        #expect(r.activity.updates.allSatisfy { $0.content.phase == .listening })
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func heartbeatRefreshesTheStaleDateWhileListening() async throws {
+        let r = CoordinatorRig()
+        _ = await r.coordinator.toggle()
+        let before = r.activity.updates.count
+        r.time.advance(5)
+        r.heartbeat.tick()
+        #expect(await eventually { r.activity.updates.count == before + 1 })
+        let beat = try #require(r.activity.updates.last)
+        #expect(beat.content.phase == .listening)
+        #expect(beat.staleDate == r.time.now.addingTimeInterval(30))
+        r.time.advance(10)
+        r.heartbeat.tick()
+        #expect(await eventually { r.activity.updates.count == before + 2 })
+        #expect(r.activity.updates.last?.staleDate == r.time.now.addingTimeInterval(30))
+        #expect(r.sleeps.durations.allSatisfy { $0 == .seconds(10) })
+
+        // It stops with the run.
+        _ = await r.coordinator.toggle()
+        let after = r.activity.calls.count
+        r.heartbeat.tick()
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.activity.calls.count == after)
+    }
+
+    // MARK: idle hook
+
+    @Test func idleHookFiresOnlyAfterTheActivityEnded() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        _ = await r.coordinator.toggle()
+        #expect(r.log.count("idle") == 0) // listening is not idle
+        _ = await r.coordinator.toggle()
+        let ev = r.log.events
+        #expect(r.log.count("idle") == 1)
+        #expect(try #require(ev.firstIndex(of: "activity.end:copied")) < ev.firstIndex(of: "idle")!)
+        #expect(ev.last == "idle")
+    }
+}

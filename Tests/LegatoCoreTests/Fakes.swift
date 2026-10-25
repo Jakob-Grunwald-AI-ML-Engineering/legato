@@ -108,6 +108,8 @@ final class FakeEngine: DictationEngine {
     }
 
     func clearFinishError() { config.withLock { $0.finishError = nil } }
+    func clearPrepareError() { config.withLock { $0.prepareError = nil } }
+    func clearStreamError() { config.withLock { $0.streamError = nil } }
 
     /// Pushes `event` into the results stream of the `run`-th `transcribe` call (0-based), if still open.
     func emit(_ event: TranscriptEvent, run: Int) {
@@ -190,4 +192,76 @@ func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         try? await Task.sleep(for: .milliseconds(5))
     }
     return await condition()
+}
+
+// MARK: coordinator ports
+
+/// Records every Live Activity call, and into the shared log (`activity.<call>:<phase>`).
+@MainActor
+final class FakeActivity: ActivityClient {
+    enum Call: Equatable {
+        case request(DictationActivityContent)
+        case update(DictationActivityContent, staleDate: Date?)
+        case end(DictationActivityContent)
+
+        var content: DictationActivityContent {
+            switch self {
+            case .request(let c), .update(let c, _), .end(let c): c
+            }
+        }
+    }
+
+    let log: EventLog
+    private(set) var calls: [Call] = []
+    /// Makes `request` throw (Live Activities refused).
+    var requestError: (any Error)?
+    /// Keeps `request` pending until cleared (polled, like `FakeEngine`'s prepare hold).
+    var holdRequest = false
+
+    init(log: EventLog) { self.log = log }
+
+    var phases: [DictationPhase] { calls.map(\.content.phase) }
+    var updates: [(content: DictationActivityContent, staleDate: Date?)] {
+        calls.compactMap { if case .update(let c, let s) = $0 { (c, s) } else { nil } }
+    }
+    var ends: [DictationActivityContent] {
+        calls.compactMap { if case .end(let c) = $0 { c } else { nil } }
+    }
+
+    func request(_ content: DictationActivityContent) async throws {
+        log.add("activity.request:\(content.phase.rawValue)")
+        calls.append(.request(content))
+        while holdRequest { try? await Task.sleep(for: .milliseconds(5)) }
+        if let requestError { throw requestError }
+    }
+    func update(_ content: DictationActivityContent, staleDate: Date?) async {
+        log.add("activity.update:\(content.phase.rawValue)")
+        calls.append(.update(content, staleDate: staleDate))
+    }
+    func end(_ content: DictationActivityContent) async {
+        log.add("activity.end:\(content.phase.rawValue)")
+        calls.append(.end(content))
+    }
+}
+
+@MainActor
+final class FakeClipboard: Clipboard {
+    let log: EventLog
+    private(set) var written: [String] = []
+    /// What `write` reports: whether the pasteboard's change count moved.
+    var changes = true
+
+    init(log: EventLog) { self.log = log }
+
+    func write(_ text: String) -> Bool {
+        log.add("clipboard.write")
+        written.append(text)
+        return changes
+    }
+}
+
+@MainActor
+final class FakeReadiness: Readiness {
+    var issue: ReadinessIssue?
+    func check() async -> ReadinessIssue? { issue }
 }

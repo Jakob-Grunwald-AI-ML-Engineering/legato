@@ -14,6 +14,10 @@ public final class DictationSession {
     public private(set) var lastError: (any Error)?
     /// Edits for the current and later runs; apply them to a text sink in order.
     public let edits: AsyncStream<TranscriptEdit>
+    /// Fires once when a run is aborted asynchronously (the engine stream failed while listening),
+    /// after the run and lease are torn down. Not fired for failures `stop()` reports itself.
+    /// The text recognized so far is still available from `partialEntry()`.
+    public var onRunAborted: (@MainActor (any Error) -> Void)?
 
     private let engine: any DictationEngine
     private let source: any AudioSource
@@ -98,15 +102,7 @@ public final class DictationSession {
             try await engine.finish()
             await consumeTask?.value
             if let streamFailure { throw streamFailure }
-            let text = assembler.committedText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                let e = DictationEntry(
-                    date: runStart,
-                    text: text,
-                    localeIdentifier: (runLocale ?? Locale.current).identifier,
-                    engineID: engine.id,
-                    duration: now().timeIntervalSince(runStart)
-                )
+            if let e = partialEntry() {
                 try await history.append(e)
                 entry = e
             }
@@ -127,6 +123,20 @@ public final class DictationSession {
         }
         await releaseLease()
         return entry
+    }
+
+    /// The entry for the text committed so far in the current or last run (nil when there is none),
+    /// built like the one `stop()` saves but not written to history: use it to salvage an aborted run.
+    public func partialEntry() -> DictationEntry? {
+        let text = assembler.committedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return DictationEntry(
+            date: runStart,
+            text: text,
+            localeIdentifier: (runLocale ?? Locale.current).identifier,
+            engineID: engine.id,
+            duration: now().timeIntervalSince(runStart)
+        )
     }
 
     // MARK: Internals
@@ -193,6 +203,7 @@ public final class DictationSession {
                 await source.detach()
                 await teardownLease()
                 runState = .idle
+                onRunAborted?(error)
             } else {
                 streamFailure = error // stop() is in flight; it reports the failure
             }
