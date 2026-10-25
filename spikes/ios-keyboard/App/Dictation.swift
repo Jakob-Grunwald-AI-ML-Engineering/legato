@@ -38,7 +38,12 @@ final class StreamStats: @unchecked Sendable {
     private var firstBuffer: TimeInterval?, firstResult: TimeInterval?
     private var lastLog = Date.distantPast
 
-    func bufferYielded() { note { buffers += 1; if firstBuffer == nil { firstBuffer = Date().timeIntervalSince(t0) } } }
+    /// Returns the running count of yielded buffers.
+    @discardableResult
+    func bufferYielded() -> Int {
+        note { buffers += 1; if firstBuffer == nil { firstBuffer = Date().timeIntervalSince(t0) } }
+        return lock.withLock { buffers }
+    }
     func resultReceived() { note { results += 1; if firstResult == nil { firstResult = Date().timeIntervalSince(t0) } } }
 
     private func note(_ bump: () -> Void) {
@@ -93,8 +98,9 @@ final class Dictation {
         guard !isRunning else { return }
         finalized = ""; volatile = ""
         publish(final: false, state: "listening", force: true)
-        let t = SpeechTranscriber(locale: Self.locale, transcriptionOptions: [],
-                                  reportingOptions: [.volatileResults], attributeOptions: [])
+        // .progressiveTranscription = volatile + fast results ("immediate transcription of live audio").
+        // Without .fastResults the transcriber uses a large context window and delivers nothing until finalize.
+        let t = SpeechTranscriber(locale: Self.locale, preset: .progressiveTranscription)
         do {
             let status = await AssetInventory.status(forModules: [t])
             guard status == .installed else {
@@ -116,7 +122,12 @@ final class Dictation {
             let (stream, cont) = AsyncStream.makeStream(of: AnalyzerInput.self)
             try await a.start(inputSequence: stream)
             router.setSink { buf in
-                if let c = conv.convert(buf) { cont.yield(AnalyzerInput(buffer: c)); stats.bufferYielded() }
+                guard let c = conv.convert(buf) else { SpikeLog.write("dict", "convert returned nil"); return }
+                cont.yield(AnalyzerInput(buffer: c))
+                let n = stats.bufferYielded()
+                if n <= 3 {
+                    SpikeLog.write("dict", "converted #\(n): in=\(buf.frameLength)@\(buf.format.sampleRate) out=\(c.frameLength)@\(c.format.sampleRate) ch=\(c.format.channelCount) fmt=\(c.format.commonFormat.rawValue)")
+                }
             }
             analyzer = a; continuation = cont; self.router = router; isRunning = true
             resultsTask = Task { [weak self] in
