@@ -70,18 +70,9 @@ final class SessionController {
             }
             try s.setActive(true)
             log("activated mixable; otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint)")
-            do {
-                try startEngine()
-            } catch {
-                // Seen with Audible playing: kAUStartIO fails ('what') from the background while
-                // mixable. Retry non-mixable, which interrupts the other app; stop() resumes it.
-                log("mixable engine start failed (\(error)); retrying non-mixable")
-                try? s.setActive(false)
-                try s.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothA2DP, .defaultToSpeaker])
-                try s.setActive(true)
-                try startEngine()
-                log("non-mixable start ok; other audio interrupted")
-            }
+            // From the background this fails with kAUStartIO 'what' in a process the user launched,
+            // and works in one the intent launched. A non-mixable retry fails with '!int'.
+            try startEngine()
             isActive = true
             Spike.defaults.set(true, forKey: Spike.Key.active)
             startActivity()
@@ -254,17 +245,21 @@ final class SessionController {
         if t == "ENDED" && isActive { restartEngine(why: "interruption ended") }
     }
 
-    /// Non-mixable interrupts other audio (Audible pauses); going back to mixable deactivates with
+    /// Interrupting spoken audio pauses Audible; going back to plain mixing deactivates with
     /// notifyOthersOnDeactivation first, so the interrupted app gets `shouldResume`.
     private func setMixing(_ mix: Bool, why: String) {
         let s = AVAudioSession.sharedInstance()
         log("setMixing(\(mix)) for \(why); otherAudioPlaying=\(s.isOtherAudioPlaying) silenceHint=\(s.secondaryAudioShouldBeSilencedHint)")
         do {
+            // Spoken-audio interrupt stays mixable (music keeps playing, Audible/podcasts pause),
+            // so it is allowed from the background, unlike a non-mixable session.
             var opts: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP, .defaultToSpeaker]
             if mix {
                 engine.stop()
                 try s.setActive(false, options: .notifyOthersOnDeactivation)
                 opts.insert(.mixWithOthers)
+            } else {
+                opts.insert(.interruptSpokenAudioAndMixWithOthers)
             }
             try s.setCategory(.playAndRecord, mode: .default, options: opts)
             try s.setActive(true)
