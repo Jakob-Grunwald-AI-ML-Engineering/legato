@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "LegatoAppleSpeech", targets: ["LegatoAppleSpeech"]),
         .library(name: "LegatoModels", targets: ["LegatoModels"]),
         .library(name: "LegatoFluidAudio", targets: ["LegatoFluidAudio"]),
+        .library(name: "LegatoEngines", targets: ["LegatoEngines"]),
     ],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
@@ -43,6 +44,22 @@ let package = Package(
             ],
             resources: [.copy("Fixtures")]
         ),
+        .target(
+            name: "LegatoEngines",
+            dependencies: ["LegatoCore", "LegatoModels", "LegatoAppleSpeech", "LegatoFluidAudio"]
+        ),
+        .testTarget(
+            name: "LegatoEnginesTests",
+            dependencies: ["LegatoEngines", "LegatoCore", "LegatoModels"]
+        ),
+        .executableTarget(
+            name: "legato-bench",
+            dependencies: [
+                "LegatoEngines", "LegatoCore", "LegatoModels", "LegatoAppleSpeech", "LegatoFluidAudio",
+            ],
+            resources: [.copy("Clips")]
+        ),
+        .testTarget(name: "legato-benchTests", dependencies: ["legato-bench"]),
     ],
     swiftLanguageModes: [.v6]
 )
