@@ -33,7 +33,14 @@ final class TapRouter: Sendable {
 /// Microphone `AudioSource`. The engine runs for a whole lease; runs attach and detach streams.
 public final class MicSource: AudioSource {
     private struct State {
-        var engine: AVAudioEngine?
+        var engine: EngineBox?
+    }
+
+    /// Lets the engine cross into the lock under Swift 6.2's region checks. Safe: once stored, the
+    /// engine is only touched by `route()` (reads `isRunning`) and by `stop()` after taking it out.
+    private final class EngineBox: @unchecked Sendable {
+        let engine: AVAudioEngine
+        init(_ engine: AVAudioEngine) { self.engine = engine }
     }
 
     private let state = Mutex(State())
@@ -59,12 +66,13 @@ public final class MicSource: AudioSource {
             input.removeTap(onBus: 0)
             throw error
         }
-        state.withLock { $0.engine = engine }
+        let box = EngineBox(engine)
+        state.withLock { $0.engine = box }
         return makeStream()
     }
 
     public func route() async throws -> AsyncStream<AudioChunk> {
-        guard state.withLock({ $0.engine?.isRunning == true }) else { throw MicSourceError.notArmed }
+        guard state.withLock({ $0.engine?.engine.isRunning == true }) else { throw MicSourceError.notArmed }
         return makeStream()
     }
 
@@ -79,7 +87,7 @@ public final class MicSource: AudioSource {
             s.engine = nil
             return e
         }
-        guard let engine else { return }
+        guard let engine = engine?.engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
     }
