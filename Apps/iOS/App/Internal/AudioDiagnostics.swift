@@ -23,8 +23,8 @@ import UIKit
 /// setActiveTrue, setActiveFalse, with its own error), `session.activate` / `session.deactivate` /
 /// `session.deactivate.skipped` / `session.release` (the wrapper's view), and `mic.attempt` (one engine
 /// start attempt: index, input sample rate, error) and `start.route` (how a start was routed: `route`
-/// is `background`, `foreground` or `foregroundHop`, with the `reason` of a hop, `otherAudioPlaying` or
-/// `backgroundStartRefused`, and the `outcome`). `setActive(true)` and the engine start are separate
+/// is `background`, `foreground` or `foregroundHop`, with the `reason` of a hop, `backgroundStartRefused`, the
+/// `outcome` and `otherAudio`, whether other audio played when the start began). `setActive(true)` and the engine start are separate
 /// events, so a failure in one is never attributed to the other. The file is cleared past 1 MB.
 enum AudioDiagnostics {
     static let fileName = "audio-diag.jsonl"
@@ -70,8 +70,8 @@ enum AudioDiagnostics {
         log("session.step", ["step": step.rawValue, "ok": error == nil, "error": describe(error)])
     }
 
-    static func startRoute(_ route: String, reason: String?, outcome: String) {
-        log("start.route", ["route": route, "reason": reason ?? "none", "outcome": outcome])
+    static func startRoute(_ route: String, reason: String?, outcome: String, otherAudio: Bool) {
+        log("start.route", ["route": route, "reason": reason ?? "none", "outcome": outcome, "otherAudio": otherAudio])
     }
 
     static func micAttempt(_ attempt: MicSource.Attempt) {

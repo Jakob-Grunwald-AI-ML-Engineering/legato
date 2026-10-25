@@ -6,9 +6,9 @@ import UIKit
 /// The start environment: where the app is, whether other audio plays, and which start errors mean
 /// "the system won't record from the background".
 ///
-/// Device logs: a background mic start works whenever nothing else plays; with other audio playing it
-/// fails ('!pla' on `setActive`, then 'what' on the engine start), and Apple requires such a start to
-/// begin in the foreground. A foreground start can duck the other audio.
+/// A background start is always attempted: it can work next to other audio (ducked) when the press
+/// itself launched the app, and fails ('!pla' on `setActive`, then 'what' on the engine start) in
+/// other cases. `otherAudioPlaying` is kept for the `start.route` diagnostics only.
 @MainActor
 final class SystemStartEnvironment: StartEnvironment {
     /// Codes of a refused background start: `AVAudioSession.ErrorCode` `.cannotStartPlaying` ('!pla'),

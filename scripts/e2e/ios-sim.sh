@@ -380,29 +380,15 @@ scenario_f() {
 
 scenario_g() {
   # Music plays while the app is in the background (-LegatoFakeOtherAudio YES -LegatoFakeBackground YES):
-  # iOS only allows recording next to other audio from the foreground, so the press must not try a
-  # background start at all. The intent then brings the app forward and presses again.
+  # the start is attempted in the background all the same (it can work, ducked); there is no hop.
   begin "g. music + background" -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio YES -LegatoFakeBackground YES -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log "e2e outcome kind=needsForeground" 10
-  sleep 1
-  assert_log "outcome needsForeground(otherAudioPlaying)" "outcome kind=needsForeground reason=otherAudioPlaying"
-  assert_log "start.route: foregroundHop, with the reason" "start.route route=foregroundHop reason=otherAudioPlaying outcome=needsForeground"
-  assert_no_log "no activity requested" "activity.request"
-  assert_no_log "no session built, no audio" "session.make"
-  assert_no_log "mic never started" "audio.start"
-  assert_no_log "audio session never activated" "session.activate"
-  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
-  assert_eq "history empty" "0" "$(history_texts | grep -c .)"
-  # The app is in the foreground now: the next press is a normal start.
-  trigger foreground
-  wait_log "e2e command foreground" 10
   trigger toggle
   wait_log "e2e outcome kind=started" 10
-  assert_log "start.route: ran in the foreground" "start.route route=foreground reason=none outcome=started"
+  assert_log "start.route: ran in the background, music seen" "start.route route=background reason=none outcome=started otherAudio=true"
+  assert_no_log "no foreground hop" "kind=needsForeground"
   assert_log "activity requested first" "activity.request phase=starting"
   assert_order "request before audio starts" "activity.request phase=starting" "audio.start"
+  assert_no_log "no activity dismissed" "activity.dismiss"
   sleep 1.5
   trigger toggle
   wait_log "e2e outcome kind=stopped" 10
@@ -413,14 +399,17 @@ scenario_g() {
   assert_count "exactly one activity requested" "activity.request phase=" 1
   assert_count "exactly one session built" "session.make" 1
 
-  # The intent's second press: the system brought the app forward, whatever the app state still says.
-  SCENARIO="g. music + background, after the hop"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio YES -LegatoFakeBackground YES -LegatoForceTapToCopy NO || return
+  # Music, and the system refuses the background start: the hop, then the foreground retry.
+  SCENARIO="g. music + background, refused, after the hop"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio YES -LegatoFakeBackground YES -LegatoFakeBackgroundRefusal pla -LegatoForceTapToCopy NO || return
   trigger toggle
   wait_log "e2e outcome kind=needsForeground" 10
+  assert_log "start.route: hop after the refusal, music seen" "start.route route=foregroundHop reason=backgroundStartRefused outcome=needsForeground otherAudio=true"
+  trigger foreground
+  wait_log "e2e command foreground" 10
   trigger toggle-after-hop
   wait_log "e2e outcome kind=started" 10
-  assert_log "start.route: ran as a foreground hop" "start.route route=foregroundHop reason=otherAudioPlaying outcome=started"
+  assert_log "start.route: ran as a foreground hop" "start.route route=foregroundHop reason=backgroundStartRefused outcome=started"
   sleep 1.5
   trigger toggle
   wait_log "e2e outcome kind=stopped" 10

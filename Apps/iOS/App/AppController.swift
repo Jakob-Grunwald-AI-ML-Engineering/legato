@@ -159,8 +159,8 @@ final class AppController {
     #endif
 
     #if DEBUG || LEGATO_INTERNAL
-    /// `start.route`: how a start was routed. `foregroundHop` (with the reason) when the start was
-    /// handed to the foreground or ran after the hop, `background` / `foreground` when it ran where
+    /// `start.route`: how a start was routed (plus whether other audio played, as evidence). `foregroundHop`
+    /// (with the reason) when the start was handed to the foreground or ran after the hop, `background` / `foreground` when it ran where
     /// the press arrived. Logged for the decision (`needsForeground`) and for the start that ran.
     /// Diagnostics only: internal and Debug builds.
     private func logStartRoute(_ outcome: DictationCoordinator.Outcome, hopReason: ForegroundReason?) {
@@ -179,10 +179,11 @@ final class AppController {
         default: result = "failed"
         }
         #if LEGATO_INTERNAL
-        AudioDiagnostics.startRoute(route, reason: reason?.rawValue, outcome: result)
+        AudioDiagnostics.startRoute(
+            route, reason: reason?.rawValue, outcome: result, otherAudio: startEnvironment.lastContext.otherAudioPlaying)
         #endif
         #if DEBUG
-        E2E.log("start.route route=\(route) reason=\(reason?.rawValue ?? "none") outcome=\(result)")
+        E2E.log("start.route route=\(route) reason=\(reason?.rawValue ?? "none") outcome=\(result) otherAudio=\(startEnvironment.lastContext.otherAudioPlaying)")
         #endif
     }
     #endif

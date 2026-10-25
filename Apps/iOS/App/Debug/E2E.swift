@@ -156,7 +156,7 @@ extension AppController {
             E2E.setFakeInBackground(true)
         case "toggle-after-hop":
             // What the intent does after `continueInForeground`, with the fake background still on.
-            _ = await toggle(afterForegroundHop: .otherAudioPlaying)
+            _ = await toggle(afterForegroundHop: .backgroundStartRefused)
         default:
             E2E.log("command.unknown \(command)")
         }

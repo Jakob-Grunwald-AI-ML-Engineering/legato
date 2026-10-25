@@ -63,7 +63,7 @@ public typealias DictationSessionFactory = @MainActor () -> DictationSession
 public struct StartContext: Sendable, Equatable {
     /// The app is in the background (e.g. an Action Button press with the app not on screen).
     public var inBackground: Bool
-    /// Another app's audio is playing.
+    /// Another app's audio is playing. Diagnostics only: it never changes how a start is routed.
     public var otherAudioPlaying: Bool
 
     public init(inBackground: Bool, otherAudioPlaying: Bool) {
@@ -77,8 +77,6 @@ public struct StartContext: Sendable, Equatable {
 
 /// Why a start has to run in the foreground.
 public enum ForegroundReason: String, Sendable, Equatable {
-    /// Other audio plays: iOS only lets an app start recording alongside it from the foreground.
-    case otherAudioPlaying
     /// A background start was tried and the system refused it.
     case backgroundStartRefused
 }

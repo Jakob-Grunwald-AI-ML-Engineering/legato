@@ -8,9 +8,9 @@ import Foundation
 /// recording intent that has no Live Activity. Every start builds a fresh `DictationSession` (and so
 /// a fresh mic); nothing stays armed between dictations.
 ///
-/// Starting from the background works only while no other audio plays. So a start in the background
-/// next to other audio, or one the system refuses, ends in `.needsForeground` with nothing left
-/// behind; the app brings itself to the foreground and toggles again.
+/// A start is always attempted where the press arrived, also in the background next to other audio.
+/// Only a start the system refuses ends in `.needsForeground` with nothing left behind; the app
+/// brings itself to the foreground and toggles again.
 @MainActor
 public final class DictationCoordinator {
     public enum Outcome: Sendable, Equatable {
@@ -115,11 +115,8 @@ public final class DictationCoordinator {
         let issue = await readiness.check()
         if cancelRequested { return finishRun(.stopped(nil), ended: false) }
         if let issue { return finishRun(.needsOnboarding(issue), ended: false) }
-        // Recording next to other audio only starts from the foreground: don't even try from here.
+        // Always try the start where the press arrived, other audio or not; only a refusal hops.
         let context = startEnvironment.current()
-        if context.inBackground, context.otherAudioPlaying {
-            return finishRun(.needsForeground(.otherAudioPlaying), ended: false)
-        }
 
         startedAt = now()
         live = LiveTranscript()

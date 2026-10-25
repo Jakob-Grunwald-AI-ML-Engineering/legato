@@ -126,19 +126,32 @@ struct CoordinatorRig {
     private let backgroundWithMusic = StartContext(inBackground: true, otherAudioPlaying: true)
     private let foregroundWithMusic = StartContext(inBackground: false, otherAudioPlaying: true)
 
-    @Test func backgroundStartWithOtherAudioNeedsTheForegroundAndTouchesNothing() async throws {
+    @Test func backgroundStartWithOtherAudioIsAttemptedAndSucceeds() async throws {
         let r = CoordinatorRig(script: [TranscriptEvent(text: "hello ", isFinal: true)])
         r.environment.context = backgroundWithMusic
-        #expect(await r.coordinator.toggle() == .needsForeground(.otherAudioPlaying))
-        #expect(r.log.events.isEmpty) // no activity, no session, no audio, no idle hook
-        #expect(r.built.all.isEmpty)
-        // The app came to the foreground and the press is repeated: a normal start, then stop.
-        r.environment.context = foregroundWithMusic
         #expect(await r.coordinator.toggle() == .started)
+        #expect(r.log.count("activity.request:starting") == 1)
+        #expect(r.log.count("activity.dismiss") == 0)
+        #expect(r.built.all.count == 1)
         #expect(r.phaseTrail == [.starting, .listening])
         #expect(await r.coordinator.toggle() == .stopped("hello"))
         #expect(r.clipboard.written == ["hello"])
         #expect(r.phaseTrail.last == .copied)
+    }
+
+    @Test func refusedBackgroundStartWithOtherAudioDismissesAndNeedsTheForeground() async throws {
+        let r = CoordinatorRig(script: [TranscriptEvent(text: "hello ", isFinal: true)])
+        r.environment.context = backgroundWithMusic
+        r.source.failStart(with: TestError(tag: "refused"))
+        #expect(await r.coordinator.toggle() == .needsForeground(.backgroundStartRefused))
+        #expect(r.log.count("activity.request:starting") == 1)
+        #expect(r.log.count("activity.dismiss") == 1)
+        #expect(r.activity.ends.isEmpty)
+        #expect(r.log.count("idle") == 0)
+        r.source.clearStartFailure()
+        r.environment.context = foregroundWithMusic
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(await r.coordinator.toggle() == .stopped("hello"))
     }
 
     @Test func foregroundStartWithOtherAudioJustStarts() async throws {
@@ -155,7 +168,7 @@ struct CoordinatorRig {
         _ = await r.coordinator.toggle()
     }
 
-    @Test func missingSetupOutranksTheForegroundHop() async throws {
+    @Test func missingSetupOutranksAnyStartAttempt() async throws {
         let r = CoordinatorRig()
         r.environment.context = backgroundWithMusic
         r.readiness.issue = .micPermission
