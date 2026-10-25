@@ -30,6 +30,50 @@ final class TapRouter: Sendable {
     }
 }
 
+/// Realtime-thread probe: when the first buffer arrived and how loud the first ~0.5 s were.
+final class FirstBufferProbe: Sendable {
+    private struct State {
+        var firstMs: Int?
+        var sumSquares = 0.0
+        var frames = 0
+        var done = false
+    }
+
+    private let state = Mutex(State())
+    private let started: ContinuousClock.Instant
+    private let sampleRate: Double
+    private let report: @Sendable (MicSource.FirstBuffer) -> Void
+
+    init(sampleRate: Double, report: @escaping @Sendable (MicSource.FirstBuffer) -> Void) {
+        self.started = .now
+        self.sampleRate = sampleRate
+        self.report = report
+    }
+
+    func observe(_ buffer: AVAudioPCMBuffer) {
+        let frames = Int(buffer.frameLength)
+        var sum = 0.0
+        if let data = buffer.floatChannelData?[0] {
+            for i in 0..<frames { let v = Double(data[i]); sum += v * v }
+        }
+        let result: MicSource.FirstBuffer? = state.withLock { s in
+            guard !s.done else { return nil }
+            if s.firstMs == nil {
+                let d = ContinuousClock.now - started
+                s.firstMs = Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
+            }
+            s.sumSquares += sum
+            s.frames += frames
+            guard Double(s.frames) >= sampleRate * 0.5 else { return nil }
+            s.done = true
+            return MicSource.FirstBuffer(
+                msSinceStart: s.firstMs ?? 0, rms: (s.sumSquares / Double(max(s.frames, 1))).squareRoot(),
+                frames: s.frames, sampleRate: sampleRate)
+        }
+        if let result { report(result) }
+    }
+}
+
 /// Microphone `AudioSource`. The engine runs for a whole lease; runs attach and detach streams.
 public final class MicSource: AudioSource {
     private struct State {
@@ -54,6 +98,16 @@ public final class MicSource: AudioSource {
         public let error: (any Error)?
     }
 
+    /// Signal check after a successful start, for diagnostics: no callback means no buffer arrived.
+    public struct FirstBuffer: Sendable {
+        /// From just before the engine started to the first tap buffer.
+        public let msSinceStart: Int
+        /// RMS (0...1) of the first channel over the first ~0.5 s of input.
+        public let rms: Double
+        public let frames: Int
+        public let sampleRate: Double
+    }
+
     /// 8 attempts, 150 ms apart.
     static let maxAttempts = 8
     static let retryDelay: Duration = .milliseconds(150)
@@ -61,10 +115,17 @@ public final class MicSource: AudioSource {
     private let state = Mutex(State())
     private let router = TapRouter()
     private let onAttempt: (@Sendable (Attempt) -> Void)?
+    private let onFirstBuffer: (@Sendable (FirstBuffer) -> Void)?
 
-    /// - Parameter onAttempt: called after every start attempt, success or failure (diagnostics only).
-    public init(onAttempt: (@Sendable (Attempt) -> Void)? = nil) {
+    /// - Parameters:
+    ///   - onAttempt: called after every start attempt, success or failure (diagnostics only).
+    ///   - onFirstBuffer: called once per started engine, after ~0.5 s of input (diagnostics only).
+    public init(
+        onAttempt: (@Sendable (Attempt) -> Void)? = nil,
+        onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil
+    ) {
         self.onAttempt = onAttempt
+        self.onFirstBuffer = onFirstBuffer
     }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
@@ -93,7 +154,8 @@ public final class MicSource: AudioSource {
                 report(MicSourceError.converterUnavailable)
                 throw MicSourceError.converterUnavailable
             }
-            input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(router, converter))
+            let probe = onFirstBuffer.map { FirstBufferProbe(sampleRate: inFormat.sampleRate, report: $0) }
+            input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(router, converter, probe))
             engine.prepare()
             do {
                 try engine.start()
@@ -141,8 +203,9 @@ public final class MicSource: AudioSource {
 
     /// Built outside any actor: a closure formed in an isolated context inherits that isolation,
     /// and Swift 6 traps when AVFAudio calls it on the realtime thread.
-    nonisolated private static func tapBlock(_ router: TapRouter, _ converter: BufferConverter) -> AVAudioNodeTapBlock {
+    nonisolated private static func tapBlock(_ router: TapRouter, _ converter: BufferConverter, _ probe: FirstBufferProbe?) -> AVAudioNodeTapBlock {
         { buffer, _ in
+            probe?.observe(buffer)
             if let chunk = converter.convert(buffer) { router.handle(chunk) }
         }
     }

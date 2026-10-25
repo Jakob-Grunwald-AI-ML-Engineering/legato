@@ -64,7 +64,7 @@ final class AppController {
                 #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
                 #if LEGATO_INTERNAL
-                let source = MicSource(onAttempt: AudioDiagnostics.micAttempt)
+                let source = MicSource(onAttempt: AudioDiagnostics.micAttempt, onFirstBuffer: AudioDiagnostics.micFirstBuffer)
                 #else
                 let source = MicSource()
                 let sessionControl = AudioSessionController()

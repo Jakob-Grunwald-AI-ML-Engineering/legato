@@ -80,6 +80,7 @@ extension SessionDescription {
         if duckOthers { o.insert(.duckOthers) }
         if allowBluetoothA2DP { o.insert(.allowBluetoothA2DP) }
         if defaultToSpeaker { o.insert(.defaultToSpeaker) }
+        if interruptSpokenAudio { o.insert(.interruptSpokenAudioAndMixWithOthers) }
         return o
     }
 }

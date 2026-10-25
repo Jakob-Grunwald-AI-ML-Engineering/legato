@@ -32,7 +32,7 @@ struct SettingsView: View {
             #if LEGATO_INTERNAL
             Section {
                 Toggle("Keep audio session active", isOn: $keepSessionActive)
-                Toggle("Offer pause others", isOn: $showPauseOthers)
+                Toggle("Offer experimental audio options", isOn: $showPauseOthers)
                 Toggle("Force tap-to-copy", isOn: $forceTapToCopy)
             } header: {
                 Text("Debug")
@@ -61,6 +61,7 @@ struct SettingsView: View {
         case .duckOthers: "Lower other audio"
         case .mixWithOthers: "Play alongside"
         case .pauseOthers: "Pause other audio"
+        case .duckMusicPauseSpoken: "Lower music, pause podcasts"
         }
     }
 }

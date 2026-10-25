@@ -29,9 +29,9 @@ enum Settings {
         set { AppGroup.defaults.set(newValue.rawValue, forKey: Key.audioPolicy) }
     }
 
-    /// Policies the picker offers: the package's list, plus `.pauseOthers` while the debug toggle is on.
+    /// Policies the picker offers: the package's list, plus the experimental ones while the debug toggle is on.
     static var offeredPolicies: [AudioPolicy] {
-        debugShowPauseOthers ? AudioPolicy.offeredPolicies + [.pauseOthers] : AudioPolicy.offeredPolicies
+        debugShowPauseOthers ? AudioPolicy.offeredPolicies + AudioPolicy.experimentalPolicies : AudioPolicy.offeredPolicies
     }
 
     /// Debug experiment (background second-start failure): a normal stop leaves the audio session active
@@ -56,7 +56,7 @@ enum Settings {
         }
     }
 
-    /// Debug: offer `.pauseOthers` in the audio picker (the #6 device test).
+    /// Debug: offer the experimental policies (`.pauseOthers`, `.duckMusicPauseSpoken`) in the audio picker (the #6 device test).
     static var debugShowPauseOthers: Bool {
         get { AppGroup.defaults.bool(forKey: Key.debugShowPauseOthers) }
         set { AppGroup.defaults.set(newValue, forKey: Key.debugShowPauseOthers) }

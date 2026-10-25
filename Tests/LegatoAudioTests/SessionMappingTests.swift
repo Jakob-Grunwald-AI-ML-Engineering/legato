@@ -12,6 +12,23 @@ import LegatoCore
         #expect(d.defaultToSpeaker)
     }
 
+    @Test func duckMusicPauseSpokenMapsDuckAndInterruptSpoken() {
+        let d = SessionDescription(AudioPolicy.duckMusicPauseSpoken.sessionConfig)
+        #expect(d.duckOthers)
+        #expect(d.interruptSpokenAudio)
+        #expect(!d.mixWithOthers)
+        #expect(!SessionDescription(AudioPolicy.duckOthers.sessionConfig).interruptSpokenAudio)
+    }
+
+    #if os(iOS)
+    @Test func duckMusicPauseSpokenAvOptions() {
+        let o = SessionDescription(AudioPolicy.duckMusicPauseSpoken.sessionConfig).avOptions
+        #expect(o.contains(.duckOthers))
+        #expect(o.contains(.interruptSpokenAudioAndMixWithOthers))
+        #expect(!o.contains(.mixWithOthers))
+    }
+    #endif
+
     @Test func duckOthersHasDuck() {
         let d = SessionDescription(AudioPolicy.duckOthers.sessionConfig)
         #expect(d.duckOthers)

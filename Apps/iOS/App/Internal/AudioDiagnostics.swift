@@ -22,7 +22,7 @@ import UIKit
 /// `toggle.end`, `session.step` (each AVAudioSession call: setCategory, setPreferredInput,
 /// setActiveTrue, setActiveFalse, with its own error), `session.activate` / `session.deactivate` /
 /// `session.deactivate.skipped` / `session.release` (the wrapper's view), and `mic.attempt` (one engine
-/// start attempt: index, input sample rate, error) and `start.route` (how a start was routed: `route`
+/// start attempt: index, input sample rate, channels, error), `mic.firstBuffer` (ms to the first buffer, RMS of the first ~0.5 s) and `start.route` (how a start was routed: `route`
 /// is `background`, `foreground` or `foregroundHop`, with the `reason` of a hop, `backgroundStartRefused`, the
 /// `outcome` and `otherAudio`, whether other audio played when the start began). `setActive(true)` and the engine start are separate
 /// events, so a failure in one is never attributed to the other. The file is cleared past 1 MB.
@@ -81,6 +81,18 @@ enum AudioDiagnostics {
             "inputChannels": attempt.inputChannelCount,
             "ok": attempt.error == nil,
             "error": describe(attempt.error),
+        ])
+    }
+
+    /// Logged once ~0.5 s after the engine starts. Absent for a run = no buffer ever arrived; an `rms`
+    /// near 0 = buffers arrived but silent (the "no signal" case).
+    static func micFirstBuffer(_ b: MicSource.FirstBuffer) {
+        log("mic.firstBuffer", [
+            "msSinceStart": b.msSinceStart,
+            "rms": b.rms,
+            "frames": b.frames,
+            "inputSampleRate": b.sampleRate,
+            "silent": b.rms < 1e-5,
         ])
     }
 
