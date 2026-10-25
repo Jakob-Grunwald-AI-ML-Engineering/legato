@@ -1,0 +1,67 @@
+# PR-only gate. Tests run once, on the PR; there is deliberately no push
+# trigger. Branch protection on main is strict (head must be up to date), so
+# the merged tree is the tested tree. `gate` is the required check on main.
+name: test
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  up-to-date:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: PR head contains current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "::notice::Not a pull_request event — up-to-date check skipped."
+            exit 0
+          fi
+          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$HEAD_SHA" --jq .behind_by)
+          if [ "$behind" != "0" ]; then
+            echo "::error::PR head is $behind commit(s) behind main. Update the branch and re-run."
+            exit 1
+          fi
+
+  build-test:
+    # When the first Swift target lands, switch runs-on to a pinned macOS
+    # image and select Xcode from .xcode-version; the script enforces this.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: scripts/ci/test.sh
+
+  # The ONE required check on main. always() so a failed or cancelled needed
+  # job fails this one instead of skipping it (a skipped required check reads
+  # as passing).
+  gate:
+    needs: [up-to-date, build-test]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every needed job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "::error::A required job finished as '$r'."
+              exit 1
+            fi
+          done
