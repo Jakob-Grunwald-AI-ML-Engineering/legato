@@ -50,6 +50,9 @@ public enum LinkChannel {
     /// How long a finished run's text stays in `link.host` and `link.applied`, so a keyboard that was away
     /// for a moment can still apply and confirm the final state. Then the text is removed from the link.
     public static let finalTextRetention: TimeInterval = 5
+    /// A keyboard acts on an insert request (`HostState.insertAt`) only this long after it was made, so a
+    /// keyboard that appears later does not type text the user asked for minutes ago.
+    public static let insertMaxAge: TimeInterval = 10
     /// A request older than this is ignored (a leftover in the inbox).
     public static let requestMaxAge: TimeInterval = 10
     /// How long the keyboard waits for a refined text once the app acked the request (a language model

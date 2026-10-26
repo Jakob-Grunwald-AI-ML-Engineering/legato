@@ -9,8 +9,9 @@ import os
 /// the system.
 @MainActor
 final class KeyboardLinkHost: TranscriptSink {
-    /// How long a finished keyboard run waits for the keyboard to confirm its text landed.
-    static let appliedTimeout: TimeInterval = 1
+    /// How long a finished keyboard run waits for the keyboard to confirm its text landed (the keyboard
+    /// types it out over a moment, so it counts from the end of that).
+    static let appliedTimeout: TimeInterval = 2
 
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-link")
 
@@ -69,10 +70,44 @@ final class KeyboardLinkHost: TranscriptSink {
 
     var keyboardIsVisible: Bool { link.keyboardIsVisible() }
 
+    /// How long an insert waits for the keyboard to confirm its text landed (it types the whole text out).
+    static let insertTimeout: TimeInterval = 4
+
+    /// The Live Activity's Insert button: publishes `text` for the keyboard on screen (flagged as asked for)
+    /// and waits for it to confirm. False when no Legato keyboard is visible, a run is going on, or the
+    /// keyboard did not confirm in time.
+    func insert(_ text: String) async -> Bool {
+        let id = UUID().uuidString
+        guard keyboardIsVisible else {
+            #if DEBUG
+            WakeProbeLog.log("skip", "reason=keyboardNotVisible run=\(id.prefix(8))")
+            #endif
+            return false
+        }
+        guard link.publishInsert(runID: id, text: text) else {
+            #if DEBUG
+            WakeProbeLog.log("skip", "reason=runInProgress run=\(id.prefix(8))")
+            #endif
+            return false
+        }
+        #if DEBUG
+        WakeProbeLog.log("post", "run=\(id.prefix(8)) seq=\(link.state.seq) chars=\(text.count)")
+        let started = Date()
+        #endif
+        let confirmed = await link.awaitFinalApplied(runID: id, timeout: Self.insertTimeout)
+        #if DEBUG
+        let waited = Int((Date().timeIntervalSince(started) * 1000).rounded())
+        WakeProbeLog.log("confirm", "run=\(id.prefix(8)) confirmed=\(confirmed ? 1 : 0) waitedMs=\(waited)")
+        #endif
+        return confirmed
+    }
+
     // MARK: TranscriptSink
 
     func runStarted(_ run: DictationRun) {
-        runDelivery = deliveryForRun()
+        // Cleanup delivery is about the keyboard's field: a run for the app's own screen or the activity's
+        // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
+        runDelivery = run.target == .keyboard ? deliveryForRun() : nil
         link.runStarted(id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery)
         onRunActivity?(true)
         #if LEGATO_INTERNAL

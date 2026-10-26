@@ -1,3 +1,4 @@
+import LegatoKeyboardCore
 import SwiftUI
 import UIKit
 
@@ -45,11 +46,38 @@ final class KeyboardViewController: UIInputViewController {
 
         // Priority 999: the system's own height constraint at 1000 must be able to win without a
         // layout-conflict log.
-        let height = view.heightAnchor.constraint(equalToConstant: Self.portraitHeight)
+        let height = view.heightAnchor.constraint(equalToConstant: requestedHeight)
         height.priority = UILayoutPriority(999)
         height.isActive = true
         heightConstraint = height
+        controller.onLayoutChange = { [weak self] reason in self?.layoutChanged(reason: reason) }
     }
+
+    /// The height the current mode asks for: the strip's own (the same in portrait and landscape), or the
+    /// full keyboard's for the orientation. By width, as `KeyGeometry` does: a portrait keyboard
+    /// (402 x 301) is wider than tall too.
+    private var requestedHeight: CGFloat {
+        if let controller, controller.mode == .strip { return CGFloat(controller.stripHeight) }
+        return KeyGeometry.isLandscape(width: view.bounds.width) ? Self.landscapeHeight : Self.portraitHeight
+    }
+
+    /// The mode or the strip height changed (the chevron, the debug height cycle, the setting): resize
+    /// with the content's cross-fade, and log the height asked for against the one laid out.
+    private func layoutChanged(reason: String) {
+        heightConstraint?.constant = requestedHeight
+        let settle: UIView = view.superview ?? view
+        #if DEBUG
+        UIView.animate(withDuration: 0.2, animations: { settle.layoutIfNeeded() }, completion: { [weak self] _ in
+            guard let self else { return }
+            KeyboardGeometryLog.reportResize(
+                reason: reason, mode: modeName, requested: requestedHeight, view: view, inputView: inputView)
+        })
+        #else
+        UIView.animate(withDuration: 0.2) { settle.layoutIfNeeded() }
+        #endif
+    }
+
+    private var modeName: String { controller?.mode == .strip ? "strip" : "full" }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
@@ -70,16 +98,14 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        // By width, as `KeyGeometry` does: a portrait keyboard (402 x 301) is wider than tall too.
-        let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
-        let wanted = landscape ? Self.landscapeHeight : Self.portraitHeight
+        let wanted = requestedHeight
         if heightConstraint?.constant != wanted { heightConstraint?.constant = wanted }
     }
 
     #if DEBUG
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        KeyboardGeometryLog.reportView(view, inputView: inputView, heightConstraint: heightConstraint)
+        KeyboardGeometryLog.reportView(view, inputView: inputView, heightConstraint: heightConstraint, mode: modeName)
     }
     #endif
 

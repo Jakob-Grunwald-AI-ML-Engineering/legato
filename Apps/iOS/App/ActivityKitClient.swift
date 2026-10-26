@@ -52,6 +52,15 @@ final class ActivityKitClient: ActivityClient {
 
     func end(_ content: DictationActivityContent) async {
         guard let id = activityID else { return }
+        // The result state is the end of the run, not of the activity: it stays up with its buttons until
+        // `resolveResult` or the app's result timeout (`AppController`) ends it.
+        guard content.phase != .result else {
+            await Self.update(id: id, ActivityContent(state: .init(content), staleDate: nil))
+            #if DEBUG
+            E2E.log("activity.result phase=\(content.phase.rawValue) tail=\(E2E.quote(content.tail))")
+            #endif
+            return
+        }
         activityID = nil
         let after = content.phase == .tapToCopy ? Self.tapToCopyDismissAfter : Self.dismissAfter
         await Self.end(
@@ -61,6 +70,15 @@ final class ActivityKitClient: ActivityClient {
         #if DEBUG
         E2E.log("activity.end phase=\(content.phase.rawValue) tail=\(E2E.quote(content.tail))")
         #endif
+    }
+
+    /// A result button's outcome: the activity shows it and ends (`ends`), or stays up with its buttons.
+    func resolveResult(_ content: DictationActivityContent, ends: Bool) async {
+        if ends {
+            await end(content)
+        } else {
+            await update(content, staleDate: nil)
+        }
     }
 
     func dismiss() async {
