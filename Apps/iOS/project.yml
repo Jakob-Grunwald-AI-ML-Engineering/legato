@@ -59,6 +59,8 @@ targets:
         product: LegatoPostProcessing
       - package: LegatoKit
         product: LegatoMLX
+      - package: LegatoKit
+        product: LegatoAppServices
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato

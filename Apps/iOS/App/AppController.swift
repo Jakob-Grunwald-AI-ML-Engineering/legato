@@ -1,5 +1,6 @@
 import AVFAudio
 import Foundation
+import LegatoAppServices
 import LegatoAppleSpeech
 import LegatoAudio
 import LegatoCore
@@ -72,14 +73,15 @@ final class AppController {
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
         if AppGroup.containerURL == nil { Self.log.error("App Group container unavailable; history is app-local") }
         let history = JSONLHistoryStore(fileURL: directory.appending(path: "history.jsonl"))
-        let models = ModelServices()
+        let models = ModelServices(root: ModelServices.phoneModelsRoot, defaults: AppGroup.defaults)
         self.models = models
         let engineBox = EngineBox(AppleSpeechEngine())
         self.engineBox = engineBox
         let reports = cleanupReports
         let engineSettings = models.engineSettings
         let cleanup = CleanupProcessor(
-            registry: models.cleanup, preferredLocale: { Self.singleLocale(engineSettings) },
+            registry: models.cleanup, settings: Settings.cleanupStore,
+            preferredLocale: { ModelServices.singleLocale(engineSettings) },
             report: { report in await reports.record(report) })
         self.history = history
         #if LEGATO_INTERNAL
@@ -178,20 +180,15 @@ final class AppController {
         }
     }
 
-    /// The one language the engine settings name, if exactly one: cleanup then writes in it.
-    nonisolated private static func singleLocale(_ settings: EngineSettings) -> Locale? {
-        let locales = settings.preferredLocales
-        return locales.count == 1 ? locales[0] : nil
-    }
-
     /// The keyboard's Refine key: a stronger rewrite (message style) of `text`, or nil when there is none.
     /// Runs in the background too (the registry falls back to Foundation Models or nothing there).
     func refine(_ text: String) async -> String? {
         let reports = cleanupReports
-        let locale = Self.singleLocale(models.engineSettings) ?? Locale.current
+        let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
         let out = await CleanupProcessor.run(
             text, locale: locale, style: .message, refine: true,
-            timeout: .seconds(max(Settings.cleanupTimeoutSeconds * 2, 8)), registry: models.cleanup,
+            timeout: .seconds(max(Settings.cleanupTimeoutSeconds * 2, 8)), settings: Settings.cleanupStore,
+            registry: models.cleanup,
             report: { report in await reports.record(report) })
         let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
         #if DEBUG

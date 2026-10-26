@@ -1,10 +1,14 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import LegatoAppServices
 import LegatoAppleSpeech
 import LegatoAudio
 import LegatoCore
+import LegatoEngines
 import LegatoMac
+import LegatoModels
+import LegatoPostProcessing
 import Observation
 import os
 
@@ -13,6 +17,9 @@ import os
 ///
 /// Hotkey events go through `HotkeyGesture`; its actions (and engine aborts) are queued and run one
 /// at a time, so a start, a stop and the finish after it can never overlap.
+///
+/// The engine is resolved from the model pick (`refreshEngine`, after a pick, a delete or an engine
+/// setting change) and cached; the session is rebuilt with it before the next run starts.
 @MainActor @Observable
 final class MacAppController {
     static let shared = MacAppController()
@@ -21,6 +28,7 @@ final class MacAppController {
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "mac")
 
     enum Phase: Equatable { case idle, preparing, listening, finishing }
+    enum SettingsTab: Hashable { case general, speech, cleanup }
 
     private(set) var phase = Phase.idle
     /// The newest history entries (20), newest first.
@@ -32,14 +40,34 @@ final class MacAppController {
     /// A hotkey press found something unfinished in setup while the user was in another app:
     /// the menu-bar icon shows a warning until the onboarding window is opened.
     private(set) var setupAttention = false
+    /// Which engine new dictations use.
+    private(set) var engineStatus = EngineStatus()
+    /// The streaming models that are installed, for the menu's engine switch.
+    private(set) var installedStreamingModels: Set<String> = []
+    /// The last delivered dictation, while it can still be swapped for another version.
+    private(set) var lastDictation: DictationEntry?
+    /// A refine of the last dictation is running.
+    private(set) var isRefining = false
+    /// The pane the Settings window shows (the menu opens it on a pane).
+    var settingsTab = SettingsTab.general
 
-    @ObservationIgnored let settings = MacSettings()
+    @ObservationIgnored let settings: MacSettings
     @ObservationIgnored let permissions: Permissions
     @ObservationIgnored let loginItem = LoginItem()
-    @ObservationIgnored private let engine = AppleSpeechEngine()
+    /// The model catalog, the engine and the cleanup registries.
+    @ObservationIgnored let models: ModelServices
+    /// What the last cleanup (or refine) did.
+    let cleanupReports: CleanupReports
+    /// The live engine (resolved from the pick); `session` is rebuilt with it before the next run.
+    @ObservationIgnored private var engine: any DictationEngine
+    @ObservationIgnored private var sessionIsStale = false
+    @ObservationIgnored private let cleanup: CleanupProcessor
     @ObservationIgnored private let history: JSONLHistoryStore
-    @ObservationIgnored private let session: DictationSession
-    @ObservationIgnored private let hud = HUDPanelController()
+    @ObservationIgnored private var session: DictationSession
+    @ObservationIgnored private var editPump: Task<Void, Never>?
+    /// The writer of the last delivered dictation: version swaps go through it.
+    @ObservationIgnored private var lastWriter: FieldWriter?
+    @ObservationIgnored private let hud: HUDPanelController
     @ObservationIgnored private let paster = PasteService()
     @ObservationIgnored private let tap = HotkeyTap()
     @ObservationIgnored private var gesture: HotkeyGesture
@@ -66,13 +94,16 @@ final class MacAppController {
         let startedAt = Date()
         /// The field was (or could not be ruled out as) a secure one: never typed or pasted into.
         let secureField: Bool
+        /// How a cleaned text reaches the field: the setting when the run started, nil with cleanup off.
+        let delivery: CleanupDelivery?
         /// Everything the engine committed, as the edit pump saw it.
         var committed = ""
 
-        init(writer: FieldWriter, targetPID: pid_t?, secureField: Bool) {
+        init(writer: FieldWriter, targetPID: pid_t?, secureField: Bool, delivery: CleanupDelivery?) {
             self.writer = writer
             self.targetPID = targetPID
             self.secureField = secureField
+            self.delivery = delivery
         }
     }
 
@@ -80,14 +111,61 @@ final class MacAppController {
         let support = URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
         let history = JSONLHistoryStore(fileURL: support.appending(path: "history.jsonl"))
         self.history = history
-        permissions = Permissions(engine: engine)
+        let settings = MacSettings()
+        self.settings = settings
+        // Apple Speech's asset download lives in Permissions; dictation uses `engine`.
+        permissions = Permissions(engine: AppleSpeechEngine())
         gesture = HotkeyGesture(mode: settings.gestureMode)
-        session = DictationSession(
+        let models = ModelServices(root: FluidAudioCatalog.defaultRoot(), defaults: .standard)
+        self.models = models
+        let reports = CleanupReports()
+        cleanupReports = reports
+        let hud = HUDPanelController()
+        self.hud = hud
+        let engineSettings = models.engineSettings
+        let cleanup = CleanupProcessor(
+            registry: models.cleanup, settings: settings.cleanupStore,
+            preferredLocale: { ModelServices.singleLocale(engineSettings) },
+            willRun: { await hud.setPhase(.cleaningUp) },
+            report: { report in await reports.record(report) })
+        self.cleanup = cleanup
+        let engine = AppleSpeechEngine()
+        self.engine = engine
+        session = Self.makeSession(engine: engine, history: history, postProcessor: cleanup)
+    }
+
+    private static func makeSession(
+        engine: any DictationEngine, history: JSONLHistoryStore, postProcessor: CleanupProcessor
+    ) -> DictationSession {
+        DictationSession(
             engine: engine,
             source: MicSource(),
             sessionControl: AudioSessionController(),
             history: history,
+            postProcessor: postProcessor,
             linger: .zero)
+    }
+
+    /// Hooks the controller to `session`: its aborts and its edit stream.
+    private func attachSession() {
+        // The engine stream failed under a run: the session has already torn itself down.
+        session.onRunAborted = { [weak self] _ in
+            guard let self, let run = activeRun else { return }
+            commands?.yield(.aborted(run.id))
+        }
+        editPump?.cancel()
+        appliedEdits = 0
+        editPump = Task { [weak self, edits = session.edits] in
+            for await edit in edits { self?.apply(edit) }
+        }
+    }
+
+    /// Builds a session with the current engine when the engine changed since. Only between runs.
+    private func rebuildSessionIfStale() {
+        guard sessionIsStale, activeRun == nil else { return }
+        sessionIsStale = false
+        session = Self.makeSession(engine: engine, history: history, postProcessor: cleanup)
+        attachSession()
     }
 
     // MARK: Derived state for the UI
@@ -137,14 +215,7 @@ final class MacAppController {
                 await self.perform(command)
             }
         }
-        // The engine stream failed under a run: the session has already torn itself down.
-        session.onRunAborted = { [weak self] _ in
-            guard let self, let run = activeRun else { return }
-            commands?.yield(.aborted(run.id))
-        }
-        Task { [weak self, edits = session.edits] in
-            for await edit in edits { self?.apply(edit) }
-        }
+        attachSession()
         Task { [weak self, samples = tap.samples] in
             for await sample in samples { self?.handle(sample) }
         }
@@ -156,7 +227,7 @@ final class MacAppController {
         }
         Task { [weak self] in
             await self?.refreshRecent()
-            await self?.permissions.refreshModel()
+            await self?.refreshEngine() // also checks Apple Speech's assets when it is the live engine
             self?.pollSystem()
             if self?.needsSetup == true { self?.requestOnboarding() }
         }
@@ -192,6 +263,88 @@ final class MacAppController {
         if permissions.hotkeyTapActive != tap.isActive { permissions.hotkeyTapActive = tap.isActive }
         if setupAttention, !needsSetup { setupAttention = false }
         releaseStuckTrigger()
+    }
+
+    // MARK: Models
+
+    /// Resolves the live engine from the pick and the engine settings, for the runs from now on. A run in
+    /// progress keeps its engine; the session is rebuilt before the next one.
+    func refreshEngine() async {
+        let resolution = await models.engines.liveEngine()
+        engine = resolution.engine
+        sessionIsStale = true
+        rebuildSessionIfStale()
+        permissions.appleSpeechLive = resolution.modelID == nil
+        engineStatus = EngineStatus(
+            modelID: resolution.modelID,
+            name: resolution.modelID.map { models.engineName(for: $0) } ?? "Apple Speech",
+            fallback: resolution.fallback?.explanation)
+        await refreshInstalledModels()
+        if resolution.modelID == nil { await permissions.refreshModel() }
+    }
+
+    func refreshInstalledModels() async {
+        var installed: Set<String> = []
+        for descriptor in models.streamingModels {
+            if case .installed = await models.manager.state(of: descriptor.id) { installed.insert(descriptor.id) }
+        }
+        if installed != installedStreamingModels { installedStreamingModels = installed }
+    }
+
+    /// The menu's engine switch: nil is Apple Speech. An installed model is picked straight away; anything
+    /// else is for the Speech engine pane, which shows the download.
+    func switchEngine(to id: String?) {
+        guard let id else {
+            models.clearPick(.liveDictation)
+            Task { await refreshEngine() }
+            return
+        }
+        models.pick(id, role: .liveDictation) { [weak self] error in
+            if let error { self?.hud.show(toast: "Could not switch: \(String(describing: error))") }
+            Task { await self?.refreshEngine() }
+        }
+    }
+
+    // MARK: Versions
+
+    /// The last dictation's raw text in place of its cleaned text: swapped in the field when it still ends
+    /// with what was delivered, else copied.
+    func revertLastToRaw() {
+        guard phase == .idle, let entry = lastDictation, let raw = entry.rawText else { return }
+        swapLast(to: raw, label: "raw text")
+    }
+
+    /// A stronger rewrite (message style) of the last dictation, swapped in like `revertLastToRaw`.
+    func refineLast() async {
+        guard phase == .idle, !isRefining, let entry = lastDictation else { return }
+        isRefining = true
+        defer { isRefining = false }
+        hud.show(toast: "Refining…", for: 30)
+        let reports = cleanupReports
+        let store = settings.cleanupStore
+        let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale(identifier: entry.localeIdentifier)
+        let out = await CleanupProcessor.run(
+            entry.text, locale: locale, style: .message, refine: true,
+            timeout: .seconds(max(store.timeoutSeconds * 2, 8)), settings: store, registry: models.cleanup,
+            report: { report in await reports.record(report) })
+        let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !refined.isEmpty, refined != entry.text else {
+            hud.show(toast: "Refine changed nothing.")
+            return
+        }
+        // A new dictation started or arrived meanwhile: its field is not ours to touch.
+        guard phase == .idle, lastDictation?.id == entry.id else { return }
+        swapLast(to: refined, label: "refined text")
+    }
+
+    private func swapLast(to text: String, label: String) {
+        switch lastWriter?.swapWritten(for: text) ?? .nothingWritten {
+        case .swapped:
+            hud.show(toast: "Swapped in the \(label).")
+        case .nothingWritten, .leftInPlace:
+            paster.copy(text)
+            hud.show(toast: "Copied the \(label) — paste with ⌘V.")
+        }
     }
 
     // MARK: History
@@ -338,6 +491,7 @@ final class MacAppController {
             flagSetup()
             return
         }
+        rebuildSessionIfStale()
 
         let target: AXTextTarget?
         var secureField = false
@@ -348,10 +502,14 @@ final class MacAppController {
             target = nil
             secureField = true
         }
+        let delivery = settings.cleanupEnabled ? settings.cleanupDelivery : nil
+        // Hold: nothing streams into the field; the HUD shows the live text and the cleaned text goes in at the end.
+        let mode = delivery?.streamsIntoField == false ? .insertOnStop : settings.insertionMode
         let run = Run(
-            writer: FieldWriter(target: target, mode: settings.insertionMode),
+            writer: FieldWriter(target: target, mode: mode),
             targetPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
-            secureField: secureField)
+            secureField: secureField,
+            delivery: delivery)
         activeRun = run
         phase = .preparing
         hud.beginRun()
@@ -363,7 +521,7 @@ final class MacAppController {
             gesture.runEnded()
             if case DictationError.assetsNotInstalled = error {
                 hud.endRun()
-                Task { await permissions.refreshModel() }
+                Task { await refreshEngine() } // a picked model may have gone: fall back, check Apple's assets
                 flagSetup()
             } else if case DictationError.cancelled = error {
                 hud.endRun()
@@ -400,14 +558,17 @@ final class MacAppController {
             conclude(run, toast: toast)
             return
         }
-        // `session.stop()` has yielded every edit; let the pump hand them to the writer.
-        await drainEdits(of: run, expecting: entry?.text)
+        // `session.stop()` has yielded every edit; let the pump hand them to the writer. They carry the
+        // engine's (raw) text, not the cleaned one.
+        await drainEdits(of: run, expecting: entry.map { $0.rawText ?? $0.text })
 
         if let failure {
             Self.log.error("stop failed: \(Self.describe(failure), privacy: .public)")
             await deliver(run, finalText: nil, salvage: true, notice: "Dictation stopped early.")
+        } else if let entry, let raw = entry.rawText {
+            await deliver(run, finalText: entry.text, cleanedFrom: raw, entry: entry)
         } else {
-            await deliver(run, finalText: entry?.text ?? "", salvage: false, notice: nil)
+            await deliver(run, finalText: entry?.text ?? "", salvage: false, notice: nil, entry: entry)
         }
     }
 
@@ -425,8 +586,21 @@ final class MacAppController {
 
     /// Finishes the writer and routes whatever the field is missing.
     /// `salvage`: the session did not save an entry (it aborted), so its `partialEntry()` goes to history.
-    private func deliver(_ run: Run, finalText: String?, salvage: Bool, notice: String?) async {
-        let action = run.writer.finish(finalText: finalText)
+    /// `cleanedFrom`: cleanup changed the text; `finalText` is the cleaned text and this the raw one that
+    /// streamed into the field, delivered per the run's cleanup delivery.
+    private func deliver(
+        _ run: Run, finalText: String?, cleanedFrom raw: String? = nil, salvage: Bool = false, notice: String? = nil,
+        entry: DictationEntry? = nil
+    ) async {
+        let action: FinishAction
+        var delivery: CleanupDelivery?
+        if let raw, let cleaned = finalText {
+            let chosen = run.delivery ?? settings.cleanupDelivery
+            delivery = chosen
+            action = run.writer.finish(rawText: raw, cleanedText: cleaned, delivery: chosen)
+        } else {
+            action = run.writer.finish(finalText: finalText)
+        }
         var toast = notice
         func note(_ message: String) { toast = notice.map { "\($0) \(message)" } ?? message }
         switch action {
@@ -434,7 +608,11 @@ final class MacAppController {
             break
         case .copy(let rest):
             paster.copy(rest)
-            note("Copied the rest — paste with ⌘V.")
+            switch delivery {
+            case nil: note("Copied the rest — paste with ⌘V.")
+            case .clipboard: note("Cleaned text copied — paste with ⌘V to use it.")
+            case .replace, .hold: note("The field changed: cleaned text copied — paste with ⌘V.")
+            }
         case .paste(let full):
             let outcome = await paster.paste(
                 full,
@@ -445,6 +623,10 @@ final class MacAppController {
         }
         if salvage, let entry = session.partialEntry() {
             try? await history.append(entry) // the session never saved this run; losing the copy is worse
+        }
+        if let entry {
+            lastDictation = entry
+            lastWriter = run.writer
         }
         conclude(run, toast: toast)
     }

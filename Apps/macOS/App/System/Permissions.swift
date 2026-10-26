@@ -25,8 +25,13 @@ final class Permissions {
     /// for it, and when it is not, macOS wants Input Monitoring.
     var hotkeyTapActive = false
 
+    /// Apple Speech is the live engine (nothing picked, or the pick fell back to it): only then do its
+    /// on-device assets matter. Set by the controller whenever it resolves the engine.
+    var appleSpeechLive = true
+
     var micGranted: Bool { mic == .granted }
-    var modelInstalled: Bool { model == .installed }
+    /// The live engine can run: a downloaded model is live, or Apple Speech's assets are installed.
+    var modelInstalled: Bool { !appleSpeechLive || model == .installed }
     /// Accessibility is granted but the tap still cannot be created: Input Monitoring is missing.
     var needsInputMonitoring: Bool { accessibility && !hotkeyTapActive }
 

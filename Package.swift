@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "LegatoEngines", targets: ["LegatoEngines"]),
         .library(name: "LegatoPostProcessing", targets: ["LegatoPostProcessing"]),
         .library(name: "LegatoMLX", targets: ["LegatoMLX"]),
+        .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
     ],
@@ -93,6 +94,17 @@ let package = Package(
             resources: [.copy("Clips")]
         ),
         .testTarget(name: "legato-benchTests", dependencies: ["legato-bench"]),
+        // What both apps share above the engines: the model catalog and picks, cleanup settings and runs.
+        .target(
+            name: "LegatoAppServices",
+            dependencies: [
+                "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoPostProcessing",
+            ]
+        ),
+        .testTarget(
+            name: "LegatoAppServicesTests",
+            dependencies: ["LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing"]
+        ),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
     ],

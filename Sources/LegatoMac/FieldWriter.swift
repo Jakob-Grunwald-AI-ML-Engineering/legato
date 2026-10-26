@@ -156,6 +156,83 @@ public final class FieldWriter {
         return rest.isEmpty ? .done : .copy(rest)
     }
 
+    // MARK: Cleanup and versions
+
+    public enum SwapResult: Sendable, Equatable {
+        /// Nothing of ours is in the field (nothing written, no target, or reverted).
+        case nothingWritten
+        /// The field now shows the new text where ours was.
+        case swapped
+        /// The field no longer ends with our text (edited, typed after, caret or focus moved) or the write
+        /// failed or could not be verified: the field was left as it was, as far as can be told.
+        case leftInPlace
+    }
+
+    /// `finish(finalText:)` for a run whose text was cleaned up: `rawText` is what the engine heard (what
+    /// streamed into the field), `cleanedText` the trimmed result. Call it once instead of `finish(finalText:)`.
+    ///
+    /// - Nothing of ours in the field yet (nothing streamed, `.insertOnStop`, Hold): one verified write of
+    ///   the cleaned text, as `finish(finalText: cleanedText)`.
+    /// - Replace: the raw text is finished first (a missing tail is flushed), then swapped for the cleaned
+    ///   text with `swapWritten(for:)`. If the field no longer ends with the raw text or the swap fails,
+    ///   the field is left and the result is `.copy(cleanedText)`.
+    /// - Clipboard: the raw text is finished and stays; the result is `.copy(cleanedText)`.
+    ///
+    /// `.paste` and `.copy` carry the whole cleaned text: `.paste` when nothing of ours landed in the field,
+    /// `.copy` when (some of) the raw text is in it and stays.
+    public func finish(rawText: String?, cleanedText: String, delivery: CleanupDelivery) -> FinishAction {
+        let cleaned = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if spanStart == nil, degradeReason == nil, !uncertainWrite {
+            return finish(finalText: cleaned)
+        }
+        switch finish(finalText: rawText) {
+        case .paste:
+            return cleaned.isEmpty ? .done : .paste(cleaned)
+        case .copy:
+            return cleaned.isEmpty ? .done : .copy(cleaned)
+        case .done:
+            guard !cleaned.isEmpty else { return .done }
+            if delivery == .clipboard { return .copy(cleaned) }
+            switch swapWritten(for: cleaned) {
+            case .swapped: return .done
+            case .nothingWritten: return .paste(cleaned)
+            case .leftInPlace: return .copy(cleaned)
+            }
+        }
+    }
+
+    /// Swaps the text this writer put into the field for `text`, in one write verified by readback: for the
+    /// cleaned text at the end of a run, and afterwards for its versions (raw, refined). Only while the
+    /// focused field still ends with our text exactly as written and the caret sits right after it; any
+    /// trailing whitespace the field got stays after the new text.
+    @discardableResult
+    public func swapWritten(for text: String) -> SwapResult {
+        guard !closed, let target, let start = spanStart, tentative.isEmpty else { return .nothingWritten }
+        let body = String(written.reversed().drop(while: \.isWhitespace).reversed())
+        guard !body.isEmpty else { return .nothingWritten }
+        guard degradeReason == nil, target.isFocused() else { return .leftInPlace }
+        let span = UTF16Range(location: start, length: written.utf16.count)
+        guard let current = try? target.text(in: span), current == written,
+              let selection = try? target.selectedRange(), selection == UTF16Range(location: span.end, length: 0)
+        else { return .leftInPlace }
+        if text == body { return .swapped }
+        let replacement = text + written.dropFirst(body.count)
+        do {
+            try target.replace(span, with: replacement)
+        } catch {
+            degrade(.writeFailed)
+            return .leftInPlace
+        }
+        guard let readback = try? target.text(in: UTF16Range(location: start, length: replacement.utf16.count)),
+              readback == replacement
+        else {
+            degrade(.notApplied)
+            return .leftInPlace
+        }
+        written = replacement
+        return .swapped
+    }
+
     // MARK: Writing
 
     /// Appends `delta` to the committed text and shows `newTentative` after it, replacing whatever
