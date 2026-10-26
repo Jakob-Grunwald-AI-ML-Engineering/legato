@@ -19,10 +19,17 @@ public protocol TranscriptPostProcessor: Sendable {
     /// `context` is the cleaned text that came before it, its end only; the result replaces `text` alone.
     /// Default: ``process(_:locale:)``.
     func processSegment(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> String
+
+    /// How long the stop of a live run may spend on cleanup in all: the segment in flight and the stop
+    /// pass together. Past it the session cancels both and keeps the raw text for what was not cleaned.
+    /// Read at the stop. Default nil: no limit beyond the processor's own.
+    var liveStopTimeLimit: Duration? { get }
 }
 
 extension TranscriptPostProcessor {
     public var cleansSegmentsLive: Bool { false }
+
+    public var liveStopTimeLimit: Duration? { nil }
 
     public func processSegment(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> String {
         try await process(text, locale: locale)

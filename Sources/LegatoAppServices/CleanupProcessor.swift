@@ -80,6 +80,13 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         return options.enabled && options.delivery == .live
     }
 
+    /// The stop of a live run spends at most the setting's time limit on cleanup, the segment in flight
+    /// and the stop pass together.
+    public var liveStopTimeLimit: Duration? {
+        let options = settings.options
+        return options.enabled ? .seconds(options.timeoutSeconds) : nil
+    }
+
     /// One live segment, with the cleaned text before it as `context`. Only the stop pass (`atStop`) shows
     /// "Cleaning up…": a segment cleaned while listening must not change what the UI says.
     public func processSegment(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> String {

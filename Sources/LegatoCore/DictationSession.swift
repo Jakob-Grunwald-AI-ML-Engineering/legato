@@ -8,7 +8,8 @@ import Foundation
 /// segment is cleaned in the background, one at a time and in order, with the cleaned text before it as
 /// context, and published as a `.revise` edit; recognition never waits for it. At the stop the segment in
 /// flight finishes, the segments still raw are cleaned in one pass, and the entry keeps the revised text
-/// (`rawText` the engine's). An abort cancels the cleanup and revises nothing more.
+/// (`rawText` the engine's). Both share one deadline, the processor's `liveStopTimeLimit`: past it they are
+/// cancelled and the rest stays raw. An abort cancels the cleanup and revises nothing more.
 @MainActor
 public final class DictationSession {
     public enum LeaseState: Sendable, Equatable { case idle, arming, armed }
@@ -322,10 +323,30 @@ public final class DictationSession {
         if gen == generation { cleaner = nil }
     }
 
-    /// At the stop: lets the segment in flight finish, then cleans the segments still raw in one pass.
+    /// At the stop: lets the segment in flight finish, then cleans the segments still raw in one pass, all
+    /// within the processor's `liveStopTimeLimit` when it has one. At that deadline both are cancelled and
+    /// what was not cleaned keeps its raw text.
     private func finishLiveCleanup(with processor: any TranscriptPostProcessor) async {
+        guard let limit = processor.liveStopTimeLimit else {
+            await cleanRemainingSegments(with: processor)
+            return
+        }
+        let race = StopRace()
+        let work = Task { await self.cleanRemainingSegments(with: processor); race.cleanupEnded() }
+        let sleep = self.sleep
+        let timer = Task { if (try? await sleep(limit)) != nil { race.finish() } }
+        await race.wait()
+        timer.cancel()
+        guard !race.cleanupDone else { return }
+        work.cancel()
+        cancelLiveCleanup()
+        nextToClean = segments.count
+    }
+
+    private func cleanRemainingSegments(with processor: any TranscriptPostProcessor) async {
         await cleaner?.value
         cleaner = nil
+        guard !Task.isCancelled else { return }
         let pending = nextToClean..<segments.count
         guard !pending.isEmpty else { return }
         nextToClean = segments.count
@@ -337,6 +358,7 @@ public final class DictationSession {
                 text, context: liveContext(before: pending.lowerBound), locale: runLocale ?? Locale.current,
                 atStop: true)
         }
+        guard !Task.isCancelled else { return }
         settle(pending, cleaned: out)
     }
 
@@ -371,6 +393,32 @@ public final class DictationSession {
     private func cancelLiveCleanup() {
         cleaner?.cancel()
         cleaner = nil
+    }
+
+    /// The stop's cleanup against its deadline: whichever ends first resumes the stop.
+    @MainActor private final class StopRace {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var done = false
+        private(set) var cleanupDone = false
+
+        func wait() async {
+            guard !done else { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        /// Called by the cleanup (when it ends) and by the timer (at the deadline).
+        func finish() {
+            guard !done else { return }
+            done = true
+            continuation?.resume()
+            continuation = nil
+        }
+
+        /// The cleanup ended (so the deadline did not cut it).
+        func cleanupEnded() {
+            cleanupDone = true
+            finish()
+        }
     }
 
     private func publish(_ edit: TranscriptEdit) {

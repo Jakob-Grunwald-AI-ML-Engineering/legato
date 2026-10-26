@@ -222,6 +222,15 @@ private final class EchoingFoundationModels: LLMBackend {
             willRun: { recorder.started() }, report: { recorder.record($0) })
     }
 
+    @Test func theLiveStopIsLimitedToTheSettingsTimeLimitWhileCleanupIsOn() {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.timeoutSeconds = 7
+        let p = processor(store, fm: EchoingFoundationModels(), recorder: Recorder())
+        #expect(p.liveStopTimeLimit == nil, "cleanup off: the stop has nothing to limit")
+        store.enabled = true
+        #expect(p.liveStopTimeLimit == .seconds(7))
+    }
+
     @Test func onlyTheLiveDeliveryCleansSegmentsLive() {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         let p = processor(store, fm: EchoingFoundationModels(), recorder: Recorder())

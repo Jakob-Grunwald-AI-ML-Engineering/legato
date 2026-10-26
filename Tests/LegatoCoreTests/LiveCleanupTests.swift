@@ -23,11 +23,13 @@ final class LiveSegmentProcessor: TranscriptPostProcessor {
 
     let id = "live"
     let cleansSegmentsLive: Bool
+    let liveStopTimeLimit: Duration?
     private let answers: [String: String]
     private let state = Mutex(State())
 
-    init(live: Bool = true, answers: [String: String], hold: Set<String> = []) {
+    init(live: Bool = true, answers: [String: String], hold: Set<String> = [], stopLimit: Duration? = nil) {
         cleansSegmentsLive = live
+        liveStopTimeLimit = stopLimit
         self.answers = answers
         state.withLock { $0.held = hold }
     }
@@ -87,14 +89,35 @@ final class LiveEditRecorder {
 }
 
 @MainActor
-private func liveSession(_ processor: LiveSegmentProcessor, script: [TranscriptEvent] = []) -> (DictationSession, FakeEngine) {
+private func liveSession(
+    _ processor: LiveSegmentProcessor, script: [TranscriptEvent] = [], deadline: Deadline = Deadline()
+) -> (DictationSession, FakeEngine) {
     let log = EventLog()
     let engine = FakeEngine(log: log)
     engine.set(script: script)
     let session = DictationSession(
         engine: engine, source: FakeSource(log: log), sessionControl: FakeSessionControl(log: log),
-        history: MemoryHistory(), postProcessor: processor, now: { Date(timeIntervalSince1970: 100) })
+        history: MemoryHistory(), postProcessor: processor, sleep: { try await deadline.wait(for: $0) },
+        now: { Date(timeIntervalSince1970: 100) })
     return (session, engine)
+}
+
+/// The session's sleeper, held until the test fires it; records how long each wait was asked for.
+final class Deadline: Sendable {
+    private struct State {
+        var fired = false
+        var asked: [Duration] = []
+    }
+
+    private let state = Mutex(State())
+
+    var asked: [Duration] { state.withLock { $0.asked } }
+    func fire() { state.withLock { $0.fired = true } }
+
+    func wait(for duration: Duration) async throws {
+        state.withLock { $0.asked.append(duration) }
+        while !state.withLock({ $0.fired }) { try await Task.sleep(for: .milliseconds(2)) }
+    }
 }
 
 private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: text, isFinal: true) }
@@ -218,6 +241,69 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         try await Task.sleep(for: .milliseconds(30))
         #expect(recorder.revisions.isEmpty)
         #expect(s.partialEntry()?.text == "hello world", "the salvage stays the raw text")
+    }
+
+    @Test func theStopGivesUpOnTheSegmentInFlightAtTheTimeLimit() async throws {
+        let processor = LiveSegmentProcessor(
+            answers: ["one": "One.", "two three": "Two, three."], hold: ["one"], stopLimit: .seconds(3))
+        let deadline = Deadline()
+        let (s, _) = liveSession(processor, script: [final("one "), final("two "), final("three ")], deadline: deadline)
+        let recorder = LiveEditRecorder(s)
+        try await s.start()
+        #expect(await eventually { processor.calls.count == 1 && recorder.commits.count == 3 })
+
+        let stop = Task { try await s.stop() }
+        #expect(await eventually { deadline.asked == [.seconds(3)] }, "one deadline, the setting's time limit")
+        deadline.fire()
+        #expect(await eventually { s.runState == .idle }, "the stop ends at the deadline")
+        processor.release("one")
+        let entry = try #require(try await stop.value)
+
+        #expect(entry.text == "one two three", "nothing was cleaned in time: all raw")
+        #expect(entry.rawText == nil)
+        #expect(processor.cancelled == ["one"])
+        #expect(processor.calls.map(\.text) == ["one"], "no stop pass after the deadline")
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(recorder.revisions.isEmpty)
+    }
+
+    @Test func theStopPassIsCutAtTheSameDeadlineAndTheTailStaysRaw() async throws {
+        let processor = LiveSegmentProcessor(
+            answers: ["one": "One.", "two three": "Two, three."], hold: ["one", "two three"], stopLimit: .seconds(3))
+        let deadline = Deadline()
+        let (s, _) = liveSession(processor, script: [final("one "), final("two "), final("three ")], deadline: deadline)
+        let recorder = LiveEditRecorder(s)
+        try await s.start()
+        #expect(await eventually { processor.calls.count == 1 && recorder.commits.count == 3 })
+
+        let stop = Task { try await s.stop() }
+        #expect(await eventually { s.runState == .finishing })
+        processor.release("one")
+        #expect(await eventually { processor.calls.count == 2 }, "the stop pass started")
+        deadline.fire()
+        #expect(await eventually { s.runState == .idle })
+        processor.release("two three")
+        let entry = try #require(try await stop.value)
+
+        #expect(entry.text == "One. two three")
+        #expect(entry.rawText == "one two three")
+        #expect(processor.cancelled == ["two three"])
+        #expect(deadline.asked == [.seconds(3)], "one deadline for the whole stop, not one per pass")
+        #expect(recorder.revisions == [TranscriptRevision(start: 0, raw: "one ", text: "One. ")])
+    }
+
+    @Test func aStopThatFinishesInTimeKeepsEverything() async throws {
+        let processor = LiveSegmentProcessor(
+            answers: ["one": "One.", "two three": "Two, three."], hold: ["one"], stopLimit: .seconds(3))
+        let (s, _) = liveSession(processor, script: [final("one "), final("two "), final("three ")])
+        try await s.start()
+        #expect(await eventually { processor.calls.count == 1 })
+        let stop = Task { try await s.stop() }
+        #expect(await eventually { s.runState == .finishing })
+        processor.release("one")
+        let entry = try #require(try await stop.value)
+        #expect(entry.text == "One. Two, three.")
+        #expect(processor.cancelled.isEmpty)
     }
 
     @Test func aProcessorThatIsNotLiveCleansTheWholeTextAtTheStopAsBefore() async throws {
