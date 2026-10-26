@@ -70,7 +70,7 @@ let package = Package(
         ),
         .testTarget(
             name: "LegatoPostProcessingTests",
-            dependencies: ["LegatoPostProcessing", "LegatoCore", "LegatoModels", "LegatoMLX"],
+            dependencies: ["LegatoPostProcessing", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoVocabulary"],
             resources: [.copy("Fixtures")]
         ),
         .target(
@@ -85,7 +85,7 @@ let package = Package(
         ),
         .target(
             name: "LegatoPostProcessing",
-            dependencies: ["LegatoCore", .product(name: "FluidAudio", package: "FluidAudio")]
+            dependencies: ["LegatoCore", "LegatoVocabulary", .product(name: "FluidAudio", package: "FluidAudio")]
         ),
         .testTarget(
             name: "LegatoMLXTests",
