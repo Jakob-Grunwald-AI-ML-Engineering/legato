@@ -4,7 +4,7 @@ Research date: 2026-10-26. Scope: the research portion of [#20](https://github.c
 
 ## Decision
 
-**Go for a later, bounded cleanup-LLM experiment; defer speech-model training; avoid building a new dependency on Apple's current custom-adapter toolkit.** MLX QLoRA on Qwen3 0.6B is the strongest first candidate because Legato already supports that model family on both platforms. Train on the Mac and transfer only the adapter privately to the phone. Keep current prompting as the default; use prompting with explicitly supplied vocabulary as the no-training comparison before claiming an adaptation advantage.
+**Go for a later, bounded cleanup-LLM experiment; defer speech-model training; avoid building a new dependency on Apple's current custom-adapter toolkit.** MLX QLoRA on Qwen3 0.6B is the strongest first candidate because Legato already supports that model family on both platforms. Mac-local training and private adapter transfer remain the established first route. CPU-based on-phone cleanup/personalization also remains open; see the [background execution follow-up](ios-background-cleanup.md). Keep current prompting as the default; use prompting with explicitly supplied vocabulary as the no-training comparison before claiming an adaptation advantage.
 
 Separate two hypotheses:
 
@@ -21,7 +21,7 @@ The current prompt records Qwen3 1.7B improving from 31% to 44% on the 16 held-o
 
 Important integration boundaries:
 
-- [CleanupRegistry](../../Sources/LegatoMLX/CleanupRegistry.swift) falls back from MLX while the iOS app is in the background. A trained adapter does not change that. It may improve Mac and foreground-phone cleanup without improving background Action Button dictation.
+- [CleanupRegistry](../../Sources/LegatoMLX/CleanupRegistry.swift) falls back from MLX while the iOS app is in the background. A trained adapter does not change that. The existing GPU path may improve Mac and foreground-phone cleanup; a CPU backend or an eligible accelerator grant could extend custom cleanup to background Action Button flows, subject to actual runtime and device proof.
 - The default pipeline grants each stage four seconds. The direct eval times cleanup without applying that deadline. A better offline score must therefore be followed by pipeline timeout/fallback measurements.
 - The current guard limits word drift to 25%, rejects missing sentences and long unmatched runs, and collapses number runs without checking numeric value. It is neither a Message-mode meaning checker nor a guarantee against changed amounts.
 - The current [history schema](../../Sources/LegatoCore/History.swift) has text, locale, engine and duration; it does not contain aligned raw-ASR/approved-correction pairs or retained audio. A history entry alone is not a supervised training example.
@@ -33,7 +33,7 @@ Important integration boundaries:
 | Option | Data and training | Deployment, memory and size | Assessment |
 |---|---|---|---|
 | Prompt + vocabulary, no training | Approved terms and examples; no optimizer | Current backends; vocabulary storage is small; ordinary inference cost remains | Baseline and first choice for names/jargon |
-| MLX LoRA/QLoRA | Mac-local paired text examples; Python mlx-lm or Swift training support | Existing Qwen base plus a small adapter; phone inference still needs foreground GPU and device memory proof | Best candidate for a later cleanup experiment |
+| MLX LoRA/QLoRA | Mac-local paired text examples; Python mlx-lm or Swift training support | Existing Qwen base plus a small adapter; phone inference needs an eligible GPU path or a CPU implementation, plus device memory proof | Best candidate for a later cleanup experiment |
 | Foundation Models custom adapter | Apple's rough guidance: 100–1,000 basic-task or 5,000+ complex-task examples; Mac 32 GB+ or Linux GPU | About 160 MB per adapter, tied to one system-model version; deployment entitlement | Avoid as a new long-term dependency under the current toolkit notice |
 | S1-mini | Already trained task specialist; local conversion would be a separate experiment | Qwen3 0.6B architecture, official BF16/GGUF artifacts; English-only declared support | Useful English comparator, not a verified bilingual solution |
 | FluidAudio vocabulary biasing | A term list, no training pairs or weight updates | Decoder biasing in the existing speech stack | Preferred first speech-personalization path |
