@@ -103,7 +103,7 @@ public final class DictationCoordinator {
     private struct HeldLease {
         let session: DictationSession
         let feed: EditFeed
-        let linger: Duration
+        var linger: Linger
     }
 
     private let activity: any ActivityClient
@@ -216,6 +216,22 @@ public final class DictationCoordinator {
         }
         pendingRelease = release
         await release.value
+    }
+
+    /// The keep-alive setting changed: a lease held between runs follows it. `.off` releases it now, any
+    /// other value re-arms it (a duration restarts its whole timer from now; `.indefinite` drops the
+    /// timer), so it stays ready without being re-activated. Does nothing without a held lease, and
+    /// nothing during a run (the run's own options decide what is kept when it ends).
+    public func updateKeepAlive(_ linger: Linger) async {
+        guard phase == .idle, pendingRelease == nil, let lease = held, lease.linger != linger else { return }
+        guard linger.holdsLease else {
+            await endKeepAlive()
+            return
+        }
+        await lease.session.setLinger(linger)
+        guard phase == .idle, let current = held, current.session === lease.session else { return }
+        held?.linger = linger
+        reportLease(leaseEnd(for: linger))
     }
 
     // MARK: Start
@@ -363,7 +379,7 @@ public final class DictationCoordinator {
     private func acquireSession(_ options: StartOptions, policy: AudioPolicy) async -> (DictationSession, EditFeed) {
         if let lease = held {
             held = nil
-            if options.keepAlive > .zero, lease.linger == options.keepAlive {
+            if options.keepAlive.holdsLease, lease.linger == options.keepAlive {
                 lease.session.onLeaseExpired = nil
                 return (lease.session, lease.feed)
             }
@@ -426,7 +442,7 @@ public final class DictationCoordinator {
             await flush(sessionFeed, of: s)
             let committed = live.committed
 
-            let keep = !releasingLease && options.keepAlive > .zero && s.leaseState == .armed
+            let keep = !releasingLease && options.keepAlive.holdsLease && s.leaseState == .armed
             if keep {
                 held = HeldLease(session: s, feed: sessionFeed, linger: options.keepAlive)
                 s.onLeaseExpired = { [weak self, weak s] in
@@ -435,7 +451,7 @@ public final class DictationCoordinator {
                 }
             }
             let landed = await sink?.runEnded(thisRun, committed: committed, text: entry?.text) ?? false
-            if keep, held?.session === s { reportLease(now().addingTimeInterval(options.keepAlive.timeInterval)) }
+            if keep, held?.session === s { reportLease(leaseEnd(for: options.keepAlive)) }
             if !keep { await retire(sessionFeed) }
 
             guard let entry else {
@@ -529,6 +545,12 @@ public final class DictationCoordinator {
         held = nil
         await retire(lease.feed)
         reportLease(nil)
+    }
+
+    /// When a lease that was just released with `linger` ends; `.distantFuture` for one with no expiry.
+    private func leaseEnd(for linger: Linger) -> Date {
+        guard let timeout = linger.timeout else { return .distantFuture }
+        return now().addingTimeInterval(timeout.timeInterval)
     }
 
     private func reportLease(_ until: Date?) {

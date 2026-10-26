@@ -13,7 +13,7 @@ struct Rig {
     let clock = ManualClock()
     let session: DictationSession
 
-    init(linger: Duration = .zero, policy: AudioPolicy = .default,
+    init(linger: Linger = .off, policy: AudioPolicy = .default,
          script: [TranscriptEvent] = [.init(text: "hello", isFinal: false), .init(text: "hello world", isFinal: true)],
          sleep: (@Sendable (Duration) async throws -> Void)? = nil) {
         engine = FakeEngine(log: log)
