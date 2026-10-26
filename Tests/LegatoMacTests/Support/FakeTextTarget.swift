@@ -50,6 +50,11 @@ final class FakeTextTarget: TextTarget {
         selection = UTF16Range(location: location, length: 0)
     }
 
+    /// The user selects text in the field.
+    func select(_ range: UTF16Range) {
+        selection = range
+    }
+
     /// Like a real field, clamps the range to the text instead of trapping.
     private func splice(_ range: UTF16Range, _ new: [UInt16]) {
         let lower = min(max(range.location, 0), units.count)

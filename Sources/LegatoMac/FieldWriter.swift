@@ -44,6 +44,9 @@ public enum DegradeReason: Sendable, Equatable {
 ///   may have landed.
 /// - A text the field is missing that the writer cannot place (the final text does not continue
 ///   what was written) is `.copy(final text)`; nothing is appended blindly.
+/// - `.insertOnStop` (Hold): when the field's selection or caret moved since the writer was created (the
+///   run's start), `finish` writes nothing and gives `.copy(final text)`, so a selection made while
+///   listening is never replaced.
 /// - Leading whitespace of the first phrase is not written, so the field matches the trimmed text.
 /// - Tentative text left in the field by a mid-run degrade in `.streamLive` is not cleaned up
 ///   by `finish`.
@@ -90,10 +93,15 @@ public final class FieldWriter {
     private var replacedText: String?
     /// `revert()` ran: the run was cancelled and the writer no longer touches the field.
     private var closed = false
+    /// `.insertOnStop`: the field's selection when the run started (nil when unreadable). The one write at
+    /// `finish` replaces the selection, so a selection or caret the user moved meanwhile is not written over.
+    private let startSelection: UTF16Range?
 
+    /// Create the writer when the run starts: `.insertOnStop` remembers the selection then.
     public init(target: (any TextTarget)?, mode: Mode = .streamCommitted) {
         self.target = target
         self.mode = mode
+        startSelection = mode == .insertOnStop ? try? target?.selectedRange() : nil
     }
 
     public func apply(_ edit: TranscriptEdit) {
@@ -153,7 +161,12 @@ public final class FieldWriter {
         if degradeReason == nil, !tentative.isEmpty { update(appending: "", tentative: "") }
         let final = (finalText ?? committed).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !final.isEmpty else { return .done }
-        guard target != nil else { return .paste(final) }
+        guard let target else { return .paste(final) }
+        // Hold: the user selected text or moved the caret while listening; writing would replace that.
+        if mode == .insertOnStop, spanStart == nil, degradeReason == nil, let startSelection,
+           (try? target.selectedRange()) != startSelection {
+            return .copy(final)
+        }
         guard let remainder = Self.remainder(of: final, after: written) else { return .copy(final) }
         let rest = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
 
