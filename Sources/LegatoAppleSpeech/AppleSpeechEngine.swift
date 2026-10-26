@@ -1,6 +1,7 @@
 import AVFAudio
 import Foundation
 import LegatoCore
+import OSLog
 import Speech
 import Synchronization
 
@@ -20,7 +21,18 @@ public final class AppleSpeechEngine: DictationEngine {
 
     private let run = Mutex<Run?>(nil)
 
-    public init() {}
+    private let vocabulary: (any VocabularyHintProvider)?
+
+    private static let log = Logger(subsystem: "app.legato", category: "AppleSpeechEngine")
+
+    /// - Parameter vocabulary: supplies hints (up to 50, for ``HintSink/appleSpeech``) set as the analyzer's
+    ///   contextual strings; none, or a failure to set them, means unbiased recognition.
+    public init(vocabulary: (any VocabularyHintProvider)? = nil) {
+        self.vocabulary = vocabulary
+    }
+
+    /// The hint provider this engine was built with.
+    public var vocabularyProvider: (any VocabularyHintProvider)? { vocabulary }
 
     // MARK: Assets
 
@@ -48,6 +60,7 @@ public final class AppleSpeechEngine: DictationEngine {
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw AppleSpeechError.noAnalyzerFormat
         }
+        await applyVocabulary(to: analyzer)
         // Resources load lazily by default; preheat so the first buffers are analyzed live.
         try await analyzer.prepareToAnalyze(in: format)
         run.withLock { $0 = Run(transcriber: transcriber, analyzer: analyzer, format: format, input: nil) }
@@ -112,6 +125,20 @@ public final class AppleSpeechEngine: DictationEngine {
     }
 
     // MARK: Helpers
+
+    /// Best-effort: a failure is logged and the dictation runs unbiased.
+    private func applyVocabulary(to analyzer: SpeechAnalyzer) async {
+        guard let vocabulary else { return }
+        let strings = AppleSpeechVocabulary.contextualStrings(await vocabulary.hints(for: .appleSpeech, limit: 50))
+        guard !strings.isEmpty else { return }
+        let context = AnalysisContext()
+        context.contextualStrings[.general] = strings
+        do {
+            try await analyzer.setContext(context)
+        } catch {
+            Self.log.error("setContext failed, continuing unbiased: \(String(describing: error), privacy: .public)")
+        }
+    }
 
     private static func resolve(_ locale: Locale?) async throws -> Locale {
         try await LocaleResolver.resolve(requested: locale) { await SpeechTranscriber.supportedLocale(equivalentTo: $0) }

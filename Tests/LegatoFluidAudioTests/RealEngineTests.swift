@@ -94,6 +94,11 @@ private func dictate(
     return (text, events, prepare)
 }
 
+private struct FixedHints: VocabularyHintProvider {
+    let hints: [VocabularyHint]
+    func hints(for sink: HintSink, limit: Int) async -> [VocabularyHint] { Array(hints.prefix(limit)) }
+}
+
 @Suite("Real FluidAudio engines", .serialized)
 struct RealEngineTests {
     @Test(.enabled(if: realEngineEnabled, "set LEGATO_REAL_ENGINE=1 to run against the on-device models"))
@@ -162,6 +167,29 @@ struct RealEngineTests {
         for phrase in ["guten morgen", "backend", "ich schlage vor", "first milestone", "feierabend"] {
             #expect(lowered.contains(phrase), "missing \"\(phrase)\"")
         }
+    }
+
+    /// Transcribes a `say` clip with and without a hint for its rare terms and prints both. Asserts only that
+    /// both runs produce text: whether biasing changes anything depends on the installed asset set (FluidAudio
+    /// silently disables it on a fused-argmax one), so an equal output is reported, not failed.
+    @Test(.enabled(if: realEngineEnabled, "set LEGATO_REAL_ENGINE=1 to run against the on-device models"), arguments: ["vocab-en", "vocab-de"])
+    func vocabularyBiasChangesOutput(clip: String) async throws {
+        let manager = makeManager()
+        try await ensureInstalled(manager, FluidAudioModels.nemotronID(.latin, chunkMs: 1120))
+        // Trailing silence lets the endpointer commit the last words, as it would live.
+        let samples = try fixtureSamples(clip) + [Float](repeating: 0, count: 16_000 * 2)
+
+        let plain = NemotronEngine(variant: .latin, chunkMs: 1120, models: manager)
+        let without = try await dictate(plain, samples: samples)
+        let hints = FixedHints(hints: [VocabularyHint(text: "Grunwald", spellings: ["Grünwald"]), VocabularyHint(text: "Kubernetes")])
+        let biased = NemotronEngine(variant: .latin, chunkMs: 1120, models: manager, vocabulary: hints)
+        let with = try await dictate(biased, samples: samples)
+
+        print("NEMOTRON-VOCAB \(clip) without: \"\(without.text)\"")
+        print("NEMOTRON-VOCAB \(clip) with:    \"\(with.text)\"")
+        if with.text == without.text { print("NEMOTRON-VOCAB \(clip): biasing inactive (identical output)") }
+        #expect(!without.text.isEmpty)
+        #expect(!with.text.isEmpty)
     }
 
     @Test(.enabled(if: realEngineEnabled, "set LEGATO_REAL_ENGINE=1 to run against the on-device models"))

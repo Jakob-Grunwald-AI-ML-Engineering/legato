@@ -7,9 +7,14 @@ import Testing
 
 private let realEngineEnabled = ProcessInfo.processInfo.environment["LEGATO_REAL_ENGINE"] == "1"
 
+private struct FixedHints: VocabularyHintProvider {
+    let hints: [VocabularyHint]
+    func hints(for sink: HintSink, limit: Int) async -> [VocabularyHint] { Array(hints.prefix(limit)) }
+}
+
 /// Reads the fixture and resamples it to Float32 mono at `spec`.
-private func fixtureSamples(spec: AudioFormatSpec) throws -> [Float] {
-    let url = try #require(Bundle.module.url(forResource: "hello-en", withExtension: "aiff", subdirectory: "Fixtures"))
+private func fixtureSamples(spec: AudioFormatSpec, name: String = "hello-en") throws -> [Float] {
+    let url = try #require(Bundle.module.url(forResource: name, withExtension: "aiff", subdirectory: "Fixtures"))
     let file = try AVAudioFile(forReading: url)
     let inBuf = try #require(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)))
     try file.read(into: inBuf)
@@ -73,5 +78,48 @@ struct RealEngineTests {
         let lowered = text.lowercased()
         #expect(lowered.contains("hello"))
         #expect(lowered.contains("dictation"))
+    }
+
+    /// Transcribes a `say` clip with and without a hint for its rare terms and prints both. Asserts only that
+    /// both runs produce text; an equal output is reported as "biasing inactive", not failed.
+    @Test(.enabled(if: realEngineEnabled, "set LEGATO_REAL_ENGINE=1 to run against the on-device model"))
+    func vocabularyBiasChangesOutput() async throws {
+        let locale = Locale(identifier: "en_US")
+        func transcribe(_ engine: AppleSpeechEngine) async throws -> String {
+            let spec = try await engine.prepare(locale: locale)
+            let samples = try fixtureSamples(spec: spec, name: "vocab-en")
+            let chunkSize = Int(spec.sampleRate / 10)
+            let (input, feed) = AsyncStream.makeStream(of: AudioChunk.self)
+            let events = engine.transcribe(input)
+            let feeder = Task {
+                var i = 0
+                while i < samples.count {
+                    let end = min(i + chunkSize, samples.count)
+                    feed.yield(AudioChunk(samples: Array(samples[i..<end]), format: spec))
+                    i = end
+                }
+                feed.finish()
+            }
+            let collector = Task {
+                var assembler = TranscriptAssembler()
+                for try await event in events { _ = assembler.apply(event) }
+                return assembler.committedText
+            }
+            await feeder.value
+            try await engine.finish()
+            return try await collector.value
+        }
+
+        let without = try await transcribe(AppleSpeechEngine())
+        let hints = FixedHints(hints: [VocabularyHint(text: "Grunwald", spellings: ["Grünwald"]), VocabularyHint(text: "Kubernetes")])
+        let engine = AppleSpeechEngine(vocabulary: hints)
+        #expect(engine.vocabularyProvider != nil)
+        let with = try await transcribe(engine)
+
+        print("APPLE-VOCAB without: \"\(without)\"")
+        print("APPLE-VOCAB with:    \"\(with)\"")
+        if with == without { print("APPLE-VOCAB: biasing inactive (identical output)") }
+        #expect(!without.isEmpty)
+        #expect(!with.isEmpty)
     }
 }

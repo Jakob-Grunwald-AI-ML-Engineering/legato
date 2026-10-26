@@ -21,6 +21,7 @@ public final class NemotronEngine: DictationEngine {
     private let rmsThreshold: Float
     private let models: ModelManager
     private let modelID: String
+    private let vocabulary: (any VocabularyHintProvider)?
     private let run = Mutex<EngineRun<NemotronBackend>?>(nil)
 
     /// - Parameters:
@@ -31,6 +32,8 @@ public final class NemotronEngine: DictationEngine {
     ///   - rmsThreshold: chunk RMS below this counts as silence.
     ///   - models: where the model is installed from and checked.
     ///   - modelID: the catalog id of the model; defaults to the one for `variant` and `chunkMs`.
+    ///   - vocabulary: supplies hints (up to 50, for ``HintSink/nemotron``) that bias each session's decoding;
+    ///     none means no biasing.
     public init(
         variant: NemotronVariant = .multilingual,
         chunkMs: Int = 1120,
@@ -38,7 +41,8 @@ public final class NemotronEngine: DictationEngine {
         silenceMs: Int = 1200,
         rmsThreshold: Float = 0.004,
         models: ModelManager,
-        modelID: String? = nil
+        modelID: String? = nil,
+        vocabulary: (any VocabularyHintProvider)? = nil
     ) {
         self.variant = variant
         self.chunkMs = chunkMs
@@ -46,9 +50,13 @@ public final class NemotronEngine: DictationEngine {
         self.silenceMs = silenceMs
         self.rmsThreshold = rmsThreshold
         self.models = models
+        self.vocabulary = vocabulary
         self.modelID = modelID ?? FluidAudioModels.nemotronID(variant, chunkMs: chunkMs)
         self.id = FluidAudioModels.nemotronID(variant, chunkMs: chunkMs)
     }
+
+    /// The hint provider this engine was built with.
+    public var vocabularyProvider: (any VocabularyHintProvider)? { vocabulary }
 
     public func installAssets(locale: Locale?) -> AsyncStream<Double> {
         EngineSupport.installAssets(models: models, id: modelID)
@@ -62,6 +70,10 @@ public final class NemotronEngine: DictationEngine {
         // Per-session state only: the heavy models come from the cache.
         let manager = StreamingNemotronMultilingualAsrManager(configuration: FluidAudioCompute.configuration())
         try await manager.loadFromShared(shared)
+        if let vocabulary {
+            // Survives `reset()`, so once per session is enough. `[]` leaves biasing off.
+            await manager.setCustomVocabulary(NemotronVocabulary.terms(await vocabulary.hints(for: .nemotron, limit: 50)))
+        }
         var clamp = LanguageClamp(preferred: LanguageClamp.preferred(configured: preferredLocales, session: locale))
         clamp.beginSession()
         await manager.setLanguage(clamp.hint)
