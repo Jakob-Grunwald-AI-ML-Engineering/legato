@@ -13,6 +13,7 @@ struct SessionDescription: Equatable {
     var duckOthers: Bool
     var allowBluetoothA2DP: Bool
     var defaultToSpeaker: Bool
+    var interruptSpokenAudio: Bool
 
     init(_ config: SessionConfig) {
         switch config.category { case .playAndRecord: category = .playAndRecord }
@@ -21,5 +22,6 @@ struct SessionDescription: Equatable {
         duckOthers = config.options.contains(.duckOthers)
         allowBluetoothA2DP = config.options.contains(.allowBluetoothA2DP)
         defaultToSpeaker = config.options.contains(.defaultToSpeaker)
+        interruptSpokenAudio = config.options.contains(.interruptSpokenAudio)
     }
 }

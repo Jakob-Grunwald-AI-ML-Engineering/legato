@@ -22,9 +22,30 @@ xcodebuild -version
 
 scheme=LegatoKit-Package
 
+# Generate the iOS app project and build it (app + widget extension) for the simulator, unsigned.
+build_ios_app() {
+  has_ios_app || return 0
+  ensure_xcodegen
+  (cd Apps/iOS && "$XCODEGEN" generate)
+  xcodebuild build -quiet -project Apps/iOS/Legato.xcodeproj -scheme Legato \
+    -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+}
+
+# Generate the macOS app project and build it unsigned.
+build_mac_app() {
+  has_mac_app || return 0
+  ensure_xcodegen
+  (cd Apps/macOS && "$XCODEGEN" generate)
+  xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato \
+    -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO
+}
+
 if [ "$mode" = quick ]; then
   swift build
+  swift build --build-tests   # PRs compile the test targets too, on the pinned Xcode, without running them
   xcodebuild build -quiet -scheme "$scheme" -destination 'generic/platform=iOS Simulator'
+  build_ios_app
+  build_mac_app
   exit 0
 fi
 
@@ -37,3 +58,11 @@ echo "Simulator: $udid"
 
 swift test
 xcodebuild test -quiet -scheme "$scheme" -destination "platform=iOS Simulator,id=$udid"
+build_ios_app
+build_mac_app
+
+# Release build + scan: no fake engine, e2e hook or debug switch may reach the shipping binary. It builds
+# only (no simulator needed), so it runs here rather than in the simulator run.
+if has_ios_app; then
+  scripts/e2e/ios-sim.sh release-check
+fi

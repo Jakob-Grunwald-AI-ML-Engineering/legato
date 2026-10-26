@@ -13,6 +13,8 @@ let package = Package(
         .library(name: "LegatoEngines", targets: ["LegatoEngines"]),
         .library(name: "LegatoPostProcessing", targets: ["LegatoPostProcessing"]),
         .library(name: "LegatoMLX", targets: ["LegatoMLX"]),
+        .library(name: "LegatoMac", targets: ["LegatoMac"]),
+        .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
     ],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
@@ -23,6 +25,9 @@ let package = Package(
     targets: [
         .target(name: "LegatoCore"),
         .testTarget(name: "LegatoCoreTests", dependencies: ["LegatoCore"]),
+        // The keyboard extension links only this (Foundation only; it must not depend on LegatoCore).
+        .target(name: "LegatoKeyboardCore"),
+        .testTarget(name: "LegatoKeyboardCoreTests", dependencies: ["LegatoKeyboardCore"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore"]),
         .target(name: "LegatoAppleSpeech", dependencies: ["LegatoCore"]),
@@ -88,6 +93,8 @@ let package = Package(
             resources: [.copy("Clips")]
         ),
         .testTarget(name: "legato-benchTests", dependencies: ["legato-bench"]),
+        .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
+        .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
     ],
     swiftLanguageModes: [.v6]
 )

@@ -9,6 +9,21 @@ import Testing
         #expect(Set(AudioPolicy.offeredPolicies) == [.duckOthers, .mixWithOthers])
     }
 
+    @Test func experimentalPoliciesAreNeverOffered() {
+        #expect(Set(AudioPolicy.experimentalPolicies) == [.pauseOthers, .duckMusicPauseSpoken])
+        #expect(Set(AudioPolicy.offeredPolicies).isDisjoint(with: AudioPolicy.experimentalPolicies))
+    }
+
+    @Test func duckMusicPauseSpokenConfig() {
+        let c = AudioPolicy.duckMusicPauseSpoken.sessionConfig
+        #expect(c.category == .playAndRecord)
+        #expect(c.options.contains(.duckOthers))
+        #expect(c.options.contains(.interruptSpokenAudio))
+        #expect(!c.options.contains(.mixWithOthers))
+        #expect(c.options.contains(.allowBluetoothA2DP))
+        #expect(c.options.contains(.defaultToSpeaker))
+    }
+
     @Test func duckConfig() {
         let c = AudioPolicy.duckOthers.sessionConfig
         #expect(c.category == .playAndRecord)

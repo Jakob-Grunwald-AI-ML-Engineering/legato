@@ -13,6 +13,54 @@ has_app_targets() {
   [ -e project.yml ] || compgen -G "*.xcodeproj" > /dev/null
 }
 
+# 0 if the repo holds the iOS app's XcodeGen spec.
+has_ios_app() {
+  [ -e Apps/iOS/project.yml ]
+}
+
+# 0 if the repo holds the macOS app's XcodeGen spec.
+has_mac_app() {
+  [ -e Apps/macOS/project.yml ]
+}
+
+# SHA256 of the XcodeGen release zip for the version pinned in .xcodegen-version.
+# Bump both together: curl -fsSL -o x.zip \
+#   https://github.com/yonaskolb/XcodeGen/releases/download/<version>/xcodegen.zip && shasum -a 256 x.zip
+XCODEGEN_ZIP_SHA256="4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+
+# Set XCODEGEN to an executable of the pinned XcodeGen version. Uses the installed one when its
+# version matches; otherwise downloads the release zip, verifies its SHA256 and runs it from the
+# extracted tree (the binary needs the sibling share/ directory, so it is never copied out alone).
+ensure_xcodegen() {
+  local version dir zip tmp
+  version="$(tr -d '[:space:]' < .xcodegen-version)"
+  if command -v xcodegen > /dev/null 2>&1 \
+    && [ "$(xcodegen --version 2> /dev/null | awk '{print $NF}')" = "$version" ]; then
+    XCODEGEN="$(command -v xcodegen)"
+    return 0
+  fi
+
+  dir="${XDG_CACHE_HOME:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}/legato-xcodegen-$version"
+  if [ ! -x "$dir/xcodegen/bin/xcodegen" ]; then
+    echo "::notice::Installed xcodegen is not $version; downloading the pinned release."
+    tmp="$(mktemp -d)"
+    zip="$tmp/xcodegen.zip"
+    curl -fsSL --retry 3 -o "$zip" \
+      "https://github.com/yonaskolb/XcodeGen/releases/download/$version/xcodegen.zip" || return 1
+    if [ "$(shasum -a 256 "$zip" | awk '{print $1}')" != "$XCODEGEN_ZIP_SHA256" ]; then
+      echo "::error::XcodeGen $version zip does not match the pinned SHA256."
+      rm -rf "$tmp"
+      return 1
+    fi
+    unzip -q "$zip" -d "$tmp/extracted" || return 1
+    rm -rf "$dir"
+    mkdir -p "$(dirname "$dir")"
+    mv "$tmp/extracted" "$dir"
+    rm -rf "$tmp"
+  fi
+  XCODEGEN="$dir/xcodegen/bin/xcodegen"
+}
+
 # Pin Xcode from .xcode-version. Missing on CI is an error; locally the default is used.
 select_xcode() {
   local version app

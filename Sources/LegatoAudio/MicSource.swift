@@ -30,6 +30,50 @@ final class TapRouter: Sendable {
     }
 }
 
+/// Realtime-thread probe: when the first buffer arrived and how loud the first ~0.5 s were.
+final class FirstBufferProbe: Sendable {
+    private struct State {
+        var firstMs: Int?
+        var sumSquares = 0.0
+        var frames = 0
+        var done = false
+    }
+
+    private let state = Mutex(State())
+    private let started: ContinuousClock.Instant
+    private let sampleRate: Double
+    private let report: @Sendable (MicSource.FirstBuffer) -> Void
+
+    init(sampleRate: Double, report: @escaping @Sendable (MicSource.FirstBuffer) -> Void) {
+        self.started = .now
+        self.sampleRate = sampleRate
+        self.report = report
+    }
+
+    func observe(_ buffer: AVAudioPCMBuffer) {
+        let frames = Int(buffer.frameLength)
+        var sum = 0.0
+        if let data = buffer.floatChannelData?[0] {
+            for i in 0..<frames { let v = Double(data[i]); sum += v * v }
+        }
+        let result: MicSource.FirstBuffer? = state.withLock { s in
+            guard !s.done else { return nil }
+            if s.firstMs == nil {
+                let d = ContinuousClock.now - started
+                s.firstMs = Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
+            }
+            s.sumSquares += sum
+            s.frames += frames
+            guard Double(s.frames) >= sampleRate * 0.5 else { return nil }
+            s.done = true
+            return MicSource.FirstBuffer(
+                msSinceStart: s.firstMs ?? 0, rms: (s.sumSquares / Double(max(s.frames, 1))).squareRoot(),
+                frames: s.frames, sampleRate: sampleRate)
+        }
+        if let result { report(result) }
+    }
+}
+
 /// Microphone `AudioSource`. The engine runs for a whole lease; runs attach and detach streams.
 public final class MicSource: AudioSource {
     private struct State {
@@ -43,32 +87,91 @@ public final class MicSource: AudioSource {
         init(_ engine: AVAudioEngine) { self.engine = engine }
     }
 
+    /// The outcome of one engine start attempt, for diagnostics.
+    public struct Attempt: Sendable {
+        /// 0-based; at most `maxAttempts` per `start(format:)`.
+        public let index: Int
+        /// The input node's format on this attempt (0 when the route was not ready).
+        public let inputSampleRate: Double
+        public let inputChannelCount: Int
+        /// nil when the engine started.
+        public let error: (any Error)?
+    }
+
+    /// Signal check after a successful start, for diagnostics: no callback means no buffer arrived.
+    public struct FirstBuffer: Sendable {
+        /// From just before the engine started to the first tap buffer.
+        public let msSinceStart: Int
+        /// RMS (0...1) of the first channel over the first ~0.5 s of input.
+        public let rms: Double
+        public let frames: Int
+        public let sampleRate: Double
+    }
+
+    /// 8 attempts, 150 ms apart.
+    static let maxAttempts = 8
+    static let retryDelay: Duration = .milliseconds(150)
+
     private let state = Mutex(State())
     private let router = TapRouter()
+    private let onAttempt: (@Sendable (Attempt) -> Void)?
+    private let onFirstBuffer: (@Sendable (FirstBuffer) -> Void)?
 
-    public init() {}
+    /// - Parameters:
+    ///   - onAttempt: called after every start attempt, success or failure (diagnostics only).
+    ///   - onFirstBuffer: called once per started engine, after ~0.5 s of input (diagnostics only).
+    public init(
+        onAttempt: (@Sendable (Attempt) -> Void)? = nil,
+        onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil
+    ) {
+        self.onAttempt = onAttempt
+        self.onFirstBuffer = onFirstBuffer
+    }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         await stop()
-        // Fresh engine, created after the session is active: an engine made earlier caches an
-        // input format that installTap then rejects.
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let inFormat = input.outputFormat(forBus: 0)
-        guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else { throw MicSourceError.invalidInputFormat }
-        guard let converter = BufferConverter(from: inFormat, to: format) else { throw MicSourceError.converterUnavailable }
-
-        input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(router, converter))
-        engine.prepare()
-        do {
-            try await Self.startWithRetry(engine)
-        } catch {
-            input.removeTap(onBus: 0)
-            throw error
+        // The route can still be settling right after session activation (kAUStartIO 'what', or a
+        // zero input sample rate), and an engine that failed to start stays unusable. So every
+        // attempt builds a fresh engine, after the session is active (an engine made earlier caches
+        // an input format that installTap then rejects), and is gated on a valid input format.
+        var lastError: (any Error)?
+        for attempt in 0..<Self.maxAttempts {
+            if attempt > 0 { try await Task.sleep(for: Self.retryDelay) }
+            let engine = AVAudioEngine()
+            let input = engine.inputNode
+            let inFormat = input.outputFormat(forBus: 0)
+            let report = { [onAttempt] (error: (any Error)?) in
+                onAttempt?(Attempt(
+                    index: attempt, inputSampleRate: inFormat.sampleRate,
+                    inputChannelCount: Int(inFormat.channelCount), error: error))
+            }
+            guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
+                lastError = MicSourceError.invalidInputFormat
+                report(lastError)
+                continue
+            }
+            guard let converter = BufferConverter(from: inFormat, to: format) else {
+                report(MicSourceError.converterUnavailable)
+                throw MicSourceError.converterUnavailable
+            }
+            let probe = onFirstBuffer.map { FirstBufferProbe(sampleRate: inFormat.sampleRate, report: $0) }
+            input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(router, converter, probe))
+            engine.prepare()
+            do {
+                try engine.start()
+            } catch {
+                input.removeTap(onBus: 0)
+                engine.stop()
+                lastError = error
+                report(error)
+                continue
+            }
+            report(nil)
+            let box = EngineBox(engine)
+            state.withLock { $0.engine = box }
+            return makeStream()
         }
-        let box = EngineBox(engine)
-        state.withLock { $0.engine = box }
-        return makeStream()
+        throw lastError ?? MicSourceError.invalidInputFormat
     }
 
     public func route() async throws -> AsyncStream<AudioChunk> {
@@ -98,25 +201,11 @@ public final class MicSource: AudioSource {
         return stream
     }
 
-    /// The route can still be settling right after session activation (kAUStartIO 'what').
-    private static func startWithRetry(_ engine: AVAudioEngine) async throws {
-        var lastError: (any Error)?
-        for attempt in 0..<8 {
-            do {
-                try engine.start()
-                return
-            } catch {
-                lastError = error
-                if attempt < 7 { try await Task.sleep(for: .milliseconds(150)) }
-            }
-        }
-        throw lastError ?? MicSourceError.invalidInputFormat
-    }
-
     /// Built outside any actor: a closure formed in an isolated context inherits that isolation,
     /// and Swift 6 traps when AVFAudio calls it on the realtime thread.
-    nonisolated private static func tapBlock(_ router: TapRouter, _ converter: BufferConverter) -> AVAudioNodeTapBlock {
+    nonisolated private static func tapBlock(_ router: TapRouter, _ converter: BufferConverter, _ probe: FirstBufferProbe?) -> AVAudioNodeTapBlock {
         { buffer, _ in
+            probe?.observe(buffer)
             if let chunk = converter.convert(buffer) { router.handle(chunk) }
         }
     }
