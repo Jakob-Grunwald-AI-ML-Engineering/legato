@@ -4,7 +4,7 @@ import Foundation
 public enum KeyboardMode: Sendable, Equatable {
     /// The typing keyboard.
     case full
-    /// One row: status text, mic key (and the globe key when iOS asks for it). The "Compact keyboard" setting.
+    /// One row (`StripRow`): chevron, globe key (when iOS asks for it), status, delete, return, mic key. The "Compact keyboard" setting.
     case strip
 }
 
