@@ -77,8 +77,8 @@ struct KeyboardRootView: View {
         .padding(.horizontal, 8)
         .frame(width: size.width, height: size.height)
         // Each control takes the swipe itself (a gesture on the row loses to the controls' own); the gaps
-        // and margins take it here.
-        .background(Color.clear.contentShape(Rectangle()).gesture(swipe))
+        // and margins take it here. Not `Color.clear`: the keyboard gets no touches on fully clear pixels.
+        .background(Color.black.opacity(0.001).gesture(swipe))
     }
 
     /// A vertical swipe that expands the strip or collapses the full keyboard (`KeyboardController.swiped`).
@@ -102,6 +102,7 @@ struct KeyboardRootView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.001))
             .contentShape(Rectangle())
             .accessibilityIdentifier("keyboard.hint")
             .simultaneousGesture(swipe)
