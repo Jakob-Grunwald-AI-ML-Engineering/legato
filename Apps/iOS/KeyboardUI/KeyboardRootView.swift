@@ -7,6 +7,8 @@ import UIKit
 struct KeyboardRootView: View {
     let controller: KeyboardController
     @Environment(\.colorScheme) private var systemScheme
+    /// Whether the current drag already toggled (`swipe`); resets when the drag ends or is cancelled.
+    @GestureState private var swipeFired = false
 
     var body: some View {
         let typing = controller.typing!
@@ -80,10 +82,17 @@ struct KeyboardRootView: View {
     }
 
     /// A vertical swipe that expands the strip or collapses the full keyboard (`KeyboardController.swiped`).
+    /// It fires while the finger moves, once per drag: a swipe up leaves the strip's few points within a
+    /// moment, and iOS then cancels the touch, so an end-of-drag handler would never run.
     private var swipe: some Gesture {
-        DragGesture(minimumDistance: 12).onEnded { value in
-            controller.swiped(dx: value.translation.width, dy: value.translation.height)
-        }
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .updating($swipeFired) { value, fired, _ in
+                guard !fired else { return }
+                let dx = value.translation.width, dy = value.translation.height
+                guard controller.expansion.swipeToggles(dx: dx, dy: dy) else { return }
+                fired = true
+                Task { @MainActor in controller.swiped(dx: dx, dy: dy) }
+            }
     }
 
     private var stripStatus: some View {

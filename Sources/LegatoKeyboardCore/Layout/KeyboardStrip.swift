@@ -39,7 +39,7 @@ public struct KeyboardExpansion: Sendable, Equatable {
     }
 
     /// The least vertical travel, in points, that counts as a swipe.
-    public static let swipeDistance = 24.0
+    public static let swipeDistance = 16.0
 
     /// Whether a drag (screen points, y down) on the strip or the full keyboard's top bar toggles: up on the
     /// strip expands, down on the full keyboard collapses; it must be long enough and more vertical than not.
