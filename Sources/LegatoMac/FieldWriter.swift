@@ -97,6 +97,8 @@ public final class FieldWriter {
         case .replaceVolatile(let text):
             guard degradeReason == nil, mode == .streamLive else { return }
             update(appending: "", tentative: text)
+        case .revise:
+            break
         }
     }
 

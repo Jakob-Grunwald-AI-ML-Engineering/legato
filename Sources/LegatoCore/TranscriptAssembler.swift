@@ -23,6 +23,39 @@ public enum TranscriptEdit: Sendable, Equatable {
     case commit(delta: String)
     /// Replace the currently shown volatile (tentative) text; empty string clears it.
     case replaceVolatile(String)
+    /// Replace an earlier committed span with its cleaned text (live cleanup). Positions are in the raw
+    /// committed text, which itself never changes.
+    case revise(TranscriptRevision)
+}
+
+/// A committed span replaced after the fact: live cleanup swaps a segment's raw text for its cleaned text.
+///
+/// Revisions of a run never overlap and arrive in order of `start`. Positions count characters of the
+/// run's raw committed text (everything the `.commit` edits appended), so they stay valid however many
+/// revisions came before.
+public struct TranscriptRevision: Sendable, Equatable, Codable {
+    /// Where the span starts in the raw committed text, in characters.
+    public var start: Int
+    /// The span's raw text, as it was committed (one segment, or at the stop the segments still raw).
+    public var raw: String
+    /// What replaces it: the cleaned text, with the raw span's leading and trailing whitespace kept.
+    public var text: String
+
+    public init(start: Int, raw: String, text: String) {
+        self.start = start
+        self.raw = raw
+        self.text = text
+    }
+
+    /// Where the span ends in the raw committed text.
+    public var end: Int { start + raw.count }
+
+    /// The revision of `raw` at `start` to `cleaned` (trimmed), keeping `raw`'s surrounding whitespace.
+    public static func cleaning(_ raw: String, at start: Int, to cleaned: String) -> TranscriptRevision {
+        let lead = String(raw.prefix(while: \.isWhitespace))
+        let trail = String(raw.reversed().prefix(while: \.isWhitespace).reversed())
+        return TranscriptRevision(start: start, raw: raw, text: lead + cleaned + trail)
+    }
 }
 
 public struct TranscriptAssembler: Sendable {

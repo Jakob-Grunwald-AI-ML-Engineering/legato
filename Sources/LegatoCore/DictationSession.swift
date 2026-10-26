@@ -3,6 +3,12 @@ import Foundation
 /// Orchestrates one dictation: an *audio lease* (policy active, mic armed) hosting *runs*
 /// (one engine transcription each). With a `linger` the lease outlives a run so the next
 /// run reuses the armed mic without re-activating the session.
+///
+/// Live cleanup (the post-processor's `cleansSegmentsLive`, read when a run starts): every committed
+/// segment is cleaned in the background, one at a time and in order, with the cleaned text before it as
+/// context, and published as a `.revise` edit; recognition never waits for it. At the stop the segment in
+/// flight finishes, the segments still raw are cleaned in one pass, and the entry keeps the revised text
+/// (`rawText` the engine's). An abort cancels the cleanup and revises nothing more.
 @MainActor
 public final class DictationSession {
     public enum LeaseState: Sendable, Equatable { case idle, arming, armed }
@@ -47,6 +53,27 @@ public final class DictationSession {
     private var generation = 0
     /// The run's own abort teardown (stream failure) is in progress.
     private var isAborting = false
+
+    /// One committed segment of a live-cleaned run.
+    private struct LiveSegment {
+        /// Where it starts in the raw committed text, in characters.
+        let start: Int
+        let raw: String
+        /// What the revised text shows for it once handled (its cleaned text, or its raw text when cleanup
+        /// failed or changed nothing; empty for a segment a multi-segment revision covered). Nil: not yet.
+        var shown: String?
+    }
+
+    /// The current run cleans its segments live.
+    private var cleansLive = false
+    private var segments: [LiveSegment] = []
+    /// The first segment not cleaned (or being cleaned) yet.
+    private var nextToClean = 0
+    private var cleaner: Task<Void, Never>?
+    /// A stop began: the cleaner takes no further segment (the stop pass cleans the rest).
+    private var liveStopping = false
+    /// How much of the cleaned text before a segment it gets as context (its end).
+    static let liveContextCharacters = 400
     private var settleWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(
@@ -108,6 +135,7 @@ public final class DictationSession {
         }
 
         runState = .finishing
+        liveStopping = true
         var entry: DictationEntry?
         var failure: (any Error)?
         do {
@@ -115,8 +143,13 @@ public final class DictationSession {
             try await engine.finish()
             await consumeTask?.value
             if let streamFailure { throw streamFailure }
+            if cleansLive, let postProcessor { await finishLiveCleanup(with: postProcessor) }
             if var e = partialEntry() {
-                if let postProcessor { await postProcess(&e, with: postProcessor) }
+                if cleansLive {
+                    applyLiveCleanup(to: &e)
+                } else if let postProcessor {
+                    await postProcess(&e, with: postProcessor)
+                }
                 try await history.append(e)
                 entry = e
             }
@@ -126,6 +159,7 @@ public final class DictationSession {
 
         // Every exit ends this run's consumer, so nothing of it can reach a later run.
         generation += 1
+        cancelLiveCleanup()
         consumeTask?.cancel()
         await consumeTask?.value
         consumeTask = nil
@@ -199,6 +233,10 @@ public final class DictationSession {
             assembler = TranscriptAssembler()
             runStart = now()
             runLocale = locale
+            cleansLive = postProcessor?.cleansSegmentsLive ?? false
+            segments = []
+            nextToClean = 0
+            liveStopping = false
             let events = engine.transcribe(input)
             runState = .listening
             generation += 1
@@ -223,7 +261,10 @@ public final class DictationSession {
         do {
             for try await event in events {
                 guard gen == generation else { return }
-                for edit in assembler.apply(event) { publish(edit) }
+                for edit in assembler.apply(event) {
+                    publish(edit)
+                    if cleansLive, case .commit(let delta) = edit { addLiveSegment(delta) }
+                }
             }
         } catch {
             guard gen == generation else { return }
@@ -232,6 +273,7 @@ public final class DictationSession {
                 runState = .finishing // blocks stop() while aborting
                 isAborting = true
                 generation += 1
+                cancelLiveCleanup()
                 consumeTask = nil
                 clearVolatile()
                 await source.detach()
@@ -246,6 +288,89 @@ public final class DictationSession {
                 streamFailure = error // stop() is in flight; it reports the failure
             }
         }
+    }
+
+    // MARK: Live cleanup
+
+    private func addLiveSegment(_ raw: String) {
+        let start = segments.last.map { $0.start + $0.raw.count } ?? 0
+        segments.append(LiveSegment(start: start, raw: raw))
+        startCleaner()
+    }
+
+    /// Starts the cleaner unless it runs already: it works through the segments in order, one at a time.
+    private func startCleaner() {
+        guard cleaner == nil, !liveStopping, nextToClean < segments.count, let processor = postProcessor else { return }
+        let gen = generation
+        cleaner = Task { await self.cleanSegments(with: processor, generation: gen) }
+    }
+
+    private func cleanSegments(with processor: any TranscriptPostProcessor, generation gen: Int) async {
+        while gen == generation, !liveStopping, !Task.isCancelled, nextToClean < segments.count {
+            let index = nextToClean
+            nextToClean += 1
+            let raw = segments[index].raw
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            var out: String?
+            if !text.isEmpty {
+                out = try? await processor.processSegment(
+                    text, context: liveContext(before: index), locale: runLocale ?? Locale.current, atStop: false)
+            }
+            guard gen == generation, !Task.isCancelled else { return }
+            settle(index..<index + 1, cleaned: out)
+        }
+        if gen == generation { cleaner = nil }
+    }
+
+    /// At the stop: lets the segment in flight finish, then cleans the segments still raw in one pass.
+    private func finishLiveCleanup(with processor: any TranscriptPostProcessor) async {
+        await cleaner?.value
+        cleaner = nil
+        let pending = nextToClean..<segments.count
+        guard !pending.isEmpty else { return }
+        nextToClean = segments.count
+        let raw = segments[pending].map(\.raw).joined()
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var out: String?
+        if !text.isEmpty {
+            out = try? await processor.processSegment(
+                text, context: liveContext(before: pending.lowerBound), locale: runLocale ?? Locale.current,
+                atStop: true)
+        }
+        settle(pending, cleaned: out)
+    }
+
+    /// Records the outcome for `range` and publishes its revision when the cleaned text differs.
+    private func settle(_ range: Range<Int>, cleaned out: String?) {
+        let raw = segments[range].map(\.raw).joined()
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = out?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !cleaned.isEmpty, cleaned != text else {
+            for i in range { segments[i].shown = segments[i].raw }
+            return
+        }
+        let revision = TranscriptRevision.cleaning(raw, at: segments[range.lowerBound].start, to: cleaned)
+        for i in range { segments[i].shown = i == range.lowerBound ? revision.text : "" }
+        publish(.revise(revision))
+    }
+
+    /// The revised text before segment `index`, its end only, trimmed.
+    private func liveContext(before index: Int) -> String {
+        let text = segments[..<index].map { $0.shown ?? $0.raw }.joined()
+        return String(text.suffix(Self.liveContextCharacters)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The entry of a live-cleaned run: the revised text, with the engine's as `rawText` when they differ.
+    private func applyLiveCleanup(to entry: inout DictationEntry) {
+        let revised = segments.map { $0.shown ?? $0.raw }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !revised.isEmpty, revised != entry.text else { return }
+        entry.rawText = entry.text
+        entry.text = revised
+    }
+
+    private func cancelLiveCleanup() {
+        cleaner?.cancel()
+        cleaner = nil
     }
 
     private func publish(_ edit: TranscriptEdit) {

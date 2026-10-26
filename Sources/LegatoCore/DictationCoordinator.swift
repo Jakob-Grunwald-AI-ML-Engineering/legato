@@ -732,7 +732,11 @@ public final class DictationCoordinator {
             for await edit in edits {
                 guard let self else { return }
                 live.apply(edit)
-                sink?.update(committed: live.committed, volatile: live.volatile)
+                if case .revise(let revision) = edit {
+                    sink?.revised(revision)
+                } else {
+                    sink?.update(committed: live.committed, volatile: live.volatile)
+                }
                 sessionFeed.noteConsumed()
                 await publishListening(force: false)
             }
