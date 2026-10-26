@@ -16,6 +16,7 @@ let package = Package(
         .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
+        .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
     ],
     dependencies: [
@@ -100,11 +101,15 @@ let package = Package(
             name: "LegatoAppServices",
             dependencies: [
                 "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoPostProcessing",
+                "LegatoAppleSpeech", "LegatoAudio", "LegatoMeetings", "LegatoClaude",
             ]
         ),
         .testTarget(
             name: "LegatoAppServicesTests",
-            dependencies: ["LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing"]
+            dependencies: [
+                "LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing",
+                "LegatoMeetings", "LegatoClaude", "LegatoFluidAudio",
+            ]
         ),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
@@ -115,6 +120,9 @@ let package = Package(
             dependencies: ["LegatoMeetings", "LegatoCore"],
             resources: [.copy("Fixtures")]
         ),
+        // The Claude API as an opt-in summary backend, and where its key lives. Core only.
+        .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
+        .testTarget(name: "LegatoClaudeTests", dependencies: ["LegatoClaude", "LegatoCore"]),
     ],
     swiftLanguageModes: [.v6]
 )

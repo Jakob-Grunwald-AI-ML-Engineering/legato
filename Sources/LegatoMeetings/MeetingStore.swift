@@ -81,6 +81,46 @@ public actor MeetingStore {
             .map(\.element)
     }
 
+    // MARK: Summaries
+
+    /// A summary some backend wrote for a meeting.
+    public struct Summary: Sendable, Equatable {
+        /// The backend that wrote it (as made safe for a file name).
+        public var backendID: String
+        public var text: String
+        public var date: Date
+    }
+
+    public func summaryURL(for id: UUID, backendID: String) -> URL {
+        folder(for: id).appendingPathComponent("summary-\(Self.fileSafe(backendID)).md")
+    }
+
+    /// Writes `text` as the backend's summary of the meeting, replacing that backend's earlier one.
+    public func saveSummary(_ text: String, backendID: String, for id: UUID) throws {
+        try FileManager.default.createDirectory(at: folder(for: id), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: summaryURL(for: id, backendID: backendID), options: .atomic)
+    }
+
+    /// Every summary of the meeting, newest first.
+    public func summaries(for id: UUID) throws -> [Summary] {
+        let dir = folder(for: id)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
+        let urls = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])
+        return urls.compactMap { url -> Summary? in
+            let name = url.lastPathComponent
+            guard name.hasPrefix("summary-"), name.hasSuffix(".md"),
+                let data = try? Data(contentsOf: url)
+            else { return nil }
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return Summary(backendID: String(name.dropFirst(8).dropLast(3)), text: String(decoding: data, as: UTF8.self), date: date)
+        }
+        .sorted { ($0.date, $1.backendID) > ($1.date, $0.backendID) }
+    }
+
+    private static func fileSafe(_ id: String) -> String {
+        String(id.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." ? $0 : "-" })
+    }
+
     // MARK: Internals
 
     private func file(_ url: URL) -> JSONLFile<MeetingSegment> {

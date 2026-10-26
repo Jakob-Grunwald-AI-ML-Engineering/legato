@@ -27,6 +27,16 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         case interrupted
     }
 
+    /// A step of the after-stop chain, recorded once done so an interrupted chain resumes after it.
+    public enum Step: String, Sendable, Equatable, Codable, CaseIterable {
+        /// The accuracy pass over the recorded audio.
+        case postPass
+        /// The CAF recordings converted to m4a.
+        case audio
+        /// The automatic on-device summary.
+        case summary
+    }
+
     public var id: UUID
     public var title: String
     public var date: Date
@@ -38,10 +48,13 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public var postPassID: String?
     public var mutedRanges: [MutedRange]
     public var state: State
+    /// The after-stop steps already done. Empty for a meeting that has not been processed.
+    public var completedSteps: Set<Step>
 
     public init(
         id: UUID = UUID(), title: String, date: Date, duration: TimeInterval = 0, engineID: String,
-        postPassID: String? = nil, mutedRanges: [MutedRange] = [], state: State = .recording
+        postPassID: String? = nil, mutedRanges: [MutedRange] = [], state: State = .recording,
+        completedSteps: Set<Step> = []
     ) {
         self.id = id
         self.title = title
@@ -51,5 +64,20 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         self.postPassID = postPassID
         self.mutedRanges = mutedRanges
         self.state = state
+        self.completedSteps = completedSteps
+    }
+
+    // Meetings saved before `completedSteps` existed decode with none done.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        date = try c.decode(Date.self, forKey: .date)
+        duration = try c.decode(TimeInterval.self, forKey: .duration)
+        engineID = try c.decode(String.self, forKey: .engineID)
+        postPassID = try c.decodeIfPresent(String.self, forKey: .postPassID)
+        mutedRanges = try c.decode([MutedRange].self, forKey: .mutedRanges)
+        state = try c.decode(State.self, forKey: .state)
+        completedSteps = try c.decodeIfPresent(Set<Step>.self, forKey: .completedSteps) ?? []
     }
 }
