@@ -55,6 +55,21 @@ public actor MeetingStore {
         try await file(segmentsURL(for: id)).replaceAll(segments)
     }
 
+    /// Saves `segments` as the meeting's live text unless that was already done; returns whether it wrote.
+    /// The post-pass calls this before replacing segments, so a re-run never overwrites the live text.
+    @discardableResult
+    public func saveLiveSegmentsOnce(_ segments: [MeetingSegment], for id: UUID) async throws -> Bool {
+        let url = liveSegmentsURL(for: id)
+        guard !FileManager.default.fileExists(atPath: url.path) else { return false }
+        try await file(url).replaceAll(segments)
+        return true
+    }
+
+    /// The live text saved by ``saveLiveSegmentsOnce(_:for:)``; empty before the post-pass ran.
+    public func liveSegments(for id: UUID) async throws -> [MeetingSegment] {
+        try await file(liveSegmentsURL(for: id)).elements()
+    }
+
     /// Ordered by start time (arrival order breaks ties).
     public func segments(for id: UUID) async throws -> [MeetingSegment] {
         Self.ordered(try await file(segmentsURL(for: id)).elements())

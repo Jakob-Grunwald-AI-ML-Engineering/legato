@@ -96,4 +96,16 @@ import LegatoCore
         try await store.create(m)
         #expect(try await store.segments(for: m.id).isEmpty)
     }
+
+    @Test func liveSegmentsAreSavedOnlyOnce() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let id = UUID()
+        #expect(try await store.liveSegments(for: id).isEmpty)
+        let first = [seg("one", 1)], second = [seg("two", 2)]
+        #expect(try await store.saveLiveSegmentsOnce(first, for: id))
+        #expect(try await store.saveLiveSegmentsOnce(second, for: id) == false)
+        #expect(try await store.liveSegments(for: id) == first)
+    }
 }
