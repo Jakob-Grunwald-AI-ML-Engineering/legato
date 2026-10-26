@@ -199,3 +199,63 @@ private func backgroundRegistry(gpu: Bool) -> CleanupRegistry {
         #expect(recorder.reports.first?.skipped == [CleanupRegistry.Skip.backgroundCleanupOff.description])
     }
 }
+
+// MARK: live delivery
+
+/// Foundation Models stand-in that records the prompts it got and echoes the text inside `<text>` tags.
+private final class EchoingFoundationModels: LLMBackend {
+    let id = "fm"
+    let maxPromptCharacters: Int? = nil
+    private let prompts = Mutex<[String]>([])
+    var sent: [String] { prompts.withLock { $0 } }
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        prompts.withLock { $0.append(prompt) }
+        return "<text>How are you?</text>"
+    }
+}
+
+@Suite struct LiveCleanupProcessorTests {
+    private func processor(_ store: CleanupSettingsStore, fm: EchoingFoundationModels, recorder: Recorder) -> CleanupProcessor {
+        CleanupProcessor(
+            registry: CleanupRegistry(models: emptyManager(), foundationModels: fm), settings: store,
+            willRun: { recorder.started() }, report: { recorder.record($0) })
+    }
+
+    @Test func onlyTheLiveDeliveryCleansSegmentsLive() {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        let p = processor(store, fm: EchoingFoundationModels(), recorder: Recorder())
+        store.delivery = .live
+        #expect(!p.cleansSegmentsLive, "cleanup off")
+        store.enabled = true
+        #expect(p.cleansSegmentsLive)
+        for other in [CleanupDelivery.replace, .clipboard, .hold] {
+            store.delivery = other
+            #expect(!p.cleansSegmentsLive)
+        }
+    }
+
+    @Test func aSegmentIsCleanedWithItsContextAndWithoutTheCleaningUpPhase() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        store.delivery = .live
+        let fm = EchoingFoundationModels()
+        let recorder = Recorder()
+        let out = try await processor(store, fm: fm, recorder: recorder)
+            .processSegment("how are you", context: "Hello world.", locale: Locale(identifier: "en_US"), atStop: false)
+        #expect(out == "How are you?")
+        #expect(fm.sent.first?.hasPrefix("<before>\nHello world.\n</before>\n") == true)
+        #expect(recorder.starts == 0, "the run is still listening")
+        #expect(recorder.reports.count == 1)
+    }
+
+    @Test func theStopPassAnnouncesItself() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        store.delivery = .live
+        let recorder = Recorder()
+        _ = try await processor(store, fm: EchoingFoundationModels(), recorder: recorder)
+            .processSegment("how are you", context: "", locale: Locale(identifier: "en_US"), atStop: true)
+        #expect(recorder.starts == 1)
+    }
+}

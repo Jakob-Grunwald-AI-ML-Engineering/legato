@@ -74,18 +74,37 @@ public struct CleanupProcessor: TranscriptPostProcessor {
             timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report)
     }
 
+    /// Cleanup on with delivery Live: the session cleans each committed segment while the run goes on.
+    public var cleansSegmentsLive: Bool {
+        let options = settings.options
+        return options.enabled && options.delivery == .live
+    }
+
+    /// One live segment, with the cleaned text before it as `context`. Only the stop pass (`atStop`) shows
+    /// "Cleaning up…": a segment cleaned while listening must not change what the UI says.
+    public func processSegment(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> String {
+        let options = settings.options
+        guard options.enabled else { return text }
+        if atStop { await willRun() }
+        return await Self.run(
+            text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
+            timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report,
+            context: context)
+    }
+
     /// One cleanup in `style`, whatever the on/off switch says (refine uses it directly). ITN and the backend
-    /// come from `settings`.
+    /// come from `settings`. `context`: the cleaned text before `text` (a live segment).
     public static func run(
         _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
-        settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void
+        settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
+        context: String = ""
     ) async -> String {
         let clock = ContinuousClock()
         let start = clock.now
         let itn = settings.itn
         let (pipeline, resolution) = await registry.pipeline(
             style: style, itn: itn, preference: settings.backend.preference, background: settings.backgroundCleanup,
-            timeout: timeout)
+            timeout: timeout, context: context)
         let out = await pipeline.process(text, locale: locale)
         let elapsed = start.duration(to: clock.now)
         await report(CleanupRunReport(
