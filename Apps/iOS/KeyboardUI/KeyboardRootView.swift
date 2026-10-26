@@ -22,12 +22,12 @@ struct KeyboardRootView: View {
                     // only takes touches from the first row down (`KeyGridView.point(inside:with:)`).
                     suggestionBar(g)
                     if controller.expansion.control == .collapse {
-                        // The top bar above the first row takes a swipe down; the pill and the chevron stay on top.
+                        // The top bar above the first row takes a swipe down, as do the pill and the chevron on top of it.
                         place(CGRect(x: 0, y: 0, width: geometry.size.width, height: g.firstRowTop)) {
                             Color.clear.contentShape(Rectangle()).gesture(swipe)
                         }
                     }
-                    place(g.pillFrame) { MicKey(controller: controller) }
+                    place(g.pillFrame) { MicKey(controller: controller).simultaneousGesture(swipe) }
                     KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance)
                     if controller.showsGlobe, let frame = frames["globe"] {
                         place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing) }
@@ -36,7 +36,7 @@ struct KeyboardRootView: View {
                         // In the top bar's first suggestion slot (empty for now), above the first row.
                         let bar = g.suggestionFrame
                         place(CGRect(x: g.marginX, y: bar.minY, width: 44, height: bar.height)) {
-                            ExpansionKey(controller: controller, symbol: "chevron.down")
+                            ExpansionKey(controller: controller, symbol: "chevron.down").simultaneousGesture(swipe)
                         }
                     }
                 }
@@ -83,13 +83,7 @@ struct KeyboardRootView: View {
     }
 
     private var stripStatus: some View {
-        let text = controller.statusText ?? "Legato"
-        #if DEBUG
-        let label = "\(text) [\(Int(controller.stripHeight)) pt]"
-        #else
-        let label = text
-        #endif
-        return Text(label)
+        Text(controller.statusText ?? "Legato")
             .font(.system(size: 15))
             .foregroundStyle(Color(uiColor: KeyColors.suggestion))
             .lineLimit(1)
