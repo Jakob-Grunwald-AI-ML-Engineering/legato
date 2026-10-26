@@ -74,3 +74,41 @@ Command: `./selftest.sh 15 auto`, with `say -v Anna` (German) and `say -v Samant
 - **Model licence.** The Hugging Face card says OpenMDW-1.1, not Apache-2.0. https://huggingface.co/FluidInference/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML
 - **Accuracy.** The first German sentence came out as "das ist ein festes System Audios"; later repeats were correct. The 560 ms tier loses punctuation over long sessions (FluidAudio #687).
 - **FluidAudio changes fast.** New versions come roughly weekly, so it stays pinned to an exact version and updates are deliberate.
+
+## Spike #3b — mic-in-use and voice processing (to run)
+
+Goal: learn whether muting inside a call app closes its mic (so `IsRunningInput` flips and Legato can follow call state), and whether Apple voice processing removes the echo of "Them" from "Me".
+
+The app now has a **Process monitor** panel (once per second it reads every Core Audio process object: bundle id, PID, `IsRunningInput`, `IsRunningOutput`) and a **Voice processing** toggle (mic engine: `setVoiceProcessingEnabled(true)`, advanced ducking off, level min; the UI shows the input format after enabling). Transitions are appended as JSON lines to `/tmp/legato-spike-mic-usage.jsonl` (also printed in the UI). Fields: `t`, `pid`, `bundle`, `input`, `output`, `prevInput`, `prevOutput`, `processGone`.
+
+### A. Mute behaviour per call app
+
+Build with `./build.sh adhoc`, open `build/Build/Products/Debug/LegatoSpike.app`. Leave the spike open (Start is not needed for the monitor). Run `: > /tmp/legato-spike-mic-usage.jsonl` first, then `tail -f` it in a terminal.
+
+For each of Zoom, Microsoft Teams, Google Meet (in Chrome), FaceTime:
+
+1. Join a call (a test meeting alone is fine) with the mic unmuted. Note the time.
+2. Mute in the app. Wait 5 s.
+3. Unmute. Wait 5 s.
+4. Leave the call. Wait 5 s.
+5. In the log, note whether the app's bundle id (Chrome: `com.google.Chrome` or a helper) flips `input` to false on mute and back to true on unmute, and how many seconds after the click. Also note when `output` flips, and what happens on leaving.
+
+| App | muting closes mic? (IsRunningInput flips) | notes (delay, bundle id seen, helper process, Bluetooth device) |
+|---|---|---|
+| Zoom | | |
+| Microsoft Teams | | |
+| Google Meet (Chrome) | | |
+| FaceTime | | |
+
+### B. Echo: voice processing off vs on (optional)
+
+On speakers (no headphones), set the language to `auto`. Play a podcast or YouTube speech at normal volume, and stay silent yourself.
+
+1. Voice processing off: Start, run 60 s, Stop. Count the sentences in "Them" and how many of them also appear in "Me" (roughly, as a percentage).
+2. Voice processing on: repeat with the toggle on. Note the mic input format line (channels, rate) and whether the playback volume dropped (ducking) or the output device changed.
+3. Optionally speak a few sentences yourself during both runs, and note whether "Me" still catches them with voice processing on.
+
+| Setting | Mic format | "Them" sentences | of those in "Me" | your own speech kept in "Me"? | notes |
+|---|---|---|---|---|---|
+| VP off | | | | | |
+| VP on | | | | | |

@@ -49,6 +49,8 @@ final class Session {
     var running = false
     var language = "auto"  // "auto", "de-DE", "en-US"
     var latencyLine = ""
+    var voiceProcessing = false
+    var micFormat = ""
 
     let chunkMs = 1120
 
@@ -110,10 +112,11 @@ final class Session {
             let meSink = meSink, themSink = themSink
             // Mic first: it registers our process with Core Audio, so the tap can exclude it.
             if granted {
-                try mic.start { s in
+                try mic.start(voiceProcessing: voiceProcessing) { s in
                     if record { meSink.append(s) }
                     meCont.yield(s)
                 }
+                micFormat = mic.inputFormatDescription
             }
             do {
                 try tap.start { s in
