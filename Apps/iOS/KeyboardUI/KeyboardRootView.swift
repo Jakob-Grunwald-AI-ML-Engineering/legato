@@ -21,6 +21,12 @@ struct KeyboardRootView: View {
                     // Under the grid: popups and the alternates strip are drawn over the top bar, and the grid
                     // only takes touches from the first row down (`KeyGridView.point(inside:with:)`).
                     suggestionBar(g)
+                    if controller.expansion.control == .collapse {
+                        // The top bar above the first row takes a swipe down; the pill and the chevron stay on top.
+                        place(CGRect(x: 0, y: 0, width: geometry.size.width, height: g.firstRowTop)) {
+                            Color.clear.contentShape(Rectangle()).gesture(swipe)
+                        }
+                    }
                     place(g.pillFrame) { MicKey(controller: controller) }
                     KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance)
                     if controller.showsGlobe, let frame = frames["globe"] {
@@ -29,7 +35,7 @@ struct KeyboardRootView: View {
                     if controller.expansion.control == .collapse {
                         // In the top bar's first suggestion slot (empty for now), above the first row.
                         let bar = g.suggestionFrame
-                        place(CGRect(x: g.marginX, y: bar.minY, width: 36, height: bar.height)) {
+                        place(CGRect(x: g.marginX, y: bar.minY, width: 44, height: bar.height)) {
                             ExpansionKey(controller: controller, symbol: "chevron.down")
                         }
                     }
@@ -40,23 +46,40 @@ struct KeyboardRootView: View {
         .environment(\.colorScheme, scheme)
     }
 
-    /// The compact layout: the globe key (when iOS asks for it), the dictation status, the mic key and the
-    /// chevron that opens the full keyboard, in one row as high as the keyboard view.
+    /// The compact layout: the chevron that opens the full keyboard, the globe key (when iOS asks for it),
+    /// the dictation status and the mic key at the full keyboard's pill size, in one row as high as the
+    /// keyboard view.
     private func strip(typing: TypingModel, size: CGSize) -> some View {
-        let controlHeight = max(min(size.height - 8, 38), 0)
+        // At the full keyboard's height: the strip's own height would scale the pill down (`vScale`).
+        let fullHeight = KeyGeometry.height(landscape: KeyGeometry.isLandscape(width: size.width))
+        let pill = KeyGeometry(size: CGSize(width: size.width, height: fullHeight)).pillSize
+        let controlHeight = max(min(size.height - 6, pill.height), 0)
         return HStack(spacing: 8) {
+            ExpansionKey(controller: controller, symbol: "chevron.up")
+                .frame(width: 44, height: controlHeight)
             if controller.showsGlobe {
                 GlobeKey(target: controller.inputModeTarget, typing: typing)
                     .frame(width: 44, height: controlHeight)
             }
             stripStatus
-            MicKey(controller: controller)
-                .frame(width: 64, height: controlHeight)
-            ExpansionKey(controller: controller, symbol: "chevron.up")
-                .frame(width: 36, height: controlHeight)
+            // Touchable over the strip's full height and to the right edge, beyond the drawn pill.
+            let slop = CGSize(width: 8, height: (size.height - controlHeight) / 2)
+            MicKey(controller: controller, hitSlop: slop)
+                .frame(width: pill.width + 2 * slop.width, height: size.height)
+                .padding(.leading, -slop.width)
+                .padding(.trailing, -slop.width)
         }
         .padding(.horizontal, 8)
         .frame(width: size.width, height: size.height)
+        .contentShape(Rectangle())
+        .simultaneousGesture(swipe)
+    }
+
+    /// A vertical swipe that expands the strip or collapses the full keyboard (`KeyboardController.swiped`).
+    private var swipe: some Gesture {
+        DragGesture(minimumDistance: 12).onEnded { value in
+            controller.swiped(dx: value.translation.width, dy: value.translation.height)
+        }
     }
 
     private var stripStatus: some View {

@@ -6,6 +6,8 @@ import SwiftUI
 /// the running app otherwise. It is the pill at the right of the top bar and fills the frame it is given.
 struct MicKey: View {
     let controller: KeyboardController
+    /// Touch area beyond the drawn pill on each side; the frame given includes it.
+    var hitSlop: CGSize = .zero
 
     var body: some View {
         switch controller.micMode {
@@ -34,7 +36,9 @@ struct MicKey: View {
                 .foregroundStyle(capturing ? Color.white : Color.primary)
                 .symbolEffect(.pulse, isActive: capturing)
         }
+        .padding(.horizontal, hitSlop.width)
+        .padding(.vertical, hitSlop.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Capsule())
+        .contentShape(hitSlop == .zero ? AnyShape(Capsule()) : AnyShape(Rectangle()))
     }
 }

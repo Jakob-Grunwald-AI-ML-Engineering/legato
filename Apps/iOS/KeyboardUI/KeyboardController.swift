@@ -99,6 +99,11 @@ final class KeyboardController {
         onLayoutChange?("toggle")
     }
 
+    /// A finished drag on the strip or the top bar: toggles when `KeyboardExpansion.swipeToggles` says so.
+    func swiped(dx: Double, dy: Double) {
+        if expansion.swipeToggles(dx: dx, dy: dy) { toggleExpansion() }
+    }
+
     #if DEBUG
     /// Debug: a long press on the strip's status text steps the strip height through the candidates.
     func cycleStripHeight() {

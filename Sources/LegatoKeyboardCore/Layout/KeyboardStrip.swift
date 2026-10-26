@@ -38,6 +38,16 @@ public struct KeyboardExpansion: Sendable, Equatable {
         expanded.toggle()
     }
 
+    /// The least vertical travel, in points, that counts as a swipe.
+    public static let swipeDistance = 24.0
+
+    /// Whether a drag (screen points, y down) on the strip or the full keyboard's top bar toggles: up on the
+    /// strip expands, down on the full keyboard collapses; it must be long enough and more vertical than not.
+    public func swipeToggles(dx: Double, dy: Double) -> Bool {
+        guard let control, abs(dy) >= Self.swipeDistance, abs(dy) > abs(dx) else { return false }
+        return control == .expand ? dy < 0 : dy > 0
+    }
+
     /// The setting as the app last stored it. A change starts a new session (collapsed); the same value
     /// keeps the state, so a keyboard that appears again in the same session does not collapse under the user.
     public mutating func setStripEnabled(_ enabled: Bool) {
