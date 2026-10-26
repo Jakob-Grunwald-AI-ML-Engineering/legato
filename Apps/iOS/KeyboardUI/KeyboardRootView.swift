@@ -1,3 +1,4 @@
+import LegatoKeyboardCore
 import SwiftUI
 import UIKit
 
@@ -14,17 +15,68 @@ struct KeyboardRootView: View {
             let g = KeyGeometry(size: geometry.size)
             let frames = Dictionary(layout.frames(in: geometry.size).map { ($0.id, $0.cgRect) }, uniquingKeysWith: { a, _ in a })
             ZStack(alignment: .topLeading) {
-                // Under the grid: popups and the alternates strip are drawn over the top bar, and the grid
-                // only takes touches from the first row down (`KeyGridView.point(inside:with:)`).
-                suggestionBar(g)
-                place(g.pillFrame) { MicKey(controller: controller) }
-                KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance)
-                if controller.showsGlobe, let frame = frames["globe"] {
-                    place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing) }
+                if controller.mode == .strip {
+                    strip(typing: typing, size: geometry.size)
+                } else {
+                    // Under the grid: popups and the alternates strip are drawn over the top bar, and the grid
+                    // only takes touches from the first row down (`KeyGridView.point(inside:with:)`).
+                    suggestionBar(g)
+                    place(g.pillFrame) { MicKey(controller: controller) }
+                    KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance)
+                    if controller.showsGlobe, let frame = frames["globe"] {
+                        place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing) }
+                    }
+                    if controller.expansion.control == .collapse {
+                        // In the top bar's first suggestion slot (empty for now), above the first row.
+                        let bar = g.suggestionFrame
+                        place(CGRect(x: g.marginX, y: bar.minY, width: 36, height: bar.height)) {
+                            ExpansionKey(controller: controller, symbol: "chevron.down")
+                        }
+                    }
                 }
             }
+            .animation(.easeInOut(duration: 0.2), value: controller.mode)
         }
         .environment(\.colorScheme, scheme)
+    }
+
+    /// The compact layout: the globe key (when iOS asks for it), the dictation status, the mic key and the
+    /// chevron that opens the full keyboard, in one row as high as the keyboard view.
+    private func strip(typing: TypingModel, size: CGSize) -> some View {
+        let controlHeight = max(min(size.height - 8, 38), 0)
+        return HStack(spacing: 8) {
+            if controller.showsGlobe {
+                GlobeKey(target: controller.inputModeTarget, typing: typing)
+                    .frame(width: 44, height: controlHeight)
+            }
+            stripStatus
+            MicKey(controller: controller)
+                .frame(width: 64, height: controlHeight)
+            ExpansionKey(controller: controller, symbol: "chevron.up")
+                .frame(width: 36, height: controlHeight)
+        }
+        .padding(.horizontal, 8)
+        .frame(width: size.width, height: size.height)
+    }
+
+    private var stripStatus: some View {
+        let text = controller.statusText ?? "Legato"
+        #if DEBUG
+        let label = "\(text) [\(Int(controller.stripHeight)) pt]"
+        #else
+        let label = text
+        #endif
+        return Text(label)
+            .font(.system(size: 15))
+            .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .accessibilityIdentifier("keyboard.hint")
+            #if DEBUG
+            .onLongPressGesture { controller.cycleStripHeight() }
+            #endif
     }
 
     private var scheme: ColorScheme {
@@ -45,9 +97,8 @@ struct KeyboardRootView: View {
     private func suggestionBar(_ g: KeyGeometry) -> some View {
         let frame = g.suggestionFrame
         let slots = controller.suggestions
-        let status: String? = controller.hint ?? (controller.isCapturing && slots.isEmpty ? "Listening…" : nil)
         return Group {
-            if let status {
+            if let status = controller.statusText {
                 Text(status)
                     .font(.system(size: 15))
                     .foregroundStyle(Color(uiColor: KeyColors.suggestion))

@@ -43,6 +43,14 @@ final class KeyboardController {
     /// The id of the request the mic key's Link carries (the Darwin request uses the same id).
     private(set) var openAppRequestID = UUID().uuidString
 
+    /// Strip or full keyboard, and the chevron that switches (`KeyboardExpansion`, per keyboard session).
+    private(set) var expansion = KeyboardExpansion(stripEnabled: false)
+    /// The strip's height in points; the debug long press steps it through `StripHeight.candidates`.
+    private(set) var stripHeight = StripHeight.standard
+    /// The extension re-sizes its view when the mode or the strip height changed (`reason` is for the log).
+    @ObservationIgnored var onLayoutChange: (@MainActor (_ reason: String) -> Void)?
+    @ObservationIgnored private let preferences: () -> KeyboardPreferences
+
     @ObservationIgnored private var cursor: AppliedCursor?
     @ObservationIgnored private var isTornDown = false
     private var forcedOpenAppUntil: Date?
@@ -50,10 +58,15 @@ final class KeyboardController {
     @ObservationIgnored private var reapply: Task<Void, Never>?
     @ObservationIgnored private var hintTimeout: Task<Void, Never>?
 
-    init(document: any TextDocument, link: LinkClient, hasFullAccess: @escaping @MainActor () -> Bool) {
+    init(
+        document: any TextDocument, link: LinkClient, hasFullAccess: @escaping @MainActor () -> Bool,
+        preferences: @escaping () -> KeyboardPreferences = { .load() }
+    ) {
         self.document = document
         self.link = link
         self.hasFullAccess = hasFullAccess
+        self.preferences = preferences
+        refreshPreferences()
         cursor = link.readApplied()
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
@@ -62,12 +75,51 @@ final class KeyboardController {
 
     var fullAccess: Bool { hasFullAccess() }
 
+    // MARK: Strip
+
+    var mode: KeyboardMode { expansion.mode }
+
+    /// Re-reads the strip setting. Turning it on or off starts a session over (collapsed with it on); the
+    /// strip height comes from the setting only then, so the debug long press survives the keyboard
+    /// appearing again.
+    func refreshPreferences() {
+        let current = preferences()
+        let changed = expansion.stripEnabled != current.strip
+        expansion.setStripEnabled(current.strip)
+        guard changed else { return }
+        stripHeight = current.stripHeight
+        onLayoutChange?("setting")
+    }
+
+    /// The chevron: strip to full keyboard and back.
+    func toggleExpansion() {
+        guard expansion.control != nil else { return }
+        expansion.toggle()
+        trace?("expansion mode=\(expansion.mode == .strip ? "strip" : "full")")
+        onLayoutChange?("toggle")
+    }
+
+    #if DEBUG
+    /// Debug: a long press on the strip's status text steps the strip height through the candidates.
+    func cycleStripHeight() {
+        stripHeight = StripHeight.next(after: stripHeight)
+        onLayoutChange?("cycle")
+    }
+    #endif
+
+    /// The dictation status the keyboard shows in place of its suggestions (the strip's text): a hint, or
+    /// "Listening…" while capturing; nil when there is nothing to say.
+    var statusText: String? {
+        hint ?? (isCapturing && suggestions.isEmpty ? "Listening…" : nil)
+    }
+
     // MARK: Visibility
 
     /// The keyboard came on screen: beat presence once a second, and catch up with a run in progress.
     func appeared() {
         guard !isTornDown else { return }
         isVisible = true
+        refreshPreferences()
         refreshTraits()
         typing.appeared()
         link.writePresence(visible: true, notify: true)
@@ -148,16 +200,33 @@ final class KeyboardController {
     private func hostDidChange() {
         guard !isTornDown else { return }
         reloadHost()
+        #if DEBUG
+        if let host, let insertAt = host.insertAt {
+            let latency = Int((Date().timeIntervalSince(insertAt) * 1000).rounded())
+            WakeProbeLog.log(
+                "recv", "run=\(host.runID?.prefix(8) ?? "-") seq=\(host.seq) latencyMs=\(latency) visible=\(isVisible ? 1 : 0)")
+        }
+        #endif
         applyHost()
     }
 
-    /// Brings the field in line with the host's text. Only while visible, and only for a run in
-    /// progress or one this keyboard already follows: the last state of a run it never saw (an old
-    /// dictation, seen again when the keyboard reappears) is not typed. A "running" state whose beat has
-    /// gone stale belongs to an app that died: its text is not typed either.
+    /// Brings the field in line with the host's text, when `HostApplyDecision` says so: only while visible,
+    /// only for a run the app marked for the keyboard, and for a run this keyboard never followed only when
+    /// its final text was asked for (the Live Activity's Insert). The last state of any other run it never
+    /// saw (an old dictation, seen again when the keyboard reappears) is not typed. A "running" state whose
+    /// beat has gone stale belongs to an app that died: its text is not typed either.
     private func applyHost() {
-        guard !isTornDown, isVisible, let host, host.isLive(now: Date()) else { return }
-        if cursor?.runID != host.runID, host.phase == .idle { return }
+        guard !isTornDown else { return }
+        let decision = HostApplyDecision.decide(
+            host: host, cursor: cursor, visible: isVisible, documentID: document.documentID, now: Date())
+        guard case .apply = decision, let host else {
+            #if DEBUG
+            if case .skip(let reason) = decision, host?.insertAt != nil {
+                WakeProbeLog.log("skip", "run=\(host?.runID?.prefix(8) ?? "-") reason=\(reason.rawValue)")
+            }
+            #endif
+            return
+        }
         let before = cursor
         let plan = ProxyEditPlanner.plan(
             state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID)
@@ -168,6 +237,11 @@ final class KeyboardController {
         if !plan.ops.isEmpty || updated.finalApplied {
             trace?("apply final=\(updated.finalApplied ? 1 : 0)")
         }
+        #if DEBUG
+        if host.insertAt != nil, !plan.ops.isEmpty {
+            WakeProbeLog.log("insert", "run=\(host.runID?.prefix(8) ?? "-") ops=\(plan.ops.count) final=\(updated.finalApplied ? 1 : 0)")
+        }
+        #endif
     }
 
     private func perform(_ ops: [ProxyOp]) {

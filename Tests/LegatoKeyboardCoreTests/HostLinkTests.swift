@@ -348,6 +348,47 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         #expect(r.host?.runID == "run-1" && r.host?.committed == "live " && r.host?.volatile == "words")
     }
 
+    // MARK: insert (the Live Activity's Insert button)
+
+    @Test func anInsertPublishesTheTextAsAFinalKeyboardStateFlaggedAsRequested() {
+        let r = Rig()
+        #expect(r.link.publishInsert(runID: "ins-1", text: "hello world"))
+        #expect(r.host?.runID == "ins-1" && r.host?.committed == "hello world" && r.host?.volatile == "")
+        #expect(r.host?.target == .keyboard && r.host?.isFinal == true)
+        #expect(r.host?.insertAt == r.env.now)
+        #expect(r.env.count(LinkChannel.Note.host) == 1) // the keyboard is woken once
+    }
+
+    @Test func anInsertDuringARunIsRefusedAndLeavesTheRunAlone() {
+        let r = Rig()
+        r.link.runStarted(id: "run-1", target: .keyboard)
+        r.link.update(committed: "live ", volatile: "words")
+        #expect(!r.link.publishInsert(runID: "ins-1", text: "other"))
+        #expect(r.host?.runID == "run-1" && r.host?.committed == "live " && r.host?.insertAt == nil)
+    }
+
+    @Test func theInsertedTextIsScrubbedWithItsFlagAfterTheRetentionWindow() async {
+        let r = Rig()
+        _ = r.link.publishInsert(runID: "ins-1", text: "hello world")
+        r.env.retention.tick()
+        #expect(await eventually { r.host?.committed == "" })
+        #expect(r.host?.insertAt == nil && r.host?.runID == nil)
+    }
+
+    @Test func aNewRunClearsTheInsertFlag() {
+        let r = Rig()
+        _ = r.link.publishInsert(runID: "ins-1", text: "hello world")
+        r.link.runStarted(id: "run-2", target: .keyboard)
+        #expect(r.host?.insertAt == nil)
+    }
+
+    @Test func theKeyboardsConfirmationOfAnInsertIsAwaitedLikeAnyFinalText() async {
+        let r = Rig()
+        _ = r.link.publishInsert(runID: "ins-1", text: "hello world")
+        r.report(cursor(runID: "ins-1", committedCount: 11, finalApplied: true))
+        #expect(await r.link.awaitFinalApplied(runID: "ins-1", timeout: 1))
+    }
+
     // MARK: requests
 
     @Test func aRemoteStartWithALeaseIsActedOnAndAccepted() async {

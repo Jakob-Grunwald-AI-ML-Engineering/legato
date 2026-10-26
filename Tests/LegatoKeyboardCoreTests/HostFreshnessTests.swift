@@ -23,6 +23,13 @@ import Testing
         #expect(hostState(phase: .idle, committed: "words", beatAt: now.addingTimeInterval(-60)).isLive(now: now))
     }
 
+    @Test func anInsertRequestIsFreshOnlyBriefly() {
+        #expect(!hostState(phase: .idle).insertIsFresh(now: now)) // no request at all
+        #expect(hostState(phase: .idle, insertAt: now).insertIsFresh(now: now))
+        #expect(hostState(phase: .idle, insertAt: now.addingTimeInterval(-LinkChannel.insertMaxAge + 0.1)).insertIsFresh(now: now))
+        #expect(!hostState(phase: .idle, insertAt: now.addingTimeInterval(-LinkChannel.insertMaxAge - 0.1)).insertIsFresh(now: now))
+    }
+
     @Test func theBoundaryMatchesTheMicKeysFreshness() {
         let edge = hostState(phase: .listening, beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness))
         #expect(!edge.isLive(now: now))

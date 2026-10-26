@@ -2,8 +2,15 @@ import Foundation
 
 // Ports the app implements for `DictationCoordinator` (ActivityKit, the pasteboard, system checks).
 
-public enum DictationPhase: String, Sendable, Equatable, Codable {
+public enum DictationPhase: String, Sendable, Equatable, Codable, CaseIterable {
     case starting, listening, finishing
+    /// The run is over and its text waits in the activity for the Insert and Copy buttons (`DictationResult`).
+    /// The activity stays up (it is not ended) until a button resolves it or the result's lifetime ends.
+    case result
+    /// Terminal: the text was typed into the Legato keyboard's field.
+    case inserted
+    /// An Insert found no Legato keyboard acting; the buttons stay.
+    case insertFailed
     /// Terminal: the text is on the clipboard.
     case copied
     /// Terminal: the clipboard write didn't take effect; tapping the activity copies from the app.
@@ -117,6 +124,9 @@ public typealias DictationSessionFactory = @MainActor (_ policy: AudioPolicy, _ 
 public enum DictationTarget: Sendable, Equatable {
     /// The app's own screen, or only the clipboard: the text is copied when the run ends.
     case app
+    /// The Live Activity's result state: nothing is copied or typed when the run ends; the text waits for
+    /// the activity's Insert or Copy button (`DictationResult`).
+    case result
     /// Streamed into the text field of the keyboard extension; copied only if it didn't land there.
     case keyboard
 }

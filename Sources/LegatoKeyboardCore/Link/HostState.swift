@@ -38,10 +38,14 @@ public struct HostState: Codable, Sendable, Equatable {
     public var leaseUntil: Date?
     /// The app can start a run from where it is, without being opened (a lease is held).
     public var acceptsRemoteStart: Bool
+    /// Set when the user asked the app to insert this (final) text (the Live Activity's Insert button): a
+    /// visible keyboard types it without having followed the run, while the request is fresh
+    /// (`LinkChannel.insertMaxAge`). Nil for every other state.
+    public var insertAt: Date?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,
-        beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool
+        beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool, insertAt: Date? = nil
     ) {
         self.v = Self.version
         self.runID = runID
@@ -53,6 +57,13 @@ public struct HostState: Codable, Sendable, Equatable {
         self.beatAt = beatAt
         self.leaseUntil = leaseUntil
         self.acceptsRemoteStart = acceptsRemoteStart
+        self.insertAt = insertAt
+    }
+
+    /// The state carries an insert request that is still recent enough to act on.
+    public func insertIsFresh(now: Date) -> Bool {
+        guard let insertAt else { return false }
+        return now.timeIntervalSince(insertAt) <= LinkChannel.insertMaxAge
     }
 
     /// The run is over and this is its last state.

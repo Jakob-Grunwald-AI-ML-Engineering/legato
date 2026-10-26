@@ -9,6 +9,9 @@ extension DictationAttributes.ContentState {
         case .starting: "Starting…"
         case .listening: "Listening"
         case .finishing: "Finishing…"
+        case .result: "Dictation ready"
+        case .inserted: "Inserted"
+        case .insertFailed: "Legato keyboard not active"
         case .copied: "Copied"
         case .tapToCopy: "Tap to copy"
         case .failed: "Nothing recognized"
@@ -18,6 +21,9 @@ extension DictationAttributes.ContentState {
     var symbol: String {
         switch phase {
         case .starting, .listening, .finishing: "mic.fill"
+        case .result: "text.bubble.fill"
+        case .inserted: "checkmark.circle.fill"
+        case .insertFailed: "keyboard"
         case .copied: "checkmark.circle.fill"
         case .tapToCopy: "doc.on.clipboard"
         case .failed: "exclamationmark.triangle.fill"
@@ -27,6 +33,9 @@ extension DictationAttributes.ContentState {
     var tint: Color {
         switch phase {
         case .starting, .listening, .finishing: .red
+        case .result: .blue
+        case .inserted: .green
+        case .insertFailed: .orange
         case .copied: .green
         case .tapToCopy: .blue
         case .failed: .orange
@@ -65,10 +74,13 @@ struct DictationLiveActivity: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text(state.body)
-                        .font(.callout)
-                        .lineLimit(3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(state.body)
+                            .font(.callout)
+                            .lineLimit(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if state.phase.offersResultActions { ResultButtons() }
+                    }
                 }
             } compactLeading: {
                 Image(systemName: state.symbol).foregroundStyle(state.tint)
@@ -104,8 +116,25 @@ private struct LockScreenView: View {
                 .font(.callout)
                 .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if state.phase.offersResultActions { ResultButtons() }
         }
         .padding()
+    }
+}
+
+/// Insert (types the text into the Legato keyboard's field) and Copy (clipboard), both run in the app.
+private struct ResultButtons: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(intent: InsertDictationIntent()) {
+                Label("Insert", systemImage: "text.insert").frame(maxWidth: .infinity)
+            }
+            Button(intent: CopyDictationIntent()) {
+                Label("Copy", systemImage: "doc.on.doc").frame(maxWidth: .infinity)
+            }
+        }
+        .buttonStyle(.bordered)
+        .font(.subheadline.weight(.semibold))
     }
 }
 
