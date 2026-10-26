@@ -53,4 +53,20 @@ import Testing
             phase: .idle, beatAt: now, leaseUntil: now.addingTimeInterval(-0.5), acceptsRemoteStart: true)
         #expect(MicKeyMode.resolve(host: host, now: now, fullAccess: true) == .openApp)
     }
+
+    // MARK: what each mode asks the app
+
+    @Test func openingTheAppAsksOnlyToArmTheMicNeverToStartADictation() {
+        // The app is not in front of the host app's field: a run started there could not type into it.
+        #expect(MicKeyMode.openApp.request == .arm)
+    }
+
+    @Test func remoteModesAskToStartAndStop() {
+        #expect(MicKeyMode.remote(.start).request == .start)
+        #expect(MicKeyMode.remote(.stop).request == .stop)
+    }
+
+    @Test func withoutFullAccessThereIsNothingToAsk() {
+        #expect(MicKeyMode.needsFullAccess.request == nil)
+    }
 }

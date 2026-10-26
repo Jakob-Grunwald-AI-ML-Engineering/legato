@@ -19,6 +19,9 @@ import Foundation
 /// A press that lands while a start is wrapping up (a retry's teardown, the release of an old lease)
 /// cancels it: such a start ends `.stopped(nil)`, never hops, and never activates audio.
 ///
+/// `arm(keepAlive:)` readies the mic lease without a run (the keyboard's hop): the next start, also in
+/// the background, reuses it.
+///
 /// Nothing starts over a teardown still in flight: a start waits for the release of a lease
 /// (`endKeepAlive`) and for the session's own abort teardown, because the old teardown's deactivation
 /// would otherwise land on the new session's audio session.
@@ -67,7 +70,7 @@ public final class DictationCoordinator {
     /// policy that failed, the one tried next (equal for a same-policy retry) and the error. For diagnostics.
     public var onStartFallback: (@MainActor (_ from: AudioPolicy, _ to: AudioPolicy, _ error: any Error) -> Void)?
 
-    private enum Phase { case idle, starting, listening, stopping, aborting }
+    private enum Phase { case idle, arming, starting, listening, stopping, aborting }
 
     /// Follows one session's edits for its whole life, across runs.
     @MainActor
@@ -103,7 +106,9 @@ public final class DictationCoordinator {
     private struct HeldLease {
         let session: DictationSession
         let feed: EditFeed
-        let linger: Duration
+        var linger: Linger
+        /// Armed without a run (`arm`): the next start reuses it whatever its keep-alive, and adopts that.
+        var armedOnly = false
     }
 
     private let activity: any ActivityClient
@@ -170,7 +175,7 @@ public final class DictationCoordinator {
         case .idle: return await start(options)
         case .starting: return await cancelStart()
         case .listening: return await stop()
-        case .stopping, .aborting: return .busy
+        case .arming, .stopping, .aborting: return .busy
         }
     }
 
@@ -188,7 +193,7 @@ public final class DictationCoordinator {
         switch phase {
         case .starting: return await cancelStart()
         case .listening: return await stop(releasingLease: releasingLease)
-        case .idle, .stopping, .aborting: return nil
+        case .idle, .arming, .stopping, .aborting: return nil
         }
     }
 
@@ -216,6 +221,96 @@ public final class DictationCoordinator {
         }
         pendingRelease = release
         await release.value
+    }
+
+    /// The keep-alive setting changed: a lease held between runs follows it. `.off` releases it now, any
+    /// other value re-arms it (a duration restarts its whole timer from now; `.indefinite` drops the
+    /// timer), so it stays ready without being re-activated. Does nothing without a held lease, and
+    /// nothing during a run (the run's own options decide what is kept when it ends).
+    public func updateKeepAlive(_ linger: Linger) async {
+        guard phase == .idle, pendingRelease == nil, let lease = held, lease.linger != linger else { return }
+        guard linger.holdsLease else {
+            await endKeepAlive()
+            return
+        }
+        await lease.session.setLinger(linger)
+        guard phase == .idle, let current = held, current.session === lease.session else { return }
+        held?.linger = linger
+        reportLease(leaseEnd(for: linger))
+    }
+
+    // MARK: Arm
+
+    public enum ArmOutcome: Sendable, Equatable {
+        /// The mic lease is held, ready for the next start.
+        case armed
+        /// A run, or a start or arm, is in progress or wrapping up: nothing was armed.
+        case busy
+        /// Not armed: resolve `ReadinessIssue` in the foreground first.
+        case needsOnboarding(ReadinessIssue)
+        /// The system refused the activation from the background, also under the default policy.
+        case needsForeground(ForegroundReason)
+        /// Arming failed (description of the error).
+        case failed(String)
+    }
+
+    /// The shortest lease an arm holds: with keep-ready off, the mic is armed this long so the next tap
+    /// (after the user returned to the host app) can start dictation on it, then it is released.
+    public nonisolated static let armFloor: Duration = .seconds(60)
+
+    /// How long an arm holds the lease: the keep-ready setting, or `armFloor` when it is off.
+    public nonisolated static func armLinger(for keepAlive: Linger) -> Linger {
+        keepAlive.holdsLease ? keepAlive : .duration(armFloor)
+    }
+
+    /// Readies the microphone and nothing else: activates the audio session and the mic as a held lease
+    /// (`armLinger(for: keepAlive)`), with no run, transcription, history entry, Live Activity or
+    /// clipboard, and no `onIdle`. The next `startIfIdle` / `toggle` runs on that lease without
+    /// activating again, so it also starts from the background; a run on it keeps the lease only as its
+    /// own `keepAlive` says. A lease already held is replaced by a fresh one (its mic may have died).
+    /// The sink hears the lease (`leaseChanged`) and nothing else.
+    public func arm(keepAlive: Linger) async -> ArmOutcome {
+        guard phase == .idle else { return .busy }
+        phase = .arming
+        defer { phase = .idle }
+        if let release = pendingRelease { await release.value }
+        if let lease = held {
+            held = nil
+            await release(lease)
+        }
+        // Live Activities are not used here: only the other readiness items matter.
+        if let issue = await readiness.check(), issue != .liveActivitiesDisabled { return .needsOnboarding(issue) }
+
+        let context = startEnvironment.current()
+        let linger = Self.armLinger(for: keepAlive)
+        var policy = context.audioPolicy
+        var inputRetries = 0
+        while true {
+            let s = makeSession(policy, linger)
+            do {
+                try await s.armLease()
+                hold(s, feed: startFeed(of: s), linger: linger, armedOnly: true)
+                reportLease(leaseEnd(for: linger))
+                return .armed
+            } catch {
+                // The session tore its own lease down. Same retries as a start.
+                if context.inBackground, startEnvironment.isBackgroundRefusal(error) {
+                    guard policy != .default else { return .needsForeground(.backgroundStartRefused) }
+                    onStartFallback?(policy, .default, error)
+                    policy = .default
+                } else if !context.inBackground, startEnvironment.isInputNotReady(error),
+                          let next = nextPolicyAfterInputNotReady(current: policy, retries: inputRetries) {
+                    inputRetries += 1
+                    onStartFallback?(policy, next, error)
+                    try? await sleep(Self.settleDelay)
+                    policy = next
+                } else if case DictationError.assetsNotInstalled = error {
+                    return .needsOnboarding(.assetsMissing)
+                } else {
+                    return .failed(String(describing: error))
+                }
+            }
+        }
     }
 
     // MARK: Start
@@ -363,8 +458,9 @@ public final class DictationCoordinator {
     private func acquireSession(_ options: StartOptions, policy: AudioPolicy) async -> (DictationSession, EditFeed) {
         if let lease = held {
             held = nil
-            if options.keepAlive > .zero, lease.linger == options.keepAlive {
+            if lease.armedOnly || (options.keepAlive.holdsLease && lease.linger == options.keepAlive) {
                 lease.session.onLeaseExpired = nil
+                if lease.armedOnly { lease.session.adoptLinger(options.keepAlive) }
                 return (lease.session, lease.feed)
             }
             await release(lease)
@@ -426,17 +522,14 @@ public final class DictationCoordinator {
             await flush(sessionFeed, of: s)
             let committed = live.committed
 
-            let keep = !releasingLease && options.keepAlive > .zero && s.leaseState == .armed
-            if keep {
-                held = HeldLease(session: s, feed: sessionFeed, linger: options.keepAlive)
-                s.onLeaseExpired = { [weak self, weak s] in
-                    guard let self, let s else { return }
-                    Task { await self.leaseExpired(s) }
-                }
-            }
+            let keep = !releasingLease && options.keepAlive.holdsLease && s.leaseState == .armed
+            if keep { hold(s, feed: sessionFeed, linger: options.keepAlive) }
             let landed = await sink?.runEnded(thisRun, committed: committed, text: entry?.text) ?? false
-            if keep, held?.session === s { reportLease(now().addingTimeInterval(options.keepAlive.timeInterval)) }
-            if !keep { await retire(sessionFeed) }
+            if keep, held?.session === s { reportLease(leaseEnd(for: options.keepAlive)) }
+            if !keep {
+                await retire(sessionFeed)
+                reportLease(nil) // a lease this run reused (an arm) ended with it
+            }
 
             guard let entry else {
                 // Nothing final was recognized: nothing to copy, nothing to show but the failure.
@@ -523,12 +616,27 @@ public final class DictationCoordinator {
         reportLease(nil)
     }
 
+    /// Keeps `s`'s lease between runs; the sink hears when it runs out (`leaseExpired`).
+    private func hold(_ s: DictationSession, feed: EditFeed, linger: Linger, armedOnly: Bool = false) {
+        held = HeldLease(session: s, feed: feed, linger: linger, armedOnly: armedOnly)
+        s.onLeaseExpired = { [weak self, weak s] in
+            guard let self, let s else { return }
+            Task { await self.leaseExpired(s) }
+        }
+    }
+
     /// The kept lease ran out on its own.
     private func leaseExpired(_ s: DictationSession) async {
         guard let lease = held, lease.session === s else { return }
         held = nil
         await retire(lease.feed)
         reportLease(nil)
+    }
+
+    /// When a lease that was just released with `linger` ends; `.distantFuture` for one with no expiry.
+    private func leaseEnd(for linger: Linger) -> Date {
+        guard let timeout = linger.timeout else { return .distantFuture }
+        return now().addingTimeInterval(timeout.timeInterval)
     }
 
     private func reportLease(_ until: Date?) {

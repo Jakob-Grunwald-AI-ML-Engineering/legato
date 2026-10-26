@@ -111,7 +111,7 @@ public final class UnrestrictedStartEnvironment: StartEnvironment {
 /// armed after a run (zero: released at once). Called once per attempt that has no held session to reuse
 /// (more than once when a refused background start falls back to the default policy, or a foreground
 /// start is retried), so no session or mic outlives its keep-alive.
-public typealias DictationSessionFactory = @MainActor (_ policy: AudioPolicy, _ linger: Duration) -> DictationSession
+public typealias DictationSessionFactory = @MainActor (_ policy: AudioPolicy, _ linger: Linger) -> DictationSession
 
 /// Where a run's text goes.
 public enum DictationTarget: Sendable, Equatable {
@@ -144,10 +144,10 @@ public struct StartOptions: Sendable, Equatable {
     public var activity: ActivityPolicy
     /// How long the mic stays armed after the run, so the next run starts without re-activating the
     /// audio session. Zero releases it at once.
-    public var keepAlive: Duration
+    public var keepAlive: Linger
     public var target: DictationTarget
 
-    public init(activity: ActivityPolicy = .required, keepAlive: Duration = .zero, target: DictationTarget = .app) {
+    public init(activity: ActivityPolicy = .required, keepAlive: Linger = .off, target: DictationTarget = .app) {
         self.activity = activity
         self.keepAlive = keepAlive
         self.target = target

@@ -35,7 +35,7 @@ final class Done {
 final class BuiltSessions {
     var all: [DictationSession] = []
     /// The linger the factory was asked for, per session.
-    var lingers: [Duration] = []
+    var lingers: [Linger] = []
     /// The audio policy each session in `all` was built for.
     var policies: [AudioPolicy] = []
 }
@@ -68,7 +68,8 @@ struct CoordinatorRig {
     let sink: FakeSink
     let coordinator: DictationCoordinator
 
-    init(script: [TranscriptEvent] = []) {
+    /// `wrapControl`: the session control the sessions get, built around the rig's fake (default: the fake).
+    init(script: [TranscriptEvent] = [], wrapControl: ((FakeSessionControl) -> any AudioSessionControlling)? = nil) {
         let log = self.log, history = self.history, time = self.time, built = self.built
         let heartbeat = self.heartbeat, throttle = self.throttle, sleeps = self.sleeps
         let lingerClock = self.lingerClock, settleClock = self.settleClock, settleGate = self.settleGate
@@ -76,6 +77,7 @@ struct CoordinatorRig {
         engine.set(script: script)
         let source = FakeSource(log: log)
         let control = FakeSessionControl(log: log)
+        let sessionControl: any AudioSessionControlling = wrapControl?(control) ?? control
         let activity = FakeActivity(log: log)
         let clipboard = FakeClipboard(log: log)
         sink = FakeSink(log: log)
@@ -88,7 +90,7 @@ struct CoordinatorRig {
             activity: activity, clipboard: clipboard, readiness: readiness, startEnvironment: environment,
             history: history, makeSession: { policy, linger in
                 let session = DictationSession(
-                    engine: engine, source: source, sessionControl: control, history: history,
+                    engine: engine, source: source, sessionControl: sessionControl, history: history,
                     policy: policy, linger: linger, sleep: lingerClock.sleep, now: { time.now }
                 )
                 built.all.append(session)

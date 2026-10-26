@@ -115,12 +115,12 @@ if [ "$mode" = release-check ]; then
   # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
-    AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
+    AudioDiagnostics session.deactivate.skipped audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
     LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoFakeRefusalInForeground LegatoFakeRefusalCount LegatoAudioPolicy
     start.route start.fallback toggle-after-hop
-    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd-forged-url kbd.forged-url
+    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-arm kbd-forged-url kbd.forged-url
     "keyboard.url admission" kbd.apply "link.host phase=" debugForceTapToCopy debugShowPauseOthers
-    KeyboardHarness LegatoKeyboardHarness harness-mic harness-type harness-numbers LegatoHarnessAppearance
+    KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers LegatoHarnessAppearance
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
     LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document)
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
@@ -542,18 +542,18 @@ scenario_j() {
 }
 
 scenario_o() {
-  begin "o. keyboard hidden: as before" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
+  begin "o. keyboard hidden: text on the clipboard, keep-ready still applies" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
   xcrun simctl pbcopy "$UDID" <<< "sentinel"
   trigger kbd-visible
   wait_log "e2e kbd.visible value=1" 10
   trigger kbd-hidden
   wait_log "e2e kbd.visible value=0" 10
   run_once 1
-  assert_log "press routes to the app: activity required, no keep-alive" "route target=app activity=required keepAliveSeconds=0"
-  assert_log "session built without linger" "lingerSeconds=0"
+  assert_log "press routes to the app: activity required, keep-ready applies" "route target=app activity=required keepAliveSeconds=30"
+  assert_log "session built with the keep-ready linger" "lingerSeconds=30"
   assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
   assert_no_log "nothing typed into a keyboard" "kbd.apply"
-  assert_log "session released at once" "session.deactivate"
+  assert_no_log "mic kept ready, not released" "session.deactivate"
   assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
 }
 
@@ -629,41 +629,84 @@ scenario_m() {
 }
 
 scenario_n() {
-  begin "n. hop: one run per request id" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger kbd-hop-start
-  wait_log "e2e outcome kind=started" 10
-  sleep 2
-  assert_count "one run started (request + URL deduped)" "e2e outcome kind=started" 1
-  assert_count "one activity" "activity.request phase=starting" 1
-  assert_log "hop screen shown" "hop shown"
-  assert_log "run targets the keyboard" "link.host phase=listening final=0 target=keyboard"
+  # The keyboard's first mic tap (no lease) hops to the app. The hop only arms the microphone: no run, no
+  # transcription, no history entry, no Live Activity, no clipboard. Back in the host app (the app in the
+  # background, a fresh background start refused by the system), the next tap starts the dictation at once
+  # on the armed lease, typing into the keyboard's field.
+  begin "n. hop arms only, the next tap dictates" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoFakeBackgroundRefusal pla || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  trigger kbd-hop-arm
+  wait_log "e2e arm outcome=armed" 10
+  sleep 1
+  assert_count "one arm (request + URL deduped)" "e2e arm outcome=" 1
+  assert_log "hop screen shown" "hop shown command=arm"
   assert_no_log "the keyboard was not left waiting" "kbd.ack result=timeout"
-  trigger kbd-request-stop
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  assert_count "stopped once" "e2e outcome kind=stopped" 1
-  assert_log "keyboard not visible: stop acked" "kbd.ack result=accepted"
+  assert_count "one session built" "session.make" 1
+  assert_count "audio session activated" "session.activate" 1
+  assert_count "mic armed" "audio.start" 1
+  assert_no_log "no run started" "e2e outcome kind="
+  assert_no_log "no run routed" "e2e route target="
+  assert_no_log "no run published" "link.host phase=listening"
+  assert_no_log "no run state at all" "link.host phase=starting"
+  assert_no_log "no Live Activity" "activity.request"
+  assert_no_log "nothing transcribed" "audio.route"
+  assert_no_log "clipboard not written" "clipboard.write source=coordinator"
+  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+  assert_eq "history empty" "0" "$(history_texts | wc -l | tr -d ' ')"
+  assert_log "lease published (the next tap may start remotely)" "lease=1 accepts=1"
+  assert_no_log "session held, not released" "session.deactivate"
 
-  SCENARIO="n. hop, URL first"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger kbd-hop-start-url-first
+  # Back in the host app: the app is in the background, the keyboard is on screen, the user taps the mic.
+  SCENARIO="n. back in the host app, the next tap dictates"
+  trigger background
+  wait_log "e2e command background" 5
+  trigger kbd-visible
+  wait_log "e2e kbd.visible value=1" 10
+  trigger kbd-request-start
   wait_log "e2e outcome kind=started" 10
-  sleep 2
-  assert_count "one run started" "e2e outcome kind=started" 1
-  assert_count "one activity" "activity.request phase=starting" 1
-  assert_log "hop screen shown" "hop shown"
+  assert_log "start acked accepted" "kbd.ack result=accepted"
+  assert_log "run targets the keyboard, best-effort activity, keep-ready off" "route target=keyboard activity=bestEffort keepAliveSeconds=0"
+  assert_log "started from the background" "start.route route=background"
+  assert_no_log "no refused activation, no hop" "kind=needsForeground"
+  assert_no_log "no fallback" "start.fallback"
+  assert_count "still the one session" "session.make" 1
+  assert_count "audio session not activated again" "session.activate" 1
+  assert_count "armed mic re-routed" "audio.route" 1
+  assert_count "armed mic not started again" "audio.start" 1
+  assert_log "run published to the keyboard" "link.host phase=listening final=0 target=keyboard"
+  sleep 1.5
   trigger kbd-request-stop
   wait_log "e2e outcome kind=stopped" 10
   sleep 0.5
-  assert_eq "history has one entry per hop run (two in all)" "2" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  assert_eq "keyboard field == script" "$TEXT " "$(log_field "kbd.apply final=1" doc)"
+  assert_eq "final link.host committed == script" "$TEXT " "$(log_field "link.host phase=idle final=1" committed)"
+  assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
+  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  assert_count "keep-ready off: the mic is released after the run" "session.deactivate" 1
+  sleep 0.3
+  if last_line "link.host" | grep -q -F "lease=0 accepts=0"; then record PASS "host publishes the lease as gone"
+  else record FAIL "host publishes the lease as gone" "last link.host: $(last_line "link.host" | cut -c1-200)"; fi
 
-  # Anything can open legato://keyboard?cmd=start: without a request from the keyboard it must not record.
+  SCENARIO="n. hop arms only, URL first"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
+  trigger kbd-hop-arm-url-first
+  wait_log "e2e arm outcome=armed" 10
+  sleep 1
+  assert_count "one arm" "e2e arm outcome=" 1
+  assert_log "hop screen shown" "hop shown command=arm"
+  assert_count "one session" "session.make" 1
+  assert_no_log "no run started" "e2e outcome kind="
+  assert_no_log "no Live Activity" "activity.request"
+
+  # Anything can open legato://keyboard?cmd=arm: without a request from the keyboard it must not touch the mic.
   SCENARIO="n. forged URL"
   relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
   trigger kbd-forged-url
   wait_log "kbd.forged-url handled" 10
   assert_log "the URL was rejected" "keyboard.url admission=rejected"
   assert_no_log "no hop screen" "hop shown"
+  assert_no_log "nothing armed" "e2e arm outcome="
   assert_no_log "nothing started" "e2e outcome kind=started"
   assert_no_log "no session, no mic" "session.make"
   assert_no_log "no activity" "activity.request"
@@ -707,7 +750,7 @@ scenario_q() {
   assert_eq "harness document == script twice" "$TEXT $TEXT " "$(log_field_last "harness apply final=1" doc)"
 
   # No running app to ask: the mic key is an open-app key; the request goes out all the same and the
-  # idle app answers hop (the URL, which the Link opens, is what starts the run).
+  # idle app answers hop (the URL, which the Link opens, is what arms the mic).
   SCENARIO="q. harness: mic key, app not running a lease"
   relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeyboardHarness YES || return
   wait_log "e2e harness visible value=1" 10
@@ -717,6 +760,40 @@ scenario_q() {
   assert_log "no lease: the mic key opens the app" "harness mic mode=openApp"
   assert_log "the idle app answers hop" "harness ack result=hop"
   assert_no_log "nothing started over the link" "e2e outcome kind=started"
+  assert_no_log "nothing armed over the link either" "e2e arm outcome="
+
+  # The real keyboard code end to end: tap 1 (open-app mode) sends an arm request and the Link opens the
+  # app, which only arms the mic; tap 2 (now remote mode, the app in the background) dictates into the
+  # harness document.
+  begin "q. harness: first tap arms, second tap dictates" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeyboardHarness YES || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  wait_log "e2e harness visible value=1" 10
+  trigger harness-mic-hop
+  wait_log "e2e arm outcome=armed" 10
+  sleep 1
+  assert_log "the first tap was an open-app tap" "harness mic mode=openApp"
+  assert_log "the hop screen came up" "hop shown command=arm"
+  assert_no_log "the first tap started no run" "e2e outcome kind="
+  assert_no_log "no run published" "link.host phase=listening"
+  assert_no_log "no Live Activity" "activity.request"
+  assert_no_log "nothing typed into the harness document" "harness apply"
+  trigger background
+  wait_log "e2e command background" 5
+  trigger harness-mic
+  wait_log "harness mic mode=remote-start" 10
+  wait_log "e2e outcome kind=started" 10
+  assert_log "the second tap asked the running app to start" "harness mic mode=remote-start"
+  assert_log "run targets the keyboard" "route target=keyboard activity=bestEffort"
+  assert_log "run published to the keyboard" "link.host phase=listening final=0 target=keyboard"
+  assert_count "audio session activated once, by the arm" "session.activate" 1
+  sleep 1.5
+  trigger harness-mic
+  wait_log "harness mic mode=remote-stop" 10
+  wait_log "e2e outcome kind=stopped" 10
+  sleep 0.5
+  assert_eq "harness document == script" "$TEXT " "$(log_field "harness apply final=1" doc)"
+  assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
+  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
 }
 
 scenario_t() {

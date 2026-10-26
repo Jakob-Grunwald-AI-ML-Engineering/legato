@@ -41,8 +41,9 @@ import os
 ///
 /// The fake keyboard (`E2EFakeKeyboard`) stands in for the keyboard extension: it publishes presence,
 /// sends requests, and applies the streamed text with the real `ProxyEditPlanner`. Commands
-/// `kbd-visible`, `kbd-hidden`, `kbd-request-start|stop|end-keep-alive`, `kbd-hop-start` (the request,
-/// then the URL), `kbd-hop-start-url-first` (the URL, then the request), `kbd-forged-url` (a start URL no request backs).
+/// `kbd-visible`, `kbd-hidden`, `kbd-request-start|stop|end-keep-alive`, `kbd-hop-arm` (the mic key with no
+/// lease: the arm request, then the URL), `kbd-hop-arm-url-first` (the URL, then the request),
+/// `kbd-forged-url` (an arm URL no request backs).
 ///
 /// Every line is logged at notice level as `e2e <event> key=value ...` (subsystem de.gruenwald.legato,
 /// category e2e).
@@ -136,11 +137,20 @@ enum E2E {
 
     static let fakePolicy: AudioPolicy? = UserDefaults.standard.string(forKey: "LegatoAudioPolicy").flatMap(AudioPolicy.init(rawValue:))
 
+    /// A linger in whole seconds for the logs: -1 for indefinite.
+    static func seconds(of linger: Linger) -> Int {
+        switch linger {
+        case .off: 0
+        case .indefinite: -1
+        case .duration(let d): Int(d.components.seconds)
+        }
+    }
+
     /// A session wired to the scripted engine, or nil when fake mode is off.
     @MainActor
-    static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy, linger: Duration) -> DictationSession? {
+    static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy, linger: Linger) -> DictationSession? {
         guard let engine = fakeEngine else { return nil }
-        log("session.make engine=\(engine.id) policy=\(policy.rawValue) lingerSeconds=\(Int(linger.components.seconds))")
+        log("session.make engine=\(engine.id) policy=\(policy.rawValue) lingerSeconds=\(seconds(of: linger))")
         return DictationSession(
             engine: engine,
             source: E2EFakeAudioSource(policy: policy),
@@ -236,8 +246,8 @@ extension E2E {
     static let commands = [
         "toggle", "interrupt", "copy-last", "foreground", "background", "toggle-after-hop",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
-        "kbd-hop-start", "kbd-hop-start-url-first", "kbd-forged-url",
-        "harness-mic", "harness-type", "harness-numbers",
+        "kbd-hop-arm", "kbd-hop-arm-url-first", "kbd-forged-url",
+        "harness-mic", "harness-mic-hop", "harness-type", "harness-numbers",
     ]
 
     /// Darwin notifications `de.gruenwald.legato.e2e.<command>`, posted from the host with

@@ -367,6 +367,74 @@ import Testing
         #expect(!r.coordinator.holdsLease)
     }
 
+    // MARK: indefinite keep-alive and a changed setting
+
+    private func leaseDates(_ r: CoordinatorRig) -> [Date?] { r.sink.leases }
+
+    @Test func anIndefiniteKeepAliveHoldsTheLeaseWithNoEndAndReusesIt() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        let options = StartOptions(keepAlive: .indefinite)
+        try await runOnce(r, options)
+        #expect(r.built.lingers == [.indefinite])
+        #expect(leaseDates(r) == [.distantFuture]) // a lease that never ends
+        r.lingerClock.tick() // no timer exists; nothing can expire it
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.coordinator.holdsLease)
+        #expect(r.log.count("deactivate") == 0)
+        try await runOnce(r, options)
+        #expect(r.built.all.count == 1)
+        await r.coordinator.endKeepAlive()
+        #expect(!r.coordinator.holdsLease)
+        #expect(leaseDates(r).last == .some(nil))
+    }
+
+    @Test func switchingTheSettingToOffReleasesAHeldLease() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        try await runOnce(r, Self.keepAlive)
+        await r.coordinator.updateKeepAlive(.off)
+        #expect(!r.coordinator.holdsLease)
+        #expect(r.log.count("deactivate") == 1)
+        #expect(leaseDates(r).last == .some(nil))
+    }
+
+    @Test func aShorterSettingRearmsTheHeldLeaseAndTheNextStartReusesIt() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        try await runOnce(r, StartOptions(keepAlive: .seconds(600)))
+        r.time.advance(100)
+        await r.coordinator.updateKeepAlive(.seconds(60))
+        #expect(r.coordinator.holdsLease)
+        let until = try #require(leaseDates(r).last ?? nil)
+        #expect(until == r.time.now.addingTimeInterval(60)) // the full new time, from now
+        try await runOnce(r, StartOptions(keepAlive: .seconds(60)))
+        #expect(r.built.all.count == 1) // the same session: no re-activation
+        #expect(r.log.count("activate") == 1)
+    }
+
+    @Test func aLongerOrIndefiniteSettingKeepsTheMicWithoutReactivating() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        try await runOnce(r, Self.keepAlive)
+        await r.coordinator.updateKeepAlive(.indefinite)
+        #expect(leaseDates(r).last == .some(.distantFuture))
+        r.lingerClock.tick()
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(r.coordinator.holdsLease && r.log.count("deactivate") == 0)
+    }
+
+    @Test func aChangedSettingWithNothingHeldOrDuringARunDoesNothing() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        await r.coordinator.updateKeepAlive(.seconds(60)) // nothing held
+        #expect(r.sink.leases.isEmpty)
+        #expect(await r.coordinator.toggle(Self.keepAlive) == .started)
+        await r.coordinator.updateKeepAlive(.off) // mid-run: the run goes on
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(r.coordinator.holdsLease) // kept as the run's own options said
+    }
+
     // MARK: start fallbacks keep the run's options
 
     private let backgroundExperimental = StartContext(

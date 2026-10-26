@@ -22,7 +22,9 @@ struct KeyPresentation: Equatable {
 final class TypingModel {
     static let settleWindow: TimeInterval = 0.15
 
-    @ObservationIgnored private unowned let controller: KeyboardController
+    /// Weak: the controller owns this model, and a view may briefly outlive the controller; a stale model
+    /// then reads defaults and edits nothing, instead of trapping.
+    @ObservationIgnored private weak var controller: KeyboardController?
     @ObservationIgnored let feedback = KeyFeedback()
     @ObservationIgnored var now: () -> Date = { Date() }
 
@@ -42,24 +44,24 @@ final class TypingModel {
 
     // MARK: What to draw
 
-    var field: KeyboardField { KeyboardField(controller.keyboardType) }
+    var field: KeyboardField { KeyboardField(controller?.keyboardType ?? .default) }
 
-    var layout: TypingLayout { .make(page: page, field: field, showsGlobe: controller.showsGlobe) }
+    var layout: TypingLayout { .make(page: page, field: field, showsGlobe: controller?.showsGlobe ?? false) }
 
     var presentation: KeyPresentation {
         KeyPresentation(
             uppercase: page == .letters && shift.isUppercase,
             shift: shift.mode,
-            returnLabel: KeyLabels.returnLabel(controller.returnKeyType),
+            returnLabel: KeyLabels.returnLabel(controller?.returnKeyType ?? .default),
             returnEnabled: returnEnabled,
-            returnProminent: controller.returnKeyType != .default,
+            returnProminent: (controller?.returnKeyType ?? .default) != .default,
             spaceLabel: KeyLabels.spaceLabel())
     }
 
     private var returnEnabled: Bool {
-        guard controller.enablesReturnKeyAutomatically else { return true }
+        guard controller?.enablesReturnKeyAutomatically == true else { return true }
         if let shadow, now().timeIntervalSince(shadow.at) < Self.settleWindow, !shadow.text.isEmpty { return true }
-        return controller.hasText
+        return controller?.hasText ?? false
     }
 
     /// What the key types now (a letter is uppercase while shift is on); nil for non-character keys.
@@ -75,12 +77,12 @@ final class TypingModel {
     }
 
     /// The suggestion slots (three, left to right); the prediction engine fills them later.
-    var suggestions: [String] { controller.suggestions }
+    var suggestions: [String] { controller?.suggestions ?? [] }
 
     // MARK: Lifecycle
 
     func appeared() {
-        feedback.refresh(fullAccess: controller.fullAccess)
+        feedback.refresh(fullAccess: controller?.fullAccess ?? false)
         documentChanged()
     }
 
@@ -94,7 +96,7 @@ final class TypingModel {
         let field = field
         if field != lastField {
             lastField = field
-            page = controller.keyboardType == .numbersAndPunctuation ? .numbers : .letters
+            page = controller?.keyboardType == .numbersAndPunctuation ? .numbers : .letters
         }
         refreshAutoShift()
     }
@@ -168,7 +170,7 @@ final class TypingModel {
             page = target
             refreshAutoShift()
         case .emoji:
-            controller.emojiTapped()
+            controller?.emojiTapped()
         case .globe, .mic:
             break
         }
@@ -196,13 +198,13 @@ final class TypingModel {
 
     private func insert(_ text: String) {
         let before = context().before
-        controller.type(text)
+        controller?.type(text)
         shadow = (before + text, now())
     }
 
     private func deleteOne() {
         let before = context().before
-        controller.deleteBackward()
+        controller?.deleteBackward()
         shadow = (String(before.dropLast()), now())
         lastSpaceAt = nil
     }
@@ -249,25 +251,25 @@ final class TypingModel {
             return TextContext(documentContextBeforeInput: shadow.text)
         }
         shadow = nil
-        return TextContext(documentContextBeforeInput: controller.document.contextBefore)
+        return TextContext(documentContextBeforeInput: controller?.document.contextBefore ?? "")
     }
 
     private func refreshAutoShift() {
-        let type = controller.autocapitalization
+        let type = controller?.autocapitalization ?? .none
         shift.applyAutoCapitalization(AutoCapitalizer.shouldCapitalize(type, context: context()))
     }
 
     /// After an edit: apply the rules now against the local context, and again once the field's has settled.
     private func afterEdit() {
         refreshAutoShift()
-        controller.refreshTraits()
+        controller?.refreshTraits()
         settleTask?.cancel()
         settleTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.settleWindow + 0.03))
             guard !Task.isCancelled, let self else { return }
             self.shadow = nil
             self.refreshAutoShift()
-            self.controller.refreshTraits()
+            self.controller?.refreshTraits()
         }
     }
 }

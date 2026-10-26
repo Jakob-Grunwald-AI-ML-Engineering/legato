@@ -14,6 +14,7 @@ enum Settings {
     private enum Key {
         static let audioPolicy = "audioPolicy"
         static let keepAliveSeconds = "keepAliveSeconds"
+        static let keepAliveChoicesVersion = "keepAliveChoicesVersion"
         #if LEGATO_INTERNAL
         static let keepSessionActiveBetweenRuns = "keepSessionActiveBetweenRuns"
         static let debugShowPauseOthers = "debugShowPauseOthers"
@@ -37,22 +38,36 @@ enum Settings {
         debugShowPauseOthers ? AudioPolicy.offeredPolicies + AudioPolicy.experimentalPolicies : AudioPolicy.offeredPolicies
     }
 
-    /// How long the microphone stays ready after a keyboard dictation, so later taps skip the hop to the
-    /// app. Off by default. Applies to dictation into the Legato keyboard only; the Action Button
-    /// without the keyboard always releases the microphone at once.
-    static var keepAlive: KeepAlive {
-        get { KeepAlive(rawValue: keepAliveSeconds) ?? .off }
+    /// How long the microphone stays ready after a dictation (Action Button, Control Center or the Legato
+    /// keyboard), so the next start skips activating the audio session. Off by default.
+    static var keepAlive: KeepAliveChoice {
+        get { KeepAliveChoice(migratingStoredSeconds: keepAliveSeconds) }
         set { keepAliveSeconds = newValue.rawValue }
     }
 
-    /// The stored keep-alive in seconds. Any value works (the e2e run sets short ones); the picker
-    /// offers `KeepAlive`'s cases.
+    /// The stored keep-alive in seconds, `-1` for indefinitely. Any value works (the e2e run sets short
+    /// ones); the picker offers `KeepAliveChoice`'s cases.
     static var keepAliveSeconds: Int {
-        get { max(AppGroup.defaults.integer(forKey: Key.keepAliveSeconds), 0) }
-        set { AppGroup.defaults.set(max(newValue, 0), forKey: Key.keepAliveSeconds) }
+        get { AppGroup.defaults.integer(forKey: Key.keepAliveSeconds) }
+        set { AppGroup.defaults.set(max(newValue, -1), forKey: Key.keepAliveSeconds) }
     }
 
-    static var keepAliveDuration: Duration { .seconds(keepAliveSeconds) }
+    /// What a press starts with: the stored value as it is, so a short e2e value stays short.
+    static var keepAliveLinger: Linger {
+        let seconds = keepAliveSeconds
+        return seconds < 0 ? .indefinite : .seconds(seconds)
+    }
+
+    /// Once: moves a keep-alive stored by an earlier version (30 s and 2 min were offered) onto the
+    /// current choices. Run before anything reads the setting.
+    static func migrateKeepAliveChoices() {
+        let defaults = AppGroup.defaults
+        guard defaults.integer(forKey: Key.keepAliveChoicesVersion) < 2 else { return }
+        if defaults.object(forKey: Key.keepAliveSeconds) != nil {
+            keepAlive = KeepAliveChoice(migratingStoredSeconds: keepAliveSeconds)
+        }
+        defaults.set(2, forKey: Key.keepAliveChoicesVersion)
+    }
 
     /// A light tap on every key of the Legato keyboard (needs Full Access). Default on. The keyboard reads
     /// the same keys (`KeyboardPreferences`).
@@ -125,25 +140,16 @@ enum Settings {
     }
 }
 
-/// The keep-alive choices, by seconds.
-enum KeepAlive: Int, CaseIterable, Identifiable {
-    case off = 0
-    case seconds30 = 30
-    case minute1 = 60
-    case minutes2 = 120
-    case minutes5 = 300
-    case minutes10 = 600
-
-    var id: Int { rawValue }
-
+extension KeepAliveChoice {
     var title: String {
         switch self {
         case .off: "Off"
-        case .seconds30: "30 seconds"
         case .minute1: "1 minute"
-        case .minutes2: "2 minutes"
         case .minutes5: "5 minutes"
         case .minutes10: "10 minutes"
+        case .minutes30: "30 minutes"
+        case .hour1: "1 hour"
+        case .indefinitely: "Indefinitely"
         }
     }
 }

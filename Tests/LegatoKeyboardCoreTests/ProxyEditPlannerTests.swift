@@ -93,6 +93,27 @@ import Testing
         #expect(plan.cursor == bound)
     }
 
+    // The host app's field can be missing for a moment (the keyboard reappears after an app switch):
+    // there is nothing to edit and nothing to bind to.
+    @Test func noFieldProducesNoOpsAndLeavesTheCursorAlone() {
+        let bound = cursor(committedCount: 6, volatile: "wor")
+        let plan = ProxyEditPlanner.plan(
+            state: hostState(committed: "hello world "), cursor: bound, contextBefore: "hello wor", documentID: nil)
+        #expect(plan.ops.isEmpty)
+        #expect(plan.cursor == bound)
+    }
+
+    @Test func noFieldDoesNotBindANewRunOrMakeItFinal() {
+        let fresh = ProxyEditPlanner.plan(
+            state: hostState(committed: "hello "), cursor: nil, contextBefore: "", documentID: nil)
+        #expect(fresh.ops.isEmpty && fresh.cursor == nil)
+        let rebind = ProxyEditPlanner.plan(
+            state: hostState(runID: "run-1", phase: .idle, committed: "hi "), cursor: cursor(runID: "run-0", committedCount: 3),
+            contextBefore: "", documentID: nil)
+        #expect(rebind.ops.isEmpty)
+        #expect(rebind.cursor == cursor(runID: "run-0", committedCount: 3))
+    }
+
     @Test func aNewRunRebindsToTheCurrentDocument() {
         let old = cursor(runID: "run-0", documentID: "doc-A", committedCount: 40)
         let plan = ProxyEditPlanner.plan(

@@ -27,6 +27,10 @@ final class AppController {
     private(set) var liveText = ""
     /// A keyboard run is in progress (the hop screen shows Stop).
     private(set) var keyboardRunActive = false
+    /// The microphone is armed (a lease is held) and the hop screen says to go back; nil when it is not.
+    private(set) var micReadyUntil: Date?
+    /// The keyboard's arm failed (readiness, a refused activation): what the hop screen tells the user.
+    private(set) var armFailure: String?
 
     @ObservationIgnored let engine = AppleSpeechEngine()
     /// The one history store; views go through the methods below, never construct their own.
@@ -45,10 +49,11 @@ final class AppController {
     @ObservationIgnored private var hopOptions: StartOptions?
     #if LEGATO_INTERNAL
     /// One instance for the process: it remembers whether a session is being held between runs.
-    @ObservationIgnored private let sessionControl: AppSessionControl
+    @ObservationIgnored private let sessionControl: KeepActiveSessionControl
     #endif
 
     private init() {
+        Settings.migrateKeepAliveChoices() // before anything reads the setting
         // The one writer of history.jsonl. Without the App Group container (misconfigured signing) fall
         // back to the app's own Application Support, so dictation still works, just not shared.
         let directory = AppGroup.containerURL
@@ -58,7 +63,7 @@ final class AppController {
         let engine = self.engine
         self.history = history
         #if LEGATO_INTERNAL
-        let sessionControl = AppSessionControl()
+        let sessionControl = KeepActiveSessionControl.app()
         self.sessionControl = sessionControl
         let startEnvironment = SystemStartEnvironment(isSessionHeld: { sessionControl.isHeld })
         #else
@@ -107,6 +112,7 @@ final class AppController {
             coordinator.sink = keyboardLink
             keyboardLink.onTranscript = { [weak self] committed, volatile in self?.liveText = committed + volatile }
             keyboardLink.onRunActivity = { [weak self] active in self?.keyboardRunActive = active }
+            keyboardLink.onLease = { [weak self] until in self?.micReadyUntil = until }
             keyboardLink.link.onRequest = { [weak self] request in await self?.perform(request.command) ?? false }
             keyboardLink.startListening()
         }
@@ -123,9 +129,9 @@ final class AppController {
 
     /// The single entry point: Action Button, Control Center, Live Activity stop and the in-app button.
     ///
-    /// With the Legato keyboard on screen (it publishes a fresh presence) the text streams into its field,
-    /// the Live Activity is still required (iOS stops a recording intent without one) and the microphone
-    /// stays ready for the keep-alive setting. Otherwise: the clipboard, an activity, no linger.
+    /// With the Legato keyboard on screen (it publishes a fresh presence) the text streams into its field;
+    /// otherwise it goes to the clipboard. Either way the Live Activity is required (iOS stops a recording
+    /// intent without one) and the microphone stays ready for the keep-alive setting.
     ///
     /// `afterForegroundHop`: this press repeats one that returned `.needsForeground(reason)` and the
     /// system has since brought the app to the foreground, so the start is a foreground start.
@@ -142,8 +148,7 @@ final class AppController {
 
     /// What a press starts with, given whether the Legato keyboard is on screen.
     static func pressOptions(keyboardVisible: Bool) -> StartOptions {
-        guard keyboardVisible else { return StartOptions() }
-        return StartOptions(activity: .required, keepAlive: Settings.keepAliveDuration, target: .keyboard)
+        StartOptions(activity: .required, keepAlive: Settings.keepAliveLinger, target: keyboardVisible ? .keyboard : .app)
     }
 
     /// The keyboard asked for this (a request over the link, or `legato://keyboard`). Returns whether it
@@ -157,9 +162,27 @@ final class AppController {
         switch command {
         case .start:
             // A start never toggles: a second one while running must not stop the run.
-            let options = StartOptions(activity: .bestEffort, keepAlive: Settings.keepAliveDuration, target: .keyboard)
+            let options = StartOptions(activity: .bestEffort, keepAlive: Settings.keepAliveLinger, target: .keyboard)
             guard let outcome = await run(options, startOnly: true) else { return true }
             if case .started = outcome { return true }
+            return false
+        case .arm:
+            // The keyboard's first tap opened the app: ready the microphone and nothing else. No run, no
+            // history entry, no Live Activity, no clipboard; the next tap, back in the host app, starts
+            // the dictation on this lease.
+            armFailure = nil
+            let outcome = await coordinator.arm(keepAlive: Settings.keepAliveLinger)
+            #if DEBUG
+            E2E.log("arm outcome=\(Self.describe(outcome))")
+            #endif
+            switch outcome {
+            case .armed, .busy: return true // busy: a run holds the mic already
+            case .needsOnboarding:
+                armFailure = "Legato needs a permission or the speech model first. Open Legato's home screen to set it up."
+                await refreshReadiness()
+            case .needsForeground, .failed:
+                armFailure = "The microphone could not be readied. Try again."
+            }
             return false
         case .stop:
             await stopIfRunning()
@@ -170,9 +193,14 @@ final class AppController {
         }
     }
 
-    /// Releases the microphone kept ready between keyboard dictations.
+    /// Releases the microphone kept ready between dictations.
     func endKeepAlive() async {
         await coordinator.endKeepAlive()
+    }
+
+    /// The keep-ready setting changed: a held microphone follows it (released for Off, re-armed otherwise).
+    func keepAliveSettingChanged(_ linger: Linger) async {
+        await coordinator.updateKeepAlive(linger)
     }
 
     func dismissKeyboardHop() {
@@ -188,7 +216,7 @@ final class AppController {
         AudioDiagnostics.log("toggle.begin", ["isDictating": isDictating])
         #endif
         #if DEBUG
-        E2E.log("route target=\(options.target == .keyboard ? "keyboard" : "app") activity=\(options.activity == .required ? "required" : "bestEffort") keepAliveSeconds=\(Int(options.keepAlive.components.seconds))")
+        E2E.log("route target=\(options.target == .keyboard ? "keyboard" : "app") activity=\(options.activity == .required ? "required" : "bestEffort") keepAliveSeconds=\(E2E.seconds(of: options.keepAlive))")
         #endif
         startEnvironment.assumeForeground = reason != nil
         defer { startEnvironment.assumeForeground = false }
@@ -244,6 +272,16 @@ final class AppController {
     #endif
 
     #if DEBUG
+    private static func describe(_ outcome: DictationCoordinator.ArmOutcome) -> String {
+        switch outcome {
+        case .armed: "armed"
+        case .busy: "busy"
+        case .needsOnboarding(let issue): "needsOnboarding(\(issue))"
+        case .needsForeground(let reason): "needsForeground(\(reason.rawValue))"
+        case .failed(let error): "failed(\(E2E.quote(error)))"
+        }
+    }
+
     private static func describe(_ outcome: DictationCoordinator.Outcome) -> String {
         switch outcome {
         case .started: "kind=started"
@@ -301,9 +339,10 @@ final class AppController {
         E2E.log("keyboard.url admission=\(admission)")
         #endif
         guard admission != .rejected else { return }
-        if command == .start { showsKeyboardHop = true }
+        let hops = command == .start || command == .arm
+        if hops { showsKeyboardHop = true }
         #if DEBUG
-        if command == .start { E2E.log("hop shown") }
+        if hops { E2E.log("hop shown command=\(command.rawValue)") }
         #endif
         guard admission == .act else {
             #if DEBUG

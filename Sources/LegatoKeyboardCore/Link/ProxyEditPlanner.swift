@@ -25,13 +25,14 @@ public struct ProxyPlan: Sendable, Equatable {
 /// - The volatile tail is revised by a common-prefix diff against what is in the field, and is deleted
 ///   only while the context still ends with it; otherwise it is left alone (it has become the user's).
 /// - Edits go only to the document the run is bound to; a run binds to the document it first types into.
+///   With no document (`documentID` nil: no field is bound) nothing is planned and the cursor stays.
 /// - A separating space goes in front of the first text of a run (and after the user typed into the
 ///   run) when the field's text before it doesn't end in whitespace.
 public enum ProxyEditPlanner {
     public static func plan(
-        state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String
+        state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?
     ) -> ProxyPlan {
-        guard state.target == .keyboard, let runID = state.runID else { return ProxyPlan(ops: [], cursor: cursor) }
+        guard let documentID, state.target == .keyboard, let runID = state.runID else { return ProxyPlan(ops: [], cursor: cursor) }
 
         var ops: [ProxyOp] = []
         var context = contextBefore

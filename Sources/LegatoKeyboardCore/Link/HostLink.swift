@@ -234,6 +234,7 @@ public final class HostLink {
         case .start: state.acceptsRemoteStart || isRunning
         case .stop: isRunning
         case .endKeepAlive: state.leaseUntil != nil
+        case .arm: false // arming activates audio: only from the front, through the URL that opens the app
         }
     }
 

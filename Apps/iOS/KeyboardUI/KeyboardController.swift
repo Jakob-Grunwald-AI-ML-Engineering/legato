@@ -44,6 +44,7 @@ final class KeyboardController {
     private(set) var openAppRequestID = UUID().uuidString
 
     @ObservationIgnored private var cursor: AppliedCursor?
+    @ObservationIgnored private var isTornDown = false
     private var forcedOpenAppUntil: Date?
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var reapply: Task<Void, Never>?
@@ -65,6 +66,7 @@ final class KeyboardController {
 
     /// The keyboard came on screen: beat presence once a second, and catch up with a run in progress.
     func appeared() {
+        guard !isTornDown else { return }
         isVisible = true
         refreshTraits()
         typing.appeared()
@@ -89,6 +91,20 @@ final class KeyboardController {
         reapply?.cancel()
         link.writePresence(visible: false, notify: true)
         trace?("visible value=0")
+    }
+
+    /// The keyboard is going away for good (its view controller is being released): stop listening to the
+    /// app and cancel everything that runs, so that a controller kept alive a moment longer by a view or a
+    /// pending notification does nothing.
+    func tearDown() {
+        guard !isTornDown else { return }
+        if isVisible { disappeared() }
+        isTornDown = true
+        link.stopObserving()
+        heartbeat?.cancel()
+        reapply?.cancel()
+        hintTimeout?.cancel()
+        typing.disappeared()
     }
 
     private func beat() {
@@ -130,6 +146,7 @@ final class KeyboardController {
     }
 
     private func hostDidChange() {
+        guard !isTornDown else { return }
         reloadHost()
         applyHost()
     }
@@ -139,7 +156,7 @@ final class KeyboardController {
     /// dictation, seen again when the keyboard reappears) is not typed. A "running" state whose beat has
     /// gone stale belongs to an app that died: its text is not typed either.
     private func applyHost() {
-        guard isVisible, let host, host.isLive(now: Date()) else { return }
+        guard !isTornDown, isVisible, let host, host.isLive(now: Date()) else { return }
         if cursor?.runID != host.runID, host.phase == .idle { return }
         let before = cursor
         let plan = ProxyEditPlanner.plan(
@@ -180,7 +197,7 @@ final class KeyboardController {
     /// The user types into a run's text: the tentative text comes out first so the key lands after the
     /// committed text; `applyHost` puts it back after the key.
     private func beforeUserEdit() {
-        guard let current = cursor, current.documentID == document.documentID,
+        guard let current = cursor, let documentID = document.documentID, current.documentID == documentID,
               let host, host.runID == current.runID, host.phase != .idle
         else { return }
         let plan = ProxyEditPlanner.prepareForTyping(cursor: current, contextBefore: document.contextBefore)
@@ -217,6 +234,10 @@ final class KeyboardController {
         return MicKeyMode.resolve(host: host, now: now, fullAccess: hasFullAccess())
     }
 
+    /// What the open-app key asks of the app: to arm the microphone, not to dictate (the app is in front
+    /// of the host app's field then). The dictation starts with the next tap, back in the host app.
+    var openAppCommand: RequestCommand { MicKeyMode.openApp.request ?? .arm }
+
     /// The mic key was tapped. In `.openApp` mode the key is a `Link` that opens the app by itself; this
     /// sends the same request over the link, for an app that is already running.
     func micTapped() {
@@ -229,7 +250,7 @@ final class KeyboardController {
         case .openApp:
             trace?("mic mode=openApp")
             let id = openAppRequestID
-            link.send(.start, id: id)
+            link.send(openAppCommand, id: id)
             Task { [weak self] in
                 let result = await self?.link.awaitAck(id: id, timeout: LinkChannel.ackTimeout)
                 self?.trace?("ack result=\(result?.rawValue ?? "timeout")")

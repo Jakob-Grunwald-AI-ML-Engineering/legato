@@ -1,7 +1,7 @@
 import Foundation
 
 /// Orchestrates one dictation: an *audio lease* (policy active, mic armed) hosting *runs*
-/// (one engine transcription each). With `linger > 0` the lease outlives a run so the next
+/// (one engine transcription each). With a `linger` the lease outlives a run so the next
 /// run reuses the armed mic without re-activating the session.
 @MainActor
 public final class DictationSession {
@@ -30,7 +30,7 @@ public final class DictationSession {
     private let history: any HistoryStore
     /// The audio policy this session activates under (fixed at construction). A reused lease keeps it.
     public let policy: AudioPolicy
-    private let linger: Duration
+    public private(set) var linger: Linger
     private let sleep: @Sendable (Duration) async throws -> Void
     private let now: @Sendable () -> Date
     private let editsContinuation: AsyncStream<TranscriptEdit>.Continuation
@@ -54,7 +54,7 @@ public final class DictationSession {
         sessionControl: any AudioSessionControlling,
         history: any HistoryStore,
         policy: AudioPolicy = .default,
-        linger: Duration = .zero,
+        linger: Linger = .off,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -249,20 +249,71 @@ public final class DictationSession {
         leaseState = .idle
     }
 
-    /// After a successful run: deactivate now, or after `linger` unless a new run starts.
+    /// After a successful run: deactivate now, after `linger` unless a new run starts, or never (indefinite).
     private func releaseLease() async {
-        if linger == .zero {
+        switch linger {
+        case .off:
             await teardownLease()
-            return
+        case .indefinite:
+            break // no timer: held until `endLease`, an abort or a dead source
+        case .duration(let duration):
+            armExpiry(after: duration)
         }
-        let sleep = self.sleep, linger = self.linger
+    }
+
+    private func armExpiry(after duration: Duration) {
+        let sleep = self.sleep
         lingerTask = Task {
-            do { try await sleep(linger) } catch { return }
+            do { try await sleep(duration) } catch { return }
             guard !Task.isCancelled, runState == .idle else { return }
             let held = leaseState != .idle
             await teardownLease()
             if held { onLeaseExpired?() }
         }
+    }
+
+    /// Changes how long the lease outlives runs. A lease held between runs follows at once: `.off` ends
+    /// it, `.indefinite` drops its timer, a duration restarts the whole timer from now. During a run
+    /// the new linger applies when the run ends.
+    public func setLinger(_ new: Linger) async {
+        guard new != linger else { return }
+        linger = new
+        guard runState == .idle, leaseState == .armed else { return }
+        await cancelLinger()
+        guard runState == .idle, leaseState == .armed, linger == new else { return }
+        switch new {
+        case .off: await teardownLease()
+        case .indefinite: break
+        case .duration(let duration): armExpiry(after: duration)
+        }
+    }
+
+    /// Arms the lease without a run: activates the audio session and starts the mic (detached, nothing
+    /// transcribes), so a later `start()` reuses it at once, also from the background. The lease then
+    /// ends like one a run left behind: after `linger`, never for `.indefinite`. Arming a lease that is
+    /// already armed only restarts its timer.
+    /// - Throws: `DictationError.alreadyRunning`, `.assetsNotInstalled`, or whatever the engine, session
+    ///   or source threw (the lease is torn down).
+    public func armLease(locale: Locale? = nil) async throws {
+        guard runState == .idle else { throw DictationError.alreadyRunning }
+        await cancelLinger()
+        do {
+            if leaseState != .armed {
+                let format = try await engine.prepare(locale: locale)
+                _ = try await arm(format)
+                await source.detach() // armed and idle, like a lease between two runs
+            }
+        } catch {
+            await teardownLease()
+            throw error
+        }
+        await releaseLease()
+    }
+
+    /// Sets the linger for the run that is about to reuse the held lease, leaving the lease itself alone
+    /// (`setLinger` would end it at once for `.off`). The run's end applies it.
+    public func adoptLinger(_ new: Linger) {
+        linger = new
     }
 
     /// Tears down a lease held between runs now. No-op during a run or without a lease.

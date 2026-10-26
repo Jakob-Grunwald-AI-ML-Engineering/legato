@@ -33,13 +33,25 @@ final class FakeSessionControl: AudioSessionControlling {
     func clearActivationFailure() { activateError.withLock { $0 = nil } }
     var activatedConfigs: [SessionConfig] { configs.withLock { $0 } }
 
+    /// Models iOS: while the session is active (and this is on), activating it again fails with the error,
+    /// the way a background `setCategory` on an active session fails with '!int'.
+    private let refusalWhileActive = Mutex<(any Error)?>(nil)
+    private let active = Mutex(false)
+    func refuseActivationWhileActive(with e: (any Error)?) { refusalWhileActive.withLock { $0 = e } }
+    var isActive: Bool { active.withLock { $0 } }
+
     func activate(_ config: SessionConfig) throws {
         log.add("activate")
         if let e = activateError.withLock({ $0 }),
            failingConfigs.withLock({ $0 })?.contains(config) ?? true { throw e }
+        if let e = refusalWhileActive.withLock({ $0 }), isActive { throw e }
+        active.withLock { $0 = true }
         configs.withLock { $0.append(config) }
     }
-    func deactivate() { log.add("deactivate") }
+    func deactivate() {
+        log.add("deactivate")
+        active.withLock { $0 = false }
+    }
 }
 
 final class FakeSource: AudioSource {

@@ -522,6 +522,40 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         #expect(r.received.requests.isEmpty)
     }
 
+    // MARK: arming (the hop)
+
+    @Test func anArmRequestOverTheLinkIsAlwaysAnsweredHopBecauseArmingNeedsTheAppInFront() async {
+        let r = Rig()
+        r.send(.arm, id: "a")
+        await r.link.processInbox()
+        #expect(r.ack == KeyboardAck(id: "a", result: .hop) && r.received.requests.isEmpty)
+        // Even with a lease held (a remote start failed and the mic may be dead): arm from the front.
+        r.link.leaseChanged(until: t0.addingTimeInterval(30))
+        r.send(.arm, id: "b")
+        await r.link.processInbox()
+        #expect(r.ack == KeyboardAck(id: "b", result: .hop) && r.received.requests.isEmpty)
+    }
+
+    @Test func theURLThatOpensTheAppAdmitsTheArmOnceAndTheLedgerBlocksTheCopy() async {
+        let r = Rig()
+        r.send(.arm)
+        #expect(r.link.admitURL(requestID: "req-1", command: .arm) == .act)
+        #expect(r.link.admitURL(requestID: "req-1", command: .arm) == .alreadyHandled)
+        await r.link.processInbox()
+        #expect(r.received.requests.isEmpty) // the URL path acts; the inbox must not arm a second time
+    }
+
+    @Test func anArmURLWithoutTheKeyboardsOwnRequestIsRejected() {
+        let r = Rig()
+        #expect(r.link.admitURL(requestID: "forged", command: .arm) == .rejected)
+    }
+
+    @Test func anArmURLDoesNotMatchAStartRequest() {
+        let r = Rig()
+        r.send(.start)
+        #expect(r.link.admitURL(requestID: "req-1", command: .arm) == .rejected)
+    }
+
     // MARK: keyboard presence
 
     @Test func theKeyboardIsVisibleOnlyWhilePresenceIsFresh() {

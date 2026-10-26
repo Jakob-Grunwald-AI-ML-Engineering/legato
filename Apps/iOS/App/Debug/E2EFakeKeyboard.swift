@@ -31,8 +31,8 @@ final class E2EFakeKeyboard {
         case "kbd-request-start": await send(.start)
         case "kbd-request-stop": await send(.stop)
         case "kbd-request-end-keep-alive": await send(.endKeepAlive)
-        case "kbd-hop-start": await hop(urlFirst: false)
-        case "kbd-hop-start-url-first": await hop(urlFirst: true)
+        case "kbd-hop-arm": await hop(urlFirst: false)
+        case "kbd-hop-arm-url-first": await hop(urlFirst: true)
         case "kbd-forged-url": await forgedURL()
         default: E2E.log("kbd.unknown \(command)")
         }
@@ -97,26 +97,27 @@ final class E2EFakeKeyboard {
         E2E.log("kbd.ack result=timeout")
     }
 
-    /// What the mic key does in `.openApp` mode: the Darwin request and the URL the Link opens.
+    /// What the mic key does in `.openApp` mode: the Darwin request and the URL the Link opens. Both ask
+    /// only to arm the microphone.
     private func hop(urlFirst: Bool) async {
         let id = newID()
-        let url = KeyboardURL.make(command: .start, requestID: id)
+        let url = KeyboardURL.make(command: .arm, requestID: id)
         if urlFirst {
             // The Link tap writes the request as it opens the URL; the Darwin note comes after the app is up.
-            writeRequest(.start, id: id)
+            writeRequest(.arm, id: id)
             await AppController.shared.handle(url)
             DarwinObserver.post(LinkChannel.Note.request)
         } else {
-            post(.start, id: id)
+            post(.arm, id: id)
             await AppController.shared.handle(url)
         }
         await awaitAck(id)
     }
 
-    /// A `legato://keyboard?cmd=start` URL that no keyboard request backs (a web page, another app): the app
-    /// may open, but must not start.
+    /// A `legato://keyboard?cmd=arm` URL that no keyboard request backs (a web page, another app): the app
+    /// may open, but must not arm the microphone.
     private func forgedURL() async {
-        await AppController.shared.handle(KeyboardURL.make(command: .start, requestID: UUID().uuidString))
+        await AppController.shared.handle(KeyboardURL.make(command: .arm, requestID: UUID().uuidString))
         E2E.log("kbd.forged-url handled")
     }
 

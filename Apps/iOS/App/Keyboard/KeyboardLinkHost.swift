@@ -19,6 +19,8 @@ final class KeyboardLinkHost: TranscriptSink {
     var onTranscript: (@MainActor (_ committed: String, _ volatile: String) -> Void)?
     /// A run began (true) or ended (false).
     var onRunActivity: (@MainActor (Bool) -> Void)?
+    /// The mic lease between runs: when it ends, or nil when it is not held.
+    var onLease: (@MainActor (Date?) -> Void)?
 
     private var observers: [DarwinObserver] = []
 
@@ -79,5 +81,6 @@ final class KeyboardLinkHost: TranscriptSink {
 
     func leaseChanged(until: Date?) {
         link.leaseChanged(until: until)
+        onLease?(until)
     }
 }
