@@ -10,7 +10,7 @@ private let realEngineEnabled = ProcessInfo.processInfo.environment["LEGATO_REAL
 /// A persistent root so reruns reuse the downloads. Override with `LEGATO_TEST_MODEL_ROOT`.
 private let modelRoot: URL = {
     if let path = ProcessInfo.processInfo.environment["LEGATO_TEST_MODEL_ROOT"] { return URL(fileURLWithPath: path) }
-    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/LegatoTests/Models")
+    return URL.cachesDirectory.appendingPathComponent("LegatoTests/Models")
 }()
 
 private let spec = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
