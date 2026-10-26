@@ -181,7 +181,7 @@ final class AppController {
     }
 
     /// The keyboard's Refine key: a stronger rewrite (message style) of `text`, or nil when there is none.
-    /// Runs in the background too (the registry falls back to Foundation Models or nothing there).
+    /// Runs in the background too, as the background cleanup setting says (the MLX model on the CPU by default).
     func refine(_ text: String) async -> String? {
         let reports = cleanupReports
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current

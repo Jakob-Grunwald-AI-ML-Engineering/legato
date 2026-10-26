@@ -146,6 +146,7 @@ struct LastDictationSection: View {
                 }
                 if let report {
                     LabeledContent(report.refine ? "Refine backend" : "Cleanup backend", value: report.backend)
+                    if let device = report.device { LabeledContent("Device", value: device) }
                     LabeledContent("Took", value: "\(report.milliseconds) ms · \(report.style.rawValue)")
                     ForEach(report.skipped, id: \.self) { reason in
                         Text("Skipped: \(reason)").font(.caption).foregroundStyle(.secondary)

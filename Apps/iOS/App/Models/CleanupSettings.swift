@@ -2,6 +2,7 @@ import Foundation
 import LegatoAppServices
 import LegatoCore
 import LegatoKeyboardCore
+import LegatoMLX
 import LegatoPostProcessing
 
 /// The cleanup settings, in the App Group's `UserDefaults` (`CleanupSettingsStore`). Off by default.
@@ -39,6 +40,12 @@ extension Settings {
     static var cleanupTimeoutSeconds: Int {
         get { cleanupStore.timeoutSeconds }
         set { cleanupStore.timeoutSeconds = newValue }
+    }
+
+    /// What cleanup runs while the app is in the background (no GPU there). Default the CPU.
+    static var cleanupBackground: CleanupRegistry.BackgroundCleanup {
+        get { cleanupStore.backgroundCleanup }
+        set { cleanupStore.backgroundCleanup = newValue }
     }
 
     /// What the keyboard is told about a run that starts now: nil with cleanup off.

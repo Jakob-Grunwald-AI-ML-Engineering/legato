@@ -12,14 +12,20 @@ public struct CleanupRunReport: Sendable, Equatable {
     public var changed: Bool
     public var milliseconds: Int
     public var refine: Bool
+    /// "GPU" or "CPU" for an MLX model; nil for any other backend.
+    public var device: String?
 
-    public init(backend: String, skipped: [String], style: CleanupStyle, changed: Bool, milliseconds: Int, refine: Bool) {
+    public init(
+        backend: String, skipped: [String], style: CleanupStyle, changed: Bool, milliseconds: Int, refine: Bool,
+        device: String? = nil
+    ) {
         self.backend = backend
         self.skipped = skipped
         self.style = style
         self.changed = changed
         self.milliseconds = milliseconds
         self.refine = refine
+        self.device = device
     }
 }
 
@@ -78,12 +84,14 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         let start = clock.now
         let itn = settings.itn
         let (pipeline, resolution) = await registry.pipeline(
-            style: style, itn: itn, preference: settings.backend.preference, timeout: timeout)
+            style: style, itn: itn, preference: settings.backend.preference, background: settings.backgroundCleanup,
+            timeout: timeout)
         let out = await pipeline.process(text, locale: locale)
         let elapsed = start.duration(to: clock.now)
         await report(CleanupRunReport(
             backend: name(resolution.choice, itn: itn), skipped: resolution.skipped.map(\.description), style: style,
-            changed: out != text, milliseconds: Int(elapsed / .milliseconds(1)), refine: refine))
+            changed: out != text, milliseconds: Int(elapsed / .milliseconds(1)), refine: refine,
+            device: resolution.device?.label))
         return out
     }
 

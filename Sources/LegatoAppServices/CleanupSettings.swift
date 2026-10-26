@@ -5,11 +5,11 @@ import LegatoPostProcessing
 
 /// Which backend cleanup uses. Stored as its raw value.
 public enum CleanupBackendChoice: String, CaseIterable, Sendable {
-    /// The picked MLX model while the GPU is usable, else Apple Foundation Models.
+    /// The picked MLX model (on the CPU in the phone's background, as the background setting says), else Apple Foundation Models.
     case auto
     /// Apple Foundation Models only.
     case foundationModels
-    /// The picked MLX model (falls through to Apple Foundation Models where MLX can't run: the phone's background).
+    /// The picked MLX model (in the phone's background as the background setting says: on the CPU by default).
     case mlx
 
     public var preference: CleanupRegistry.BackendPreference { self == .foundationModels ? .foundationModels : .auto }
@@ -25,10 +25,12 @@ public struct CleanupOptions: Sendable, Equatable {
     public var itn: Bool
     /// Per-stage limit, 1 to 10 seconds.
     public var timeoutSeconds: Int
+    /// What runs while the GPU is not usable (the phone app in the background).
+    public var background: CleanupRegistry.BackgroundCleanup
 
     public init(
         enabled: Bool, delivery: CleanupDelivery, style: CleanupStyle, backend: CleanupBackendChoice, itn: Bool,
-        timeoutSeconds: Int
+        timeoutSeconds: Int, background: CleanupRegistry.BackgroundCleanup = .cpu
     ) {
         self.enabled = enabled
         self.delivery = delivery
@@ -36,11 +38,13 @@ public struct CleanupOptions: Sendable, Equatable {
         self.backend = backend
         self.itn = itn
         self.timeoutSeconds = timeoutSeconds
+        self.background = background
     }
 }
 
 /// The cleanup settings in an injected `UserDefaults` (the App Group's on the phone, the app's on the Mac).
-/// Off by default; delivery Replace, style Verbatim, backend Auto, ITN off (#22), 4 s per stage.
+/// Off by default; delivery Replace, style Verbatim, backend Auto, ITN off (#22), 4 s per stage, background
+/// cleanup on the CPU.
 public struct CleanupSettingsStore: Sendable {
     // UserDefaults is documented thread-safe but not annotated Sendable.
     nonisolated(unsafe) private let defaults: UserDefaults
@@ -52,6 +56,7 @@ public struct CleanupSettingsStore: Sendable {
         static let backend = "cleanup.backend"
         static let itn = "cleanup.itn"
         static let timeoutSeconds = "cleanup.timeoutSeconds"
+        static let background = "cleanup.background"
     }
 
     public init(defaults: UserDefaults) {
@@ -93,8 +98,15 @@ public struct CleanupSettingsStore: Sendable {
         nonmutating set { defaults.set(min(max(newValue, 1), 10), forKey: Key.timeoutSeconds) }
     }
 
+    /// What cleanup does while the GPU is not usable (the phone app in the background). Default the CPU.
+    public var backgroundCleanup: CleanupRegistry.BackgroundCleanup {
+        get { defaults.string(forKey: Key.background).flatMap(CleanupRegistry.BackgroundCleanup.init(rawValue:)) ?? .cpu }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.background) }
+    }
+
     public var options: CleanupOptions {
         CleanupOptions(
-            enabled: enabled, delivery: delivery, style: style, backend: backend, itn: itn, timeoutSeconds: timeoutSeconds)
+            enabled: enabled, delivery: delivery, style: style, backend: backend, itn: itn, timeoutSeconds: timeoutSeconds,
+            background: backgroundCleanup)
     }
 }

@@ -1,6 +1,7 @@
 import Foundation
 import HuggingFace
 import LegatoCore
+import MLX
 import LegatoModels
 import MLXLLM
 import MLXLMCommon
@@ -79,22 +80,40 @@ private struct TokenizerBridge: MLXLMCommon.Tokenizer {
     }
 }
 
+/// Where an MLX model computes.
+public enum ComputeDevice: String, Sendable, Equatable, CaseIterable {
+    /// Metal: fast, foreground only on the phone (iOS refuses GPU work from a background app).
+    case gpu
+    /// The CPU: slower, allowed in the background.
+    case cpu
+
+    /// "GPU" / "CPU", for Settings.
+    public var label: String { rawValue.uppercased() }
+}
+
 /// An installed MLX model as a cleanup (or later summary) backend.
 ///
 /// Runs greedy decoding with Qwen3's thinking mode off. Each call uses a fresh chat session, so nothing
 /// carries over between calls. MLX array work needs the Metal shaders that only an Xcode build produces.
+///
+/// On ``ComputeDevice/cpu`` the load and the generation run with the CPU as the task's default device, so
+/// no GPU work is submitted (the phone's background). The loaded model is shared with the GPU backend: MLX
+/// arrays live in unified memory and any device computes on them, and the weights load on the CPU stream
+/// either way, so one resident copy serves both and a device switch reloads nothing.
 public final class MLXBackend: LLMBackend {
     public let spec: MLXModelSpec
     public let folder: URL
+    public let device: ComputeDevice
 
-    public var id: String { "mlx:\(spec.repo)" }
+    public var id: String { device == .gpu ? "mlx:\(spec.repo)" : "mlx-cpu:\(spec.repo)" }
 
     /// Instructions, prompt and reply together, in characters; small models drift on long input.
     public let maxPromptCharacters: Int? = 4_000
 
-    public init(spec: MLXModelSpec, folder: URL) {
+    public init(spec: MLXModelSpec, folder: URL, device: ComputeDevice = .gpu) {
         self.spec = spec
         self.folder = folder
+        self.device = device
     }
 
     public var availability: LLMAvailability {
@@ -112,6 +131,17 @@ public final class MLXBackend: LLMBackend {
         guard MLXInstaller.isComplete(folder: folder) else {
             throw LLMError.unavailable(reason: "\(spec.displayName) is not downloaded.")
         }
+        switch device {
+        case .gpu:
+            return try await generate(instructions: instructions, examples: examples, prompt: prompt)
+        case .cpu:
+            return try await Device.withDefaultDevice(.cpu) {
+                try await generate(instructions: instructions, examples: examples, prompt: prompt)
+            }
+        }
+    }
+
+    private func generate(instructions: String, examples: [LLMExample], prompt: String) async throws -> String {
         let container = try await MLXModelCache.shared.container(for: spec, folder: folder)
         let session = ChatSession(
             container,

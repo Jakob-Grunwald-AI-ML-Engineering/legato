@@ -119,3 +119,83 @@ private final class Recorder: Sendable {
         #expect(recorder.reports.first?.skipped == ["Apple Foundation Models unavailable: off in tests"])
     }
 }
+
+// MARK: background cleanup (the phone app in the background: no GPU)
+
+/// Says the files are there; enough for the manager to call a model installed once its marker is written.
+private struct PresentInstaller: ModelInstaller {
+    let folderName: String
+    func installFolder(root: URL) -> URL { root.appending(path: folderName, directoryHint: .isDirectory) }
+    func isInstalled(root: URL) async -> Bool { true }
+    func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {}
+    func warm(root: URL) async throws {}
+}
+
+private struct NamedLLM: LLMBackend {
+    let id: String
+    let maxPromptCharacters: Int? = nil
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String { prompt }
+}
+
+/// A registry whose picked MLX model is installed, with the GPU usable or not.
+private func backgroundRegistry(gpu: Bool) -> CleanupRegistry {
+    let spec = MLXModels.spec(id: MLXModels.qwen3_1_7bID)!
+    let root = FileManager.default.temporaryDirectory.appending(path: "legato-appservices-\(UUID().uuidString)")
+    let installer = PresentInstaller(folderName: "mlx/\(spec.folderName)")
+    try? InstallMarker.write(in: installer.installFolder(root: root), id: spec.id, stage: .installed)
+    let selection = SelectionStore(defaults: freshDefaults())
+    selection.set(spec.id, for: .cleanup)
+    let manager = ModelManager(root: root, catalog: [spec.descriptor], installers: [spec.id: installer], selection: selection)
+    return CleanupRegistry(
+        models: manager, foundationModels: FakeFoundationModels(available: true),
+        makeMLXBackend: { _, _ in NamedLLM(id: "gpu") }, makeCPUBackend: { _, _ in NamedLLM(id: "cpu") },
+        canUseGPU: { gpu })
+}
+
+@Suite struct BackgroundCleanupSettingTests {
+    @Test func backgroundCleanupDefaultsToTheCpu() {
+        #expect(CleanupSettingsStore(defaults: freshDefaults()).backgroundCleanup == .cpu)
+    }
+
+    @Test func backgroundCleanupPersists() {
+        let defaults = freshDefaults()
+        CleanupSettingsStore(defaults: defaults).backgroundCleanup = .foundationModels
+        #expect(CleanupSettingsStore(defaults: defaults).backgroundCleanup == .foundationModels)
+        #expect(CleanupSettingsStore(defaults: defaults).options.background == .foundationModels)
+    }
+
+    @Test func aBackgroundRunReportsTheCpu() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        let recorder = Recorder()
+        let processor = CleanupProcessor(
+            registry: backgroundRegistry(gpu: false), settings: store, report: { recorder.record($0) })
+        _ = try await processor.process("hello world", locale: Locale(identifier: "en_US"))
+        #expect(recorder.reports.first?.backend == "Qwen3 1.7B (4-bit)")
+        #expect(recorder.reports.first?.device == "CPU")
+    }
+
+    @Test func aForegroundRunReportsTheGpu() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        let recorder = Recorder()
+        let processor = CleanupProcessor(
+            registry: backgroundRegistry(gpu: true), settings: store, report: { recorder.record($0) })
+        _ = try await processor.process("hello world", locale: Locale(identifier: "en_US"))
+        #expect(recorder.reports.first?.device == "GPU")
+    }
+
+    @Test func theSettingReachesTheRegistry() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        store.backgroundCleanup = .off
+        let recorder = Recorder()
+        let processor = CleanupProcessor(
+            registry: backgroundRegistry(gpu: false), settings: store, report: { recorder.record($0) })
+        let out = try await processor.process("hello world", locale: Locale(identifier: "en_US"))
+        #expect(out == "hello world")
+        #expect(recorder.reports.first?.device == nil)
+        #expect(recorder.reports.first?.skipped == [CleanupRegistry.Skip.backgroundCleanupOff.description])
+    }
+}

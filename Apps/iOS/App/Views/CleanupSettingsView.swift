@@ -1,5 +1,6 @@
 import LegatoAppServices
 import LegatoCore
+import LegatoMLX
 import LegatoModels
 import LegatoPostProcessing
 import SwiftUI
@@ -13,6 +14,7 @@ struct CleanupSettingsView: View {
     @State private var delivery = Settings.cleanupDelivery
     @State private var style = Settings.cleanupStyle
     @State private var backend = Settings.cleanupBackend
+    @State private var background = Settings.cleanupBackground
     @State private var itn = Settings.cleanupITN
     @State private var timeout = Double(Settings.cleanupTimeoutSeconds)
     @State private var selectedMLX: String?
@@ -59,8 +61,8 @@ struct CleanupSettingsView: View {
             }
 
             Section {
-                backendRow("Auto", detail: "Your MLX model in the foreground, else Apple Foundation Models", choice: .auto)
-                backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence) · works in the background", choice: .foundationModels)
+                backendRow("Auto", detail: "Your MLX model when one is picked, else Apple Foundation Models", choice: .auto)
+                backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence)", choice: .foundationModels)
                 ForEach(models.cleanupModels) { descriptor in
                     ModelRow(
                         descriptor: descriptor, manager: models.manager,
@@ -74,7 +76,18 @@ struct CleanupSettingsView: View {
             } header: {
                 Text("Backend")
             } footer: {
-                Text("MLX models need the app in front (no GPU in the background): a dictation from the background uses Apple Foundation Models instead. Picking a model downloads it first. Auto uses the MLX model picked last: \(selectedMLXName ?? "none yet").")
+                Text("Picking a model downloads it first. Auto uses the MLX model picked last: \(selectedMLXName ?? "none yet").")
+            }
+
+            Section {
+                Picker("Background cleanup", selection: $background) {
+                    Text("CPU (slower)").tag(CleanupRegistry.BackgroundCleanup.cpu)
+                    Text("Apple Foundation Models").tag(CleanupRegistry.BackgroundCleanup.foundationModels)
+                    Text("Off").tag(CleanupRegistry.BackgroundCleanup.off)
+                }
+                .accessibilityIdentifier("cleanup.background")
+            } footer: {
+                Text(Self.explain(background))
             }
 
             Section {
@@ -95,6 +108,7 @@ struct CleanupSettingsView: View {
         .onChange(of: delivery) { _, new in Settings.cleanupDelivery = new }
         .onChange(of: style) { _, new in Settings.cleanupStyle = new }
         .onChange(of: backend) { _, new in Settings.cleanupBackend = new }
+        .onChange(of: background) { _, new in Settings.cleanupBackground = new }
         .onChange(of: itn) { _, new in Settings.cleanupITN = new }
         .onChange(of: timeout) { _, new in Settings.cleanupTimeoutSeconds = Int(new) }
     }
@@ -135,6 +149,17 @@ struct CleanupSettingsView: View {
             await models.manager.delete(id)
             selectedMLX = models.selected(.cleanup)
             if selectedMLX == nil, backend == .mlx { backend = .auto }
+        }
+    }
+
+    static func explain(_ background: CleanupRegistry.BackgroundCleanup) -> String {
+        switch background {
+        case .cpu:
+            "With Legato in the background iOS allows no GPU work, so your MLX model runs on the CPU: same text, a few times slower. Apple Foundation Models work in the background as they are."
+        case .foundationModels:
+            "With Legato in the background your MLX model is passed over and Apple Foundation Models clean up instead."
+        case .off:
+            "With Legato in the background no language model runs; the raw text is kept."
         }
     }
 
