@@ -27,6 +27,14 @@ public actor ModelManager {
         let continuation: AsyncStream<ModelState>.Continuation
         /// Install streams end with the install; event streams stay open.
         let finishOnTerminal: Bool
+        /// Who waits on an install stream: a caller of ``install(_:)``, or a ``select(_:role:superseding:)``
+        /// for a role. Nil for an event stream (it watches, it does not want the install).
+        let owner: Owner?
+    }
+
+    private enum Owner: Equatable {
+        case caller
+        case select(ModelRole)
     }
 
     /// - Parameters:
@@ -68,7 +76,7 @@ public actor ModelManager {
     /// The current state, then every change, until the stream is dropped.
     public func events(for id: String) async -> AsyncStream<ModelState> {
         let probed = await state(of: id)
-        return subscribe(id, initial: transient[id] ?? probed, finishOnTerminal: false)
+        return subscribe(id, initial: transient[id] ?? probed, finishOnTerminal: false, owner: nil)
     }
 
     /// Total bytes of every installed model's folder.
@@ -91,6 +99,10 @@ public actor ModelManager {
     /// installed model yields `installed` and ends without touching the installer's `install`.
     /// Dropping the stream only stops this caller's updates.
     public func install(_ id: String) async -> AsyncStream<ModelState> {
+        await install(id, owner: .caller)
+    }
+
+    private func install(_ id: String, owner: Owner) async -> AsyncStream<ModelState> {
         guard let installer = installers[id], descriptors[id] != nil else {
             return Self.single(.failed("Unknown model \(id)"))
         }
@@ -104,7 +116,7 @@ public actor ModelManager {
                 start(id, installer)
             }
         }
-        return subscribe(id, initial: transient[id] ?? .downloading(0), finishOnTerminal: true)
+        return subscribe(id, initial: transient[id] ?? .downloading(0), finishOnTerminal: true, owner: owner)
     }
 
     /// Cancels the model's download for every waiter and removes the partial folder. Returns once it
@@ -148,15 +160,25 @@ public actor ModelManager {
     /// ``selected(role:)`` keeps answering with the previous choice, and a failed or cancelled install
     /// leaves it untouched. If another pick for the same role arrives meanwhile, the later one wins and
     /// this call returns without switching.
-    public func select(_ id: String, role: ModelRole) async throws {
+    ///
+    /// `superseding`: the pick this one replaces (for example the previous latency tier of the same family).
+    /// Its install is cancelled, and its partial folder removed, unless someone other than a pick for
+    /// `role` still waits for it (an ``install(_:)`` caller, or a pick for another role). An installed or
+    /// idle model is left alone.
+    public func select(_ id: String, role: ModelRole, superseding superseded: String? = nil) async throws {
         guard let descriptor = descriptors[id], installers[id] != nil else { throw ModelError.unknownModel(id) }
         guard descriptor.kind == role.kind else { throw ModelError.wrongKind(model: id, role: role) }
 
         pending[role] = id
         defer { if pending[role] == id { pending[role] = nil } }
 
+        if let superseded, superseded != id, running[superseded] != nil, !isWanted(superseded, besidesPicksFor: role) {
+            await cancel(superseded)
+        }
+        try Task.checkCancellation()
+
         var last: ModelState = .notInstalled
-        for await state in await install(id) { last = state }
+        for await state in await install(id, owner: .select(role)) { last = state }
         try Task.checkCancellation()
 
         switch last {
@@ -166,6 +188,14 @@ public actor ModelManager {
             throw ModelError.installFailed(model: id, message: message)
         default:
             throw ModelError.cancelled(model: id)
+        }
+    }
+
+    /// Whether anyone but a pick for `role` waits on `id`'s install.
+    private func isWanted(_ id: String, besidesPicksFor role: ModelRole) -> Bool {
+        (subscribers[id] ?? [:]).values.contains { sub in
+            guard let owner = sub.owner else { return false }
+            return owner != .select(role)
         }
     }
 
@@ -238,7 +268,9 @@ public actor ModelManager {
 
     // MARK: subscribers
 
-    private func subscribe(_ id: String, initial: ModelState, finishOnTerminal: Bool) -> AsyncStream<ModelState> {
+    private func subscribe(
+        _ id: String, initial: ModelState, finishOnTerminal: Bool, owner: Owner?
+    ) -> AsyncStream<ModelState> {
         let (stream, continuation) = AsyncStream<ModelState>.makeStream()
         continuation.yield(initial)
         if finishOnTerminal && initial.isTerminal {
@@ -246,7 +278,8 @@ public actor ModelManager {
             return stream
         }
         let token = UUID()
-        subscribers[id, default: [:]][token] = Subscriber(continuation: continuation, finishOnTerminal: finishOnTerminal)
+        subscribers[id, default: [:]][token] = Subscriber(
+            continuation: continuation, finishOnTerminal: finishOnTerminal, owner: owner)
         continuation.onTermination = { [weak self] _ in
             Task { await self?.unsubscribe(id, token) }
         }

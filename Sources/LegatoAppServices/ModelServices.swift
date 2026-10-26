@@ -28,6 +28,8 @@ public final class ModelServices {
     private let familySelection: FamilySelection
     /// The pick in flight per role; a newer pick (or Apple Speech) cancels it.
     private var picks: [ModelRole: Task<Void, Never>] = [:]
+    /// The model each pick in `picks` installs.
+    private var pickIDs: [ModelRole: (token: UUID, id: String)] = [:]
 
     /// - Parameters:
     ///   - root: where the models live (`<App Group>/Models` on the phone, `Application Support/Legato/Models`
@@ -80,23 +82,43 @@ public final class ModelServices {
     }
 
     /// Picks `id` for `role`: installs and warms it first when missing, then switches. `done` runs on the
-    /// main actor with nil on success or the error. A newer pick for the role cancels this one's wait (the
-    /// download itself carries on; the selection does not switch to it).
+    /// main actor with nil on success or the error. A newer pick for the role cancels this one's wait and the
+    /// selection does not switch to it. Its download carries on, except when the newer pick is another
+    /// latency tier of the same family (``supersededPick(inFlight:next:families:)``): then it stops, unless
+    /// something else still waits for it, and its partial folder goes.
     public func pick(_ id: String, role: ModelRole, done: @escaping @MainActor ((any Error)?) -> Void) {
         picks[role]?.cancel()
+        let superseded = Self.supersededPick(inFlight: pickIDs[role]?.id, next: id, families: streamingFamilies)
         let manager = self.manager
+        let token = UUID()
+        pickIDs[role] = (token, id)
         picks[role] = Task {
+            defer {
+                if pickIDs[role]?.token == token {
+                    picks[role] = nil
+                    pickIDs[role] = nil
+                }
+            }
             do {
-                try await manager.select(id, role: role)
+                try await manager.select(id, role: role, superseding: superseded)
                 try Task.checkCancellation()
                 done(nil)
-            } catch is CancellationError {
-                return
             } catch {
+                // Superseded by a newer pick: its own error (a cancelled install) is not this pick's to report.
+                if Task.isCancelled || error is CancellationError { return }
                 Self.log.error("pick \(id, privacy: .public) failed: \(String(describing: error), privacy: .public)")
                 done(error)
             }
         }
+    }
+
+    /// The pick in flight that a pick of `next` replaces: another latency tier of the same family, whose
+    /// download then stops (a tier flurry must not leave several tiers downloading). Nil otherwise.
+    public nonisolated static func supersededPick(inFlight: String?, next: String, families: [ModelFamily]) -> String? {
+        guard let inFlight, inFlight != next,
+              let family = families.first(where: { $0.contains(next) }), family.isTiered, family.contains(inFlight)
+        else { return nil }
+        return inFlight
     }
 
     // MARK: families
@@ -148,6 +170,7 @@ public final class ModelServices {
     public func clearPick(_ role: ModelRole) {
         picks[role]?.cancel()
         picks[role] = nil
+        pickIDs[role] = nil
         selection.set(nil, for: role)
     }
 }

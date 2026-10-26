@@ -74,6 +74,28 @@ private struct Rig {
         #expect(services.chosenModel(of: services.streamingFamilies[2])?.id == "parakeet-eou-320")
     }
 
+    // MARK: a tier flurry downloads only the last tier
+
+    @Test func aNewerTierOfTheSameFamilySupersedesThePickInFlight() {
+        let rig = Rig()
+        defer { rig.cleanUp() }
+        let families = rig.services().streamingFamilies
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "nemotron-multilingual-1120", families: families)
+            == "nemotron-multilingual-560")
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-1120", next: "nemotron-multilingual-2240", families: families)
+            == "nemotron-multilingual-1120")
+    }
+
+    @Test func aPickOfAnotherFamilyOrTheSameTierSupersedesNothing() {
+        let rig = Rig()
+        defer { rig.cleanUp() }
+        let families = rig.services().streamingFamilies
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "parakeet-eou-320", families: families) == nil)
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-latin-560", next: "nemotron-multilingual-560", families: families) == nil)
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "nemotron-multilingual-560", families: families) == nil)
+        #expect(ModelServices.supersededPick(inFlight: nil, next: "nemotron-multilingual-560", families: families) == nil)
+    }
+
     @Test func theLiveLabelNamesTheFamilyAndItsTier() {
         let rig = Rig()
         defer { rig.cleanUp() }

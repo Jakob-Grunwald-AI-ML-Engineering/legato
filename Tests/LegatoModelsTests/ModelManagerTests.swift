@@ -411,6 +411,56 @@ import Testing
         #expect(await h.manager.state(of: "speech-a") == .installed(bytes: 1_000), "the superseded model still installed")
     }
 
+    @Test func aPickThatSupersedesAnotherCancelsItsInstallAndLeavesNoPartialFolder() async throws {
+        let slow = FakeInstaller(folderName: "speech-a", gated: true)
+        let fast = FakeInstaller(folderName: "speech-b")
+        let h = Harness(installers: ["speech-a": slow, "speech-b": fast])
+        defer { h.cleanUp() }
+        h.store.set("previous", for: .liveDictation)
+        let first = Task { try await h.manager.select("speech-a", role: .liveDictation) }
+        #expect(await eventually { slow.reachedGate })
+        #expect(h.folderExists("speech-a"), "precondition: a partial download is on disk")
+
+        try await h.manager.select("speech-b", role: .liveDictation, superseding: "speech-a")
+        #expect(slow.cancelledCalls == 1, "the superseded download was cancelled")
+        slow.release() // a download that was not cancelled would finish now
+
+        await #expect(throws: ModelError.cancelled(model: "speech-a")) { try await first.value }
+        #expect(!h.folderExists("speech-a"), "no partial folder")
+        #expect(await h.manager.state(of: "speech-a") == .notInstalled)
+        #expect(await h.manager.selected(role: .liveDictation) == "speech-b")
+    }
+
+    @Test func aSupersededInstallThatAnotherCallerWaitsForKeepsGoing() async throws {
+        let slow = FakeInstaller(folderName: "speech-a", gated: true)
+        let fast = FakeInstaller(folderName: "speech-b")
+        let h = Harness(installers: ["speech-a": slow, "speech-b": fast])
+        defer { h.cleanUp() }
+        let first = Task { try await h.manager.select("speech-a", role: .liveDictation) }
+        #expect(await eventually { slow.reachedGate })
+        let otherWaiter = await h.manager.install("speech-a")
+        let watched = Task { await collect(otherWaiter) }
+
+        try await h.manager.select("speech-b", role: .liveDictation, superseding: "speech-a")
+        slow.release()
+        try await first.value
+
+        #expect(await watched.value.last == .installed(bytes: 1_000), "the other waiter got its model")
+        #expect(slow.cancelledCalls == 0)
+        #expect(await h.manager.selected(role: .liveDictation) == "speech-b", "the last pick still wins")
+    }
+
+    @Test func supersedingAModelThatIsNotInstallingChangesNothing() async throws {
+        let h = Harness(installers: ["speech-a": FakeInstaller(folderName: "speech-a"), "speech-b": FakeInstaller(folderName: "speech-b")])
+        defer { h.cleanUp() }
+        _ = await collect(await h.manager.install("speech-a"))
+
+        try await h.manager.select("speech-b", role: .liveDictation, superseding: "speech-a")
+
+        #expect(await h.manager.state(of: "speech-a") == .installed(bytes: 1_000), "an installed model is never removed")
+        #expect(await h.manager.selected(role: .liveDictation) == "speech-b")
+    }
+
     @Test func selectRejectsAModelOfTheWrongKind() async {
         let h = Harness(installers: ["llm-a": FakeInstaller(folderName: "llm-a")])
         defer { h.cleanUp() }
