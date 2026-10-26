@@ -229,11 +229,13 @@ enum Bench {
     }
 
     private static func cell(_ stat: Stat?) -> String {
-        guard let stat else { return "n/a" }
-        return "\(Int(stat.medianMs.rounded())) / \(Int(stat.p95Ms.rounded()))"
+        guard let stat else { return "n/a (n=0)" }
+        return "\(Int(stat.medianMs.rounded())) / \(Int(stat.p95Ms.rounded())) (n=\(stat.n))"
     }
 
-    /// A Markdown table, one row per configuration. Times are median / p95 in milliseconds.
+    /// A Markdown table, one row per configuration. Times are median / p95 in milliseconds, and `n` is how
+    /// many measurements each cell rests on (runs for the first word, partial events for the emission lag,
+    /// covered sentences for the finalization).
     static func markdown(_ configs: [ConfigResult]) -> String {
         var lines = [
             "| Engine | Tier (ms) | Silence (ms) | First word | Emission lag | Finalization | Punctuation / sentences | Notes |",

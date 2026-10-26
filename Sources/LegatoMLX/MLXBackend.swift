@@ -1,37 +1,32 @@
 import Foundation
 import HuggingFace
 import LegatoCore
+import LegatoModels
 import MLXLLM
 import MLXLMCommon
 import Tokenizers
 
-/// Keeps loaded models, so warming at install time and the first cleanup call share one load.
+/// Keeps the loaded model, so warming at install time and the first cleanup call share one load. Holds
+/// one model at a time (about 1 GB resident): picking another one releases the previous.
 actor MLXModelCache {
     static let shared = MLXModelCache()
 
-    private var loads: [String: Task<ModelContainer, any Error>] = [:]
+    private let cache = RecentModelCache<ModelContainer>(capacity: 1)
 
     /// Loads the model from `folder` (once). Never downloads: the downloader below refuses.
     func container(for spec: MLXModelSpec, folder: URL) async throws -> ModelContainer {
-        let key = folder.standardizedFileURL.path
-        if let existing = loads[key] { return try await existing.value }
-        let task = Task<ModelContainer, any Error> {
+        try await cache.model(at: folder) {
             try await LLMModelFactory.shared.loadContainer(
                 from: NoDownloads(), using: TransformersTokenizerLoader(),
                 configuration: ModelConfiguration(directory: folder, extraEOSTokens: spec.extraEOSTokens))
         }
-        loads[key] = task
-        do {
-            return try await task.value
-        } catch {
-            loads[key] = nil
-            throw error
-        }
     }
 
-    func evict(folder: URL) {
-        loads[folder.standardizedFileURL.path] = nil
+    func evict(folder: URL) async {
+        await cache.evict(folder: folder)
     }
+
+    var residentFolders: [String] { get async { await cache.residentFolders } }
 }
 
 /// A downloader that always refuses: models load from disk only.

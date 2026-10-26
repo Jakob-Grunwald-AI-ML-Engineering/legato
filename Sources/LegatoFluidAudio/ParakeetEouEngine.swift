@@ -10,7 +10,8 @@ import Synchronization
 /// both streaming engines share one endpointing rule.
 ///
 /// `prepare` throws ``DictationError/assetsNotInstalled`` unless the model is installed in `models`. The loaded
-/// model stays with the engine, so later sessions on the same instance only reset it.
+/// model is shared (see ``EouModelCache``), so only the first engine to prepare pays the load and later
+/// engines and sessions only reset it.
 public final class ParakeetEouEngine: DictationEngine {
     public let id: String
 
@@ -19,7 +20,6 @@ public final class ParakeetEouEngine: DictationEngine {
     private let rmsThreshold: Float
     private let models: ModelManager
     private let modelID: String
-    private let loaded = Mutex<StreamingEouAsrManager?>(nil)
     private let run = Mutex<EngineRun<EouBackend>?>(nil)
 
     public init(
@@ -43,15 +43,9 @@ public final class ParakeetEouEngine: DictationEngine {
 
     public func prepare(locale: Locale?) async throws -> AudioFormatSpec {
         try await EngineSupport.requireInstalled(models: models, id: modelID)
-        let manager: StreamingEouAsrManager
-        if let existing = loaded.withLock({ $0 }) {
-            manager = existing
-            await manager.reset()
-        } else {
-            manager = StreamingEouAsrManager(configuration: FluidAudioCompute.configuration(), chunkSize: chunk.chunkSize)
-            try await manager.loadModels(from: ParakeetEouInstaller(chunk: chunk).installFolder(root: await models.root))
-            loaded.withLock { $0 = manager }
-        }
+        let folder = ParakeetEouInstaller(chunk: chunk).installFolder(root: await models.root)
+        let manager = try await EouModelCache.shared.manager(at: folder, chunk: chunk)
+        await manager.reset()
         let box = PartialBox()
         await manager.setPartialCallback { box.set($0) }
         run.withLock {

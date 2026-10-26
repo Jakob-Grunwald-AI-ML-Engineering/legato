@@ -40,6 +40,14 @@ struct MLXCatalogTests {
         #expect(phone == [MLXModels.qwen3_0_6bID, MLXModels.gemma3_1bID])
     }
 
+    @Test func everyModelIsPinnedToACommitHash() {
+        for spec in MLXModels.specs {
+            #expect(
+                spec.revision.count == 40 && spec.revision.allSatisfy { $0.isHexDigit && !$0.isUppercase },
+                "\(spec.id): \(spec.revision) is not a 40-character commit hash")
+        }
+    }
+
     @Test func eachListedModelHasAnInstallerAndNoneHasADefault() {
         let installers = MLXModels.installers(platform: .macOS, fetcher: FakeFetcher())
         #expect(Set(installers.keys) == Set(MLXModels.descriptors(platform: .macOS).map(\.id)))
@@ -70,6 +78,7 @@ struct MLXInstallerTests {
 
         let call = try #require(fetcher.recorded.first)
         #expect(call.repo == "mlx-community/Qwen3-0.6B-4bit")
+        #expect(call.revision == qwen06.revision, "the download is pinned to the spec's commit")
         #expect(call.folder == installer.installFolder(root: root))
         for pattern in ["*.safetensors", "*.json"] { #expect(call.patterns.contains(pattern)) }
         for name in ["config.json", "tokenizer.json", "model.safetensors"] {
@@ -167,5 +176,54 @@ struct MLXInstallerTests {
             Issue.record("not installed")
             return
         }
+    }
+}
+
+// MARK: Hub requests
+
+/// Answers every request with a 503 and records it, so the fetcher's requests can be read without a network.
+private final class RecordingProtocol: URLProtocol, @unchecked Sendable {
+    static let requests = Mutex<[URLRequest]>([])
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requests.withLock { $0.append(request) }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+@Suite("HubFileFetcher", .serialized)
+struct HubFileFetcherTests {
+    @Test func askForThePinnedCommitWithoutSendingAnyToken() async {
+        RecordingProtocol.requests.withLock { $0 = [] }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RecordingProtocol.self]
+        let fetcher = HubFileFetcher(session: URLSession(configuration: configuration))
+        let folder = tempRoot()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        // A token in the environment must not reach a public download.
+        setenv("HF_TOKEN", "hf_secret_token_for_test", 1)
+        defer { unsetenv("HF_TOKEN") }
+
+        _ = try? await fetcher.fetch(
+            repo: qwen06.repo, revision: qwen06.revision, to: folder, matching: MLXInstaller.filePatterns
+        ) { _ in }
+
+        let requests = RecordingProtocol.requests.withLock { $0 }
+        #expect(!requests.isEmpty)
+        for request in requests {
+            #expect(request.value(forHTTPHeaderField: "Authorization") == nil, "\(request.url?.absoluteString ?? "")")
+            #expect(request.url?.host == "huggingface.co")
+        }
+        #expect(
+            requests.contains { $0.url?.absoluteString.contains(qwen06.revision) == true },
+            "the commit appears in the request: \(requests.compactMap { $0.url?.absoluteString })")
     }
 }

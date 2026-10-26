@@ -74,7 +74,8 @@ final class FakeInstaller: ModelInstaller, @unchecked Sendable {
         self.installed.withLock { $0 = installed }
     }
     func installFolder(root: URL) -> URL { root.appendingPathComponent(folderName) }
-    func isInstalled(root: URL) async -> Bool { installed.withLock { $0 } }
+    var isInstalledNow: Bool { installed.withLock { $0 } }
+    func isInstalled(root: URL) async -> Bool { isInstalledNow }
     func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         progress(0.5)
         progress(1)
@@ -88,6 +89,10 @@ func makeManager(id: String, installer: FakeInstaller) -> ModelManager {
     let descriptor = ModelDescriptor(
         id: id, kind: .speechStreaming, displayName: "Fake", approxBytes: 1, licence: "test", family: "fake")
     let defaults = UserDefaults(suiteName: "legato-seam-\(UUID().uuidString)")!
+    // A model staged as installed carries the marker an earlier install would have left.
+    if installer.isInstalledNow {
+        try? InstallMarker.write(in: installer.installFolder(root: root), id: id, stage: .installed)
+    }
     return ModelManager(root: root, catalog: [descriptor], installers: [id: installer], selection: SelectionStore(defaults: defaults))
 }
 

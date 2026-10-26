@@ -33,17 +33,21 @@ public enum FluidAudioCatalog {
         })
     }
 
-    /// A manager over the speech catalog for `platform`, storing under `root`.
+    /// A manager over the speech catalog for `platform`, storing under `root`. Deleting a model also
+    /// releases its loaded copy, which holds about a gigabyte, and downloads are pinned to reviewed commits
+    /// (``FluidAudioModels/pinnedRevisions``).
     public static func makeManager(
         root: URL = defaultRoot(),
         selection: SelectionStore = SelectionStore(),
         platform: ModelPlatform = .current
     ) -> ModelManager {
-        ModelManager(
+        FluidAudioModels.pinRevisions()
+        return ModelManager(
             root: root,
             catalog: descriptors(platform: platform),
             installers: installers(platform: platform),
-            selection: selection)
+            selection: selection,
+            onDelete: { _, folder in await FluidAudioModels.release(folder: folder) })
     }
 
     /// The streaming engine for a catalog id (tier included), or `nil` when the id is not a FluidAudio

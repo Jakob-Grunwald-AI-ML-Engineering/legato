@@ -84,8 +84,10 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
     // MARK: chunking
 
     /// Cuts `text` into pieces of at most `maxCharacters`, at sentence ends. A sentence longer than the
-    /// limit is cut at word boundaries. Joining the pieces with a space restores the sentence text.
-    public static func chunks(of text: String, maxCharacters: Int) -> [String] {
+    /// limit is cut at word boundaries, or by character where there are none. Joining the pieces with
+    /// `joiner` restores the sentence text: a space, or nothing for Chinese and Japanese, which are written
+    /// without spaces.
+    public static func chunks(of text: String, maxCharacters: Int, joiner: String = " ") -> [String] {
         let limit = max(1, maxCharacters)
         var sentences: [String] = []
         text.enumerateSubstrings(in: text.startIndex..., options: .bySentences) { substring, _, _, _ in
@@ -113,8 +115,8 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         for piece in pieces {
             if current.isEmpty {
                 current = piece
-            } else if current.count + 1 + piece.count <= limit {
-                current += " " + piece
+            } else if current.count + joiner.count + piece.count <= limit {
+                current += joiner + piece
             } else {
                 chunks.append(current)
                 current = piece
@@ -124,7 +126,13 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         return chunks
     }
 
-    /// Cuts after each `.`, `!` or `?` that is followed by whitespace.
+    /// Whether `locale` is written without spaces between words.
+    static func isUnspaced(_ locale: Locale) -> Bool {
+        guard let code = locale.language.languageCode?.identifier else { return false }
+        return code == "zh" || code == "ja" || code == "yue"
+    }
+
+    /// Cuts after each `.`, `!` or `?` that is followed by whitespace, and after each CJK `。`, `！` or `？`.
     private static func splitAtTerminators(_ text: String) -> [String] {
         var parts: [String] = []
         var current = ""
@@ -138,6 +146,10 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
             }
             current.append(character)
             previousWasTerminator = ".!?".contains(character)
+            if "。！？".contains(character) {
+                parts.append(current)
+                current = ""
+            }
         }
         if !current.isEmpty { parts.append(current) }
         return parts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -147,16 +159,30 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         var parts: [String] = []
         var current = ""
         for word in sentence.split(whereSeparator: \.isWhitespace) {
-            if current.isEmpty {
-                current = String(word)
-            } else if current.count + 1 + word.count <= limit {
-                current += " " + word
-            } else {
-                parts.append(current)
-                current = String(word)
+            // A "word" over the limit has no spaces to cut at (Chinese, Japanese): cut it by character.
+            let pieces = word.count <= limit ? [String(word)] : hardCut(String(word), limit: limit)
+            for piece in pieces {
+                if current.isEmpty {
+                    current = piece
+                } else if current.count + 1 + piece.count <= limit {
+                    current += " " + piece
+                } else {
+                    parts.append(current)
+                    current = piece
+                }
             }
         }
         if !current.isEmpty { parts.append(current) }
+        return parts
+    }
+
+    private static func hardCut(_ text: String, limit: Int) -> [String] {
+        var parts: [String] = []
+        var rest = Substring(text)
+        while !rest.isEmpty {
+            parts.append(String(rest.prefix(limit)))
+            rest = rest.dropFirst(limit)
+        }
         return parts
     }
 
@@ -167,7 +193,8 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
             throw LLMError.unavailable(reason: reason)
         }
         let instructions = Self.instructions(locale: locale, vocabulary: vocabulary)
-        let chunks = Self.chunks(of: text, maxCharacters: chunkLimit(instructions: instructions))
+        let joiner = Self.isUnspaced(locale) ? "" : " "
+        let chunks = Self.chunks(of: text, maxCharacters: chunkLimit(instructions: instructions), joiner: joiner)
         guard !chunks.isEmpty else { return text }
 
         var cleaned: [String] = []
@@ -175,7 +202,7 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
             try Task.checkCancellation()
             cleaned.append(try await clean(chunk, instructions: instructions, locale: locale))
         }
-        return cleaned.joined(separator: " ")
+        return cleaned.joined(separator: joiner)
     }
 
     private func clean(_ chunk: String, instructions: String, locale: Locale) async throws -> String {

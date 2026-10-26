@@ -203,6 +203,27 @@ private func tone(_ seconds: Double, amp: Float = 0.1) -> [Float] {
         #expect(lines[2].contains("apple-speech"))
         #expect(lines[2].contains("500"))
     }
+
+    @Test func everyMetricCellShowsHowManyMeasurementsItRestsOn() {
+        let config = Bench.ConfigResult(
+            engine: "apple-speech", model: nil, tierMs: nil, silenceMs: nil,
+            runs: [
+                run("en", firstWord: 500, lags: [10, 20, 30], finals: [900, 1000], punct: 1, sentences: 2),
+                run("de", firstWord: 700, lags: [40], finals: [800, nil], punct: 1, sentences: 2),
+            ])
+        let row = Bench.markdown([config]).split(separator: "\n")[2]
+        #expect(row.contains("600 / 700 (n=2)"), "first word: \(row)")
+        #expect(row.contains("25 / 40 (n=4)"), "emission lag: \(row)")
+        #expect(row.contains("900 / 1000 (n=3)"), "finalization: \(row)")
+    }
+
+    @Test func aMetricWithoutMeasurementsSaysSo() {
+        let config = Bench.ConfigResult(
+            engine: "apple-speech", model: nil, tierMs: nil, silenceMs: nil,
+            runs: [run("en", firstWord: nil, lags: [], finals: [], punct: 0, sentences: 0)])
+        let row = Bench.markdown([config]).split(separator: "\n")[2]
+        #expect(row.contains("n/a (n=0)"))
+    }
 }
 
 #if os(macOS)

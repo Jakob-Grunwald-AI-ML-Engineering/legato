@@ -14,6 +14,7 @@ public actor ModelManager {
     private let descriptors: [String: ModelDescriptor]
     private let installers: [String: any ModelInstaller]
     private let selection: SelectionStore
+    private let onDelete: (@Sendable (_ id: String, _ folder: URL) async -> Void)?
 
     /// In-flight (downloading, warming) and failed states. Installed and not installed are read from disk.
     private var transient: [String: ModelState] = [:]
@@ -34,17 +35,22 @@ public actor ModelManager {
     ///   - installers: one installer per catalog model, keyed by ``ModelDescriptor/id``. A model without
     ///     an installer cannot be installed.
     ///   - selection: where the picked model per role persists.
+    ///   - onDelete: called after ``delete(_:)`` removed a model's folder, with the model id and that
+    ///     folder, so the owner of loaded copies of the model (in-memory caches) can release them. The
+    ///     manager itself keeps no loaded models.
     public init(
         root: URL,
         catalog: [ModelDescriptor],
         installers: [String: any ModelInstaller],
-        selection: SelectionStore
+        selection: SelectionStore,
+        onDelete: (@Sendable (_ id: String, _ folder: URL) async -> Void)? = nil
     ) {
         self.root = root
         self.catalog = catalog
         self.descriptors = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         self.installers = installers
         self.selection = selection
+        self.onDelete = onDelete
     }
 
     // MARK: state
@@ -53,7 +59,7 @@ public actor ModelManager {
     public func state(of id: String) async -> ModelState {
         if let current = transient[id] { return current }
         guard let installer = installers[id] else { return .notInstalled }
-        let installed = await installer.isInstalled(root: root)
+        let installed = await isInstalledOnDisk(id, installer)
         // An install may have started while the disk was being probed.
         if let current = transient[id] { return current }
         return installed ? .installed(bytes: folderSize(installer.installFolder(root: root))) : .notInstalled
@@ -70,7 +76,7 @@ public actor ModelManager {
         var total: Int64 = 0
         for descriptor in catalog {
             guard let installer = installers[descriptor.id] else { continue }
-            if await installer.isInstalled(root: root) {
+            if await isInstalledOnDisk(descriptor.id, installer) {
                 total += folderSize(installer.installFolder(root: root))
             }
         }
@@ -89,7 +95,7 @@ public actor ModelManager {
             return Self.single(.failed("Unknown model \(id)"))
         }
         if running[id] == nil {
-            let installed = await installer.isInstalled(root: root)
+            let installed = await isInstalledOnDisk(id, installer)
             // Another caller may have started the install while the disk was being probed.
             if running[id] == nil {
                 if installed {
@@ -110,16 +116,23 @@ public actor ModelManager {
     }
 
     /// Cancels any install, removes the model's folder, resets its state and clears any selection of it.
+    ///
+    /// An install that queues up while the cancelled one winds down is cancelled too: the folder is only
+    /// removed once nothing runs, and nothing suspends between that check and the removal.
     public func delete(_ id: String) async {
-        await cancel(id)
-        if let installer = installers[id] {
-            try? FileManager.default.removeItem(at: installer.installFolder(root: root))
+        while let task = running[id] {
+            task.cancel()
+            await task.value
         }
+        let folder = installers[id]?.installFolder(root: root)
+        if let folder { try? FileManager.default.removeItem(at: folder) }
         transient[id] = nil
         for role in ModelRole.allCases where selection.selected(for: role) == id {
             selection.set(nil, for: role)
         }
         publish(id, .notInstalled)
+        // Last, and after the removal: nothing above may wait, so a racing install is never undone.
+        if let folder { await onDelete?(id, folder) }
     }
 
     // MARK: selection
@@ -165,14 +178,26 @@ public actor ModelManager {
     }
 
     private func run(_ id: String, _ installer: any ModelInstaller) async {
+        let folder = installer.installFolder(root: root)
         let outcome: ModelState
         do {
-            try await download(id, installer)
+            // A download that finished earlier (a warm-up failed or was cut short) is kept. Anything else
+            // in the folder is a leftover of an unfinished download that the installer might mistake for
+            // a complete one, so it goes before the download starts.
+            var downloaded = InstallMarker.stage(in: folder, id: id) == .downloaded
+            if downloaded { downloaded = await installer.isInstalled(root: root) }
+            if !downloaded {
+                try? FileManager.default.removeItem(at: folder)
+                try await download(id, installer)
+                try Task.checkCancellation()
+                try InstallMarker.write(in: folder, id: id, stage: .downloaded)
+            }
             try Task.checkCancellation()
             transient[id] = .warming
             publish(id, .warming)
             try await installer.warm(root: root)
             try Task.checkCancellation()
+            try InstallMarker.write(in: folder, id: id, stage: .installed)
             outcome = .installed(bytes: folderSize(installer.installFolder(root: root)))
         } catch {
             if Task.isCancelled || error is CancellationError {
@@ -245,6 +270,12 @@ public actor ModelManager {
 
     // MARK: helpers
 
+    /// Installed means finished: the `installed` marker names this model and the installer finds its files.
+    private func isInstalledOnDisk(_ id: String, _ installer: any ModelInstaller) async -> Bool {
+        guard InstallMarker.stage(in: installer.installFolder(root: root), id: id) == .installed else { return false }
+        return await installer.isInstalled(root: root)
+    }
+
     private static func single(_ state: ModelState) -> AsyncStream<ModelState> {
         AsyncStream { continuation in
             continuation.yield(state)
@@ -256,13 +287,14 @@ public actor ModelManager {
         (error as? LocalizedError)?.errorDescription ?? String(describing: error)
     }
 
-    /// Sum of the file sizes under `folder`; zero when it does not exist.
+    /// Sum of the file sizes under `folder` (the install marker excluded); zero when it does not exist.
     private nonisolated func folderSize(_ folder: URL) -> Int64 {
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
         guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: keys) else { return 0 }
         var total: Int64 = 0
         for case let url as URL in walker {
             let values = try? url.resourceValues(forKeys: Set(keys))
+            if url.lastPathComponent == InstallMarker.fileName { continue }
             if values?.isRegularFile == true { total += Int64(values?.fileSize ?? 0) }
         }
         return total

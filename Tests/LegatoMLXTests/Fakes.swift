@@ -6,7 +6,7 @@ import Synchronization
 
 /// Writes what the Hub would: a snapshot of files into the folder, and records what was asked for.
 final class FakeFetcher: MLXFileFetcher {
-    struct Call: Equatable { var repo: String; var folder: URL; var patterns: [String] }
+    struct Call: Equatable { var repo: String; var revision: String; var folder: URL; var patterns: [String] }
     private let calls = Mutex<[Call]>([])
     let files: [String]
     let failure: (any Error & Sendable)?
@@ -18,8 +18,8 @@ final class FakeFetcher: MLXFileFetcher {
 
     var recorded: [Call] { calls.withLock { $0 } }
 
-    func fetch(repo: String, to folder: URL, matching patterns: [String], progress: @escaping @Sendable (Double) -> Void) async throws {
-        calls.withLock { $0.append(Call(repo: repo, folder: folder, patterns: patterns)) }
+    func fetch(repo: String, revision: String, to folder: URL, matching patterns: [String], progress: @escaping @Sendable (Double) -> Void) async throws {
+        calls.withLock { $0.append(Call(repo: repo, revision: revision, folder: folder, patterns: patterns)) }
         progress(0.25)
         if let failure { throw failure }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

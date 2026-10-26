@@ -90,17 +90,25 @@ private func runFixtures(label: String, backend base: any LLMBackend) async thro
     print("REAL[\(label)] peak memory: \(peakMemoryMB()) MB")
 }
 
+/// Whether Apple's on-device model can answer on this machine, and if not, why. A test that needs it is
+/// skipped with that reason instead of passing without having run.
+private let foundationModelsStatus: (available: Bool, reason: String) = {
+    #if canImport(FoundationModels)
+    switch FoundationModelsBackend.currentAvailability() {
+    case .available: return (true, "available")
+    case .unavailable(let reason): return (false, reason)
+    }
+    #else
+    return (false, "FoundationModels is not available on this platform.")
+    #endif
+}()
+
 @Suite("RealCleanup", .enabled(if: realEnabled, "set LEGATO_REAL_ENGINE=1"), .serialized)
 struct RealCleanupTests {
-    @Test func foundationModels() async throws {
+    @Test(.enabled(if: foundationModelsStatus.available, "Foundation Models unavailable: \(foundationModelsStatus.reason)"))
+    func foundationModels() async throws {
         #if canImport(FoundationModels)
-        let backend = FoundationModelsBackend()
-        let availability = await backend.availability
-        guard availability.isAvailable else {
-            print("REAL[foundation-models] unavailable: \(availability)")
-            return
-        }
-        try await runFixtures(label: "foundation-models", backend: backend)
+        try await runFixtures(label: "foundation-models", backend: FoundationModelsBackend())
         #endif
     }
 

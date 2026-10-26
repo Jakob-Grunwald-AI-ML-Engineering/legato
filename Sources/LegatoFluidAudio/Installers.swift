@@ -68,6 +68,22 @@ private func exists(_ url: URL) -> Bool {
     FileManager.default.fileExists(atPath: url.path)
 }
 
+/// Whether `folder` still holds a download in flight: FluidAudio stages each file as `<name>.partial`
+/// (plus `<name>.partial.etag`) and renames it when complete.
+func hasPartialFiles(in folder: URL) -> Bool {
+    guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil) else { return false }
+    for case let url as URL in walker where url.lastPathComponent.hasSuffix(".partial")
+        || url.lastPathComponent.hasSuffix(".partial.etag") {
+        return true
+    }
+    return false
+}
+
+/// Every entry of `required` exists in `folder` and no download is still staged there.
+private func isComplete(_ folder: URL, required: some Sequence<String>) -> Bool {
+    required.allSatisfy { exists(folder.appendingPathComponent($0)) } && !hasPartialFiles(in: folder)
+}
+
 private func progressHandler(_ progress: @escaping @Sendable (Double) -> Void) -> ProgressHandler {
     { progress($0.fractionCompleted) }
 }
@@ -93,15 +109,18 @@ public struct NemotronInstaller: ModelInstaller {
     }
 
     public func isInstalled(root: URL) async -> Bool {
-        let folder = installFolder(root: root)
-        return [
+        isComplete(installFolder(root: root), required: [
             ModelNames.NemotronMultilingualStreaming.metadata,
             ModelNames.NemotronMultilingualStreaming.tokenizer,
+            ModelNames.NemotronMultilingualStreaming.preprocessorFile,
             ModelNames.NemotronMultilingualStreaming.encoderFile,
-        ].allSatisfy { exists(folder.appendingPathComponent($0)) }
+            ModelNames.NemotronMultilingualStreaming.decoderFile,
+            ModelNames.NemotronMultilingualStreaming.jointFile,
+        ])
     }
 
     public func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        FluidAudioModels.pinRevisions()
         _ = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
             languageCode: variant.languageHint,
             chunkMs: chunkMs,
@@ -131,11 +150,11 @@ public struct ParakeetEouInstaller: ModelInstaller {
     }
 
     public func isInstalled(root: URL) async -> Bool {
-        let folder = installFolder(root: root)
-        return ModelNames.ParakeetEOU.requiredModels.allSatisfy { exists(folder.appendingPathComponent($0)) }
+        isComplete(installFolder(root: root), required: ModelNames.ParakeetEOU.requiredModels)
     }
 
     public func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        FluidAudioModels.pinRevisions()
         try await ModelHub.download(
             chunk.repo,
             to: root,
@@ -165,10 +184,12 @@ public struct ParakeetBatchInstaller: ModelInstaller {
     }
 
     public func isInstalled(root: URL) async -> Bool {
-        AsrModels.modelsExist(at: installFolder(root: root), version: model.version)
+        let folder = installFolder(root: root)
+        return AsrModels.modelsExist(at: folder, version: model.version) && !hasPartialFiles(in: folder)
     }
 
     public func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        FluidAudioModels.pinRevisions()
         try await AsrModels.download(
             to: installFolder(root: root), version: model.version, progressHandler: progressHandler(progress))
     }

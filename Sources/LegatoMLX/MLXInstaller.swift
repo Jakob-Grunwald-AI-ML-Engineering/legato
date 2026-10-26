@@ -4,10 +4,10 @@ import LegatoModels
 
 /// Downloads a model repository's files into a folder. A seam so tests stage files without the network.
 public protocol MLXFileFetcher: Sendable {
-    /// Downloads the files of `repo` matching `patterns` into `folder`, reporting the fraction done.
-    /// Honors task cancellation by throwing.
+    /// Downloads the files of `repo` at `revision` matching `patterns` into `folder`, reporting the
+    /// fraction done. Honors task cancellation by throwing.
     func fetch(
-        repo: String, to folder: URL, matching patterns: [String],
+        repo: String, revision: String, to folder: URL, matching patterns: [String],
         progress: @escaping @Sendable (Double) -> Void
     ) async throws
 }
@@ -19,19 +19,28 @@ public protocol MLXFileFetcher: Sendable {
 /// copy of the weights) and the cache removed, which also leaves nothing behind when the manager deletes
 /// the folder after a cancel.
 public struct HubFileFetcher: MLXFileFetcher {
-    public init() {}
+    private let session: URLSession
+
+    /// - Parameter session: the URL session the Hub client uses; tests pass one that records requests.
+    public init(session: URLSession = URLSession(configuration: .default)) {
+        self.session = session
+    }
 
     public func fetch(
-        repo: String, to folder: URL, matching patterns: [String],
+        repo: String, revision: String, to folder: URL, matching patterns: [String],
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
         guard let id = Repo.ID(rawValue: repo) else {
             throw MLXInstallError.invalidRepository(repo)
         }
         let cacheFolder = folder.appending(path: ".hub-cache", directoryHint: .isDirectory)
-        let client = HubClient(cache: HubCache(cacheDirectory: cacheFolder))
+        // Public repositories need no account: no token (so none from the environment is sent either) and the
+        // fixed Hub host, not the `HF_ENDPOINT` one, since the download is pinned to a commit of that host.
+        let client = HubClient(
+            session: session, host: HubClient.defaultHost, tokenProvider: .none,
+            cache: HubCache(cacheDirectory: cacheFolder))
         _ = try await client.downloadSnapshot(
-            of: id, to: folder, matching: patterns,
+            of: id, to: folder, revision: revision, matching: patterns,
             progressHandler: { @MainActor update in progress(update.fractionCompleted) })
         try? FileManager.default.removeItem(at: cacheFolder)
     }
@@ -88,7 +97,7 @@ public struct MLXInstaller: ModelInstaller {
     public func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         let folder = installFolder(root: root)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try await fetcher.fetch(repo: spec.repo, to: folder, matching: Self.filePatterns, progress: progress)
+        try await fetcher.fetch(repo: spec.repo, revision: spec.revision, to: folder, matching: Self.filePatterns, progress: progress)
         try Task.checkCancellation()
         guard Self.isComplete(folder: folder) else { throw MLXInstallError.invalidRepository(spec.repo) }
     }

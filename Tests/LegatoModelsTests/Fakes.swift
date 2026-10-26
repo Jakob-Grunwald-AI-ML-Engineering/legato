@@ -20,14 +20,16 @@ final class FakeInstaller: ModelInstaller {
         var cancelled = 0
         var reachedGate = false
         var failuresLeft = 0
+        var warmFailuresLeft = 0
     }
     private let counters = Mutex(Counters())
 
     /// - Parameters:
     ///   - gated: hold the download after the first step until `release()`.
     ///   - failFirst: how many installs fail (after the first step) before one succeeds.
+    ///   - warmFailFirst: how many warms throw before one succeeds.
     init(folderName: String, steps: [Double] = [0.25, 0.5, 0.75, 1.0], weightsBytes: Int = 1_000,
-         gated: Bool = false, failFirst: Int = 0) {
+         gated: Bool = false, failFirst: Int = 0, warmFailFirst: Int = 0) {
         self.folderName = folderName
         self.steps = steps
         self.weightsBytes = weightsBytes
@@ -39,7 +41,7 @@ final class FakeInstaller: ModelInstaller {
             gate = nil
             gateCont = nil
         }
-        counters.withLock { $0.failuresLeft = failFirst }
+        counters.withLock { $0.failuresLeft = failFirst; $0.warmFailuresLeft = warmFailFirst }
     }
 
     var installCalls: Int { counters.withLock { $0.installs } }
@@ -86,7 +88,12 @@ final class FakeInstaller: ModelInstaller {
     }
 
     func warm(root: URL) async throws {
-        counters.withLock { $0.warms += 1 }
+        let shouldFail = counters.withLock { c -> Bool in
+            c.warms += 1
+            if c.warmFailuresLeft > 0 { c.warmFailuresLeft -= 1; return true }
+            return false
+        }
+        if shouldFail { throw FakeInstallError(tag: "warm") }
     }
 }
 

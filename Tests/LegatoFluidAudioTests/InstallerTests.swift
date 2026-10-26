@@ -25,6 +25,15 @@ private struct StagedRoot {
     }
 
     func remove() { try? FileManager.default.removeItem(at: url) }
+
+    /// Every file a Nemotron tier needs, except the entries named in `skipping`.
+    func nemotronTier(_ base: String, skipping: Set<String> = []) throws {
+        for name in ["metadata.json", "tokenizer.json"] where !skipping.contains(name) { try file("\(base)/\(name)") }
+        for name in ["preprocessor.mlmodelc", "encoder.mlmodelc", "decoder.mlmodelc", "joint.mlmodelc"]
+        where !skipping.contains(name) {
+            try directory("\(base)/\(name)")
+        }
+    }
 }
 
 @Suite("Installers") enum InstallerTests {}
@@ -52,33 +61,42 @@ struct Nemotron {
         #expect(await NemotronInstaller(variant: .latin, chunkMs: 1120).isInstalled(root: staged.url) == false)
     }
 
-    @Test func installedWhenMetadataTokenizerAndEncoderArePresent() async throws {
+    @Test func installedWhenMetadataTokenizerAndEveryModelArePresent() async throws {
         let staged = try StagedRoot()
         defer { staged.remove() }
         let base = "nemotron-multilingual/multilingual/1120ms"
-        try staged.file("\(base)/metadata.json")
-        try staged.file("\(base)/tokenizer.json")
-        try staged.directory("\(base)/encoder.mlmodelc")
+        try staged.nemotronTier(base)
         #expect(await NemotronInstaller(variant: .multilingual, chunkMs: 1120).isInstalled(root: staged.url))
     }
 
-    @Test(arguments: ["metadata.json", "tokenizer.json", "encoder.mlmodelc"])
+    @Test(arguments: [
+        "metadata.json", "tokenizer.json", "preprocessor.mlmodelc", "encoder.mlmodelc", "decoder.mlmodelc", "joint.mlmodelc",
+    ])
     func notInstalledWhenARequiredPartIsMissing(missing: String) async throws {
         let staged = try StagedRoot()
         defer { staged.remove() }
         let base = "nemotron-multilingual/latin/560ms"
-        for name in ["metadata.json", "tokenizer.json"] where name != missing { try staged.file("\(base)/\(name)") }
-        if missing != "encoder.mlmodelc" { try staged.directory("\(base)/encoder.mlmodelc") }
+        try staged.nemotronTier(base, skipping: [missing])
         #expect(await NemotronInstaller(variant: .latin, chunkMs: 560).isInstalled(root: staged.url) == false)
+    }
+
+    @Test(arguments: ["encoder.mlmodelc/weights/weight.bin.partial", "tokenizer.json.partial", "metadata.json.partial.etag"])
+    func notInstalledWhileADownloadIsStillStaged(partial: String) async throws {
+        let staged = try StagedRoot()
+        defer { staged.remove() }
+        let base = "nemotron-multilingual/multilingual/1120ms"
+        try staged.nemotronTier(base)
+        let installer = NemotronInstaller(variant: .multilingual, chunkMs: 1120)
+        #expect(await installer.isInstalled(root: staged.url), "precondition: the tier is complete")
+        try staged.file("\(base)/\(partial)")
+        #expect(await installer.isInstalled(root: staged.url) == false)
     }
 
     @Test func installedStateIsPerTier() async throws {
         let staged = try StagedRoot()
         defer { staged.remove() }
         let base = "nemotron-multilingual/multilingual/2240ms"
-        try staged.file("\(base)/metadata.json")
-        try staged.file("\(base)/tokenizer.json")
-        try staged.directory("\(base)/encoder.mlmodelc")
+        try staged.nemotronTier(base)
         #expect(await NemotronInstaller(variant: .multilingual, chunkMs: 2240).isInstalled(root: staged.url))
         #expect(await NemotronInstaller(variant: .multilingual, chunkMs: 1120).isInstalled(root: staged.url) == false)
         #expect(await NemotronInstaller(variant: .latin, chunkMs: 2240).isInstalled(root: staged.url) == false)
@@ -103,6 +121,21 @@ struct Eou {
         try staged.file("\(base)/vocab.json")
         #expect(await ParakeetEouInstaller(chunk: .ms160).isInstalled(root: staged.url))
         #expect(await ParakeetEouInstaller(chunk: .ms320).isInstalled(root: staged.url) == false)
+    }
+
+    @Test(arguments: ["streaming_encoder.mlmodelc/weights/weight.bin.partial", "vocab.json.partial", "decoder.mlmodelc/model.mil.partial.etag"])
+    func notInstalledWhileADownloadIsStillStaged(partial: String) async throws {
+        let staged = try StagedRoot()
+        defer { staged.remove() }
+        let base = "parakeet-eou-streaming/160ms"
+        for dir in ["streaming_encoder.mlmodelc", "decoder.mlmodelc", "joint_decision.mlmodelc"] {
+            try staged.directory("\(base)/\(dir)")
+        }
+        try staged.file("\(base)/vocab.json")
+        let installer = ParakeetEouInstaller(chunk: .ms160)
+        #expect(await installer.isInstalled(root: staged.url), "precondition: the model is complete")
+        try staged.file("\(base)/\(partial)")
+        #expect(await installer.isInstalled(root: staged.url) == false)
     }
 
     @Test(arguments: ["streaming_encoder.mlmodelc", "decoder.mlmodelc", "joint_decision.mlmodelc", "vocab.json"])

@@ -4,37 +4,6 @@ import LegatoCore
 import LegatoModels
 import Synchronization
 
-/// Loaded Nemotron models, shared across sessions and engines, keyed by model folder, so only the first
-/// `prepare` per folder pays the load (and a cold Neural Engine compile if the install was cut short).
-actor NemotronModelCache {
-    static let shared = NemotronModelCache()
-
-    private var loads: [String: Task<SharedNemotronMultilingualModels, any Error>] = [:]
-
-    func models(at folder: URL) async throws -> SharedNemotronMultilingualModels {
-        let key = folder.standardizedFileURL.path
-        if let existing = loads[key] { return try await existing.value }
-        let load = Task {
-            try await StreamingNemotronMultilingualAsrManager.preloadShared(
-                from: folder, configuration: FluidAudioCompute.configuration())
-        }
-        loads[key] = load
-        do {
-            return try await load.value
-        } catch {
-            loads[key] = nil  // a failed or cancelled load is not cached
-            throw error
-        }
-    }
-
-    func evictAll() { loads.removeAll() }
-}
-
-/// Releases every cached Nemotron model (about 1 GB resident each), for example on a memory warning.
-public func releaseCachedNemotronModels() async {
-    await NemotronModelCache.shared.evictAll()
-}
-
 /// Live dictation with Nemotron multilingual streaming (FluidAudio): partials while speaking, a final
 /// segment after `silenceMs` of silence.
 ///

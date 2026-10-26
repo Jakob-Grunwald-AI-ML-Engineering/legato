@@ -1,5 +1,6 @@
 import Foundation
 import LegatoCore
+import LegatoFluidAudio
 import LegatoModels
 import Synchronization
 import Testing
@@ -203,5 +204,14 @@ struct Rig: @unchecked Sendable {
         let path = FluidAudioCatalog.defaultRoot().path
         #expect(path.hasSuffix("Legato/Models"))
         #expect(path.contains("Application Support"))
+    }
+}
+
+@Suite struct FluidAudioPinTests {
+    @Test func buildingTheSpeechManagerPinsTheDownloadsToReviewedCommits() {
+        _ = FluidAudioCatalog.makeManager(
+            root: FileManager.default.temporaryDirectory.appending(path: "legato-pin-\(UUID().uuidString)"),
+            selection: SelectionStore(defaults: UserDefaults(suiteName: "legato.pin.\(UUID().uuidString)")!))
+        #expect(FluidAudioModels.revisionsArePinned)
     }
 }

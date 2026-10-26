@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import LegatoModels
 
@@ -85,6 +86,92 @@ import Testing
         #expect(await h.manager.state(of: "speech-a") == .installed(bytes: 1_000))
     }
 
+    // MARK: completion marker
+
+    @Test func filesOnDiskWithoutTheMarkerAreNotInstalledAndTheStaleFolderIsReplaced() async throws {
+        let fake = FakeInstaller(folderName: "speech-a")
+        let h = Harness(fake)
+        defer { h.cleanUp() }
+        // What a download cut short leaves behind: every file the installer looks for, no marker.
+        let folder = fake.installFolder(root: h.root)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(count: 10).write(to: folder.appending(path: "weights.bin"))
+        try Data(count: 10).write(to: folder.appending(path: "stale.bin"))
+        #expect(await fake.isInstalled(root: h.root), "precondition: the installer alone calls this installed")
+
+        #expect(await h.manager.state(of: "speech-a") == .notInstalled)
+        #expect(await h.manager.storageUsed() == 0)
+
+        let states = await collect(await h.manager.install("speech-a"))
+        #expect(states.last == .installed(bytes: 1_000))
+        #expect(fake.installCalls == 1, "the model is downloaded again")
+        #expect(!FileManager.default.fileExists(atPath: folder.appending(path: "stale.bin").path), "the stale folder was cleared first")
+    }
+
+    @Test func aFinishedInstallLeavesTheInstalledMarker() async throws {
+        let fake = FakeInstaller(folderName: "speech-a")
+        let h = Harness(fake)
+        defer { h.cleanUp() }
+        _ = await collect(await h.manager.install("speech-a"))
+        let folder = fake.installFolder(root: h.root)
+        #expect(InstallMarker.stage(in: folder, id: "speech-a") == .installed)
+        #expect(InstallMarker.stage(in: folder, id: "another-model") == nil, "a marker names its model")
+    }
+
+    @Test func aMarkerWithoutTheFilesIsNotInstalled() async throws {
+        let fake = FakeInstaller(folderName: "speech-a")
+        let h = Harness(fake)
+        defer { h.cleanUp() }
+        try InstallMarker.write(in: fake.installFolder(root: h.root), id: "speech-a", stage: .installed)
+        #expect(await h.manager.state(of: "speech-a") == .notInstalled)
+    }
+
+    @Test func aDownloadedOnlyMarkerIsNotInstalled() async throws {
+        let fake = FakeInstaller(folderName: "speech-a")
+        let h = Harness(fake)
+        defer { h.cleanUp() }
+        let folder = fake.installFolder(root: h.root)
+        try Data(count: 10).write(to: { try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true); return folder.appending(path: "weights.bin") }())
+        try InstallMarker.write(in: folder, id: "speech-a", stage: .downloaded)
+        #expect(await h.manager.state(of: "speech-a") == .notInstalled)
+    }
+
+    // MARK: warm failure
+
+    @Test func aFailedWarmIsRetriedWithoutDownloadingAgain() async {
+        let fake = FakeInstaller(folderName: "speech-a", warmFailFirst: 1)
+        let h = Harness(fake)
+        defer { h.cleanUp() }
+
+        let first = await collect(await h.manager.install("speech-a"))
+        if case .failed = first.last {} else { Issue.record("expected failed, got \(first)") }
+        if case .failed = await h.manager.state(of: "speech-a") {} else {
+            Issue.record("a failed warm keeps the failed state")
+        }
+
+        let second = await collect(await h.manager.install("speech-a"))
+        #expect(second.last == .installed(bytes: 1_000), "the retry clears the failure: \(second)")
+        #expect(fake.warmCalls == 2, "warm runs again")
+        #expect(fake.installCalls == 1, "the finished download is reused")
+        #expect(await h.manager.state(of: "speech-a") == .installed(bytes: 1_000))
+    }
+
+    @Test func aFailedWarmThenARelaunchStillRetriesWarmOnly() async {
+        let fake = FakeInstaller(folderName: "speech-a", warmFailFirst: 1)
+        let h = Harness(fake)
+        defer { h.cleanUp() }
+        _ = await collect(await h.manager.install("speech-a"))
+
+        // A new manager over the same root: no in-memory failure, only what the disk says.
+        let relaunched = ModelManager(
+            root: h.root, catalog: [Harness.speech], installers: ["speech-a": fake], selection: h.store)
+        #expect(await relaunched.state(of: "speech-a") == .notInstalled)
+        let states = await collect(await relaunched.install("speech-a"))
+        #expect(states.last == .installed(bytes: 1_000))
+        #expect(fake.installCalls == 1)
+        #expect(fake.warmCalls == 2)
+    }
+
     // MARK: sharing
 
     @Test func concurrentInstallsShareOneDownload() async {
@@ -159,6 +246,78 @@ import Testing
         await h.manager.delete("speech-a")
 
         #expect(await h.manager.selected(role: .liveDictation) == nil)
+    }
+
+    @Test func deleteRemovesTheFolderOfAnInstallThatQueuedUpWhileItWasCancelling() async throws {
+        // An observer that starts a new install the moment the old one reports `notInstalled` gets its
+        // call onto the manager before `delete` resumes. `delete` must not strip the folder from under it.
+        for round in 0..<40 {
+            let fake = FakeInstaller(folderName: "speech-a", gated: true)
+            let h = Harness(fake)
+            defer { h.cleanUp() }
+            let events = await h.manager.events(for: "speech-a")
+            let reinstall = Task { () -> [ModelState] in
+                for await state in events where state == .notInstalled && fake.installCalls > 0 {
+                    return await collect(await h.manager.install("speech-a"))
+                }
+                return []
+            }
+            let first = await h.manager.install("speech-a")
+            #expect(await eventually { fake.reachedGate })
+
+            await h.manager.delete("speech-a")
+            fake.release()
+            _ = await reinstall.value
+            _ = await collect(first)
+            // Let any install that started after the delete finish.
+            _ = await eventually {
+                switch await h.manager.state(of: "speech-a") {
+                case .downloading, .warming: false
+                default: true
+                }
+            }
+
+            let state = await h.manager.state(of: "speech-a")
+            if case .failed(let message) = state {
+                Issue.record("round \(round): an install lost its folder to delete: \(message)")
+                return
+            }
+        }
+    }
+
+    @Test func deleteTellsTheEvictionHookAfterTheFolderIsGone() async {
+        let fake = FakeInstaller(folderName: "speech-a")
+        let calls = Mutex<[(id: String, folder: URL, folderExisted: Bool)]>([])
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "legato-models-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = UserDefaults(suiteName: "legato.tests.\(UUID().uuidString)")!
+        let manager = ModelManager(
+            root: root, catalog: [Harness.speech], installers: ["speech-a": fake],
+            selection: SelectionStore(defaults: defaults),
+            onDelete: { id, folder in
+                calls.withLock { $0.append((id, folder, FileManager.default.fileExists(atPath: folder.path))) }
+            })
+        _ = await collect(await manager.install("speech-a"))
+
+        await manager.delete("speech-a")
+
+        let seen = calls.withLock { $0 }
+        #expect(seen.count == 1)
+        #expect(seen.first?.id == "speech-a")
+        #expect(seen.first?.folder == fake.installFolder(root: root))
+        #expect(seen.first?.folderExisted == false, "the hook runs once the files are gone")
+    }
+
+    @Test func deletingAnUnknownModelDoesNotCallTheHook() async {
+        let calls = Mutex(0)
+        let h = Harness()
+        defer { h.cleanUp() }
+        let manager = ModelManager(
+            root: h.root, catalog: [Harness.speech], installers: ["speech-a": h.installers["speech-a"]!],
+            selection: h.store, onDelete: { _, _ in calls.withLock { $0 += 1 } })
+        await manager.delete("nope")
+        #expect(calls.withLock { $0 } == 0)
     }
 
     @Test func storageUsedSumsInstalledFolders() async {

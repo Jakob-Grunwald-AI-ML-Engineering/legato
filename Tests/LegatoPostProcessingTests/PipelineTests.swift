@@ -13,6 +13,12 @@ final class CallLog: Sendable {
     var names: [String] { items.withLock { $0 } }
 }
 
+final class FlagBox: Sendable {
+    private let flag = Mutex(false)
+    func set() { flag.withLock { $0 = true } }
+    var isSet: Bool { flag.withLock { $0 } }
+}
+
 /// Records calls in a shared log, then applies `transform` (which may throw or hang).
 private final class SpyStage: TranscriptPostProcessor {
     let id: String
@@ -91,6 +97,79 @@ struct PipelineTests {
             })
         // The slow stage times out; the next stage still runs on the unchanged input.
         #expect(await pipeline.process("x", locale: en) == "x!")
+    }
+
+    @Test func aStageThatIgnoresCancellationStillCannotHoldThePipelineBeyondTheTimeout() async {
+        let log = CallLog()
+        let finished = FlagBox()
+        let pipeline = PostProcessingPipeline(
+            stages: [
+                // A cold model load: nothing in it checks for cancellation, and it takes 2 s.
+                SpyStage("stubborn", log: log) { _ in
+                    await Task.detached { try? await Task.sleep(for: .seconds(2)) }.value
+                    finished.set()
+                    return "too late"
+                },
+                SpyStage("after", log: log) { $0 + "!" },
+            ],
+            timeout: .milliseconds(100),
+            sleeper: { try await Task.sleep(for: $0) })
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        let out = await pipeline.process("x", locale: en)
+        let elapsed = clock.now - started
+
+        #expect(out == "x!", "the input goes on to the next stage")
+        #expect(elapsed < .seconds(1), "returned at the deadline, not when the stage ended: \(elapsed)")
+        #expect(!finished.isSet, "the stage was still running when the pipeline returned")
+    }
+
+    @Test func aTimedOutStageIsCancelled() async {
+        let log = CallLog()
+        let sawCancel = FlagBox()
+        let pipeline = PostProcessingPipeline(
+            stages: [
+                SpyStage("slow", log: log) { text in
+                    try? await Task.sleep(for: .seconds(3600))
+                    if Task.isCancelled { sawCancel.set() }
+                    return text + "?"
+                },
+            ],
+            sleeper: firesAtOnce)
+        #expect(await pipeline.process("x", locale: en) == "x")
+        for _ in 0..<200 where !sawCancel.isSet { try? await Task.sleep(for: .milliseconds(5)) }
+        #expect(sawCancel.isSet)
+    }
+
+    @Test func aStageThatBeatsTheTimeoutStopsTheTimer() async {
+        let log = CallLog()
+        let timerCancelled = FlagBox()
+        let pipeline = PostProcessingPipeline(
+            stages: [SpyStage("fast", log: log) { $0 + "A" }],
+            sleeper: { _ in
+                do { try await Task.sleep(for: .seconds(3600)) } catch { timerCancelled.set(); throw error }
+            })
+        #expect(await pipeline.process("x", locale: en) == "xA")
+        for _ in 0..<200 where !timerCancelled.isSet { try? await Task.sleep(for: .milliseconds(5)) }
+        #expect(timerCancelled.isSet)
+    }
+
+    @Test func cancellingTheCallerReturnsTheInputAtOnce() async {
+        let log = CallLog()
+        let pipeline = PostProcessingPipeline(
+            stages: [SpyStage("stubborn", log: log) { _ in
+                await Task.detached { try? await Task.sleep(for: .seconds(2)) }.value
+                return "too late"
+            }],
+            sleeper: neverFires)
+        let caller = Task { await pipeline.process("x", locale: en) }
+        for _ in 0..<200 where log.names.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        let clock = ContinuousClock()
+        let started = clock.now
+        caller.cancel()
+        #expect(await caller.value == "x")
+        #expect(clock.now - started < .seconds(1))
     }
 
     @Test func aStageThatReturnsNothingPassesItsInputThrough() async {

@@ -47,6 +47,74 @@ struct CleanupGuardTests {
         #expect(!guardrail.accepts(pair.1, reference: pair.0))
     }
 
+    // MARK: numbers and dropped content
+
+    @Test(arguments: [
+        ("twenty one euros", "21 euros"),
+        ("call me at three thirty", "Call me at 3:30."),
+        ("das kostet zwölf euro fünfzig", "Das kostet 12,50 Euro."),
+        ("am zweiten juni", "am 2. Juni"),
+        ("das kostet fünfundzwanzig euro", "Das kostet 25 Euro."),
+        ("es sind dreißig grad", "Es sind 30 Grad."),
+        ("it costs one hundred and five dollars", "It costs 105 dollars."),
+        ("the meeting is on the third of may", "The meeting is on the 3rd of May."),
+        ("twenty five euros", "€25"),
+    ])
+    func acceptsSpokenNumbersWrittenAsDigits(_ pair: (String, String)) {
+        #expect(guardrail.accepts(pair.1, reference: pair.0))
+    }
+
+    private static let fiveSentences =
+        "we shipped the new version on monday. the team collected a lot of feedback from customers. "
+        + "most people liked the faster start up time. a few asked for a dark mode. we will plan the next release on friday."
+
+    @Test func rejectsACleanupThatDropsAWholeSentenceOfALongText() {
+        let dropped = "We shipped the new version on Monday. The team collected a lot of feedback from customers. "
+            + "Most people liked the faster start up time. We will plan the next release on Friday."
+        #expect(!guardrail.accepts(dropped, reference: Self.fiveSentences))
+        // The same drop in a transcript without punctuation.
+        let flat = Self.fiveSentences.replacingOccurrences(of: ".", with: "")
+        let flatDropped = "We shipped the new version on Monday. The team collected a lot of feedback from customers. "
+            + "Most people liked the faster start up time. We will plan the next release on Friday."
+        #expect(!guardrail.accepts(flatDropped, reference: flat))
+    }
+
+    @Test func rejectsADroppedShortSentenceWhenTheReferenceHasSentences() {
+        let reference = "we shipped the new version on monday. thanks a lot. the team collected a lot of feedback from customers. "
+            + "most people liked the faster start up time."
+        let dropped = "We shipped the new version on Monday. The team collected a lot of feedback from customers. "
+            + "Most people liked the faster start up time."
+        #expect(!guardrail.accepts(dropped, reference: reference))
+    }
+
+    @Test func acceptsTheFaithfulCleanupOfALongText() {
+        let faithful = "We shipped the new version on Monday. The team collected a lot of feedback from customers. "
+            + "Most people liked the faster start-up time. A few asked for a dark mode. We will plan the next release on Friday."
+        #expect(guardrail.accepts(faithful, reference: Self.fiveSentences))
+    }
+
+    @Test func aNumberThatIsNotThereIsStillMissing() {
+        #expect(!guardrail.accepts("It costs dollars.", reference: "it costs thirty dollars and fifty cents per month"))
+    }
+
+    // MARK: CJK
+
+    @Test func chineseAndJapaneseTokenizeByCharacter() {
+        #expect(CleanupGuard.tokens("今天天气很好。") == ["今", "天", "天", "气", "很", "好"])
+        #expect(CleanupGuard.tokens("こんにちは世界") == ["こ", "ん", "に", "ち", "は", "世", "界"])
+        #expect(CleanupGuard.tokens("iPhoneで写真") == ["iphone", "で", "写", "真"])
+    }
+
+    @Test func punctuationOnlyChangesToChineseHaveNoDrift() {
+        #expect(guardrail.drift(candidate: "今天天气很好，我们去公园。", reference: "今天天气很好我们去公园") == 0)
+    }
+
+    @Test func aDroppedChineseSentenceIsRejected() {
+        let reference = "今天天气很好。我们去公园散步。然后我们去吃午饭。下午回家休息。"
+        #expect(guardrail.accepts("今天天气很好。我们去公园散步。然后我们去吃午饭。下午回家休息。", reference: reference))
+        #expect(!guardrail.accepts("今天天气很好。我们去公园散步。下午回家休息。", reference: reference))
+    }
+
     @Test func punctuationAndCasingChangesHaveZeroDrift() {
         #expect(guardrail.drift(candidate: "Hello, World!", reference: "hello world") == 0)
     }
@@ -245,6 +313,36 @@ struct CleanupStageTests {
         let out = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 100_000).process(text, locale: en)
         #expect(backend.prompts.count >= 2)
         #expect(out == text)
+    }
+
+    // MARK: CJK
+
+    private static let chinese = "今天天气很好。我们去公园散步。然后我们去吃午饭。下午回家休息。"
+
+    @Test(arguments: ["zh-CN", "ja-JP", "zh-Hant-TW"])
+    func chineseAndJapaneseChunksJoinWithoutSpaces(_ identifier: String) async throws {
+        let backend = FakeBackend { transcript(in: $0) }
+        let out = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 14)
+            .process(Self.chinese, locale: Locale(identifier: identifier))
+        #expect(backend.prompts.count >= 2, "the text was cut into chunks")
+        #expect(out == Self.chinese)
+        for prompt in backend.prompts { #expect(!transcript(in: prompt).contains(" ")) }
+    }
+
+    @Test func spacedLanguagesStillJoinWithASpace() async throws {
+        let text = "First sentence here. Second one follows! Is a third a question?"
+        let backend = FakeBackend { transcript(in: $0) }
+        let out = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 25).process(text, locale: en)
+        #expect(backend.prompts.count >= 2)
+        #expect(out == text)
+    }
+
+    @Test func aChineseSentenceOverTheLimitIsCutByCharacters() {
+        let text = "今天天气很好我们去公园散步然后我们去吃午饭下午回家休息"
+        let chunks = LLMCleanupStage.chunks(of: text, maxCharacters: 10, joiner: "")
+        #expect(chunks.count > 1)
+        #expect(chunks.allSatisfy { $0.count <= 10 })
+        #expect(chunks.joined() == text)
     }
 
     @Test func aChunkThatFailsTheGuardOrGuardrailKeepsOnlyItsOwnText() async throws {
