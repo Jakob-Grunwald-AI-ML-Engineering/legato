@@ -72,7 +72,8 @@ import Testing
         r.lingerClock.tick()
         #expect(await eventually { !r.coordinator.holdsLease })
         #expect(r.log.count("deactivate") == 1)
-        #expect(r.sink.leases.map { $0 != nil } == [true, false])
+        // The sink hears the release after the lease is gone; wait for it rather than race it.
+        #expect(await eventually { r.sink.leases.map { $0 != nil } == [true, false] })
     }
 
     @Test func armingNeverFiresTheIdleHook() async throws {
