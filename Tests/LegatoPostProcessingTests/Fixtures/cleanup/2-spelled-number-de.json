@@ -1,0 +1,6 @@
+{
+  "name": "spelled-number-de",
+  "locale": "de-DE",
+  "input": "das ticket kostet fünfundzwanzig euro und wir fahren am dritten märz um vierzehn uhr los",
+  "mustContain": ["25", "März", "Euro"]
+}

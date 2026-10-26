@@ -1,0 +1,61 @@
+import Foundation
+import LegatoCore
+
+#if canImport(FoundationModels)
+import FoundationModels
+
+/// Apple's on-device system language model. The zero-download cleanup default.
+///
+/// Every call builds a fresh session, so nothing carries over between calls. The system model has a small
+/// context window (about 4,000 tokens for prompt and reply together), so callers chunk long input at
+/// ``maxPromptCharacters``.
+public struct FoundationModelsBackend: LLMBackend {
+    public let id = "apple-foundation-models"
+
+    /// Instructions, prompt and reply together, in characters. About 4,000 tokens at roughly 2.5
+    /// characters per token for German, with room to spare.
+    public let maxPromptCharacters: Int? = 6_000
+
+    public init() {}
+
+    public var availability: LLMAvailability {
+        get async { Self.currentAvailability() }
+    }
+
+    static func currentAvailability() -> LLMAvailability {
+        switch SystemLanguageModel.default.availability {
+        case .available:
+            return .available
+        case .unavailable(let reason):
+            switch reason {
+            case .deviceNotEligible: return .unavailable(reason: "This device does not support Apple Intelligence.")
+            case .appleIntelligenceNotEnabled: return .unavailable(reason: "Apple Intelligence is turned off.")
+            case .modelNotReady: return .unavailable(reason: "The Apple on-device model is still downloading.")
+            @unknown default: return .unavailable(reason: "The Apple on-device model is unavailable.")
+            }
+        }
+    }
+
+    public func respond(instructions: String, prompt: String) async throws -> String {
+        if case .unavailable(let reason) = Self.currentAvailability() {
+            throw LLMError.unavailable(reason: reason)
+        }
+        let session = LanguageModelSession(model: .default, instructions: instructions)
+        do {
+            let response = try await session.respond(to: prompt, options: GenerationOptions(sampling: .greedy))
+            return response.content
+        } catch let error as LanguageModelSession.GenerationError {
+            throw Self.map(error)
+        }
+    }
+
+    private static func map(_ error: LanguageModelSession.GenerationError) -> LLMError {
+        switch error {
+        case .guardrailViolation, .refusal: .guardrail
+        case .exceededContextWindowSize: .contextTooLong
+        case .assetsUnavailable: .unavailable(reason: "The Apple on-device model is unavailable.")
+        default: .failed(error.localizedDescription)
+        }
+    }
+}
+#endif

@@ -1,0 +1,6 @@
+{
+  "name": "misrecognition-en",
+  "locale": "en-US",
+  "input": "please ask kloud to summarize the meeting notes and then paste the summary into the project channel",
+  "mustContain": ["Claude", "Please", "summary"]
+}
