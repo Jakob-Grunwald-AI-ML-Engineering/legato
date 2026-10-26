@@ -21,6 +21,8 @@ final class SleepLog: Sendable {
 @MainActor
 final class BuiltSessions {
     var all: [DictationSession] = []
+    /// The audio policy each session in `all` was built for.
+    var policies: [AudioPolicy] = []
 }
 
 @MainActor
@@ -60,12 +62,13 @@ struct CoordinatorRig {
         self.clipboard = clipboard
         coordinator = DictationCoordinator(
             activity: activity, clipboard: clipboard, readiness: readiness, startEnvironment: environment,
-            history: history, makeSession: {
+            history: history, makeSession: { policy in
                 let session = DictationSession(
                     engine: engine, source: source, sessionControl: control, history: history,
-                    now: { time.now }
+                    policy: policy, now: { time.now }
                 )
                 built.all.append(session)
+                built.policies.append(policy)
                 return session
             },
             sleep: { duration in
@@ -79,6 +82,7 @@ struct CoordinatorRig {
             now: { time.now }
         )
         coordinator.onIdle = { log.add("idle") }
+        coordinator.onStartFallback = { from, to, _ in log.add("fallback:\(from.rawValue)>\(to.rawValue)") }
     }
 
     /// Phases in order with consecutive repeats collapsed (listening updates come and go with edits).
@@ -166,6 +170,123 @@ struct CoordinatorRig {
         r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false)
         #expect(await r.coordinator.toggle() == .started)
         _ = await r.coordinator.toggle()
+    }
+
+    // MARK: policy fallback
+
+    private let backgroundExperimental = StartContext(
+        inBackground: true, otherAudioPlaying: true, audioPolicy: .duckMusicPauseSpoken)
+
+    @Test(arguments: ["activation", "source"])
+    func aRefusedExperimentalPolicyFallsBackToDuckOthersInTheBackground(failingStep: String) async throws {
+        let r = CoordinatorRig(script: [TranscriptEvent(text: "hello ", isFinal: true)])
+        r.environment.context = backgroundExperimental
+        if failingStep == "activation" {
+            r.control.failActivation(with: TestError(tag: "refused"), only: [.duckMusicPauseSpoken])
+        } else {
+            r.source.failNextStarts(1, with: TestError(tag: "refused"))
+        }
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckOthers])
+        #expect(r.control.activatedConfigs.last == AudioPolicy.duckOthers.sessionConfig)
+        #expect(r.log.count("fallback:duckMusicPauseSpoken>duckOthers") == 1)
+        // The one activity stays: not dismissed, not requested again, never shown as failed.
+        #expect(r.log.count("activity.request:starting") == 1)
+        #expect(r.log.count("activity.dismiss") == 0)
+        #expect(r.activity.ends.isEmpty)
+        #expect(r.log.count("idle") == 0)
+        #expect(r.phaseTrail == [.starting, .listening])
+        // The session that was refused is torn down before the retry starts.
+        let ev = r.log.events
+        #expect(try #require(ev.firstIndex(of: "fallback:duckMusicPauseSpoken>duckOthers")) < ev.lastIndex(of: "engine.transcribe")!)
+        #expect(await r.coordinator.toggle() == .stopped("hello"))
+        #expect(r.clipboard.written == ["hello"])
+        #expect(await r.history.entries.count == 1)
+        #expect(r.log.count("idle") == 1)
+        #expect(r.phaseTrail.last == .copied)
+        #expect(r.activity.ends.count == 1)
+    }
+
+    @Test func whenTheFallbackIsRefusedTooTheHopHappensOnce() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = backgroundExperimental
+        r.control.failActivation(with: TestError(tag: "refused"))
+        #expect(await r.coordinator.toggle() == .needsForeground(.backgroundStartRefused))
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckOthers]) // one retry, not a loop
+        #expect(r.log.count("fallback:duckMusicPauseSpoken>duckOthers") == 1)
+        #expect(r.log.count("activity.request:starting") == 1)
+        #expect(r.log.count("activity.dismiss") == 1)
+        #expect(r.activity.ends.isEmpty)
+        #expect(r.log.count("idle") == 0)
+        // The foreground press starts under the selected policy again.
+        r.control.clearActivationFailure()
+        r.environment.context = StartContext(inBackground: false, otherAudioPlaying: true, audioPolicy: .duckMusicPauseSpoken)
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(r.built.policies.last == .duckMusicPauseSpoken)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func aRefusedDefaultPolicyHopsAtOnceWithoutARetry() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: true, audioPolicy: .duckOthers)
+        r.control.failActivation(with: TestError(tag: "refused"))
+        #expect(await r.coordinator.toggle() == .needsForeground(.backgroundStartRefused))
+        #expect(r.built.policies == [.duckOthers])
+        #expect(r.log.count("fallback:duckOthers>duckOthers") == 0)
+        #expect(r.log.events.filter { $0.hasPrefix("fallback:") }.isEmpty)
+        #expect(r.log.count("activity.dismiss") == 1)
+    }
+
+    @Test(arguments: [AudioPolicy.mixWithOthers, .pauseOthers])
+    func anyNonDefaultPolicyFallsBackToDuckOthers(policy: AudioPolicy) async throws {
+        let r = CoordinatorRig()
+        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false, audioPolicy: policy)
+        r.control.failActivation(with: TestError(tag: "refused"), only: [policy])
+        #expect(await r.coordinator.toggle() == .started)
+        #expect(r.built.policies == [policy, .duckOthers])
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func aRefusalInTheForegroundNeverFallsBack() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = StartContext(inBackground: false, otherAudioPlaying: true, audioPolicy: .duckMusicPauseSpoken)
+        r.control.failActivation(with: TestError(tag: "refused"))
+        guard case .failed = await r.coordinator.toggle() else {
+            Issue.record("expected .failed")
+            return
+        }
+        #expect(r.built.policies == [.duckMusicPauseSpoken])
+        #expect(r.log.events.filter { $0.hasPrefix("fallback:") }.isEmpty)
+    }
+
+    @Test func aNonRefusalErrorInTheBackgroundNeverFallsBack() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = backgroundExperimental
+        r.engine.set(prepareError: TestError(tag: "prep"))
+        guard case .failed = await r.coordinator.toggle() else {
+            Issue.record("expected .failed")
+            return
+        }
+        #expect(r.built.policies == [.duckMusicPauseSpoken])
+        #expect(r.log.events.filter { $0.hasPrefix("fallback:") }.isEmpty)
+        #expect(r.phaseTrail == [.starting, .failed])
+    }
+
+    @Test func aFallbackThatFailsForAnotherReasonEndsTheActivityFailedOnce() async throws {
+        let r = CoordinatorRig()
+        r.environment.context = backgroundExperimental
+        r.control.failActivation(with: TestError(tag: "refused"), only: [.duckMusicPauseSpoken])
+        r.source.failStart(with: TestError(tag: "mic")) // not a refusal: reached only by the retry
+        guard case .failed = await r.coordinator.toggle() else {
+            Issue.record("expected .failed")
+            return
+        }
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckOthers])
+        #expect(r.log.count("activity.request:starting") == 1)
+        #expect(r.log.count("activity.dismiss") == 0)
+        #expect(r.phaseTrail == [.starting, .failed])
+        #expect(r.activity.ends.count == 1)
+        #expect(r.log.count("idle") == 1)
     }
 
     @Test func missingSetupOutranksAnyStartAttempt() async throws {

@@ -1,5 +1,6 @@
 import AVFAudio
 import Foundation
+import LegatoAudio
 import LegatoCore
 import UIKit
 
@@ -8,12 +9,13 @@ import UIKit
 ///
 /// A background start is always attempted: it can work next to other audio (ducked) when the press
 /// itself launched the app, and fails ('!pla' on `setActive`, then 'what' on the engine start) in
-/// other cases. `otherAudioPlaying` is kept for the `start.route` diagnostics only.
+/// other cases. `otherAudioPlaying` is kept for the `start.route` diagnostics only. The selected audio
+/// policy rides along, so the coordinator can fall back to the default when a non-default one is refused.
 @MainActor
 final class SystemStartEnvironment: StartEnvironment {
     /// Codes of a refused background start: `AVAudioSession.ErrorCode` `.cannotStartPlaying` ('!pla'),
     /// `.cannotInterruptOthers` ('!int'), `.cannotStartRecording` ('!rec'), and the engine's
-    /// kAUStartIO 'what'.
+    /// kAUStartIO 'what'. `MicSourceError.invalidInputFormat` (0 Hz input after all retries) counts too.
     nonisolated static let refusalCodes: Set<Int> = [
         561_015_905, // '!pla'
         560_557_684, // '!int'
@@ -40,7 +42,8 @@ final class SystemStartEnvironment: StartEnvironment {
         if let fake = E2E.fakeInBackground { inBackground = !assumeForeground && fake }
         if let fake = E2E.fakeOtherAudioPlaying { otherAudioPlaying = fake }
         #endif
-        lastContext = StartContext(inBackground: inBackground, otherAudioPlaying: otherAudioPlaying)
+        lastContext = StartContext(
+            inBackground: inBackground, otherAudioPlaying: otherAudioPlaying, audioPolicy: Settings.audioPolicy)
         return lastContext
     }
 
@@ -48,15 +51,34 @@ final class SystemStartEnvironment: StartEnvironment {
         Self.isRefusal(error)
     }
 
-    /// The error or any error it wraps carries one of `refusalCodes`.
+    /// The error is the mic reporting no input format (0 Hz right after activation, which retries did
+    /// not clear), or it or any error it wraps carries one of `refusalCodes`.
     nonisolated static func isRefusal(_ error: any Error) -> Bool {
+        if let mic = error as? MicSourceError, mic == .invalidInputFormat { return true }
+        return refusalCode(of: error) != nil
+    }
+
+    /// A short name for a refusal, for logs: the code as a FourCC when it is one ('!int'), else the
+    /// number, else the error's description.
+    nonisolated static func refusalLabel(_ error: any Error) -> String {
+        if let mic = error as? MicSourceError { return String(describing: mic) }
+        let code = refusalCode(of: error) ?? (error as NSError).code
+        let bytes = [24, 16, 8, 0].map { UInt8((code >> $0) & 0xFF) }
+        if code > 0, code <= Int(UInt32.max), bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7F }) {
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        return String(code)
+    }
+
+    /// The first code in the error chain that is one of `refusalCodes`.
+    nonisolated private static func refusalCode(of error: any Error) -> Int? {
         var current: NSError? = error as NSError
         var depth = 0
         while let ns = current, depth < 5 {
-            if refusalCodes.contains(ns.code) { return true }
+            if refusalCodes.contains(ns.code) { return ns.code }
             current = ns.userInfo[NSUnderlyingErrorKey] as? NSError
             depth += 1
         }
-        return false
+        return nil
     }
 }

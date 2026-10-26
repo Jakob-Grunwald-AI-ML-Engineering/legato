@@ -114,7 +114,8 @@ if [ "$mode" = release-check ]; then
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
     AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
-    LegatoFakeBackground LegatoFakeBackgroundRefusal start.route toggle-after-hop)
+    LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoAudioPolicy
+    start.route start.fallback toggle-after-hop)
   scan() { # every Mach-O file in the bundle
     find "$1" -type f \( -name Legato -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }
@@ -431,6 +432,8 @@ scenario_i() {
     assert_log "outcome needsForeground(backgroundStartRefused)" "outcome kind=needsForeground reason=backgroundStartRefused"
     assert_log "start.route: foregroundHop, with the reason" "start.route route=foregroundHop reason=backgroundStartRefused outcome=needsForeground"
     assert_log "the background start was attempted" "$([ "$step" = pla ] && echo session.activate.refused || echo audio.start.refused)"
+    assert_no_log "default policy: no pointless fallback retry" "start.fallback"
+    assert_count "default policy: one session built for the refused start" "session.make" 1
     assert_count "one activity requested" "activity.request phase=" 1
     assert_log "activity dismissed at once, none left" "activity.dismiss live=0"
     assert_no_log "no failed activity left behind" "activity.end"
@@ -479,8 +482,61 @@ scenario_h() {
   wait_log_n "e2e outcome kind=stopped" 2 10
 }
 
+scenario_j() {
+  # The experimental policy (duck music, pause spoken audio) is refused in the background: the start is
+  # retried once with the default (duckOthers), in the background, with the same activity. No hop.
+  local step expect
+  for step in int input; do
+    expect="$([ "$step" = int ] && echo '!int' || echo invalidInputFormat)"
+    SCENARIO="j. fallback to duckOthers ($step)"
+    begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoFakeBackground YES -LegatoAudioPolicy duckMusicPauseSpoken \
+      -LegatoFakeBackgroundRefusal "$step" -LegatoFakeRefusalOnlyNonDefault YES -LegatoForceTapToCopy NO || continue
+    xcrun simctl pbcopy "$UDID" <<< "sentinel"
+    trigger toggle
+    wait_log "e2e outcome kind=" 10
+    sleep 0.5
+    assert_log "outcome started" "outcome kind=started"
+    assert_no_log "no foreground hop" "kind=needsForeground"
+    assert_log "start.fallback logged with from, to and the refusal" "start.fallback from=duckMusicPauseSpoken to=duckOthers error=$expect"
+    assert_count "exactly one fallback" "start.fallback" 1
+    assert_log "the experimental session was refused" "$([ "$step" = int ] && echo session.activate.refused || echo audio.start.refused)"
+    assert_log "first session built for the selected policy" "session.make engine=e2e-scripted policy=duckMusicPauseSpoken"
+    assert_log "second session built for the default" "session.make engine=e2e-scripted policy=duckOthers"
+    assert_count "two sessions built" "session.make" 2
+    assert_log "start.route: ran in the background" "start.route route=background reason=none outcome=started"
+    assert_count "one activity requested (no flicker)" "activity.request phase=" 1
+    assert_no_log "activity not dismissed" "activity.dismiss"
+    assert_no_log "activity not ended failed" "activity.end phase=failed"
+    sleep 1.5
+    trigger toggle
+    wait_log "e2e outcome kind=stopped" 10
+    sleep 0.5
+    assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
+    assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
+    assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  done
+
+  # Both policies refused: one retry, then the hop, with the activity gone at once.
+  SCENARIO="j. fallback refused too"
+  begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoFakeBackground YES -LegatoAudioPolicy duckMusicPauseSpoken \
+    -LegatoFakeBackgroundRefusal int -LegatoForceTapToCopy NO || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  trigger toggle
+  wait_log "e2e outcome kind=needsForeground" 10
+  sleep 1
+  assert_count "exactly one fallback" "start.fallback" 1
+  assert_count "two sessions built, no more" "session.make" 2
+  assert_count "outcome needsForeground once" "outcome kind=needsForeground" 1
+  assert_log "start.route: foregroundHop" "start.route route=foregroundHop reason=backgroundStartRefused outcome=needsForeground"
+  assert_count "one activity requested" "activity.request phase=" 1
+  assert_log "activity dismissed at once" "activity.dismiss live=0"
+  assert_no_log "no failed activity left behind" "activity.end"
+  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+  assert_eq "history empty" "0" "$(history_texts | grep -c .)"
+}
+
 t_run=$SECONDS
-for s in a b c d e f g h i; do "scenario_$s"; done
+for s in a b c d e f g h i j; do "scenario_$s"; done
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report

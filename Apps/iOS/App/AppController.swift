@@ -58,9 +58,9 @@ final class AppController {
             readiness: readiness,
             startEnvironment: startEnvironment,
             history: history,
-            makeSession: {
+            makeSession: { policy in
                 #if DEBUG
-                if let fake = E2E.makeFakeSession(history: history, policy: Settings.audioPolicy) { return fake }
+                if let fake = E2E.makeFakeSession(history: history, policy: policy) { return fake }
                 #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
                 #if LEGATO_INTERNAL
@@ -74,10 +74,20 @@ final class AppController {
                     source: source,
                     sessionControl: sessionControl,
                     history: history,
-                    policy: Settings.audioPolicy,
+                    policy: policy,
                     linger: .zero)
             })
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
+        coordinator.onStartFallback = { from, to, error in
+            let label = SystemStartEnvironment.refusalLabel(error)
+            Self.log.info("start fallback \(from.rawValue, privacy: .public) -> \(to.rawValue, privacy: .public): \(label, privacy: .public)")
+            #if LEGATO_INTERNAL
+            AudioDiagnostics.startFallback(from: from.rawValue, to: to.rawValue, error: error, label: label)
+            #endif
+            #if DEBUG
+            E2E.log("start.fallback from=\(from.rawValue) to=\(to.rawValue) error=\(label)")
+            #endif
+        }
         installInterruptionObservers()
         #if LEGATO_INTERNAL
         AudioDiagnostics.install()

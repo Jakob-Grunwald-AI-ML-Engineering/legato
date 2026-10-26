@@ -18,19 +18,25 @@ final class FakeSessionControl: AudioSessionControlling {
     let log: EventLog
     let supportedPolicies: Set<AudioPolicy>
     private let activateError = Mutex<(any Error)?>(nil)
+    /// Activation fails only for these configs; nil = for every config.
+    private let failingConfigs = Mutex<[SessionConfig]?>(nil)
     private let configs = Mutex<[SessionConfig]>([])
 
     init(log: EventLog, supported: Set<AudioPolicy> = [.duckOthers, .mixWithOthers]) {
         self.log = log
         self.supportedPolicies = supported
     }
-    func failActivation(with e: any Error) { activateError.withLock { $0 = e } }
+    func failActivation(with e: any Error, only policies: [AudioPolicy]? = nil) {
+        activateError.withLock { $0 = e }
+        failingConfigs.withLock { $0 = policies?.map(\.sessionConfig) }
+    }
     func clearActivationFailure() { activateError.withLock { $0 = nil } }
     var activatedConfigs: [SessionConfig] { configs.withLock { $0 } }
 
     func activate(_ config: SessionConfig) throws {
         log.add("activate")
-        if let e = activateError.withLock({ $0 }) { throw e }
+        if let e = activateError.withLock({ $0 }),
+           failingConfigs.withLock({ $0 })?.contains(config) ?? true { throw e }
         configs.withLock { $0.append(config) }
     }
     func deactivate() { log.add("deactivate") }
@@ -40,11 +46,14 @@ final class FakeSource: AudioSource {
     let log: EventLog
     private let continuation = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
     private let startError = Mutex<(any Error)?>(nil)
+    /// `start` fails this many more times, then works.
+    private let startFailuresLeft = Mutex<(error: (any Error)?, count: Int)>((nil, 0))
     private let routeError = Mutex<(any Error)?>(nil)
 
     init(log: EventLog) { self.log = log }
     func failStart(with e: any Error) { startError.withLock { $0 = e } }
     func clearStartFailure() { startError.withLock { $0 = nil } }
+    func failNextStarts(_ count: Int, with e: any Error) { startFailuresLeft.withLock { $0 = (e, count) } }
     func failRoute(with e: any Error) { routeError.withLock { $0 = e } }
 
     private func makeStream() -> AsyncStream<AudioChunk> {
@@ -59,6 +68,12 @@ final class FakeSource: AudioSource {
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         log.add("source.start")
         if let e = startError.withLock({ $0 }) { throw e }
+        let transient = startFailuresLeft.withLock { s -> (any Error)? in
+            guard s.count > 0 else { return nil }
+            s.count -= 1
+            return s.error
+        }
+        if let transient { throw transient }
         return makeStream()
     }
     func route() async throws -> AsyncStream<AudioChunk> {

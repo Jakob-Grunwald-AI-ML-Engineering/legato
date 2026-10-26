@@ -56,8 +56,10 @@ public protocol Readiness: AnyObject {
     func check() async -> ReadinessIssue?
 }
 
-/// Builds the session for one dictation. Called once per start, so no session or mic outlives a run.
-public typealias DictationSessionFactory = @MainActor () -> DictationSession
+/// Builds the session for one dictation attempt under the given audio policy. Called once per start
+/// (twice when a refused background start falls back to the default policy), so no session or mic
+/// outlives a run.
+public typealias DictationSessionFactory = @MainActor (AudioPolicy) -> DictationSession
 
 /// What the app knows about the moment a start is requested.
 public struct StartContext: Sendable, Equatable {
@@ -65,10 +67,14 @@ public struct StartContext: Sendable, Equatable {
     public var inBackground: Bool
     /// Another app's audio is playing. Diagnostics only: it never changes how a start is routed.
     public var otherAudioPlaying: Bool
+    /// The audio policy the user selected. When it is not `AudioPolicy.default` and the system refuses a
+    /// background start under it, the coordinator retries once with the default.
+    public var audioPolicy: AudioPolicy
 
-    public init(inBackground: Bool, otherAudioPlaying: Bool) {
+    public init(inBackground: Bool, otherAudioPlaying: Bool, audioPolicy: AudioPolicy = .default) {
         self.inBackground = inBackground
         self.otherAudioPlaying = otherAudioPlaying
+        self.audioPolicy = audioPolicy
     }
 
     /// Nothing restricts a start.
