@@ -114,7 +114,7 @@ if [ "$mode" = release-check ]; then
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
     AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
-    LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoAudioPolicy
+    LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoFakeRefusalInForeground LegatoFakeRefusalCount LegatoAudioPolicy
     start.route start.fallback toggle-after-hop)
   scan() { # every Mach-O file in the bundle
     find "$1" -type f \( -name Legato -o -name '*.dylib' \) -print0 | xargs -0 strings -a
@@ -535,8 +535,61 @@ scenario_j() {
   assert_eq "history empty" "0" "$(history_texts | grep -c .)"
 }
 
+scenario_k() {
+  # Foreground, the mic has no input yet (0 Hz): the start is retried with a fresh session after a short
+  # settle wait, same policy first, then duckOthers for a non-default policy. Same activity throughout.
+  local label="$1" policy="$2" count="$3" sessions="$4" expect_started="$5"
+  SCENARIO="k. foreground no mic input ($label)"
+  begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoAudioPolicy "$policy" -LegatoFakeBackgroundRefusal input \
+    -LegatoFakeRefusalInForeground YES -LegatoFakeRefusalCount "$count" -LegatoForceTapToCopy NO || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  trigger toggle
+  wait_log "e2e outcome kind=" 10
+  sleep 0.5
+  assert_count "sessions built" "session.make" "$sessions"
+  assert_count "one activity requested (no flicker)" "activity.request phase=" 1
+  assert_no_log "no hop" "kind=needsForeground"
+  assert_no_log "activity not dismissed" "activity.dismiss"
+  assert_log "start.fallback logged for the retry" "start.fallback from=$policy to="
+  if [ "$expect_started" = yes ]; then
+    assert_log "outcome started" "outcome kind=started"
+    assert_no_log "no failed activity" "activity.end phase=failed"
+    sleep 1.5
+    trigger toggle
+    wait_log "e2e outcome kind=stopped" 10
+    sleep 0.5
+    assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
+    assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  else
+    assert_log "outcome failed(invalidInputFormat)" 'outcome kind=failed error="invalidInputFormat"'
+    assert_count "activity ended failed once" "activity.end phase=failed" 1
+    assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+    assert_eq "history empty" "0" "$(history_texts | grep -c .)"
+  fi
+}
+
+scenario_l() {
+  # A foreground refusal of another kind ('!int') is a plain failure: no retry, no fallback.
+  SCENARIO="l. foreground !int still fails"
+  begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoAudioPolicy duckMusicPauseSpoken -LegatoFakeBackgroundRefusal int \
+    -LegatoFakeRefusalInForeground YES -LegatoForceTapToCopy NO || return
+  trigger toggle
+  wait_log "e2e outcome kind=" 10
+  sleep 0.5
+  assert_log "outcome failed" "outcome kind=failed"
+  assert_count "one session, no retry" "session.make" 1
+  assert_no_log "no fallback" "start.fallback"
+  assert_no_log "no hop" "kind=needsForeground"
+  assert_count "activity ended failed once" "activity.end phase=failed" 1
+}
+
 t_run=$SECONDS
 for s in a b c d e f g h i j; do "scenario_$s"; done
+scenario_k "retry succeeds" duckOthers 1 2 yes
+scenario_k "default fails twice" duckOthers 9 2 no
+scenario_k "experimental: same policy, then duckOthers" duckMusicPauseSpoken 2 3 yes
+scenario_k "experimental fails thrice" duckMusicPauseSpoken 9 3 no
+scenario_l
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report

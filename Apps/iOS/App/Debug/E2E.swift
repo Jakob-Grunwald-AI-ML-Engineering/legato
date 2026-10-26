@@ -21,6 +21,9 @@ import os
 ///   or `input` (`MicSourceError.invalidInputFormat`, 0 Hz) on the mic start.
 /// - `-LegatoFakeRefusalOnlyNonDefault YES`: the refusal applies only to sessions built for a policy
 ///   other than the default (so the fallback to `duckOthers` succeeds).
+/// - `-LegatoFakeRefusalInForeground YES`: the refusal applies in the foreground too (default: only in
+///   the background).
+/// - `-LegatoFakeRefusalCount N`: only the first N refusable starts are refused, the rest succeed.
 /// - `-LegatoAudioPolicy duckOthers|mixWithOthers|pauseOthers|duckMusicPauseSpoken`: the selected policy
 ///   (the experimental ones are switched on). With the fake engine, absent means the default policy.
 ///
@@ -97,13 +100,25 @@ enum E2E {
 
     static let fakeRefusal: Refusal? = UserDefaults.standard.string(forKey: "LegatoFakeBackgroundRefusal").flatMap(Refusal.init)
     static let fakeRefusalOnlyNonDefault = launchFlag("LegatoFakeRefusalOnlyNonDefault") == true
+    static let fakeRefusalInForeground = launchFlag("LegatoFakeRefusalInForeground") == true
+    /// Refusals still to hand out; nil = unlimited.
+    private static let refusalsLeft = Mutex<Int?>(
+        UserDefaults.standard.object(forKey: "LegatoFakeRefusalCount") == nil
+            ? nil : UserDefaults.standard.integer(forKey: "LegatoFakeRefusalCount"))
 
     /// The error a start should fail with now, when it is the session (`sessionStep`) or the mic step
     /// that is refused, for a session built for `policy`.
     static func refusal(sessionStep: Bool, policy: AudioPolicy) -> (any Error)? {
-        guard let refusal = fakeRefusal, refusal.isSessionStep == sessionStep, fakeInBackground == true else { return nil }
+        guard let refusal = fakeRefusal, refusal.isSessionStep == sessionStep,
+              fakeInBackground == true || fakeRefusalInForeground else { return nil }
         if fakeRefusalOnlyNonDefault && policy == .default { return nil }
-        return refusal.error
+        let allowed = refusalsLeft.withLock { left -> Bool in
+            guard let n = left else { return true }
+            guard n > 0 else { return false }
+            left = n - 1
+            return true
+        }
+        return allowed ? refusal.error : nil
     }
 
     static let fakePolicy: AudioPolicy? = UserDefaults.standard.string(forKey: "LegatoAudioPolicy").flatMap(AudioPolicy.init(rawValue:))

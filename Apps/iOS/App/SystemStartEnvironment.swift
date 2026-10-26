@@ -51,10 +51,19 @@ final class SystemStartEnvironment: StartEnvironment {
         Self.isRefusal(error)
     }
 
+    func isInputNotReady(_ error: any Error) -> Bool {
+        Self.isNoInput(error)
+    }
+
+    /// The mic reported no input format (0 Hz right after activation) for its whole retry budget.
+    nonisolated static func isNoInput(_ error: any Error) -> Bool {
+        (error as? MicSourceError) == .invalidInputFormat
+    }
+
     /// The error is the mic reporting no input format (0 Hz right after activation, which retries did
     /// not clear), or it or any error it wraps carries one of `refusalCodes`.
     nonisolated static func isRefusal(_ error: any Error) -> Bool {
-        if let mic = error as? MicSourceError, mic == .invalidInputFormat { return true }
+        if isNoInput(error) { return true }
         return refusalCode(of: error) != nil
     }
 

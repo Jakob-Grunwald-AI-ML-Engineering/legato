@@ -95,6 +95,13 @@ public protocol StartEnvironment: AnyObject {
     /// Whether `error`, thrown by a start that ran in the background, is the system refusing to record
     /// from there (so the same start can succeed in the foreground).
     func isBackgroundRefusal(_ error: any Error) -> Bool
+    /// Whether `error` says the microphone had no input yet (e.g. a 0 Hz input format right after the
+    /// session was activated). Such a start is worth one retry with a fresh session, also in the foreground.
+    func isInputNotReady(_ error: any Error) -> Bool
+}
+
+extension StartEnvironment {
+    public func isInputNotReady(_ error: any Error) -> Bool { false }
 }
 
 /// The default environment: nothing is restricted, no error is a refusal.

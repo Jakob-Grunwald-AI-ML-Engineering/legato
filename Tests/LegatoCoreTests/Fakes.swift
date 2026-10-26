@@ -294,8 +294,14 @@ final class FakeStartEnvironment: StartEnvironment {
     var context = StartContext.unrestricted
     /// `TestError.tag` values that count as "the system refused a background start".
     var refusalTags: Set<String> = ["refused"]
+    /// `TestError.tag` values that mean "the mic had no input yet". Also a refusal in the background,
+    /// like the app's `invalidInputFormat`.
+    var notReadyTags: Set<String> = ["notReady"]
     func current() -> StartContext { context }
     func isBackgroundRefusal(_ error: any Error) -> Bool {
-        (error as? TestError).map { refusalTags.contains($0.tag) } ?? false
+        (error as? TestError).map { refusalTags.contains($0.tag) || notReadyTags.contains($0.tag) } ?? false
+    }
+    func isInputNotReady(_ error: any Error) -> Bool {
+        (error as? TestError).map { notReadyTags.contains($0.tag) } ?? false
     }
 }
