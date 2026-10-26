@@ -26,6 +26,14 @@ select_xcode() {
   else
     echo "::notice::Pinned Xcode $version not installed; using local default ($(xcodebuild -version | head -n 1))."
   fi
+  ensure_metal_toolchain
+}
+
+# MLX compiles Metal shaders; since Xcode 26 the Metal toolchain is a separate download.
+ensure_metal_toolchain() {
+  if ! xcodebuild -showComponent MetalToolchain 2>/dev/null | grep -q "Status: installed"; then
+    xcodebuild -downloadComponent MetalToolchain
+  fi
 }
 
 # Print the UDID of an available iPhone simulator on the newest iOS >= 26 runtime.
