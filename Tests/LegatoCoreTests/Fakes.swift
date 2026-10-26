@@ -18,18 +18,25 @@ final class FakeSessionControl: AudioSessionControlling {
     let log: EventLog
     let supportedPolicies: Set<AudioPolicy>
     private let activateError = Mutex<(any Error)?>(nil)
+    /// Activation fails only for these configs; nil = for every config.
+    private let failingConfigs = Mutex<[SessionConfig]?>(nil)
     private let configs = Mutex<[SessionConfig]>([])
 
     init(log: EventLog, supported: Set<AudioPolicy> = [.duckOthers, .mixWithOthers]) {
         self.log = log
         self.supportedPolicies = supported
     }
-    func failActivation(with e: any Error) { activateError.withLock { $0 = e } }
+    func failActivation(with e: any Error, only policies: [AudioPolicy]? = nil) {
+        activateError.withLock { $0 = e }
+        failingConfigs.withLock { $0 = policies?.map(\.sessionConfig) }
+    }
+    func clearActivationFailure() { activateError.withLock { $0 = nil } }
     var activatedConfigs: [SessionConfig] { configs.withLock { $0 } }
 
     func activate(_ config: SessionConfig) throws {
         log.add("activate")
-        if let e = activateError.withLock({ $0 }) { throw e }
+        if let e = activateError.withLock({ $0 }),
+           failingConfigs.withLock({ $0 })?.contains(config) ?? true { throw e }
         configs.withLock { $0.append(config) }
     }
     func deactivate() { log.add("deactivate") }
@@ -39,10 +46,17 @@ final class FakeSource: AudioSource {
     let log: EventLog
     private let continuation = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
     private let startError = Mutex<(any Error)?>(nil)
+    /// `start` fails this many more times, then works.
+    private let startFailuresLeft = Mutex<(error: (any Error)?, count: Int)>((nil, 0))
     private let routeError = Mutex<(any Error)?>(nil)
+    private let stopHold = Mutex(false)
 
     init(log: EventLog) { self.log = log }
+    /// Keeps `stop` pending (after it logged) until released: a teardown a test can interleave with.
+    func holdStop(_ on: Bool) { stopHold.withLock { $0 = on } }
     func failStart(with e: any Error) { startError.withLock { $0 = e } }
+    func clearStartFailure() { startError.withLock { $0 = nil } }
+    func failNextStarts(_ count: Int, with e: any Error) { startFailuresLeft.withLock { $0 = (e, count) } }
     func failRoute(with e: any Error) { routeError.withLock { $0 = e } }
 
     private func makeStream() -> AsyncStream<AudioChunk> {
@@ -57,6 +71,12 @@ final class FakeSource: AudioSource {
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         log.add("source.start")
         if let e = startError.withLock({ $0 }) { throw e }
+        let transient = startFailuresLeft.withLock { s -> (any Error)? in
+            guard s.count > 0 else { return nil }
+            s.count -= 1
+            return s.error
+        }
+        if let transient { throw transient }
         return makeStream()
     }
     func route() async throws -> AsyncStream<AudioChunk> {
@@ -70,6 +90,7 @@ final class FakeSource: AudioSource {
     }
     func stop() async {
         log.add("source.stop")
+        while stopHold.withLock({ $0 }) { try? await Task.sleep(for: .milliseconds(5)) }
         continuation.withLock { $0?.finish(); $0 = nil }
     }
 }
@@ -86,6 +107,8 @@ final class FakeEngine: DictationEngine {
         var finishError: (any Error)?
         /// Leave the results stream open after the input ends (a stream that outlives `finish()`).
         var holdStreamOpen = false
+        /// Keeps `finish()` pending until cleared (polled), so a test can sit inside a stop.
+        var holdFinish = false
     }
     private let config = Mutex(Config())
     /// Results continuations in `transcribe` order, for `emit` / `failStream`.
@@ -95,7 +118,7 @@ final class FakeEngine: DictationEngine {
 
     func set(installed: Bool? = nil, prepareError: (any Error)? = nil, hangInPrepare: Bool? = nil,
              script: [TranscriptEvent]? = nil, streamError: (any Error)? = nil, finishError: (any Error)? = nil,
-             holdStreamOpen: Bool? = nil) {
+             holdStreamOpen: Bool? = nil, holdFinish: Bool? = nil) {
         config.withLock {
             if let installed { $0.installed = installed }
             if let prepareError { $0.prepareError = prepareError }
@@ -104,10 +127,13 @@ final class FakeEngine: DictationEngine {
             if let streamError { $0.streamError = streamError }
             if let finishError { $0.finishError = finishError }
             if let holdStreamOpen { $0.holdStreamOpen = holdStreamOpen }
+            if let holdFinish { $0.holdFinish = holdFinish }
         }
     }
 
     func clearFinishError() { config.withLock { $0.finishError = nil } }
+    func clearPrepareError() { config.withLock { $0.prepareError = nil } }
+    func clearStreamError() { config.withLock { $0.streamError = nil } }
 
     /// Pushes `event` into the results stream of the `run`-th `transcribe` call (0-based), if still open.
     func emit(_ event: TranscriptEvent, run: Int) {
@@ -143,9 +169,14 @@ final class FakeEngine: DictationEngine {
         let cfg = config.withLock { $0 }
         let (stream, cont) = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
         streams.withLock { $0.append(cont) }
+        if let err = cfg.streamError {
+            // Buffered before `transcribe` returns, so the failure is already waiting for the consumer.
+            for e in cfg.script { cont.yield(e) }
+            cont.finish(throwing: err)
+            return stream
+        }
         let task = Task {
             for e in cfg.script { cont.yield(e) }
-            if let err = cfg.streamError { cont.finish(throwing: err); return }
             for await _ in input {}
             if !cfg.holdStreamOpen { cont.finish() }
         }
@@ -155,6 +186,7 @@ final class FakeEngine: DictationEngine {
 
     func finish() async throws {
         log.add("engine.finish")
+        while config.withLock({ $0.holdFinish }) { try await Task.sleep(for: .milliseconds(5)) }
         if let e = config.withLock({ $0.finishError }) { throw e }
     }
 }
@@ -167,19 +199,57 @@ actor MemoryHistory: HistoryStore {
     func delete(id: UUID) async throws { entries.removeAll { $0.id == id } }
 }
 
-/// Manually driven sleep: each call to the returned closure waits for one `tick()`.
+/// Manually driven sleep: each call to the returned closure waits for one `tick()` (a tick sent before
+/// anyone waits is kept for the next sleeper). A cancelled sleeper throws and consumes nothing, and
+/// the clock stays usable afterwards (an `AsyncStream`-based clock would end for good once a
+/// cancelled task had been iterating it, so a second run's sleep would return at once).
 struct ManualClock: Sendable {
-    let ticks: AsyncStream<Void>
-    private let cont: AsyncStream<Void>.Continuation
-    init() { (ticks, cont) = AsyncStream<Void>.makeStream() }
-    func tick() { cont.yield(()) }
-    var sleep: @Sendable (Duration) async throws -> Void {
-        let ticks = self.ticks
-        return { _ in
-            var it = ticks.makeAsyncIterator()
-            _ = await it.next()
-            try Task.checkCancellation()
+    private final class Source: Sendable {
+        private struct State {
+            var pending = 0
+            var nextID = 0
+            var waiters: [Int: CheckedContinuation<Void, any Error>] = [:]
         }
+        private let state = Mutex(State())
+
+        func tick() {
+            let waiter = state.withLock { s -> CheckedContinuation<Void, any Error>? in
+                if let id = s.waiters.keys.min() { return s.waiters.removeValue(forKey: id) }
+                s.pending += 1
+                return nil
+            }
+            waiter?.resume()
+        }
+
+        func wait() async throws {
+            let id = state.withLock { s -> Int in s.nextID += 1; return s.nextID }
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, any Error>) in
+                    enum Next { case resume, cancel, wait }
+                    let next = state.withLock { s -> Next in
+                        if Task.isCancelled { return .cancel }
+                        if s.pending > 0 { s.pending -= 1; return .resume }
+                        s.waiters[id] = c
+                        return .wait
+                    }
+                    switch next {
+                    case .resume: c.resume()
+                    case .cancel: c.resume(throwing: CancellationError())
+                    case .wait: break
+                    }
+                }
+            } onCancel: {
+                let waiter = state.withLock { $0.waiters.removeValue(forKey: id) }
+                waiter?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private let source = Source()
+    func tick() { source.tick() }
+    var sleep: @Sendable (Duration) async throws -> Void {
+        let source = self.source
+        return { _ in try await source.wait() }
     }
 }
 
@@ -190,4 +260,138 @@ func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         try? await Task.sleep(for: .milliseconds(5))
     }
     return await condition()
+}
+
+// MARK: coordinator ports
+
+/// Records every Live Activity call, and into the shared log (`activity.<call>:<phase>`).
+@MainActor
+final class FakeActivity: ActivityClient {
+    enum Call: Equatable {
+        case request(DictationActivityContent)
+        case update(DictationActivityContent, staleDate: Date?)
+        case end(DictationActivityContent)
+
+        var content: DictationActivityContent {
+            switch self {
+            case .request(let c), .update(let c, _), .end(let c): c
+            }
+        }
+    }
+
+    let log: EventLog
+    private(set) var calls: [Call] = []
+    /// How often `dismiss` was called (the run never began; the activity was removed at once).
+    private(set) var dismissals = 0
+    /// Makes `request` throw (Live Activities refused).
+    var requestError: (any Error)?
+    /// Keeps `request` pending until cleared (polled, like `FakeEngine`'s prepare hold).
+    var holdRequest = false
+    /// Keeps `dismiss` pending after it logged, until cleared.
+    var holdDismiss = false
+    /// Keeps `update` pending after it logged, until cleared.
+    var holdUpdate = false
+
+    init(log: EventLog) { self.log = log }
+
+    var phases: [DictationPhase] { calls.map(\.content.phase) }
+    var updates: [(content: DictationActivityContent, staleDate: Date?)] {
+        calls.compactMap { if case .update(let c, let s) = $0 { (c, s) } else { nil } }
+    }
+    var ends: [DictationActivityContent] {
+        calls.compactMap { if case .end(let c) = $0 { c } else { nil } }
+    }
+
+    func request(_ content: DictationActivityContent) async throws {
+        log.add("activity.request:\(content.phase.rawValue)")
+        calls.append(.request(content))
+        while holdRequest { try? await Task.sleep(for: .milliseconds(5)) }
+        if let requestError { throw requestError }
+    }
+    func update(_ content: DictationActivityContent, staleDate: Date?) async {
+        log.add("activity.update:\(content.phase.rawValue)")
+        calls.append(.update(content, staleDate: staleDate))
+        while holdUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+    func end(_ content: DictationActivityContent) async {
+        log.add("activity.end:\(content.phase.rawValue)")
+        calls.append(.end(content))
+    }
+    func dismiss() async {
+        log.add("activity.dismiss")
+        dismissals += 1
+        while holdDismiss { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+}
+
+@MainActor
+final class FakeClipboard: Clipboard {
+    let log: EventLog
+    private(set) var written: [String] = []
+    /// What `write` reports: whether the pasteboard's change count moved.
+    var changes = true
+
+    init(log: EventLog) { self.log = log }
+
+    func write(_ text: String) -> Bool {
+        log.add("clipboard.write")
+        written.append(text)
+        return changes
+    }
+}
+
+@MainActor
+final class FakeReadiness: Readiness {
+    var issue: ReadinessIssue?
+    func check() async -> ReadinessIssue? { issue }
+}
+
+@MainActor
+final class FakeStartEnvironment: StartEnvironment {
+    var context = StartContext.unrestricted
+    /// `TestError.tag` values that count as "the system refused a background start".
+    var refusalTags: Set<String> = ["refused"]
+    /// `TestError.tag` values that mean "the mic had no input yet". Also a refusal in the background,
+    /// like the app's `invalidInputFormat`.
+    var notReadyTags: Set<String> = ["notReady"]
+    func current() -> StartContext { context }
+    func isBackgroundRefusal(_ error: any Error) -> Bool {
+        (error as? TestError).map { refusalTags.contains($0.tag) || notReadyTags.contains($0.tag) } ?? false
+    }
+    func isInputNotReady(_ error: any Error) -> Bool {
+        (error as? TestError).map { notReadyTags.contains($0.tag) } ?? false
+    }
+}
+
+/// Records what the coordinator tells its sink, and into the shared log (`sink.<call>`).
+@MainActor
+final class FakeSink: TranscriptSink {
+    let log: EventLog
+    private(set) var started: [DictationRun] = []
+    private(set) var updates: [(committed: String, volatile: String)] = []
+    private(set) var ended: [(run: DictationRun, committed: String, text: String?)] = []
+    /// `leaseChanged` calls in order: the lease end, or nil when it ended.
+    private(set) var leases: [Date?] = []
+    /// What `runEnded` reports: the final text landed in the field.
+    var finalApplied = false
+
+    init(log: EventLog) { self.log = log }
+
+    func runStarted(_ run: DictationRun) {
+        log.add("sink.runStarted:\(run.target)")
+        started.append(run)
+    }
+    func update(committed: String, volatile: String) {
+        log.add("sink.update")
+        updates.append((committed, volatile))
+    }
+    func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
+        log.add("sink.runEnded")
+        ended.append((run, committed, text))
+        return finalApplied
+    }
+    func leaseChanged(until: Date?) {
+        log.add(until == nil ? "sink.lease:nil" : "sink.lease:set")
+        leases.append(until)
+    }
 }

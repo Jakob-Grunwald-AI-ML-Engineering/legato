@@ -46,7 +46,8 @@ final class MacAppController {
     @ObservationIgnored private var recorder = HotkeyRecorderLogic()
     @ObservationIgnored private var commands: AsyncStream<Command>.Continuation?
     @ObservationIgnored private var activeRun: Run?
-    @ObservationIgnored private var monitor: Task<Void, Never>?
+    /// Edits the pump has handed to the writer so far; compared with `session.editCount` to know it caught up.
+    @ObservationIgnored private var appliedEdits = 0
     /// Fires `gesture.tick` when a press has been held alone for the arm delay.
     @ObservationIgnored private var armTask: Task<Void, Never>?
     @ObservationIgnored private var triggerPressedAt: TimeInterval?
@@ -135,6 +136,11 @@ final class MacAppController {
                 guard let self else { return }
                 await self.perform(command)
             }
+        }
+        // The engine stream failed under a run: the session has already torn itself down.
+        session.onRunAborted = { [weak self] _ in
+            guard let self, let run = activeRun else { return }
+            commands?.yield(.aborted(run.id))
         }
         Task { [weak self, edits = session.edits] in
             for await edit in edits { self?.apply(edit) }
@@ -369,23 +375,11 @@ final class MacAppController {
         }
         phase = .listening
         hud.setPhase(.listening)
-        monitor = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(250))
-                guard let self, !Task.isCancelled else { return }
-                // The session ends a run on its own when the engine stream fails.
-                if self.session.runState == .idle {
-                    self.commands?.yield(.aborted(run.id))
-                    return
-                }
-            }
-        }
     }
 
     /// Ends the run. `discard` is the chord cancel: nothing is delivered and nothing is saved.
     private func finishRun(discard: Bool) async {
         guard let run = activeRun, phase == .listening || phase == .preparing else { return }
-        monitor?.cancel()
         phase = .finishing
         hud.setPhase(.finishing)
 
@@ -417,10 +411,10 @@ final class MacAppController {
         }
     }
 
-    /// The engine ended the run by itself: deliver what was heard.
+    /// The engine ended the run by itself (`onRunAborted`; the session is already torn down): deliver
+    /// what was heard. A stop or cancel that was queued first has already ended the run, so this is a no-op then.
     private func abortRun(id: UUID) async {
         guard let run = activeRun, run.id == id, phase == .listening else { return }
-        monitor?.cancel()
         phase = .finishing
         hud.setPhase(.finishing)
         gesture.runEnded()
@@ -430,35 +424,27 @@ final class MacAppController {
     }
 
     /// Finishes the writer and routes whatever the field is missing.
-    /// `salvage`: the session did not save an entry (it aborted), so the run's own text goes to history.
+    /// `salvage`: the session did not save an entry (it aborted), so its `partialEntry()` goes to history.
     private func deliver(_ run: Run, finalText: String?, salvage: Bool, notice: String?) async {
         let action = run.writer.finish(finalText: finalText)
         var toast = notice
+        func note(_ message: String) { toast = notice.map { "\($0) \(message)" } ?? message }
         switch action {
         case .done:
             break
         case .copy(let rest):
             paster.copy(rest)
-            toast = "Copied the rest — paste with ⌘V."
+            note("Copied the rest — paste with ⌘V.")
         case .paste(let full):
             let outcome = await paster.paste(
                 full,
                 restoreClipboard: settings.restoreClipboard,
                 targetPID: run.targetPID,
                 secureField: run.secureField)
-            if case .copied(let reason) = outcome { toast = reason.toast }
+            if case .copied(let reason) = outcome { note(reason.toast) }
         }
-        if salvage {
-            let saved = (finalText ?? run.committed).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !saved.isEmpty {
-                let entry = DictationEntry(
-                    date: run.startedAt,
-                    text: saved,
-                    localeIdentifier: Locale.current.identifier,
-                    engineID: engine.id,
-                    duration: Date().timeIntervalSince(run.startedAt))
-                try? await history.append(entry)
-            }
+        if salvage, let entry = session.partialEntry() {
+            try? await history.append(entry) // the session never saved this run; losing the copy is worse
         }
         conclude(run, toast: toast)
     }
@@ -476,14 +462,14 @@ final class MacAppController {
         Task { await refreshRecent() }
     }
 
-    /// Waits (briefly) until the pump has applied the run's last commit to the writer.
+    /// Waits (briefly) until the pump has applied the run's last edits to the writer: its last commit
+    /// when the final text is known, else every edit the session has published.
     private func drainEdits(of run: Run, expecting text: String?) async {
-        guard let text else {
-            await Task.yield()
-            return
-        }
         var tries = 0
-        while run.committed.trimmingCharacters(in: .whitespacesAndNewlines) != text, tries < 50 {
+        while tries < 50 {
+            let caughtUp = text.map { run.committed.trimmingCharacters(in: .whitespacesAndNewlines) == $0 }
+                ?? (appliedEdits >= session.editCount)
+            if caughtUp { return }
             try? await Task.sleep(for: .milliseconds(10))
             tries += 1
         }
@@ -492,6 +478,7 @@ final class MacAppController {
     // MARK: Edits
 
     private func apply(_ edit: TranscriptEdit) {
+        appliedEdits += 1
         guard let run = activeRun else { return }
         run.writer.apply(edit)
         switch edit {

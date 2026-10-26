@@ -1,0 +1,31 @@
+import Foundation
+import Testing
+@testable import LegatoKeyboardCore
+
+/// Whether a keyboard may follow the host's state: a state left behind by a dead app must not be typed.
+@Suite struct HostFreshnessTests {
+    private let now = t0.addingTimeInterval(10)
+
+    @Test(arguments: [HostPhase.starting, .listening, .finishing])
+    func aRunningStateWithAStaleBeatIsNotFollowed(phase: HostPhase) {
+        let stale = hostState(phase: phase, committed: "words", beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness - 0.1))
+        #expect(!stale.isLive(now: now))
+    }
+
+    @Test(arguments: [HostPhase.starting, .listening, .finishing])
+    func aRunningStateWithAFreshBeatIsFollowed(phase: HostPhase) {
+        #expect(hostState(phase: phase, beatAt: now.addingTimeInterval(-2.4)).isLive(now: now))
+        #expect(hostState(phase: phase, beatAt: now).isLive(now: now))
+    }
+
+    @Test func anIdleStateIsFollowedWhateverItsAge() {
+        // The final state of a run that ended: the beat stops with the run, so it is always old.
+        #expect(hostState(phase: .idle, committed: "words", beatAt: now.addingTimeInterval(-60)).isLive(now: now))
+    }
+
+    @Test func theBoundaryMatchesTheMicKeysFreshness() {
+        let edge = hostState(phase: .listening, beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness))
+        #expect(!edge.isLive(now: now))
+        #expect(MicKeyMode.resolve(host: edge, now: now, fullAccess: true) == .openApp) // same verdict
+    }
+}

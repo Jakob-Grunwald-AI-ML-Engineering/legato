@@ -7,3 +7,5 @@ build/
 *.xcuserstate
 .claude/tmp/
 .claude/worktrees/
+Apps/iOS/Gen/
+Apps/iOS/*.xcodeproj

@@ -9,10 +9,14 @@ let package = Package(
         .library(name: "LegatoAudio", targets: ["LegatoAudio"]),
         .library(name: "LegatoAppleSpeech", targets: ["LegatoAppleSpeech"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
+        .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
     ],
     targets: [
         .target(name: "LegatoCore"),
         .testTarget(name: "LegatoCoreTests", dependencies: ["LegatoCore"]),
+        // The keyboard extension links only this (Foundation only; it must not depend on LegatoCore).
+        .target(name: "LegatoKeyboardCore"),
+        .testTarget(name: "LegatoKeyboardCoreTests", dependencies: ["LegatoKeyboardCore"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore"]),
         .target(name: "LegatoAppleSpeech", dependencies: ["LegatoCore"]),
