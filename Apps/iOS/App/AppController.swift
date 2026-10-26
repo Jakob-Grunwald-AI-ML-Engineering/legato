@@ -157,7 +157,8 @@ final class AppController {
 
     /// Resolves the live engine from the pick and the engine settings, for the sessions built from now on.
     /// `releasingKeptMicrophone`: a session kept between runs (keep-ready) holds the old engine, so it is
-    /// released and the next start builds one with the new engine.
+    /// released and the next start builds one with the new engine. During a run, the run's session is
+    /// released when the run ends instead of being kept.
     func refreshEngine(releasingKeptMicrophone: Bool = true) async {
         let resolution = await models.engines.liveEngine()
         engineBox.engine = resolution.engine
@@ -169,7 +170,7 @@ final class AppController {
         #if DEBUG
         E2E.log("engine.resolved id=\(resolution.engine.id) fallback=\(resolution.fallback.map(Self.describe) ?? "none")")
         #endif
-        if releasingKeptMicrophone { await coordinator.endKeepAlive() }
+        if releasingKeptMicrophone { await coordinator.invalidateKeptSession() }
         await refreshReadiness()
     }
 
