@@ -1,5 +1,6 @@
 import Foundation
 import LegatoModels
+import LegatoCore
 import Synchronization
 import Testing
 @testable import LegatoMLX
@@ -225,5 +226,38 @@ struct HubFileFetcherTests {
         #expect(
             requests.contains { $0.url?.absoluteString.contains(qwen06.revision) == true },
             "the commit appears in the request: \(requests.compactMap { $0.url?.absoluteString })")
+    }
+}
+
+/// Records the device each warm-up load ran on.
+private final class WarmRecorder: MLXGenerating {
+    private let devices = Mutex<[ComputeDevice]>([])
+    var loads: [ComputeDevice] { devices.withLock { $0 } }
+    func load(spec: MLXModelSpec, folder: URL, device: ComputeDevice) async throws {
+        devices.withLock { $0.append(device) }
+    }
+    func stream(
+        spec: MLXModelSpec, folder: URL, instructions: String, examples: [LLMExample], prompt: String,
+        device: ComputeDevice
+    ) async throws -> AsyncThrowingStream<String, any Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+}
+
+@Suite("MLXInstaller warm device")
+struct MLXInstallerWarmDeviceTests {
+    /// A download that finishes while the phone app is in the background must not warm on the GPU.
+    @Test func warmsOnTheCpuWhenTheGpuIsUnavailable() async throws {
+        let recorder = WarmRecorder()
+        let installer = MLXInstaller(spec: qwen06, fetcher: FakeFetcher(), generator: recorder, canUseGPU: { false })
+        try await installer.warm(root: URL(fileURLWithPath: NSTemporaryDirectory()))
+        #expect(recorder.loads == [.cpu])
+    }
+
+    @Test func warmsOnTheGpuWhenItIsUsable() async throws {
+        let recorder = WarmRecorder()
+        let installer = MLXInstaller(spec: qwen06, fetcher: FakeFetcher(), generator: recorder, canUseGPU: { true })
+        try await installer.warm(root: URL(fileURLWithPath: NSTemporaryDirectory()))
+        #expect(recorder.loads == [.gpu])
     }
 }
