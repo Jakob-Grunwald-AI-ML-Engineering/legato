@@ -215,6 +215,18 @@ private final class EchoingFoundationModels: LLMBackend {
     }
 }
 
+/// Answers "How are you?" after a fixed delay, so a run's time is measurable.
+private struct SlowFoundationModels: LLMBackend {
+    static let delayMs = 40
+    let id = "fm"
+    let maxPromptCharacters: Int? = nil
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        try await Task.sleep(for: .milliseconds(Self.delayMs))
+        return "<text>How are you?</text>"
+    }
+}
+
 @Suite struct LiveCleanupProcessorTests {
     private func processor(_ store: CleanupSettingsStore, fm: EchoingFoundationModels, recorder: Recorder) -> CleanupProcessor {
         CleanupProcessor(
@@ -256,6 +268,43 @@ private final class EchoingFoundationModels: LLMBackend {
         #expect(fm.sent.first?.hasPrefix("<before>\nHello world.\n</before>\n") == true)
         #expect(recorder.starts == 0, "the run is still listening")
         #expect(recorder.reports.count == 1)
+    }
+
+    @Test func theReadoutOfALiveRunCoversAllItsSegments() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        store.delivery = .live
+        let recorder = Recorder()
+        let p = CleanupProcessor(
+            registry: CleanupRegistry(models: emptyManager(), foundationModels: SlowFoundationModels()), settings: store,
+            report: { recorder.record($0) })
+        let en = Locale(identifier: "en_US")
+        p.liveRunStarts()
+        _ = try await p.processSegment("how are you", context: "", locale: en, atStop: false) // changed
+        _ = try await p.processSegment("How are you?", context: "How are you?", locale: en, atStop: false) // unchanged
+        let last = try #require(recorder.reports.last)
+        #expect(last.changed, "a segment changed, so the run did")
+        #expect(last.milliseconds >= 2 * SlowFoundationModels.delayMs, "the time of both segments")
+        #expect(last.backend == "Apple Foundation Models")
+        #expect(last.refine == false)
+    }
+
+    @Test func aNewLiveRunStartsAFreshReadout() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        store.delivery = .live
+        let recorder = Recorder()
+        let p = CleanupProcessor(
+            registry: CleanupRegistry(models: emptyManager(), foundationModels: SlowFoundationModels()), settings: store,
+            report: { recorder.record($0) })
+        let en = Locale(identifier: "en_US")
+        p.liveRunStarts()
+        _ = try await p.processSegment("how are you", context: "", locale: en, atStop: false)
+        p.liveRunStarts()
+        _ = try await p.processSegment("How are you?", context: "", locale: en, atStop: false)
+        let last = try #require(recorder.reports.last)
+        #expect(!last.changed, "only this run's segment counts")
+        #expect(last.milliseconds < 2 * SlowFoundationModels.delayMs + SlowFoundationModels.delayMs / 2)
     }
 
     @Test func theStopPassAnnouncesItself() async throws {

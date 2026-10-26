@@ -19,6 +19,7 @@ final class LiveSegmentProcessor: TranscriptPostProcessor {
         var active = 0
         var maxActive = 0
         var cancelled: [String] = []
+        var runStarts = 0
     }
 
     let id = "live"
@@ -38,6 +39,8 @@ final class LiveSegmentProcessor: TranscriptPostProcessor {
     var wholeTexts: [String] { state.withLock { $0.wholeTexts } }
     var maxActive: Int { state.withLock { $0.maxActive } }
     var cancelled: [String] { state.withLock { $0.cancelled } }
+    var runStarts: Int { state.withLock { $0.runStarts } }
+    func liveRunStarts() { state.withLock { $0.runStarts += 1 } }
     func release(_ text: String) { _ = state.withLock { $0.held.remove(text) } }
 
     func process(_ text: String, locale: Locale) async throws -> String {
@@ -304,6 +307,25 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         let entry = try #require(try await stop.value)
         #expect(entry.text == "One. Two, three.")
         #expect(processor.cancelled.isEmpty)
+    }
+
+    @Test func eachLiveRunTellsTheProcessorItStarts() async throws {
+        let processor = LiveSegmentProcessor(answers: ["hello world": "Hello world."])
+        let (s, _) = liveSession(processor, script: [final("hello world ")])
+        try await s.start()
+        #expect(processor.runStarts == 1)
+        _ = try await s.stop()
+        try await s.start()
+        #expect(processor.runStarts == 2)
+        _ = try await s.stop()
+    }
+
+    @Test func aRunThatIsNotLiveDoesNotAnnounceALiveRun() async throws {
+        let processor = LiveSegmentProcessor(live: false, answers: [:])
+        let (s, _) = liveSession(processor, script: [final("hello world ")])
+        try await s.start()
+        _ = try await s.stop()
+        #expect(processor.runStarts == 0)
     }
 
     @Test func aProcessorThatIsNotLiveCleansTheWholeTextAtTheStopAsBefore() async throws {

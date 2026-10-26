@@ -235,6 +235,7 @@ public final class DictationSession {
             runStart = now()
             runLocale = locale
             cleansLive = postProcessor?.cleansSegmentsLive ?? false
+            if cleansLive { postProcessor?.liveRunStarts() }
             segments = []
             nextToClean = 0
             liveStopping = false

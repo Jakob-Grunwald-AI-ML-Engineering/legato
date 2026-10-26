@@ -24,12 +24,18 @@ public protocol TranscriptPostProcessor: Sendable {
     /// pass together. Past it the session cancels both and keeps the raw text for what was not cleaned.
     /// Read at the stop. Default nil: no limit beyond the processor's own.
     var liveStopTimeLimit: Duration? { get }
+
+    /// A run that cleans its segments live starts now (called once, before its first segment), so a
+    /// processor can sum up what the run's segments did. Default: nothing.
+    func liveRunStarts()
 }
 
 extension TranscriptPostProcessor {
     public var cleansSegmentsLive: Bool { false }
 
     public var liveStopTimeLimit: Duration? { nil }
+
+    public func liveRunStarts() {}
 
     public func processSegment(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> String {
         try await process(text, locale: locale)

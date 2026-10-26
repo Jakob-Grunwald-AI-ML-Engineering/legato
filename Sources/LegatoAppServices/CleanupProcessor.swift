@@ -3,6 +3,7 @@ import LegatoCore
 import LegatoMLX
 import LegatoPostProcessing
 import Observation
+import Synchronization
 
 /// What a cleanup run did, for Settings ("what am I testing?").
 public struct CleanupRunReport: Sendable, Equatable {
@@ -50,6 +51,8 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     /// Called when a run's cleanup begins (cleanup on), before any stage: the UI shows "Cleaning up…".
     let willRun: @Sendable () async -> Void
     let report: @Sendable (CleanupRunReport) async -> Void
+    /// What the segments of the current live run did so far.
+    private let liveRun = LiveRunTally()
 
     public init(
         registry: CleanupRegistry,
@@ -80,6 +83,9 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         return options.enabled && options.delivery == .live
     }
 
+    /// A live run starts: its readout begins afresh.
+    public func liveRunStarts() { liveRun.reset() }
+
     /// The stop of a live run spends at most the setting's time limit on cleanup, the segment in flight
     /// and the stop pass together.
     public var liveStopTimeLimit: Duration? {
@@ -88,15 +94,18 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     }
 
     /// One live segment, with the cleaned text before it as `context`. Only the stop pass (`atStop`) shows
-    /// "Cleaning up…": a segment cleaned while listening must not change what the UI says.
+    /// "Cleaning up…": a segment cleaned while listening must not change what the UI says. The report covers
+    /// the run so far (``liveRunStarts()``): the time of all its segments, changed when any changed.
     public func processSegment(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> String {
         let options = settings.options
         guard options.enabled else { return text }
         if atStop { await willRun() }
+        let liveRun = liveRun
+        let report = report
         return await Self.run(
             text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
-            timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report,
-            context: context)
+            timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry,
+            report: { await report(liveRun.adding($0)) }, context: context)
     }
 
     /// One cleanup in `style`, whatever the on/off switch says (refine uses it directly). ITN and the backend
@@ -127,5 +136,41 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         case .foundationModels: "Apple Foundation Models"
         case .itnOnly: itn ? "ITN only (no language model)" : "None (no language model)"
         }
+    }
+}
+
+/// The sum of a live run's segment reports: total time, changed when any segment changed, every backend
+/// and device that ran (in order, each once) and every skip reason.
+final class LiveRunTally: Sendable {
+    private let total = Mutex<CleanupRunReport?>(nil)
+
+    func reset() { total.withLock { $0 = nil } }
+
+    /// Adds one segment's report and returns the run's so far.
+    func adding(_ segment: CleanupRunReport) -> CleanupRunReport {
+        total.withLock { total in
+            guard var run = total else {
+                total = segment
+                return segment
+            }
+            run.backend = Self.merged(run.backend, segment.backend, separator: " + ")
+            run.device = Self.merged(run.device, segment.device, separator: "/")
+            for reason in segment.skipped where !run.skipped.contains(reason) { run.skipped.append(reason) }
+            run.style = segment.style
+            run.changed = run.changed || segment.changed
+            run.milliseconds += segment.milliseconds
+            total = run
+            return run
+        }
+    }
+
+    private static func merged(_ run: String?, _ next: String?, separator: String) -> String? {
+        guard let next else { return run }
+        guard let run else { return next }
+        return run.components(separatedBy: separator).contains(next) ? run : run + separator + next
+    }
+
+    private static func merged(_ run: String, _ next: String, separator: String) -> String {
+        merged(Optional(run), Optional(next), separator: separator) ?? run
     }
 }
