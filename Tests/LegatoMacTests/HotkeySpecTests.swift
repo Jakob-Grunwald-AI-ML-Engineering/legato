@@ -236,3 +236,93 @@ import Testing
         #expect(!HotkeySpec.Warning.systemShortcut.message.isEmpty)
     }
 }
+
+@Suite struct HotkeyPressDetectorTests {
+    /// `#expect` cannot call a mutating member, so the detector sits in a reference.
+    private final class Detector {
+        var inner: HotkeyPressDetector
+        init(_ spec: HotkeySpec) { inner = HotkeyPressDetector(spec: spec) }
+        func feed(_ e: KeyEvent) -> Bool { inner.feed(e) }
+        func reset() { inner.reset() }
+    }
+
+    private func key(_ kind: KeyEvent.Kind, _ code: UInt16, _ f: ModifierFlags) -> KeyEvent {
+        KeyEvent(kind: kind, keyCode: code, flags: f)
+    }
+
+    @Test func comboFiresOnceOnKeyDownAndIgnoresAutoRepeat() {
+        let d = Detector(.combo(keyCode: 46, modifiers: [.control, .option])) // ⌃⌥M
+        #expect(d.feed(key(.keyDown, 46, [.control, .option])))
+        #expect(!d.feed(key(.keyDown, 46, [.control, .option]))) // auto-repeat
+        #expect(!d.feed(key(.keyDown, 46, [.control, .option])))
+    }
+
+    @Test func comboFiresAgainAfterRelease() {
+        let d = Detector(.combo(keyCode: 46, modifiers: [.control, .option]))
+        #expect(d.feed(key(.keyDown, 46, [.control, .option])))
+        #expect(!d.feed(key(.keyUp, 46, [.control, .option])))
+        #expect(d.feed(key(.keyDown, 46, [.control, .option])))
+    }
+
+    @Test func comboFiresAgainAfterAModifierIsLiftedFirst() {
+        let d = Detector(.combo(keyCode: 46, modifiers: [.control, .option]))
+        #expect(d.feed(key(.keyDown, 46, [.control, .option])))
+        #expect(!d.feed(key(.flagsChanged, 59, [.option])))
+        #expect(d.feed(key(.keyDown, 46, [.control, .option])))
+    }
+
+    @Test func otherKeysNeverFireACombo() {
+        let d = Detector(.combo(keyCode: 46, modifiers: [.control, .option]))
+        #expect(!d.feed(key(.keyDown, 8, [.control, .option])))
+        #expect(!d.feed(key(.keyDown, 46, [.control])))
+    }
+
+    @Test func loneModifierFiresOnReleaseOfACleanTap() {
+        let d = Detector(.modifier(.rightOption))
+        #expect(!d.feed(key(.flagsChanged, 61, .option)))
+        #expect(d.feed(key(.flagsChanged, 61, [])))
+        #expect(!d.feed(key(.flagsChanged, 61, [])))
+    }
+
+    @Test func loneModifierDoesNotFireAfterAChord() {
+        let d = Detector(.modifier(.rightOption))
+        #expect(!d.feed(key(.flagsChanged, 61, .option)))
+        #expect(!d.feed(key(.keyDown, 0, .option))) // Right ⌥ + A
+        #expect(!d.feed(key(.flagsChanged, 61, [])))
+        // The next clean tap works again.
+        #expect(!d.feed(key(.flagsChanged, 61, .option)))
+        #expect(d.feed(key(.flagsChanged, 61, [])))
+    }
+
+    @Test func loneModifierDoesNotFireWhenAnotherModifierJoins() {
+        let d = Detector(.modifier(.rightOption))
+        #expect(!d.feed(key(.flagsChanged, 61, .option)))
+        #expect(!d.feed(key(.flagsChanged, 56, [.option, .shift])))
+        #expect(!d.feed(key(.flagsChanged, 61, .shift)))
+    }
+
+    @Test func resetForgetsAPressInProgress() {
+        let d = Detector(.modifier(.rightOption))
+        #expect(!d.feed(key(.flagsChanged, 61, .option)))
+        d.reset()
+        #expect(!d.feed(key(.flagsChanged, 61, [])))
+    }
+}
+
+@Suite struct HotkeySpecConflictTests {
+    @Test func identicalSpecsConflict() {
+        #expect(HotkeySpec.modifier(.rightCommand).conflicts(with: .modifier(.rightCommand)))
+        let combo = HotkeySpec.combo(keyCode: 46, modifiers: [.control])
+        #expect(combo.conflicts(with: combo))
+    }
+
+    @Test func differentSidesOrKeysDoNotConflict() {
+        #expect(!HotkeySpec.modifier(.rightCommand).conflicts(with: .modifier(.leftCommand)))
+        #expect(!HotkeySpec.combo(keyCode: 46, modifiers: [.control]).conflicts(with: .combo(keyCode: 46, modifiers: [.option])))
+        #expect(!HotkeySpec.modifier(.rightCommand).conflicts(with: .combo(keyCode: 46, modifiers: [.command])))
+    }
+
+    @Test func aModifierThatIsAPartOfAComboOfTheOtherDoesNotConflictByItself() {
+        #expect(!HotkeySpec.modifier(.rightOption).conflicts(with: .combo(keyCode: 49, modifiers: [.option])))
+    }
+}

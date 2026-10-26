@@ -88,6 +88,12 @@ final class Permissions {
         Self.openSettings("Privacy_ListenEvent")
     }
 
+    /// Meetings capture system audio through a Core Audio tap. macOS has no public pre-check for its
+    /// permission, so this only opens the pane (Privacy & Security > Screen & System Audio Recording).
+    func openSystemAudioRecordingSettings() {
+        Self.openSettings("Privacy_AudioCapture")
+    }
+
     func installModel() {
         guard download == nil else { return }
         model = .downloading(0)

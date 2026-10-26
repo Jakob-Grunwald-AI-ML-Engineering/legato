@@ -1,7 +1,7 @@
 import LegatoMac
 import SwiftUI
 
-/// The Settings window: General (hotkey, text, login), Speech engine and Cleanup.
+/// The Settings window: General (hotkey, text, login), Speech engine, Cleanup and Meetings.
 struct SettingsView: View {
     @Environment(MacAppController.self) private var controller
 
@@ -19,6 +19,9 @@ struct SettingsView: View {
                 .frame(width: 520, height: 620)
                 .tabItem { Label("Cleanup", systemImage: "sparkles") }
                 .tag(MacAppController.SettingsTab.cleanup)
+            MeetingSettingsView()
+                .tabItem { Label("Meetings", systemImage: "person.2.wave.2") }
+                .tag(MacAppController.SettingsTab.meetings)
         }
     }
 }
