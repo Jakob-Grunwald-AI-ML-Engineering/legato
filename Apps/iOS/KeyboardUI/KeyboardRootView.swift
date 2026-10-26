@@ -48,34 +48,52 @@ struct KeyboardRootView: View {
         .environment(\.colorScheme, scheme)
     }
 
-    /// The compact layout: the chevron that opens the full keyboard, the globe key (when iOS asks for it),
-    /// the dictation status and the mic key at the full keyboard's pill size, in one row as high as the
-    /// keyboard view.
+    /// The compact layout, one row as high as the keyboard view: the chevron that opens the full keyboard,
+    /// the globe key (when iOS asks for it), the dictation status, delete, return and the mic key at the full
+    /// keyboard's pill size. `StripRow` decides the slots and widths for the keyboard width and the
+    /// touch areas that tile the row.
     private func strip(typing: TypingModel, size: CGSize) -> some View {
         // At the full keyboard's height: the strip's own height would scale the pill down (`vScale`).
         let fullHeight = KeyGeometry.height(landscape: KeyGeometry.isLandscape(width: size.width))
         let pill = KeyGeometry(size: CGSize(width: size.width, height: fullHeight)).pillSize
         let controlHeight = max(min(size.height - 6, pill.height), 0)
-        return HStack(spacing: 8) {
-            ExpansionKey(controller: controller, symbol: "chevron.up")
-                .frame(width: 44, height: controlHeight)
-                .simultaneousGesture(swipe)
-            if controller.showsGlobe {
-                GlobeKey(target: controller.inputModeTarget, typing: typing)
-                    .frame(width: 44, height: controlHeight)
-                    .simultaneousGesture(swipe)
+        let returnStyle: StripReturnStyle = KeyLabels.returnSymbol(for: typing.presentation.returnLabel) == nil ? .text : .glyph
+        let row = StripRow.make(width: size.width, showsGlobe: controller.showsGlobe, returnStyle: returnStyle)
+        let vertical = max((size.height - controlHeight) / 2, 0)
+        return HStack(spacing: 0) {
+            ForEach(row.cells, id: \.slot) { cell in
+                // The key is drawn inside its touch area (`StripCell` insets, and the strip's full height).
+                let insets = EdgeInsets(top: vertical, leading: cell.leadingInset, bottom: vertical, trailing: cell.trailingInset)
+                Group {
+                    switch cell.slot {
+                    case .expand:
+                        ExpansionKey(controller: controller, symbol: "chevron.up", insets: insets)
+                            .simultaneousGesture(swipe)
+                    case .globe:
+                        // A UIKit button: the drawn size is its touch area.
+                        GlobeKey(target: controller.inputModeTarget, typing: typing)
+                            .frame(width: cell.width, height: controlHeight)
+                            .padding(.leading, cell.leadingInset)
+                            .padding(.trailing, cell.trailingInset)
+                            .simultaneousGesture(swipe)
+                    case .status:
+                        stripStatus(visible: row.statusTextVisible, leading: cell.leadingInset)
+                            .simultaneousGesture(swipe)
+                    case .delete:
+                        StripDeleteKey(typing: typing, insets: insets)
+                            .simultaneousGesture(swipe)
+                    case .returnKey:
+                        StripReturnKey(typing: typing, insets: insets)
+                            .simultaneousGesture(swipe)
+                    case .mic:
+                        MicKey(controller: controller, hitInsets: insets)
+                            .simultaneousGesture(swipe)
+                    }
+                }
+                .frame(width: cell.hitWidth, height: size.height)
             }
-            stripStatus
-            // Touchable over the strip's full height and to the right edge, beyond the drawn pill.
-            let slop = CGSize(width: 8, height: (size.height - controlHeight) / 2)
-            MicKey(controller: controller, hitSlop: slop)
-                .frame(width: pill.width + 2 * slop.width, height: size.height)
-                .padding(.leading, -slop.width)
-                .padding(.trailing, -slop.width)
-                .simultaneousGesture(swipe)
         }
-        .padding(.horizontal, 8)
-        .frame(width: size.width, height: size.height)
+        .frame(width: size.width, height: size.height, alignment: .leading)
         // Each control takes the swipe itself (a gesture on the row loses to the controls' own); the gaps
         // and margins take it here. Not `Color.clear`: the keyboard gets no touches on fully clear pixels.
         .background(Color.black.opacity(0.001).gesture(swipe))
@@ -95,17 +113,17 @@ struct KeyboardRootView: View {
             }
     }
 
-    private var stripStatus: some View {
-        Text(controller.statusText ?? "Legato")
+    private func stripStatus(visible: Bool, leading: CGFloat) -> some View {
+        Text(visible ? (controller.statusText ?? "Legato") : "")
             .font(.system(size: 15))
             .foregroundStyle(Color(uiColor: KeyColors.suggestion))
             .lineLimit(1)
             .minimumScaleFactor(0.7)
+            .padding(.leading, leading)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .background(Color.black.opacity(0.001))
             .contentShape(Rectangle())
             .accessibilityIdentifier("keyboard.hint")
-            .simultaneousGesture(swipe)
             #if DEBUG
             .onLongPressGesture { controller.cycleStripHeight() }
             #endif

@@ -319,10 +319,8 @@ final class KeyGridView: UIView {
                 drawText(text, centerX: frame.midX, baseline: frame.minY + g.letterBaseline, size: g.letterSize, weight: .regular, color: inkColor)
             }
         case .returnKey:
-            if p.returnLabel == "return" || p.returnLabel == "Return" {
-                drawSymbol("return", in: frame, color: inkColor)
-            } else if p.returnLabel == "send" || p.returnLabel == "Senden" {
-                drawSymbol("arrow.up", in: frame, color: inkColor, weight: .medium)
+            if let symbol = KeyLabels.returnSymbol(for: p.returnLabel) {
+                drawSymbol(symbol.name, in: frame, color: inkColor, weight: symbol.weight)
             } else {
                 drawText(p.returnLabel, centerX: frame.midX, baseline: frame.minY + g.labelBaseline, size: 17, weight: .regular, color: inkColor)
             }

@@ -7,7 +7,7 @@ import SwiftUI
 struct MicKey: View {
     let controller: KeyboardController
     /// Touch area beyond the drawn pill on each side; the frame given includes it.
-    var hitSlop: CGSize = .zero
+    var hitInsets = EdgeInsets()
 
     var body: some View {
         switch controller.micMode {
@@ -36,9 +36,8 @@ struct MicKey: View {
                 .foregroundStyle(capturing ? Color.white : Color.primary)
                 .symbolEffect(.pulse, isActive: capturing)
         }
-        .padding(.horizontal, hitSlop.width)
-        .padding(.vertical, hitSlop.height)
+        .padding(hitInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(hitSlop == .zero ? AnyShape(Capsule()) : AnyShape(Rectangle()))
+        .contentShape(hitInsets == EdgeInsets() ? AnyShape(Capsule()) : AnyShape(Rectangle()))
     }
 }
