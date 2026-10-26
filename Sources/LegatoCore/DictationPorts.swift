@@ -62,10 +62,14 @@ public struct StartContext: Sendable, Equatable {
     public var inBackground: Bool
     /// Another app's audio is playing. Diagnostics only: it never changes how a start is routed.
     public var otherAudioPlaying: Bool
+    /// The audio policy the user selected. When it is not `AudioPolicy.default` and the system refuses a
+    /// background start under it, the coordinator retries once with the default.
+    public var audioPolicy: AudioPolicy
 
-    public init(inBackground: Bool, otherAudioPlaying: Bool) {
+    public init(inBackground: Bool, otherAudioPlaying: Bool, audioPolicy: AudioPolicy = .default) {
         self.inBackground = inBackground
         self.otherAudioPlaying = otherAudioPlaying
+        self.audioPolicy = audioPolicy
     }
 
     /// Nothing restricts a start.
@@ -86,6 +90,13 @@ public protocol StartEnvironment: AnyObject {
     /// Whether `error`, thrown by a start that ran in the background, is the system refusing to record
     /// from there (so the same start can succeed in the foreground).
     func isBackgroundRefusal(_ error: any Error) -> Bool
+    /// Whether `error` says the microphone had no input yet (e.g. a 0 Hz input format right after the
+    /// session was activated). Such a start is worth one retry with a fresh session, also in the foreground.
+    func isInputNotReady(_ error: any Error) -> Bool
+}
+
+extension StartEnvironment {
+    public func isInputNotReady(_ error: any Error) -> Bool { false }
 }
 
 /// The default environment: nothing is restricted, no error is a refusal.
@@ -96,9 +107,11 @@ public final class UnrestrictedStartEnvironment: StartEnvironment {
     public func isBackgroundRefusal(_ error: any Error) -> Bool { false }
 }
 
-/// Builds a session. `linger` is how long its mic lease stays armed after a run (zero: released at once).
-/// Called once per start that has no held session to reuse, so no session or mic outlives its keep-alive.
-public typealias DictationSessionFactory = @MainActor (_ linger: Duration) -> DictationSession
+/// Builds the session for one dictation attempt under `policy`. `linger` is how long its mic lease stays
+/// armed after a run (zero: released at once). Called once per attempt that has no held session to reuse
+/// (more than once when a refused background start falls back to the default policy, or a foreground
+/// start is retried), so no session or mic outlives its keep-alive.
+public typealias DictationSessionFactory = @MainActor (_ policy: AudioPolicy, _ linger: Duration) -> DictationSession
 
 /// Where a run's text goes.
 public enum DictationTarget: Sendable, Equatable {

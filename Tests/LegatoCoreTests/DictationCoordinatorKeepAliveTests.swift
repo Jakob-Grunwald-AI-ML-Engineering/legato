@@ -341,4 +341,108 @@ import Testing
         await r.coordinator.endKeepAlive()
         #expect(!r.coordinator.holdsLease)
     }
+
+    // MARK: start fallbacks keep the run's options
+
+    private let backgroundExperimental = StartContext(
+        inBackground: true, otherAudioPlaying: true, audioPolicy: .duckMusicPauseSpoken)
+    private let foregroundExperimental = StartContext(
+        inBackground: false, otherAudioPlaying: false, audioPolicy: .duckMusicPauseSpoken)
+
+    @Test func aBackgroundFallbackKeepsTargetKeepAliveAndTheSinkRun() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        r.environment.context = backgroundExperimental
+        r.control.failActivation(with: TestError(tag: "refused"), only: [.duckMusicPauseSpoken])
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckOthers])
+        #expect(r.built.lingers == [.seconds(30), .seconds(30)]) // the retry keeps the keep-alive
+        // One press, one run: the sink hears runStarted once, with the keyboard target, and no runEnded yet.
+        #expect(r.sink.started.count == 1 && r.sink.started.first?.target == .keyboard)
+        #expect(r.sink.ended.isEmpty)
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(r.sink.started.count == 1 && r.sink.ended.count == 1)
+        #expect(r.sink.ended.first?.run == r.sink.started.first)
+        #expect(r.coordinator.holdsLease) // the fallback session's lease is the one kept
+        #expect(r.sink.leases.count == 1 && r.sink.leases.first != nil)
+        #expect(r.log.count("activity.request:starting") == 1)
+    }
+
+    @Test func aFallbackKeepsABestEffortRunWithoutAnActivity() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.activity.requestError = TestError(tag: "activities")
+        r.environment.context = backgroundExperimental
+        r.control.failActivation(with: TestError(tag: "refused"), only: [.duckMusicPauseSpoken])
+        #expect(await r.coordinator.toggle(StartOptions(activity: .bestEffort, keepAlive: .seconds(30))) == .started)
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckOthers])
+        #expect(r.log.count("activity.dismiss") == 0 && r.activity.ends.isEmpty)
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+    }
+
+    @Test func aRefusedFallbackHopsWithOneBalancedSinkRunAndNoLease() async throws {
+        let r = CoordinatorRig()
+        r.attachSink()
+        r.environment.context = backgroundExperimental
+        r.control.failActivation(with: TestError(tag: "refused"))
+        #expect(await r.coordinator.toggle(Self.keyboard) == .needsForeground(.backgroundStartRefused))
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckOthers])
+        #expect(r.sink.started.count == 1 && r.sink.ended.count == 1)
+        #expect(r.sink.ended.first?.text == nil && r.sink.ended.first?.committed == "")
+        #expect(r.sink.leases.isEmpty)
+        #expect(!r.coordinator.holdsLease && r.coordinator.isIdle)
+        // The foreground press starts normally, under the selected policy and the same options.
+        r.control.clearActivationFailure()
+        r.environment.context = foregroundExperimental
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        #expect(r.built.policies.last == .duckMusicPauseSpoken && r.built.lingers.last == .seconds(30))
+        #expect(r.sink.started.count == 2)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func aSettleRetryKeepsTargetKeepAliveAndTheSinkRun() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        r.environment.context = foregroundExperimental
+        r.source.failNextStarts(2, with: TestError(tag: "notReady"))
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        // Same policy once, then plain ducking; every attempt carries the keep-alive.
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckMusicPauseSpoken, .duckOthers])
+        #expect(r.built.lingers == [.seconds(30), .seconds(30), .seconds(30)])
+        #expect(r.sink.started.count == 1 && r.sink.started.first?.target == .keyboard)
+        #expect(r.sink.ended.isEmpty)
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(r.sink.started.count == 1 && r.sink.ended.count == 1)
+        #expect(r.coordinator.holdsLease)
+    }
+
+    @Test func aSettleRetryThatKeepsFailingEndsTheSinkRunOnce() async throws {
+        let r = CoordinatorRig()
+        r.attachSink()
+        r.environment.context = foregroundExperimental
+        r.source.failNextStarts(10, with: TestError(tag: "notReady"))
+        guard case .failed = await r.coordinator.toggle(Self.keyboard) else {
+            Issue.record("expected .failed")
+            return
+        }
+        #expect(r.built.policies == [.duckMusicPauseSpoken, .duckMusicPauseSpoken, .duckOthers])
+        #expect(r.sink.started.count == 1 && r.sink.ended.count == 1)
+        #expect(r.sink.ended.first?.text == nil)
+        #expect(r.activity.ends.count == 1)
+        #expect(r.coordinator.isIdle && !r.coordinator.holdsLease)
+    }
+
+    @Test func aHeldLeaseIsReusedBeforeAnyPolicyLogic() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.environment.context = foregroundExperimental
+        try await runOnce(r, Self.keyboard) // arms a lease under the selected policy
+        // Now the system would refuse any new activation, in the background, under a non-default policy.
+        r.environment.context = backgroundExperimental
+        r.control.failActivation(with: TestError(tag: "refused"))
+        r.source.failNextStarts(5, with: TestError(tag: "notReady"))
+        try await runOnce(r, Self.keyboard)
+        #expect(r.built.all.count == 1) // the held session ran again: no new session, no fallback
+        #expect(r.built.policies == [.duckMusicPauseSpoken])
+        #expect(r.log.events.filter { $0.hasPrefix("fallback:") }.isEmpty)
+        #expect(r.log.count("activity.dismiss") == 0)
+    }
 }

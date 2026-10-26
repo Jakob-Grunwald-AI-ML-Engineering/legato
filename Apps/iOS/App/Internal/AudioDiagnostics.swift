@@ -22,7 +22,7 @@ import UIKit
 /// `toggle.end`, `session.step` (each AVAudioSession call: setCategory, setPreferredInput,
 /// setActiveTrue, setActiveFalse, with its own error), `session.activate` / `session.deactivate` /
 /// `session.deactivate.skipped` / `session.release` (the wrapper's view), and `mic.attempt` (one engine
-/// start attempt: index, input sample rate, channels, error), `mic.firstBuffer` (ms to the first buffer, RMS of the first ~0.5 s) and `start.route` (how a start was routed: `route`
+/// start attempt: index, input sample rate, channels, error), `mic.firstBuffer` (ms to the first buffer, RMS of the first ~0.5 s) and `start.fallback` (a refused background start retried under the default policy: `from`, `to`, the `refusal` as a FourCC or name, and the `error`) and `start.route` (how a start was routed: `route`
 /// is `background`, `foreground` or `foregroundHop`, with the `reason` of a hop, `backgroundStartRefused`, the
 /// `outcome` and `otherAudio`, whether other audio played when the start began). `setActive(true)` and the engine start are separate
 /// events, so a failure in one is never attributed to the other. The file is cleared past 1 MB.
@@ -72,6 +72,11 @@ enum AudioDiagnostics {
 
     static func startRoute(_ route: String, reason: String?, outcome: String, otherAudio: Bool) {
         log("start.route", ["route": route, "reason": reason ?? "none", "outcome": outcome, "otherAudio": otherAudio])
+    }
+
+    /// A refused background start retried once under the default policy.
+    static func startFallback(from: String, to: String, error: any Error, label: String) {
+        log("start.fallback", ["from": from, "to": to, "refusal": label, "error": describe(error)])
     }
 
     static func micAttempt(_ attempt: MicSource.Attempt) {

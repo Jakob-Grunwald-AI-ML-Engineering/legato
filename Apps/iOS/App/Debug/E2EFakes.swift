@@ -77,10 +77,13 @@ final class E2EScriptedEngine: DictationEngine, Sendable {
 /// A microphone that produces no audio but follows the real source's lifecycle.
 final class E2EFakeAudioSource: AudioSource, Sendable {
     private let stream = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
+    private let policy: AudioPolicy
+
+    init(policy: AudioPolicy = .default) { self.policy = policy }
 
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
-        if let refusal = E2E.refusal(at: .what) {
-            E2E.log("audio.start.refused code=\(refusal.code)")
+        if let refusal = E2E.refusal(sessionStep: false, policy: policy) {
+            E2E.log("audio.start.refused error=\(SystemStartEnvironment.refusalLabel(refusal))")
             throw refusal
         }
         E2E.log("audio.start")
@@ -111,11 +114,12 @@ final class E2EFakeAudioSource: AudioSource, Sendable {
 
 /// An audio session that does nothing but log.
 struct E2ENoopSessionControl: AudioSessionControlling {
+    var policy: AudioPolicy = .default
     var supportedPolicies: Set<AudioPolicy> { Set(AudioPolicy.allCases) }
 
     func activate(_ config: SessionConfig) throws {
-        if let refusal = E2E.refusal(at: .pla) {
-            E2E.log("session.activate.refused code=\(refusal.code)")
+        if let refusal = E2E.refusal(sessionStep: true, policy: policy) {
+            E2E.log("session.activate.refused error=\(SystemStartEnvironment.refusalLabel(refusal))")
             throw refusal
         }
         E2E.log("session.activate")

@@ -1,6 +1,7 @@
 #if DEBUG
 import AVFAudio
 import Foundation
+import LegatoAudio
 import LegatoCore
 import Synchronization
 import os
@@ -15,8 +16,16 @@ import os
 /// - `-LegatoFakeOtherAudio YES|NO`: other audio is (not) playing, whatever the audio session says.
 /// - `-LegatoFakeBackground YES|NO`: the app is (not) in the background, whatever UIKit says. The
 ///   `foreground` / `background` commands flip it, like the app coming forward.
-/// - `-LegatoFakeBackgroundRefusal pla|what`: while the fake background is on, the start fails like the
-///   device did: `pla` on the session activation ('!pla'), `what` on the mic start (kAUStartIO).
+/// - `-LegatoFakeBackgroundRefusal pla|int|what|input`: while the fake background is on, the start fails
+///   like the device did: `pla` ('!pla') or `int` ('!int') on the session activation, `what` (kAUStartIO)
+///   or `input` (`MicSourceError.invalidInputFormat`, 0 Hz) on the mic start.
+/// - `-LegatoFakeRefusalOnlyNonDefault YES`: the refusal applies only to sessions built for a policy
+///   other than the default (so the fallback to `duckOthers` succeeds).
+/// - `-LegatoFakeRefusalInForeground YES`: the refusal applies in the foreground too (default: only in
+///   the background).
+/// - `-LegatoFakeRefusalCount N`: only the first N refusable starts are refused, the rest succeed.
+/// - `-LegatoAudioPolicy duckOthers|mixWithOthers|pauseOthers|duckMusicPauseSpoken`: the selected policy
+///   (the experimental ones are switched on). With the fake engine, absent means the default policy.
 ///
 /// Darwin notifications (see `installTriggers`): `toggle`, `interrupt`, `copy-last`, `foreground`,
 /// `background`, `toggle-after-hop` (the press that repeats a `needsForeground` one after the hop).
@@ -85,31 +94,57 @@ enum E2E {
     static func setFakeInBackground(_ value: Bool) { fake.withLock { $0.inBackground = value } }
 
     enum Refusal: String {
-        case pla, what
+        case pla, int, what, input
 
-        /// 'pla' = `AVAudioSession.ErrorCode.cannotStartPlaying`, 'what' = kAUStartIO.
-        var error: NSError {
-            NSError(domain: NSOSStatusErrorDomain, code: self == .pla ? 561_015_905 : 2_003_329_396)
+        /// `pla` / `int` fail the session activation, `what` / `input` the mic start.
+        var isSessionStep: Bool { self == .pla || self == .int }
+
+        /// 'pla' = `AVAudioSession.ErrorCode.cannotStartPlaying`, 'int' = `.cannotInterruptOthers`,
+        /// 'what' = kAUStartIO, `input` = the input node reported 0 Hz.
+        var error: any Error {
+            switch self {
+            case .pla: NSError(domain: NSOSStatusErrorDomain, code: 561_015_905)
+            case .int: NSError(domain: NSOSStatusErrorDomain, code: 560_557_684)
+            case .what: NSError(domain: NSOSStatusErrorDomain, code: 2_003_329_396)
+            case .input: MicSourceError.invalidInputFormat
+            }
         }
     }
 
     static let fakeRefusal: Refusal? = UserDefaults.standard.string(forKey: "LegatoFakeBackgroundRefusal").flatMap(Refusal.init)
+    static let fakeRefusalOnlyNonDefault = launchFlag("LegatoFakeRefusalOnlyNonDefault") == true
+    static let fakeRefusalInForeground = launchFlag("LegatoFakeRefusalInForeground") == true
+    /// Refusals still to hand out; nil = unlimited.
+    private static let refusalsLeft = Mutex<Int?>(
+        UserDefaults.standard.object(forKey: "LegatoFakeRefusalCount") == nil
+            ? nil : UserDefaults.standard.integer(forKey: "LegatoFakeRefusalCount"))
 
-    /// The error a start should fail with now, when it is `step` that is refused.
-    static func refusal(at step: Refusal) -> NSError? {
-        guard fakeRefusal == step, fakeInBackground == true else { return nil }
-        return step.error
+    /// The error a start should fail with now, when it is the session (`sessionStep`) or the mic step
+    /// that is refused, for a session built for `policy`.
+    static func refusal(sessionStep: Bool, policy: AudioPolicy) -> (any Error)? {
+        guard let refusal = fakeRefusal, refusal.isSessionStep == sessionStep,
+              fakeInBackground == true || fakeRefusalInForeground else { return nil }
+        if fakeRefusalOnlyNonDefault && policy == .default { return nil }
+        let allowed = refusalsLeft.withLock { left -> Bool in
+            guard let n = left else { return true }
+            guard n > 0 else { return false }
+            left = n - 1
+            return true
+        }
+        return allowed ? refusal.error : nil
     }
+
+    static let fakePolicy: AudioPolicy? = UserDefaults.standard.string(forKey: "LegatoAudioPolicy").flatMap(AudioPolicy.init(rawValue:))
 
     /// A session wired to the scripted engine, or nil when fake mode is off.
     @MainActor
     static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy, linger: Duration) -> DictationSession? {
         guard let engine = fakeEngine else { return nil }
-        log("session.make engine=\(engine.id) lingerSeconds=\(Int(linger.components.seconds))")
+        log("session.make engine=\(engine.id) policy=\(policy.rawValue) lingerSeconds=\(Int(linger.components.seconds))")
         return DictationSession(
             engine: engine,
-            source: E2EFakeAudioSource(),
-            sessionControl: E2ENoopSessionControl(),
+            source: E2EFakeAudioSource(policy: policy),
+            sessionControl: E2ENoopSessionControl(policy: policy),
             history: history,
             policy: policy,
             linger: linger)
@@ -140,6 +175,13 @@ enum E2E {
         }
         if let flag = UserDefaults.standard.string(forKey: "LegatoFakeKeyboardApply") {
             E2EFakeKeyboard.shared.applies = ["YES", "TRUE", "1"].contains(flag.uppercased())
+        }
+        if let policy = fakePolicy {
+            Settings.debugShowPauseOthers = true
+            Settings.audioPolicy = policy
+        } else if fakeEngine != nil {
+            Settings.debugShowPauseOthers = false
+            Settings.audioPolicy = .default
         }
         installTriggers()
         log("launch keepAliveSeconds=\(Settings.keepAliveSeconds) fakeEngine=\(fakeEngine != nil) fakeReadiness=\(String(describing: fakeReadiness)) forceTapToCopy=\(Settings.debugForceTapToCopy) fakeBackground=\(String(describing: fakeInBackground)) fakeOtherAudio=\(String(describing: fakeOtherAudioPlaying))")

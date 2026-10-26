@@ -12,8 +12,10 @@ import Foundation
 /// consumer of its edits keeps running between the runs.
 ///
 /// A start is always attempted where the press arrived, also in the background next to other audio.
-/// Only a start the system refuses ends in `.needsForeground` with nothing left behind; the app
-/// brings itself to the foreground and toggles again.
+/// A background start the system refuses under a non-default audio policy is retried once under the
+/// default (same activity). A foreground start whose mic reports no input yet (`isInputNotReady`) is
+/// retried with a fresh session after a short settle wait. Only a start still refused ends in
+/// `.needsForeground` with nothing left behind; the app brings itself to the foreground and toggles again.
 @MainActor
 public final class DictationCoordinator {
     public enum Outcome: Sendable, Equatable {
@@ -35,6 +37,8 @@ public final class DictationCoordinator {
 
     /// While listening, the activity is refreshed this often so a pause in speech never looks stale.
     public static let heartbeatInterval: Duration = .seconds(10)
+    /// How long a start waits before its retry after the mic reported no input (`isInputNotReady`).
+    public nonisolated static let settleDelay: Duration = .milliseconds(300)
     /// How long after an update the system may treat the activity as stale.
     public static let staleAfter: TimeInterval = 30
 
@@ -50,6 +54,11 @@ public final class DictationCoordinator {
     public var isIdle: Bool { phase == .idle }
     /// A mic lease is held between runs (keep-alive), ready for the next start.
     public var holdsLease: Bool { held != nil }
+
+    /// Fires when a start is retried: a refused background start under the default audio policy, or a
+    /// foreground start whose mic had no input yet (same policy first, then the default). Gives the
+    /// policy that failed, the one tried next (equal for a same-policy retry) and the error. For diagnostics.
+    public var onStartFallback: (@MainActor (_ from: AudioPolicy, _ to: AudioPolicy, _ error: any Error) -> Void)?
 
     private enum Phase { case idle, starting, listening, stopping, aborting }
 
@@ -206,34 +215,61 @@ public final class DictationCoordinator {
 
         let thisRun = DictationRun(target: options.target)
         run = thisRun
-        sink?.runStarted(thisRun)
-        let (s, sessionFeed) = await acquireSession(options)
-        session = s
-        feed = sessionFeed
-        s.onRunAborted = { [weak self, weak s] _ in
-            guard let self, let s else { return }
-            Task { _ = await self.abort(s) }
-        }
-        do {
-            try await s.start()
-        } catch {
-            await discard(s)
-            // The system refused a background start: tear down quietly and let the app retry in the
-            // foreground. No `failed` activity (it would linger), no idle hook (no run happened).
-            if context.inBackground, startEnvironment.isBackgroundRefusal(error) {
-                if activityLive {
-                    activityLive = false
-                    await activity.dismiss()
+        sink?.runStarted(thisRun) // once per press: fallback and settle retries below stay within this run
+
+        // A held armed lease is reused before any policy logic (no start refusal can hit it: the mic is
+        // already ours). Otherwise: the selected policy first. A refused background start under a
+        // non-default policy gets one more try under the default (duck), keeping the same activity and
+        // options; only then does it hop.
+        var policy = context.audioPolicy
+        var inputRetries = 0
+        var s = await launch(policy, options)
+        while true {
+            do {
+                try await s.start()
+                break
+            } catch {
+                await discard(s)
+                if context.inBackground, startEnvironment.isBackgroundRefusal(error) {
+                    if policy != .default, !cancelRequested {
+                        onStartFallback?(policy, .default, error)
+                        policy = .default
+                        s = await launch(policy, options)
+                        continue
+                    }
+                    // The system refused a background start: tear down quietly and let the app retry in the
+                    // foreground. No `failed` activity (it would linger), no idle hook (no run happened).
+                    if activityLive {
+                        activityLive = false
+                        await activity.dismiss()
+                    }
+                    _ = await sink?.runEnded(thisRun, committed: "", text: nil) // a run that began always ends
+                    return finishRun(.needsForeground(.backgroundStartRefused), ended: false)
                 }
-                _ = await sink?.runEnded(thisRun, committed: "", text: nil) // a run that began always ends
-                return finishRun(.needsForeground(.backgroundStartRefused), ended: false)
-            }
-            await endActivity(content(.failed))
-            _ = await sink?.runEnded(thisRun, committed: "", text: nil)
-            switch error {
-            case DictationError.cancelled: return finishRun(.stopped(nil))
-            case DictationError.assetsNotInstalled: return finishRun(.needsOnboarding(.assetsMissing))
-            default: return finishRun(.failed(String(describing: error)))
+                // The mic had no input yet (0 Hz after activation) in the foreground: nothing to hop to,
+                // so retry with a fresh session after a short settle wait. Same policy first; a non-default
+                // policy that fails again gets the default. Then it is a plain failure.
+                if !context.inBackground, !cancelRequested, startEnvironment.isInputNotReady(error),
+                   let next = nextPolicyAfterInputNotReady(current: policy, retries: inputRetries) {
+                    inputRetries += 1
+                    onStartFallback?(policy, next, error)
+                    try? await sleep(Self.settleDelay)
+                    if cancelRequested {
+                        await endActivity(content(.failed))
+                        _ = await sink?.runEnded(thisRun, committed: "", text: nil)
+                        return finishRun(.stopped(nil))
+                    }
+                    policy = next
+                    s = await launch(policy, options)
+                    continue
+                }
+                await endActivity(content(.failed))
+                _ = await sink?.runEnded(thisRun, committed: "", text: nil)
+                switch error {
+                case DictationError.cancelled: return finishRun(.stopped(nil))
+                case DictationError.assetsNotInstalled: return finishRun(.needsOnboarding(.assetsMissing))
+                default: return finishRun(.failed(String(describing: error)))
+                }
             }
         }
         guard session === s else { return .started } // aborted right away; `abort` is wrapping it up
@@ -246,8 +282,9 @@ public final class DictationCoordinator {
         return .started
     }
 
-    /// The held session when it fits `options` (same keep-alive), else a fresh one with its own edit feed.
-    private func acquireSession(_ options: StartOptions) async -> (DictationSession, EditFeed) {
+    /// The held session when it fits `options` (same keep-alive), else a fresh one for `policy` with its
+    /// own edit feed.
+    private func acquireSession(_ options: StartOptions, policy: AudioPolicy) async -> (DictationSession, EditFeed) {
         if let lease = held {
             held = nil
             if options.keepAlive > .zero, lease.linger == options.keepAlive {
@@ -256,8 +293,31 @@ public final class DictationCoordinator {
             }
             await release(lease)
         }
-        let s = makeSession(options.keepAlive)
+        let s = makeSession(policy, options.keepAlive)
         return (s, startFeed(of: s))
+    }
+
+    /// The policy for the next foreground try after the mic had no input: the same one on the first
+    /// retry, the default on the second (only if it differs), none after that.
+    private func nextPolicyAfterInputNotReady(current: AudioPolicy, retries: Int) -> AudioPolicy? {
+        switch retries {
+        case 0: return current
+        case 1 where current != .default: return .default
+        default: return nil
+        }
+    }
+
+    /// Acquires the session for `policy` (a held lease first, else a fresh one) and wires it to this run
+    /// (abort hook, edits feed).
+    private func launch(_ policy: AudioPolicy, _ options: StartOptions) async -> DictationSession {
+        let (s, sessionFeed) = await acquireSession(options, policy: policy)
+        session = s
+        feed = sessionFeed
+        s.onRunAborted = { [weak self, weak s] _ in
+            guard let self, let s else { return }
+            Task { _ = await self.abort(s) }
+        }
+        return s
     }
 
     /// A press while starting: stops through the session (which cancels a preparing start, so no
