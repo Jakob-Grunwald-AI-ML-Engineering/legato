@@ -78,6 +78,16 @@ final class FirstBufferProbe: Sendable {
 public final class MicSource: AudioSource {
     private struct State {
         var engine: EngineBox?
+        /// Bumped by every start and stop, so a restart that lost the race to either drops its engine.
+        var lease = 0
+        var format: AudioFormatSpec?
+        var observer: ObserverBox?
+    }
+
+    /// Holds the configuration-change observer token (not Sendable) inside the lock.
+    private final class ObserverBox: @unchecked Sendable {
+        let token: any NSObjectProtocol
+        init(_ token: any NSObjectProtocol) { self.token = token }
     }
 
     /// Lets the engine cross into the lock under Swift 6.2's region checks. Safe: once stored, the
@@ -116,20 +126,39 @@ public final class MicSource: AudioSource {
     private let router = TapRouter()
     private let onAttempt: (@Sendable (Attempt) -> Void)?
     private let onFirstBuffer: (@Sendable (FirstBuffer) -> Void)?
+    private let voiceProcessing: Bool
 
     /// - Parameters:
+    ///   - voiceProcessing: macOS only; ignored on iOS. Turns on Apple's voice processing (echo
+    ///     cancellation) on the input before the engine starts, with other-audio ducking at its
+    ///     minimum. Off by default, so dictation is unchanged. The input then reports many channels
+    ///     and the converter takes channel 0 (the processed voice; an assumption from the spike).
     ///   - onAttempt: called after every start attempt, success or failure (diagnostics only).
     ///   - onFirstBuffer: called once per started engine, after ~0.5 s of input (diagnostics only).
     public init(
         onAttempt: (@Sendable (Attempt) -> Void)? = nil,
-        onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil
+        onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil,
+        voiceProcessing: Bool = false
     ) {
         self.onAttempt = onAttempt
         self.onFirstBuffer = onFirstBuffer
+        self.voiceProcessing = voiceProcessing
     }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         await stop()
+        state.withLock { s in
+            s.lease += 1
+            s.format = format
+        }
+        let box = try await launchEngine(format: format)
+        state.withLock { $0.engine = box }
+        installConfigurationObserver(for: box)
+        return makeStream()
+    }
+
+    /// Builds, taps and starts a fresh engine, retrying while the route settles.
+    private func launchEngine(format: AudioFormatSpec) async throws -> EngineBox {
         // The route can still be settling right after session activation (kAUStartIO 'what', or a
         // zero input sample rate), and an engine that failed to start stays unusable. So every
         // attempt builds a fresh engine, after the session is active (an engine made earlier caches
@@ -139,6 +168,20 @@ public final class MicSource: AudioSource {
             if attempt > 0 { try await Task.sleep(for: Self.retryDelay) }
             let engine = AVAudioEngine()
             let input = engine.inputNode
+            #if os(macOS)
+            if voiceProcessing {
+                // Before the engine starts. The input format changes with it, so it is read afterwards.
+                do {
+                    try input.setVoiceProcessingEnabled(true)
+                } catch {
+                    lastError = error
+                    onAttempt?(Attempt(index: attempt, inputSampleRate: 0, inputChannelCount: 0, error: error))
+                    continue
+                }
+                input.voiceProcessingOtherAudioDuckingConfiguration = AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                    enableAdvancedDucking: false, duckingLevel: .min)
+            }
+            #endif
             let inFormat = input.outputFormat(forBus: 0)
             let report = { [onAttempt] (error: (any Error)?) in
                 onAttempt?(Attempt(
@@ -150,7 +193,7 @@ public final class MicSource: AudioSource {
                 report(lastError)
                 continue
             }
-            guard let converter = BufferConverter(from: inFormat, to: format) else {
+            guard let converter = BufferConverter(from: inFormat, to: format, firstChannelOnly: voiceProcessing) else {
                 report(MicSourceError.converterUnavailable)
                 throw MicSourceError.converterUnavailable
             }
@@ -167,9 +210,7 @@ public final class MicSource: AudioSource {
                 continue
             }
             report(nil)
-            let box = EngineBox(engine)
-            state.withLock { $0.engine = box }
-            return makeStream()
+            return EngineBox(engine)
         }
         throw lastError ?? MicSourceError.invalidInputFormat
     }
@@ -185,14 +226,60 @@ public final class MicSource: AudioSource {
 
     public func stop() async {
         router.setSink(nil)
-        let engine = state.withLock { s in
-            let e = s.engine
+        let (engine, observer) = state.withLock { s in
+            let taken = (s.engine, s.observer)
             s.engine = nil
-            return e
+            s.observer = nil
+            s.lease += 1
+            return taken
         }
+        if let observer { NotificationCenter.default.removeObserver(observer.token) }
         guard let engine = engine?.engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+    }
+
+    /// macOS: a device or format change stops the engine; with the lease armed it is rebuilt and the
+    /// current run's stream carries on. (iOS handles route changes in the session controller.)
+    private func installConfigurationObserver(for box: EngineBox) {
+        #if os(macOS)
+        let token = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: box.engine, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.restartAfterConfigurationChange(box) }
+        }
+        state.withLock { $0.observer = ObserverBox(token) }
+        #endif
+    }
+
+    private func restartAfterConfigurationChange(_ old: EngineBox) async {
+        let armed = state.withLock { s -> (Int, AudioFormatSpec)? in
+            guard s.engine === old, let format = s.format else { return nil }
+            s.engine = nil
+            return (s.lease, format)
+        }
+        guard let (lease, format) = armed else { return }
+        if let observer = state.withLock({ s -> ObserverBox? in defer { s.observer = nil }; return s.observer }) {
+            NotificationCenter.default.removeObserver(observer.token)
+        }
+        old.engine.inputNode.removeTap(onBus: 0)
+        old.engine.stop()
+        guard let fresh = try? await launchEngine(format: format) else {
+            router.setSink(nil)
+            return
+        }
+        let kept = state.withLock { s -> Bool in
+            guard s.lease == lease else { return false }
+            s.engine = fresh
+            return true
+        }
+        if kept {
+            installConfigurationObserver(for: fresh)
+        } else {
+            fresh.engine.inputNode.removeTap(onBus: 0)
+            fresh.engine.stop()
+        }
     }
 
     private func makeStream() -> AsyncStream<AudioChunk> {
