@@ -20,9 +20,15 @@ import Foundation
 ///    - four or more reference tokens in a row have no counterpart in the candidate
 ///      (``maxUnmatchedRun`` is 3).
 ///
-/// With a ``wordRatio`` (the message style, ``message``) the rule is only that: the candidate's token
-/// count, numbers counted as one, must lie within that multiple of the reference's. A message rewrite drops
-/// fillers and false starts and applies spoken corrections, which the drift rule would reject.
+/// With a ``wordRatio`` (the message style, ``message``) the drift rules give way to that: the candidate's
+/// token count, numbers counted as one, must lie within that multiple of the reference's. A message rewrite
+/// drops fillers and false starts and applies spoken corrections, which the drift rule would reject. With
+/// ``faithful`` on as well (``message`` has it) the rewrite must still say what was said:
+/// - **Content words.** Every candidate word that is not a function word ("the", "is", "ich", "zu" …) must
+///   occur in the reference, except one in ``newContentWordsPerWord`` of them (rounded down), so a long
+///   message may fix a misheard word but an answer ("Paris"), a translation or a rewording adds too many.
+/// - **Drift.** The edit distance stays under ``messageMaxDrift`` (what deleting alone down to the ratio's
+///   floor costs, plus a little).
 public struct CleanupGuard: Sendable {
     /// The limit tuned against the cleanup fixtures and the literal pairs in `CleanupStageTests`.
     public static let defaultMaxDrift = 0.25
@@ -36,13 +42,25 @@ public struct CleanupGuard: Sendable {
     /// range (bounds included).
     public var wordRatio: ClosedRange<Double>?
 
-    public init(maxDrift: Double = CleanupGuard.defaultMaxDrift, wordRatio: ClosedRange<Double>? = nil) {
+    /// With a ``wordRatio``: also require the content words to come from the reference, and the drift to
+    /// stay under ``messageMaxDrift``.
+    public var faithful: Bool
+
+    public init(maxDrift: Double = CleanupGuard.defaultMaxDrift, wordRatio: ClosedRange<Double>? = nil, faithful: Bool = false) {
         self.maxDrift = maxDrift
         self.wordRatio = wordRatio
+        self.faithful = faithful
     }
 
-    /// The looser guard of the message style: 0.4 to 1.3 times the input's words.
-    public static let message = CleanupGuard(wordRatio: 0.4 ... 1.3)
+    /// The looser guard of the message style: 0.4 to 1.3 times the input's words, its content words taken
+    /// from the input.
+    public static let message = CleanupGuard(wordRatio: 0.4 ... 1.3, faithful: true)
+
+    /// A faithful message may bring in one new content word per this many candidate content words.
+    public static let newContentWordsPerWord = 8
+
+    /// The drift ceiling of a faithful message.
+    public static let messageMaxDrift = 0.65
 
     // MARK: tokens
 
@@ -158,8 +176,13 @@ public struct CleanupGuard: Sendable {
         let b = Self.canonicalTokens(candidate)
         if b.isEmpty { return a.isEmpty }
         if let wordRatio {
-            guard !a.isEmpty else { return false }
-            return wordRatio.contains(Double(b.count) / Double(a.count))
+            guard !a.isEmpty, wordRatio.contains(Double(b.count) / Double(a.count)) else { return false }
+            guard faithful else { return true }
+            let known = Set(a)
+            let content = b.filter { !FunctionWords.contains($0) }
+            let new = content.filter { !known.contains($0) }.count
+            guard new <= content.count / Self.newContentWordsPerWord else { return false }
+            return Double(Self.align(a, b).distance) <= Self.messageMaxDrift * Double(max(a.count, b.count))
         }
         let alignment = Self.align(a, b)
         let allowed = max(maxDrift * Double(max(a.count, b.count)), 1)
@@ -215,6 +238,32 @@ public struct CleanupGuard: Sendable {
         }
         return Alignment(distance: table[a.count * width + b.count], longestUnmatchedRun: longest)
     }
+}
+
+/// Words a grammar fix may add without changing what was said: articles, pronouns, auxiliaries,
+/// prepositions, conjunctions and contraction pieces, in English and German (lowercased tokens).
+private enum FunctionWords {
+    static func contains(_ token: String) -> Bool { words.contains(token) || token == CleanupGuard.numberToken }
+
+    private static let words: Set<String> = [
+        // English
+        "a", "an", "the", "this", "that", "these", "those", "some", "any",
+        "i", "me", "my", "mine", "we", "us", "our", "you", "your", "he", "him", "his", "she", "her", "it", "its",
+        "they", "them", "their", "there", "here",
+        "is", "am", "are", "was", "were", "be", "been", "being", "do", "does", "did", "have", "has", "had",
+        "will", "would", "shall", "should", "can", "could", "may", "might", "must", "going", "gonna", "wanna",
+        "to", "of", "in", "on", "at", "by", "for", "with", "from", "about", "into", "as", "up", "out",
+        "and", "or", "but", "so", "if", "then", "than", "not", "no", "just", "also", "too", "very",
+        "s", "m", "re", "ve", "ll", "d", "t", "let", "lets",
+        // German
+        "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "einer", "eines",
+        "ich", "mich", "mir", "du", "dich", "dir", "er", "sie", "es", "ihn", "ihm", "ihr", "wir", "uns", "euch",
+        "ihnen", "mein", "meine", "dein", "deine", "sein", "seine", "unser", "unsere",
+        "bin", "bist", "ist", "sind", "seid", "war", "waren", "habe", "hast", "hat", "haben", "hatte",
+        "werde", "wird", "werden", "würde", "kann", "können", "soll", "sollte", "sollten", "muss", "müssen",
+        "zu", "zum", "zur", "von", "vom", "mit", "für", "auf", "an", "am", "im", "in", "bei", "nach", "aus",
+        "und", "oder", "aber", "dass", "wenn", "dann", "als", "auch", "nicht", "noch", "schon", "doch", "so",
+    ]
 }
 
 /// Spoken number words in English and German.

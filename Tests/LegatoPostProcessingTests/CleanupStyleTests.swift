@@ -74,3 +74,50 @@ struct CleanupGuardWordRatioTests {
         #expect(!guardrail.accepts(Array(repeating: "w", count: 14).joined(separator: " "), reference: ten))
     }
 }
+
+@Suite("CleanupGuard message faithfulness")
+struct CleanupGuardMessageFaithfulnessTests {
+    @Test func anAnswerToADictatedQuestionIsRejected() {
+        #expect(!CleanupGuard.message.accepts("Paris is the capital of France.", reference: "what is the capital of france"))
+    }
+
+    @Test func aTranslationIsRejected() {
+        #expect(!CleanupGuard.message.accepts(
+            "Wir sollten uns am Donnerstag treffen.", reference: "um we should meet on thursday"))
+    }
+
+    @Test func aRewordingWithNewContentIsRejected() {
+        #expect(!CleanupGuard.message.accepts(
+            "Let's schedule it for Thursday.", reference: "uh we should meet on thursday"))
+    }
+
+    @Test func fillersAndASpokenCorrectionStillPass() {
+        #expect(CleanupGuard.message.accepts(
+            "I think we should meet on Thursday.",
+            reference: "um so i think uh we should meet on friday no wait thursday"))
+    }
+
+    @Test func germanFillersAndACorrectionStillPass() {
+        #expect(CleanupGuard.message.accepts(
+            "Ich glaube, wir sollten uns am Donnerstag treffen.",
+            reference: "äh also ich glaube halt wir sollten uns am freitag nee doch donnerstag treffen"))
+    }
+
+    @Test func aGrammarFixThatAddsAFunctionWordStillPasses() {
+        #expect(CleanupGuard.message.accepts(
+            "I'm going to send you the report tomorrow.",
+            reference: "um i gonna send you the report tomorrow"))
+    }
+
+    @Test func numbersWrittenAsDigitsStillPass() {
+        #expect(CleanupGuard.message.accepts(
+            "The meeting is at 3:30 in room 12.", reference: "uh the meeting is at three thirty in room twelve"))
+    }
+
+    @Test func oneMisheardWordFixedInALongMessageStillPasses() {
+        let spoken = "hey so um i wanted to let you know that the new legato build is ready and you can try it on your fone tonight"
+        #expect(CleanupGuard.message.accepts(
+            "Hey, I wanted to let you know that the new Legato build is ready and you can try it on your phone tonight.",
+            reference: spoken))
+    }
+}
