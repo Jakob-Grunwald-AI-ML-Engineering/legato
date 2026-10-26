@@ -76,7 +76,15 @@ final class KeyGridView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         if bounds.size != builtFor { rebuild() }
+        #if DEBUG
+        KeyboardGeometryLog.report(grid: self)
+        #endif
     }
+
+    #if DEBUG
+    /// The grid's key frames, for `KeyboardGeometryLog`.
+    var keyFrames: [String: CGRect] { frames }
+    #endif
 
     private func rebuild() {
         builtFor = bounds.size

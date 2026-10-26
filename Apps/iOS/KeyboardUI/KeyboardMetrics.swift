@@ -34,17 +34,27 @@ import UIKit
 struct KeyGeometry {
     let size: CGSize
 
-    /// A phone is wider than 500 pt only in landscape (the keyboard is shorter than it is wide in both).
-    var landscape: Bool { size.width > 500 }
+    /// A phone is wider than 500 pt only in landscape. Never compare width with height: the keyboard is
+    /// shorter than it is wide in both orientations.
+    var landscape: Bool { Self.isLandscape(width: size.width) }
+    static func isLandscape(width: CGFloat) -> Bool { width > 500 }
+
+    /// The vertical metrics below are the measured ones at the requested height; when the keyboard gets
+    /// less (a system that grants less height, a small phone), rows, bar and pill shrink with it so every
+    /// row stays inside the view. Never above 1: extra height stays empty under the rows.
+    var vScale: CGFloat {
+        guard size.height > 0 else { return 1 }
+        return min(1, max(0.5, size.height / Self.height(landscape: landscape)))
+    }
 
     var marginX: CGFloat { landscape ? 79 : 6.33 }
     var gap: CGFloat { 6 }
     /// A letter key's width.
     var keyWidth: CGFloat { (size.width - 2 * marginX - 9 * gap) / 10 }
-    var keyHeight: CGFloat { landscape ? 25.33 : 43 }
-    var rowPitch: CGFloat { landscape ? 35.33 : 54 }
+    var keyHeight: CGFloat { (landscape ? 25.33 : 43) * vScale }
+    var rowPitch: CGFloat { (landscape ? 35.33 : 54) * vScale }
     /// Distance from the top of the keyboard view to the first row.
-    var firstRowTop: CGFloat { Self.firstRowTop(landscape: landscape) }
+    var firstRowTop: CGFloat { Self.firstRowTop(landscape: landscape) * vScale }
     static let keyRadius: CGFloat = 8.5
     var radius: CGFloat { Self.keyRadius }
 
@@ -60,21 +70,21 @@ struct KeyGeometry {
     var modeKeyWidth: CGFloat { (landscape ? 66.33 : 44) * unit }
     var wideKeyWidth: CGFloat { (landscape ? 138.33 : 93) * unit }
     var smallKeyWidth: CGFloat { (landscape ? 66 : 43.33) * unit }
-    var numpadKeyHeight: CGFloat { landscape ? keyHeight : 45.33 }
+    var numpadKeyHeight: CGFloat { landscape ? keyHeight : 45.33 * vScale }
 
     /// Letter and label baselines below the key top.
-    var letterBaseline: CGFloat { landscape ? 18.3 : 28.0 }
-    var labelBaseline: CGFloat { landscape ? 17.6 : 27.3 }
+    var letterBaseline: CGFloat { (landscape ? 18.3 : 28.0) * vScale }
+    var labelBaseline: CGFloat { (landscape ? 17.6 : 27.3) * vScale }
     /// Landscape (measured): x-height 11.3 pt against 12.7 pt in portrait.
     var letterSize: CGFloat { landscape ? 22.2 : 25 }
     var labelSize: CGFloat { landscape ? 16 : 18 }
 
     // MARK: Top bar
 
-    var pillSize: CGSize { CGSize(width: 81, height: landscape ? 34 : 43.3) }
+    var pillSize: CGSize { CGSize(width: 81, height: (landscape ? 34 : 43.3) * vScale) }
     var pillFrame: CGRect {
         let h = pillSize.height
-        let gapToRow: CGFloat = landscape ? 9 : 15.7
+        let gapToRow: CGFloat = (landscape ? 9 : 15.7) * vScale
         return CGRect(x: size.width - (landscape ? marginX : 14.3) - pillSize.width, y: firstRowTop - gapToRow - h, width: pillSize.width, height: h)
     }
     /// Where the three suggestion slots go (left of the pill).
@@ -87,7 +97,7 @@ struct KeyGeometry {
     // MARK: Popups
 
     /// The popup's scale against portrait (the keys are shorter in landscape).
-    var popupScale: CGFloat { landscape ? 0.78 : 1 }
+    var popupScale: CGFloat { (landscape ? 0.78 : 1) * vScale }
 }
 
 /// The key colors, light and dark, from the system keyboard.

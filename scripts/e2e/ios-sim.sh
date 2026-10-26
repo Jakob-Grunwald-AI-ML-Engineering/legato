@@ -119,7 +119,8 @@ if [ "$mode" = release-check ]; then
     LegatoFakeBackground LegatoFakeBackgroundRefusal start.route toggle-after-hop
     E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd.apply "link.host phase="
     KeyboardHarness LegatoKeyboardHarness harness-mic harness-type harness-numbers LegatoHarnessAppearance
-    LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions)
+    LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
+    LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document)
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f \( -name 'Legato*' -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }
@@ -780,8 +781,51 @@ scenario_s() {
   [ "${LEGATO_E2E_SHOTS:-}" != "" ] && echo "Screenshots: $dir"
 }
 
+# The last value of key=<value> on the last line matching a fixed string (values without spaces).
+log_kv_last() { # log_kv_last <line marker> <key>
+  grep -F -- "$1" "$LOG" | tail -1 | sed -n "s/.* $2=\\([^ ]*\\).*/\\1/p"
+}
+
+scenario_r() {
+  # The real keyboard extension, not the harness: the system presents it for a plain text field, and the
+  # extension logs where its keys are (`kbd.geometry`, Debug builds; KeyboardGeometryLog.swift). All four key
+  # rows must lie inside the visible keyboard, at the height the extension asked for. Regression for a
+  # portrait keyboard (402 x 301) read as landscape because it is wider than tall: 190 pt, rows 3 and 4 cut.
+  # Enabling the keyboard: the Settings preferences below (a simulator reads them when the app starts).
+  # Screenshots go to $LEGATO_E2E_SHOTS (default: inside the work directory).
+  local dir="${LEGATO_E2E_SHOTS:-$WORK/shots}"
+  mkdir -p "$dir"
+  xcrun simctl spawn "$UDID" defaults write -g AppleKeyboards -array "$BID.keyboard" "en_US@sw=QWERTY;hw=Automatic" "emoji@sw=Emoji"
+  xcrun simctl spawn "$UDID" defaults write -g AppleKeyboardsExpanded -int 1
+  xcrun simctl spawn "$UDID" defaults write com.apple.Preferences KeyboardsCurrentAndNext -array "$BID.keyboard" "en_US@sw=QWERTY;hw=Automatic"
+  local appearance file size
+  for appearance in light dark; do
+    SCENARIO="r. real extension ($appearance)"
+    begin "$SCENARIO" -LegatoKeyboardHarness YES -LegatoHarnessSystemField YES -LegatoHarnessAppearance "$appearance" || return
+    if ! wait_log "kbd.geometry" 8; then   # the first launch after the preferences changed may not see the keyboard yet
+      relaunch -LegatoKeyboardHarness YES -LegatoHarnessSystemField YES -LegatoHarnessAppearance "$appearance" || return
+      wait_log "kbd.geometry" 10
+    fi
+    sleep 2.5   # the system resizes the keyboard while it comes up; the last layout counts
+    assert_log "the system presented the Legato keyboard extension" "kbd.geometry"
+    assert_log "the extension asked for the portrait height (301 pt, not landscape's 190)" "constraint=301@999"
+    assert_no_log "portrait is never taken for landscape" "constraint=190@"
+    assert_eq "the keyboard view is 301 pt high" "301" "$(last_line "kbd.view" | sed -n 's/.* bounds=[0-9-]*,[0-9-]*,[0-9]*x\([0-9]*\) .*/\1/p')"
+    assert_eq "all four key rows are inside the visible keyboard" "1" "$(log_kv_last kbd.geometry visible)"
+    local bottom height
+    bottom="$(log_kv_last kbd.geometry keysMaxY)"
+    height="$(last_line kbd.geometry | sed -n 's/.* grid=[0-9-]*,[0-9-]*,[0-9]*x\([0-9]*\) .*/\1/p')"
+    if [ -n "$bottom" ] && [ -n "$height" ] && [ "$bottom" -le "$height" ]; then record PASS "lowest key edge ${bottom} pt <= keyboard height ${height} pt"
+    else record FAIL "lowest key edge <= keyboard height" "keysMaxY=<$bottom> height=<$height>"; fi
+    file="$dir/keyboard-extension-$appearance.png"
+    xcrun simctl io "$UDID" screenshot "$file" > /dev/null 2>&1
+    size="$(stat -f %z "$file" 2> /dev/null || echo 0)"
+    if [ "$size" -gt 20000 ]; then record PASS "screenshot of the real extension ($appearance, $size bytes)"; else record FAIL "screenshot of the real extension ($appearance)" "no usable image at $file"; fi
+  done
+}
+
 t_run=$SECONDS
-for s in a b c d e f g h i p j o k l m n q t s; do "scenario_$s"; done
+for s in a b c d e f g h i p j o k l m n q t r s; do "scenario_$s"; done
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report

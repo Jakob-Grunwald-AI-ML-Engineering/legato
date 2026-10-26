@@ -18,6 +18,11 @@ import UIKit
 /// - `-LegatoHarnessLandscape YES`: lay the keyboard out 874 pt wide (landscape height), turned a quarter
 ///   turn so it fits the portrait screen (the screenshot is turned back).
 ///
+/// - `-LegatoHarnessSystemField YES`: no harness at all: a plain text field that the system gives the real
+///   Legato keyboard extension to (pins the field to the extension's input mode, see `SystemFieldHost`),
+///   to look at the extension itself. Logs `systemfield modes=...` and the keyboard's own
+///   `kbd.geometry` lines (see `KeyboardViewController`).
+///
 /// Commands (Darwin notifications): `harness-mic`, `harness-type` (the scripted typing cases below),
 /// `harness-numbers` (tap the 123 key).
 @MainActor
@@ -170,7 +175,9 @@ struct KeyboardHarness: View {
 
     var body: some View {
         Group {
-            if Self.flag("LegatoHarnessLandscape") {
+            if Self.flag("LegatoHarnessSystemField") {
+                SystemFieldHost().ignoresSafeArea()
+            } else if Self.flag("LegatoHarnessLandscape") {
                 GeometryReader { geometry in
                     // 874 pt wide, turned a quarter turn: a landscape phone's keyboard on the portrait screen.
                     let length = geometry.size.height
@@ -203,6 +210,49 @@ struct KeyboardHarness: View {
 
     private var keyboard: some View {
         KeyboardRootView(controller: model.controller)
+    }
+}
+
+/// A text field in a plain view controller, first responder from the start, whose `textInputMode` is the
+/// Legato extension's (found among the active input modes by its identifier).
+private struct SystemFieldHost: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> SystemFieldController { SystemFieldController() }
+    func updateUIViewController(_ controller: SystemFieldController, context: Context) {}
+}
+
+private final class LegatoModeTextField: UITextField {
+    override var textInputMode: UITextInputMode? {
+        UITextInputMode.activeInputModes.first { ($0.value(forKey: "identifier") as? String)?.contains("de.gruenwald.legato") == true }
+            ?? super.textInputMode
+    }
+}
+
+private final class SystemFieldController: UIViewController {
+    private let field = LegatoModeTextField()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+        field.accessibilityIdentifier = "systemfield.document"
+        field.borderStyle = .roundedRect
+        field.placeholder = "Legato keyboard"
+        field.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(field)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            field.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            field.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 60),
+        ])
+        if let mode = UserDefaults.standard.string(forKey: "LegatoHarnessAppearance") {
+            field.keyboardAppearance = mode == "dark" ? .dark : .light
+        }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        let modes = UITextInputMode.activeInputModes.map { ($0.value(forKey: "identifier") as? String) ?? "?" }
+        E2E.log("systemfield modes=\(E2E.quote(modes.joined(separator: ",")))")
+        field.becomeFirstResponder()
     }
 }
 

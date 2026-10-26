@@ -62,9 +62,18 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        let landscape = view.bounds.width > view.bounds.height && view.bounds.height > 0
-        heightConstraint?.constant = landscape ? Self.landscapeHeight : Self.portraitHeight
+        // By width, as `KeyGeometry` does: a portrait keyboard (402 x 301) is wider than tall too.
+        let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
+        let wanted = landscape ? Self.landscapeHeight : Self.portraitHeight
+        if heightConstraint?.constant != wanted { heightConstraint?.constant = wanted }
     }
+
+    #if DEBUG
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        KeyboardGeometryLog.reportView(view, inputView: inputView, heightConstraint: heightConstraint)
+    }
+    #endif
 
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
