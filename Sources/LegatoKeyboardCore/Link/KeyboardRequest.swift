@@ -73,3 +73,30 @@ public enum KeyboardURL {
         return (command, id)
     }
 }
+
+/// keyboard -> app (`link.refine`): rewrite this dictation more strongly (the app's message style). The app
+/// acks it with a `KeyboardAck` of the same id at once, answers with a `RefineReply`, and removes the
+/// request (it carries dictated text) once read.
+public struct RefineRequest: Codable, Sendable, Equatable {
+    public var id: String
+    public var text: String
+    public var at: Date
+
+    public init(id: String, text: String, at: Date) {
+        self.id = id
+        self.text = text
+        self.at = at
+    }
+}
+
+/// app -> keyboard (`link.refined`): the refined text, or nil when there is no better version (no model, or
+/// the result was rejected).
+public struct RefineReply: Codable, Sendable, Equatable {
+    public var id: String
+    public var text: String?
+
+    public init(id: String, text: String?) {
+        self.id = id
+        self.text = text
+    }
+}

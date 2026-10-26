@@ -17,6 +17,9 @@ public struct AppliedCursor: Codable, Sendable, Equatable {
     public var needsSeparator: Bool
     /// The run's final text is in the field.
     public var finalApplied: Bool
+    /// Whether the streamed text was swapped for the host's `finalText` (`HostDelivery.replace`): true once
+    /// swapped, false when the field no longer ended with it (never retried), nil when no swap was due.
+    public var finalReplaced: Bool?
 
     public init(
         runID: String, documentID: String, committedCount: Int = 0, volatile: String = "",

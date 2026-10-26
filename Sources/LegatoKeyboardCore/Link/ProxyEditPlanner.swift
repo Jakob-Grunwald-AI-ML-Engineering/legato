@@ -28,6 +28,11 @@ public struct ProxyPlan: Sendable, Equatable {
 ///   With no document (`documentID` nil: no field is bound) nothing is planned and the cursor stays.
 /// - A separating space goes in front of the first text of a run (and after the user typed into the
 ///   run) when the field's text before it doesn't end in whitespace.
+/// - Cleanup (`HostState.delivery`, `finalText`): with `.replace` the streamed text is swapped for the
+///   final text in one edit once it has all landed, only while the field still ends with it (never
+///   retried; without the swap the final state is not confirmed, so the app uses the clipboard). With
+///   `.clipboard` the streamed text stays. With `.hold` nothing is typed while listening; the final text
+///   is inserted once, at the end.
 public enum ProxyEditPlanner {
     public static func plan(
         state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?
@@ -48,6 +53,8 @@ public enum ProxyEditPlanner {
             }
             current = AppliedCursor(runID: runID, documentID: documentID)
         }
+
+        if state.delivery == .hold { return planHeld(state: state, cursor: current, ops: ops, context: context) }
 
         // The tentative text in the field is only editable while it is still the end of the context.
         var inField = current.volatile
@@ -71,8 +78,64 @@ public enum ProxyEditPlanner {
         // With nothing newly committed the separator belongs to the tentative text; otherwise it is committed.
         current.volatile = delta.isEmpty ? separator + state.volatile : state.volatile
         current.needsSeparator = current.needsSeparator && delta.isEmpty
-        current.finalApplied = state.isFinal && current.committedCount == state.committed.count && current.volatile.isEmpty
+        let streamedLanded = state.isFinal && current.committedCount == state.committed.count && current.volatile.isEmpty
+        current.finalApplied = streamedLanded
+        if streamedLanded, state.delivery != .clipboard, let finalText = cleanedText(state) {
+            if current.finalReplaced == nil {
+                let span = streamedSpan(of: state.committed)
+                if !span.isEmpty, (context + target).hasSuffix(span) {
+                    ops += replaceOps(from: span, to: finalText + trailingWhitespace(of: span))
+                    current.finalReplaced = true
+                } else {
+                    current.finalReplaced = false
+                }
+            }
+            current.finalApplied = current.finalReplaced == true
+        }
         return ProxyPlan(ops: ops, cursor: current)
+    }
+
+    /// `.hold`: nothing goes into the field while listening; the final text goes in once, at the end.
+    private static func planHeld(state: HostState, cursor: AppliedCursor, ops: [ProxyOp], context: String) -> ProxyPlan {
+        var ops = ops
+        var current = cursor
+        guard state.isFinal, !current.finalApplied else { return ProxyPlan(ops: ops, cursor: current) }
+        let text = cleanedText(state) ?? state.committed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+            ops.append(.insert((needsSeparator(before: context, inserting: text) ? " " : "") + text))
+        }
+        current.committedCount = state.committed.count
+        current.volatile = ""
+        current.finalApplied = true
+        return ProxyPlan(ops: ops, cursor: current)
+    }
+
+    /// The final state's post-processed text, trimmed, when there is one that differs from the streamed text.
+    static func cleanedText(_ state: HostState) -> String? {
+        guard let text = state.finalText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty,
+              text != state.committed.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return nil }
+        return text
+    }
+
+    /// What a run's streamed text left in the field: the committed text without its leading whitespace
+    /// (that stays as the separator), trailing whitespace included.
+    static func streamedSpan(of committed: String) -> String {
+        String(committed.drop(while: \.isWhitespace))
+    }
+
+    static func trailingWhitespace(of text: String) -> String {
+        String(text.reversed().prefix(while: \.isWhitespace).reversed())
+    }
+
+    /// The edit that turns `old`, the end of the field, into `new`: a shared beginning stays.
+    static func replaceOps(from old: String, to new: String) -> [ProxyOp] {
+        let shared = commonPrefixCount(old, new)
+        var ops: [ProxyOp] = []
+        if old.count > shared { ops.append(.deleteBackward(old.count - shared)) }
+        let missing = String(new.dropFirst(shared))
+        if !missing.isEmpty { ops.append(.insert(missing)) }
+        return ops
     }
 
     /// The user is about to type into the field mid-run: remove the tentative text (if it is still the end

@@ -16,6 +16,18 @@ public enum HostTarget: String, Codable, Sendable, Equatable {
     case keyboard
 }
 
+/// How the run's text reaches the field when post-processing (cleanup) changed it. Mirrors the app's
+/// cleanup delivery setting; nil when cleanup is off (the final text is the streamed text).
+public enum HostDelivery: String, Codable, Sendable, Equatable {
+    /// Stream while listening; at the end swap the streamed text for `finalText` in one edit, when the
+    /// field still ends with it (otherwise the app puts `finalText` on the clipboard).
+    case replace
+    /// Stream while listening; the field keeps the streamed text, the app puts `finalText` on the clipboard.
+    case clipboard
+    /// Type nothing while listening; insert the final text (`finalText`, else the committed text) at the end.
+    case hold
+}
+
 /// What the app publishes to the keyboard (`link.host`): the run's text so far and whether the app
 /// is alive and can be asked to start or stop without opening it.
 public struct HostState: Codable, Sendable, Equatable {
@@ -38,10 +50,15 @@ public struct HostState: Codable, Sendable, Equatable {
     public var leaseUntil: Date?
     /// The app can start a run from where it is, without being opened (a lease is held).
     public var acceptsRemoteStart: Bool
+    /// How this run's final text reaches the field (set when the run starts); nil without cleanup.
+    public var delivery: HostDelivery?
+    /// On the final state: the post-processed text when it differs from the trimmed `committed` text.
+    public var finalText: String?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,
-        beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool
+        beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool, delivery: HostDelivery? = nil,
+        finalText: String? = nil
     ) {
         self.v = Self.version
         self.runID = runID
@@ -53,6 +70,8 @@ public struct HostState: Codable, Sendable, Equatable {
         self.beatAt = beatAt
         self.leaseUntil = leaseUntil
         self.acceptsRemoteStart = acceptsRemoteStart
+        self.delivery = delivery
+        self.finalText = finalText
     }
 
     /// The run is over and this is its last state.
