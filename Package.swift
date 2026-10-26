@@ -66,7 +66,7 @@ let package = Package(
         ),
         .testTarget(
             name: "LegatoEnginesTests",
-            dependencies: ["LegatoEngines", "LegatoCore", "LegatoModels"]
+            dependencies: ["LegatoEngines", "LegatoCore", "LegatoModels", "LegatoAppleSpeech", "LegatoFluidAudio"]
         ),
         .testTarget(
             name: "LegatoPostProcessingTests",
@@ -104,11 +104,15 @@ let package = Package(
             name: "LegatoAppServices",
             dependencies: [
                 "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoPostProcessing",
+                "LegatoVocabulary",
             ]
         ),
         .testTarget(
             name: "LegatoAppServicesTests",
-            dependencies: ["LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing"]
+            dependencies: [
+                "LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing", "LegatoVocabulary",
+                "LegatoEngines",
+            ]
         ),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),

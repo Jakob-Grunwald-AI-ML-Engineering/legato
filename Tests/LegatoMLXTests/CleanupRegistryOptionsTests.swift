@@ -13,7 +13,9 @@ private final class EchoBackend: LLMBackend {
     let id: String
     let maxPromptCharacters: Int? = nil
     private let seen = Mutex<[String]>([])
+    private let seenPrompts = Mutex<[String]>([])
     init(id: String) { self.id = id }
+    var prompts: [String] { seenPrompts.withLock { $0 } }
     var availability: LLMAvailability { get async { .available } }
     var instructions: [String] { seen.withLock { $0 } }
     func respond(instructions: String, prompt: String) async throws -> String {
@@ -21,6 +23,7 @@ private final class EchoBackend: LLMBackend {
     }
     func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String {
         seen.withLock { $0.append(instructions) }
+        seenPrompts.withLock { $0.append(prompt) }
         return prompt
     }
 }
@@ -132,5 +135,22 @@ struct CleanupRegistryOptionsTests {
         #expect(sent.count == 2)
         #expect(sent.first == CleanupStyle.message.prompt.instructions(Locale(identifier: "en-US"), []))
         #expect(sent.last == CleanupPrompt.standard.instructions(Locale(identifier: "en-US"), []))
+    }
+
+    @Test func theVocabularyReachesTheStagesPrompt() async {
+        let fm = EchoBackend(id: "fm")
+        let registry = Rig(installed: false, selected: nil).registry(fm: fm)
+        let built = await registry.pipeline(
+            style: .verbatim, itn: false, preference: .auto, timeout: .seconds(4), vocabulary: ["Grunwald", "Kubernetes"])
+        _ = await built.pipeline.process("hello there", locale: Locale(identifier: "en-US"))
+        #expect(fm.prompts.first?.contains("<terms>Grunwald, Kubernetes</terms>") == true)
+    }
+
+    @Test func noVocabularyMeansNoTermsLine() async {
+        let fm = EchoBackend(id: "fm")
+        let registry = Rig(installed: false, selected: nil).registry(fm: fm)
+        let built = await registry.pipeline(style: .verbatim, itn: false, preference: .auto, timeout: .seconds(4))
+        _ = await built.pipeline.process("hello there", locale: Locale(identifier: "en-US"))
+        #expect(fm.prompts.first?.contains("<terms>") == false)
     }
 }

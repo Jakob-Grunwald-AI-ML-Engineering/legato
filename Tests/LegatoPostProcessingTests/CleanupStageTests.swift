@@ -267,6 +267,21 @@ struct CleanupStageTests {
 
     // MARK: chunking
 
+    @Test func theTermsLineShrinksTheChunkBudget() async throws {
+        let long = String(repeating: "wort ", count: 20).trimmingCharacters(in: .whitespaces) + "."
+        let text = Array(repeating: long, count: 12).joined(separator: " ")
+        func calls(vocabulary: [String]) async throws -> Int {
+            let backend = FakeBackend(maxPromptCharacters: 4_000) { transcript(in: $0) }
+            _ = try await LLMCleanupStage(backend: backend, vocabulary: vocabulary).process(text, locale: de)
+            return backend.prompts.count
+        }
+        let terms = (1...20).map { "Fachbegriff\($0)" }
+        let without = try await calls(vocabulary: [])
+        let with = try await calls(vocabulary: terms)
+        #expect(with > without)
+    }
+
+
     @Test func chunksBreakAtSentenceBoundaries() {
         let text = "First sentence here. Second one follows! Is a third a question? Yes, and a fourth ends it."
         let chunks = LLMCleanupStage.chunks(of: text, maxCharacters: 45)

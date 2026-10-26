@@ -190,7 +190,7 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         let instructions = prompt.instructions(locale, vocabulary) + (context.isEmpty ? "" : "\n" + Self.contextInstruction)
         let examples = prompt.examples(locale)
         let joiner = Self.isUnspaced(locale) ? "" : " "
-        let overhead = instructions.count + contextPrefix.count
+        let overhead = instructions.count + contextPrefix.count + termsLineLength(locale)
             + examples.reduce(0) { $0 + $1.user.count + $1.assistant.count }
         let chunks = Self.chunks(of: text, maxCharacters: chunkLimit(overhead: overhead), joiner: joiner)
 
@@ -220,6 +220,13 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         let candidate = prompt.extractText(reply)
         let accepted = cleanupGuard.accepts(candidate, reference: chunk)
         return ChunkResult(input: chunk, reply: reply, output: accepted ? candidate : chunk, accepted: accepted)
+    }
+
+    /// How many characters the user message adds for the vocabulary (the `<terms>` line), measured on the
+    /// prompt's own rendering so it follows any prompt.
+    private func termsLineLength(_ locale: Locale) -> Int {
+        guard !vocabulary.isEmpty else { return 0 }
+        return max(0, prompt.userMessage("", locale, vocabulary).count - prompt.userMessage("", locale, []).count)
     }
 
     /// What goes before the user message when there is context.
