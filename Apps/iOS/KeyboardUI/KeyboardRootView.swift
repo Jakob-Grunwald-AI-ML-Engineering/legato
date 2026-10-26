@@ -57,9 +57,11 @@ struct KeyboardRootView: View {
         return HStack(spacing: 8) {
             ExpansionKey(controller: controller, symbol: "chevron.up")
                 .frame(width: 44, height: controlHeight)
+                .simultaneousGesture(swipe)
             if controller.showsGlobe {
                 GlobeKey(target: controller.inputModeTarget, typing: typing)
                     .frame(width: 44, height: controlHeight)
+                    .simultaneousGesture(swipe)
             }
             stripStatus
             // Touchable over the strip's full height and to the right edge, beyond the drawn pill.
@@ -68,11 +70,13 @@ struct KeyboardRootView: View {
                 .frame(width: pill.width + 2 * slop.width, height: size.height)
                 .padding(.leading, -slop.width)
                 .padding(.trailing, -slop.width)
+                .simultaneousGesture(swipe)
         }
         .padding(.horizontal, 8)
         .frame(width: size.width, height: size.height)
-        .contentShape(Rectangle())
-        .simultaneousGesture(swipe)
+        // Each control takes the swipe itself (a gesture on the row loses to the controls' own); the gaps
+        // and margins take it here.
+        .background(Color.clear.contentShape(Rectangle()).gesture(swipe))
     }
 
     /// A vertical swipe that expands the strip or collapses the full keyboard (`KeyboardController.swiped`).
@@ -91,6 +95,7 @@ struct KeyboardRootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .accessibilityIdentifier("keyboard.hint")
+            .simultaneousGesture(swipe)
             #if DEBUG
             .onLongPressGesture { controller.cycleStripHeight() }
             #endif
