@@ -39,6 +39,11 @@ final class AppController {
     @ObservationIgnored private let readiness = SystemReadiness()
     @ObservationIgnored private let startEnvironment: SystemStartEnvironment
     @ObservationIgnored private let coordinator: DictationCoordinator
+    @ObservationIgnored private let activityClient: ActivityKitClient
+    /// The finished dictation the Live Activity's Insert and Copy buttons act on, until one resolves it,
+    /// a new run starts or `DictationResult.lifetime` ends.
+    @ObservationIgnored private var pendingResult: DictationResult?
+    @ObservationIgnored private var resultExpiry: Task<Void, Never>?
     /// The link to the keyboard extension; nil without the App Group.
     @ObservationIgnored private let keyboardLink: KeyboardLinkHost?
     /// Counts finished runs, so `toggle()` can tell an abort that raced with its own start.
@@ -72,8 +77,10 @@ final class AppController {
         self.startEnvironment = startEnvironment
         let keyboardLink = KeyboardLinkHost()
         self.keyboardLink = keyboardLink
+        let activityClient = ActivityKitClient()
+        self.activityClient = activityClient
         coordinator = DictationCoordinator(
-            activity: ActivityKitClient(),
+            activity: activityClient,
             clipboard: pasteboard,
             readiness: readiness,
             startEnvironment: startEnvironment,
@@ -98,6 +105,7 @@ final class AppController {
                     linger: linger)
             })
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
+        coordinator.onResult = { [weak self] result in self?.resultReady(result) }
         coordinator.onStartFallback = { from, to, error in
             let label = SystemStartEnvironment.refusalLabel(error)
             Self.log.info("start fallback \(from.rawValue, privacy: .public) -> \(to.rawValue, privacy: .public): \(label, privacy: .public)")
@@ -111,7 +119,10 @@ final class AppController {
         if let keyboardLink {
             coordinator.sink = keyboardLink
             keyboardLink.onTranscript = { [weak self] committed, volatile in self?.liveText = committed + volatile }
-            keyboardLink.onRunActivity = { [weak self] active in self?.keyboardRunActive = active }
+            keyboardLink.onRunActivity = { [weak self] active in
+                self?.keyboardRunActive = active
+                if active { self?.clearResult() } // a new run's activity replaces the result's
+            }
             keyboardLink.onLease = { [weak self] until in self?.micReadyUntil = until }
             keyboardLink.link.onRequest = { [weak self] request in await self?.perform(request.command) ?? false }
             keyboardLink.startListening()
@@ -140,15 +151,66 @@ final class AppController {
         if reason != nil, let remembered = hopOptions {
             options = remembered
         } else {
-            options = Self.pressOptions(keyboardVisible: keyboardLink?.keyboardIsVisible ?? false)
+            options = Self.pressOptions()
         }
         hopOptions = nil
         return await run(options, hopReason: reason) ?? .busy
     }
 
-    /// What a press starts with, given whether the Legato keyboard is on screen.
-    static func pressOptions(keyboardVisible: Bool) -> StartOptions {
-        StartOptions(activity: .required, keepAlive: Settings.keepAliveLinger, target: keyboardVisible ? .keyboard : .app)
+    /// What a press starts with. The text is neither copied nor typed when the run ends: it waits in the
+    /// Live Activity for its Insert and Copy buttons (`insertResult`, `copyResult`).
+    static func pressOptions() -> StartOptions {
+        StartOptions(activity: .required, keepAlive: Settings.keepAliveLinger, target: .result)
+    }
+
+    // MARK: Result buttons
+
+    private func resultReady(_ result: DictationResult) {
+        pendingResult = result
+        resultExpiry?.cancel()
+        resultExpiry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(DictationResult.lifetime))
+            guard !Task.isCancelled else { return }
+            await self?.expireResult(result)
+        }
+    }
+
+    private func clearResult() {
+        pendingResult = nil
+        resultExpiry?.cancel()
+        resultExpiry = nil
+    }
+
+    private func expireResult(_ result: DictationResult) async {
+        guard pendingResult == result else { return }
+        clearResult()
+        await activityClient.dismiss()
+    }
+
+    /// The Live Activity's Insert button: the Legato keyboard on screen types the text. With no keyboard
+    /// acting the activity says so and keeps its buttons.
+    func insertResult() async {
+        guard let result = pendingResult, result.isActionable(now: Date()) else { return }
+        let inserted = await keyboardLink?.insert(result.text) ?? false
+        await resolveResult(result, inserted ? .inserted : .keyboardNotActive)
+    }
+
+    /// The Live Activity's Copy button: writes the clipboard from the background (the write is checked
+    /// by its change count; a dropped one leaves the activity in "tap to copy").
+    func copyResult() async {
+        guard let result = pendingResult, result.isActionable(now: Date()) else { return }
+        let changed = pasteboard.forceWrite(result.text, source: "activity-copy")
+        #if DEBUG
+        WakeProbeLog.log("copy", "changed=\(changed ? 1 : 0) chars=\(result.text.count)")
+        #endif
+        await resolveResult(result, changed ? .copied : .copyFailed)
+    }
+
+    private func resolveResult(_ result: DictationResult, _ outcome: ResultOutcome) async {
+        if outcome.endsActivity { clearResult() }
+        let content = DictationActivityContent(
+            startedAt: result.at, tail: LiveTranscript.tail(of: result.text), phase: outcome.phase)
+        await activityClient.resolveResult(content, ends: outcome.endsActivity)
     }
 
     /// The keyboard asked for this (a request over the link, or `legato://keyboard`). Returns whether it
@@ -223,7 +285,7 @@ final class AppController {
         AudioDiagnostics.log("toggle.begin", ["isDictating": isDictating])
         #endif
         #if DEBUG
-        E2E.log("route target=\(options.target == .keyboard ? "keyboard" : "app") activity=\(options.activity == .required ? "required" : "bestEffort") keepAliveSeconds=\(E2E.seconds(of: options.keepAlive))")
+        E2E.log("route target=\(Self.describe(options.target)) activity=\(options.activity == .required ? "required" : "bestEffort") keepAliveSeconds=\(E2E.seconds(of: options.keepAlive))")
         #endif
         startEnvironment.assumeForeground = reason != nil
         defer { startEnvironment.assumeForeground = false }
@@ -279,6 +341,14 @@ final class AppController {
     #endif
 
     #if DEBUG
+    private static func describe(_ target: DictationTarget) -> String {
+        switch target {
+        case .app: "app"
+        case .result: "result"
+        case .keyboard: "keyboard"
+        }
+    }
+
     private static func describe(_ outcome: DictationCoordinator.ArmOutcome) -> String {
         switch outcome {
         case .armed: "armed"

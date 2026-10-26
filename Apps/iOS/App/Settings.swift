@@ -1,5 +1,6 @@
 import Foundation
 import LegatoCore
+import LegatoKeyboardCore
 
 /// The App Group, shared with the widget extension and (later) the keyboard.
 enum AppGroup {
@@ -80,6 +81,20 @@ enum Settings {
     static var keyboardClicks: Bool {
         get { AppGroup.defaults.object(forKey: KeyboardPreferences.clicksKey) as? Bool ?? true }
         set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.clicksKey) }
+    }
+
+    /// The compact keyboard: one row with the dictation status, the mic key and a chevron that expands to the
+    /// full keyboard. The keyboard reads the same key (`KeyboardPreferences`). Default off.
+    static var keyboardStrip: Bool {
+        get { AppGroup.defaults.object(forKey: KeyboardPreferences.stripKey) as? Bool ?? false }
+        set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.stripKey) }
+    }
+
+    /// Debug experiment: the height (points) a strip session starts with, one of `StripHeight.candidates`.
+    /// The keyboard honours it in DEBUG builds only (a long press on its status text steps through them).
+    static var keyboardStripHeight: Double {
+        get { StripHeight.resolve(stored: AppGroup.defaults.object(forKey: KeyboardPreferences.stripHeightKey) as? Double) }
+        set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.stripHeightKey) }
     }
 
     /// Debug experiment (background second-start failure): a normal stop leaves the audio session active

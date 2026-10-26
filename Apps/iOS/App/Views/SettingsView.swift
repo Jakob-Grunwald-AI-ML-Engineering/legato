@@ -1,5 +1,6 @@
 import LegatoAudio
 import LegatoCore
+import LegatoKeyboardCore
 import SwiftUI
 import UIKit
 
@@ -9,6 +10,10 @@ struct SettingsView: View {
     @State private var keepAlive = Settings.keepAlive
     @State private var haptics = Settings.keyboardHaptics
     @State private var clicks = Settings.keyboardClicks
+    @State private var strip = Settings.keyboardStrip
+    #if DEBUG
+    @State private var stripHeight = Settings.keyboardStripHeight
+    #endif
     @State private var showPauseOthers = Settings.debugShowPauseOthers
     #if LEGATO_INTERNAL
     @State private var keepSessionActive = Settings.keepSessionActiveBetweenRuns
@@ -46,13 +51,19 @@ struct SettingsView: View {
             Section {
                 Toggle("Haptic feedback", isOn: $haptics)
                 Toggle("Key clicks", isOn: $clicks)
+                Toggle("Compact keyboard (strip)", isOn: $strip)
+                #if DEBUG
+                Picker("Strip height", selection: $stripHeight) {
+                    ForEach(StripHeight.candidates, id: \.self) { Text("\(Int($0)) pt").tag($0) }
+                }
+                #endif
                 Button("Keyboard settings") {
                     if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                 }
             } header: {
                 Text("Typing")
             } footer: {
-                Text("Haptics and clicks need Allow Full Access for the Legato keyboard (Settings > Legato > Keyboards). Clicks also follow the system's Keyboard Clicks switch in Settings > Sounds & Haptics.")
+                Text("Haptics and clicks need Allow Full Access for the Legato keyboard (Settings > Legato > Keyboards). Clicks also follow the system's Keyboard Clicks switch in Settings > Sounds & Haptics. The compact keyboard is one row with the dictation status and the mic key; its chevron opens the full keyboard.")
             }
 
             #if LEGATO_INTERNAL
@@ -79,6 +90,10 @@ struct SettingsView: View {
         }
         .onChange(of: haptics) { _, new in Settings.keyboardHaptics = new }
         .onChange(of: clicks) { _, new in Settings.keyboardClicks = new }
+        .onChange(of: strip) { _, new in Settings.keyboardStrip = new }
+        #if DEBUG
+        .onChange(of: stripHeight) { _, new in Settings.keyboardStripHeight = new }
+        #endif
         .onChange(of: showPauseOthers) { _, new in
             Settings.debugShowPauseOthers = new
             policy = Settings.audioPolicy // falls back to the default if the stored policy is no longer offered

@@ -31,7 +31,7 @@ public final class DictationCoordinator {
         /// Listening; the next toggle stops.
         case started
         /// Finished and idle again. The run's text (on the clipboard unless the sink says it landed in
-        /// the target field), or nil when nothing was recognized (or the start was cancelled).
+        /// the target field, or the run is a `.result` run: its text waits in the activity), or nil when nothing was recognized (or the start was cancelled).
         case stopped(String?)
         /// Not started: resolve `ReadinessIssue` in the foreground first.
         case needsOnboarding(ReadinessIssue)
@@ -55,6 +55,10 @@ public final class DictationCoordinator {
     /// the coordinator idle again. The app decides what to do with the quiet moment (e.g. leave the
     /// background). Not fired when a press ends in `.needsOnboarding`: no run happened.
     public var onIdle: (@MainActor () -> Void)?
+
+    /// Fires with the run's text when a `.result`-target run ends with one: the app keeps it for the
+    /// activity's Insert and Copy buttons. Set once after `init`.
+    public var onResult: (@MainActor (DictationResult) -> Void)?
 
     /// Receives each run's text and the lease state; set once after `init`.
     public var sink: (any TranscriptSink)?
@@ -587,7 +591,14 @@ public final class DictationCoordinator {
     // MARK: Pieces
 
     /// `landed`: the sink confirmed the final text is in the target field, so the clipboard stays untouched.
+    /// A `.result` run neither copies nor types: its text goes to `onResult`.
     private func deliver(_ text: String, landed: Bool) async {
+        if let run, run.target == .result {
+            // Nothing is copied or typed: the text waits in the activity for its buttons.
+            await endActivity(content(.result, tail: LiveTranscript.tail(of: text)))
+            onResult?(DictationResult(runID: run.id.uuidString, text: text, at: now()))
+            return
+        }
         if landed {
             await endActivity(content(.copied, tail: LiveTranscript.tail(of: text)))
             return

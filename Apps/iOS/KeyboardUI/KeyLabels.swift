@@ -32,5 +32,15 @@ enum KeyLabels {
         }
     }
 
+    /// The SF Symbol the return key shows for a caption (the full keyboard and the strip share it); nil for a
+    /// word, which is drawn as text.
+    static func returnSymbol(for label: String) -> (name: String, weight: UIImage.SymbolWeight)? {
+        switch label {
+        case "return", "Return": ("return", .regular)
+        case "send", "Senden": ("arrow.up", .medium)
+        default: nil
+        }
+    }
+
     static func spaceLabel(german: Bool = systemIsGerman) -> String { german ? "Leerzeichen" : "space" }
 }

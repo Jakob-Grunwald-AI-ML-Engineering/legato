@@ -131,6 +131,11 @@ final class TypingModel {
     /// Delete acts on touch-down and repeats while held; every other key acts on `keyUp`.
     func keyDown(_ key: Key) {
         guard key.action == .delete else { return }
+        beginDelete()
+    }
+
+    /// Delete once now, then repeat while held (`DeleteRepeater`) until `endDelete`. The strip's delete key uses it too.
+    func beginDelete() {
         deleteOne()
         afterEdit()
         deleter.begin(at: now())
@@ -142,6 +147,14 @@ final class TypingModel {
                 self?.tickDelete()
             }
         }
+    }
+
+    /// The return key's tap, as on the full keyboard: a newline, unless the field disables return (empty field).
+    func tapReturn() {
+        guard returnEnabled else { return }
+        insert("\n")
+        lastSpaceAt = nil
+        afterEdit()
     }
 
     /// The touch lifted over `key`. `alternate` is the long-press pick, which replaces the key's output.
@@ -157,11 +170,7 @@ final class TypingModel {
             typeSpace()
             afterEdit()
         case .returnKey:
-            if returnEnabled {
-                insert("\n")
-                lastSpaceAt = nil
-                afterEdit()
-            }
+            tapReturn()
         case .delete:
             endDelete()
         case .shift:
@@ -238,7 +247,7 @@ final class TypingModel {
         afterEdit()
     }
 
-    private func endDelete() {
+    func endDelete() {
         deleter.end()
         deleteTask?.cancel()
         deleteTask = nil
