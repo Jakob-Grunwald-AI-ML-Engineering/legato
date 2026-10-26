@@ -60,18 +60,93 @@ public struct CleanupRegistry: Sendable {
 
     /// The first usable backend, in order MLX, Foundation Models, none.
     public func resolve() async -> (choice: Choice, backend: (any LLMBackend)?) {
-        if let id = await models.selected(role: .cleanup),
-           let spec = MLXModels.spec(id: id),
-           case .installed = await models.state(of: id),
-           await canUseGPU() {
-            let root = await models.root
-            let backend = makeMLXBackend(spec, spec.folder(root: root))
-            if await backend.availability.isAvailable { return (.mlx(modelID: id), backend) }
+        let resolution = await resolve(preference: .auto)
+        return (resolution.choice, resolution.backend)
+    }
+
+    /// Which backends ``resolve(preference:)`` may pick.
+    public enum BackendPreference: String, Sendable, Equatable, CaseIterable {
+        /// The picked MLX model while the GPU is usable, else Foundation Models, else none.
+        case auto
+        /// Foundation Models only (an installed MLX pick is passed over), else none.
+        case foundationModels
+    }
+
+    /// Why a backend earlier in the order was passed over.
+    public enum Skip: Sendable, Equatable, CustomStringConvertible {
+        /// The picked MLX model is not (fully) installed.
+        case mlxNotInstalled(modelID: String)
+        /// The GPU is not usable now (the app is in the background on the phone).
+        case mlxNeedsForeground(modelID: String)
+        /// The MLX backend reported itself unusable.
+        case mlxUnavailable(modelID: String, reason: String)
+        case foundationModelsUnavailable(reason: String)
+        /// This build or device has no Foundation Models backend.
+        case noFoundationModels
+
+        public var description: String {
+            switch self {
+            case .mlxNotInstalled(let id): "\(Self.name(id)) is not installed"
+            case .mlxNeedsForeground(let id): "\(Self.name(id)) needs the app in front (no GPU in the background)"
+            case .mlxUnavailable(let id, let reason): "\(Self.name(id)) is unavailable: \(reason)"
+            case .foundationModelsUnavailable(let reason): "Apple Foundation Models unavailable: \(reason)"
+            case .noFoundationModels: "Apple Foundation Models are not available on this device"
+            }
         }
-        if let foundationModels, await foundationModels.availability.isAvailable {
-            return (.foundationModels, foundationModels)
+
+        private static func name(_ id: String) -> String { MLXModels.spec(id: id)?.displayName ?? id }
+    }
+
+    /// The backend a cleanup run uses and why earlier ones were passed over.
+    public struct Resolution: Sendable {
+        public let choice: Choice
+        public let backend: (any LLMBackend)?
+        public let skipped: [Skip]
+    }
+
+    /// The first usable backend for `preference`, in order MLX (``BackendPreference/auto`` only),
+    /// Foundation Models, none, with the reasons the earlier ones were passed over.
+    public func resolve(preference: BackendPreference) async -> Resolution {
+        var skipped: [Skip] = []
+        if preference == .auto, let id = await models.selected(role: .cleanup), let spec = MLXModels.spec(id: id) {
+            if case .installed = await models.state(of: id) {
+                if await canUseGPU() {
+                    let root = await models.root
+                    let backend = makeMLXBackend(spec, spec.folder(root: root))
+                    switch await backend.availability {
+                    case .available: return Resolution(choice: .mlx(modelID: id), backend: backend, skipped: skipped)
+                    case .unavailable(let reason): skipped.append(.mlxUnavailable(modelID: id, reason: reason))
+                    }
+                } else {
+                    skipped.append(.mlxNeedsForeground(modelID: id))
+                }
+            } else {
+                skipped.append(.mlxNotInstalled(modelID: id))
+            }
         }
-        return (.itnOnly, nil)
+        if let foundationModels {
+            switch await foundationModels.availability {
+            case .available: return Resolution(choice: .foundationModels, backend: foundationModels, skipped: skipped)
+            case .unavailable(let reason): skipped.append(.foundationModelsUnavailable(reason: reason))
+            }
+        } else {
+            skipped.append(.noFoundationModels)
+        }
+        return Resolution(choice: .itnOnly, backend: nil, skipped: skipped)
+    }
+
+    /// The pipeline for one run: ITN (when `itn`), then LLM cleanup in `style` when a backend resolved, each
+    /// stage limited to `timeout`. Resolves afresh on every call, so GPU access is checked per run.
+    public func pipeline(
+        style: CleanupStyle, itn: Bool, preference: BackendPreference, timeout: Duration
+    ) async -> (pipeline: PostProcessingPipeline, resolution: Resolution) {
+        let resolution = await resolve(preference: preference)
+        var stages: [any TranscriptPostProcessor] = itn ? [ITNStage()] : []
+        if let backend = resolution.backend {
+            let guardrail = style == .verbatim ? cleanupGuard : style.cleanupGuard
+            stages.append(LLMCleanupStage(backend: backend, cleanupGuard: guardrail, prompt: style.prompt))
+        }
+        return (PostProcessingPipeline(stages: stages, timeout: timeout), resolution)
     }
 
     /// ITN, then LLM cleanup when a backend resolved.

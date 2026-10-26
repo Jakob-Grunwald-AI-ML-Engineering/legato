@@ -19,6 +19,10 @@ import Foundation
 ///      candidate holds fewer, or
 ///    - four or more reference tokens in a row have no counterpart in the candidate
 ///      (``maxUnmatchedRun`` is 3).
+///
+/// With a ``wordRatio`` (the message style, ``message``) the rule is only that: the candidate's token
+/// count, numbers counted as one, must lie within that multiple of the reference's. A message rewrite drops
+/// fillers and false starts and applies spoken corrections, which the drift rule would reject.
 public struct CleanupGuard: Sendable {
     /// The limit tuned against the cleanup fixtures and the literal pairs in `CleanupStageTests`.
     public static let defaultMaxDrift = 0.25
@@ -28,8 +32,17 @@ public struct CleanupGuard: Sendable {
 
     /// Candidates with a drift above this are rejected.
     public var maxDrift: Double
+    /// When set, replaces the drift rules: the candidate's token count over the reference's must lie in this
+    /// range (bounds included).
+    public var wordRatio: ClosedRange<Double>?
 
-    public init(maxDrift: Double = CleanupGuard.defaultMaxDrift) { self.maxDrift = maxDrift }
+    public init(maxDrift: Double = CleanupGuard.defaultMaxDrift, wordRatio: ClosedRange<Double>? = nil) {
+        self.maxDrift = maxDrift
+        self.wordRatio = wordRatio
+    }
+
+    /// The looser guard of the message style: 0.4 to 1.3 times the input's words.
+    public static let message = CleanupGuard(wordRatio: 0.4 ... 1.3)
 
     // MARK: tokens
 
@@ -144,6 +157,10 @@ public struct CleanupGuard: Sendable {
         let a = Self.canonicalTokens(reference)
         let b = Self.canonicalTokens(candidate)
         if b.isEmpty { return a.isEmpty }
+        if let wordRatio {
+            guard !a.isEmpty else { return false }
+            return wordRatio.contains(Double(b.count) / Double(a.count))
+        }
         let alignment = Self.align(a, b)
         let allowed = max(maxDrift * Double(max(a.count, b.count)), 1)
         guard Double(alignment.distance) <= allowed else { return false }
