@@ -1,0 +1,20 @@
+{
+  "name": "long-de",
+  "language": "de",
+  "length": "long",
+  "locale": "de-DE",
+  "input": "guten morgen zusammen. ich möchte kurz den stand des projekts zusammenfassen. wir haben letzte woche die neue version der app an die testgruppe verschickt und bisher kamen nur wenige rückmeldungen. die meisten betreffen die anmeldung, die für einige nutzer zu lange dauert. das team hat den fehler gestern gefunden und heute morgen schon behoben. außerdem muß ich erwähnen, dass die spracherkennung auf dem iphone jetzt deutlich schneller reagiert als vorher. besonders bei kurzen sätzen merkt man den unterschied sofort. für nächste woche planen wir drei dinge. erstens, die einstellungen für die modellauswahl fertigzustellen. zweitens, die zusammenfassung von meetings auf dem mac zu testen. drittens, die dokumentation für die entwickler zu aktualisieren. wenn ihr fragen habt, schreibt mir einfach eine nachricht oder ruft mich nach dem mittagessen an.",
+  "vocabulary": [],
+  "mustContain": [
+    "Guten Morgen",
+    "muss",
+    "Rückmeldungen",
+    "Mittagessen",
+    "Erstens"
+  ],
+  "mustNotContain": [
+    "muß",
+    "iphone"
+  ],
+  "reference": "Guten Morgen zusammen. Ich möchte kurz den Stand des Projekts zusammenfassen. Wir haben letzte Woche die neue Version der App an die Testgruppe verschickt, und bisher kamen nur wenige Rückmeldungen. Die meisten betreffen die Anmeldung, die für einige Nutzer zu lange dauert. Das Team hat den Fehler gestern gefunden und heute Morgen schon behoben. Außerdem muss ich erwähnen, dass die Spracherkennung auf dem iPhone jetzt deutlich schneller reagiert als vorher. Besonders bei kurzen Sätzen merkt man den Unterschied sofort. Für nächste Woche planen wir drei Dinge. Erstens, die Einstellungen für die Modellauswahl fertigzustellen. Zweitens, die Zusammenfassung von Meetings auf dem Mac zu testen. Drittens, die Dokumentation für die Entwickler zu aktualisieren. Wenn ihr Fragen habt, schreibt mir einfach eine Nachricht oder ruft mich nach dem Mittagessen an."
+}

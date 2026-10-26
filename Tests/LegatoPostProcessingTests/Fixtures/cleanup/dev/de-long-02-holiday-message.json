@@ -1,0 +1,28 @@
+{
+  "name": "de-long-02-holiday-message",
+  "language": "de",
+  "length": "long",
+  "locale": "de-DE",
+  "input": "liebe grüße aus dem urlaub. wir sind gestern in lissabon angekommen und das wetter ist traumhaft. das hotel liegt direkt am wasser und kostet hundertachtzig euro pro nacht. heute morgen sind wir mit der straßenbahn zur burg gefahren. die fahrkarte hat zwei euro fünfzig gekostet. am abend haben wir in einem kleinen restaurant fisch gegessen. morgen wollen wir nach sintra fahren und den palast besichtigen. am sonntag um neunzehn uhr geht unser flug zurück nach berlin. ich melde mich dann wieder bei dir.",
+  "vocabulary": [],
+  "mustContain": [
+    "Lissabon",
+    "180",
+    "2,50",
+    "Sintra",
+    "19",
+    "Berlin",
+    "Sonntag",
+    "Fisch"
+  ],
+  "mustNotContain": [
+    "hundertachtzig",
+    "zwei euro",
+    "neunzehn",
+    "lissabon",
+    ". wir sind",
+    ". das hotel",
+    ". die fahrkarte"
+  ],
+  "reference": "Liebe Grüße aus dem Urlaub. Wir sind gestern in Lissabon angekommen, und das Wetter ist traumhaft. Das Hotel liegt direkt am Wasser und kostet 180 Euro pro Nacht. Heute Morgen sind wir mit der Straßenbahn zur Burg gefahren. Die Fahrkarte hat 2,50 Euro gekostet. Am Abend haben wir in einem kleinen Restaurant Fisch gegessen. Morgen wollen wir nach Sintra fahren und den Palast besichtigen. Am Sonntag um 19 Uhr geht unser Flug zurück nach Berlin. Ich melde mich dann wieder bei dir."
+}

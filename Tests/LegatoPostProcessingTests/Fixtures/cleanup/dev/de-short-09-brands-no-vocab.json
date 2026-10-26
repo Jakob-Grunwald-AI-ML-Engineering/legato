@@ -1,0 +1,20 @@
+{
+  "name": "de-short-09-brands-no-vocab",
+  "language": "de",
+  "length": "short",
+  "locale": "de-DE",
+  "input": "hast du die nachricht von chat gpt gesehen oder soll ich sie dir bei whats app schicken",
+  "vocabulary": [],
+  "mustContain": [
+    "Hast du",
+    "ChatGPT",
+    "WhatsApp"
+  ],
+  "mustNotContain": [
+    "chat gpt",
+    "Chat GPT",
+    "whats app",
+    "Whats App"
+  ],
+  "reference": "Hast du die Nachricht von ChatGPT gesehen oder soll ich sie dir bei WhatsApp schicken?"
+}

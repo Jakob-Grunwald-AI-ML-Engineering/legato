@@ -1,0 +1,33 @@
+{
+  "name": "de-long-01-project-update",
+  "language": "de",
+  "length": "long",
+  "locale": "de-DE",
+  "input": "hallo zusammen kurzes update zum diktierprojekt wir haben diese woche die spracherkennung mit nemo tron getestet und sie ist bei langen sätzen deutlich besser als parakeet allerdings gibt es noch probleme mit zahlen und eigennamen die ligato app schreibt zum beispiel manchmal kleine buchstaben mitten im satz die modelle für die nachbearbeitung brauchen ungefähr neunhundert megabyte speicher und laufen auf dem mac in unter vierzehn sekunden ich möchte bis zum fünfzehnten november eine erste testversion verschicken dafür brauchen wir noch etwa zwanzig prozent mehr testdaten wenn ihr zeit habt schaut euch bitte die offenen tickets an danke euch",
+  "vocabulary": [
+    "Legato",
+    "Nemotron",
+    "Parakeet"
+  ],
+  "mustContain": [
+    "Hallo zusammen",
+    "Nemotron",
+    "Legato",
+    "Parakeet",
+    "900",
+    "14",
+    "15. November",
+    "20",
+    "Spracherkennung"
+  ],
+  "mustNotContain": [
+    "nemo tron",
+    "ligato",
+    "Ligato",
+    "neunhundert",
+    "fünfzehnten",
+    "vierzehn",
+    "zwanzig"
+  ],
+  "reference": "Hallo zusammen, kurzes Update zum Diktierprojekt. Wir haben diese Woche die Spracherkennung mit Nemotron getestet, und sie ist bei langen Sätzen deutlich besser als Parakeet. Allerdings gibt es noch Probleme mit Zahlen und Eigennamen. Die Legato-App schreibt zum Beispiel manchmal kleine Buchstaben mitten im Satz. Die Modelle für die Nachbearbeitung brauchen ungefähr 900 Megabyte Speicher und laufen auf dem Mac in unter 14 Sekunden. Ich möchte bis zum 15. November eine erste Testversion verschicken. Dafür brauchen wir noch etwa 20 Prozent mehr Testdaten. Wenn ihr Zeit habt, schaut euch bitte die offenen Tickets an. Danke euch."
+}

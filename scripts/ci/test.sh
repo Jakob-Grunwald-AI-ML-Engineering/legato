@@ -43,7 +43,8 @@ build_mac_app() {
 if [ "$mode" = quick ]; then
   swift build
   swift build --build-tests   # PRs compile the test targets too, on the pinned Xcode, without running them
-  xcodebuild build -quiet -scheme "$scheme" -destination 'generic/platform=iOS Simulator'
+  # Test targets too: a macOS-only API in a test otherwise surfaces only in the queue's simulator run.
+  xcodebuild build-for-testing -quiet -scheme "$scheme" -destination 'generic/platform=iOS Simulator'
   build_ios_app
   build_mac_app
   exit 0

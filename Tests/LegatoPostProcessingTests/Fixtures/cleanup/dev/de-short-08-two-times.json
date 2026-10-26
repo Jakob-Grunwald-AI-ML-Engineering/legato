@@ -1,0 +1,22 @@
+{
+  "name": "de-short-08-two-times",
+  "language": "de",
+  "length": "short",
+  "locale": "de-DE",
+  "input": "der zug nach hamburg fährt um sieben uhr fünfzehn ab und ist um zehn uhr vierzig da",
+  "vocabulary": [],
+  "mustContain": [
+    "Zug",
+    "Hamburg",
+    "7",
+    "15",
+    "10",
+    "40"
+  ],
+  "mustNotContain": [
+    "sieben",
+    "fünfzehn",
+    "vierzig"
+  ],
+  "reference": "Der Zug nach Hamburg fährt um 7:15 Uhr ab und ist um 10:40 Uhr da."
+}

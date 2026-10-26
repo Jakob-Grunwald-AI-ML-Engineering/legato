@@ -1,0 +1,22 @@
+{
+  "name": "en-short-06-tools-vocab",
+  "language": "en",
+  "length": "short",
+  "locale": "en-US",
+  "input": "the graphana dashboard shows that the kuberneties cluster is running at eighty five percent capacity",
+  "vocabulary": [
+    "Grafana",
+    "Kubernetes"
+  ],
+  "mustContain": [
+    "Grafana",
+    "Kubernetes",
+    "85"
+  ],
+  "mustNotContain": [
+    "graphana",
+    "kuberneties",
+    "eighty"
+  ],
+  "reference": "The Grafana dashboard shows that the Kubernetes cluster is running at 85% capacity."
+}

@@ -1,0 +1,18 @@
+{
+  "name": "punctuation-casing-en",
+  "language": "en",
+  "length": "short",
+  "locale": "en-US",
+  "input": "hey sarah i looked at the budget for next quarter and it seems fine to me can you send me the final numbers by friday afternoon thanks",
+  "vocabulary": [],
+  "mustContain": [
+    "Hey",
+    "Sarah",
+    "Friday"
+  ],
+  "mustNotContain": [
+    "hey sarah",
+    "friday afternoon"
+  ],
+  "reference": "Hey Sarah, I looked at the budget for next quarter, and it seems fine to me. Can you send me the final numbers by Friday afternoon? Thanks."
+}

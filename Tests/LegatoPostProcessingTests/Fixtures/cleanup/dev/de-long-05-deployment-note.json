@@ -1,0 +1,30 @@
+{
+  "name": "de-long-05-deployment-note",
+  "language": "de",
+  "length": "long",
+  "locale": "de-DE",
+  "input": "kurze notiz zum deployment. die datenbank läuft jetzt auf post gres statt auf sqlite. das backup läuft jede nacht um drei uhr und wird zwei wochen aufbewahrt. kulifai startet den container automatisch neu wenn er abstürzt. der speicher ist auf vierzig gigabyte erweitert worden. die kosten liegen bei etwa neunzehn euro im monat. noch offen ist das monitoring der antwortzeiten. dafür brauchen wir bis ende des monats eine lösung.",
+  "vocabulary": [
+    "Coolify",
+    "Postgres"
+  ],
+  "mustContain": [
+    "Postgres",
+    "SQLite",
+    "3 Uhr",
+    "Coolify",
+    "40",
+    "19",
+    "Monitoring"
+  ],
+  "mustNotContain": [
+    "post gres",
+    "kulifai",
+    "vierzig",
+    "neunzehn",
+    "sqlite",
+    ". das backup",
+    ". die datenbank"
+  ],
+  "reference": "Kurze Notiz zum Deployment. Die Datenbank läuft jetzt auf Postgres statt auf SQLite. Das Backup läuft jede Nacht um 3 Uhr und wird zwei Wochen aufbewahrt. Coolify startet den Container automatisch neu, wenn er abstürzt. Der Speicher ist auf 40 Gigabyte erweitert worden. Die Kosten liegen bei etwa 19 Euro im Monat. Noch offen ist das Monitoring der Antwortzeiten. Dafür brauchen wir bis Ende des Monats eine Lösung."
+}

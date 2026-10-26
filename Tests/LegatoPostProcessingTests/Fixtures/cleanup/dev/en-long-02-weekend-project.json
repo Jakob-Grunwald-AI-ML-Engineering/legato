@@ -1,0 +1,27 @@
+{
+  "name": "en-long-02-weekend-project",
+  "language": "en",
+  "length": "long",
+  "locale": "en-US",
+  "input": "so i spent the weekend building a small tool with kloud. it reads my meeting notes and drafts the follow up emails. the first version took a couple of hours. anthropik released a new model on friday so i tried that as well. the results were noticeably better, especially for longer notes. i still have to fix the date parsing though. it mixes up the month and the day. i will push the code to github tonight.",
+  "vocabulary": [
+    "Claude",
+    "Anthropic"
+  ],
+  "mustContain": [
+    "So I",
+    "Claude",
+    "Anthropic",
+    "Friday",
+    "GitHub",
+    "It reads"
+  ],
+  "mustNotContain": [
+    "kloud",
+    "anthropik",
+    "github",
+    ". it reads",
+    ". the first"
+  ],
+  "reference": "So I spent the weekend building a small tool with Claude. It reads my meeting notes and drafts the follow-up emails. The first version took a couple of hours. Anthropic released a new model on Friday, so I tried that as well. The results were noticeably better, especially for longer notes. I still have to fix the date parsing though. It mixes up the month and the day. I will push the code to GitHub tonight."
+}

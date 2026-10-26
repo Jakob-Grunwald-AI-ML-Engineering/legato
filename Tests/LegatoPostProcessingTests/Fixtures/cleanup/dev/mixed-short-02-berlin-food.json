@@ -1,0 +1,21 @@
+{
+  "name": "mixed-short-02-berlin-food",
+  "language": "mixed",
+  "length": "short",
+  "locale": "en-US",
+  "input": "i had a great schnitzel at the restaurant near the brandenburger tor and then took the u bahn to alexanderplatz",
+  "vocabulary": [],
+  "mustContain": [
+    "I had",
+    "Schnitzel",
+    "Brandenburger Tor",
+    "Alexanderplatz"
+  ],
+  "mustNotContain": [
+    "schnitzel",
+    "brandenburger tor",
+    "alexanderplatz",
+    "u bahn"
+  ],
+  "reference": "I had a great Schnitzel at the restaurant near the Brandenburger Tor and then took the U-Bahn to Alexanderplatz."
+}

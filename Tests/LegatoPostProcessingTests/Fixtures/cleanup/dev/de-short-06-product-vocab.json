@@ -1,0 +1,19 @@
+{
+  "name": "de-short-06-product-vocab",
+  "language": "de",
+  "length": "short",
+  "locale": "de-DE",
+  "input": "ich habe die app gestern auf kulifai deployed und sie läuft seitdem stabil",
+  "vocabulary": [
+    "Coolify"
+  ],
+  "mustContain": [
+    "App",
+    "Coolify",
+    "deployed"
+  ],
+  "mustNotContain": [
+    "kulifai"
+  ],
+  "reference": "Ich habe die App gestern auf Coolify deployed, und sie läuft seitdem stabil."
+}

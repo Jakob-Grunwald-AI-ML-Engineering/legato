@@ -1,0 +1,27 @@
+{
+  "name": "en-long-h1-weekly-plan",
+  "language": "en",
+  "length": "long",
+  "locale": "en-US",
+  "input": "good morning team here is the plan for the week on monday we ship the bug fix for the login screen on tuesday the design review with sarah takes place at two thirty in the afternoon and i would like everyone to bring their feedback on wednesday we have a call with the client at nine o'clock their budget is about fifty thousand dollars so we need to be careful with the scope on thursday we freeze the code and on friday we do the release if anything goes wrong call me at any time have a great week",
+  "vocabulary": [],
+  "mustContain": [
+    "Good morning team",
+    "Monday",
+    "Tuesday",
+    "Sarah",
+    "2:30",
+    "Wednesday",
+    "50,000",
+    "Thursday",
+    "Friday"
+  ],
+  "mustNotContain": [
+    "fifty thousand",
+    "two thirty",
+    "monday",
+    "sarah",
+    "friday"
+  ],
+  "reference": "Good morning team, here is the plan for the week. On Monday we ship the bug fix for the login screen. On Tuesday the design review with Sarah takes place at 2:30 in the afternoon, and I would like everyone to bring their feedback. On Wednesday we have a call with the client at 9 o'clock. Their budget is about $50,000, so we need to be careful with the scope. On Thursday we freeze the code, and on Friday we do the release. If anything goes wrong, call me at any time. Have a great week."
+}

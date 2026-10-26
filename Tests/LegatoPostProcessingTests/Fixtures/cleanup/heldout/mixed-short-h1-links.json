@@ -1,0 +1,21 @@
+{
+  "name": "mixed-short-h1-links",
+  "language": "mixed",
+  "length": "short",
+  "locale": "de-DE",
+  "input": "ich brauche den link zum github repo und das passwort für den vpn zugang",
+  "vocabulary": [],
+  "mustContain": [
+    "Ich brauche",
+    "Link",
+    "GitHub",
+    "VPN",
+    "Passwort"
+  ],
+  "mustNotContain": [
+    "github",
+    "vpn",
+    "link"
+  ],
+  "reference": "Ich brauche den Link zum GitHub-Repo und das Passwort für den VPN-Zugang."
+}

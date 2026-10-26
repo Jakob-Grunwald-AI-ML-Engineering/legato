@@ -1,0 +1,25 @@
+{
+  "name": "de-long-04-workshop-cancelled",
+  "language": "de",
+  "length": "long",
+  "locale": "de-DE",
+  "input": "ich muß euch leider sagen daß der workshop am samstag ausfällt der referent ist krank geworden und wir haben so kurzfristig keinen ersatz gefunden die teilnehmer bekommen ihr geld zurück das sind pro person fünfundachtzig euro wir bieten stattdessen einen neuen termin am neunzehnten oktober an ich weiß daß das ärgerlich ist und bitte um verständnis wer nicht kann meldet sich bitte bis donnerstag bei mir",
+  "vocabulary": [],
+  "mustContain": [
+    "muss",
+    "dass",
+    "Workshop",
+    "Samstag",
+    "85",
+    "19. Oktober",
+    "Donnerstag",
+    "Referent"
+  ],
+  "mustNotContain": [
+    "muß",
+    "daß",
+    "fünfundachtzig",
+    "neunzehnten"
+  ],
+  "reference": "Ich muss euch leider sagen, dass der Workshop am Samstag ausfällt. Der Referent ist krank geworden, und wir haben so kurzfristig keinen Ersatz gefunden. Die Teilnehmer bekommen ihr Geld zurück, das sind pro Person 85 Euro. Wir bieten stattdessen einen neuen Termin am 19. Oktober an. Ich weiß, dass das ärgerlich ist, und bitte um Verständnis. Wer nicht kann, meldet sich bitte bis Donnerstag bei mir."
+}

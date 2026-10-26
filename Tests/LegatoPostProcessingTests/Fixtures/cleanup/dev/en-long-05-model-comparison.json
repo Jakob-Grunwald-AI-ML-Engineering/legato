@@ -1,0 +1,27 @@
+{
+  "name": "en-long-05-model-comparison",
+  "language": "en",
+  "length": "long",
+  "locale": "en-US",
+  "input": "today i compared nemo tron and parakeet on a set of thirty dictation clips nemo tron was better on long sentences but parakeet was faster by about two hundred milliseconds the fluid audio library made it easy to swap the models the biggest problem was still proper names we should probably add a custom vocabulary next week",
+  "vocabulary": [
+    "Nemotron",
+    "FluidAudio",
+    "Parakeet"
+  ],
+  "mustContain": [
+    "Today I",
+    "Nemotron",
+    "Parakeet",
+    "FluidAudio",
+    "30",
+    "200"
+  ],
+  "mustNotContain": [
+    "nemo tron",
+    "fluid audio",
+    "thirty",
+    "two hundred"
+  ],
+  "reference": "Today I compared Nemotron and Parakeet on a set of 30 dictation clips. Nemotron was better on long sentences, but Parakeet was faster by about 200 milliseconds. The FluidAudio library made it easy to swap the models. The biggest problem was still proper names. We should probably add a custom vocabulary next week."
+}
