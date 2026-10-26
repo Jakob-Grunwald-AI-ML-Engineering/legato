@@ -76,13 +76,17 @@ public struct HostState: Codable, Sendable, Equatable {
     public var delivery: HostDelivery?
     /// On the final state: the post-processed text when it differs from the trimmed `committed` text.
     public var finalText: String?
+    /// Set when the user asked the app to insert this (final) text (the Live Activity's Insert button): a
+    /// visible keyboard types it without having followed the run, while the request is fresh
+    /// (`LinkChannel.insertMaxAge`). Nil for every other state.
+    public var insertAt: Date?
     /// `.live`: the revisions of this run so far, in order; nil before the first.
     public var revisions: [HostRevision]?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,
         beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool, delivery: HostDelivery? = nil,
-        finalText: String? = nil, revisions: [HostRevision]? = nil
+        finalText: String? = nil, insertAt: Date? = nil, revisions: [HostRevision]? = nil
     ) {
         self.v = Self.version
         self.runID = runID
@@ -96,7 +100,14 @@ public struct HostState: Codable, Sendable, Equatable {
         self.acceptsRemoteStart = acceptsRemoteStart
         self.delivery = delivery
         self.finalText = finalText
+        self.insertAt = insertAt
         self.revisions = revisions
+    }
+
+    /// The state carries an insert request that is still recent enough to act on.
+    public func insertIsFresh(now: Date) -> Bool {
+        guard let insertAt else { return false }
+        return now.timeIntervalSince(insertAt) <= LinkChannel.insertMaxAge
     }
 
     /// The run is over and this is its last state.

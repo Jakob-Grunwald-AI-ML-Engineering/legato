@@ -9,6 +9,12 @@ struct DictationAttributes: ActivityAttributes {
         /// Mirrors `DictationPhase` (same raw values).
         enum Phase: String, Codable, Hashable, Sendable {
             case starting, listening, finishing
+            /// The text waits for the Insert and Copy buttons.
+            case result
+            /// Terminal: the text was typed into the Legato keyboard's field.
+            case inserted
+            /// An Insert found no Legato keyboard acting; the buttons stay.
+            case insertFailed
             /// Terminal: the text is on the clipboard.
             case copied
             /// Terminal: tapping the activity opens the app, which copies the last transcript.
@@ -17,6 +23,8 @@ struct DictationAttributes: ActivityAttributes {
             case failed
 
             var isRunning: Bool { self == .starting || self == .listening }
+            /// The activity shows the Insert and Copy buttons (mirrors `DictationPhase.offersResultActions`).
+            var offersResultActions: Bool { self == .result || self == .insertFailed }
         }
 
         var startedAt: Date

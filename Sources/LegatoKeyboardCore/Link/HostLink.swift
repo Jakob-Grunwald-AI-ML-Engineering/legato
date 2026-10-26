@@ -70,6 +70,7 @@ public final class HostLink {
         state.volatile = ""
         state.delivery = delivery
         state.finalText = nil
+        state.insertAt = nil
         state.revisions = nil
         publish()
     }
@@ -86,6 +87,28 @@ public final class HostLink {
         guard state.runID != nil, state.phase == .starting || state.phase == .listening else { return }
         state.phase = .finishing
         publish()
+    }
+
+    /// The user asked to insert `text` (the Live Activity's Insert button): published as the final state of
+    /// a run of its own, for the keyboard, flagged so a visible keyboard types it although it never followed
+    /// the run. Wakes the keyboard with the usual note; `awaitFinalApplied(runID:timeout:)` tells whether it
+    /// landed. Refused (false) while a run is going on: its text is the link's.
+    @discardableResult
+    public func publishInsert(runID: String, text: String) -> Bool {
+        guard !isRunning else { return false }
+        cancelScrub()
+        state.runID = runID
+        state.target = .keyboard
+        state.phase = .idle
+        state.committed = text
+        state.volatile = ""
+        state.delivery = nil // an insert is typed as it is: no cleanup swap, no hold
+        state.finalText = nil
+        state.revisions = nil
+        state.insertAt = now()
+        publish()
+        scheduleScrub()
+        return true
     }
 
     public func update(committed: String, volatile: String) {
@@ -129,6 +152,7 @@ public final class HostLink {
         state.volatile = ""
         state.finalText = nil
         state.delivery = nil
+        state.insertAt = nil
         state.revisions = nil
         publish()
     }

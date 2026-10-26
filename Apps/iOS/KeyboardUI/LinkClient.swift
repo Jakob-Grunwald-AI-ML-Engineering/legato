@@ -29,9 +29,11 @@ final class LinkClient {
     func readAck() -> KeyboardAck? { store?.read(KeyboardAck.self, forKey: LinkChannel.Key.ack) }
     func readApplied() -> AppliedCursor? { store?.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) }
 
-    func writeApplied(_ cursor: AppliedCursor) {
+    /// `notify`: also post the note. The app waits only for `finalApplied`, so the typewriter's per-tick
+    /// writes stay quiet until the last one.
+    func writeApplied(_ cursor: AppliedCursor, notify: Bool = true) {
         store?.write(cursor, forKey: LinkChannel.Key.applied)
-        DarwinObserver.post(LinkChannel.Note.applied)
+        if notify { DarwinObserver.post(LinkChannel.Note.applied) }
     }
 
     /// `notify`: also post the note (on a change of visibility; the 1 s refreshes stay quiet).

@@ -22,11 +22,25 @@ enum KeyboardGeometryLog {
         logger.notice("e2e \(message, privacy: .public)")
     }
 
-    /// The controller's view and the height constraint that was asked for.
-    @MainActor static func reportView(_ view: UIView, inputView: UIInputView?, heightConstraint: NSLayoutConstraint?) {
-        let message = "kbd.view bounds=\(format(view.bounds)) frame=\(format(view.frame)) safe=\(format(view.safeAreaInsets)) "
+    /// The controller's view and the height constraint that was asked for. `mode` is the layout (strip or full).
+    @MainActor static func reportView(
+        _ view: UIView, inputView: UIInputView?, heightConstraint: NSLayoutConstraint?, mode: String
+    ) {
+        let message = "kbd.view mode=\(mode) requested=\(Int(heightConstraint?.constant ?? 0)) actual=\(Int(view.bounds.height.rounded())) "
+            + "bounds=\(format(view.bounds)) frame=\(format(view.frame)) safe=\(format(view.safeAreaInsets)) "
             + "window=\(view.window.map { format($0.bounds) } ?? "none") constraint=\(Int(heightConstraint?.constant ?? 0))@\(Int(heightConstraint?.priority.rawValue ?? 0)) "
             + "inputView=\(inputView.map { format($0.frame) } ?? "none") superview=\(view.superview.map { format($0.frame) } ?? "none")"
+        logger.notice("e2e \(message, privacy: .public)")
+    }
+
+    /// A resize the strip asked for (the chevron, the height cycle, the setting): the height requested
+    /// against the laid-out view and input view heights, once it has settled.
+    @MainActor static func reportResize(
+        reason: String, mode: String, requested: CGFloat, view: UIView, inputView: UIInputView?
+    ) {
+        let message = "kbd.resize reason=\(reason) mode=\(mode) requested=\(Int(requested.rounded())) "
+            + "viewActual=\(Int(view.bounds.height.rounded())) inputViewActual=\(inputView.map { Int($0.frame.height.rounded()) } ?? -1) "
+            + "width=\(Int(view.bounds.width.rounded()))"
         logger.notice("e2e \(message, privacy: .public)")
     }
 
