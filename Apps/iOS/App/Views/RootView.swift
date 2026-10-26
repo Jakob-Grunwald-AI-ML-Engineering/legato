@@ -13,9 +13,17 @@ struct RootView: View {
                 OnboardingView(controller: controller)
             }
         }
+        .fullScreenCover(isPresented: Binding(
+            get: { controller.showsKeyboardHop },
+            set: { if !$0 { controller.dismissKeyboardHop() } })
+        ) {
+            KeyboardHopView(controller: controller)
+        }
         .task { await controller.refreshReadiness() }
         .task { await controller.refreshLastTranscript() }
         .onChange(of: scenePhase) { _, phase in
+            // Back to the app the user came from (or away): the hop screen has done its job.
+            if phase == .background { controller.dismissKeyboardHop() }
             guard phase == .active else { return }
             Task {
                 await controller.refreshReadiness()

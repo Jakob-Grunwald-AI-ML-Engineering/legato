@@ -33,6 +33,7 @@ build_ios_app() {
 
 if [ "$mode" = quick ]; then
   swift build
+  swift build --build-tests   # PRs compile the test targets too, on the pinned Xcode, without running them
   xcodebuild build -quiet -scheme "$scheme" -destination 'generic/platform=iOS Simulator'
   build_ios_app
   exit 0
@@ -48,3 +49,9 @@ echo "Simulator: $udid"
 swift test
 xcodebuild test -quiet -scheme "$scheme" -destination "platform=iOS Simulator,id=$udid"
 build_ios_app
+
+# Release build + scan: no fake engine, e2e hook or debug switch may reach the shipping binary. It builds
+# only (no simulator needed), so it runs here rather than in the simulator run.
+if has_ios_app; then
+  scripts/e2e/ios-sim.sh release-check
+fi

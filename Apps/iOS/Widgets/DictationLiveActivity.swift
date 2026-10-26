@@ -109,10 +109,11 @@ private struct LockScreenView: View {
     }
 }
 
-/// Stops the running dictation. The same intent as the Action Button: pressed while listening it stops.
+/// Stops the running dictation. A stop-only intent, not the toggle: a press that lands after the run ended
+/// (a stale activity, a double tap) must do nothing, never start a new dictation.
 private struct StopButton: View {
     var body: some View {
-        Button(intent: ToggleDictationIntent()) {
+        Button(intent: StopDictationIntent()) {
             Image(systemName: "stop.circle.fill").font(.title)
         }
         .buttonStyle(.plain)

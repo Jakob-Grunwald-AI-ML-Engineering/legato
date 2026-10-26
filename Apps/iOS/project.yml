@@ -1,10 +1,16 @@
 # Legato for iOS. `xcodegen generate` (pinned in /.xcodegen-version) writes Legato.xcodeproj and Gen/;
 # both are gitignored. Run it from this directory.
 #
-# Layout: Shared/ compiles into every target and must not import LegatoKit. Only the app links the
-# package. To add the keyboard (leg 3): add a `LegatoKeyboard` app-extension target mirroring
-# LegatoWidgets (sources: [Keyboard, Shared]), list it under the app's dependencies, and give it the
-# same App Group entitlement.
+# Layout: Shared/ (the AppIntents and the Live Activity attributes) compiles into the app and the widget
+# extension and must not import LegatoKit. The keyboard compiles [Keyboard, KeyboardUI] and never
+# Shared/: an AppIntent inside a keyboard runs in the keyboard process, which cannot record. It links
+# only LegatoKeyboardCore, and talks to the app over the App Group (link.* keys plus Darwin notes). The
+# app compiles KeyboardUI too, for the DEBUG keyboard harness (App/Debug/KeyboardHarness.swift) that
+# the simulator end-to-end run drives. Only the app links the rest of the package.
+#
+# Each target carries a PrivacyInfo.xcprivacy next to its sources (App/, Widgets/, Keyboard/): the App
+# Group's UserDefaults is the one required-reason API in use (CA92.1 own defaults, 1C8F.1 same App Group);
+# no tracking, no collected data.
 #
 # TestFlight builds are Release builds that keep the audio diagnostics and debug switches: pass
 # OTHER_SWIFT_FLAGS='$(inherited) -D LEGATO_INTERNAL' to xcodebuild (leg 5). App Store builds don't.
@@ -30,15 +36,18 @@ targets:
   Legato:
     type: application
     platform: iOS
-    sources: [App, Shared]
+    sources: [App, Shared, KeyboardUI]
     dependencies:
       - target: LegatoWidgets
+      - target: LegatoKeyboard
       - package: LegatoKit
         product: LegatoCore
       - package: LegatoKit
         product: LegatoAudio
       - package: LegatoKit
         product: LegatoAppleSpeech
+      - package: LegatoKit
+        product: LegatoKeyboardCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato
@@ -63,6 +72,8 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
         NSSupportsLiveActivities: true
+        # Only Apple's own encryption (TLS, system frameworks): exempt, so App Store Connect stops asking.
+        ITSAppUsesNonExemptEncryption: false
         NSMicrophoneUsageDescription: Legato records your voice to turn it into text.
         NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this device.
         CFBundleURLTypes:
@@ -88,3 +99,33 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  LegatoKeyboard:
+    type: app-extension
+    platform: iOS
+    sources: [Keyboard, KeyboardUI]
+    dependencies:
+      - package: LegatoKit
+        product: LegatoKeyboardCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.keyboard
+        APPLICATION_EXTENSION_API_ONLY: YES
+    entitlements:
+      path: Gen/Keyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato]
+    info:
+      path: Gen/Keyboard-Info.plist
+      properties:
+        CFBundleDisplayName: Legato
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: true
+            PrefersRightToLeft: false
+            PrimaryLanguage: en-US
+            RequestsOpenAccess: true

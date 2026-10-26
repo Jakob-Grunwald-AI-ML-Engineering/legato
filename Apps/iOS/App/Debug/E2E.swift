@@ -29,9 +29,20 @@ import os
 ///
 /// Darwin notifications (see `installTriggers`): `toggle`, `interrupt`, `copy-last`, `foreground`,
 /// `background`, `toggle-after-hop` (the press that repeats a `needsForeground` one after the hop).
+/// - `-LegatoKeepAliveSeconds <n>`: sets the keep-alive setting (any number of seconds).
+/// - `-LegatoFakeKeyboardApply YES|NO`: whether the fake keyboard types the streamed text into its
+///   document and confirms it (default YES). NO leaves the final text unconfirmed.
+///
+/// - `-LegatoKeyboardHarness YES`: show the keyboard harness (the keyboard's UI over a text view in the
+///   app) instead of the app's screens. Its command is `harness-mic` (a tap on the mic key).
 ///
 /// URLs: `legato://toggle` calls `AppController.toggle()`; `legato://interrupt` posts the notification
 /// the audio session sends on an interruption, so the real observer handles it.
+///
+/// The fake keyboard (`E2EFakeKeyboard`) stands in for the keyboard extension: it publishes presence,
+/// sends requests, and applies the streamed text with the real `ProxyEditPlanner`. Commands
+/// `kbd-visible`, `kbd-hidden`, `kbd-request-start|stop|end-keep-alive`, `kbd-hop-start` (the request,
+/// then the URL), `kbd-hop-start-url-first` (the URL, then the request), `kbd-forged-url` (a start URL no request backs).
 ///
 /// Every line is logged at notice level as `e2e <event> key=value ...` (subsystem de.gruenwald.legato,
 /// category e2e).
@@ -46,6 +57,8 @@ enum E2E {
     static func quote(_ text: String) -> String {
         "\"" + text.replacingOccurrences(of: "\"", with: "'").replacingOccurrences(of: "\n", with: " ") + "\""
     }
+
+    static let showsKeyboardHarness = UserDefaults.standard.bool(forKey: "LegatoKeyboardHarness")
 
     static let fakeEngine: E2EScriptedEngine? = {
         guard let text = UserDefaults.standard.string(forKey: "LegatoFakeEngine"), !text.isEmpty else { return nil }
@@ -125,16 +138,16 @@ enum E2E {
 
     /// A session wired to the scripted engine, or nil when fake mode is off.
     @MainActor
-    static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy) -> DictationSession? {
+    static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy, linger: Duration) -> DictationSession? {
         guard let engine = fakeEngine else { return nil }
-        log("session.make engine=\(engine.id) policy=\(policy.rawValue)")
+        log("session.make engine=\(engine.id) policy=\(policy.rawValue) lingerSeconds=\(Int(linger.components.seconds))")
         return DictationSession(
             engine: engine,
             source: E2EFakeAudioSource(policy: policy),
             sessionControl: E2ENoopSessionControl(policy: policy),
             history: history,
             policy: policy,
-            linger: .zero)
+            linger: linger)
     }
 
     /// Applies the status overrides to what the system reports.
@@ -157,6 +170,12 @@ enum E2E {
         if let flag = UserDefaults.standard.string(forKey: "LegatoForceTapToCopy") {
             Settings.debugForceTapToCopy = ["YES", "TRUE", "1"].contains(flag.uppercased())
         }
+        if UserDefaults.standard.object(forKey: "LegatoKeepAliveSeconds") != nil {
+            Settings.keepAliveSeconds = UserDefaults.standard.integer(forKey: "LegatoKeepAliveSeconds")
+        }
+        if let flag = UserDefaults.standard.string(forKey: "LegatoFakeKeyboardApply") {
+            E2EFakeKeyboard.shared.applies = ["YES", "TRUE", "1"].contains(flag.uppercased())
+        }
         if let policy = fakePolicy {
             Settings.debugShowPauseOthers = true
             Settings.audioPolicy = policy
@@ -165,7 +184,7 @@ enum E2E {
             Settings.audioPolicy = .default
         }
         installTriggers()
-        log("launch fakeEngine=\(fakeEngine != nil) fakeReadiness=\(String(describing: fakeReadiness)) forceTapToCopy=\(Settings.debugForceTapToCopy) fakeBackground=\(String(describing: fakeInBackground)) fakeOtherAudio=\(String(describing: fakeOtherAudioPlaying))")
+        log("launch keepAliveSeconds=\(Settings.keepAliveSeconds) fakeEngine=\(fakeEngine != nil) fakeReadiness=\(String(describing: fakeReadiness)) forceTapToCopy=\(Settings.debugForceTapToCopy) fakeBackground=\(String(describing: fakeInBackground)) fakeOtherAudio=\(String(describing: fakeOtherAudioPlaying))")
     }
 }
 
@@ -179,9 +198,17 @@ extension AppController {
         return true
     }
 
-    /// `toggle`, `interrupt`, `copy-last`, `foreground`, `background` or `toggle-after-hop`.
+    /// `toggle`, `interrupt`, `copy-last`, `foreground`, `background`, `toggle-after-hop` or one of the `kbd-` commands.
     func runE2E(_ command: String) async {
         E2E.log("command \(command)")
+        if command.hasPrefix("kbd-") {
+            await E2EFakeKeyboard.shared.run(command)
+            return
+        }
+        if command.hasPrefix("harness-") {
+            KeyboardHarnessModel.shared.run(command)
+            return
+        }
         switch command {
         case "toggle":
             _ = await toggle()
@@ -206,7 +233,12 @@ extension AppController {
 }
 
 extension E2E {
-    static let commands = ["toggle", "interrupt", "copy-last", "foreground", "background", "toggle-after-hop"]
+    static let commands = [
+        "toggle", "interrupt", "copy-last", "foreground", "background", "toggle-after-hop",
+        "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
+        "kbd-hop-start", "kbd-hop-start-url-first", "kbd-forged-url",
+        "harness-mic", "harness-type", "harness-numbers",
+    ]
 
     /// Darwin notifications `de.gruenwald.legato.e2e.<command>`, posted from the host with
     /// `xcrun simctl spawn <udid> notifyutil -p <name>`. `simctl openurl` with a custom scheme stops at

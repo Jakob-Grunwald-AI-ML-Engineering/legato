@@ -18,12 +18,18 @@ public final class DictationSession {
     /// after the run and lease are torn down. Not fired for failures `stop()` reports itself.
     /// The text recognized so far is still available from `partialEntry()`.
     public var onRunAborted: (@MainActor (any Error) -> Void)?
+    /// Fires once when a lease held between runs (`linger`) runs out and is torn down. Not fired for
+    /// `endLease()`, nor when there is no linger.
+    public var onLeaseExpired: (@MainActor () -> Void)?
+    /// How many edits have been published on `edits` so far; a consumer that has seen this many is caught up.
+    public private(set) var editCount = 0
 
     private let engine: any DictationEngine
     private let source: any AudioSource
     private let sessionControl: any AudioSessionControlling
     private let history: any HistoryStore
-    private let policy: AudioPolicy
+    /// The audio policy this session activates under (fixed at construction). A reused lease keeps it.
+    public let policy: AudioPolicy
     private let linger: Duration
     private let sleep: @Sendable (Duration) async throws -> Void
     private let now: @Sendable () -> Date
@@ -38,6 +44,9 @@ public final class DictationSession {
     private var streamFailure: (any Error)?
     /// Identifies the current run's consume task; events and errors from older runs are ignored.
     private var generation = 0
+    /// The run's own abort teardown (stream failure) is in progress.
+    private var isAborting = false
+    private var settleWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(
         engine: any DictationEngine,
@@ -125,6 +134,13 @@ public final class DictationSession {
         return entry
     }
 
+    /// Returns once the run's own abort teardown (after a stream failure) has finished and
+    /// `onRunAborted` has fired; at once when no abort is in progress. A caller that must not start
+    /// anything over that teardown (a new activation would be deactivated by it) waits here.
+    public func settled() async {
+        while isAborting { await withCheckedContinuation { settleWaiters.append($0) } }
+    }
+
     /// The entry for the text committed so far in the current or last run (nil when there is none),
     /// built like the one `stop()` saves but not written to history: use it to salvage an aborted run.
     public func partialEntry() -> DictationEntry? {
@@ -190,29 +206,39 @@ public final class DictationSession {
         do {
             for try await event in events {
                 guard gen == generation else { return }
-                for edit in assembler.apply(event) { editsContinuation.yield(edit) }
+                for edit in assembler.apply(event) { publish(edit) }
             }
         } catch {
             guard gen == generation else { return }
             lastError = error
             if runState == .listening {
                 runState = .finishing // blocks stop() while aborting
+                isAborting = true
                 generation += 1
                 consumeTask = nil
                 clearVolatile()
                 await source.detach()
                 await teardownLease()
                 runState = .idle
+                isAborting = false
                 onRunAborted?(error)
+                let pending = settleWaiters
+                settleWaiters = []
+                for waiter in pending { waiter.resume() }
             } else {
                 streamFailure = error // stop() is in flight; it reports the failure
             }
         }
     }
 
+    private func publish(_ edit: TranscriptEdit) {
+        editCount += 1
+        editsContinuation.yield(edit)
+    }
+
     /// Removes tentative text from the sink; a run never leaves volatile text behind.
     private func clearVolatile() {
-        for edit in assembler.apply(TranscriptEvent(text: "", isFinal: false)) { editsContinuation.yield(edit) }
+        for edit in assembler.apply(TranscriptEvent(text: "", isFinal: false)) { publish(edit) }
     }
 
     /// Ends the lease: stops the mic, then deactivates the session. No-op when idle.
@@ -233,8 +259,17 @@ public final class DictationSession {
         lingerTask = Task {
             do { try await sleep(linger) } catch { return }
             guard !Task.isCancelled, runState == .idle else { return }
+            let held = leaseState != .idle
             await teardownLease()
+            if held { onLeaseExpired?() }
         }
+    }
+
+    /// Tears down a lease held between runs now. No-op during a run or without a lease.
+    public func endLease() async {
+        guard runState == .idle, leaseState != .idle else { return }
+        await cancelLinger()
+        await teardownLease()
     }
 
     private func cancelLinger() async {

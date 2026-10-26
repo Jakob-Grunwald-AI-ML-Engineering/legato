@@ -56,11 +56,6 @@ public protocol Readiness: AnyObject {
     func check() async -> ReadinessIssue?
 }
 
-/// Builds the session for one dictation attempt under the given audio policy. Called once per start
-/// (twice when a refused background start falls back to the default policy), so no session or mic
-/// outlives a run.
-public typealias DictationSessionFactory = @MainActor (AudioPolicy) -> DictationSession
-
 /// What the app knows about the moment a start is requested.
 public struct StartContext: Sendable, Equatable {
     /// The app is in the background (e.g. an Action Button press with the app not on screen).
@@ -110,4 +105,69 @@ public final class UnrestrictedStartEnvironment: StartEnvironment {
     public init() {}
     public func current() -> StartContext { .unrestricted }
     public func isBackgroundRefusal(_ error: any Error) -> Bool { false }
+}
+
+/// Builds the session for one dictation attempt under `policy`. `linger` is how long its mic lease stays
+/// armed after a run (zero: released at once). Called once per attempt that has no held session to reuse
+/// (more than once when a refused background start falls back to the default policy, or a foreground
+/// start is retried), so no session or mic outlives its keep-alive.
+public typealias DictationSessionFactory = @MainActor (_ policy: AudioPolicy, _ linger: Duration) -> DictationSession
+
+/// Where a run's text goes.
+public enum DictationTarget: Sendable, Equatable {
+    /// The app's own screen, or only the clipboard: the text is copied when the run ends.
+    case app
+    /// Streamed into the text field of the keyboard extension; copied only if it didn't land there.
+    case keyboard
+}
+
+/// One run, for the sink: the id ties its events together.
+public struct DictationRun: Sendable, Equatable {
+    public let id: UUID
+    public let target: DictationTarget
+
+    public init(id: UUID = UUID(), target: DictationTarget) {
+        self.id = id
+        self.target = target
+    }
+}
+
+/// How a start treats the Live Activity, the mic lease and the text.
+public struct StartOptions: Sendable, Equatable {
+    public enum ActivityPolicy: Sendable, Equatable {
+        /// iOS stops a recording intent that has no Live Activity: a refusal means onboarding, no run.
+        case required
+        /// Try for one; run without it when the system refuses (or Live Activities are off).
+        case bestEffort
+    }
+
+    public var activity: ActivityPolicy
+    /// How long the mic stays armed after the run, so the next run starts without re-activating the
+    /// audio session. Zero releases it at once.
+    public var keepAlive: Duration
+    public var target: DictationTarget
+
+    public init(activity: ActivityPolicy = .required, keepAlive: Duration = .zero, target: DictationTarget = .app) {
+        self.activity = activity
+        self.keepAlive = keepAlive
+        self.target = target
+    }
+}
+
+/// Receives a run's text as it happens (the app publishes it to the keyboard). Per run, in order:
+/// `runStarted`, `update` (first with empty text once listening, then after every edit), `runEnded`;
+/// then `leaseChanged` when a keep-alive lease is held. A run that began always ends, however it ends.
+@MainActor
+public protocol TranscriptSink: AnyObject {
+    /// A run begins; the activity (if required) exists and the session is about to start.
+    func runStarted(_ run: DictationRun)
+    /// The run's text so far: everything committed, and the tentative tail.
+    func update(committed: String, volatile: String)
+    /// The run is over. `committed` is everything committed (as it was streamed), `text` the final
+    /// trimmed transcript, nil when nothing final was recognized. Returns whether the final text is
+    /// now in the target's field, so the clipboard isn't needed; may wait briefly for the target to
+    /// confirm it.
+    func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool
+    /// The mic lease between runs: when it ends, or nil when it is not held (ended or expired).
+    func leaseChanged(until: Date?)
 }
