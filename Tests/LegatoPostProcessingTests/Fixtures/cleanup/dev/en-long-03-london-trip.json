@@ -1,0 +1,29 @@
+{
+  "name": "en-long-03-london-trip",
+  "language": "en",
+  "length": "long",
+  "locale": "en-US",
+  "input": "we arrive in london at seven forty five on saturday morning the hotel is on baker street and costs one hundred and twenty pounds a night after check in we are going to the british museum which opens at ten the tickets are free but we booked a guided tour for thirty five pounds per person in the evening we have a table at a restaurant in soho at eight on sunday we take the train to oxford at nine fifteen and come back late",
+  "vocabulary": [],
+  "mustContain": [
+    "London",
+    "7:45",
+    "Baker Street",
+    "120",
+    "British Museum",
+    "35",
+    "Soho",
+    "Sunday",
+    "Oxford",
+    "9:15"
+  ],
+  "mustNotContain": [
+    "london",
+    "seven forty",
+    "hundred",
+    "thirty five",
+    "oxford",
+    "soho"
+  ],
+  "reference": "We arrive in London at 7:45 on Saturday morning. The hotel is on Baker Street and costs £120 a night. After check-in we are going to the British Museum, which opens at 10. The tickets are free, but we booked a guided tour for £35 per person. In the evening we have a table at a restaurant in Soho at 8. On Sunday we take the train to Oxford at 9:15 and come back late."
+}

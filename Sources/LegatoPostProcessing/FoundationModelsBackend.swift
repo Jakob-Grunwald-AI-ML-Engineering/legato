@@ -37,16 +37,34 @@ public struct FoundationModelsBackend: LLMBackend {
     }
 
     public func respond(instructions: String, prompt: String) async throws -> String {
+        try await respond(instructions: instructions, examples: [], prompt: prompt)
+    }
+
+    public func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String {
         if case .unavailable(let reason) = Self.currentAvailability() {
             throw LLMError.unavailable(reason: reason)
         }
-        let session = LanguageModelSession(model: .default, instructions: instructions)
+        let session = LanguageModelSession(
+            model: .default, tools: [], transcript: Self.transcript(instructions: instructions, examples: examples))
         do {
             let response = try await session.respond(to: prompt, options: GenerationOptions(sampling: .greedy))
             return response.content
         } catch let error as LanguageModelSession.GenerationError {
             throw Self.map(error)
         }
+    }
+
+    /// The session's starting transcript: the instructions, then each example as a prompt and its response.
+    static func transcript(instructions: String, examples: [LLMExample]) -> Transcript {
+        func text(_ content: String) -> [Transcript.Segment] { [.text(Transcript.TextSegment(content: content))] }
+        var entries: [Transcript.Entry] = [
+            .instructions(Transcript.Instructions(segments: text(instructions), toolDefinitions: []))
+        ]
+        for example in examples {
+            entries.append(.prompt(Transcript.Prompt(segments: text(example.user))))
+            entries.append(.response(Transcript.Response(assetIDs: [], segments: text(example.assistant))))
+        }
+        return Transcript(entries: entries)
     }
 
     private static func map(_ error: LanguageModelSession.GenerationError) -> LLMError {

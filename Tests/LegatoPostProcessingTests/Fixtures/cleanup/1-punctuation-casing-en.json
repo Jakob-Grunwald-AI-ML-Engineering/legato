@@ -1,6 +1,0 @@
-{
-  "name": "punctuation-casing-en",
-  "locale": "en-US",
-  "input": "hey sarah i looked at the budget for next quarter and it seems fine to me can you send me the final numbers by friday afternoon thanks",
-  "mustContain": ["Hey", "Sarah", "Friday"]
-}

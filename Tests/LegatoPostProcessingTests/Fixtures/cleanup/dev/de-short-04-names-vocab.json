@@ -1,0 +1,22 @@
+{
+  "name": "de-short-04-names-vocab",
+  "language": "de",
+  "length": "short",
+  "locale": "de-DE",
+  "input": "herr grün wald hat gesagt dass ligato bald auf dem iphone läuft",
+  "vocabulary": [
+    "Legato",
+    "Grunwald"
+  ],
+  "mustContain": [
+    "Herr Grunwald",
+    "Legato",
+    "iPhone"
+  ],
+  "mustNotContain": [
+    "grün wald",
+    "ligato",
+    "Ligato"
+  ],
+  "reference": "Herr Grunwald hat gesagt, dass Legato bald auf dem iPhone läuft."
+}

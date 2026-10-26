@@ -1,0 +1,21 @@
+{
+  "name": "de-short-h2-name-vocab",
+  "language": "de",
+  "length": "short",
+  "locale": "de-DE",
+  "input": "ich habe heute mit herrn wenkata raman telefoniert er schickt uns die unterlagen bis freitag",
+  "vocabulary": [
+    "Venkataraman"
+  ],
+  "mustContain": [
+    "Ich habe",
+    "Venkataraman",
+    "Freitag",
+    "Unterlagen"
+  ],
+  "mustNotContain": [
+    "wenkata",
+    "freitag"
+  ],
+  "reference": "Ich habe heute mit Herrn Venkataraman telefoniert. Er schickt uns die Unterlagen bis Freitag."
+}

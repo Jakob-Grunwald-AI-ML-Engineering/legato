@@ -1,0 +1,22 @@
+{
+  "name": "mixed-short-h2-munich",
+  "language": "mixed",
+  "length": "short",
+  "locale": "en-US",
+  "input": "we are meeting herr müller at the hauptbahnhof in munich at nine fifteen",
+  "vocabulary": [],
+  "mustContain": [
+    "We are meeting",
+    "Herr Müller",
+    "Hauptbahnhof",
+    "Munich",
+    "9:15"
+  ],
+  "mustNotContain": [
+    "müller",
+    "hauptbahnhof",
+    "munich",
+    "nine"
+  ],
+  "reference": "We are meeting Herr Müller at the Hauptbahnhof in Munich at 9:15."
+}

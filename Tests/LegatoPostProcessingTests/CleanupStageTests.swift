@@ -162,10 +162,14 @@ private final class FakeBackend: LLMBackend {
     }
 }
 
-/// The text the stage put in the prompt: what sits between the transcript tags.
+/// The text the stage put in the prompt: what sits between the text tags.
 private func transcript(in prompt: String) -> String {
-    guard let open = prompt.range(of: "<transcript>"), let close = prompt.range(of: "</transcript>") else { return prompt }
-    return String(prompt[open.upperBound ..< close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+    for tag in ["text", "transcript"] {
+        if let open = prompt.range(of: "<\(tag)>"), let close = prompt.range(of: "</\(tag)>") {
+            return String(prompt[open.upperBound ..< close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+    return prompt
 }
 
 private let de = Locale(identifier: "de-DE")
@@ -173,33 +177,36 @@ private let en = Locale(identifier: "en-US")
 
 @Suite("LLMCleanupStage")
 struct CleanupStageTests {
-    @Test func theInstructionsAndPromptCarryTheLocale() async throws {
+    @Test func theTextReachesThePromptAndTheExamplesEndInItsLanguage() async throws {
         let backend = FakeBackend { transcript(in: $0) }
         _ = try await LLMCleanupStage(backend: backend).process("hallo welt", locale: de)
-        let combined = (backend.instructions + backend.prompts).joined(separator: "\n")
-        #expect(combined.contains("de-DE"))
-        #expect(combined.contains("German"))
         #expect(backend.prompts.first?.contains("hallo welt") == true)
+        // The nearest example counts most, so the last one is in the transcript's language.
+        let german = CleanupPrompt.standard.examples(de)
+        let english = CleanupPrompt.standard.examples(en)
+        #expect(german.last?.assistant.contains("Samstag") == true)
+        #expect(english.last?.assistant.contains("morning") == true)
     }
 
     @Test func theInstructionsForbidAddingOrDroppingContent() {
-        let text = LLMCleanupStage.instructions(locale: en).lowercased()
-        for phrase in ["punctuation", "spelling", "never add", "only the"] {
+        let text = CleanupPrompt.standard.instructions(en, []).lowercased()
+        for phrase in ["punctuation", "spelling", "every sentence", "never translate", "add anything", "nothing else"] {
             #expect(text.contains(phrase), "missing: \(phrase)")
         }
     }
 
-    @Test func theUsersVocabularyReachesTheInstructions() async throws {
+    @Test func theUsersVocabularyReachesThePrompt() async throws {
         let backend = FakeBackend { transcript(in: $0) }
         _ = try await LLMCleanupStage(backend: backend, vocabulary: ["Legato", "Grunwald"])
             .process("hallo welt", locale: de)
-        let instructions = backend.instructions.joined(separator: "\n")
-        #expect(instructions.contains("Legato"))
-        #expect(instructions.contains("Grunwald"))
+        let prompt = backend.prompts.joined(separator: "\n")
+        #expect(prompt.contains("Legato"))
+        #expect(prompt.contains("Grunwald"))
+        #expect(!backend.instructions.joined(separator: "\n").contains("Legato"))
     }
 
     @Test func noVocabularyNamesNoWords() {
-        let text = LLMCleanupStage.instructions(locale: en)
+        let text = CleanupPrompt.standard.instructions(en, [])
         for name in ["Claude", "ChatGPT", "OpenAI", "GitHub"] {
             #expect(!text.contains(name), "unexpected built-in name: \(name)")
         }
@@ -307,8 +314,9 @@ struct CleanupStageTests {
 
     @Test func theBackendLimitShrinksTheChunkSize() async throws {
         let text = "First sentence here. Second one follows! Is a third a question? Yes, and a fourth ends it."
-        // The limit leaves room for the instructions; the stage must still chunk below it.
-        let limit = LLMCleanupStage.instructions(locale: en).count + 140
+        // The limit leaves room for the instructions and examples; the stage must still chunk below it.
+        let examples = CleanupPrompt.standard.examples(en).reduce(0) { $0 + $1.user.count + $1.assistant.count }
+        let limit = CleanupPrompt.standard.instructions(en, []).count + examples + 140
         let backend = FakeBackend(maxPromptCharacters: limit) { transcript(in: $0) }
         let out = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 100_000).process(text, locale: en)
         #expect(backend.prompts.count >= 2)

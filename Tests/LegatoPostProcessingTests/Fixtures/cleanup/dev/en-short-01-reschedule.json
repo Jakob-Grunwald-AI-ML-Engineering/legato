@@ -1,0 +1,19 @@
+{
+  "name": "en-short-01-reschedule",
+  "language": "en",
+  "length": "short",
+  "locale": "en-US",
+  "input": "can you move the call with tom from tuesday to thursday at three thirty p m",
+  "vocabulary": [],
+  "mustContain": [
+    "Can you",
+    "Tom",
+    "Tuesday",
+    "Thursday",
+    "3:30"
+  ],
+  "mustNotContain": [
+    "three thirty"
+  ],
+  "reference": "Can you move the call with Tom from Tuesday to Thursday at 3:30 p.m.?"
+}

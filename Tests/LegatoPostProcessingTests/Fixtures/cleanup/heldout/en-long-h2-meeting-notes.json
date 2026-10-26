@@ -1,0 +1,31 @@
+{
+  "name": "en-long-h2-meeting-notes",
+  "language": "en",
+  "length": "long",
+  "locale": "en-US",
+  "input": "okay here is what i learned from the meeting. anthropik is working on a longer context window for kloud. the plan is to roll it out in march. our own team will get early access at the end of january. in the meantime we should clean up our prompts. i also talked to lena from the legal department about the data processing agreement. she said it needs to be signed by the fifteenth of december. i will send everyone a summary tomorrow morning.",
+  "vocabulary": [
+    "Claude",
+    "Anthropic"
+  ],
+  "mustContain": [
+    "Okay",
+    "Anthropic",
+    "Claude",
+    "March",
+    "January",
+    "Lena",
+    "December",
+    "15"
+  ],
+  "mustNotContain": [
+    "anthropik",
+    "kloud",
+    "fifteenth",
+    "march",
+    "lena",
+    ". anthropik",
+    ". the plan"
+  ],
+  "reference": "Okay, here is what I learned from the meeting. Anthropic is working on a longer context window for Claude. The plan is to roll it out in March. Our own team will get early access at the end of January. In the meantime, we should clean up our prompts. I also talked to Lena from the legal department about the data processing agreement. She said it needs to be signed by the 15th of December. I will send everyone a summary tomorrow morning."
+}

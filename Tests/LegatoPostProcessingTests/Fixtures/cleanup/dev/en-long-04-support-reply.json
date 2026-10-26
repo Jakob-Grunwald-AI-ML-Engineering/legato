@@ -1,0 +1,25 @@
+{
+  "name": "en-long-04-support-reply",
+  "language": "en",
+  "length": "long",
+  "locale": "en-US",
+  "input": "dear mister johnson. thank you for contacting us about your order. i am sorry that the package arrived damaged. we will send a replacement free of charge, and you do not need to return the broken item. the new parcel should arrive within five working days. your reference number is eight four seven two. if you have any further questions, just reply to this email. best regards, emma from customer support.",
+  "vocabulary": [],
+  "mustContain": [
+    "Johnson",
+    "8472",
+    "Emma",
+    "Dear",
+    "Thank you",
+    "Best regards"
+  ],
+  "mustNotContain": [
+    "johnson",
+    "emma",
+    "eight four",
+    "mister",
+    ". thank you",
+    ". i am sorry"
+  ],
+  "reference": "Dear Mr. Johnson. Thank you for contacting us about your order. I am sorry that the package arrived damaged. We will send a replacement free of charge, and you do not need to return the broken item. The new parcel should arrive within five working days. Your reference number is 8472. If you have any further questions, just reply to this email. Best regards, Emma from Customer Support."
+}

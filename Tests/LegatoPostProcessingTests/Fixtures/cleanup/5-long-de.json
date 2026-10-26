@@ -1,6 +1,0 @@
-{
-  "name": "long-de",
-  "locale": "de-DE",
-  "input": "guten morgen zusammen. ich möchte kurz den stand des projekts zusammenfassen. wir haben letzte woche die neue version der app an die testgruppe verschickt und bisher kamen nur wenige rückmeldungen. die meisten betreffen die anmeldung, die für einige nutzer zu lange dauert. das team hat den fehler gestern gefunden und heute morgen schon behoben. außerdem muß ich erwähnen, dass die spracherkennung auf dem iphone jetzt deutlich schneller reagiert als vorher. besonders bei kurzen sätzen merkt man den unterschied sofort. für nächste woche planen wir drei dinge. erstens, die einstellungen für die modellauswahl fertigzustellen. zweitens, die zusammenfassung von meetings auf dem mac zu testen. drittens, die dokumentation für die entwickler zu aktualisieren. wenn ihr fragen habt, schreibt mir einfach eine nachricht oder ruft mich nach dem mittagessen an.",
-  "mustContain": ["Guten Morgen", "muss", "Rückmeldungen", "Mittagessen", "Erstens"]
-}

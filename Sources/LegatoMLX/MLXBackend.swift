@@ -105,6 +105,10 @@ public final class MLXBackend: LLMBackend {
     }
 
     public func respond(instructions: String, prompt: String) async throws -> String {
+        try await respond(instructions: instructions, examples: [], prompt: prompt)
+    }
+
+    public func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String {
         guard MLXInstaller.isComplete(folder: folder) else {
             throw LLMError.unavailable(reason: "\(spec.displayName) is not downloaded.")
         }
@@ -114,8 +118,14 @@ public final class MLXBackend: LLMBackend {
             instructions: instructions,
             generateParameters: GenerateParameters(maxTokens: 1_024, temperature: 0),
             additionalContext: ["enable_thinking": false])
-        let reply = try await session.respond(to: prompt)
+        let reply = try await session.respond(to: Self.chatMessages(examples: examples, prompt: prompt))
         guard !reply.allSatisfy(\.isWhitespace) else { throw LLMError.emptyResponse }
         return reply
+    }
+
+    /// The conversation after the system instructions: each example as a user turn and the answer to it,
+    /// then the prompt.
+    static func chatMessages(examples: [LLMExample], prompt: String) -> [Chat.Message] {
+        examples.flatMap { [Chat.Message.user($0.user), Chat.Message.assistant($0.assistant)] } + [.user(prompt)]
     }
 }

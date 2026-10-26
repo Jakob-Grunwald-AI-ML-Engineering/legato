@@ -1,0 +1,20 @@
+{
+  "name": "en-short-08-temperature",
+  "language": "en",
+  "length": "short",
+  "locale": "en-US",
+  "input": "it is twenty three degrees in berlin right now but it will drop to fourteen tonight",
+  "vocabulary": [],
+  "mustContain": [
+    "It is",
+    "23",
+    "Berlin",
+    "14"
+  ],
+  "mustNotContain": [
+    "twenty",
+    "fourteen",
+    "berlin"
+  ],
+  "reference": "It is 23 degrees in Berlin right now, but it will drop to 14 tonight."
+}

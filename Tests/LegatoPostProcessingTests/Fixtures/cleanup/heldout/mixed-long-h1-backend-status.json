@@ -1,0 +1,33 @@
+{
+  "name": "mixed-long-h1-backend-status",
+  "language": "mixed",
+  "length": "long",
+  "locale": "de-DE",
+  "input": "kurzes status update zum backend das deployment auf kuberneties läuft jetzt stabil und wir haben die response time von achthundert millisekunden auf zweihundert gesenkt der neue cache funktioniert super besonders bei den api calls für die suche das team hat außerdem den bug im login flow gefixt der bei ligato nutzern auftrat ich möchte am dienstag um vierzehn uhr ein review meeting mit allen ansetzen bitte bringt eure pull requests mit",
+  "vocabulary": [
+    "Legato",
+    "Kubernetes"
+  ],
+  "mustContain": [
+    "Kubernetes",
+    "800",
+    "200",
+    "API",
+    "Legato",
+    "14",
+    "Dienstag",
+    "Backend",
+    "Pull Requests"
+  ],
+  "mustNotContain": [
+    "kuberneties",
+    "ligato",
+    "Ligato",
+    "achthundert",
+    "zweihundert",
+    "vierzehn",
+    "backend",
+    "dienstag"
+  ],
+  "reference": "Kurzes Status-Update zum Backend. Das Deployment auf Kubernetes läuft jetzt stabil, und wir haben die Response Time von 800 Millisekunden auf 200 gesenkt. Der neue Cache funktioniert super, besonders bei den API-Calls für die Suche. Das Team hat außerdem den Bug im Login-Flow gefixt, der bei Legato-Nutzern auftrat. Ich möchte am Dienstag um 14 Uhr ein Review-Meeting mit allen ansetzen. Bitte bringt eure Pull Requests mit."
+}

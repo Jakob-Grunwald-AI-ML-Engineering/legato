@@ -1,0 +1,27 @@
+{
+  "name": "de-long-h1-update-review",
+  "language": "de",
+  "length": "long",
+  "locale": "de-DE",
+  "input": "ich habe mir gestern das neue update angeschaut und muß sagen daß ich begeistert bin die startzeit hat sich von vier sekunden auf unter eine sekunde verbessert auch der akku hält deutlich länger wir haben das auf fünf verschiedenen geräten getestet und nur auf einem alten iphone gab es kleine ruckler die einstellungen sind jetzt viel übersichtlicher und die suche findet endlich auch ältere einträge ich würde vorschlagen daß wir das update am fünfundzwanzigsten november freigeben bitte gebt mir bis montag rückmeldung",
+  "vocabulary": [],
+  "mustContain": [
+    "muss",
+    "dass",
+    "iPhone",
+    "25. November",
+    "Montag",
+    "Update",
+    "Akku",
+    "Einträge"
+  ],
+  "mustNotContain": [
+    "muß",
+    "daß",
+    "fünfundzwanzigsten",
+    "iphone",
+    "akku",
+    "montag"
+  ],
+  "reference": "Ich habe mir gestern das neue Update angeschaut und muss sagen, dass ich begeistert bin. Die Startzeit hat sich von vier Sekunden auf unter eine Sekunde verbessert. Auch der Akku hält deutlich länger. Wir haben das auf fünf verschiedenen Geräten getestet, und nur auf einem alten iPhone gab es kleine Ruckler. Die Einstellungen sind jetzt viel übersichtlicher, und die Suche findet endlich auch ältere Einträge. Ich würde vorschlagen, dass wir das Update am 25. November freigeben. Bitte gebt mir bis Montag Rückmeldung."
+}

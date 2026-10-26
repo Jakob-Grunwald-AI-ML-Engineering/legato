@@ -23,6 +23,18 @@ public enum LLMError: Error, Sendable, Hashable {
     case failed(String)
 }
 
+/// One example exchange shown to the model before the real request: what the user sent and the answer the
+/// model should give to it.
+public struct LLMExample: Sendable, Hashable {
+    public var user: String
+    public var assistant: String
+
+    public init(user: String, assistant: String) {
+        self.user = user
+        self.assistant = assistant
+    }
+}
+
 /// A language model that answers one self-contained request. Cleanup uses it now; summaries reuse it.
 ///
 /// Every call is independent: no conversation state carries over between calls.
@@ -41,4 +53,19 @@ public protocol LLMBackend: Sendable {
     ///
     /// - Throws: ``LLMError``; other errors are backend-specific.
     func respond(instructions: String, prompt: String) async throws -> String
+
+    /// Like ``respond(instructions:prompt:)``, with `examples` shown first as earlier turns of the chat: each
+    /// a user message and the model's answer to it. Chat models follow examples given as turns more closely
+    /// than examples written into the instructions.
+    ///
+    /// The default folds the examples into `instructions`, so a backend that cannot send turns still works.
+    func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String
+}
+
+extension LLMBackend {
+    public func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String {
+        guard !examples.isEmpty else { return try await respond(instructions: instructions, prompt: prompt) }
+        let shown = examples.map { "Input:\n\($0.user)\nOutput:\n\($0.assistant)" }.joined(separator: "\n\n")
+        return try await respond(instructions: instructions + "\n\nExamples:\n\n" + shown, prompt: prompt)
+    }
 }

@@ -1,0 +1,21 @@
+{
+  "name": "en-short-03-names-vocab",
+  "language": "en",
+  "length": "short",
+  "locale": "en-US",
+  "input": "i asked kloud to review the draft that anthropik sent over yesterday",
+  "vocabulary": [
+    "Claude",
+    "Anthropic"
+  ],
+  "mustContain": [
+    "I asked",
+    "Claude",
+    "Anthropic"
+  ],
+  "mustNotContain": [
+    "kloud",
+    "anthropik"
+  ],
+  "reference": "I asked Claude to review the draft that Anthropic sent over yesterday."
+}

@@ -1,0 +1,17 @@
+{
+  "name": "de-short-03-old-spelling",
+  "language": "de",
+  "length": "short",
+  "locale": "de-DE",
+  "input": "ich weiß daß er heute nicht kommt weil er krank ist",
+  "vocabulary": [],
+  "mustContain": [
+    "Ich weiß",
+    "dass",
+    "krank"
+  ],
+  "mustNotContain": [
+    "daß"
+  ],
+  "reference": "Ich weiß, dass er heute nicht kommt, weil er krank ist."
+}

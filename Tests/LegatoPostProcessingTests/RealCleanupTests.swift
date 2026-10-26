@@ -13,21 +13,6 @@ private let modelRoot: URL = {
     return URL.cachesDirectory.appending(path: "LegatoTests/Models", directoryHint: .isDirectory)
 }()
 
-private struct CleanupFixture: Decodable {
-    let name: String
-    let locale: String
-    let input: String
-    let mustContain: [String]
-}
-
-private func fixtures() throws -> [CleanupFixture] {
-    let dir = try #require(Bundle.module.url(forResource: "cleanup", withExtension: nil, subdirectory: "Fixtures"))
-    let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-        .filter { $0.pathExtension == "json" }
-        .sorted { $0.lastPathComponent < $1.lastPathComponent }
-    return try files.map { try JSONDecoder().decode(CleanupFixture.self, from: Data(contentsOf: $0)) }
-}
-
 /// Peak resident memory of this process so far, in MB.
 private func peakMemoryMB() -> Int {
     var usage = rusage()
@@ -44,8 +29,12 @@ private struct RecordingBackend: LLMBackend {
     var availability: LLMAvailability { get async { await base.availability } }
 
     func respond(instructions: String, prompt: String) async throws -> String {
+        try await respond(instructions: instructions, examples: [], prompt: prompt)
+    }
+
+    func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String {
         do {
-            let reply = try await base.respond(instructions: instructions, prompt: prompt)
+            let reply = try await base.respond(instructions: instructions, examples: examples, prompt: prompt)
             print("RAW[\(label)] \(reply.debugDescription)")
             return reply
         } catch {
@@ -55,26 +44,34 @@ private struct RecordingBackend: LLMBackend {
     }
 }
 
-/// Runs every fixture through ITN and then the backend's cleanup stage, prints before/after with timings,
-/// and checks each output against the guard and the fixture's required words.
+/// The five fixtures this smoke test started with; the larger sets and the prompt comparison live in
+/// `CleanupPromptEvalTests`.
+private let smokeFixtureNames: Set<String> = [
+    "punctuation-casing-en", "spelled-number-de", "misrecognition-en", "spelling-de", "long-de",
+]
+
+/// Runs the smoke fixtures through ITN and then the backend's cleanup stage, prints before/after with
+/// timings, and checks each output against the guard and the fixture's required words.
 private func runFixtures(label: String, backend base: any LLMBackend) async throws {
     let backend = RecordingBackend(label: label, base: base)
     let guardrail = CleanupGuard()
     let itn = ITNStage()
     // Small chunks, so the long fixture crosses chunk boundaries on every backend.
-    let stage = LLMCleanupStage(backend: backend, cleanupGuard: guardrail, maxChunkCharacters: 400)
+    func stage(vocabulary: [String]) -> LLMCleanupStage {
+        LLMCleanupStage(backend: backend, cleanupGuard: guardrail, maxChunkCharacters: 400, vocabulary: vocabulary)
+    }
     let clock = ContinuousClock()
 
     // The first call pays model load and warm-up; time it apart from the fixtures.
     let warmStart = clock.now
-    _ = try await stage.process("Hallo Welt.", locale: Locale(identifier: "de-DE"))
+    _ = try await stage(vocabulary: []).process("Hallo Welt.", locale: Locale(identifier: "de-DE"))
     print("REAL[\(label)] first call (load + warm-up): \(clock.now - warmStart)")
 
-    for fixture in try fixtures() {
+    for fixture in try CleanupFixtures.load(.heldout) where smokeFixtureNames.contains(fixture.name) {
         let locale = Locale(identifier: fixture.locale)
         let before = try await itn.process(fixture.input, locale: locale)
         let started = clock.now
-        let after = try await stage.process(before, locale: locale)
+        let after = try await stage(vocabulary: fixture.vocabulary).process(before, locale: locale)
         let elapsed = clock.now - started
         let drift = guardrail.drift(candidate: after, reference: before)
         print("""

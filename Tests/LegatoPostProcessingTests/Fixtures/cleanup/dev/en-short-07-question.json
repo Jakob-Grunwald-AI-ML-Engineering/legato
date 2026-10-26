@@ -1,0 +1,16 @@
+{
+  "name": "en-short-07-question",
+  "language": "en",
+  "length": "short",
+  "locale": "en-US",
+  "input": "do you want me to book the hotel or should we just stay with my cousin in boston",
+  "vocabulary": [],
+  "mustContain": [
+    "Do you",
+    "Boston"
+  ],
+  "mustNotContain": [
+    "boston"
+  ],
+  "reference": "Do you want me to book the hotel, or should we just stay with my cousin in Boston?"
+}
