@@ -17,6 +17,19 @@ final class SleepLog: Sendable {
     var durations: [Duration] { store.withLock { $0 } }
 }
 
+/// Whether the coordinator's settle wait blocks until the rig's `settleClock` ticks.
+final class SettleGate: Sendable {
+    private let flag = Mutex(false)
+    var held: Bool { flag.withLock { $0 } }
+    func hold(_ on: Bool) { flag.withLock { $0 = on } }
+}
+
+/// Set when an awaited call returned; lets a test observe that something is still waiting.
+@MainActor
+final class Done {
+    var value = false
+}
+
 /// The sessions the factory built, in order.
 @MainActor
 final class BuiltSessions {
@@ -48,6 +61,9 @@ struct CoordinatorRig {
     let built = BuiltSessions()
     /// Drives the sessions' keep-alive window: one tick expires one lingering lease.
     let lingerClock = ManualClock()
+    /// The settle wait before a foreground retry: instant unless `holdSettle` is on, then one tick ends it.
+    let settleClock = ManualClock()
+    let settleGate = SettleGate()
     /// Not attached to the coordinator unless a test calls `attachSink()`.
     let sink: FakeSink
     let coordinator: DictationCoordinator
@@ -55,7 +71,7 @@ struct CoordinatorRig {
     init(script: [TranscriptEvent] = []) {
         let log = self.log, history = self.history, time = self.time, built = self.built
         let heartbeat = self.heartbeat, throttle = self.throttle, sleeps = self.sleeps
-        let lingerClock = self.lingerClock
+        let lingerClock = self.lingerClock, settleClock = self.settleClock, settleGate = self.settleGate
         let engine = FakeEngine(log: log)
         engine.set(script: script)
         let source = FakeSource(log: log)
@@ -82,7 +98,10 @@ struct CoordinatorRig {
             },
             sleep: { duration in
                 sleeps.add(duration)
-                if duration == DictationCoordinator.settleDelay { return } // settle waits don't block tests
+                if duration == DictationCoordinator.settleDelay { // settle waits don't block tests, unless held
+                    if settleGate.held { try await settleClock.sleep(duration) }
+                    return
+                }
                 if duration == .seconds(10) { // the heartbeat
                     try await heartbeat.sleep(duration)
                 } else {
@@ -208,9 +227,14 @@ struct CoordinatorRig {
         #expect(r.activity.ends.isEmpty)
         #expect(r.log.count("idle") == 0)
         #expect(r.phaseTrail == [.starting, .listening])
-        // The session that was refused is torn down before the retry starts.
+        // The session that was refused is torn down (mic stopped, audio session deactivated) before the
+        // retry is announced, and the retry activates only after that.
         let ev = r.log.events
-        #expect(try #require(ev.firstIndex(of: "fallback:duckMusicPauseSpoken>duckOthers")) < ev.lastIndex(of: "engine.transcribe")!)
+        let refusedTeardown = try #require(ev.firstIndex(of: "deactivate"))
+        let fallback = try #require(ev.firstIndex(of: "fallback:duckMusicPauseSpoken>duckOthers"))
+        #expect(try #require(ev.firstIndex(of: "source.stop")) < refusedTeardown)
+        #expect(refusedTeardown < fallback && fallback < ev.lastIndex(of: "activate")!)
+        #expect(r.log.count("deactivate") == 1) // the retry's session is still live
         #expect(await r.coordinator.toggle() == .stopped("hello"))
         #expect(r.clipboard.written == ["hello"])
         #expect(await r.history.entries.count == 1)
@@ -323,7 +347,12 @@ struct CoordinatorRig {
         #expect(r.phaseTrail == [.starting, .listening])
         // The first session is torn down before the settle wait; the second starts after it.
         let ev = r.log.events
-        #expect(try #require(ev.firstIndex(of: "fallback:duckOthers>duckOthers")) < ev.lastIndex(of: "engine.transcribe")!)
+        let tornDown = try #require(ev.firstIndex(of: "deactivate"))
+        let retry = try #require(ev.firstIndex(of: "fallback:duckOthers>duckOthers"))
+        #expect(try #require(ev.firstIndex(of: "source.stop")) < tornDown)
+        #expect(tornDown < retry && retry < ev.lastIndex(of: "activate")!)
+        #expect(retry < ev.lastIndex(of: "engine.transcribe")!)
+        #expect(r.log.count("deactivate") == 1)
         #expect(await r.coordinator.toggle() == .stopped("hello"))
         #expect(r.log.count("idle") == 1)
     }
@@ -806,12 +835,18 @@ struct CoordinatorRig {
     @Test func aSystemStopWhileStoppingIsIgnored() async throws {
         let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
         _ = await r.coordinator.toggle()
+        r.engine.set(holdFinish: true) // the session's stop hangs inside the engine's finish
         let stopping = Task { await r.coordinator.toggle() }
-        #expect(await eventually { r.log.count("activity.update:finishing") == 1 }) // the stop has begun
-        #expect(await r.coordinator.stopIfRunning() == nil) // nil whether it is still wrapping up or done
+        #expect(await eventually { r.log.count("engine.finish") == 1 }) // the coordinator is in .stopping now
+        #expect(r.coordinator.isIdle == false)
+        #expect(await r.coordinator.stopIfRunning() == nil) // ignored while the stop is wrapping up
+        #expect(await r.coordinator.stopIfRunning(releasingLease: true) == nil)
+        #expect(r.log.count("engine.finish") == 1 && r.log.count("idle") == 0) // and it changed nothing
+        r.engine.set(holdFinish: false)
         #expect(await stopping.value == .stopped("hello world"))
         #expect(r.built.all.count == 1)
         #expect(r.log.count("idle") == 1)
+        #expect(r.clipboard.written == ["hello world"])
     }
 
     // MARK: idle hook

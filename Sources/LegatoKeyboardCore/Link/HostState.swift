@@ -57,4 +57,12 @@ public struct HostState: Codable, Sendable, Equatable {
 
     /// The run is over and this is its last state.
     public var isFinal: Bool { runID != nil && phase == .idle }
+
+    /// Whether a keyboard may follow this state. A state that says a run is going on is only believable
+    /// while the app keeps beating: an app that died mid-run leaves its last "listening" state (with the
+    /// run's text) behind, and that must never be typed into a field later. An idle state is the final
+    /// state of a finished run (the beat stops with the run), so its age says nothing.
+    public func isLive(now: Date) -> Bool {
+        phase == .idle || now.timeIntervalSince(beatAt) < LinkChannel.beatFreshness
+    }
 }

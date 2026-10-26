@@ -16,6 +16,12 @@ import Foundation
 /// default (same activity). A foreground start whose mic reports no input yet (`isInputNotReady`) is
 /// retried with a fresh session after a short settle wait. Only a start still refused ends in
 /// `.needsForeground` with nothing left behind; the app brings itself to the foreground and toggles again.
+/// A press that lands while a start is wrapping up (a retry's teardown, the release of an old lease)
+/// cancels it: such a start ends `.stopped(nil)`, never hops, and never activates audio.
+///
+/// Nothing starts over a teardown still in flight: a start waits for the release of a lease
+/// (`endKeepAlive`) and for the session's own abort teardown, because the old teardown's deactivation
+/// would otherwise land on the new session's audio session.
 @MainActor
 public final class DictationCoordinator {
     public enum Outcome: Sendable, Equatable {
@@ -50,8 +56,9 @@ public final class DictationCoordinator {
     /// Receives each run's text and the lease state; set once after `init`.
     public var sink: (any TranscriptSink)?
 
-    /// No run is starting, listening or being wrapped up (a held lease doesn't count).
-    public var isIdle: Bool { phase == .idle }
+    /// No run is starting, listening or being wrapped up, and no lease is being released (a held lease
+    /// doesn't count).
+    public var isIdle: Bool { phase == .idle && pendingRelease == nil }
     /// A mic lease is held between runs (keep-alive), ready for the next start.
     public var holdsLease: Bool { held != nil }
 
@@ -113,6 +120,11 @@ public final class DictationCoordinator {
     private var feed: EditFeed?
     private var held: HeldLease?
     private var run: DictationRun?
+    /// A held lease being released right now (`endKeepAlive`); a start waits for it.
+    private var pendingRelease: Task<Void, Never>?
+    /// The abort the session's `onRunAborted` set going, so a start that finds its run already dead can
+    /// report the abort's outcome.
+    private var abortTask: (session: DictationSession, task: Task<Outcome, Never>)?
     private var options = StartOptions()
     /// The current run has a Live Activity (always with `.required`, maybe not with `.bestEffort`).
     private var activityLive = false
@@ -162,25 +174,48 @@ public final class DictationCoordinator {
         }
     }
 
-    /// For system events (interruption, lost input, engine change, media reset): only ever ends a run,
-    /// never begins one, so a late or duplicate event (e.g. the route change our own session
-    /// deactivation raises) cannot start a dictation. Listening: stops like `toggle()`. Starting:
-    /// cancels the start. Returns nil when there was nothing to stop (idle, or a stop or abort is
-    /// already wrapping up).
+    /// Never begins a run, only ends one: for system events (interruption, lost input, engine change,
+    /// media reset) and for a stop command, so a late or duplicate event (e.g. the route change our own
+    /// session deactivation raises) cannot start a dictation. Listening: stops like `toggle()`.
+    /// Starting: cancels the start. Returns nil when there was nothing to stop (idle, or a stop or abort
+    /// is already wrapping up).
+    ///
+    /// `releasingLease`: do not keep the mic lease for the keep-alive window, release it now. A system
+    /// event means the system took the mic or the route away, so the lease the run would have kept is
+    /// dead; holding it would only fail the next start.
     @discardableResult
-    public func stopIfRunning() async -> Outcome? {
+    public func stopIfRunning(releasingLease: Bool = false) async -> Outcome? {
         switch phase {
         case .starting: return await cancelStart()
-        case .listening: return await stop()
+        case .listening: return await stop(releasingLease: releasingLease)
         case .idle, .stopping, .aborting: return nil
         }
     }
 
-    /// Releases the mic lease kept between runs, now. Does nothing during a run or without a lease.
+    /// Starts a run with `options` only when nothing is in progress; never stops one (a second start
+    /// while running must not toggle it off). Waits for a lease release in flight first. Nil when a run
+    /// was starting, listening or wrapping up and so nothing started.
+    public func startIfIdle(_ options: StartOptions = StartOptions()) async -> Outcome? {
+        if phase == .idle, let release = pendingRelease { await release.value }
+        guard phase == .idle else { return nil }
+        return await start(options)
+    }
+
+    /// Releases the mic lease kept between runs, now. Does nothing during a run or without a lease; a
+    /// call that finds a release already in flight returns when that one is done.
     public func endKeepAlive() async {
-        guard phase == .idle, let lease = held else { return }
+        guard phase == .idle else { return }
+        guard let lease = held else {
+            await pendingRelease?.value
+            return
+        }
         held = nil
-        await release(lease)
+        let release = Task {
+            await self.release(lease)
+            self.pendingRelease = nil
+        }
+        pendingRelease = release
+        await release.value
     }
 
     // MARK: Start
@@ -188,7 +223,11 @@ public final class DictationCoordinator {
     private func start(_ options: StartOptions) async -> Outcome {
         phase = .starting
         cancelRequested = false
+        abortTask = nil
         self.options = options
+        // Nothing starts over a release in flight: its deactivation would land on the new audio session.
+        if let release = pendingRelease { await release.value }
+        if cancelRequested { return finishRun(.stopped(nil), ended: false) }
         let issue = await readiness.check()
         if cancelRequested { return finishRun(.stopped(nil), ended: false) }
         // With a best-effort activity, "Live Activities are off" is not a reason to stay out of the run.
@@ -217,24 +256,28 @@ public final class DictationCoordinator {
         run = thisRun
         sink?.runStarted(thisRun) // once per press: fallback and settle retries below stay within this run
 
-        // A held armed lease is reused before any policy logic (no start refusal can hit it: the mic is
-        // already ours). Otherwise: the selected policy first. A refused background start under a
-        // non-default policy gets one more try under the default (duck), keeping the same activity and
-        // options; only then does it hop.
-        var policy = context.audioPolicy
+        // A held lease is reused as is. The session re-arms itself under *its own* policy when its mic
+        // died meanwhile, so a refusal of that re-arm is judged by the session's policy (`s.policy`),
+        // not by the one selected for this press. Otherwise: the selected policy first. A refused
+        // background start under a non-default policy gets one more try under the default (duck),
+        // keeping the same activity and options; only then does it hop.
         var inputRetries = 0
-        var s = await launch(policy, options)
+        var s = await launch(context.audioPolicy, options)
         while true {
+            // A press that landed while the session was acquired (e.g. an old lease was being released)
+            // cancels the start before it touches the audio session.
+            if cancelRequested { return await cancelBeforeStart(s, thisRun) }
             do {
                 try await s.start()
                 break
             } catch {
                 await discard(s)
+                let policy = s.policy
                 if context.inBackground, startEnvironment.isBackgroundRefusal(error) {
-                    if policy != .default, !cancelRequested {
+                    if cancelRequested { return await finishCancelledRetry(thisRun) }
+                    if policy != .default {
                         onStartFallback?(policy, .default, error)
-                        policy = .default
-                        s = await launch(policy, options)
+                        s = await launch(.default, options)
                         continue
                     }
                     // The system refused a background start: tear down quietly and let the app retry in the
@@ -244,23 +287,22 @@ public final class DictationCoordinator {
                         await activity.dismiss()
                     }
                     _ = await sink?.runEnded(thisRun, committed: "", text: nil) // a run that began always ends
+                    // A press during that teardown cancelled the start: hopping now would begin the very
+                    // dictation the user just cancelled.
+                    if cancelRequested { return finishRun(.stopped(nil)) }
                     return finishRun(.needsForeground(.backgroundStartRefused), ended: false)
                 }
                 // The mic had no input yet (0 Hz after activation) in the foreground: nothing to hop to,
                 // so retry with a fresh session after a short settle wait. Same policy first; a non-default
                 // policy that fails again gets the default. Then it is a plain failure.
-                if !context.inBackground, !cancelRequested, startEnvironment.isInputNotReady(error),
+                if !context.inBackground, startEnvironment.isInputNotReady(error),
                    let next = nextPolicyAfterInputNotReady(current: policy, retries: inputRetries) {
+                    if cancelRequested { return await finishCancelledRetry(thisRun) }
                     inputRetries += 1
                     onStartFallback?(policy, next, error)
                     try? await sleep(Self.settleDelay)
-                    if cancelRequested {
-                        await endActivity(content(.failed))
-                        _ = await sink?.runEnded(thisRun, committed: "", text: nil)
-                        return finishRun(.stopped(nil))
-                    }
-                    policy = next
-                    s = await launch(policy, options)
+                    if cancelRequested { return await finishCancelledRetry(thisRun) }
+                    s = await launch(next, options)
                     continue
                 }
                 await endActivity(content(.failed))
@@ -272,14 +314,48 @@ public final class DictationCoordinator {
                 }
             }
         }
-        guard session === s else { return .started } // aborted right away; `abort` is wrapping it up
+        // The run may have died while the start was finishing (the engine stream failed at once). Its
+        // abort is the real outcome, not `.started`.
+        if let dead = await outcomeIfDead(s) { return dead }
         if cancelRequested { return await stop() } // pressed in the instant between listening and here
 
         phase = .listening
         startHeartbeat()
         sink?.update(committed: live.committed, volatile: live.volatile)
         await publishListening(force: true)
+        // ... or while the first activity update was in flight.
+        if let dead = await outcomeIfDead(s) { return dead }
         return .started
+    }
+
+    /// The outcome of `s`'s run when it is already over (aborted) although the start flow still holds it:
+    /// waits for the abort to finish. Nil while the run is alive.
+    private func outcomeIfDead(_ s: DictationSession) async -> Outcome? {
+        guard session !== s || s.runState != .listening else { return nil }
+        await s.settled()
+        if let abort = abortTask, abort.session === s { return await abort.task.value }
+        return session === s ? nil : .stopped(nil)
+    }
+
+    /// A cancel arrived before the session started: nothing was activated. Ends the activity `failed`
+    /// like every cancel at the start, and drops a reused lease too (a cancelled run keeps none).
+    private func cancelBeforeStart(_ s: DictationSession, _ thisRun: DictationRun) async -> Outcome {
+        await s.endLease()
+        await discard(s)
+        await endActivity(content(.failed))
+        _ = await sink?.runEnded(thisRun, committed: "", text: nil)
+        return finishRun(.stopped(nil))
+    }
+
+    /// A cancel arrived while a failed attempt was being torn down for a retry or a hop: the retry never
+    /// happens. The activity is dismissed (as for a hop), not ended `failed`.
+    private func finishCancelledRetry(_ thisRun: DictationRun) async -> Outcome {
+        if activityLive {
+            activityLive = false
+            await activity.dismiss()
+        }
+        _ = await sink?.runEnded(thisRun, committed: "", text: nil)
+        return finishRun(.stopped(nil))
     }
 
     /// The held session when it fits `options` (same keep-alive), else a fresh one for `policy` with its
@@ -315,7 +391,7 @@ public final class DictationCoordinator {
         feed = sessionFeed
         s.onRunAborted = { [weak self, weak s] _ in
             guard let self, let s else { return }
-            Task { _ = await self.abort(s) }
+            abortTask = (s, Task { await self.abort(s) })
         }
         return s
     }
@@ -330,7 +406,7 @@ public final class DictationCoordinator {
 
     // MARK: Stop
 
-    private func stop() async -> Outcome {
+    private func stop(releasingLease: Bool = false) async -> Outcome {
         guard let s = session, let thisRun = run else { return .busy }
         phase = .stopping
         await drainTimers()
@@ -345,10 +421,12 @@ public final class DictationCoordinator {
             let entry = try await s.stop()
             s.onRunAborted = nil
             guard let sessionFeed = feed else { return .busy }
+            // The system ended this run: the lease it would keep is dead, so it ends with the run.
+            if releasingLease { await s.endLease() }
             await flush(sessionFeed, of: s)
             let committed = live.committed
 
-            let keep = options.keepAlive > .zero && s.leaseState == .armed
+            let keep = !releasingLease && options.keepAlive > .zero && s.leaseState == .armed
             if keep {
                 held = HeldLease(session: s, feed: sessionFeed, linger: options.keepAlive)
                 s.onLeaseExpired = { [weak self, weak s] in
@@ -380,6 +458,9 @@ public final class DictationCoordinator {
         guard session === s else { return .busy }
         session = nil
         phase = .aborting
+        // The session may still be tearing its own lease down (it aborted by itself and this call came
+        // from a press or a start that found it dead): nothing may start over that.
+        await s.settled()
         await drainTimers()
         if let dying = feed {
             await flush(dying, of: s)

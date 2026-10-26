@@ -81,6 +81,31 @@ import Testing
         #expect(r.built.all.count == 2)
     }
 
+    @Test func aSystemStopNeverKeepsTheLeaseOfTheRunItEnds() async throws {
+        // The system took the mic (interruption, media reset, lost input, engine change): the lease the
+        // run would have kept is dead, so the stop must release it instead of holding it for the window.
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        #expect(await r.coordinator.stopIfRunning(releasingLease: true) == .stopped("hello world"))
+        #expect(!r.coordinator.holdsLease)
+        #expect(r.log.count("deactivate") == 1) // torn down now, not after 30 s
+        #expect(r.sink.leases.isEmpty) // the sink never hears of a lease
+        #expect(r.sink.ended.first?.text == "hello world" && r.clipboard.written == ["hello world"])
+        // The next press builds a session of its own.
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        #expect(r.built.all.count == 2 && r.log.count("activate") == 2)
+        _ = await r.coordinator.toggle()
+    }
+
+    @Test func aStopFromTheKeyboardKeepsTheLeaseLikeAToggle() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        #expect(await r.coordinator.stopIfRunning() == .stopped("hello world"))
+        #expect(r.coordinator.holdsLease)
+        #expect(r.log.count("deactivate") == 0)
+    }
+
     @Test func endKeepAliveWithNothingHeldDoesNothing() async throws {
         let r = CoordinatorRig()
         r.attachSink()

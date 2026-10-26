@@ -33,6 +33,7 @@ final class E2EFakeKeyboard {
         case "kbd-request-end-keep-alive": await send(.endKeepAlive)
         case "kbd-hop-start": await hop(urlFirst: false)
         case "kbd-hop-start-url-first": await hop(urlFirst: true)
+        case "kbd-forged-url": await forgedURL()
         default: E2E.log("kbd.unknown \(command)")
         }
     }
@@ -75,8 +76,12 @@ final class E2EFakeKeyboard {
     }
 
     private func post(_ command: RequestCommand, id: String) {
-        store?.write(KeyboardRequest(id: id, command: command, at: Date()), forKey: LinkChannel.Key.request)
+        writeRequest(command, id: id)
         DarwinObserver.post(LinkChannel.Note.request)
+    }
+
+    private func writeRequest(_ command: RequestCommand, id: String) {
+        store?.write(KeyboardRequest(id: id, command: command, at: Date()), forKey: LinkChannel.Key.request)
         E2E.log("kbd.request command=\(command.rawValue)")
     }
 
@@ -97,13 +102,22 @@ final class E2EFakeKeyboard {
         let id = newID()
         let url = KeyboardURL.make(command: .start, requestID: id)
         if urlFirst {
+            // The Link tap writes the request as it opens the URL; the Darwin note comes after the app is up.
+            writeRequest(.start, id: id)
             await AppController.shared.handle(url)
-            post(.start, id: id)
+            DarwinObserver.post(LinkChannel.Note.request)
         } else {
             post(.start, id: id)
             await AppController.shared.handle(url)
         }
         await awaitAck(id)
+    }
+
+    /// A `legato://keyboard?cmd=start` URL that no keyboard request backs (a web page, another app): the app
+    /// may open, but must not start.
+    private func forgedURL() async {
+        await AppController.shared.handle(KeyboardURL.make(command: .start, requestID: UUID().uuidString))
+        E2E.log("kbd.forged-url handled")
     }
 
     // MARK: Applying the host's text

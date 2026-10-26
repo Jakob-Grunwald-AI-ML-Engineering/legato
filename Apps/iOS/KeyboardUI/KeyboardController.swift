@@ -136,9 +136,10 @@ final class KeyboardController {
 
     /// Brings the field in line with the host's text. Only while visible, and only for a run in
     /// progress or one this keyboard already follows: the last state of a run it never saw (an old
-    /// dictation, seen again when the keyboard reappears) is not typed.
+    /// dictation, seen again when the keyboard reappears) is not typed. A "running" state whose beat has
+    /// gone stale belongs to an app that died: its text is not typed either.
     private func applyHost() {
-        guard isVisible, let host else { return }
+        guard isVisible, let host, host.isLive(now: Date()) else { return }
         if cursor?.runID != host.runID, host.phase == .idle { return }
         let before = cursor
         let plan = ProxyEditPlanner.plan(
@@ -251,7 +252,35 @@ final class KeyboardController {
         link.send(action == .start ? .start : .stop, id: id)
         let result = await link.awaitAck(id: id, timeout: LinkChannel.ackTimeout)
         trace?("ack result=\(result?.rawValue ?? "timeout")")
-        guard result != .accepted else { return }
+        guard result != .accepted else {
+            // "Accepted" is the app taking the request on; a start can still fail afterwards (the system
+            // refused the microphone), and then the app answers the same request again with `hop`.
+            if action == .start { await watchForFailedStart(id: id) }
+            return
+        }
+        needsAppOpened()
+    }
+
+    /// Watches a start the app accepted until the run is listening, or the app says it could not start.
+    private func watchForFailedStart(id: String) async {
+        let deadline = ContinuousClock.now + .seconds(Self.startWatchSeconds)
+        while ContinuousClock.now < deadline, isVisible {
+            if let ack = link.readAck(), ack.id == id, ack.result == .hop {
+                trace?("ack result=hop-after-accept")
+                needsAppOpened()
+                return
+            }
+            reloadHost()
+            if let host, host.isLive(now: now), host.phase == .listening { return }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
+    /// How long a remote start is watched for failing after it was accepted.
+    private static let startWatchSeconds = 8.0
+
+    /// The app can't dictate from where it is: the mic key becomes an open-app key for a few seconds.
+    private func needsAppOpened() {
         reloadHost()
         forcedOpenAppUntil = now.addingTimeInterval(5)
         openAppRequestID = UUID().uuidString

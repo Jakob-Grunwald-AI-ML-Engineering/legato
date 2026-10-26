@@ -118,7 +118,8 @@ if [ "$mode" = release-check ]; then
     AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
     LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoFakeRefusalInForeground LegatoFakeRefusalCount LegatoAudioPolicy
     start.route start.fallback toggle-after-hop
-    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd.apply "link.host phase="
+    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd-forged-url kbd.forged-url
+    "keyboard.url admission" kbd.apply "link.host phase=" debugForceTapToCopy debugShowPauseOthers
     KeyboardHarness LegatoKeyboardHarness harness-mic harness-type harness-numbers LegatoHarnessAppearance
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
     LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document)
@@ -655,6 +656,17 @@ scenario_n() {
   wait_log "e2e outcome kind=stopped" 10
   sleep 0.5
   assert_eq "history has one entry per hop run (two in all)" "2" "$(history_texts | grep -c -x -F -- "$TEXT")"
+
+  # Anything can open legato://keyboard?cmd=start: without a request from the keyboard it must not record.
+  SCENARIO="n. forged URL"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
+  trigger kbd-forged-url
+  wait_log "kbd.forged-url handled" 10
+  assert_log "the URL was rejected" "keyboard.url admission=rejected"
+  assert_no_log "no hop screen" "hop shown"
+  assert_no_log "nothing started" "e2e outcome kind=started"
+  assert_no_log "no session, no mic" "session.make"
+  assert_no_log "no activity" "activity.request"
 }
 
 scenario_q() {

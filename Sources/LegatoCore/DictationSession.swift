@@ -28,7 +28,8 @@ public final class DictationSession {
     private let source: any AudioSource
     private let sessionControl: any AudioSessionControlling
     private let history: any HistoryStore
-    private let policy: AudioPolicy
+    /// The audio policy this session activates under (fixed at construction). A reused lease keeps it.
+    public let policy: AudioPolicy
     private let linger: Duration
     private let sleep: @Sendable (Duration) async throws -> Void
     private let now: @Sendable () -> Date
@@ -43,6 +44,9 @@ public final class DictationSession {
     private var streamFailure: (any Error)?
     /// Identifies the current run's consume task; events and errors from older runs are ignored.
     private var generation = 0
+    /// The run's own abort teardown (stream failure) is in progress.
+    private var isAborting = false
+    private var settleWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(
         engine: any DictationEngine,
@@ -130,6 +134,13 @@ public final class DictationSession {
         return entry
     }
 
+    /// Returns once the run's own abort teardown (after a stream failure) has finished and
+    /// `onRunAborted` has fired; at once when no abort is in progress. A caller that must not start
+    /// anything over that teardown (a new activation would be deactivated by it) waits here.
+    public func settled() async {
+        while isAborting { await withCheckedContinuation { settleWaiters.append($0) } }
+    }
+
     /// The entry for the text committed so far in the current or last run (nil when there is none),
     /// built like the one `stop()` saves but not written to history: use it to salvage an aborted run.
     public func partialEntry() -> DictationEntry? {
@@ -202,13 +213,18 @@ public final class DictationSession {
             lastError = error
             if runState == .listening {
                 runState = .finishing // blocks stop() while aborting
+                isAborting = true
                 generation += 1
                 consumeTask = nil
                 clearVolatile()
                 await source.detach()
                 await teardownLease()
                 runState = .idle
+                isAborting = false
                 onRunAborted?(error)
+                let pending = settleWaiters
+                settleWaiters = []
+                for waiter in pending { waiter.resume() }
             } else {
                 streamFailure = error // stop() is in flight; it reports the failure
             }

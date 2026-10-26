@@ -49,8 +49,11 @@ final class FakeSource: AudioSource {
     /// `start` fails this many more times, then works.
     private let startFailuresLeft = Mutex<(error: (any Error)?, count: Int)>((nil, 0))
     private let routeError = Mutex<(any Error)?>(nil)
+    private let stopHold = Mutex(false)
 
     init(log: EventLog) { self.log = log }
+    /// Keeps `stop` pending (after it logged) until released: a teardown a test can interleave with.
+    func holdStop(_ on: Bool) { stopHold.withLock { $0 = on } }
     func failStart(with e: any Error) { startError.withLock { $0 = e } }
     func clearStartFailure() { startError.withLock { $0 = nil } }
     func failNextStarts(_ count: Int, with e: any Error) { startFailuresLeft.withLock { $0 = (e, count) } }
@@ -87,6 +90,7 @@ final class FakeSource: AudioSource {
     }
     func stop() async {
         log.add("source.stop")
+        while stopHold.withLock({ $0 }) { try? await Task.sleep(for: .milliseconds(5)) }
         continuation.withLock { $0?.finish(); $0 = nil }
     }
 }
@@ -103,6 +107,8 @@ final class FakeEngine: DictationEngine {
         var finishError: (any Error)?
         /// Leave the results stream open after the input ends (a stream that outlives `finish()`).
         var holdStreamOpen = false
+        /// Keeps `finish()` pending until cleared (polled), so a test can sit inside a stop.
+        var holdFinish = false
     }
     private let config = Mutex(Config())
     /// Results continuations in `transcribe` order, for `emit` / `failStream`.
@@ -112,7 +118,7 @@ final class FakeEngine: DictationEngine {
 
     func set(installed: Bool? = nil, prepareError: (any Error)? = nil, hangInPrepare: Bool? = nil,
              script: [TranscriptEvent]? = nil, streamError: (any Error)? = nil, finishError: (any Error)? = nil,
-             holdStreamOpen: Bool? = nil) {
+             holdStreamOpen: Bool? = nil, holdFinish: Bool? = nil) {
         config.withLock {
             if let installed { $0.installed = installed }
             if let prepareError { $0.prepareError = prepareError }
@@ -121,6 +127,7 @@ final class FakeEngine: DictationEngine {
             if let streamError { $0.streamError = streamError }
             if let finishError { $0.finishError = finishError }
             if let holdStreamOpen { $0.holdStreamOpen = holdStreamOpen }
+            if let holdFinish { $0.holdFinish = holdFinish }
         }
     }
 
@@ -162,9 +169,14 @@ final class FakeEngine: DictationEngine {
         let cfg = config.withLock { $0 }
         let (stream, cont) = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
         streams.withLock { $0.append(cont) }
+        if let err = cfg.streamError {
+            // Buffered before `transcribe` returns, so the failure is already waiting for the consumer.
+            for e in cfg.script { cont.yield(e) }
+            cont.finish(throwing: err)
+            return stream
+        }
         let task = Task {
             for e in cfg.script { cont.yield(e) }
-            if let err = cfg.streamError { cont.finish(throwing: err); return }
             for await _ in input {}
             if !cfg.holdStreamOpen { cont.finish() }
         }
@@ -174,6 +186,7 @@ final class FakeEngine: DictationEngine {
 
     func finish() async throws {
         log.add("engine.finish")
+        while config.withLock({ $0.holdFinish }) { try await Task.sleep(for: .milliseconds(5)) }
         if let e = config.withLock({ $0.finishError }) { throw e }
     }
 }
@@ -274,6 +287,10 @@ final class FakeActivity: ActivityClient {
     var requestError: (any Error)?
     /// Keeps `request` pending until cleared (polled, like `FakeEngine`'s prepare hold).
     var holdRequest = false
+    /// Keeps `dismiss` pending after it logged, until cleared.
+    var holdDismiss = false
+    /// Keeps `update` pending after it logged, until cleared.
+    var holdUpdate = false
 
     init(log: EventLog) { self.log = log }
 
@@ -294,6 +311,7 @@ final class FakeActivity: ActivityClient {
     func update(_ content: DictationActivityContent, staleDate: Date?) async {
         log.add("activity.update:\(content.phase.rawValue)")
         calls.append(.update(content, staleDate: staleDate))
+        while holdUpdate { try? await Task.sleep(for: .milliseconds(5)) }
     }
     func end(_ content: DictationActivityContent) async {
         log.add("activity.end:\(content.phase.rawValue)")
@@ -302,6 +320,7 @@ final class FakeActivity: ActivityClient {
     func dismiss() async {
         log.add("activity.dismiss")
         dismissals += 1
+        while holdDismiss { try? await Task.sleep(for: .milliseconds(5)) }
     }
 }
 

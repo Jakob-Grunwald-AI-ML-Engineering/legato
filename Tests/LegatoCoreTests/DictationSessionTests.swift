@@ -487,8 +487,12 @@ extension DictationSessionTests {
         plain.session.onLeaseExpired = { fired.count += 1 }
         try await plain.session.start()
         _ = try await plain.session.stop()
-        try? await Task.sleep(for: .milliseconds(30))
+        // Time passes: the window the ended lease would have run out in, and a (never armed) one for the plain run.
+        ended.clock.tick()
+        plain.clock.tick()
+        try? await Task.sleep(for: .milliseconds(50))
         #expect(fired.count == 0)
+        #expect(ended.log.count("deactivate") == 1 && plain.log.count("deactivate") == 1) // no second teardown either
     }
 
     @Test func editCountCountsEveryEditPublished() async throws {

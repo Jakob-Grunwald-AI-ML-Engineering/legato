@@ -23,6 +23,7 @@ final class LinkClient {
     }
 
     func readHost() -> HostState? { store?.read(HostState.self, forKey: LinkChannel.Key.host) }
+    func readAck() -> KeyboardAck? { store?.read(KeyboardAck.self, forKey: LinkChannel.Key.ack) }
     func readApplied() -> AppliedCursor? { store?.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) }
 
     func writeApplied(_ cursor: AppliedCursor) {

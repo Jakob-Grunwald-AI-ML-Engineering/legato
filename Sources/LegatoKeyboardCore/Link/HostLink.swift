@@ -8,10 +8,14 @@ import Foundation
 /// (a held-back update is published when its window ends). While a run or a lease exists the state is
 /// re-published every `LinkChannel.beatInterval` with a fresh `beatAt`, so a keyboard can tell a live
 /// app from a dead one.
+///
+/// Dictated text does not stay in the App Group: a new link overwrites whatever an earlier process left
+/// in `link.host` (an app that died mid-run would otherwise leave "listening" and the run's text there),
+/// and a finished run's text leaves `link.host` and `link.applied` after `LinkChannel.finalTextRetention`.
 @MainActor
 public final class HostLink {
     /// Acts on an accepted request (start, stop or end the keep-alive).
-    public var onRequest: (@MainActor (KeyboardRequest) async -> Void)?
+    public var onRequest: (@MainActor (KeyboardRequest) async -> Bool)?
 
     /// Called with every state written to `link.host` (for logging and the app's own UI).
     public var onPublish: (@MainActor (HostState) -> Void)?
@@ -30,6 +34,7 @@ public final class HostLink {
     private var beat: Task<Void, Never>?
     private var appliedWaiter: (runID: String, continuation: CheckedContinuation<Bool, Never>)?
     private var appliedTimeout: Task<Void, Never>?
+    private var scrub: Task<Void, Never>?
 
     public init(
         store: LinkStore,
@@ -44,11 +49,16 @@ public final class HostLink {
         state = HostState(
             runID: nil, phase: .idle, target: .app, committed: "", volatile: "", seq: 0, beatAt: now(),
             leaseUntil: nil, acceptsRemoteStart: false)
+        // Whatever an earlier process left behind is stale by definition: say "idle, no text" now.
+        store.write(state, forKey: LinkChannel.Key.host)
+        store.remove(forKey: LinkChannel.Key.applied)
+        post(LinkChannel.Note.host)
     }
 
     // MARK: Publishing
 
     public func runStarted(id: String, target: HostTarget) {
+        cancelScrub()
         state.runID = id
         state.target = target
         state.phase = .starting
@@ -76,6 +86,37 @@ public final class HostLink {
         state.committed = committed
         state.volatile = ""
         publish()
+        scheduleScrub()
+    }
+
+    /// Removes the dictated text from the link: `link.host` goes back to "idle, no run, no text" (a lease
+    /// stays) and `link.applied` is deleted. Called when a finished run's retention ends, and when the
+    /// user deletes history. Does nothing while a run is going on.
+    public func scrubText() {
+        guard !isRunning else { return }
+        cancelScrub()
+        store.remove(forKey: LinkChannel.Key.applied)
+        guard state.runID != nil || !state.committed.isEmpty || !state.volatile.isEmpty else { return }
+        state.runID = nil
+        state.phase = .idle
+        state.committed = ""
+        state.volatile = ""
+        publish()
+    }
+
+    private func scheduleScrub() {
+        cancelScrub()
+        let sleep = self.sleep
+        scrub = Task { [weak self] in
+            do { try await sleep(.seconds(LinkChannel.finalTextRetention)) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.scrubText()
+        }
+    }
+
+    private func cancelScrub() {
+        scrub?.cancel()
+        scrub = nil
     }
 
     /// The mic lease between runs: `until` is when it ends, nil when it is not held.
@@ -152,12 +193,38 @@ public final class HostLink {
         _ = ledger.admit(id: request.id)
         // Ack first: acting (a dictation start) takes longer than the keyboard is willing to wait.
         acknowledge(request.id, .accepted)
-        if willChangeSomething(request.command) { await onRequest?(request) }
+        if willChangeSomething(request.command) {
+            let succeeded = await onRequest?(request) ?? true
+            // The keyboard took the first ack as "on it" and has stopped waiting. A start that then failed
+            // (refused, not ready) needs the user to open the app: say so.
+            if !succeeded, request.command == .start { acknowledge(request.id, .hop) }
+        }
     }
 
-    /// `legato://keyboard?...&req=<id>` arrived: true the first time this id is seen (act on it).
-    public func admitURL(requestID: String) -> Bool {
-        ledger.admit(id: requestID)
+    /// What to do with a `legato://keyboard` URL.
+    public enum URLAdmission: Sendable, Equatable {
+        /// Our keyboard asked for this and nothing acted on it yet: act.
+        case act
+        /// Its request id was already handled (the Darwin note got there first): do not act twice.
+        case alreadyHandled
+        /// No fresh request from our keyboard backs this URL: just open the app, start nothing.
+        case rejected
+    }
+
+    /// `legato://keyboard?...&req=<id>` arrived.
+    ///
+    /// Anything can open this URL (a web page, another app), and acting on it starts the microphone. So
+    /// it only counts when our keyboard's own request for the same id and command sits in `link.request`
+    /// and is recent; every other URL just opens the app. The ledger drops the copy when the Darwin note
+    /// got there first.
+    public func admitURL(requestID: String, command: RequestCommand) -> URLAdmission {
+        if ledger.contains(id: requestID) { return .alreadyHandled }
+        guard let request = store.read(KeyboardRequest.self, forKey: LinkChannel.Key.request),
+              request.id == requestID, request.command == command,
+              now().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge
+        else { return .rejected }
+        _ = ledger.admit(id: requestID)
+        return .act
     }
 
     private var isRunning: Bool { state.runID != nil && (state.phase == .starting || state.phase == .listening) }

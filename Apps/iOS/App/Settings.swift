@@ -14,9 +14,11 @@ enum Settings {
     private enum Key {
         static let audioPolicy = "audioPolicy"
         static let keepAliveSeconds = "keepAliveSeconds"
+        #if LEGATO_INTERNAL
         static let keepSessionActiveBetweenRuns = "keepSessionActiveBetweenRuns"
         static let debugShowPauseOthers = "debugShowPauseOthers"
         static let debugForceTapToCopy = "debugForceTapToCopy"
+        #endif
     }
 
     /// How dictation shares audio with other apps. Default `.duckOthers`. A stored policy that is no
@@ -88,15 +90,38 @@ enum Settings {
     }
 
     /// Debug: offer the experimental policies (`.pauseOthers`, `.duckMusicPauseSpoken`) in the audio picker (the #6 device test).
+    /// Stored values are honoured in `LEGATO_INTERNAL` builds only; a Release build always reads false, whatever
+    /// the App Group holds (it is shared with the other targets and could carry a value from an earlier build).
     static var debugShowPauseOthers: Bool {
-        get { AppGroup.defaults.bool(forKey: Key.debugShowPauseOthers) }
-        set { AppGroup.defaults.set(newValue, forKey: Key.debugShowPauseOthers) }
+        get {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.bool(forKey: Key.debugShowPauseOthers)
+            #else
+            false
+            #endif
+        }
+        set {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.set(newValue, forKey: Key.debugShowPauseOthers)
+            #endif
+        }
     }
 
-    /// Debug: the pasteboard client reports "didn't change", so the activity ends in `tapToCopy`.
+    /// Debug: the pasteboard client reports "didn't change", so the activity ends in `tapToCopy`. `LEGATO_INTERNAL`
+    /// builds only, like `debugShowPauseOthers`.
     static var debugForceTapToCopy: Bool {
-        get { AppGroup.defaults.bool(forKey: Key.debugForceTapToCopy) }
-        set { AppGroup.defaults.set(newValue, forKey: Key.debugForceTapToCopy) }
+        get {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.bool(forKey: Key.debugForceTapToCopy)
+            #else
+            false
+            #endif
+        }
+        set {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.set(newValue, forKey: Key.debugForceTapToCopy)
+            #endif
+        }
     }
 }
 
