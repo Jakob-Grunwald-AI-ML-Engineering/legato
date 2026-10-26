@@ -519,6 +519,7 @@ public final class DictationCoordinator {
         await updateActivity(content(.finishing, tail: live.tail()), staleDate: nil)
         guard session === s else { return .busy }
 
+        sink?.runFinishing(thisRun)
         do {
             // The session saves the entry to history itself; it is not appended again here.
             let entry = try await s.stop()

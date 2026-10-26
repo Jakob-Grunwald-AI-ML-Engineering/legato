@@ -397,6 +397,10 @@ final class FakeSink: TranscriptSink {
         log.add("sink.update")
         updates.append((committed, volatile))
     }
+    /// Logged outside the `sink.` prefix, so the sink trails other tests compare stay as they were.
+    func runFinishing(_ run: DictationRun) {
+        log.add("finishing:sink")
+    }
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
         log.add("sink.runEnded")
         ended.append((run, committed, text))

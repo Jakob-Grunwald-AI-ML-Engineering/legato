@@ -28,6 +28,7 @@ public final class DictationSession {
     private let source: any AudioSource
     private let sessionControl: any AudioSessionControlling
     private let history: any HistoryStore
+    private let postProcessor: (any TranscriptPostProcessor)?
     /// The audio policy this session activates under (fixed at construction). A reused lease keeps it.
     public let policy: AudioPolicy
     public private(set) var linger: Linger
@@ -53,6 +54,7 @@ public final class DictationSession {
         source: any AudioSource,
         sessionControl: any AudioSessionControlling,
         history: any HistoryStore,
+        postProcessor: (any TranscriptPostProcessor)? = nil,
         policy: AudioPolicy = .default,
         linger: Linger = .off,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
@@ -62,6 +64,7 @@ public final class DictationSession {
         self.source = source
         self.sessionControl = sessionControl
         self.history = history
+        self.postProcessor = postProcessor
         self.policy = policy
         self.linger = linger
         self.sleep = sleep
@@ -90,7 +93,8 @@ public final class DictationSession {
     }
 
     /// Ends the run. Returns the saved entry, or nil when nothing final was recognized
-    /// (or when stopped while still preparing).
+    /// (or when stopped while still preparing). With a `postProcessor` the entry carries its result as
+    /// `text` and the engine's text as `rawText` (see `DictationEntry.rawText`).
     public func stop() async throws -> DictationEntry? {
         switch runState {
         case .idle, .finishing:
@@ -111,7 +115,8 @@ public final class DictationSession {
             try await engine.finish()
             await consumeTask?.value
             if let streamFailure { throw streamFailure }
-            if let e = partialEntry() {
+            if var e = partialEntry() {
+                if let postProcessor { await postProcess(&e, with: postProcessor) }
                 try await history.append(e)
                 entry = e
             }
@@ -156,6 +161,18 @@ public final class DictationSession {
     }
 
     // MARK: Internals
+
+    /// Runs the post-processor on the entry's (raw) text. A throw or a blank result keeps the raw text; a
+    /// changed result becomes `text`, with the raw text kept as `rawText`.
+    private func postProcess(_ entry: inout DictationEntry, with processor: any TranscriptPostProcessor) async {
+        let raw = entry.text
+        let locale = runLocale ?? Locale.current
+        guard let out = try? await processor.process(raw, locale: locale) else { return }
+        let processed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !processed.isEmpty, processed != raw else { return }
+        entry.text = processed
+        entry.rawText = raw
+    }
 
     private func performStart(locale: Locale?) async throws {
         do {
