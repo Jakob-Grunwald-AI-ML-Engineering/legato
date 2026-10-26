@@ -198,6 +198,13 @@ final class AppController {
         await coordinator.endKeepAlive()
     }
 
+    /// The audio policy changed: a held microphone (lease, or a session kept by the internal switch) is
+    /// released so the next start activates under the new policy.
+    func audioPolicySettingChanged() async {
+        await coordinator.audioPolicyChanged()
+        releaseHeldSession()
+    }
+
     /// The keep-ready setting changed: a held microphone follows it (released for Off, re-armed otherwise).
     func keepAliveSettingChanged(_ linger: Linger) async {
         await coordinator.updateKeepAlive(linger)

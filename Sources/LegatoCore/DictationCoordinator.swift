@@ -223,6 +223,13 @@ public final class DictationCoordinator {
         await release.value
     }
 
+    /// The audio policy setting changed: a lease held between runs was activated under the old policy and
+    /// iOS applies lowering or pausing only when a session activates, so it is released now and the next
+    /// start activates afresh under the new one. Nothing during a run (its own policy stands).
+    public func audioPolicyChanged() async {
+        await endKeepAlive()
+    }
+
     /// The keep-alive setting changed: a lease held between runs follows it. `.off` releases it now, any
     /// other value re-arms it (a duration restarts its whole timer from now; `.indefinite` drops the
     /// timer), so it stays ready without being re-activated. Does nothing without a held lease, and
