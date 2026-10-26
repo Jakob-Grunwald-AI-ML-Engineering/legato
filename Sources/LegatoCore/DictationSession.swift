@@ -288,6 +288,34 @@ public final class DictationSession {
         }
     }
 
+    /// Arms the lease without a run: activates the audio session and starts the mic (detached, nothing
+    /// transcribes), so a later `start()` reuses it at once, also from the background. The lease then
+    /// ends like one a run left behind: after `linger`, never for `.indefinite`. Arming a lease that is
+    /// already armed only restarts its timer.
+    /// - Throws: `DictationError.alreadyRunning`, `.assetsNotInstalled`, or whatever the engine, session
+    ///   or source threw (the lease is torn down).
+    public func armLease(locale: Locale? = nil) async throws {
+        guard runState == .idle else { throw DictationError.alreadyRunning }
+        await cancelLinger()
+        do {
+            if leaseState != .armed {
+                let format = try await engine.prepare(locale: locale)
+                _ = try await arm(format)
+                await source.detach() // armed and idle, like a lease between two runs
+            }
+        } catch {
+            await teardownLease()
+            throw error
+        }
+        await releaseLease()
+    }
+
+    /// Sets the linger for the run that is about to reuse the held lease, leaving the lease itself alone
+    /// (`setLinger` would end it at once for `.off`). The run's end applies it.
+    public func adoptLinger(_ new: Linger) {
+        linger = new
+    }
+
     /// Tears down a lease held between runs now. No-op during a run or without a lease.
     public func endLease() async {
         guard runState == .idle, leaseState != .idle else { return }

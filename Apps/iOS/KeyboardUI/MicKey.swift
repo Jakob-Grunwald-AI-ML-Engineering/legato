@@ -10,7 +10,7 @@ struct MicKey: View {
     var body: some View {
         switch controller.micMode {
         case .openApp:
-            Link(destination: KeyboardURL.make(command: .start, requestID: controller.openAppRequestID)) {
+            Link(destination: KeyboardURL.make(command: controller.openAppCommand, requestID: controller.openAppRequestID)) {
                 label
             }
             .simultaneousGesture(TapGesture().onEnded { controller.micTapped() })

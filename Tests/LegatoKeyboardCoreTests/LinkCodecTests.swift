@@ -63,6 +63,13 @@ import Testing
         #expect(parsed.command == .start && parsed.requestID == "req-1")
     }
 
+    @Test func theArmURLCarriesTheArmCommand() throws {
+        let url = KeyboardURL.make(command: .arm, requestID: "req-1")
+        #expect(url.absoluteString == "legato://keyboard?cmd=arm&req=req-1")
+        let parsed = try #require(KeyboardURL.parse(url))
+        #expect(parsed.command == .arm && parsed.requestID == "req-1")
+    }
+
     @Test func foreignOrIncompleteURLsAreNotKeyboardURLs() {
         #expect(KeyboardURL.parse(URL(string: "legato://copy-last")!) == nil)
         #expect(KeyboardURL.parse(URL(string: "https://keyboard?cmd=start&req=1")!) == nil)

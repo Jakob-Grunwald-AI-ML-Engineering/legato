@@ -40,7 +40,7 @@ struct SettingsView: View {
             } header: {
                 Text("Microphone")
             } footer: {
-                Text("After a dictation, the microphone stays ready for this long, so the next one from the Action Button, Control Center or the Legato keyboard starts at once, without opening Legato. While it is ready, the orange microphone indicator stays on, and with \"Lower other audio\" your music stays lowered. Indefinitely keeps it until a call or another app takes the microphone, or you turn this off. Off by default.")
+                Text("After a dictation, the microphone stays ready for this long, so the next one from the Action Button, Control Center or the Legato keyboard starts at once, without opening Legato. While it is ready, the orange microphone indicator stays on, and with \"Lower other audio\" your music stays lowered. Indefinitely keeps it until a call or another app takes the microphone, or you turn this off. Off by default. With Off, the keyboard's microphone key still opens Legato once to ready the microphone for 60 seconds, so your next tap dictates; then it is released.")
             }
 
             Section {

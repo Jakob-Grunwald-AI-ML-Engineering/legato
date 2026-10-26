@@ -1,4 +1,5 @@
 #if DEBUG
+import LegatoKeyboardCore
 import SwiftUI
 import UIKit
 
@@ -23,7 +24,8 @@ import UIKit
 ///   to look at the extension itself. Logs `systemfield modes=...` and the keyboard's own
 ///   `kbd.geometry` lines (see `KeyboardViewController`).
 ///
-/// Commands (Darwin notifications): `harness-mic`, `harness-type` (the scripted typing cases below),
+/// Commands (Darwin notifications): `harness-mic`, `harness-mic-hop` (a tap on the mic key in open-app
+/// mode, plus the URL its Link would open), `harness-type` (the scripted typing cases below),
 /// `harness-numbers` (tap the 123 key).
 @MainActor
 final class HarnessDocument: TextDocument {
@@ -127,6 +129,11 @@ final class KeyboardHarnessModel {
     func run(_ command: String) {
         switch command {
         case "harness-mic": controller.micTapped()
+        case "harness-mic-hop":
+            // What the open-app mic key does: the Link opens the app with its URL as the tap lands.
+            let url = KeyboardURL.make(command: controller.openAppCommand, requestID: controller.openAppRequestID)
+            controller.micTapped()
+            Task { await AppController.shared.handle(url) }
         case "harness-numbers": controller.typing.press(keyID: "mode:numbers")
         case "harness-type": runTypingCases()
         default: E2E.log("harness.unknown \(command)")

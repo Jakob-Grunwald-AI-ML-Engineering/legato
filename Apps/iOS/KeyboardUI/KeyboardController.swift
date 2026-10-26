@@ -217,6 +217,10 @@ final class KeyboardController {
         return MicKeyMode.resolve(host: host, now: now, fullAccess: hasFullAccess())
     }
 
+    /// What the open-app key asks of the app: to arm the microphone, not to dictate (the app is in front
+    /// of the host app's field then). The dictation starts with the next tap, back in the host app.
+    var openAppCommand: RequestCommand { MicKeyMode.openApp.request ?? .arm }
+
     /// The mic key was tapped. In `.openApp` mode the key is a `Link` that opens the app by itself; this
     /// sends the same request over the link, for an app that is already running.
     func micTapped() {
@@ -229,7 +233,7 @@ final class KeyboardController {
         case .openApp:
             trace?("mic mode=openApp")
             let id = openAppRequestID
-            link.send(.start, id: id)
+            link.send(openAppCommand, id: id)
             Task { [weak self] in
                 let result = await self?.link.awaitAck(id: id, timeout: LinkChannel.ackTimeout)
                 self?.trace?("ack result=\(result?.rawValue ?? "timeout")")
