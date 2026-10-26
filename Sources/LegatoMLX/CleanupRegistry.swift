@@ -30,7 +30,9 @@ public struct CleanupRegistry: Sendable {
     /// - Parameters:
     ///   - models: the manager whose `cleanup` selection and install states decide.
     ///   - foundationModels: the fallback, or `nil` where it does not exist.
-    ///   - makeMLXBackend: builds the (GPU) backend for an installed model and its folder.
+    ///   - makeMLXBackend: builds the (GPU) backend for an installed model and its folder; by default an
+    ///     ``MLXBackend`` that asks `canUseGPU` again before each load and generation and runs on the CPU
+    ///     while it is `false`.
     ///   - makeCPUBackend: builds the CPU backend for an installed model and its folder, used while the GPU is
     ///     not usable and the background setting is ``BackgroundCleanup/cpu``.
     ///   - canUseGPU: asked on every resolve; `false` means the app is where the GPU is off limits (the phone's
@@ -40,7 +42,7 @@ public struct CleanupRegistry: Sendable {
         models: ModelManager,
         foundationModels: (any LLMBackend)?,
         cleanupGuard: CleanupGuard = CleanupGuard(),
-        makeMLXBackend: @escaping @Sendable (MLXModelSpec, URL) -> any LLMBackend = { MLXBackend(spec: $0, folder: $1) },
+        makeMLXBackend: (@Sendable (MLXModelSpec, URL) -> any LLMBackend)? = nil,
         makeCPUBackend: @escaping @Sendable (MLXModelSpec, URL) -> any LLMBackend = {
             MLXBackend(spec: $0, folder: $1, device: .cpu)
         },
@@ -49,7 +51,8 @@ public struct CleanupRegistry: Sendable {
         self.models = models
         self.foundationModels = foundationModels
         self.cleanupGuard = cleanupGuard
-        self.makeMLXBackend = makeMLXBackend
+        // The GPU backend asks the same check before each load and generation, and falls back to the CPU.
+        self.makeMLXBackend = makeMLXBackend ?? { MLXBackend(spec: $0, folder: $1, canUseGPU: canUseGPU) }
         self.makeCPUBackend = makeCPUBackend
         self.canUseGPU = canUseGPU
     }
