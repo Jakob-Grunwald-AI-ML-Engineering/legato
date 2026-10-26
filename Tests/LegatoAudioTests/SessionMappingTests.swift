@@ -22,10 +22,10 @@ import LegatoCore
 
     #if os(iOS)
     @Test func duckMusicPauseSpokenAvOptions() {
+        // `.interruptSpokenAudioAndMixWithOthers` carries the mix bit itself (raw 0x11), so the exact set
+        // is asserted rather than the absence of `.mixWithOthers`.
         let o = SessionDescription(AudioPolicy.duckMusicPauseSpoken.sessionConfig).avOptions
-        #expect(o.contains(.duckOthers))
-        #expect(o.contains(.interruptSpokenAudioAndMixWithOthers))
-        #expect(!o.contains(.mixWithOthers))
+        #expect(o == [.duckOthers, .interruptSpokenAudioAndMixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker])
     }
     #endif
 
