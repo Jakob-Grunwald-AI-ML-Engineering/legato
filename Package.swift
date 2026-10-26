@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "LegatoMLX", targets: ["LegatoMLX"]),
         .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
+        .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
     ],
     dependencies: [
@@ -107,6 +108,13 @@ let package = Package(
         ),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
+        // Meeting notes: a multi-stream session, its store, recovery, echo de-duplication and export. Core only.
+        .target(name: "LegatoMeetings", dependencies: ["LegatoCore"]),
+        .testTarget(
+            name: "LegatoMeetingsTests",
+            dependencies: ["LegatoMeetings", "LegatoCore"],
+            resources: [.copy("Fixtures")]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
