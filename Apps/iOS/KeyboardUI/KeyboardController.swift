@@ -7,8 +7,8 @@ import UIKit
 /// state, turns the host's dictation text into edits of the document (`ProxyEditPlanner`), reports what
 /// landed (`link.applied`), keeps the presence beat while visible and decides what the mic key does.
 ///
-/// The planner and the mic-key rules live in LegatoKeyboardCore and are tested there; this type only
-/// carries them out against a `TextDocument` and the App Group.
+/// The planner, the typewriter reveal and the mic-key rules live in LegatoKeyboardCore and are tested
+/// there; this type only carries them out against a `TextDocument` and the App Group.
 @MainActor @Observable
 final class KeyboardController {
     @ObservationIgnored let document: any TextDocument
@@ -52,6 +52,9 @@ final class KeyboardController {
     @ObservationIgnored private let preferences: () -> KeyboardPreferences
 
     @ObservationIgnored private var cursor: AppliedCursor?
+    /// Types the host's text into the field a few characters at a time; `ticker` drives it while it has text left.
+    @ObservationIgnored private var reveal = TypewriterReveal()
+    @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var isTornDown = false
     private var forcedOpenAppUntil: Date?
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
@@ -141,6 +144,10 @@ final class KeyboardController {
     }
 
     func disappeared() {
+        // Text still to be revealed goes in now; with no field left to type into this does nothing, and the
+        // rest is typed from the cursor when the keyboard (or the run's final state) is seen again.
+        if reveal.needsTicks { applyHost(flush: true) }
+        stopTicker()
         isVisible = false
         typing.disappeared()
         heartbeat?.cancel()
@@ -157,6 +164,7 @@ final class KeyboardController {
         guard !isTornDown else { return }
         if isVisible { disappeared() }
         isTornDown = true
+        stopTicker()
         link.stopObserving()
         heartbeat?.cancel()
         reapply?.cancel()
@@ -220,11 +228,15 @@ final class KeyboardController {
     /// its final text was asked for (the Live Activity's Insert). The last state of any other run it never
     /// saw (an old dictation, seen again when the keyboard reappears) is not typed. A "running" state whose
     /// beat has gone stale belongs to an app that died: its text is not typed either.
-    private func applyHost() {
+    ///
+    /// The text goes in through `TypewriterReveal`: a host update only moves the target, the ticker (and
+    /// `elapsedMs`, the time since its last tick) reveals it. `flush` (and Reduce Motion) types it all now.
+    private func applyHost(elapsedMs: Double = 0, flush: Bool = false) {
         guard !isTornDown else { return }
         let decision = HostApplyDecision.decide(
             host: host, cursor: cursor, visible: isVisible, documentID: document.documentID, now: Date())
         guard case .apply = decision, let host else {
+            stopTicker()
             #if DEBUG
             if case .skip(let reason) = decision, host?.insertAt != nil {
                 WakeProbeLog.log("skip", "run=\(host?.runID?.prefix(8) ?? "-") reason=\(reason.rawValue)")
@@ -233,20 +245,52 @@ final class KeyboardController {
             return
         }
         let before = cursor
-        let plan = ProxyEditPlanner.plan(
-            state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID)
+        let plan = reveal.plan(
+            state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID,
+            animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs)
         perform(plan.ops)
+        startTickerIfNeeded()
         guard let updated = plan.cursor, updated != before else { return }
         cursor = updated
-        link.writeApplied(updated)
-        if !plan.ops.isEmpty || updated.finalApplied {
+        // Tick writes keep the cursor exact (a restarted keyboard continues from it) but only the last one wakes the app.
+        link.writeApplied(updated, notify: elapsedMs == 0 || updated.finalApplied)
+        if updated.finalApplied || (elapsedMs == 0 && !plan.ops.isEmpty) {
             trace?("apply final=\(updated.finalApplied ? 1 : 0)")
         }
         #if DEBUG
-        if host.insertAt != nil, !plan.ops.isEmpty {
+        let firstText = before?.runID != updated.runID || (before?.committedCount == 0 && before?.volatile.isEmpty == true)
+        if host.insertAt != nil, !plan.ops.isEmpty, updated.finalApplied || firstText {
             WakeProbeLog.log("insert", "run=\(host.runID?.prefix(8) ?? "-") ops=\(plan.ops.count) final=\(updated.finalApplied ? 1 : 0)")
         }
         #endif
+    }
+
+    // MARK: Typewriter
+
+    /// How often the reveal ticks. Every insert is a cross-process call to the host app, so this stays well
+    /// under the display rate; a tick reveals as many characters as the time since the last one calls for.
+    private static let tickInterval = Duration.milliseconds(33)
+
+    private func startTickerIfNeeded() {
+        guard reveal.needsTicks, !isTornDown, isVisible else { return stopTicker() }
+        guard ticker == nil else { return }
+        ticker = Task { [weak self] in
+            let clock = ContinuousClock()
+            var last = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.tickInterval)
+                guard !Task.isCancelled, let self else { return }
+                let now = clock.now
+                let parts = last.duration(to: now).components
+                last = now
+                applyHost(elapsedMs: Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15)
+            }
+        }
+    }
+
+    private func stopTicker() {
+        ticker?.cancel()
+        ticker = nil
     }
 
     private func perform(_ ops: [ProxyOp]) {
@@ -276,6 +320,8 @@ final class KeyboardController {
     /// The user types into a run's text: the tentative text comes out first so the key lands after the
     /// committed text; `applyHost` puts it back after the key.
     private func beforeUserEdit() {
+        // Committed text still to be revealed goes in first, so the key does not land in the middle of it.
+        if reveal.needsTicks { applyHost(flush: true) }
         guard let current = cursor, let documentID = document.documentID, current.documentID == documentID,
               let host, host.runID == current.runID, host.phase != .idle
         else { return }

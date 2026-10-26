@@ -9,8 +9,9 @@ import os
 /// the system.
 @MainActor
 final class KeyboardLinkHost: TranscriptSink {
-    /// How long a finished keyboard run waits for the keyboard to confirm its text landed.
-    static let appliedTimeout: TimeInterval = 1
+    /// How long a finished keyboard run waits for the keyboard to confirm its text landed (the keyboard
+    /// types it out over a moment, so it counts from the end of that).
+    static let appliedTimeout: TimeInterval = 2
 
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-link")
 
@@ -58,8 +59,8 @@ final class KeyboardLinkHost: TranscriptSink {
 
     var keyboardIsVisible: Bool { link.keyboardIsVisible() }
 
-    /// How long an insert waits for the keyboard to confirm its text landed.
-    static let insertTimeout: TimeInterval = 2
+    /// How long an insert waits for the keyboard to confirm its text landed (it types the whole text out).
+    static let insertTimeout: TimeInterval = 4
 
     /// The Live Activity's Insert button: publishes `text` for the keyboard on screen (flagged as asked for)
     /// and waits for it to confirm. False when no Legato keyboard is visible, a run is going on, or the
