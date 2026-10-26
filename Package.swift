@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "LegatoCore", targets: ["LegatoCore"]),
         .library(name: "LegatoAudio", targets: ["LegatoAudio"]),
         .library(name: "LegatoAppleSpeech", targets: ["LegatoAppleSpeech"]),
+        .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
     ],
     targets: [
@@ -24,6 +25,8 @@ let package = Package(
             dependencies: ["LegatoAppleSpeech", "LegatoCore"],
             resources: [.copy("Fixtures")]
         ),
+        .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
+        .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
     ],
     swiftLanguageModes: [.v6]
 )

@@ -18,6 +18,11 @@ has_ios_app() {
   [ -e Apps/iOS/project.yml ]
 }
 
+# 0 if the repo holds the macOS app's XcodeGen spec.
+has_mac_app() {
+  [ -e Apps/macOS/project.yml ]
+}
+
 # SHA256 of the XcodeGen release zip for the version pinned in .xcodegen-version.
 # Bump both together: curl -fsSL -o x.zip \
 #   https://github.com/yonaskolb/XcodeGen/releases/download/<version>/xcodegen.zip && shasum -a 256 x.zip
