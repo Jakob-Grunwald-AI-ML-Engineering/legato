@@ -21,7 +21,9 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        let document = ProxyDocument(proxy: { [unowned self] in self.textDocumentProxy })
+        // Weak: the proxy is read whenever a Darwin note arrives, which can be after this view controller
+        // went away; the document then reads as "no field" (see `ProxyDocument`).
+        let document = ProxyDocument(proxy: { [weak self] in self?.textDocumentProxy })
         let controller = KeyboardController(
             document: document, link: LinkClient(), hasFullAccess: { [weak self] in self?.hasFullAccess ?? false })
         controller.inputModeTarget = self
@@ -53,6 +55,12 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillAppear(animated)
         controller?.showsGlobe = needsInputModeSwitchKey
         controller?.appeared()
+    }
+
+    /// The controller observes the app's Darwin notes and runs tasks of its own; a hosting view can keep it
+    /// alive a moment past this view controller, so it is shut down here, not left to its own release.
+    isolated deinit {
+        controller?.tearDown()
     }
 
     override func viewDidDisappear(_ animated: Bool) {

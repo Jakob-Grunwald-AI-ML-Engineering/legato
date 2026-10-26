@@ -22,6 +22,9 @@ final class LinkClient {
         })
     }
 
+    /// Stops the `link.host` observation; the handlers never run again.
+    func stopObserving() { observers.removeAll() }
+
     func readHost() -> HostState? { store?.read(HostState.self, forKey: LinkChannel.Key.host) }
     func readAck() -> KeyboardAck? { store?.read(KeyboardAck.self, forKey: LinkChannel.Key.ack) }
     func readApplied() -> AppliedCursor? { store?.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) }

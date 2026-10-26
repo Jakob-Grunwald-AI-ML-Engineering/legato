@@ -30,7 +30,7 @@ import UIKit
 @MainActor
 final class HarnessDocument: TextDocument {
     let textView = UITextView()
-    let documentID = "harness-document"
+    let documentID: String? = "harness-document"
 
     private static func argument(_ key: String) -> String? { UserDefaults.standard.string(forKey: key) }
 

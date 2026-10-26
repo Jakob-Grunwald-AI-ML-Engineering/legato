@@ -5,7 +5,9 @@ import UIKit
 @MainActor
 protocol TextDocument: AnyObject {
     /// Stable for one field (`documentIdentifier`); a run's text goes only to the field it is bound to.
-    var documentID: String { get }
+    /// Nil while no field is bound (the keyboard is appearing, or the host's field is gone): nothing is
+    /// then applied.
+    var documentID: String? { get }
     /// The text before the insertion point (`documentContextBeforeInput`); empty when there is none.
     var contextBefore: String { get }
     var returnKeyType: UIReturnKeyType { get }
