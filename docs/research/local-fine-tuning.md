@@ -106,6 +106,18 @@ The current scorer checks required/forbidden strings, word distance and the stri
 
 Freeze the rubric and promotion criteria before the test set is opened. Higher training accuracy or lower loss alone is not a go decision.
 
+## Periodic learning while idle and connected to power
+
+The intended personalization cadence is occasional, opportunistic maintenance, preferably overnight while connected to power. It need not run after every dictation, finish quickly, or run every night. Proposed policy: require enough new approved corrections and a cooldown since the last successful update, then train in small bounded slices while idle, on external power and within acceptable thermal conditions. A fully charged device still connected to power should remain eligible. Save checkpoints and defer safely when conditions change; a missed night is acceptable.
+
+Apple explicitly lists overnight machine-learning training under [deferred intensive work](https://developer.apple.com/documentation/backgroundtasks/choosing-background-strategies-for-your-app). On iOS, [BGProcessingTaskRequest.requiresExternalPower](https://developer.apple.com/documentation/backgroundtasks/bgprocessingtaskrequest/requiresexternalpower) gates work on external power, but the system chooses execution time and [can interrupt processing](https://developer.apple.com/documentation/backgroundtasks/bgprocessingtask). This is an opportunity to make progress, not an exact nightly timer or an unlimited training window.
+
+Background GPU access needs separate investigation. Apple's [continued-processing tasks](https://developer.apple.com/documentation/backgroundtasks/performing-long-running-tasks-on-ios-and-ipados) permit GPU work on supported devices with the capability, but must start in response to a user action in the foreground. They do not establish an unattended overnight GPU-training path. Slower CPU training during scheduled processing is a candidate to research, not a demonstrated MLX-on-iPhone solution. The current Legato background fallback describes its implementation, not a universal prohibition on all iOS background GPU work.
+
+On macOS, [NSBackgroundActivityScheduler](https://developer.apple.com/documentation/foundation/nsbackgroundactivityscheduler) supports deferrable repeated activity and responding to changed conditions. Mac-local training remains the more established first path, provided the Mac is awake and available; charging-and-idle policy still needs implementation and measurement.
+
+This cadence relaxes wall-time and frequency requirements; it does not establish affordable peak memory, low total energy, or quality gains. Train a candidate separately, evaluate against the active adapter on reserved data, and activate it only after validation, retaining rollback. Use new approved pairs plus representative older examples to check against forgetting. The phone-only automatic path remains open research rather than rejected merely for being slow.
+
 ## A later experiment, if requested
 
 First compare current prompting with an explicitly supplied, frozen vocabulary baseline, an appropriately prompted S1-mini English comparator, and a task-adapted Qwen3 0.6B on identical frozen inputs. Qwen3 1.7B is a Mac quality comparator; Foundation Models is included only where actually available. Do not substitute missing baselines with invented scores.
