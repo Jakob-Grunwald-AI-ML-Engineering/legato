@@ -33,7 +33,7 @@ struct CleanupSettingsView: View {
                 Toggle("Clean up dictation", isOn: $enabled)
                     .accessibilityIdentifier("cleanup.enabled")
             } footer: {
-                Text("After you stop, a language model on this iPhone adds punctuation and fixes misheard words. History keeps the raw text next to the cleaned one.")
+                Text("A language model on this iPhone adds punctuation and fixes misheard words (after you stop, or phrase by phrase with Live). History keeps the raw text next to the cleaned one.")
             }
 
             Section {
@@ -41,6 +41,7 @@ struct CleanupSettingsView: View {
                     Text("Replace").tag(CleanupDelivery.replace)
                     Text("Clipboard").tag(CleanupDelivery.clipboard)
                     Text("Hold").tag(CleanupDelivery.hold)
+                    Text("Live").tag(CleanupDelivery.live)
                 }
                 .accessibilityIdentifier("cleanup.delivery")
             } header: {
@@ -171,6 +172,8 @@ struct CleanupSettingsView: View {
             "Clipboard: the field keeps the raw text; the cleaned text goes to the clipboard."
         case .hold:
             "Hold: nothing is typed while you speak (the keyboard's top bar shows the live text); the cleaned text is inserted when you stop."
+        case .live:
+            "Live: each phrase is cleaned while you speak the next and replaces its raw text in place; when you stop only the last phrases are left. A phrase you typed around keeps its raw text."
         }
     }
 }

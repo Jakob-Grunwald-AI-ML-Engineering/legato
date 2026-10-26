@@ -55,6 +55,7 @@ extension Settings {
         case .replace: return .replace
         case .clipboard: return .clipboard
         case .hold: return .hold
+        case .live: return .live
         }
     }
 }

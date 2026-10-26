@@ -25,7 +25,7 @@ struct CleanupSettingsView: View {
             Section {
                 Toggle("Clean up dictation", isOn: $settings.cleanupEnabled)
             } footer: {
-                Text("After you stop, a language model on this Mac adds punctuation and fixes misheard words. History keeps the raw text next to the cleaned one.")
+                Text("A language model on this Mac adds punctuation and fixes misheard words (after you stop, or phrase by phrase with Live). History keeps the raw text next to the cleaned one.")
                     .font(.callout).foregroundStyle(.secondary)
             }
 

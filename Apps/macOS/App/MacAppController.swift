@@ -96,8 +96,11 @@ final class MacAppController {
         let secureField: Bool
         /// How a cleaned text reaches the field: the setting when the run started, nil with cleanup off.
         let delivery: CleanupDelivery?
+        /// The run's text as the edit pump saw it: raw committed (`committed`), with live cleanup's revisions
+        /// applied for the HUD (`revisedCommitted`).
+        var transcript = LiveTranscript()
         /// Everything the engine committed, as the edit pump saw it.
-        var committed = ""
+        var committed: String { transcript.committed }
 
         init(writer: FieldWriter, targetPID: pid_t?, secureField: Bool, delivery: CleanupDelivery?) {
             self.writer = writer
@@ -567,8 +570,9 @@ final class MacAppController {
             return
         }
         // `session.stop()` has yielded every edit; let the pump hand them to the writer. They carry the
-        // engine's (raw) text, not the cleaned one.
-        await drainEdits(of: run, expecting: entry.map { $0.rawText ?? $0.text })
+        // engine's (raw) text, not the cleaned one; a live run's revisions come after its last commit, so it
+        // waits for every edit.
+        await drainEdits(of: run, expecting: run.delivery == .live ? nil : entry.map { $0.rawText ?? $0.text })
 
         if let failure {
             Self.log.error("stop failed: \(Self.describe(failure), privacy: .public)")
@@ -619,7 +623,7 @@ final class MacAppController {
             switch delivery {
             case nil: note("Copied the rest — paste with ⌘V.")
             case .clipboard: note("Cleaned text copied — paste with ⌘V to use it.")
-            case .replace, .hold: note("The field changed: cleaned text copied — paste with ⌘V.")
+            case .replace, .hold, .live: note("The field changed: cleaned text copied — paste with ⌘V.")
             }
         case .paste(let full):
             let outcome = await paster.paste(
@@ -671,10 +675,10 @@ final class MacAppController {
         appliedEdits += 1
         guard let run = activeRun else { return }
         run.writer.apply(edit)
+        run.transcript.apply(edit)
         switch edit {
-        case .commit(let delta):
-            run.committed += delta
-            hud.model.committed += delta
+        case .commit, .revise:
+            hud.model.committed = run.transcript.revisedCommitted
         case .replaceVolatile(let text):
             hud.model.volatile = text
         }

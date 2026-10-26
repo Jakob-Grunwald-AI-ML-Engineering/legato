@@ -83,6 +83,11 @@ final class KeyboardLinkHost: TranscriptSink {
         onTranscript?(committed, volatile)
     }
 
+    /// Live cleanup replaced a committed span: the keyboard swaps it in while its field still shows the raw text.
+    func revised(_ revision: TranscriptRevision) {
+        link.revise(HostRevision(start: revision.start, raw: revision.raw, text: revision.text))
+    }
+
     /// With cleanup, `text` is the cleaned text: the keyboard swaps it in (`.replace`), keeps the streamed
     /// text (`.clipboard`: never confirmed, so the cleaned text goes to the clipboard) or inserts it (`.hold`).
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {

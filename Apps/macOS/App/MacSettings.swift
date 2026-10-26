@@ -105,6 +105,7 @@ extension CleanupDelivery {
         case .replace: "Replace"
         case .clipboard: "Clipboard"
         case .hold: "Hold"
+        case .live: "Live"
         }
     }
 
@@ -116,6 +117,8 @@ extension CleanupDelivery {
             "The field keeps the raw text; the cleaned text goes to the clipboard."
         case .hold:
             "Nothing is typed while you speak (the floating panel shows the live text); the cleaned text is inserted when you stop."
+        case .live:
+            "Each phrase is cleaned while you speak the next and replaces its raw text in place; at the end only the last phrases are left to clean. A phrase you typed around keeps its raw text."
         }
     }
 }
