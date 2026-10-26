@@ -22,7 +22,10 @@ public final class ModelServices {
     public let engineSettings: EngineSettings
     /// The models on offer on this device (the manager's catalog, readable without awaiting it).
     public let catalog: [ModelDescriptor]
+    /// The live (streaming) models grouped by family, each with its latency tiers.
+    public let streamingFamilies: [ModelFamily]
     private let selection: SelectionStore
+    private let familySelection: FamilySelection
     /// The pick in flight per role; a newer pick (or Apple Speech) cancels it.
     private var picks: [ModelRole: Task<Void, Never>] = [:]
 
@@ -33,12 +36,14 @@ public final class ModelServices {
     public init(root: URL, defaults: UserDefaults, platform: ModelPlatform = .current) {
         FluidAudioModels.pinRevisions()
         selection = SelectionStore(defaults: defaults)
+        familySelection = FamilySelection(selection: selection, tiers: FamilyTierStore(defaults: defaults))
         engineSettings = EngineSettings(defaults: defaults)
         let speech = FluidAudioCatalog.descriptors(platform: platform)
         let llms = MLXModels.descriptors(platform: platform)
         let installers = FluidAudioCatalog.installers(platform: platform)
             .merging(MLXModels.installers(platform: platform)) { first, _ in first }
         catalog = speech + llms
+        streamingFamilies = ModelFamily.groups(of: speech, kind: .speechStreaming)
         manager = ModelManager(
             root: root,
             catalog: catalog,
@@ -92,6 +97,51 @@ public final class ModelServices {
                 done(error)
             }
         }
+    }
+
+    // MARK: families
+
+    /// The family the live pick belongs to, if a model is picked.
+    public var activeFamily: ModelFamily? {
+        familySelection.activeFamily(in: streamingFamilies, role: .liveDictation)
+    }
+
+    /// The tier shown for `family`: the live pick's tier when the family is live, else the remembered tier
+    /// or the family default. `nil` for a model without tiers.
+    public func chosenTier(of family: ModelFamily) -> Int? {
+        familySelection.chosenTier(of: family, role: .liveDictation)
+    }
+
+    /// The catalog model a pick of `family` would use now: the one at its chosen tier.
+    public func chosenModel(of family: ModelFamily) -> ModelDescriptor? {
+        familySelection.activate(family, role: .liveDictation).flatMap { id in family.members.first { $0.id == id } }
+    }
+
+    /// "Nemotron multilingual · 1120 ms": the family with its chosen tier.
+    public func liveLabel(of family: ModelFamily) -> String {
+        chosenTier(of: family).map { "\(family.name) · \($0) ms" } ?? family.name
+    }
+
+    /// Makes `family` the live engine at its chosen tier. Only that tier downloads (see ``pick(_:role:done:)``).
+    public func pick(family: ModelFamily, done: @escaping @MainActor ((any Error)?) -> Void) {
+        guard let id = familySelection.activate(family, role: .liveDictation) else { return }
+        pick(id, role: .liveDictation, done: done)
+    }
+
+    /// Makes `family` live at `tierMs`, downloading that tier first if it is missing.
+    public func pick(family: ModelFamily, tierMs: Int, done: @escaping @MainActor ((any Error)?) -> Void) {
+        guard let id = familySelection.choose(family, tierMs: tierMs, role: .liveDictation, activate: true) else { return }
+        pick(id, role: .liveDictation, done: done)
+    }
+
+    /// Changes the latency tier of `family`. When the family is the live one, the new tier is picked (it
+    /// downloads first; the old tier stays live until then) and this returns `true`. Otherwise the tier is
+    /// only remembered for when the family is picked, and nothing downloads.
+    @discardableResult
+    public func setTier(_ tierMs: Int, of family: ModelFamily, done: @escaping @MainActor ((any Error)?) -> Void) -> Bool {
+        guard let id = familySelection.choose(family, tierMs: tierMs, role: .liveDictation, activate: false) else { return false }
+        pick(id, role: .liveDictation, done: done)
+        return true
     }
 
     /// Back to the zero-download default for `role` (Apple Speech, or no MLX model): cancels a pick in flight.

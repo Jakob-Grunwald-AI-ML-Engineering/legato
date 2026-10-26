@@ -237,7 +237,9 @@ public enum FluidAudioModels {
                         languages: multilingual ? nemotronLanguages : latinLanguages,
                         licence: "OpenMDW-1.1",
                         platforms: [.iOS, .macOS],
-                        family: "nemotron"),
+                        family: "nemotron-\(variant.rawValue)",
+                        familyName: "Nemotron \(multilingual ? "multilingual" : "Latin")",
+                        tierMs: chunkMs),
                     NemotronInstaller(variant: variant, chunkMs: chunkMs)))
             }
         }
@@ -251,7 +253,9 @@ public enum FluidAudioModels {
                     languages: ["en"],
                     licence: "NVIDIA Open Model License",
                     platforms: [.iOS, .macOS],
-                    family: "parakeet-eou"),
+                    family: "parakeet-eou",
+                    familyName: "Parakeet EOU",
+                    tierMs: chunk.rawValue),
                 ParakeetEouInstaller(chunk: chunk)))
         }
         rows.append((

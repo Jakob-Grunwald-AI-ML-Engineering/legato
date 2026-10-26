@@ -305,6 +305,14 @@ final class MacAppController {
         }
     }
 
+    /// The menu's engine switch for a family: its chosen tier, picked straight away when installed.
+    func switchEngine(to family: ModelFamily) {
+        models.pick(family: family) { [weak self] error in
+            if let error { self?.hud.show(toast: "Could not switch: \(String(describing: error))") }
+            Task { await self?.refreshEngine() }
+        }
+    }
+
     // MARK: Versions
 
     /// The last dictation's raw text in place of its cleaned text: swapped in the field when it still ends

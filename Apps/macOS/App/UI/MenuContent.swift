@@ -1,4 +1,5 @@
 import AppKit
+import LegatoModels
 import SwiftUI
 
 /// The menu-bar window: status, the last 20 dictations, Settings, Quit.
@@ -53,13 +54,16 @@ struct MenuContent: View {
                     Toggle("Apple Speech", isOn: Binding(
                         get: { controller.engineStatus.modelID == nil },
                         set: { if $0 { controller.switchEngine(to: nil) } }))
-                    ForEach(controller.models.streamingModels) { descriptor in
-                        if controller.installedStreamingModels.contains(descriptor.id) {
-                            Toggle(descriptor.displayName, isOn: Binding(
-                                get: { controller.engineStatus.modelID == descriptor.id },
-                                set: { if $0 { controller.switchEngine(to: descriptor.id) } }))
+                    ForEach(controller.models.streamingFamilies) { family in
+                        let label = controller.models.liveLabel(of: family)
+                        if let chosen = controller.models.chosenModel(of: family),
+                            controller.installedStreamingModels.contains(chosen.id)
+                        {
+                            Toggle(label, isOn: Binding(
+                                get: { controller.engineStatus.modelID.map(family.contains) ?? false },
+                                set: { if $0 { controller.switchEngine(to: family) } }))
                         } else {
-                            Button("\(descriptor.displayName) (not installed)…") { open(.speech) }
+                            Button("\(label) (not installed)…") { open(.speech) }
                         }
                     }
                     Divider()

@@ -3,13 +3,16 @@ import LegatoEngines
 import LegatoModels
 import SwiftUI
 
-/// The live dictation engine: Apple Speech (the default, nothing to download) or one of the streaming
-/// catalog models. Tapping a model installs and warms it, then switches; the previous engine stays live
-/// until then. Swipe to delete a downloaded model.
+/// The live dictation engine: Apple Speech (the default, nothing to download) or one of the streaming model
+/// families. Tapping a family installs and warms its chosen latency tier, then switches; the previous engine
+/// stays live until then. Only the chosen tier downloads; each downloaded tier can be deleted on its own.
 struct SpeechEngineView: View {
     let controller: AppController
 
     @State private var selected: String?
+    @State private var activeFamilyID: String?
+    @State private var tiers: [String: Int] = [:]
+    /// The family whose pick is waiting for its install.
     @State private var pending: String?
     @State private var failures: [String: String] = [:]
     @State private var languages: Set<String> = []
@@ -27,7 +30,7 @@ struct SpeechEngineView: View {
                 Button {
                     pending = nil
                     models.clearPick(.liveDictation)
-                    selected = nil
+                    reload()
                     Task { await controller.refreshEngine() }
                 } label: {
                     HStack {
@@ -40,19 +43,17 @@ struct SpeechEngineView: View {
                     }
                 }
                 .accessibilityIdentifier("engine.apple")
-                ForEach(models.streamingModels) { descriptor in
-                    ModelRow(
-                        descriptor: descriptor, manager: models.manager, isSelected: selected == descriptor.id,
-                        isPending: pending == descriptor.id, failure: failures[descriptor.id]
-                    ) { pick(descriptor.id) }
-                    .swipeActions {
-                        Button("Delete", role: .destructive) { delete(descriptor.id) }
-                    }
+                ForEach(models.streamingFamilies) { family in
+                    FamilyRow(
+                        family: family, manager: models.manager, isActive: activeFamilyID == family.id,
+                        tierMs: tiers[family.id], isPending: pending == family.id, failure: failures[family.id],
+                        onPick: { pick(family) }, onTier: { setTier($0, of: family) },
+                        onDelete: { delete($0, of: family) })
                 }
             } header: {
                 Text("Engine")
             } footer: {
-                Text("Picking a model downloads and prepares it first; dictation keeps using the current engine until it is ready. Swipe left on a model to delete it. Now in use: \(controller.engineStatus.name)\(controller.engineStatus.fallback.map { " (\($0))" } ?? "").")
+                Text("Picking a model downloads and prepares it first; dictation keeps using the current engine until it is ready. Latency is the audio the model waits for: a shorter wait shows words sooner, a longer one is more accurate. Only the tier you choose is downloaded. Now in use: \(controller.engineStatus.name)\(controller.engineStatus.fallback.map { " (\($0))" } ?? "").")
             }
 
             Section {
@@ -87,32 +88,52 @@ struct SpeechEngineView: View {
         }
         .navigationTitle("Speech engine")
         .onAppear {
-            selected = models.selected(.liveDictation)
+            reload()
             languages = Set(models.engineSettings.preferredLocales.map { $0.language.languageCode?.identifier ?? $0.identifier })
             silenceMs = Double(models.engineSettings.silenceMs)
         }
     }
 
-    private func pick(_ id: String) {
-        guard id != selected else { return }
-        failures[id] = nil
-        pending = id
-        models.pick(id, role: .liveDictation) { error in
-            if pending == id { pending = nil }
-            if let error {
-                failures[id] = String(describing: error)
-            } else {
-                selected = models.selected(.liveDictation)
-            }
-            Task { await controller.refreshEngine() }
-        }
+    private func reload() {
+        selected = models.selected(.liveDictation)
+        activeFamilyID = models.activeFamily?.id
+        tiers = Dictionary(uniqueKeysWithValues: models.streamingFamilies.compactMap { family in
+            models.chosenTier(of: family).map { (family.id, $0) }
+        })
     }
 
-    private func delete(_ id: String) {
-        if pending == id { pending = nil }
+    private func pick(_ family: ModelFamily) {
+        guard activeFamilyID != family.id else { return }
+        failures[family.id] = nil
+        pending = family.id
+        models.pick(family: family) { finished(family, $0) }
+    }
+
+    private func setTier(_ tierMs: Int, of family: ModelFamily) {
+        failures[family.id] = nil
+        let isLive = activeFamilyID == family.id
+        let switching = models.setTier(tierMs, of: family, done: { finished(family, $0) })
+        reload()
+        // The live pick stays on the old tier until the new one is installed; the picker shows the target.
+        if switching, isLive { pending = family.id; tiers[family.id] = tierMs }
+    }
+
+    private func finished(_ family: ModelFamily, _ error: (any Error)?) {
+        if pending == family.id { pending = nil }
+        if let error { failures[family.id] = String(describing: error) }
+        reload()
+        Task { await controller.refreshEngine() }
+    }
+
+    private func delete(_ tier: InstalledTier?, of family: ModelFamily) {
+        if pending == family.id { pending = nil }
         Task {
-            await models.manager.delete(id)
-            selected = models.selected(.liveDictation)
+            if let tier {
+                await models.manager.delete(tier.id)
+            } else {
+                await models.manager.delete(family: family)
+            }
+            reload()
             await controller.refreshEngine()
         }
     }
