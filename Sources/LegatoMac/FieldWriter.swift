@@ -36,15 +36,20 @@ public enum DegradeReason: Sendable, Equatable {
 ///   nil means "use what was committed". With no target everything is `.paste`.
 /// - If `finish` finds the field missing the tail of the final text (edits still in flight) it
 ///   writes that too, so call it after the edit stream has been drained.
-/// - A first write that fails, is ignored or lies leaves nothing of ours in the field:
-///   `.paste(full text)`, never a duplicate. A failure after text landed gives
-///   `.copy(remainder)`: the pasteboard only, because pasting could land somewhere else or
-///   duplicate. A first write that cannot be verified (readback failed) is `.copy(full text)`
-///   as it may have landed.
+/// - A first write that fails, or is ignored (the field reads exactly as before), leaves nothing
+///   of ours in the field: `.paste(full text)`, never a duplicate. A failure after text landed
+///   gives `.copy(remainder)`: the pasteboard only, because pasting could land somewhere else
+///   or duplicate. A first write that cannot be verified (readback failed) or that altered the
+///   field without showing our text (truncated, mangled) is `.copy(full text)` as part of it
+///   may have landed.
 /// - A text the field is missing that the writer cannot place (the final text does not continue
 ///   what was written) is `.copy(final text)`; nothing is appended blindly.
 /// - Leading whitespace of the first phrase is not written, so the field matches the trimmed text.
-/// - Tentative text left in the field by a mid-run degrade in `.streamLive` is not cleaned up.
+/// - Tentative text left in the field by a mid-run degrade in `.streamLive` is not cleaned up
+///   by `finish`.
+/// - `revert()` is for a cancelled run: it removes what this writer typed (and puts back the
+///   selection the first write replaced) if the field still reads exactly as the writer left
+///   it; otherwise it leaves everything alone. The writer ignores all edits after it.
 @MainActor
 public final class FieldWriter {
     public enum Mode: String, Sendable, Codable, CaseIterable {
@@ -70,6 +75,11 @@ public final class FieldWriter {
     private var tentative = ""
     /// A write was attempted whose landing could not be verified (the readback failed).
     private var uncertainWrite = false
+    /// What the first write replaced: `replacedText` is nil when the selection could not be read.
+    private var replacedLength = 0
+    private var replacedText: String?
+    /// `revert()` ran: the run was cancelled and the writer no longer touches the field.
+    private var closed = false
 
     public init(target: (any TextTarget)?, mode: Mode = .streamCommitted) {
         self.target = target
@@ -77,6 +87,7 @@ public final class FieldWriter {
     }
 
     public func apply(_ edit: TranscriptEdit) {
+        guard !closed else { return }
         switch edit {
         case .commit(let delta):
             guard !delta.isEmpty else { return }
@@ -87,6 +98,43 @@ public final class FieldWriter {
             guard degradeReason == nil, mode == .streamLive else { return }
             update(appending: "", tentative: text)
         }
+    }
+
+    public enum RevertResult: Sendable, Equatable {
+        /// The writer had put nothing into the field.
+        case nothingWritten
+        /// Our text is gone from the field.
+        case removed
+        /// Our text may still be in the field: it was edited, the focus moved, or removing failed.
+        case leftInPlace
+    }
+
+    /// Takes back what this writer typed (a cancelled run). Never deletes anything it cannot
+    /// prove is its own: the span must read back exactly as written, in the still-focused field.
+    @discardableResult
+    public func revert() -> RevertResult {
+        guard !closed else { return .nothingWritten }
+        closed = true
+        guard let target, let start = spanStart else { return .nothingWritten }
+        let shown = written + tentative
+        guard !shown.isEmpty else { return .nothingWritten }
+        guard target.isFocused() else { return .leftInPlace }
+        let range = UTF16Range(location: start, length: shown.utf16.count)
+        guard let current = try? target.text(in: range), current == shown else { return .leftInPlace }
+        let restore: String
+        if replacedLength == 0 {
+            restore = ""
+        } else if let replacedText {
+            restore = replacedText
+        } else {
+            return .leftInPlace
+        }
+        do { try target.replace(range, with: restore) } catch { return .leftInPlace }
+        guard let after = try? target.text(in: range), after != shown else { return .leftInPlace }
+        written = ""
+        tentative = ""
+        spanStart = nil
+        return .removed
     }
 
     public func finish(finalText: String?) -> FinishAction {
@@ -128,6 +176,9 @@ public final class FieldWriter {
 
         let start: Int
         let range: UTF16Range
+        // First write only: the text around the insertion before it, to tell "ignored" from "altered".
+        var probe: (window: UTF16Range, before: String)?
+        var replaced: String??
         if let spanStart {
             start = spanStart
             // Our text must be exactly where we left it before we change it.
@@ -146,6 +197,9 @@ public final class FieldWriter {
                 return degrade(.unreadable)
             }
             start = range.location
+            let window = UTF16Range(location: start, length: range.length + insertion.utf16.count)
+            if let before = try? target.text(in: window) { probe = (window, before) }
+            replaced = .some(range.length == 0 ? "" : try? target.text(in: range))
         }
 
         do {
@@ -156,10 +210,23 @@ public final class FieldWriter {
         let expected = written + insertion
         do {
             let readback = try target.text(in: UTF16Range(location: start, length: expected.utf16.count))
-            guard readback == expected else { return degrade(.notApplied) }
+            guard readback == expected else {
+                if let probe {
+                    // Unchanged field: nothing of ours is in it. Anything else may hold part of our text.
+                    let now = try? target.text(in: probe.window)
+                    if now != probe.before { uncertainWrite = true }
+                } else if spanStart == nil {
+                    uncertainWrite = true
+                }
+                return degrade(.notApplied)
+            }
         } catch {
             uncertainWrite = true
             return degrade(.unreadable)
+        }
+        if spanStart == nil, let replaced {
+            replacedLength = range.length
+            replacedText = replaced
         }
         spanStart = start
         written += delta

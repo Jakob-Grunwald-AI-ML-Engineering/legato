@@ -18,6 +18,8 @@ final class FakeTextTarget: TextTarget {
     var ignoreWrites = false
     /// `replace` returns normally but stores `x`s instead of the text.
     var lieOnWrites = false
+    /// `replace` stores only the first `n` UTF-16 units of the text (a truncated write).
+    var storeOnlyFirst: Int?
     /// After this many successful writes, `replace` throws.
     var failWritesAfter: Int?
     var failReads = false
@@ -63,7 +65,8 @@ final class FakeTextTarget: TextTarget {
         successfulWrites += 1
         if ignoreWrites { return }
         let stored = lieOnWrites ? String(repeating: "x", count: text.utf16.count) : text
-        let new = Array(stored.utf16)
+        var new = Array(stored.utf16)
+        if let storeOnlyFirst { new = Array(new.prefix(storeOnlyFirst)) }
         splice(range, new)
         selection = UTF16Range(location: range.location + new.count, length: 0)
     }

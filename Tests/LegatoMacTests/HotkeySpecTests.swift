@@ -173,3 +173,66 @@ import Testing
         }
     }
 }
+
+@Suite struct HotkeySpecImplicitFunctionFlagTests {
+    private func key(_ kind: KeyEvent.Kind, _ code: UInt16, _ f: ModifierFlags) -> KeyEvent {
+        KeyEvent(kind: kind, keyCode: code, flags: f)
+    }
+
+    @Test func arrowKeysCarryFnImplicitlyAndStillMatch() {
+        let spec = HotkeySpec.combo(keyCode: 126, modifiers: [.command]) // ⌘↑
+        #expect(spec.triggerEvent(for: key(.keyDown, 126, [.command, .function])) == .pressed)
+        #expect(spec.triggerEvent(for: key(.keyDown, 126, [.command])) == .pressed)
+    }
+
+    @Test func functionKeysCarryFnImplicitlyAndStillMatch() {
+        let spec = HotkeySpec.combo(keyCode: 96, modifiers: []) // F5
+        #expect(spec.triggerEvent(for: key(.keyDown, 96, [.function])) == .pressed)
+    }
+
+    @Test func fnIsStillRequiredForOrdinaryKeys() {
+        let spec = HotkeySpec.combo(keyCode: 36, modifiers: [.function])
+        #expect(spec.triggerEvent(for: key(.keyDown, 36, [.function])) == .pressed)
+        #expect(spec.triggerEvent(for: key(.keyDown, 36, [])) == .otherKeyDown)
+    }
+
+    @Test func fnOnAnOrdinaryKeyIsNotIgnoredWhenTheSpecHasNone() {
+        let spec = HotkeySpec.combo(keyCode: 0, modifiers: [.command])
+        #expect(spec.triggerEvent(for: key(.keyDown, 0, [.command, .function])) == .otherKeyDown)
+    }
+}
+
+@Suite struct HotkeySpecWarningTests {
+    @Test func modifierKeysHaveNoWarning() {
+        #expect(HotkeySpec.modifier(.rightCommand).warning == nil)
+    }
+
+    @Test func plainCharacterKeysWarn() {
+        #expect(HotkeySpec.combo(keyCode: 0, modifiers: []).warning == .producesCharacter) // A
+        #expect(HotkeySpec.combo(keyCode: 0, modifiers: [.shift]).warning == .producesCharacter)
+        #expect(HotkeySpec.combo(keyCode: 0, modifiers: [.option]).warning == .producesCharacter) // ⌥A types å
+        #expect(HotkeySpec.combo(keyCode: 49, modifiers: []).warning == .producesCharacter) // Space
+        #expect(HotkeySpec.combo(keyCode: 36, modifiers: []).warning == .producesCharacter) // Return
+    }
+
+    @Test func commonSystemShortcutsWarn() {
+        for code: UInt16 in [8, 9, 7, 6, 12, 13, 48, 49] { // C V X Z Q W Tab Space
+            #expect(HotkeySpec.combo(keyCode: code, modifiers: [.command]).warning == .systemShortcut)
+        }
+    }
+
+    @Test func safeCombosHaveNoWarning() {
+        #expect(HotkeySpec.combo(keyCode: 96, modifiers: []).warning == nil) // F5
+        #expect(HotkeySpec.combo(keyCode: 96, modifiers: [.shift]).warning == nil)
+        #expect(HotkeySpec.combo(keyCode: 126, modifiers: []).warning == nil) // ↑
+        #expect(HotkeySpec.combo(keyCode: 40, modifiers: [.command, .option]).warning == nil)
+        #expect(HotkeySpec.combo(keyCode: 49, modifiers: [.control, .shift]).warning == nil)
+        #expect(HotkeySpec.combo(keyCode: 8, modifiers: [.command, .shift]).warning == nil)
+        #expect(HotkeySpec.combo(keyCode: 0, modifiers: [.control]).warning == nil)
+    }
+
+    @Test func everyWarningHasAMessage() {
+        #expect(!HotkeySpec.Warning.producesCharacter.message.isEmpty)
+        #expect(!HotkeySpec.Warning.systemShortcut.message.isEmpty)
+    }
+}

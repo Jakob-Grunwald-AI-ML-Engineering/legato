@@ -14,6 +14,18 @@ public struct ModifierFlags: OptionSet, Sendable, Hashable, Codable {
     public static let function = ModifierFlags(rawValue: 1 << 23)
 }
 
+extension ModifierFlags {
+    /// Arrow keys and F1...F12 set the fn flag by themselves.
+    public static func carriesImplicitFunction(keyCode: UInt16) -> Bool {
+        implicitFunctionKeys.contains(keyCode)
+    }
+
+    private static let implicitFunctionKeys: Set<UInt16> = [
+        123, 124, 125, 126, // arrows
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, // F1...F12
+    ]
+}
+
 /// A single physical modifier key, with side.
 public enum ModifierKey: String, Sendable, Hashable, Codable, CaseIterable {
     case leftCommand, rightCommand, leftOption, rightOption
@@ -124,7 +136,8 @@ public enum HotkeySpec: Sendable, Hashable, Codable {
         case .combo(let keyCode, let modifiers):
             switch event.kind {
             case .keyDown:
-                if event.keyCode == keyCode, event.flags.intersection(Self.matchedModifiers) == modifiers {
+                if event.keyCode == keyCode,
+                   Self.eventModifiers(event, specModifiers: modifiers) == modifiers {
                     return .pressed
                 }
                 return .otherKeyDown
@@ -134,6 +147,47 @@ public enum HotkeySpec: Sendable, Hashable, Codable {
                 return event.flags.isSuperset(of: modifiers) ? nil : .released
             }
         }
+    }
+
+    /// Arrow and function keys carry the fn flag implicitly; unless the spec asks for fn, it is not
+    /// part of the match.
+    private static func eventModifiers(_ event: KeyEvent, specModifiers: ModifierFlags) -> ModifierFlags {
+        var flags = event.flags.intersection(matchedModifiers)
+        if ModifierFlags.carriesImplicitFunction(keyCode: event.keyCode), !specModifiers.contains(.function) {
+            flags.remove(.function)
+        }
+        return flags
+    }
+
+    /// Why a recorded hotkey may be a poor choice.
+    public enum Warning: Sendable, Equatable {
+        /// The key would still type a character (or a symbol, with ⌥) into the focused field.
+        case producesCharacter
+        /// A shortcut other apps and the system rely on.
+        case systemShortcut
+
+        public var message: String {
+            switch self {
+            case .producesCharacter: "This key also types a character. Add ⌃ or ⌘, or pick a function key."
+            case .systemShortcut: "A common system shortcut. Legato cannot stop it from also acting."
+            }
+        }
+    }
+
+    /// ⌘C ⌘V ⌘X ⌘Z ⌘Q ⌘W ⌘Tab ⌘Space.
+    private static let systemShortcutKeys: Set<UInt16> = [8, 9, 7, 6, 12, 13, 48, 49]
+    private static let nonCharacterKeys: Set<UInt16> = [51, 53]
+
+    /// A caution for the recorder UI; nil for a lone modifier and for combos that look safe.
+    public var warning: Warning? {
+        guard case .combo(let keyCode, let modifiers) = self else { return nil }
+        let held = modifiers.intersection(Self.matchedModifiers)
+        if held == .command, Self.systemShortcutKeys.contains(keyCode) { return .systemShortcut }
+        let isCharacterKey = Self.names[keyCode] != nil
+            && !Self.nonCharacterKeys.contains(keyCode)
+            && !ModifierFlags.carriesImplicitFunction(keyCode: keyCode)
+        if isCharacterKey, held.isSubset(of: [.shift, .option]) { return .producesCharacter }
+        return nil
     }
 
     /// For the UI, e.g. "Right ⌘" or "⌃⇧Space".

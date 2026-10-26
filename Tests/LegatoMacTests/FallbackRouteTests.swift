@@ -18,3 +18,17 @@ import Testing
         #expect(FallbackRoute.route(axTrusted: false, frontmostIsTarget: false) == .copyOnly)
     }
 }
+
+@Suite struct FallbackRouteGuardTests {
+    @Test func copiesIntoASecureField() {
+        #expect(FallbackRoute.route(axTrusted: true, frontmostIsTarget: true, secureField: true) == .copyOnly)
+    }
+
+    @Test func copiesWhenModifiersAreStillHeld() {
+        #expect(FallbackRoute.route(axTrusted: true, frontmostIsTarget: true, modifiersReleased: false) == .copyOnly)
+    }
+
+    @Test func pastesOnlyWhenEveryGuardPasses() {
+        #expect(FallbackRoute.route(axTrusted: true, frontmostIsTarget: true, secureField: false, modifiersReleased: true) == .pasteKeystroke)
+    }
+}

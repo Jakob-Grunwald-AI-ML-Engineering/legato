@@ -29,6 +29,9 @@ final class MacAppController {
     private(set) var onboardingRequests = 0
     private(set) var isRecordingHotkey = false
     private(set) var recordingPreview: String?
+    /// A hotkey press found something unfinished in setup while the user was in another app:
+    /// the menu-bar icon shows a warning until the onboarding window is opened.
+    private(set) var setupAttention = false
 
     @ObservationIgnored let settings = MacSettings()
     @ObservationIgnored let permissions: Permissions
@@ -44,6 +47,9 @@ final class MacAppController {
     @ObservationIgnored private var commands: AsyncStream<Command>.Continuation?
     @ObservationIgnored private var activeRun: Run?
     @ObservationIgnored private var monitor: Task<Void, Never>?
+    /// Fires `gesture.tick` when a press has been held alone for the arm delay.
+    @ObservationIgnored private var armTask: Task<Void, Never>?
+    @ObservationIgnored private var triggerPressedAt: TimeInterval?
     @ObservationIgnored private var bootstrapped = false
 
     private enum Command: Sendable {
@@ -57,12 +63,15 @@ final class MacAppController {
         let writer: FieldWriter
         let targetPID: pid_t?
         let startedAt = Date()
+        /// The field was (or could not be ruled out as) a secure one: never typed or pasted into.
+        let secureField: Bool
         /// Everything the engine committed, as the edit pump saw it.
         var committed = ""
 
-        init(writer: FieldWriter, targetPID: pid_t?) {
+        init(writer: FieldWriter, targetPID: pid_t?, secureField: Bool) {
             self.writer = writer
             self.targetPID = targetPID
+            self.secureField = secureField
         }
     }
 
@@ -148,18 +157,35 @@ final class MacAppController {
     }
 
     func requestOnboarding() {
+        setupAttention = false
         onboardingRequests += 1
     }
+
+    /// Something is missing, discovered from a hotkey press: do not pull the user out of the app
+    /// they are in. Show a toast and flag the menu-bar item instead.
+    private func flagSetup() {
+        setupAttention = true
+        hud.show(toast: "Open Legato to finish setup")
+    }
+
+    /// The hotkey spec's caution, if any, for the recorder UI.
+    var hotkeyWarning: HotkeySpec.Warning? { settings.hotkey?.warning }
 
     /// Permissions can change at any time: keep the event tap alive and in step with them.
     private func pollSystem() {
         permissions.refresh()
         if tap.isActive, !tap.isEnabled {
             tap.stop() // revoked behind our back; try again below
+            resetGesture()
         }
         // Only try once a grant exists: creating the tap without one makes macOS show a prompt.
-        if !tap.isActive, permissions.accessibility || CGPreflightListenEventAccess() { tap.start() }
+        if !tap.isActive, permissions.accessibility || CGPreflightListenEventAccess() {
+            resetGesture() // key events while there was no tap are gone
+            tap.start()
+        }
         if permissions.hotkeyTapActive != tap.isActive { permissions.hotkeyTapActive = tap.isActive }
+        if setupAttention, !needsSetup { setupAttention = false }
+        releaseStuckTrigger()
     }
 
     // MARK: History
@@ -186,6 +212,7 @@ final class MacAppController {
             hud.show(toast: "Grant Accessibility access first.")
             return
         }
+        resetGesture()
         recorder = HotkeyRecorderLogic()
         recordingPreview = nil
         isRecordingHotkey = true
@@ -199,8 +226,12 @@ final class MacAppController {
     // MARK: Key events
 
     private func handle(_ sample: TapSample) {
+        guard let event = sample.event else {
+            resetGesture() // the tap was disabled for a while: held keys can no longer be trusted
+            return
+        }
         if isRecordingHotkey {
-            switch recorder.feed(sample.event) {
+            switch recorder.feed(event) {
             case .none: break
             case .preview(let text): recordingPreview = text
             case .captured(let spec):
@@ -210,22 +241,71 @@ final class MacAppController {
             }
             return
         }
-        guard let hotkey = settings.hotkey, let trigger = hotkey.triggerEvent(for: sample.event) else { return }
+        guard let hotkey = settings.hotkey, let trigger = hotkey.triggerEvent(for: event) else { return }
+        // A timer that fired late must not reorder things: bring the gesture up to this event's time first.
+        dispatch(gesture.tick(at: sample.time))
         if trigger == .pressed, phase == .idle, gesture.mode != settings.gestureMode {
             gesture = HotkeyGesture(mode: settings.gestureMode)
         }
-        let action: HotkeyGesture.Action?
-        switch trigger {
-        case .pressed: action = gesture.pressed(at: sample.time)
-        case .released: action = gesture.released(at: sample.time)
-        case .otherKeyDown: action = gesture.otherKeyDown()
+        if trigger == .pressed, case .modifier = hotkey, gesture.isTriggerDown {
+            // A lone modifier cannot go down twice: its release was lost. Close that press first.
+            dispatch(gesture.released(at: sample.time))
         }
+        switch trigger {
+        case .pressed:
+            triggerPressedAt = sample.time
+            dispatch(gesture.pressed(at: sample.time))
+        case .released:
+            triggerPressedAt = nil
+            dispatch(gesture.released(at: sample.time))
+        case .otherKeyDown:
+            dispatch(gesture.otherKeyDown())
+        }
+        scheduleArm()
+    }
+
+    private func dispatch(_ action: HotkeyGesture.Action?) {
         switch action {
         case .start: commands?.yield(.start)
         case .stop: commands?.yield(.stop)
         case .cancel: commands?.yield(.cancel)
         case nil: break
         }
+    }
+
+    /// Wakes up when the pressed trigger has been held alone long enough to start a run.
+    private func scheduleArm() {
+        armTask?.cancel()
+        armTask = nil
+        guard let deadline = gesture.armDeadline else { return }
+        armTask = Task { [weak self] in
+            let wait = deadline - ProcessInfo.processInfo.systemUptime
+            if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+            guard !Task.isCancelled, let self else { return }
+            self.dispatch(self.gesture.tick(at: max(ProcessInfo.processInfo.systemUptime, deadline)))
+        }
+    }
+
+    /// Key events were lost (tap restarted or re-enabled): forget any press or latch in progress.
+    private func resetGesture() {
+        armTask?.cancel()
+        armTask = nil
+        triggerPressedAt = nil
+        gesture.reset()
+    }
+
+    /// Safety net for a lost release of a lone-modifier trigger: if the keyboard says the modifier
+    /// has been up for a while but the gesture still thinks it is held, close the press.
+    private func releaseStuckTrigger() {
+        guard case .modifier(let key)? = settings.hotkey, gesture.isTriggerDown,
+              let pressedAt = triggerPressedAt, ProcessInfo.processInfo.systemUptime - pressedAt > 1.5
+        else { return }
+        let raw = CGEventSource.flagsState(.combinedSessionState).rawValue
+        let flags = ModifierFlags(rawValue: UInt(truncatingIfNeeded: raw) & 0xFFFF_0000)
+        guard !flags.contains(key.flag) else { return }
+        triggerPressedAt = nil
+        dispatch(gesture.released(at: ProcessInfo.processInfo.systemUptime))
+        scheduleArm()
     }
 
     // MARK: Commands
@@ -241,20 +321,31 @@ final class MacAppController {
 
     private func startRun() async {
         guard activeRun == nil else {
+            // A start while a run is already going means the gesture lost track of it (events were
+            // lost): treat the press as the stop tap.
             gesture.runEnded()
+            if phase == .listening { await finishRun(discard: false) }
             return
         }
         guard permissions.micGranted else {
             gesture.runEnded()
-            hud.show(toast: "Legato needs microphone access.")
-            requestOnboarding()
+            flagSetup()
             return
         }
 
-        let target = AXTextTarget.captureFocused()
+        let target: AXTextTarget?
+        var secureField = false
+        switch AXTextTarget.captureFocused() {
+        case .target(let focused): target = focused
+        case .none: target = nil
+        case .secure:
+            target = nil
+            secureField = true
+        }
         let run = Run(
             writer: FieldWriter(target: target, mode: settings.insertionMode),
-            targetPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+            targetPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            secureField: secureField)
         activeRun = run
         phase = .preparing
         hud.beginRun()
@@ -265,13 +356,13 @@ final class MacAppController {
             phase = .idle
             gesture.runEnded()
             if case DictationError.assetsNotInstalled = error {
-                hud.endRun(toast: "The speech model is not installed.")
+                hud.endRun()
                 Task { await permissions.refreshModel() }
-                requestOnboarding()
+                flagSetup()
             } else if case DictationError.cancelled = error {
                 hud.endRun()
             } else {
-                Self.log.error("start failed: \(String(describing: error), privacy: .public)")
+                Self.log.error("start failed: \(Self.describe(error), privacy: .public)")
                 hud.endRun(toast: "Could not start: \(error.localizedDescription)")
             }
             return
@@ -308,14 +399,18 @@ final class MacAppController {
 
         if discard {
             if let entry { try? await history.delete(id: entry.id) }
-            conclude(run, toast: nil)
+            // Cancelled with no text kept: take back what was typed, if it is provably still ours.
+            let toast = run.writer.revert() == .leftInPlace
+                ? "Cancelled. Text already typed was left in place."
+                : nil
+            conclude(run, toast: toast)
             return
         }
         // `session.stop()` has yielded every edit; let the pump hand them to the writer.
         await drainEdits(of: run, expecting: entry?.text)
 
         if let failure {
-            Self.log.error("stop failed: \(String(describing: failure), privacy: .public)")
+            Self.log.error("stop failed: \(Self.describe(failure), privacy: .public)")
             await deliver(run, finalText: nil, salvage: true, notice: "Dictation stopped early.")
         } else {
             await deliver(run, finalText: entry?.text ?? "", salvage: false, notice: nil)
@@ -329,7 +424,7 @@ final class MacAppController {
         phase = .finishing
         hud.setPhase(.finishing)
         gesture.runEnded()
-        if let error = session.lastError { Self.log.error("run aborted: \(String(describing: error), privacy: .public)") }
+        if let error = session.lastError { Self.log.error("run aborted: \(Self.describe(error), privacy: .public)") }
         await drainEdits(of: run, expecting: nil)
         await deliver(run, finalText: nil, salvage: true, notice: "Dictation stopped early.")
     }
@@ -346,19 +441,12 @@ final class MacAppController {
             paster.copy(rest)
             toast = "Copied the rest — paste with ⌘V."
         case .paste(let full):
-            let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            let route = FallbackRoute.route(
-                axTrusted: AXIsProcessTrusted(),
-                frontmostIsTarget: frontmost != nil && frontmost == run.targetPID)
-            switch route {
-            case .pasteKeystroke:
-                await paster.paste(full, restoreClipboard: settings.restoreClipboard)
-            case .copyOnly:
-                paster.copy(full)
-                toast = AXIsProcessTrusted()
-                    ? "Copied to the clipboard — paste with ⌘V."
-                    : "Copied to the clipboard. Grant Accessibility to type into fields."
-            }
+            let outcome = await paster.paste(
+                full,
+                restoreClipboard: settings.restoreClipboard,
+                targetPID: run.targetPID,
+                secureField: run.secureField)
+            if case .copied(let reason) = outcome { toast = reason.toast }
         }
         if salvage {
             let saved = (finalText ?? run.committed).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -373,6 +461,12 @@ final class MacAppController {
             }
         }
         conclude(run, toast: toast)
+    }
+
+    /// Errors are logged by type and code only: their descriptions could echo dictated text.
+    private static func describe(_ error: any Error) -> String {
+        let ns = error as NSError
+        return "\(type(of: error)) \(ns.domain) \(ns.code)"
     }
 
     private func conclude(_ run: Run, toast: String?) {

@@ -125,13 +125,43 @@ import Testing
         #expect(writer.finish(finalText: "Hello world") == .paste("Hello world"))
     }
 
-    @Test func firstWriteLyingPastesTheFullText() {
+    @Test func firstWriteIgnoredOverASelectionPastesTheFullText() {
+        // The field is unchanged (the selection is still there), so nothing of ours is in it.
+        let field = FakeTextTarget("Hello there", selection: UTF16Range(location: 6, length: 5))
+        field.ignoreWrites = true
+        let writer = FieldWriter(target: field)
+        writer.apply(.commit(delta: "friend"))
+        #expect(writer.degradeReason == .notApplied)
+        #expect(field.string == "Hello there")
+        #expect(writer.finish(finalText: "friend") == .paste("friend"))
+    }
+
+    @Test func firstWriteLyingCopiesTheFullTextNeverPastes() {
+        // The field changed but does not show our text: pasting could duplicate what landed.
         let field = FakeTextTarget()
         field.lieOnWrites = true
         let writer = FieldWriter(target: field)
         writer.apply(.commit(delta: "Hello"))
         #expect(writer.degradeReason == .notApplied)
-        #expect(writer.finish(finalText: "Hello") == .paste("Hello"))
+        #expect(writer.finish(finalText: "Hello") == .copy("Hello"))
+    }
+
+    @Test func firstWriteTruncatedCopiesTheFullTextNeverPastes() {
+        let field = FakeTextTarget()
+        field.storeOnlyFirst = 3
+        let writer = FieldWriter(target: field)
+        writer.apply(.commit(delta: "Hello"))
+        #expect(writer.degradeReason == .notApplied)
+        #expect(field.string == "Hel")
+        #expect(writer.finish(finalText: "Hello") == .copy("Hello"))
+    }
+
+    @Test func firstWriteAlteredOverASelectionCopiesTheFullText() {
+        let field = FakeTextTarget("Hello there", selection: UTF16Range(location: 6, length: 5))
+        field.lieOnWrites = true
+        let writer = FieldWriter(target: field)
+        writer.apply(.commit(delta: "friend"))
+        #expect(writer.finish(finalText: "friend") == .copy("friend"))
     }
 
     @Test func focusAlreadyGoneAtTheFirstWritePastesTheFullText() {

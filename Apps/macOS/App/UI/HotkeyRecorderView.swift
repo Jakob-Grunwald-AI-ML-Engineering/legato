@@ -5,6 +5,18 @@ struct HotkeyRecorderView: View {
     @Environment(MacAppController.self) private var controller
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            recorder
+            if !controller.isRecordingHotkey, let warning = controller.hotkeyWarning {
+                Label(warning.message, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var recorder: some View {
         HStack(spacing: 10) {
             Text(label)
                 .font(.system(.body, design: .rounded, weight: .medium))

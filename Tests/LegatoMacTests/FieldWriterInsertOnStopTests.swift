@@ -65,12 +65,12 @@ import Testing
         #expect(writer.degradeReason == .notApplied)
     }
 
-    @Test func lyingWritePastes() {
+    @Test func lyingWriteCopiesBecauseTheFieldChanged() {
         let field = FakeTextTarget()
         field.lieOnWrites = true
         let writer = FieldWriter(target: field, mode: .insertOnStop)
         writer.apply(.commit(delta: "Hello"))
-        #expect(writer.finish(finalText: "Hello") == .paste("Hello"))
+        #expect(writer.finish(finalText: "Hello") == .copy("Hello"))
         #expect(writer.degradeReason == .notApplied)
     }
 

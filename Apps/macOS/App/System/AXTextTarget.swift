@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import LegatoMac
 
 enum AXTargetError: Error {
@@ -21,26 +22,71 @@ final class AXTextTarget: TextTarget {
         self.appElement = appElement
     }
 
-    /// The focused text element of the frontmost app; nil when Accessibility is not granted, our own
-    /// app is in front, nothing is focused, the field is secure or exposes no selection.
-    static func captureFocused() -> AXTextTarget? {
+    /// What `captureFocused` found.
+    enum Capture {
+        /// A text element we can write into with Accessibility.
+        case target(AXTextTarget)
+        /// No usable element (Accessibility off, our own app in front, nothing focused, no selection
+        /// support). Text is delivered by paste, where that is allowed.
+        case none
+        /// A secure (password) field, or one we could not rule out as secure: no AX writes, no
+        /// synthesized paste, the text is only copied.
+        case secure
+    }
+
+    /// The focused text element of the frontmost app. Fails closed: secure event input being on, or
+    /// any failure to read the focused element's role or subrole beyond "the attribute is not there",
+    /// counts as a secure field.
+    static func captureFocused() -> Capture {
+        if IsSecureEventInputEnabled() { return .secure }
         guard AXIsProcessTrusted(),
               let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier
-        else { return nil }
+        else { return .none }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
-        guard let focused = try? copyAttribute(appElement, kAXFocusedUIElementAttribute),
-              CFGetTypeID(focused) == AXUIElementGetTypeID()
-        else { return nil }
+        let focused: CFTypeRef?
+        do {
+            focused = try copyAttribute(appElement, kAXFocusedUIElementAttribute)
+        } catch AXTargetError.attribute(let error) where Self.isAbsent(error) {
+            return .none
+        } catch {
+            return .secure
+        }
+        guard let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return .none }
         let element = unsafeDowncast(focused, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
 
-        if let subrole = try? copyAttribute(element, kAXSubroleAttribute) as? String, subrole == "AXSecureTextField" {
-            return nil
+        switch secureState(of: element) {
+        case .secure, .unknown: return .secure
+        case .notSecure: break
         }
-        guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { return nil }
-        return AXTextTarget(element: element, appElement: appElement)
+        guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { return .none }
+        return .target(AXTextTarget(element: element, appElement: appElement))
+    }
+
+    private enum SecureState { case secure, notSecure, unknown }
+
+    /// An absent attribute is the normal case for most elements; any other error (a timeout, a dead
+    /// element) leaves the question open.
+    private static func isAbsent(_ error: AXError) -> Bool {
+        error == .noValue || error == .attributeUnsupported
+    }
+
+    private static func secureState(of element: AXUIElement) -> SecureState {
+        for attribute in [kAXSubroleAttribute, kAXRoleAttribute] {
+            do {
+                if let value = try copyAttribute(element, attribute) as? String,
+                   value == "AXSecureTextField" || value.localizedCaseInsensitiveContains("secure") {
+                    return .secure
+                }
+            } catch AXTargetError.attribute(let error) where isAbsent(error) {
+                continue
+            } catch {
+                return .unknown
+            }
+        }
+        return .notSecure
     }
 
     // MARK: TextTarget

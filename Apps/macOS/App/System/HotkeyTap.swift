@@ -4,8 +4,10 @@ import Foundation
 import LegatoMac
 
 /// One key event as seen by the tap, with the time it was seen (`ProcessInfo.systemUptime`).
+/// `event` is nil for "the tap was disabled and re-enabled": key events may have been lost, so
+/// whatever the consumer believes about held keys can no longer be trusted.
 struct TapSample: Sendable {
-    var event: KeyEvent
+    var event: KeyEvent?
     var time: TimeInterval
 }
 
@@ -71,6 +73,7 @@ private func hotkeyTapCallback(
     switch type {
     case .tapDisabledByTimeout, .tapDisabledByUserInput:
         if let port = context.port { CGEvent.tapEnable(tap: port, enable: true) }
+        context.continuation.yield(TapSample(event: nil, time: ProcessInfo.processInfo.systemUptime))
         return Unmanaged.passUnretained(event)
     case .flagsChanged: kind = .flagsChanged
     case .keyDown: kind = .keyDown
@@ -141,52 +144,5 @@ final class HotkeyTap {
     var isEnabled: Bool {
         guard let port else { return false }
         return CGEvent.tapIsEnabled(tap: port)
-    }
-}
-
-/// Captures a hotkey from raw key events: a lone modifier (pressed and released with nothing
-/// else), or a key with modifiers. Escape cancels. Pure; fed by the tap while the recorder is open.
-struct HotkeyRecorderLogic {
-    enum Outcome: Equatable {
-        case none
-        case preview(String)
-        case captured(HotkeySpec)
-        case cancelled
-    }
-
-    private static let counted: ModifierFlags = [.shift, .control, .option, .command, .function]
-    /// F1...F12 may be used bare.
-    private static let functionKeys: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
-
-    private var candidate: ModifierKey?
-    private var spoiled = false
-
-    mutating func feed(_ event: KeyEvent) -> Outcome {
-        let held = event.flags.intersection(Self.counted)
-        switch event.kind {
-        case .keyUp:
-            return .none
-        case .keyDown:
-            if event.keyCode == 53, held.isEmpty { return .cancelled }
-            guard !held.isEmpty || Self.functionKeys.contains(event.keyCode) else { return .none }
-            return .captured(.combo(keyCode: event.keyCode, modifiers: held))
-        case .flagsChanged:
-            guard let key = ModifierKey(keyCode: event.keyCode) else { return .none }
-            if event.flags.contains(key.flag) {
-                if held == key.flag, candidate == nil, !spoiled {
-                    candidate = key
-                    return .preview(key.displayName)
-                }
-                candidate = nil
-                spoiled = true
-                return .preview("Press a key to finish")
-            }
-            if let candidate, candidate == key {
-                self.candidate = nil
-                return .captured(.modifier(candidate))
-            }
-            if held.isEmpty { spoiled = false }
-            return .none
-        }
     }
 }
