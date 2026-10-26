@@ -150,6 +150,62 @@ final class EditRecorder {
         #expect(r.session.lastError as? TestError == TestError(tag: "stream"))
     }
 
+    // MARK: abort hook
+
+    @Test func abortFiresHookOnceAfterTeardown() async throws {
+        let r = Rig()
+        r.engine.set(script: [.init(text: "partial", isFinal: true)], streamError: TestError(tag: "stream"))
+        var calls: [(run: DictationSession.RunState, lease: DictationSession.LeaseState, error: TestError?)] = []
+        r.session.onRunAborted = { [session = r.session] error in
+            calls.append((session.runState, session.leaseState, error as? TestError))
+        }
+        try await r.session.start()
+        #expect(await eventually { !calls.isEmpty })
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(calls.count == 1)
+        #expect(calls.first?.run == .idle && calls.first?.lease == .idle) // torn down before the hook runs
+        #expect(calls.first?.error == TestError(tag: "stream"))
+    }
+
+    @Test func normalStopDoesNotFireAbortHook() async throws {
+        let r = Rig()
+        var fired = 0
+        r.session.onRunAborted = { _ in fired += 1 }
+        try await r.session.start()
+        _ = try await r.session.stop()
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(fired == 0)
+    }
+
+    @Test func failureReportedByStopDoesNotFireAbortHook() async throws {
+        let r = Rig()
+        r.engine.set(finishError: TestError(tag: "fin"))
+        var fired = 0
+        r.session.onRunAborted = { _ in fired += 1 }
+        try await r.session.start()
+        await #expect(throws: TestError(tag: "fin")) { _ = try await r.session.stop() } // stop() reports it itself
+        #expect(fired == 0)
+    }
+
+    @Test func partialEntryHoldsTheTextCommittedBeforeAnAbort() async throws {
+        let r = Rig(script: [.init(text: "kept ", isFinal: true), .init(text: "tentative", isFinal: false)])
+        r.engine.set(streamError: TestError(tag: "stream"))
+        try await r.session.start(locale: Locale(identifier: "de_DE"))
+        #expect(await eventually { r.session.runState == .idle })
+        let entry = try #require(r.session.partialEntry())
+        #expect(entry.text == "kept") // trimmed, volatile text excluded
+        #expect(entry.localeIdentifier == "de_DE" && entry.engineID == "fake")
+        #expect(await r.history.entries.isEmpty) // the session never writes it; the caller decides
+    }
+
+    @Test func partialEntryIsNilWithoutCommittedText() async throws {
+        let r = Rig(script: [.init(text: "tentative", isFinal: false)])
+        r.engine.set(streamError: TestError(tag: "stream"))
+        try await r.session.start()
+        #expect(await eventually { r.session.runState == .idle })
+        #expect(r.session.partialEntry() == nil)
+    }
+
     @Test func finishFailureStillDeactivates() async throws {
         let r = Rig()
         r.engine.set(finishError: TestError(tag: "fin"))
@@ -374,4 +430,83 @@ final class EditRecorder {
         #expect(r.log.count("deactivate") == 1)
         #expect(r.session.leaseState == .idle)
     }
+}
+
+// MARK: lease control for keep-alive
+
+extension DictationSessionTests {
+    @Test func endLeaseTearsDownAHeldLeaseAtOnce() async throws {
+        let r = Rig(linger: .seconds(30))
+        try await r.session.start()
+        _ = try await r.session.stop()
+        #expect(r.session.leaseState == .armed)
+        await r.session.endLease()
+        #expect(r.session.leaseState == .idle)
+        #expect(r.log.count("deactivate") == 1)
+        r.clock.tick() // the cancelled linger must not tear down a second time
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(r.log.count("deactivate") == 1)
+    }
+
+    @Test func endLeaseDuringARunLeavesItAlone() async throws {
+        let r = Rig(linger: .seconds(30))
+        try await r.session.start()
+        await r.session.endLease()
+        #expect(r.session.leaseState == .armed && r.session.runState == .listening)
+        #expect(r.log.count("deactivate") == 0)
+        _ = try await r.session.stop()
+    }
+
+    @Test func endLeaseWithNoLeaseDoesNothing() async throws {
+        let r = Rig(linger: .seconds(30))
+        await r.session.endLease()
+        #expect(r.log.events.isEmpty)
+    }
+
+    @Test func leaseExpiryFiresTheHookOnceAfterTeardown() async throws {
+        let r = Rig(linger: .seconds(30))
+        let fired = Fired()
+        r.session.onLeaseExpired = { fired.count += 1; fired.leaseWasIdle = r.session.leaseState == .idle }
+        try await r.session.start()
+        _ = try await r.session.stop()
+        #expect(fired.count == 0)
+        r.clock.tick()
+        #expect(await eventually { fired.count == 1 })
+        #expect(fired.leaseWasIdle)
+        #expect(r.log.count("deactivate") == 1)
+    }
+
+    @Test func theExpiryHookStaysQuietWhenTheLeaseIsEndedOrNeverHeld() async throws {
+        let ended = Rig(linger: .seconds(30))
+        let fired = Fired()
+        ended.session.onLeaseExpired = { fired.count += 1 }
+        try await ended.session.start()
+        _ = try await ended.session.stop()
+        await ended.session.endLease()
+        let plain = Rig()
+        plain.session.onLeaseExpired = { fired.count += 1 }
+        try await plain.session.start()
+        _ = try await plain.session.stop()
+        // Time passes: the window the ended lease would have run out in, and a (never armed) one for the plain run.
+        ended.clock.tick()
+        plain.clock.tick()
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(fired.count == 0)
+        #expect(ended.log.count("deactivate") == 1 && plain.log.count("deactivate") == 1) // no second teardown either
+    }
+
+    @Test func editCountCountsEveryEditPublished() async throws {
+        let r = Rig()
+        let recorder = EditRecorder(r.session.edits)
+        try await r.session.start()
+        _ = try await r.session.stop()
+        #expect(await eventually { recorder.edits.count == r.session.editCount })
+        #expect(r.session.editCount > 0)
+    }
+}
+
+@MainActor
+private final class Fired {
+    var count = 0
+    var leaseWasIdle = false
 }

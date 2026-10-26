@@ -8,11 +8,17 @@ public enum AudioPolicy: String, Sendable, CaseIterable, Codable {
     case mixWithOthers
     /// Non-mixable session: other audio pauses, resumes on deactivate. Unverified on device.
     case pauseOthers
+    /// Experiment: ducks music, pauses spoken audio (podcasts, audiobooks), which resumes on deactivate.
+    /// An old spike saw no mic signal (route none / 0 Hz) with this combination; unverified.
+    case duckMusicPauseSpoken
 
     public static let `default`: AudioPolicy = .duckOthers
 
     /// Policies the UI may offer. `pauseOthers` stays hidden until verified on device.
     public static let offeredPolicies: [AudioPolicy] = [.duckOthers, .mixWithOthers]
+
+    /// Policies hidden from the UI unless a debug switch offers them.
+    public static let experimentalPolicies: [AudioPolicy] = [.pauseOthers, .duckMusicPauseSpoken]
 
     /// `pauseOthers` is `.playAndRecord` with neither mix nor duck: non-mixable, so other audio pauses.
     public var sessionConfig: SessionConfig {
@@ -21,6 +27,7 @@ public enum AudioPolicy: String, Sendable, CaseIterable, Codable {
         case .duckOthers: return SessionConfig(options: common.union(.duckOthers))
         case .mixWithOthers: return SessionConfig(options: common.union(.mixWithOthers))
         case .pauseOthers: return SessionConfig(options: common)
+        case .duckMusicPauseSpoken: return SessionConfig(options: common.union([.duckOthers, .interruptSpokenAudio]))
         }
     }
 }
@@ -37,6 +44,8 @@ public struct SessionConfig: Sendable, Equatable {
         public static let mixWithOthers = Options(rawValue: 1 << 1)
         public static let allowBluetoothA2DP = Options(rawValue: 1 << 2)
         public static let defaultToSpeaker = Options(rawValue: 1 << 3)
+        /// `.interruptSpokenAudioAndMixWithOthers`: spoken audio pauses, other audio mixes.
+        public static let interruptSpokenAudio = Options(rawValue: 1 << 4)
     }
 
     public var category: Category
