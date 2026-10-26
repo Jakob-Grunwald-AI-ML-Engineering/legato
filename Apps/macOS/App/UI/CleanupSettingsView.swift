@@ -55,7 +55,8 @@ struct CleanupSettingsView: View {
                         descriptor: descriptor, manager: models.manager,
                         isSelected: settings.cleanupBackend == .mlx && selectedMLX == descriptor.id,
                         isPending: pending == descriptor.id, failure: failures[descriptor.id],
-                        onPick: { pickMLX(descriptor.id) }, onDelete: { delete(descriptor.id) })
+                        onPick: { pickMLX(descriptor.id) }, onDelete: { delete(descriptor.id) },
+                        onCancel: { cancelDownload(descriptor.id) })
                 }
             } header: {
                 Text("Backend")
@@ -116,6 +117,11 @@ struct CleanupSettingsView: View {
                 controller.settings.cleanupBackend = .mlx
             }
         }
+    }
+
+    private func cancelDownload(_ id: String) {
+        if pending == id { pending = nil }
+        Task { await models.cancelDownload(id) }
     }
 
     private func delete(_ id: String) {

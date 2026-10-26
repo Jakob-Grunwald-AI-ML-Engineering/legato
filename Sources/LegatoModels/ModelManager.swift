@@ -127,6 +127,14 @@ public actor ModelManager {
         await task.value
     }
 
+    /// A pick for `role` gave up on `id` (another model or the default was picked): its install is
+    /// cancelled, and its partial folder removed, unless someone other than a pick for `role` waits for it.
+    /// A no-op when nothing is running.
+    public func abandon(_ id: String, besidesPicksFor role: ModelRole) async {
+        guard running[id] != nil, !isWanted(id, besidesPicksFor: role) else { return }
+        await cancel(id)
+    }
+
     /// Cancels any install, removes the model's folder, resets its state and clears any selection of it.
     ///
     /// An install that queues up while the cancelled one winds down is cancelled too: the folder is only

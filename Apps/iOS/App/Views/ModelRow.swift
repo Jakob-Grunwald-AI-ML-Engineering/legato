@@ -10,11 +10,28 @@ struct ModelRow: View {
     /// This row's pick is waiting for its install.
     let isPending: Bool
     let failure: String?
+    /// Stops this model's download.
+    let onCancel: () -> Void
     let onPick: () -> Void
 
     @State private var state: ModelState = .notInstalled
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            pickButton
+            if case .downloading = state {
+                Button("Cancel download", role: .cancel, action: onCancel)
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("model.\(descriptor.id).cancel")
+            }
+        }
+        .task(id: descriptor.id) {
+            for await next in await manager.events(for: descriptor.id) { state = next }
+        }
+    }
+
+    private var pickButton: some View {
         Button(action: onPick) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -32,9 +49,6 @@ struct ModelRow: View {
             }
         }
         .accessibilityIdentifier("model.\(descriptor.id)")
-        .task(id: descriptor.id) {
-            for await next in await manager.events(for: descriptor.id) { state = next }
-        }
     }
 
     private var details: String {

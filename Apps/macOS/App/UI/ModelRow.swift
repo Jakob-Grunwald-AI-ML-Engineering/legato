@@ -13,6 +13,8 @@ struct ModelRow: View {
     let failure: String?
     let onPick: () -> Void
     let onDelete: () -> Void
+    /// Stops this model's download.
+    let onCancel: () -> Void
 
     @State private var state: ModelState = .notInstalled
 
@@ -36,6 +38,11 @@ struct ModelRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            if case .downloading = state {
+                Button("Cancel", role: .cancel, action: onCancel)
+                    .buttonStyle(.borderless)
+                    .help("Stop the download")
+            }
             if hasFiles {
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")

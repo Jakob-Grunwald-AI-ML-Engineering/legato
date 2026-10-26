@@ -77,23 +77,18 @@ private struct Rig {
     // MARK: a tier flurry downloads only the last tier
 
     @Test func aNewerTierOfTheSameFamilySupersedesThePickInFlight() {
-        let rig = Rig()
-        defer { rig.cleanUp() }
-        let families = rig.services().streamingFamilies
-        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "nemotron-multilingual-1120", families: families)
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "nemotron-multilingual-1120")
             == "nemotron-multilingual-560")
-        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-1120", next: "nemotron-multilingual-2240", families: families)
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-1120", next: "nemotron-multilingual-2240")
             == "nemotron-multilingual-1120")
     }
 
-    @Test func aPickOfAnotherFamilyOrTheSameTierSupersedesNothing() {
-        let rig = Rig()
-        defer { rig.cleanUp() }
-        let families = rig.services().streamingFamilies
-        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "parakeet-eou-320", families: families) == nil)
-        #expect(ModelServices.supersededPick(inFlight: "nemotron-latin-560", next: "nemotron-multilingual-560", families: families) == nil)
-        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "nemotron-multilingual-560", families: families) == nil)
-        #expect(ModelServices.supersededPick(inFlight: nil, next: "nemotron-multilingual-560", families: families) == nil)
+    /// Requirement changed (review of PR #30): a pick of another family also stops the download in flight.
+    @Test func aPickOfAnotherFamilySupersedesThePickInFlightTheSameModelNothing() {
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "parakeet-eou-320") == "nemotron-multilingual-560")
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-latin-560", next: "nemotron-multilingual-560") == "nemotron-latin-560")
+        #expect(ModelServices.supersededPick(inFlight: "nemotron-multilingual-560", next: "nemotron-multilingual-560") == nil)
+        #expect(ModelServices.supersededPick(inFlight: nil, next: "nemotron-multilingual-560") == nil)
     }
 
     @Test func theLiveLabelNamesTheFamilyAndItsTier() {

@@ -68,7 +68,8 @@ struct CleanupSettingsView: View {
                     ModelRow(
                         descriptor: descriptor, manager: models.manager,
                         isSelected: backend == .mlx && selectedMLX == descriptor.id,
-                        isPending: pending == descriptor.id, failure: failures[descriptor.id]
+                        isPending: pending == descriptor.id, failure: failures[descriptor.id],
+                        onCancel: { cancelDownload(descriptor.id) }
                     ) { pickMLX(descriptor.id) }
                     .swipeActions {
                         Button("Delete", role: .destructive) { delete(descriptor.id) }
@@ -142,6 +143,11 @@ struct CleanupSettingsView: View {
                 backend = .mlx
             }
         }
+    }
+
+    private func cancelDownload(_ id: String) {
+        if pending == id { pending = nil }
+        Task { await models.cancelDownload(id) }
     }
 
     private func delete(_ id: String) {

@@ -48,7 +48,7 @@ struct SpeechEngineSettingsView: View {
                         family: family, manager: models.manager, isActive: activeFamilyID == family.id,
                         tierMs: tiers[family.id], isPending: pending == family.id, failure: failures[family.id],
                         onPick: { pick(family) }, onTier: { setTier($0, of: family) },
-                        onDelete: { delete($0, of: family) })
+                        onDelete: { delete($0, of: family) }, onCancel: { cancel($0, of: family) })
                 }
             } header: {
                 Text("Engine")
@@ -127,6 +127,15 @@ struct SpeechEngineSettingsView: View {
         if let error { failures[family.id] = String(describing: error) }
         reload()
         Task { await controller.refreshEngine() }
+    }
+
+    /// Stops a tier's download: the pick waiting for it ends without switching and without an error.
+    private func cancel(_ id: String, of family: ModelFamily) {
+        if pending == family.id { pending = nil }
+        Task {
+            await models.cancelDownload(id)
+            reload()
+        }
     }
 
     private func delete(_ tier: InstalledTier?, of family: ModelFamily) {

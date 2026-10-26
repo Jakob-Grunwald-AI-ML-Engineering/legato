@@ -35,14 +35,19 @@ public final class ModelServices {
     ///   - root: where the models live (`<App Group>/Models` on the phone, `Application Support/Legato/Models`
     ///     on the Mac).
     ///   - defaults: where the picks and the engine settings persist.
-    public init(root: URL, defaults: UserDefaults, platform: ModelPlatform = .current) {
+    public convenience init(root: URL, defaults: UserDefaults, platform: ModelPlatform = .current) {
+        self.init(root: root, defaults: defaults, platform: platform, installers: nil)
+    }
+
+    /// `installers`: replaces the catalog's real installers (tests); nil for the real ones.
+    init(root: URL, defaults: UserDefaults, platform: ModelPlatform, installers custom: [String: any ModelInstaller]?) {
         FluidAudioModels.pinRevisions()
         selection = SelectionStore(defaults: defaults)
         familySelection = FamilySelection(selection: selection, tiers: FamilyTierStore(defaults: defaults))
         engineSettings = EngineSettings(defaults: defaults)
         let speech = FluidAudioCatalog.descriptors(platform: platform)
         let llms = MLXModels.descriptors(platform: platform)
-        let installers = FluidAudioCatalog.installers(platform: platform)
+        let installers = custom ?? FluidAudioCatalog.installers(platform: platform)
             .merging(MLXModels.installers(platform: platform)) { first, _ in first }
         catalog = speech + llms
         streamingFamilies = ModelFamily.groups(of: speech, kind: .speechStreaming)
@@ -83,12 +88,12 @@ public final class ModelServices {
 
     /// Picks `id` for `role`: installs and warms it first when missing, then switches. `done` runs on the
     /// main actor with nil on success or the error. A newer pick for the role cancels this one's wait and the
-    /// selection does not switch to it. Its download carries on, except when the newer pick is another
-    /// latency tier of the same family (``supersededPick(inFlight:next:families:)``): then it stops, unless
-    /// something else still waits for it, and its partial folder goes.
+    /// selection does not switch to it; its download stops too (``supersededPick(inFlight:next:)``), unless
+    /// something else still waits for it, and its partial folder goes. A download cancelled by the user
+    /// (``cancelDownload(_:)``, a delete) ends the pick without calling `done`: it is no failure.
     public func pick(_ id: String, role: ModelRole, done: @escaping @MainActor ((any Error)?) -> Void) {
         picks[role]?.cancel()
-        let superseded = Self.supersededPick(inFlight: pickIDs[role]?.id, next: id, families: streamingFamilies)
+        let superseded = Self.supersededPick(inFlight: pickIDs[role]?.id, next: id)
         let manager = self.manager
         let token = UUID()
         pickIDs[role] = (token, id)
@@ -106,18 +111,19 @@ public final class ModelServices {
             } catch {
                 // Superseded by a newer pick: its own error (a cancelled install) is not this pick's to report.
                 if Task.isCancelled || error is CancellationError { return }
+                // The download was cancelled or the model deleted while it downloaded: the user's own doing.
+                if case ModelError.cancelled = error { return }
                 Self.log.error("pick \(id, privacy: .public) failed: \(String(describing: error), privacy: .public)")
                 done(error)
             }
         }
     }
 
-    /// The pick in flight that a pick of `next` replaces: another latency tier of the same family, whose
-    /// download then stops (a tier flurry must not leave several tiers downloading). Nil otherwise.
-    public nonisolated static func supersededPick(inFlight: String?, next: String, families: [ModelFamily]) -> String? {
-        guard let inFlight, inFlight != next,
-              let family = families.first(where: { $0.contains(next) }), family.isTiered, family.contains(inFlight)
-        else { return nil }
+    /// The pick in flight that a pick of `next` replaces: any other model (another tier, another family),
+    /// whose download then stops, so a flurry of picks never leaves several downloads running. Nil for the
+    /// same model or nothing in flight.
+    public nonisolated static func supersededPick(inFlight: String?, next: String) -> String? {
+        guard let inFlight, inFlight != next else { return nil }
         return inFlight
     }
 
@@ -166,10 +172,26 @@ public final class ModelServices {
         return true
     }
 
-    /// Back to the zero-download default for `role` (Apple Speech, or no MLX model): cancels a pick in flight.
+    /// The Cancel control of a downloading model: stops its download for every waiter (a pick of it ends
+    /// without switching and without an error) and removes the partial folder. Returns once it wound down.
+    public func cancelDownload(_ id: String) async {
+        for (role, pick) in pickIDs where pick.id == id {
+            picks[role]?.cancel()
+            picks[role] = nil
+            pickIDs[role] = nil
+        }
+        await manager.cancel(id)
+    }
+
+    /// Back to the zero-download default for `role` (Apple Speech, or no MLX model): cancels a pick in
+    /// flight and its download, unless something else still waits for it.
     public func clearPick(_ role: ModelRole) {
         picks[role]?.cancel()
         picks[role] = nil
+        if let abandoned = pickIDs[role]?.id {
+            let manager = self.manager
+            Task { await manager.abandon(abandoned, besidesPicksFor: role) }
+        }
         pickIDs[role] = nil
         selection.set(nil, for: role)
     }

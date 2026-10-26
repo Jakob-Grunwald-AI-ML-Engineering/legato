@@ -18,6 +18,8 @@ struct FamilyRow: View {
     let onTier: (Int) -> Void
     /// Deletes one installed tier, or every tier when `nil`.
     let onDelete: (InstalledTier?) -> Void
+    /// Stops the download of the given tier (its model id).
+    let onCancel: (String) -> Void
 
     @State private var states: [String: ModelState] = [:]
 
@@ -42,6 +44,13 @@ struct FamilyRow: View {
             }
             .buttonStyle(.borderless)
             .accessibilityIdentifier("family.\(family.id)")
+
+            if case .downloading? = chosen, let id = family.descriptor(tierMs: tierMs)?.id {
+                Button("Cancel download", role: .cancel) { onCancel(id) }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("family.\(family.id).cancel")
+            }
 
             if family.isTiered, let tierMs {
                 Picker("Latency", selection: Binding(get: { tierMs }, set: { onTier($0) })) {
