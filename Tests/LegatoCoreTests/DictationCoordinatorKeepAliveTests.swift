@@ -106,6 +106,31 @@ import Testing
         #expect(r.log.count("deactivate") == 0)
     }
 
+    @Test func anAudioPolicyChangeReleasesTheHeldLeaseAndTheNextStartActivatesUnderTheNewPolicy() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        r.attachSink()
+        r.environment.context = StartContext(inBackground: false, otherAudioPlaying: false, audioPolicy: .duckOthers)
+        try await runOnce(r, Self.keepAlive)
+        #expect(r.coordinator.holdsLease)
+        #expect(r.log.count("deactivate") == 0)
+        r.environment.context = StartContext(inBackground: false, otherAudioPlaying: false, audioPolicy: .mixWithOthers)
+        await r.coordinator.audioPolicyChanged()
+        #expect(!r.coordinator.holdsLease)
+        #expect(r.log.count("deactivate") == 1)
+        try await runOnce(r, Self.keepAlive)
+        #expect(r.control.activatedConfigs == [AudioPolicy.duckOthers.sessionConfig, AudioPolicy.mixWithOthers.sessionConfig])
+    }
+
+    @Test func anAudioPolicyChangeWithNothingHeldOrDuringARunDoesNothing() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        await r.coordinator.audioPolicyChanged()
+        #expect(r.log.events.isEmpty)
+        #expect(await r.coordinator.toggle(Self.keepAlive) == .started)
+        await r.coordinator.audioPolicyChanged()
+        #expect(r.log.count("deactivate") == 0)
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+    }
+
     @Test func endKeepAliveWithNothingHeldDoesNothing() async throws {
         let r = CoordinatorRig()
         r.attachSink()

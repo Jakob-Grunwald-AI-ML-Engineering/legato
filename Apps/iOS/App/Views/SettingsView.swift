@@ -30,7 +30,7 @@ struct SettingsView: View {
             } header: {
                 Text("Audio")
             } footer: {
-                Text("How dictation treats music and other audio that is playing. iOS only lets an app record next to playing audio from the foreground, so with audio playing, Legato opens first when you start from the Action Button or Control Center.")
+                Text("How dictation treats music and other audio that is playing. It applies when the microphone starts fresh, not while it is kept ready (see Microphone); changing it releases a kept-ready microphone. iOS only lets an app record next to playing audio from the foreground, so with audio playing, Legato opens first when you start from the Action Button or Control Center.")
             }
 
             Section {
@@ -40,7 +40,7 @@ struct SettingsView: View {
             } header: {
                 Text("Microphone")
             } footer: {
-                Text("After a dictation, the microphone stays ready for this long, so the next one from the Action Button, Control Center or the Legato keyboard starts at once, without opening Legato. While it is ready, the orange microphone indicator stays on, and with \"Lower other audio\" your music stays lowered. Indefinitely keeps it until a call or another app takes the microphone, or you turn this off. Off by default. With Off, the keyboard's microphone key still opens Legato once to ready the microphone for 60 seconds, so your next tap dictates; then it is released.")
+                Text("After a dictation, the microphone stays ready for this long, so the next one from the Action Button, Control Center or the Legato keyboard starts at once, even with music playing, and without opening Legato. While it is ready, the orange microphone indicator stays on and other audio plays alongside: it is not lowered or paused. With Off, each dictation lowers or pauses audio as set under Audio, and with music playing, a start from the background opens Legato first. Indefinitely keeps it until a call or another app takes the microphone, or you turn this off. Off by default. With Off, the keyboard's microphone key still opens Legato once to ready the microphone for 60 seconds, so your next tap dictates; then it is released.")
             }
 
             Section {
@@ -63,12 +63,16 @@ struct SettingsView: View {
             } header: {
                 Text("Debug")
             } footer: {
-                Text("Keep audio session active: a stop leaves the session on, so music stays lowered (or paused) between dictations until an interruption or this switch ends it. Diagnostics: Library/Caches/audio-diag.jsonl in the app container.")
+                Text("Keep audio session active: a stop leaves the session on, so the session, and any lowering or pausing of music from its last start, stays in place between dictations, and the Audio setting does not apply until an interruption or this switch ends it. Diagnostics: Library/Caches/audio-diag.jsonl in the app container.")
             }
             #endif
         }
         .navigationTitle("Settings")
-        .onChange(of: policy) { _, new in Settings.audioPolicy = new }
+        .onChange(of: policy) { _, new in
+            guard new != Settings.audioPolicy else { return }
+            Settings.audioPolicy = new
+            Task { await controller.audioPolicySettingChanged() }
+        }
         .onChange(of: keepAlive) { _, new in
             Settings.keepAlive = new
             Task { await controller.keepAliveSettingChanged(new.linger) }
