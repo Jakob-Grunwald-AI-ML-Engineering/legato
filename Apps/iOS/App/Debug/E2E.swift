@@ -136,11 +136,20 @@ enum E2E {
 
     static let fakePolicy: AudioPolicy? = UserDefaults.standard.string(forKey: "LegatoAudioPolicy").flatMap(AudioPolicy.init(rawValue:))
 
+    /// A linger in whole seconds for the logs: -1 for indefinite.
+    static func seconds(of linger: Linger) -> Int {
+        switch linger {
+        case .off: 0
+        case .indefinite: -1
+        case .duration(let d): Int(d.components.seconds)
+        }
+    }
+
     /// A session wired to the scripted engine, or nil when fake mode is off.
     @MainActor
-    static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy, linger: Duration) -> DictationSession? {
+    static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy, linger: Linger) -> DictationSession? {
         guard let engine = fakeEngine else { return nil }
-        log("session.make engine=\(engine.id) policy=\(policy.rawValue) lingerSeconds=\(Int(linger.components.seconds))")
+        log("session.make engine=\(engine.id) policy=\(policy.rawValue) lingerSeconds=\(seconds(of: linger))")
         return DictationSession(
             engine: engine,
             source: E2EFakeAudioSource(policy: policy),

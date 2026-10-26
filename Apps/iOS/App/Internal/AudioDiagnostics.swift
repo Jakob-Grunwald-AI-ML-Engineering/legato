@@ -179,78 +179,66 @@ enum AudioDiagnostics {
     }
 }
 
-/// The app's audio-session control: `AudioSessionController` plus the internal-build extras.
+/// The app's audio-session control: `AudioSessionController` inside LegatoCore's
+/// `KeepActiveSessionControl`, plus the internal-build diagnostics.
 ///
-/// - Logs every activate/deactivate to `AudioDiagnostics`.
+/// - Logs every activate/deactivate to `AudioDiagnostics` (`session.activate` carries the requested
+///   options and what was done: `activated`, `reused`, `reconfigured`, `keptCurrent`, `reactivated`).
 /// - `Settings.keepSessionActiveBetweenRuns`: a normal stop does not deactivate the session, so the
-///   next run's `activate` finds it live (the category is left as it is). While it is held, other apps'
-///   audio stays ducked or paused under the policy that was active. A system event (interruption,
-///   media reset, lost input) still deactivates: `release()`.
+///   next run finds it live. A background start must not re-run `setCategory` on it (iOS refuses with
+///   '!int'), so a held session is reused as is. While it is held, other apps' audio stays ducked or
+///   paused under the policy that was active. A system event (interruption, media reset, lost input)
+///   still deactivates: `release()`.
 ///
 /// One instance lives for the whole process; sessions are built per dictation.
-final class AppSessionControl: AudioSessionControlling, Sendable {
-    private struct State {
-        /// A deactivate was skipped and nothing has activated the session since.
-        var held = false
-        /// The next deactivate must really happen (a system event ended the run).
-        var releaseRequested = false
+extension KeepActiveSessionControl {
+    static func app() -> KeepActiveSessionControl {
+        KeepActiveSessionControl(
+            inner: AudioSessionController(observer: AudioDiagnostics.sessionStep),
+            keepActive: { Settings.keepSessionActiveBetweenRuns },
+            hasLiveInput: { !AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty },
+            isRefusal: { SystemStartEnvironment.isRefusal($0) },
+            observer: AudioDiagnostics.sessionEvent)
+    }
+}
+
+extension AudioDiagnostics {
+    static func sessionEvent(_ event: KeepActiveSessionControl.Event) {
+        switch event {
+        case .activate(let requested, let wasHeld, let result):
+            var fields: [String: Any] = [
+                "ok": true, "wasHeld": wasHeld, "requested": optionNames(requested.options),
+            ]
+            switch result {
+            case .activated: fields["result"] = "activated"
+            case .reused: fields["result"] = "reused"
+            case .reconfigured: fields["result"] = "reconfigured"
+            case .reactivated: fields["result"] = "reactivated"
+            case .keptCurrent(let error):
+                fields["result"] = "keptCurrent"
+                fields["error"] = describe(error)
+            }
+            log("session.activate", fields)
+        case .activateFailed(let requested, let wasHeld, let error):
+            log("session.activate", [
+                "ok": false, "wasHeld": wasHeld, "requested": optionNames(requested.options), "error": describe(error),
+            ])
+        case .deactivateSkipped: log("session.deactivate.skipped")
+        case .deactivated: log("session.deactivate")
+        case .released(let reason, let wasHeld): log("session.release", ["reason": reason, "wasHeld": wasHeld])
+        }
     }
 
-    private let inner = AudioSessionController(observer: AudioDiagnostics.sessionStep)
-    private let state = Mutex(State())
-
-    /// A normal stop skipped its deactivate and nothing has activated the session since.
-    var isHeld: Bool { state.withLock { $0.held } }
-
-    var supportedPolicies: Set<AudioPolicy> { inner.supportedPolicies }
-
-    func activate(_ config: SessionConfig) throws {
-        let wasHeld = state.withLock { s in
-            defer { s.held = false; s.releaseRequested = false }
-            return s.held
-        }
-        do {
-            try inner.activate(config)
-            AudioDiagnostics.log("session.activate", ["ok": true, "wasHeld": wasHeld])
-        } catch {
-            AudioDiagnostics.log("session.activate", ["ok": false, "wasHeld": wasHeld, "error": AudioDiagnostics.describe(error)])
-            throw error
-        }
-    }
-
-    func deactivate() {
-        let keep = Settings.keepSessionActiveBetweenRuns
-        let skip = state.withLock { s in
-            let skip = keep && !s.releaseRequested
-            if skip { s.held = true } else { s.held = false; s.releaseRequested = false }
-            return skip
-        }
-        if skip {
-            AudioDiagnostics.log("session.deactivate.skipped")
-            return
-        }
-        inner.deactivate()
-        AudioDiagnostics.log("session.deactivate")
-    }
-
-    /// The system took the microphone (interruption, media reset, lost input): make sure the session is
-    /// really deactivated. A held session is deactivated now; during a run, the run's stop will.
-    func release(reason: String) {
-        let heldNow = state.withLock { s in
-            defer { if s.held { s.held = false } else { s.releaseRequested = true } }
-            return s.held
-        }
-        AudioDiagnostics.log("session.release", ["reason": reason, "wasHeld": heldNow])
-        if heldNow { inner.deactivate() }
-    }
-
-    /// The debug switch went off while a session was held.
-    func releaseIfHeld() {
-        let heldNow = state.withLock { s in
-            defer { s.held = false }
-            return s.held
-        }
-        if heldNow { inner.deactivate() }
+    /// The options a `SessionConfig` asks for, by name (the snapshot's `options` is the session's state
+    /// *after* the call, so a refused `setCategory` shows what the session kept, not what was asked).
+    private static func optionNames(_ o: SessionConfig.Options) -> [String] {
+        var names: [String] = []
+        if o.contains(.mixWithOthers) { names.append("mixWithOthers") }
+        if o.contains(.duckOthers) { names.append("duckOthers") }
+        if o.contains(.allowBluetoothA2DP) { names.append("allowBluetoothA2DP") }
+        if o.contains(.defaultToSpeaker) { names.append("defaultToSpeaker") }
+        if o.contains(.interruptSpokenAudio) { names.append("interruptSpokenAudioAndMixWithOthers") }
+        return names
     }
 }
 #endif

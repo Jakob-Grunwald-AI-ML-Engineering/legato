@@ -35,12 +35,12 @@ struct SettingsView: View {
 
             Section {
                 Picker("Keep microphone ready", selection: $keepAlive) {
-                    ForEach(KeepAlive.allCases) { Text($0.title).tag($0) }
+                    ForEach(KeepAliveChoice.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
             } header: {
-                Text("Keyboard")
+                Text("Microphone")
             } footer: {
-                Text("After a dictation with the Legato keyboard, the microphone stays ready for this long, so the next tap on the keyboard's mic key starts at once without opening Legato. While it is ready, the orange microphone indicator stays on. Off by default.")
+                Text("After a dictation, the microphone stays ready for this long, so the next one from the Action Button, Control Center or the Legato keyboard starts at once, without opening Legato. While it is ready, the orange microphone indicator stays on, and with \"Lower other audio\" your music stays lowered. Indefinitely keeps it until a call or another app takes the microphone, or you turn this off. Off by default.")
             }
 
             Section {
@@ -71,7 +71,7 @@ struct SettingsView: View {
         .onChange(of: policy) { _, new in Settings.audioPolicy = new }
         .onChange(of: keepAlive) { _, new in
             Settings.keepAlive = new
-            if new == .off { Task { await controller.endKeepAlive() } }
+            Task { await controller.keepAliveSettingChanged(new.linger) }
         }
         .onChange(of: haptics) { _, new in Settings.keyboardHaptics = new }
         .onChange(of: clicks) { _, new in Settings.keyboardClicks = new }

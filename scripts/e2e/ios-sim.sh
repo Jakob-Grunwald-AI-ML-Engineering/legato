@@ -115,7 +115,7 @@ if [ "$mode" = release-check ]; then
   # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
-    AudioDiagnostics AppSessionControl audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
+    AudioDiagnostics session.deactivate.skipped audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
     LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoFakeRefusalInForeground LegatoFakeRefusalCount LegatoAudioPolicy
     start.route start.fallback toggle-after-hop
     E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-start kbd-forged-url kbd.forged-url
@@ -542,18 +542,18 @@ scenario_j() {
 }
 
 scenario_o() {
-  begin "o. keyboard hidden: as before" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
+  begin "o. keyboard hidden: text on the clipboard, keep-ready still applies" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
   xcrun simctl pbcopy "$UDID" <<< "sentinel"
   trigger kbd-visible
   wait_log "e2e kbd.visible value=1" 10
   trigger kbd-hidden
   wait_log "e2e kbd.visible value=0" 10
   run_once 1
-  assert_log "press routes to the app: activity required, no keep-alive" "route target=app activity=required keepAliveSeconds=0"
-  assert_log "session built without linger" "lingerSeconds=0"
+  assert_log "press routes to the app: activity required, keep-ready applies" "route target=app activity=required keepAliveSeconds=30"
+  assert_log "session built with the keep-ready linger" "lingerSeconds=30"
   assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
   assert_no_log "nothing typed into a keyboard" "kbd.apply"
-  assert_log "session released at once" "session.deactivate"
+  assert_no_log "mic kept ready, not released" "session.deactivate"
   assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
 }
 
