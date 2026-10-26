@@ -16,6 +16,7 @@ let package = Package(
         .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
+        .library(name: "LegatoVocabulary", targets: ["LegatoVocabulary"]),
     ],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
@@ -29,6 +30,10 @@ let package = Package(
         // The keyboard extension links only this (Foundation only; it must not depend on LegatoCore).
         .target(name: "LegatoKeyboardCore"),
         .testTarget(name: "LegatoKeyboardCoreTests", dependencies: ["LegatoKeyboardCore"]),
+        // The personal vocabulary (Foundation and NaturalLanguage only; like the keyboard core, it must not
+        // depend on LegatoCore, so the keyboard extension can link it).
+        .target(name: "LegatoVocabulary"),
+        .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore"]),
         .target(name: "LegatoAppleSpeech", dependencies: ["LegatoCore"]),
