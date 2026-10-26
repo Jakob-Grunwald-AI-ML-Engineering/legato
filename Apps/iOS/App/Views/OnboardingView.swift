@@ -81,7 +81,7 @@ struct OnboardingView: View {
     private func install() async {
         installFailed = false
         installProgress = 0
-        for await fraction in controller.engine.installAssets(locale: nil) {
+        for await fraction in controller.appleSpeech.installAssets(locale: nil) {
             installProgress = fraction
         }
         installProgress = nil

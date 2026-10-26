@@ -45,6 +45,26 @@ final class LinkClient {
         DarwinObserver.post(LinkChannel.Note.request)
     }
 
+    /// Asks the app for a refined version of `text` (`link.refine`); the app acks `id` on `link.ack`.
+    func sendRefine(_ text: String, id: String) {
+        store?.write(RefineRequest(id: id, text: text, at: Date()), forKey: LinkChannel.Key.refine)
+        DarwinObserver.post(LinkChannel.Note.refine)
+    }
+
+    /// The app's reply to refine request `id`, or nil when none arrives within `timeout`. The reply leaves
+    /// the App Group once read (it carries dictated text).
+    func awaitRefined(id: String, timeout: TimeInterval) async -> RefineReply? {
+        let deadline = ContinuousClock.now + .seconds(timeout)
+        repeat {
+            if let reply = store?.read(RefineReply.self, forKey: LinkChannel.Key.refined), reply.id == id {
+                store?.remove(forKey: LinkChannel.Key.refined)
+                return reply
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        } while ContinuousClock.now < deadline
+        return nil
+    }
+
     /// The app's answer to request `id`, or nil when none arrives within `timeout`.
     func awaitAck(id: String, timeout: TimeInterval) async -> AckResult? {
         let deadline = ContinuousClock.now + .seconds(timeout)

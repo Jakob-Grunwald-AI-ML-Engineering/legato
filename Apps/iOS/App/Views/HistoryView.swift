@@ -1,7 +1,7 @@
 import LegatoCore
 import SwiftUI
 
-/// Recent dictations. Tap copies; swipe deletes. All access goes through `AppController`.
+/// Recent dictations, with the raw text under a cleaned one. Tap copies; hold for the raw text; swipe deletes. All access goes through `AppController`.
 struct HistoryView: View {
     let controller: AppController
     @State private var entries: [DictationEntry] = []
@@ -16,12 +16,21 @@ struct HistoryView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(entry.text).lineLimit(4).foregroundStyle(.primary)
+                        if let raw = entry.rawText {
+                            Text("Raw: \(raw)").lineLimit(4).font(.footnote).foregroundStyle(.secondary)
+                        }
                         HStack {
                             Text(entry.date, format: .dateTime.day().month().hour().minute())
                             if copiedID == entry.id { Text("Copied").foregroundStyle(.green) }
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    }
+                }
+                .contextMenu {
+                    Button("Copy") { controller.copy(entry.text) }
+                    if let raw = entry.rawText {
+                        Button("Copy raw text") { controller.copy(raw) }
                     }
                 }
             }

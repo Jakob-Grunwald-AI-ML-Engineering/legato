@@ -16,13 +16,17 @@ struct ReadinessStatus: Equatable {
 /// The readiness port: microphone permission, Live Activities, and the speech model.
 @MainActor
 final class SystemReadiness: Readiness {
+    /// The live engine is a downloaded model that is installed: Apple Speech's assets are not needed then.
+    var modelEngineReady = false
+
     func snapshot() async -> ReadinessStatus {
         let mic = AVAudioApplication.shared.recordPermission
+        let assets = modelEngineReady ? true : await Self.assetsInstalled()
         var status = ReadinessStatus(
             micGranted: mic == .granted,
             micDenied: mic == .denied,
             activitiesEnabled: ActivityAuthorizationInfo().areActivitiesEnabled,
-            assetsInstalled: await Self.assetsInstalled())
+            assetsInstalled: assets)
         #if DEBUG
         E2E.adjust(&status)
         #endif

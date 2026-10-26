@@ -42,6 +42,11 @@ final class KeyboardController {
     var showsGlobe = false
     /// The id of the request the mic key's Link carries (the Darwin request uses the same id).
     private(set) var openAppRequestID = UUID().uuidString
+    /// The versions of the last dictation that landed in this field (raw, cleaned, refinements), for the
+    /// version keys; nil when there is none (a new run, the user typed, another field).
+    private(set) var versions: DictationVersions?
+    /// A refine request is waiting for the app.
+    private(set) var isRefining = false
 
     @ObservationIgnored private var cursor: AppliedCursor?
     @ObservationIgnored private var isTornDown = false
@@ -116,6 +121,7 @@ final class KeyboardController {
     func documentDidChange() {
         refreshTraits()
         typing.documentChanged()
+        if let versions, versions.documentID != document.documentID { self.versions = nil }
     }
 
     /// Reads the field's traits; only changed values are stored, so the keys redraw only when needed.
@@ -162,12 +168,27 @@ final class KeyboardController {
         let plan = ProxyEditPlanner.plan(
             state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID)
         perform(plan.ops)
-        guard let updated = plan.cursor, updated != before else { return }
-        cursor = updated
-        link.writeApplied(updated)
-        if !plan.ops.isEmpty || updated.finalApplied {
-            trace?("apply final=\(updated.finalApplied ? 1 : 0)")
+        if let updated = plan.cursor, updated != before {
+            cursor = updated
+            link.writeApplied(updated)
+            if !plan.ops.isEmpty || updated.finalApplied {
+                trace?("apply final=\(updated.finalApplied ? 1 : 0) replaced=\(updated.finalReplaced.map { $0 ? "1" : "0" } ?? "-")")
+            }
         }
+        updateVersions(host)
+    }
+
+    /// A new run drops the last dictation's versions; a run that landed here offers its own.
+    private func updateVersions(_ host: HostState) {
+        if host.phase != .idle {
+            if versions != nil, host.runID != versions?.runID { versions = nil }
+            return
+        }
+        guard host.isFinal, versions?.runID != host.runID,
+              let landed = DictationVersions.landed(state: host, cursor: cursor)
+        else { return }
+        versions = landed
+        trace?("versions count=\(landed.texts.count) current=\(landed.current)")
     }
 
     private func perform(_ ops: [ProxyOp]) {
@@ -183,12 +204,14 @@ final class KeyboardController {
     // MARK: Typing
 
     func type(_ text: String) {
+        versions = nil // the user moved on from the dictation
         beforeUserEdit()
         document.insert(text)
         afterUserEdit()
     }
 
     func deleteBackward() {
+        versions = nil
         beforeUserEdit()
         document.deleteBackward()
         afterUserEdit()
@@ -306,6 +329,96 @@ final class KeyboardController {
         forcedOpenAppUntil = now.addingTimeInterval(5)
         openAppRequestID = UUID().uuidString
         show("Legato needs to open. Tap the mic again.")
+    }
+
+    // MARK: Versions
+
+    func showPreviousVersion() {
+        guard let versions else { return }
+        showVersion(at: versions.current - 1)
+    }
+
+    func showNextVersion() {
+        guard let versions else { return }
+        showVersion(at: versions.current + 1)
+    }
+
+    /// Swaps the dictation in the field for version `index`, only while the field still ends with the
+    /// version shown now.
+    private func showVersion(at index: Int) {
+        guard var current = versions, current.texts.indices.contains(index) else { return }
+        guard current.documentID == document.documentID,
+              let ops = current.swapOps(to: index, contextBefore: document.contextBefore)
+        else {
+            trace?("version swap=refused")
+            show("The text changed, so there is nothing to swap.")
+            return
+        }
+        perform(ops)
+        current.show(index)
+        versions = current
+        trace?("version index=\(index) of=\(current.texts.count)")
+    }
+
+    /// Asks the app for a stronger rewrite (its message style) of the raw dictation and shows it as a new
+    /// version. The keyboard never runs a model itself; the app must be running (it acks at once).
+    func refine() {
+        guard let versions, !isRefining else { return }
+        guard hasFullAccess() else {
+            show("Turn on Allow Full Access for Legato in Settings > General > Keyboard to refine.")
+            return
+        }
+        isRefining = true
+        let id = UUID().uuidString
+        let runID = versions.runID
+        link.sendRefine(versions.texts[0], id: id)
+        trace?("refine sent")
+        Task { [weak self] in
+            await self?.awaitRefinement(id: id, runID: runID)
+            self?.isRefining = false
+        }
+    }
+
+    private func awaitRefinement(id: String, runID: String) async {
+        let ack = await link.awaitAck(id: id, timeout: LinkChannel.ackTimeout)
+        guard ack == .accepted else {
+            trace?("refine ack=\(ack?.rawValue ?? "timeout")")
+            show("Open Legato to refine: it isn't running right now.")
+            return
+        }
+        guard let reply = await link.awaitRefined(id: id, timeout: LinkChannel.refineTimeout) else {
+            trace?("refine reply=timeout")
+            show("Refine took too long.")
+            return
+        }
+        guard let refined = reply.text else {
+            trace?("refine reply=none")
+            show("No better version.")
+            return
+        }
+        guard var current = versions, current.runID == runID else { return }
+        let index = current.add(refined)
+        versions = current
+        trace?("refine reply=text")
+        showVersion(at: index)
+    }
+
+    // MARK: Status
+
+    /// The top bar's dictation line: the live text while a `.hold` run listens (nothing is typed then),
+    /// "Listening…" otherwise, "Cleaning up…" while a run with cleanup finishes.
+    var dictationStatus: String? {
+        guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return nil }
+        switch host.phase {
+        case .starting, .listening:
+            let live = host.committed + host.volatile
+            guard host.delivery == .hold, !live.trimmingCharacters(in: .whitespaces).isEmpty else { return "Listening…" }
+            return live.count > 90 ? "…" + live.suffix(90) : live
+        case .finishing:
+            return host.delivery == nil ? nil : "Cleaning up…"
+        case .idle:
+            return nil
+        }
     }
 
     /// The emoji key: the emoji panel lands later; for now it says so.

@@ -48,6 +48,17 @@ targets:
         product: LegatoAppleSpeech
       - package: LegatoKit
         product: LegatoKeyboardCore
+      # Downloadable models, engines and cleanup: the app only, never the keyboard or the widgets.
+      - package: LegatoKit
+        product: LegatoModels
+      - package: LegatoKit
+        product: LegatoFluidAudio
+      - package: LegatoKit
+        product: LegatoEngines
+      - package: LegatoKit
+        product: LegatoPostProcessing
+      - package: LegatoKit
+        product: LegatoMLX
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato
