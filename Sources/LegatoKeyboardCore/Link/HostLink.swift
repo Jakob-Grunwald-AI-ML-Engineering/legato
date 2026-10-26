@@ -322,6 +322,11 @@ public final class HostLink {
         resolveAppliedWaiter(true)
     }
 
+    /// What the keyboard last reported it applied (`link.applied`), whichever run it was for.
+    public func appliedCursor() -> AppliedCursor? {
+        store.read(AppliedCursor.self, forKey: LinkChannel.Key.applied)
+    }
+
     private func finalApplied(runID: String) -> Bool {
         guard let cursor = store.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) else { return false }
         return cursor.runID == runID && cursor.finalApplied

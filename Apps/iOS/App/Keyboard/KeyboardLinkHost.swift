@@ -28,6 +28,9 @@ final class KeyboardLinkHost: TranscriptSink {
     private var runDelivery: HostDelivery?
 
     private var observers: [DarwinObserver] = []
+    #if LEGATO_INTERNAL
+    private let trace = LiveTrace()
+    #endif
 
     /// nil when the App Group is unavailable (misconfigured signing): the keyboard link is then off.
     init?() {
@@ -72,6 +75,9 @@ final class KeyboardLinkHost: TranscriptSink {
         runDelivery = deliveryForRun()
         link.runStarted(id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery)
         onRunActivity?(true)
+        #if LEGATO_INTERNAL
+        trace.runStarted(run, delivery: runDelivery)
+        #endif
     }
 
     func runFinishing(_ run: DictationRun) {
@@ -81,11 +87,17 @@ final class KeyboardLinkHost: TranscriptSink {
     func update(committed: String, volatile: String) {
         link.update(committed: committed, volatile: volatile)
         onTranscript?(committed, volatile)
+        #if LEGATO_INTERNAL
+        trace.update(committed: committed)
+        #endif
     }
 
     /// Live cleanup replaced a committed span: the keyboard swaps it in while its field still shows the raw text.
     func revised(_ revision: TranscriptRevision) {
         link.revise(HostRevision(start: revision.start, raw: revision.raw, text: revision.text))
+        #if LEGATO_INTERNAL
+        trace.revised(revision)
+        #endif
     }
 
     /// With cleanup, `text` is the cleaned text: the keyboard swaps it in (`.replace`), keeps the streamed
@@ -97,8 +109,16 @@ final class KeyboardLinkHost: TranscriptSink {
         onTranscript?(text ?? committed, "")
         onRunActivity?(false)
         // Only a run streamed into a visible keyboard has anything to confirm.
-        guard run.target == .keyboard, text != nil, link.keyboardIsVisible() else { return false }
+        guard run.target == .keyboard, text != nil, link.keyboardIsVisible() else {
+            #if LEGATO_INTERNAL
+            trace.runEnded(applied: nil, confirmed: false)
+            #endif
+            return false
+        }
         let applied = await link.awaitFinalApplied(runID: run.id.uuidString, timeout: Self.appliedTimeout)
+        #if LEGATO_INTERNAL
+        trace.runEnded(applied: link.appliedCursor(), confirmed: applied)
+        #endif
         if runDelivery == .clipboard, finalText != nil { return false }
         return applied
     }
