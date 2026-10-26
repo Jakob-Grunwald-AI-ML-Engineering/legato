@@ -41,6 +41,11 @@ public struct DictationVersions: Sendable, Equatable {
         case .clipboard:
             return DictationVersions(
                 runID: runID, documentID: cursor.documentID, texts: texts, current: 0, trailing: streamedTrailing)
+        case .live:
+            // Landed means every revision did: the field shows the cleaned text.
+            return DictationVersions(
+                runID: runID, documentID: cursor.documentID, texts: texts, current: texts.count - 1,
+                trailing: streamedTrailing)
         case .replace, nil:
             let current = cursor.finalReplaced == true ? texts.count - 1 : 0
             return DictationVersions(

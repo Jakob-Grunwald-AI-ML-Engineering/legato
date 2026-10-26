@@ -26,6 +26,28 @@ public enum HostDelivery: String, Codable, Sendable, Equatable {
     case clipboard
     /// Type nothing while listening; insert the final text (`finalText`, else the committed text) at the end.
     case hold
+    /// Stream while listening; each `HostState.revisions` entry (a cleaned segment) replaces its raw span
+    /// while the field still ends with it from there; a span the user typed around is skipped.
+    case live
+}
+
+/// A committed span the app's live cleanup replaced (`HostDelivery.live`). Positions count characters of
+/// `HostState.committed`, which stays the raw text; a run's revisions never overlap and come in order.
+public struct HostRevision: Codable, Sendable, Equatable {
+    /// Where the span starts in `committed`.
+    public var start: Int
+    /// The span's raw text.
+    public var raw: String
+    /// What replaces it (the cleaned text with the raw span's surrounding whitespace).
+    public var text: String
+
+    public init(start: Int, raw: String, text: String) {
+        self.start = start
+        self.raw = raw
+        self.text = text
+    }
+
+    public var end: Int { start + raw.count }
 }
 
 /// What the app publishes to the keyboard (`link.host`): the run's text so far and whether the app
@@ -54,11 +76,13 @@ public struct HostState: Codable, Sendable, Equatable {
     public var delivery: HostDelivery?
     /// On the final state: the post-processed text when it differs from the trimmed `committed` text.
     public var finalText: String?
+    /// `.live`: the revisions of this run so far, in order; nil before the first.
+    public var revisions: [HostRevision]?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,
         beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool, delivery: HostDelivery? = nil,
-        finalText: String? = nil
+        finalText: String? = nil, revisions: [HostRevision]? = nil
     ) {
         self.v = Self.version
         self.runID = runID
@@ -72,6 +96,7 @@ public struct HostState: Codable, Sendable, Equatable {
         self.acceptsRemoteStart = acceptsRemoteStart
         self.delivery = delivery
         self.finalText = finalText
+        self.revisions = revisions
     }
 
     /// The run is over and this is its last state.

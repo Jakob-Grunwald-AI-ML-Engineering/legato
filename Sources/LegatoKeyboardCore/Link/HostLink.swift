@@ -70,6 +70,14 @@ public final class HostLink {
         state.volatile = ""
         state.delivery = delivery
         state.finalText = nil
+        state.revisions = nil
+        publish()
+    }
+
+    /// Live cleanup replaced a committed span (`HostDelivery.live`): published at once.
+    public func revise(_ revision: HostRevision) {
+        guard state.runID != nil else { return }
+        state.revisions = (state.revisions ?? []) + [revision]
         publish()
     }
 
@@ -121,6 +129,7 @@ public final class HostLink {
         state.volatile = ""
         state.finalText = nil
         state.delivery = nil
+        state.revisions = nil
         publish()
     }
 
