@@ -39,7 +39,8 @@ public struct ProxyPlan: Sendable, Equatable {
 ///   typed yet waits. When the field no longer ends with it (the user edited) the revision is skipped, and
 ///   so is every later one. The final state is confirmed only when the newest revision landed and none was
 ///   skipped. A cleared field is a sent boundary (`fieldCleared`): revisions of the sent text are dropped and
-///   the rest of the run streams into the empty field.
+///   the rest of the run streams into the empty field; tentative text it showed went too, and the committed
+///   text that finalizes it is not typed again (`awaitsSentTentative`).
 public enum ProxyEditPlanner {
     public static func plan(
         state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?
@@ -108,6 +109,8 @@ public enum ProxyEditPlanner {
     private static func planLive(state: HostState, cursor: AppliedCursor, ops: [ProxyOp], context: String) -> ProxyPlan {
         var ops = ops
         var current = cursor
+        // Tentative text sent with a message: nothing goes in until the committed text shows where it ends.
+        if awaitsSentTentative(state: state, cursor: &current) { return ProxyPlan(ops: ops, cursor: current) }
         var stripped = context
         var inField = current.volatile
         if !inField.isEmpty {
@@ -134,6 +137,23 @@ public enum ProxyEditPlanner {
         current.finalApplied = streamedLanded && current.revisionHandled >= (state.revision?.n ?? 0)
             && !current.revisionSkipped
         return ProxyPlan(ops: ops, cursor: current)
+    }
+
+    /// `.live`: the field was cleared while it showed tentative text (`AppliedCursor.sentTentative`). Once the
+    /// committed text after the boundary shows where that text ends (`SentTentative`; at the run's final state at
+    /// the latest), the boundary moves past it and false is returned; true while that can't be told yet, and
+    /// nothing of the run may be typed. Called with the host's whole state (not a reveal's cut of it).
+    static func awaitsSentTentative(state: HostState, cursor: inout AppliedCursor) -> Bool {
+        guard !cursor.sentTentative.isEmpty, state.runID == cursor.runID else { return false }
+        let after = String(state.committed.dropFirst(cursor.sentBase))
+        guard let covered = SentTentative.coveredCount(of: cursor.sentTentative, in: after, complete: state.isFinal)
+        else { return true }
+        cursor.sentBase += covered
+        cursor.committedCount = max(cursor.committedCount, cursor.sentBase)
+        cursor.revisedEnd = cursor.sentBase
+        cursor.revisedText = ""
+        cursor.sentTentative = ""
+        return false
     }
 
     /// What the field shows for the run's committed text since the last sent boundary, up to `count` raw
@@ -174,8 +194,10 @@ public enum ProxyEditPlanner {
     /// The keyboard saw its field change (the host's own edit): when the field is now empty although it showed
     /// the run's text (a chat app sent it), returns the cursor with a sent boundary at what was typed; nil for
     /// anything else (no run text there, another field, a finished run, an edit that left text). Only a `.live`
-    /// run that is still going has boundaries. The field then shows nothing of the run: the rest streams into
-    /// it afresh, without a separator, and revisions start over after the boundary.
+    /// run that is still going has boundaries. Everything the field showed went: the committed text up to the
+    /// boundary and the tentative text after it (`sentTentative`, which the boundary moves past once it is
+    /// committed: `awaitsSentTentative`). The field then shows nothing of the run: the rest streams into it
+    /// afresh, without a separator, and revisions start over after the boundary.
     public static func fieldCleared(
         state: HostState, cursor: AppliedCursor?, documentID: String?, contextBefore: String, hasText: Bool
     ) -> AppliedCursor? {
@@ -187,6 +209,8 @@ public enum ProxyEditPlanner {
         guard !shown.allSatisfy(\.isWhitespace) else { return nil }
         current.sentShownRevision = current.revisedEnd > current.sentBase ? current.shownRevision : 0
         current.sentBase = current.committedCount
+        current.sentTentative = current.volatile.allSatisfy(\.isWhitespace) ? "" : current.volatile
+        current.sentCount += 1
         current.revisedEnd = current.committedCount
         current.revisedText = ""
         current.shownRevision = 0

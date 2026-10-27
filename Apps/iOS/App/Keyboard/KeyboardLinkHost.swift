@@ -136,6 +136,11 @@ final class KeyboardLinkHost: TranscriptSink {
         #endif
     }
 
+    /// The tentative text the keyboard's field showed when it was cleared at `boundary`: it went with the message.
+    func sentTentative(runID: String, boundary: Int) -> String {
+        link.sentTentative(runID: runID, boundary: boundary)
+    }
+
     func liveTraced(_ event: LiveTraceEvent) {
         #if LEGATO_INTERNAL
         trace.traced(event)

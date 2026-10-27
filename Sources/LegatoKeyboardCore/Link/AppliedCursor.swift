@@ -37,6 +37,12 @@ public struct AppliedCursor: Codable, Sendable, Equatable {
     public var sentBase: Int = 0
     /// `.live`: the revision the field showed at that boundary (0: raw text).
     public var sentShownRevision: Int = 0
+    /// `.live`: the tentative text the field showed after the committed text when it was cleared: it went with
+    /// the message. Until the committed text after `sentBase` shows where it ends (`SentTentative`), nothing of
+    /// the run is typed; then the boundary moves past it and this is emptied.
+    public var sentTentative: String = ""
+    /// `.live`: how many sent boundaries the run had; the app hears of each one once.
+    public var sentCount: Int = 0
 
     public init(
         runID: String, documentID: String, committedCount: Int = 0, volatile: String = "",
@@ -53,6 +59,7 @@ public struct AppliedCursor: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case runID, documentID, committedCount, volatile, needsSeparator, finalApplied, finalReplaced
         case revisionHandled, revisionSkipped, shownRevision, revisedEnd, revisedText, sentBase, sentShownRevision
+        case sentTentative, sentCount
     }
 
     /// A cursor saved before a field existed decodes with its default.
@@ -72,5 +79,7 @@ public struct AppliedCursor: Codable, Sendable, Equatable {
         revisedText = try c.decodeIfPresent(String.self, forKey: .revisedText) ?? ""
         sentBase = try c.decodeIfPresent(Int.self, forKey: .sentBase) ?? 0
         sentShownRevision = try c.decodeIfPresent(Int.self, forKey: .sentShownRevision) ?? 0
+        sentTentative = try c.decodeIfPresent(String.self, forKey: .sentTentative) ?? ""
+        sentCount = try c.decodeIfPresent(Int.self, forKey: .sentCount) ?? 0
     }
 }

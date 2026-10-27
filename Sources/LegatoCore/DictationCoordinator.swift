@@ -619,12 +619,14 @@ public final class DictationCoordinator {
     }
 
     /// The field run `runID` streams into was cleared while it showed the run's raw text up to `upTo`
-    /// (shown as revision `shownRevision`, 0 for raw): the user sent it (a chat app's Send). The session
-    /// cleans only what comes after it; the run's text is never put on the clipboard. Ignored for any
-    /// other run, or once the run is over.
+    /// (shown as revision `shownRevision`, 0 for raw) and the tentative text the sink reports for it
+    /// (`TranscriptSink.sentTentative`): the user sent it (a chat app's Send). The session cleans only what
+    /// comes after it; the run's text is never put on the clipboard. Ignored for any other run, or once the
+    /// run is over.
     public func liveTextSent(runID: String, upTo boundary: Int, shownRevision: Int) {
         guard let run, run.id.uuidString == runID, let session, phase == .listening || phase == .stopping else { return }
-        if session.liveTextSent(upTo: boundary, shownRevision: shownRevision) { runWasSent = true }
+        let tentative = sink?.sentTentative(runID: runID, boundary: boundary) ?? ""
+        if session.liveTextSent(upTo: boundary, shownRevision: shownRevision, tentative: tentative) { runWasSent = true }
     }
 
     // MARK: Pieces

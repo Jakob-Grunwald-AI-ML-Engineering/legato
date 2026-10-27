@@ -420,4 +420,7 @@ final class FakeSink: TranscriptSink {
         log.add(until == nil ? "sink.lease:nil" : "sink.lease:set")
         leases.append(until)
     }
+    /// What `sentTentative` answers: the tentative text the keyboard's field showed when it was cleared.
+    var tentative = ""
+    func sentTentative(runID: String, boundary: Int) -> String { tentative }
 }

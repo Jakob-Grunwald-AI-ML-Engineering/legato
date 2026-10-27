@@ -14,8 +14,9 @@ import Foundation
 /// At the stop one final pass covers the whole raw text (a pass in flight over all of it is that pass; one
 /// over older text gives way), within the processor's `liveStopTimeLimit`: past it the entry keeps the
 /// newest published text and the raw tail. The entry's `rawText` is the whole raw text, `text` the final
-/// cleaned one. A sent boundary (``liveTextSent(upTo:shownRevision:)``) closes the text before it: it is not
-/// cleaned again and later passes start after it. An abort cancels the cleanup and revises nothing more.
+/// cleaned one. A sent boundary (``liveTextSent(upTo:shownRevision:tentative:)``) closes the text before it,
+/// and the tentative text sent with it once that is committed: it is not cleaned again and later passes
+/// (the stop's too) start after it. An abort cancels the cleanup and revises nothing more.
 @MainActor
 public final class DictationSession {
     public enum LeaseState: Sendable, Equatable { case idle, arming, armed }
@@ -89,6 +90,11 @@ public final class DictationSession {
     private var liveBase = 0
     /// The text the field showed for the parts sent so far (cleaned as far as it was), in order.
     private var sentText = ""
+    /// Tentative text the field showed after `liveBase` when it was sent: until the committed text shows where it
+    /// ends (`SentTentative`), no pass starts; then `liveBase` moves past it.
+    private var sentTentative = ""
+    /// The stop's final pass has begun and the stop's cleanup is not over: a send now starts a stop pass of its own.
+    private var stopPassOpen = false
     /// The revisions published for the current segment, oldest first; the last one is what clients show.
     private var segmentRevisions: [TranscriptRevision] = []
     private var revisionCount = 0
@@ -264,6 +270,8 @@ public final class DictationSession {
             if cleansLive { postProcessor?.liveRunStarts() }
             liveBase = 0
             sentText = ""
+            sentTentative = ""
+            stopPassOpen = false
             segmentRevisions = []
             revisionCount = 0
             passCount = 0
@@ -328,12 +336,13 @@ public final class DictationSession {
 
     /// A commit: a pass starts over the newest raw text unless one runs (it starts the next when it ends).
     private func liveCommitted() {
+        resolveSentTentative(complete: false)
         guard !liveStopping, pass == nil, assembler.committedText.count > lastPassEnd else { return }
         startPass(atStop: false)
     }
 
     private func startPass(atStop: Bool) {
-        guard let processor = postProcessor else { return }
+        guard let processor = postProcessor, sentTentative.isEmpty else { return }
         let raw = Array(assembler.committedText)
         let end = raw.count
         guard end > liveBase else { return }
@@ -449,16 +458,23 @@ public final class DictationSession {
     }
 
     /// The field the run streams into was cleared (the user sent what it showed, as in a chat app) when it
-    /// held the run's raw text up to `boundary`, shown as revision `shownRevision` (0: raw). That text is
-    /// done: it is recorded as it was shown, never cleaned again, and passes start after it. A pass in flight
-    /// over it is dropped. A boundary that does not move forward is ignored.
+    /// held the run's raw text up to `boundary`, shown as revision `shownRevision` (0: raw), and then
+    /// `tentative`, tentative text not committed yet. That text is done: it is recorded as it was shown, never
+    /// cleaned again, and passes start after it; for the tentative text, after the committed text that
+    /// finalizes it, once that shows where it ends (`SentTentative`, the keyboard's rule). A pass in flight over
+    /// it is dropped; a send during the stop's cleanup starts the stop pass again after it. A boundary that does
+    /// not move forward (and sends no tentative text) is ignored.
     /// Returns whether the boundary was taken.
     @discardableResult
-    public func liveTextSent(upTo boundary: Int, shownRevision: Int) -> Bool {
+    public func liveTextSent(upTo boundary: Int, shownRevision: Int, tentative: String = "") -> Bool {
         guard cleansLive, runState == .listening || runState == .finishing else { return false }
+        // An earlier send's tentative text is placed by now: the keyboard typed after it before this send.
+        resolveSentTentative(complete: false)
+        resolveSentTentative(complete: true)
         let raw = Array(assembler.committedText)
         let end = min(boundary, raw.count)
-        guard end > liveBase else { return false }
+        let sentNow = tentative.allSatisfy(\.isWhitespace) ? "" : tentative
+        guard end > liveBase || (end == liveBase && !sentNow.isEmpty) else { return false }
         let shown: String
         if let revision = segmentRevisions.first(where: { $0.n == shownRevision }), revision.end <= end {
             shown = revision.text + String(raw[revision.end..<end])
@@ -467,14 +483,37 @@ public final class DictationSession {
         }
         let cancelled = cancelPass(.superseded, final: false) ? 1 : 0
         onLiveTrace?(.sent(LiveSentReport(
-            rawCharacters: end - liveBase, shownCharacters: shown.count, cancelledPasses: cancelled)))
+            rawCharacters: end - liveBase, shownCharacters: shown.count + sentNow.count, cancelledPasses: cancelled)))
         sentText += shown
         liveBase = end
         segmentRevisions = []
         frozen = nil
         lastPassEnd = max(lastPassEnd, end)
-        if !liveStopping, raw.count > end { startPass(atStop: false) }
+        sentTentative = sentNow
+        resolveSentTentative(complete: stopPassOpen)
+        if sentTentative.isEmpty, raw.count > liveBase {
+            if !liveStopping {
+                startPass(atStop: false)
+            } else if stopPassOpen {
+                startPass(atStop: true)
+            }
+        }
         return true
+    }
+
+    /// Moves `liveBase` past the tentative text sent with the last boundary once the committed text shows where it
+    /// ends (`complete`: the engine is done, all of it counts). The field showed it as it was: so it is recorded.
+    private func resolveSentTentative(complete: Bool) {
+        guard !sentTentative.isEmpty else { return }
+        let raw = Array(assembler.committedText)
+        guard let covered = SentTentative.coveredCount(
+            of: sentTentative, in: String(raw[liveBase...]), complete: complete)
+        else { return }
+        let end = liveBase + covered
+        sentText += sentTentative + String(raw[liveBase..<end].reversed().prefix(while: \.isWhitespace).reversed())
+        liveBase = end
+        lastPassEnd = max(lastPassEnd, end)
+        sentTentative = ""
     }
 
     /// At the stop: one final pass over the whole raw text, unless the last pass covered it already (a pass
@@ -482,6 +521,7 @@ public final class DictationSession {
     /// `liveStopTimeLimit` when it has one. At that deadline the pass is cancelled; the newest published
     /// text and the raw tail stay.
     private func finishLiveCleanup(with processor: any TranscriptPostProcessor) async {
+        defer { stopPassOpen = false }
         if let p = pass, p.end < assembler.committedText.count { cancelPass(.superseded, final: false) }
         guard let limit = processor.liveStopTimeLimit else {
             await runFinalPass()
@@ -498,14 +538,22 @@ public final class DictationSession {
         cancelPass(.timeout, final: true)
     }
 
+    /// The stop pass; a send while it runs drops it and starts one after the sent text, which is awaited too.
     private func runFinalPass() async {
+        stopPassOpen = true
+        resolveSentTentative(complete: true)
         if pass == nil, assembler.committedText.count > max(lastPassEnd, liveBase) { startPass(atStop: true) }
-        await pass?.task?.value
+        var awaited: Task<Void, Never>?
+        while let task = pass?.task, task != awaited {
+            awaited = task
+            await task.value
+        }
     }
 
     /// The entry of a live-cleaned run: the sent parts as they were shown, then what clients show for the
     /// rest; the engine's text as `rawText` when they differ.
     private func applyLiveCleanup(to entry: inout DictationEntry) {
+        resolveSentTentative(complete: true)
         let raw = Array(assembler.committedText)
         let shown = (sentText + shownText(upTo: raw.count, raw: raw)).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !shown.isEmpty, shown != entry.text else { return }

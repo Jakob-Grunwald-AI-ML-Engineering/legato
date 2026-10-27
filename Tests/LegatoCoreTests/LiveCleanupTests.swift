@@ -460,6 +460,68 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         #expect(entry.rawText == "one two")
     }
 
+    @Test func theTentativeTextSentWithTheMessageIsNeverCleanedAgain() async throws {
+        let processor = LivePassProcessor(answers: ["hello world": "Hello world.", "you": "You?"])
+        let (s, engine) = liveSession(processor)
+        let recorder = LiveEditRecorder(s)
+        try await s.start()
+        engine.emit(final("hello world "), run: 0)
+        #expect(await eventually { recorder.revisions.count == 1 })
+
+        // The field showed "Hello world. how are" ("how are" tentative) when it was sent.
+        s.liveTextSent(upTo: 12, shownRevision: 1, tentative: "how are")
+        engine.emit(final("how are you "), run: 0)
+        #expect(await eventually { recorder.revisions.count == 2 })
+        #expect(recorder.revisions.last == TranscriptRevision(n: 2, start: 20, raw: "you ", text: "You? "))
+        #expect(processor.calls.map(\.text) == ["hello world", "you"], "the sent phrase is not cleaned again")
+
+        let entry = try #require(try await s.stop())
+        #expect(entry.text == "Hello world. how are You?", "the sent message as it was shown, then the rest")
+    }
+
+    @Test func aSendReportedAfterTheTentativePhraseWasCommittedStillLeavesItOut() async throws {
+        let processor = LivePassProcessor(
+            answers: ["hello world": "Hello world.", "hello world how are you": "Hello world. How are you?", "you": "You?"],
+            hold: ["hello world how are you"])
+        let (s, engine) = liveSession(processor)
+        let recorder = LiveEditRecorder(s)
+        try await s.start()
+        engine.emit(final("hello world "), run: 0)
+        #expect(await eventually { recorder.revisions.count == 1 })
+        engine.emit(final("how are you "), run: 0)
+        #expect(await eventually { processor.calls.count == 2 })
+
+        // The keyboard had not seen the commit yet: the field still showed "how are" as tentative.
+        s.liveTextSent(upTo: 12, shownRevision: 1, tentative: "how are")
+        #expect(await eventually { recorder.revisions.count == 2 })
+        #expect(recorder.revisions.last == TranscriptRevision(n: 2, start: 20, raw: "you ", text: "You? "))
+        processor.release("hello world how are you")
+        let entry = try #require(try await s.stop())
+        #expect(entry.text == "Hello world. how are You?")
+    }
+
+    @Test func aSendDuringTheStopLeavesTheTentativeTextOutOfTheStopPass() async throws {
+        let processor = LivePassProcessor(
+            answers: ["hello world": "Hello world.", "hello world how are you": "Hello world. How are you?", "you": "You?"],
+            hold: ["hello world how are you"])
+        let (s, engine) = liveSession(processor)
+        let recorder = LiveEditRecorder(s)
+        try await s.start()
+        engine.emit(final("hello world "), run: 0)
+        #expect(await eventually { recorder.revisions.count == 1 })
+        engine.emit(final("how are you "), run: 0)
+        #expect(await eventually { processor.calls.count == 2 })
+
+        let stopping = Task { try await s.stop() }
+        #expect(await eventually { s.runState == .finishing })
+        s.liveTextSent(upTo: 12, shownRevision: 1, tentative: "how are")
+        let entry = try #require(try await stopping.value)
+        processor.release("hello world how are you")
+        #expect(entry.text == "Hello world. how are You?")
+        #expect(recorder.revisions.last?.start == 20, "the stop pass covers only what followed the sent phrase")
+        #expect(processor.calls.last?.text == "you")
+    }
+
     @Test func aBoundaryThatDoesNotMoveForwardIsIgnored() async throws {
         let processor = LivePassProcessor(answers: ["hello world": "Hello world."])
         let (s, engine) = liveSession(processor)
@@ -580,6 +642,22 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         #expect(outcomes == [.published])
         #expect(sink.ended.last?.committed == "hello world ", "the run's committed text stays raw")
         #expect(sink.ended.last?.text == "Hello world.")
+    }
+
+    @Test func theSentTentativeTextReachesTheSessionThroughTheSink() async throws {
+        let processor = LivePassProcessor(answers: ["hello world": "Hello world.", "you": "You?"])
+        let (coordinator, sink, clipboard, engine) = rig(processor, script: [])
+        #expect(await coordinator.toggle() == .started)
+        engine.emit(final("hello world "), run: 0)
+        #expect(await eventually { sink.revisions.count == 1 })
+        let runID = try #require(sink.started.last?.id.uuidString)
+        sink.tentative = "how are"
+        coordinator.liveTextSent(runID: runID, upTo: 12, shownRevision: 1)
+        engine.emit(final("how are you "), run: 0)
+        #expect(await eventually { sink.revisions.count == 2 })
+        #expect(sink.revisions.last?.start == 20)
+        #expect(await coordinator.toggle() == .stopped("Hello world. how are You?"))
+        #expect(clipboard.written.isEmpty)
     }
 
     @Test func aSentRunRebasesTheSessionAndNeverWritesTheClipboard() async throws {

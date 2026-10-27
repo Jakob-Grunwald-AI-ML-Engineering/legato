@@ -73,6 +73,8 @@ public final class HostLink {
         state.insertAt = nil
         state.revision = nil
         reportedSentBase = 0
+        reportedSentCount = 0
+        reportedSent = nil
         publish()
     }
 
@@ -89,6 +91,9 @@ public final class HostLink {
     /// showed for the text before it (0: raw). Called once per boundary, from `appliedDidChange()`.
     public var onSent: (@MainActor (_ runID: String, _ boundary: Int, _ shownRevision: Int) -> Void)?
     private var reportedSentBase = 0
+    private var reportedSentCount = 0
+    /// The last boundary reported, with the tentative text that went with it (`sentTentative(runID:boundary:)`).
+    private var reportedSent: (runID: String, boundary: Int, tentative: String)?
 
     /// A stop began: published at once. Updates that still arrive while the engine finalizes keep the phase.
     public func runFinishing() {
@@ -357,10 +362,19 @@ public final class HostLink {
 
     private func reportSentBoundary() {
         guard isRunning, let runID = state.runID, let cursor = appliedCursor(), cursor.runID == runID,
-              cursor.sentBase > reportedSentBase
+              cursor.sentBase > reportedSentBase || cursor.sentCount > reportedSentCount
         else { return }
         reportedSentBase = cursor.sentBase
+        reportedSentCount = cursor.sentCount
+        reportedSent = (runID, cursor.sentBase, cursor.sentTentative)
         onSent?(runID, cursor.sentBase, cursor.sentShownRevision)
+    }
+
+    /// The tentative text that went with the boundary at `boundary` of run `runID` (`AppliedCursor.sentTentative`),
+    /// as last reported through `onSent`; "" for any other.
+    public func sentTentative(runID: String, boundary: Int) -> String {
+        guard let sent = reportedSent, sent.runID == runID, sent.boundary == boundary else { return "" }
+        return sent.tentative
     }
 
     /// What the keyboard last reported it applied (`link.applied`), whichever run it was for.

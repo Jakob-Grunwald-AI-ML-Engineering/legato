@@ -190,10 +190,14 @@ public protocol TranscriptSink: AnyObject {
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool
     /// The mic lease between runs: when it ends, or nil when it is not held (ended or expired).
     func leaseChanged(until: Date?)
+    /// Live cleanup: the tentative text the target's field showed after the committed text when it was cleared
+    /// at `boundary` (it went with the sent message), for the coordinator's `liveTextSent`. Optional ("").
+    func sentTentative(runID: String, boundary: Int) -> String
 }
 
 extension TranscriptSink {
     public func runFinishing(_ run: DictationRun) {}
     public func revised(_ revision: TranscriptRevision) {}
     public func liveTraced(_ event: LiveTraceEvent) {}
+    public func sentTentative(runID: String, boundary: Int) -> String { "" }
 }
