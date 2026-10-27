@@ -84,4 +84,19 @@ public enum FluidAudioCatalog {
         if id == FluidAudioModels.parakeetUltraID { return ParakeetTranscriber(model: .ultra, models: models, modelID: id) }
         return nil
     }
+
+    /// The streaming diarizer for a catalog id, or `nil` when the id is not a live speakers model.
+    public static func liveDiarizer(id: String, models: ModelManager) -> (any SpeakerDiarizer)? {
+        id == FluidAudioModels.sortformerID ? SortformerSpeakerDiarizer(models: models, modelID: id) : nil
+    }
+
+    /// The after-meeting diarizer for a catalog id, or `nil` when the id is not an after-meeting speakers model.
+    public static func batchDiarizer(id: String, models: ModelManager) -> (any BatchDiarizer)? {
+        id == FluidAudioModels.diarizerOfflineID ? OfflineSpeakerDiarizer(models: models, modelID: id) : nil
+    }
+
+    /// The mic enhancer for a catalog id, or `nil` when the id is not an echo-and-noise model.
+    public static func micEnhancer(id: String, models: ModelManager) -> (any MicEnhancer)? {
+        id == FluidAudioModels.localVqeID ? LocalVqeEnhancer(models: models, modelID: id) : nil
+    }
 }

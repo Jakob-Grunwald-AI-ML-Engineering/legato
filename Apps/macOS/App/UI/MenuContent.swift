@@ -73,6 +73,13 @@ struct MenuContent: View {
                     get: { meetings.isMuted }, set: { _ in meetings.toggleManualMute() }))
                     .toggleStyle(.switch)
                     .controlSize(.small)
+                HStack {
+                    Button(meetings.isPaused ? "Resume" : "Pause") { meetings.togglePause() }
+                    Button("Shrink to pill") { meetings.togglePill() }
+                        .keyboardShortcut("m", modifiers: [.control, .command])
+                    Spacer()
+                }
+                .controlSize(.small)
                 if meetings.autoMute {
                     Text("Muted automatically: the call app closed its mic.").font(.caption).foregroundStyle(.secondary)
                 }

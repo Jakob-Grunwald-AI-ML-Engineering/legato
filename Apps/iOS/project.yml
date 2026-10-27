@@ -89,7 +89,8 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, processing]
+        BGTaskSchedulerPermittedIdentifiers: [de.gruenwald.legato.meeting-processing]
         NSSupportsLiveActivities: true
         # Only Apple's own encryption (TLS, system frameworks): exempt, so App Store Connect stops asking.
         ITSAppUsesNonExemptEncryption: false

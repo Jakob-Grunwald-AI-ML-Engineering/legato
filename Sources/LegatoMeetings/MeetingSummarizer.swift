@@ -3,62 +3,92 @@ import LegatoCore
 
 /// Summarises a meeting transcript with an ``LLMBackend``, however long it is.
 ///
-/// The transcript becomes lines `Me [mm:ss]: …` / `Them [mm:ss]: …` (echoes left out), cut at segment
-/// boundaries into chunks that fit the backend's ``LLMBackend/maxPromptCharacters`` together with the
-/// instructions. Each chunk is summarised; the partial summaries are then merged, batch by batch, until one
-/// request holds them all. A backend that refuses a chunk as too long gets it back in halves; one that
-/// refuses it as unsafe has the chunk skipped, and the summary says so.
+/// The transcript becomes lines `Alice [mm:ss]: …`, labelled with the speaker's name (echoes left out; a
+/// segment with no speaker, old two-stream ones included, has no name). They are
+/// cut at segment boundaries into chunks that fit the backend's ``LLMBackend/maxPromptCharacters`` together
+/// with the instructions. Each chunk is summarised; the partial summaries are then merged, batch by batch,
+/// until one request holds them all. A backend that refuses a chunk as too long gets it back in halves; one
+/// that refuses it as unsafe has the chunk skipped, and the summary says so.
+///
+/// - The instructions name the ticked **sections**, each to be written under its `## <heading>`, in the order
+///   given, plus the language to write in. A transcript that fits one request is written up at once. A longer one
+///   is cut into parts: each part's request asks for notes on what it says for those sections, and the merge
+///   writes the document with exactly those sections. A custom `prompt` replaces all of this (every request).
+/// - The user's **notes** go in a "Notes from the user (treat as facts)" block at the start of every request,
+///   the merge steps included. They are never split or shortened: the transcript chunks shrink to leave room,
+///   and notes too long to leave any room fail the summary.
 public struct MeetingSummarizer: Sendable {
-    /// The prompt used when the user's custom prompt is empty.
-    public static let defaultPrompt = """
-        You write meeting notes from a transcript. Lines starting with "Me" are the user, lines starting with \
-        "Them" are everyone else on the call. Write in the same language as the transcript, as Markdown with \
-        exactly these sections:
+    /// The instructions for the default sections (Summary, Decisions, Action items).
+    public static let defaultPrompt = SummarySection.instructions(for: defaultSections)
 
-        ## Summary
-        A short paragraph or a few bullets on what the meeting covered.
+    private static var defaultSections: [SummarySection] { SummarySection.resolve(SummarySection.defaultIDs, in: SummarySection.builtIns) }
 
-        ## Decisions
-        Bullets for each decision made. Write "None." if there were none.
-
-        ## Action items
-        Bullets for each task, with the owner (Me or Them) where it is clear. Write "None." if there were none.
-
-        Use only what the transcript says. Do not invent names, dates or commitments.
-        """
+    /// Heads the user's notes in a request.
+    static let notesHeader = "Notes from the user (treat as facts):"
 
     /// Below this many characters of room for the transcript, summarising cannot work.
     private static let minimumBudget = 200
     private static let separator = "\n\n---\n\n"
 
     private let backend: any LLMBackend
+    /// Writes the document: one request for the whole transcript, and every merge.
     private let instructions: String
+    /// Notes on one part of a transcript that takes several requests.
+    private let partInstructions: String
+    private let notesBlock: String
+    private let speakers: [PersonID: SpeakerInfo]
 
-    /// - Parameter prompt: the user's custom instructions; blank means ``defaultPrompt``.
-    public init(backend: any LLMBackend, prompt: String = "") {
+    /// - Parameters:
+    ///   - prompt: custom instructions that replace the sections' for every request; blank means the sections'.
+    ///   - sections: what the summary holds, in this order; the default sections when empty.
+    ///   - notes: what the user wrote during the meeting; blank means none.
+    ///   - language: the locale identifier to write in (`de-DE`); nil is Auto, which leaves it to the
+    ///     transcript's language.
+    ///   - speakers: the meeting's people, to name the lines.
+    public init(
+        backend: any LLMBackend, prompt: String = "", sections: [SummarySection] = [], notes: String = "",
+        language: String? = nil, speakers: [PersonID: SpeakerInfo] = [:]
+    ) {
         self.backend = backend
-        self.instructions = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultPrompt : prompt
+        let custom = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ticked = sections.isEmpty ? Self.defaultSections : sections
+        let language = Self.languageLine(language)
+        self.instructions = (custom.isEmpty ? SummarySection.instructions(for: ticked) : prompt) + language
+        self.partInstructions = (custom.isEmpty ? SummarySection.noteInstructions(for: ticked) : prompt) + language
+        let trimmedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.notesBlock = trimmedNotes.isEmpty ? "" : "\(Self.notesHeader)\n\(trimmedNotes)\n\n"
+        self.speakers = speakers
     }
 
     /// The summary, in Markdown.
     ///
     /// - Throws: ``LLMError/emptyResponse`` when nothing was spoken; ``LLMError/guardrail`` or
     ///   ``LLMError/contextTooLong`` when no part could be summarised; the backend's other errors as they are.
-    public func summarize(segments: [MeetingSegment]) async throws -> String {
-        let lines = Self.lines(of: segments)
+    ///
+    /// - Parameter progress: told, after each transcript chunk, how much of the job is done: `i / (chunks + 1)`,
+    ///   the merge being the last part. It never reaches 1; the caller knows when the whole summary is written.
+    public func summarize(segments: [MeetingSegment], progress: (@Sendable (Double) async -> Void)? = nil) async throws -> String {
+        let lines = Self.lines(of: segments, speakers: speakers)
         guard !lines.isEmpty else { throw LLMError.emptyResponse }
 
         let mergeInstructions = Self.mergeInstructions(for: instructions)
-        let budget = backend.maxPromptCharacters.map { $0 - max(instructions.count, mergeInstructions.count) }
-        if let budget, budget < Self.minimumBudget {
-            throw LLMError.failed("The summary prompt is too long for this model")
+        let room = backend.maxPromptCharacters.map { $0 - max(instructions.count, mergeInstructions.count, partInstructions.count) }
+        let budget = room.map { $0 - notesBlock.count }
+        if let room, let budget, budget < Self.minimumBudget {
+            throw LLMError.failed(
+                room < Self.minimumBudget || notesBlock.isEmpty
+                    ? "The summary prompt is too long for this model" : "The notes are too long for this model")
         }
 
         var skips = Skips()
         var partials: [String] = []
-        for chunk in Self.chunks(of: lines, budget: budget) {
+        let chunks = Self.chunks(of: lines, budget: budget)
+        // One request holds it all: the document at once. Several: notes per part, written up by the merge.
+        let chunkInstructions = chunks.count == 1 ? instructions : partInstructions
+        for (index, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
-            partials += try await summarizeChunk(chunk, skips: &skips)
+            partials += try await summarizeChunk(chunk, instructions: chunkInstructions, skips: &skips)
+            await progress?(Double(index + 1) / Double(chunks.count + 1))
         }
         guard !partials.isEmpty else { throw skips.guardrail > 0 ? LLMError.guardrail : LLMError.contextTooLong }
 
@@ -66,14 +96,28 @@ public struct MeetingSummarizer: Sendable {
         return merged + skips.note
     }
 
+    /// "Write the summary in German." for `de-DE`; nothing for Auto.
+    private static func languageLine(_ identifier: String?) -> String {
+        guard let identifier, !identifier.isEmpty else { return "" }
+        let code = Locale(identifier: identifier).language.languageCode?.identifier ?? identifier
+        let name = Locale(identifier: "en_US").localizedString(forLanguageCode: code) ?? identifier
+        return "\n\nWrite the summary in \(name)."
+    }
+
     // MARK: Transcript
 
-    static func lines(of segments: [MeetingSegment]) -> [String] {
+    static func lines(of segments: [MeetingSegment], speakers: [PersonID: SpeakerInfo] = [:]) -> [String] {
         segments.filter { !$0.echo }.compactMap { segment in
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
-            return "\(segment.stream == .mic ? "Me" : "Them") [\(clock(segment.start))]: \(text)"
+            let stamp = "[\(clock(segment.start))]: \(text)"
+            guard let name = label(of: segment, speakers: speakers) else { return stamp }
+            return "\(name) \(stamp)"
         }
+    }
+
+    private static func label(of segment: MeetingSegment, speakers: [PersonID: SpeakerInfo]) -> String? {
+        segment.speaker.flatMap { speakers[$0]?.name }
     }
 
     private static func clock(_ seconds: TimeInterval) -> String {
@@ -147,15 +191,16 @@ public struct MeetingSummarizer: Sendable {
         }
     }
 
-    private func summarizeChunk(_ chunk: String, skips: inout Skips) async throws -> [String] {
+    private func summarizeChunk(_ chunk: String, instructions: String, skips: inout Skips) async throws -> [String] {
         do {
-            return [try await backend.respond(instructions: instructions, prompt: chunk)]
+            return [try await backend.respond(instructions: instructions, prompt: notesBlock + chunk)]
         } catch LLMError.contextTooLong {
             guard let (first, second) = Self.halves(of: chunk) else {
                 skips.tooLong += 1
                 return []
             }
-            return try await summarizeChunk(first, skips: &skips) + summarizeChunk(second, skips: &skips)
+            return try await summarizeChunk(first, instructions: instructions, skips: &skips)
+                + summarizeChunk(second, instructions: instructions, skips: &skips)
         } catch LLMError.guardrail {
             skips.guardrail += 1
             return []
@@ -180,9 +225,9 @@ public struct MeetingSummarizer: Sendable {
 
     private static func mergeInstructions(for instructions: String) -> String {
         """
-        The text you receive holds summaries of consecutive parts of one meeting transcript. Combine them into \
-        one summary of the whole meeting. Remove repetition and keep every decision and action item. Follow \
-        these instructions for the result:
+        The text you receive holds notes on consecutive parts of one meeting transcript. Combine them into one \
+        summary of the whole meeting. Remove repetition and keep every decision and action item. Follow these \
+        instructions for the result:
 
         \(instructions)
         """
@@ -201,7 +246,7 @@ public struct MeetingSummarizer: Sendable {
             try Task.checkCancellation()
             if budget == nil || Self.mergePrompt(parts).count <= budget! {
                 do {
-                    return try await backend.respond(instructions: instructions, prompt: Self.mergePrompt(parts))
+                    return try await backend.respond(instructions: instructions, prompt: notesBlock + Self.mergePrompt(parts))
                 } catch LLMError.contextTooLong, LLMError.guardrail, LLMError.emptyResponse {
                     return parts.joined(separator: "\n\n")
                 }
@@ -211,7 +256,7 @@ public struct MeetingSummarizer: Sendable {
             for batch in batches {
                 guard batch.count > 1 else { next += batch; continue }
                 do {
-                    next.append(try await backend.respond(instructions: instructions, prompt: Self.mergePrompt(batch)))
+                    next.append(try await backend.respond(instructions: instructions, prompt: notesBlock + Self.mergePrompt(batch)))
                 } catch LLMError.contextTooLong, LLMError.guardrail, LLMError.emptyResponse {
                     next += batch
                 }

@@ -32,7 +32,8 @@ private final class LimitedBackend: LLMBackend {
     }
 }
 
-private func isChunk(_ call: LimitedBackend.Call) -> Bool { call.prompt.contains("Me [") || call.prompt.contains("Them [") }
+/// A request that carries transcript lines (`[mm:ss]: s<i> …`), not chunk summaries to merge.
+private func isChunk(_ call: LimitedBackend.Call) -> Bool { call.prompt.contains("]: s") }
 
 private func seg(_ stream: TranscriptEvent.Stream, _ text: String, _ start: TimeInterval, echo: Bool = false) -> MeetingSegment {
     MeetingSegment(stream: stream, text: text, start: start, end: start + 1, echo: echo)
@@ -58,14 +59,16 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
         #expect(result == "SUMMARY")
         let call = try #require(backend.all.first)
         #expect(backend.all.count == 1)
-        #expect(call.prompt == "Me [00:05]: Hello there\nThem [01:10]: Hi, ready?\nMe [62:05]: Late one")
+        // Plan decision 2: old two-stream segments have no speaker, so no label (no Me and Them).
+        #expect(call.prompt == "[00:05]: Hello there\n[01:10]: Hi, ready?\n[62:05]: Late one")
         #expect(call.instructions == MeetingSummarizer.defaultPrompt)
     }
 
     @Test func defaultPromptAsksForTheThreeSectionsInTheTranscriptsLanguage() {
         let p = MeetingSummarizer.defaultPrompt
         #expect(p.contains("## Summary") && p.contains("## Decisions") && p.contains("## Action items"))
-        #expect(p.contains("Me") && p.contains("Them"))
+        #expect(p.localizedCaseInsensitiveContains("speaker"))
+        #expect(!p.contains("\"Me\"") && !p.contains("\"Them\""))
         #expect(p.localizedCaseInsensitiveContains("same language"))
     }
 
@@ -105,6 +108,26 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
         for (i, line) in lines.enumerated() {
             #expect(line.hasSuffix(segments[i].text), "line \(i) is a whole segment, in order")
         }
+    }
+
+    @Test func theSummaryReportsHowManyChunksAreDoneOutOfTheWholeJob() async throws {
+        let segments = transcript(count: 40)
+        let backend = LimitedBackend(limit: 3_000) { call, i in isChunk(call) ? "c\(i)" : "m\(i)" }
+        let seen = Mutex<[Double]>([])
+        _ = try await MeetingSummarizer(backend: backend).summarize(segments: segments, progress: { f in seen.withLock { $0.append(f) } })
+        let chunks = backend.all.filter(isChunk).count
+        #expect(chunks > 1)
+        // After each chunk: i of the chunks plus the merge, which is the last part of the job.
+        let expected = (1...chunks).map { Double($0) / Double(chunks + 1) }
+        #expect(seen.withLock { $0 } == expected)
+        #expect(expected.last! < 1)
+    }
+
+    @Test func oneChunkReportsHalf() async throws {
+        let backend = LimitedBackend(limit: 100_000) { _, _ in "S" }
+        let seen = Mutex<[Double]>([])
+        _ = try await MeetingSummarizer(backend: backend).summarize(segments: transcript(count: 3), progress: { f in seen.withLock { $0.append(f) } })
+        #expect(seen.withLock { $0 } == [0.5])
     }
 
     @Test func theMergeStepRecursesUntilItFits() async throws {
@@ -165,6 +188,107 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
         _ = try await MeetingSummarizer(backend: backend).summarize(segments: [seg(.mic, long, 0)])
         #expect(backend.all.count > 1)
         for call in backend.all { #expect(call.size <= 3_000) }
+    }
+}
+
+@Suite struct MeetingSummarizerContextTests {
+    let notes = "Budget is 5k. Maria owns the launch."
+    let notesHeader = "Notes from the user (treat as facts)"
+
+    private func mixed(_ text: String, _ start: TimeInterval, speaker: String?) -> MeetingSegment {
+        MeetingSegment(stream: .mixed, text: text, start: start, end: start + 1, speaker: speaker)
+    }
+
+    @Test func linesAreLabelledBySpeakerNameNotMeAndThem() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        let speakers = [
+            "P1": SpeakerInfo(name: "You", colorIndex: 0),
+            "P2": SpeakerInfo(name: "Alice", colorIndex: 1),
+        ]
+        _ = try await MeetingSummarizer(backend: backend, speakers: speakers).summarize(segments: [
+            mixed("Hello", 5, speaker: "P1"), mixed("Hi!", 70, speaker: "P2"), mixed("Unlabelled", 80, speaker: nil),
+        ])
+        #expect(backend.all[0].prompt == "You [00:05]: Hello\nAlice [01:10]: Hi!\n[01:20]: Unlabelled")
+    }
+
+    private func section(_ id: String) throws -> SummarySection { try #require(SummarySection.find(id, custom: [])) }
+
+    @Test func theTickedSectionsAreTheInstructions() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        _ = try await MeetingSummarizer(backend: backend, sections: [try section("action-items")]).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == SummarySection.instructions(for: [try section("action-items")]))
+        #expect(backend.all[0].instructions.contains("## Action items"))
+        #expect(!backend.all[0].instructions.contains("## Summary"))
+    }
+
+    @Test func noSectionsMeansTheDefaultOnes() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        _ = try await MeetingSummarizer(backend: backend, sections: []).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == MeetingSummarizer.defaultPrompt)
+    }
+
+    @Test func eachChunkNotesWhatBelongsInTheTickedSectionsAndTheMergeWritesThem() async throws {
+        let ticked = [try section("decisions"), try section("open-questions")]
+        let backend = LimitedBackend(limit: 3_000) { call, i in isChunk(call) ? "c\(i)" : "m\(i)" }
+        _ = try await MeetingSummarizer(backend: backend, sections: ticked).summarize(segments: transcript(count: 80))
+        let chunks = backend.all.filter(isChunk)
+        let merges = backend.all.filter { !isChunk($0) }
+        #expect(chunks.count > 2 && !merges.isEmpty)
+        let document = SummarySection.instructions(for: ticked)
+        for call in chunks {
+            #expect(call.instructions != document, "a part is noted, not written up as the document")
+            #expect(call.instructions.localizedCaseInsensitiveContains("part"))
+            #expect(call.instructions.contains("## Decisions") && call.instructions.contains("## Open questions"))
+            #expect(!call.instructions.contains("## Summary") && !call.instructions.contains("## Action items"))
+        }
+        for call in merges {
+            #expect(call.instructions.contains(document), "the merge writes exactly the ticked sections")
+        }
+    }
+
+    @Test func theLanguageIsNamedInTheInstructionsOfEveryStep() async throws {
+        let backend = LimitedBackend(limit: 1_500) { call, i in isChunk(call) ? "c\(i) " + String(repeating: "y", count: 100) : "m\(i)" }
+        _ = try await MeetingSummarizer(backend: backend, sections: [try section("brainstorm")], language: "de-DE").summarize(segments: transcript(count: 40))
+        #expect(backend.all.count > 2)
+        for call in backend.all {
+            #expect(call.instructions.contains("German"), "every request, merge included, asks for the meeting's language")
+            #expect(call.instructions.contains("## Brainstorm"))
+        }
+    }
+
+    @Test func autoLanguageAddsNothingToTheInstructions() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        let ticked = [try section("summary")]
+        _ = try await MeetingSummarizer(backend: backend, sections: ticked, language: nil).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == SummarySection.instructions(for: ticked))
+    }
+
+    @Test func theNotesGoToEveryChunkAndTheMergeWholeAndOnce() async throws {
+        let backend = LimitedBackend(limit: 3_000) { call, i in isChunk(call) ? "c\(i)" : "m\(i)" }
+        _ = try await MeetingSummarizer(backend: backend, notes: notes).summarize(segments: transcript(count: 80))
+        let chunks = backend.all.filter(isChunk)
+        let merges = backend.all.filter { !isChunk($0) }
+        #expect(chunks.count > 2 && !merges.isEmpty)
+        for call in backend.all {
+            #expect(call.prompt.components(separatedBy: notesHeader).count == 2, "one notes block per request")
+            #expect(call.prompt.contains(notes), "the notes are never cut")
+            #expect(call.size <= 3_000)
+        }
+    }
+
+    @Test func noNotesMeansNoNotesBlock() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        _ = try await MeetingSummarizer(backend: backend, notes: "  \n").summarize(segments: transcript(count: 2))
+        #expect(!backend.all[0].prompt.contains(notesHeader))
+    }
+
+    @Test func notesTooLongToLeaveRoomForTheTranscriptFailInsteadOfBeingSplit() async {
+        let backend = LimitedBackend(limit: 1_000) { _, _ in "S" }
+        let huge = String(repeating: "important ", count: 100)
+        await #expect(throws: LLMError.self) {
+            try await MeetingSummarizer(backend: backend, notes: huge).summarize(segments: transcript(count: 4))
+        }
+        #expect(backend.all.isEmpty)
     }
 }
 

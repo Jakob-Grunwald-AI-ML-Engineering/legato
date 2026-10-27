@@ -124,6 +124,16 @@ private let batchB = ModelDescriptor(
         #expect(llm.roleLine == nil)
     }
 
+    @Test func roleLinesOfTheMeetingModelsAreTheAgreedWords() {
+        func row(_ kind: ModelKind) -> ModelDescriptor {
+            ModelDescriptor(id: "m-\(kind)", kind: kind, displayName: "M", approxBytes: 1, licence: "MIT", family: "m")
+        }
+        #expect(row(.speakersLive).roleLine == "Speakers · live")
+        #expect(row(.speakersBatch).roleLine == "Speakers · after meetings")
+        #expect(row(.echoNoise).roleLine == "Echo & noise cancellation · live")
+        #expect(ModelFamily.groups(of: [row(.speakersLive)], kind: .speakersLive)[0].roleLine == "Speakers · live")
+    }
+
     @Test func aLoneModelsSizeIsNotPerTier() {
         let lone = ModelFamily.groups(of: [batchA], kind: .speechBatch)[0]
         let size = ByteCountFormatter.string(fromByteCount: 2_000, countStyle: .file)

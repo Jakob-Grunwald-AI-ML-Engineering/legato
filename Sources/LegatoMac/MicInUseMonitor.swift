@@ -8,10 +8,14 @@ public struct AudioProcessInfo: Sendable, Equatable {
     public var bundleID: String
     public var isRunningInput: Bool
     public var isRunningOutput: Bool
+    /// The public input devices it records from (`kAudioProcessPropertyDevices`, input scope); empty when it
+    /// records nothing. Private devices (a voice-processing aggregate) are left out.
+    public var inputDevices: [UInt32] = []
 }
 
-/// Reads which processes have the mic and the speakers open (`kAudioProcessPropertyIsRunningInput` / `IsRunningOutput`). Feeds
-/// `AutoMutePolicy`; which call apps close the mic on mute is a device measurement (spike task 0).
+/// Reads which processes have the mic and the speakers open (`kAudioProcessPropertyIsRunningInput` / `IsRunningOutput`),
+/// and which input devices they record from. Feeds `AutoMutePolicy` and `MeetingMicRoute`; which call apps close the
+/// mic on mute is a device measurement (spike task 0).
 public struct MicInUseMonitor: Sendable {
     public let interval: Duration
 
@@ -29,20 +33,32 @@ public struct MicInUseMonitor: Sendable {
         var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
         err = AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids)
         guard err == noErr else { throw MicInUseError.coreAudio(call: "process list", status: err) }
+        let devices = Set(AudioDevices.all())
         return ids.compactMap { id in
             guard let pid: Int32 = Self.scalar(id, kAudioProcessPropertyPID) else { return nil }
+            let input = (Self.scalar(id, kAudioProcessPropertyIsRunningInput) as UInt32? ?? 0) != 0
             return AudioProcessInfo(
                 pid: pid, bundleID: Self.string(id, kAudioProcessPropertyBundleID) ?? "",
-                isRunningInput: (Self.scalar(id, kAudioProcessPropertyIsRunningInput) as UInt32? ?? 0) != 0,
-                isRunningOutput: (Self.scalar(id, kAudioProcessPropertyIsRunningOutput) as UInt32? ?? 0) != 0)
+                isRunningInput: input,
+                isRunningOutput: (Self.scalar(id, kAudioProcessPropertyIsRunningOutput) as UInt32? ?? 0) != 0,
+                inputDevices: input ? AudioDevices.ids(of: id, kAudioProcessPropertyDevices, scope: kAudioObjectPropertyScopeInput)
+                    .filter(devices.contains) : [])
         }
     }
 
     /// The processes with the mic or the speakers running now (our own included; `AutoMutePolicy` drops it).
     public func activeProcesses() throws -> [AutoMuteProcess] {
         try snapshot().filter { $0.isRunningInput || $0.isRunningOutput }.map {
-            AutoMuteProcess(pid: $0.pid, isRunningInput: $0.isRunningInput, isRunningOutput: $0.isRunningOutput)
+            AutoMuteProcess(
+                pid: $0.pid, isRunningInput: $0.isRunningInput, isRunningOutput: $0.isRunningOutput,
+                inputDevices: $0.inputDevices)
         }
+    }
+
+    /// The meeting mic's device now: the call app's input, else the default input (``MeetingMicRoute``).
+    public func meetingMic(ownPID: Int32) -> MeetingMicChoice {
+        MeetingMicRoute.choose(
+            processes: (try? activeProcesses()) ?? [], ownPID: ownPID, defaultInput: AudioDevices.defaultInput())
     }
 
     /// The active processes, polled every `interval`; yields on change (and once at the start).
@@ -83,6 +99,48 @@ public struct MicInUseMonitor: Sendable {
         var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         guard AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &value) == noErr, let value else { return nil }
         return value.takeRetainedValue() as String
+    }
+}
+
+/// Core Audio device reads for the meeting mic: the default input, the device list, names.
+public enum AudioDevices {
+    /// The system default input device.
+    public static func defaultInput() -> UInt32? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let err = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
+        return err == noErr && id != kAudioObjectUnknown ? id : nil
+    }
+
+    /// The public devices (private aggregates are not among them).
+    public static func all() -> [UInt32] {
+        ids(of: AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, scope: kAudioObjectPropertyScopeGlobal)
+    }
+
+    /// A device's name, for notices.
+    public static func name(of device: UInt32) -> String? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr, let value else { return nil }
+        return value.takeRetainedValue() as String
+    }
+
+    /// An object-ID array property; empty when the read fails.
+    static func ids(
+        of object: AudioObjectID, _ selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope
+    ) -> [UInt32] {
+        var addr = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(object, &addr, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &ids) == noErr else { return [] }
+        return Array(ids.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
     }
 }
 

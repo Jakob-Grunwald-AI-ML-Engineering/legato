@@ -233,8 +233,9 @@ public actor ModelManager {
             }
             try Task.checkCancellation()
             // A batch model's compile takes minutes on first use and would queue the Neural Engine ahead
-            // of a meeting's live engine; it compiles when the post-pass loads it instead.
-            if descriptors[id]?.kind != .speechBatch {
+            // of a meeting's live engine; it compiles when the post-pass (or the after-meeting diarizer)
+            // loads it instead.
+            if let kind = descriptors[id]?.kind, kind != .speechBatch, kind != .speakersBatch {
                 transient[id] = .warming
                 publish(id, .warming)
                 try await installer.warm(root: root)

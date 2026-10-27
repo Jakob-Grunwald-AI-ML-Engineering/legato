@@ -174,3 +174,24 @@ final class GatedEngine: DictationEngine {
     }
     func finish() async throws {}
 }
+
+/// A streaming diarizer the test scripts: it records what it is fed and answers with the turns it is given.
+final class FakeDiarizer: SpeakerDiarizer {
+    private let state = Mutex((fed: [AudioChunk](), turns: [SpeakerTurn](), finished: 0, failFeed: false))
+    var fed: [AudioChunk] { state.withLock { $0.fed } }
+    var fedSamples: Int { state.withLock { $0.fed.reduce(0) { $0 + $1.samples.count } } }
+    var finishCount: Int { state.withLock { $0.finished } }
+    /// What `turns()` answers from now on.
+    func script(_ turns: [SpeakerTurn]) { state.withLock { $0.turns = turns } }
+    func failFeeds() { state.withLock { $0.failFeed = true } }
+
+    func feed(_ chunk: AudioChunk) async throws {
+        if state.withLock({ $0.failFeed }) { throw EngineBoom() }
+        state.withLock { $0.fed.append(chunk) }
+    }
+    func turns() async -> [SpeakerTurn] { state.withLock { $0.turns } }
+    func finish() async throws -> [SpeakerTurn] {
+        state.withLock { $0.finished += 1 }
+        return state.withLock { $0.turns }
+    }
+}

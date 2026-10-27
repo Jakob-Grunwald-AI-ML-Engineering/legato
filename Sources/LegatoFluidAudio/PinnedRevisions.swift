@@ -10,12 +10,16 @@ extension FluidAudioModels {
     ///
     /// Bumping a commit is a deliberate commit: read the repository's changes, fetch the new hash with
     /// `curl -s https://huggingface.co/api/models/<repo>` (`sha`), and update the date below.
-    /// Last reviewed 2026-10-26.
+    /// Last reviewed 2026-10-27.
     public static let pinnedRevisions: [String: String] = [
         "FluidInference/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML": "1a41b75758b0337ff67db7d5408280aaaf23074e",
         "FluidInference/parakeet-tdt-0.6b-v3-coreml": "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe",
         "FluidInference/parakeet-ultra-coreml": "95eaa59a39d4394f047a4dc5cce480388a60d1b6",
         "FluidInference/parakeet-realtime-eou-120m-coreml": "40a23f4c0b333aa17ad8c0f2ea47ec2347f2f355",
+        "FluidInference/diar-streaming-sortformer-coreml": "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1",
+        // The commit FluidAudio 0.17.7 itself pins for this repository (Repo.revision).
+        "FluidInference/speaker-diarization-coreml": "df2625ac79a7ac6b65ad868fee6d80f320da4232",
+        "FluidInference/localvqe-coreml": "4205430781c240397073d6f7bf676fb4c732fc12",
     ]
 
     /// Serializes this module's writes to the registry's process-wide (unsynchronized) overrides.

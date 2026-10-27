@@ -4,7 +4,8 @@ import Testing
 import LegatoCore
 @testable import LegatoMeetings
 
-/// Both streams, their recordings and their segments share one origin: the moment the first source started.
+/// Every recording and every segment share one origin: the moment the first source started. Ported from the
+/// two-engine session to the mixed one.
 @Suite struct MeetingSessionTimelineTests {
     struct Rig {
         let root = tempRoot()
@@ -12,7 +13,7 @@ import LegatoCore
         let sink = RecordingSink()
         let clock = TestClock()
         let micSource: ScriptedSource, systemSource: ScriptedSource
-        let micEngine = RecordingEngine(id: "mic-engine"), systemEngine = RecordingEngine(id: "sys-engine")
+        let engine = RecordingEngine(id: "mixed-engine")
         let meeting = Meeting(title: "Timeline", date: Date(timeIntervalSince1970: 1), engineID: "fake")
         let session: MeetingSession
 
@@ -27,39 +28,42 @@ import LegatoCore
             systemSource = ScriptedSource(onStart: { clock.now += systemStartTakes })
             session = MeetingSession(
                 meeting: meeting,
-                inputs: [
-                    MeetingInput(stream: .mic, source: micSource, engine: micEngine, locale: locale),
-                    MeetingInput(stream: .system, source: systemSource, engine: systemEngine, locale: locale),
-                ],
-                store: store, sink: sink, convert: { $0 }, clock: { clock.now })
+                sources: [MeetingSource(stream: .mic, source: micSource), MeetingSource(stream: .system, source: systemSource)],
+                engine: engine, locale: locale, store: store, sink: sink, convert: { $0 }, clock: { clock.now })
         }
 
         func cleanup() { try? FileManager.default.removeItem(at: root) }
         func stored() async -> [MeetingSegment] { (try? await store.segments(for: meeting.id)) ?? [] }
+        func calls(_ stream: TranscriptEvent.Stream) -> [RecordingSink.Call] {
+            sink.calls.filter {
+                switch $0 {
+                case .write(let s, _), .silence(let s, _): s == stream
+                case .finish: false
+                }
+            }
+        }
     }
 
-    @Test func aLateStartingStreamGetsLeadingSilenceAndItsSegmentsLineUp() async throws {
+    @Test func aLateStartingSourcesTrackBeginsWithItsLeadAndTheEnginesTimesNeedNoOffset() async throws {
         let rig = Rig(systemStartTakes: 0.5)
         defer { rig.cleanup() }
         try await rig.session.start()
 
-        // The same second of speech in both engines' own time: the system stream began 0.5 s later.
-        rig.micEngine.emit(finalEvent("Same words.", 1..<2))
-        rig.systemEngine.emit(finalEvent("Same words.", 1..<2))
-        #expect(await eventually { await rig.stored().count == 2 })
-        let byStream = Dictionary(uniqueKeysWithValues: await rig.stored().map { ($0.stream, $0) })
-        #expect(byStream[.mic]?.start == 1 && byStream[.mic]?.end == 2)
-        #expect(byStream[.system]?.start == 1.5 && byStream[.system]?.end == 2.5)
+        // The engine hears the mix from the meeting's first moment: its times are meeting times.
+        rig.engine.emit(finalEvent("Same words.", 1..<2))
+        #expect(await eventually { await rig.stored().count == 1 })
+        let segment = try #require(await rig.stored().first)
+        #expect(segment.start == 1 && segment.end == 2)
 
-        // The recording of the late stream starts with the lead, before any audio.
+        // The recording of the late source starts with the lead, before any audio.
         rig.systemSource.push(tone(1_600))
-        #expect(await eventually { rig.sink.calls.count == 2 })
-        #expect(rig.sink.calls == [.silence(.system, 0.5), .write(.system, Array(repeating: 0.5, count: 1_600))])
+        #expect(await eventually { rig.calls(.system).count == 2 })
+        #expect(rig.calls(.system) == [.silence(.system, 0.5), .write(.system, Array(repeating: 0.5, count: 1_600))])
         _ = await rig.session.stop()
     }
 
     @Test func theFirstSourceToStartSetsTheOriginAndClockTimesAreMeasuredFromIt() async throws {
-        // A clock whose origin is far from zero, and a start that takes 2 s before the first source is up.
+        // A clock whose origin is far from zero, and a start that takes 2 s before the second source is up.
         let rig = Rig(origin: 5_000, systemStartTakes: 2)
         defer { rig.cleanup() }
         try await rig.session.start()
@@ -70,10 +74,10 @@ import LegatoCore
         let collector = Task { for await s in snapshots { latest.withLock { $0 = s } } }
         defer { collector.cancel() }
         rig.clock.now = 5_007
-        rig.micEngine.emit(TranscriptEvent(stream: .mic, text: "Thinking", isFinal: false))
-        #expect(await eventually { latest.withLock { $0 }?.volatile[.mic] == "Thinking" })  // heard at the clock time, whatever the load
+        rig.engine.emit(TranscriptEvent(stream: .mic, text: "Thinking", isFinal: false))
+        #expect(await eventually { latest.withLock { $0 }?.volatile[.mixed] == "Thinking" })  // heard at 7, whatever the load
         rig.clock.now = 5_008
-        rig.micEngine.emit(finalEvent("Thinking aloud."))
+        rig.engine.emit(finalEvent("Thinking aloud."))
         #expect(await eventually { await rig.stored().count == 1 })
         let seg = try #require(await rig.stored().first)
         #expect(seg.start == 7 && seg.end == 8)
@@ -86,36 +90,32 @@ import LegatoCore
         #expect(finished.duration == 12)
     }
 
-    @Test func aRestartedSourceHasItsGapFilledWithSilence() async throws {
+    @Test func aRestartedSourceHasItsGapFilledWithSilenceButJitterIsNotAGap() async throws {
         let rig = Rig()
         defer { rig.cleanup() }
         try await rig.session.start()
 
         rig.micSource.push(tone(16_000))  // 1 s of audio
-        #expect(await eventually { rig.sink.calls.count == 1 })
+        #expect(await eventually { rig.calls(.mic).count == 1 })
         rig.clock.now = 5  // 4 s pass with nothing from the mic, then it comes back
         rig.micSource.resume()
 
-        #expect(await eventually { rig.sink.calls.count == 2 })
-        #expect(rig.sink.calls[1] == .silence(.mic, 4))
-        // The engine's own timeline stays in step with the recording.
-        #expect(await eventually { rig.micEngine.chunks.reduce(0) { $0 + $1.samples.count } == 5 * 16_000 })
-        #expect(rig.micEngine.chunks.dropFirst().allSatisfy { $0.samples.allSatisfy { $0 == 0 } })
+        #expect(await eventually { rig.calls(.mic).count == 2 })
+        #expect(rig.calls(.mic)[1] == .silence(.mic, 4))
 
         // Jitter is not a gap.
         rig.clock.now = 5.1
         rig.micSource.resume()
         try await Task.sleep(for: .milliseconds(50))
-        #expect(rig.sink.calls.count == 2)
+        #expect(rig.calls(.mic).count == 2)
         _ = await rig.session.stop()
     }
 
-    @Test func enginesArePreparedForTheInputsLocale() async throws {
+    @Test func theEngineIsPreparedForTheMeetingsLocale() async throws {
         let rig = Rig(locale: Locale(identifier: "de-DE"))
         defer { rig.cleanup() }
         try await rig.session.start()
-        #expect(rig.micEngine.preparedLocales == [Locale(identifier: "de-DE")])
-        #expect(rig.systemEngine.preparedLocales == [Locale(identifier: "de-DE")])
+        #expect(rig.engine.preparedLocales == [Locale(identifier: "de-DE")])
         _ = await rig.session.stop()
     }
 
@@ -123,7 +123,7 @@ import LegatoCore
         let rig = Rig()
         defer { rig.cleanup() }
         try await rig.session.start()
-        #expect(rig.micEngine.preparedLocales == [nil])
+        #expect(rig.engine.preparedLocales == [nil])
         _ = await rig.session.stop()
     }
 }

@@ -31,6 +31,16 @@ struct LegatoMacApp: App {
                 .environment(controller)
         }
         .defaultLaunchBehavior(.suppressed)
+        .commands {
+            // Control-Command-M: Command-M stays Minimize.
+            CommandGroup(after: .windowArrangement) {
+                Button(controller.meetings.pillVisible ? "Expand Meeting Pill" : "Shrink Meeting to Pill") {
+                    controller.meetings.togglePill()
+                }
+                .keyboardShortcut("m", modifiers: [.control, .command])
+                .disabled(controller.meetings.phase != .recording)
+            }
+        }
 
         Settings {
             SettingsView()

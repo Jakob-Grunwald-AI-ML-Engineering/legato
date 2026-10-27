@@ -2,11 +2,14 @@ import AVFAudio
 import Foundation
 import LegatoCore
 
-/// Records a meeting's two streams into one folder: `mic.caf` / `system.caf` (Int16 PCM, 16 kHz mono)
-/// while recording, then `mic.m4a` / `system.m4a` (AAC, ~32 kbps) after ``finalize()``.
+/// Records a meeting's tracks into one folder: `mic.caf` / `system.caf` and, with several sources, `mix.caf`
+/// (what the live engine heard; Int16 PCM, 16 kHz mono) while recording, then the same as `.m4a` (AAC,
+/// ~32 kbps) after ``finalize()``, which keeps the CAFs until ``discardLossless()``. The tracks come from the session: it writes each source on its own and the
+/// mix on `.mixed`. A meeting with one source (the phone) has no `mix` file; asking the reader for `.mixed` then
+/// answers with the mic recording, which is the mix.
 ///
 /// CAF is written first because it survives a crash; ``finish()`` only closes it so the post-pass can
-/// read full quality. The reader prefers a CAF and falls back to the m4a. Being an actor, writes happen
+/// read full quality. The reader prefers a CAF and falls back to the m4a once it is discarded. Being an actor, writes happen
 /// off the audio thread and in order.
 public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
     public enum WriterError: Error, Equatable {
@@ -24,7 +27,7 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
     }
 
     public static let recordingSpec = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
-    private static let allStreams: [TranscriptEvent.Stream] = [.mic, .system]
+    private static let allStreams: [TranscriptEvent.Stream] = [.mic, .system, .mixed]
 
     private let folder: URL
     private var files: [TranscriptEvent.Stream: AVAudioFile] = [:]
@@ -37,12 +40,17 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
 
     // MARK: Paths
 
+    /// The file name of a track: the stream's name, `mix` for the mixed one.
+    nonisolated private static func fileName(_ s: TranscriptEvent.Stream) -> String {
+        s == .mixed ? "mix" : s.rawValue
+    }
+
     nonisolated private static func cafURL(_ folder: URL, _ s: TranscriptEvent.Stream) -> URL {
-        folder.appendingPathComponent("\(s.rawValue).caf")
+        folder.appendingPathComponent("\(fileName(s)).caf")
     }
 
     nonisolated private static func m4aURL(_ folder: URL, _ s: TranscriptEvent.Stream) -> URL {
-        folder.appendingPathComponent("\(s.rawValue).m4a")
+        folder.appendingPathComponent("\(fileName(s)).m4a")
     }
 
     // MARK: MeetingAudioSink
@@ -72,8 +80,9 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
 
     // MARK: Conversion
 
-    /// Converts each stream's CAF in this folder to m4a, removing the CAF once the m4a reads back.
-    /// A stream that fails keeps its CAF and is listed in the report, whatever the other streams did.
+    /// Converts each stream's CAF in this folder to m4a and keeps the CAF: the post-pass and the speaker pass
+    /// read it at full quality; ``discardLossless()`` removes it afterwards. A stream that fails is listed in
+    /// the report, whatever the other streams did.
     @discardableResult
     public func finalize() -> ConversionReport {
         finish()
@@ -128,13 +137,28 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
             throw error
         }
         PrivateFiles.protect(fileAt: m4a)
-        // Verify before deleting the CAF: the m4a must open and be about as long as the source.
+        // Verify: the m4a must open and be about as long as the source. The CAF stays (see ``discardLossless()``).
         let check = try AVAudioFile(forReading: m4a)
         guard check.length > 0 || expected == 0, abs(check.length - expected) <= 4_096 else {
             try? FileManager.default.removeItem(at: m4a)
             throw WriterError.unreadable(m4a.lastPathComponent)
         }
-        try FileManager.default.removeItem(at: caf)
+    }
+
+    /// Deletes each CAF that has a readable m4a, once the steps that want full quality are over. A stream
+    /// with no m4a keeps its CAF.
+    public func discardLossless() {
+        Self.discardLossless(in: folder)
+    }
+
+    /// ``discardLossless()`` for a folder (a meeting whose writer is gone).
+    public static func discardLossless(in folder: URL) {
+        let fm = FileManager.default
+        for stream in allStreams where fm.fileExists(atPath: cafURL(folder, stream).path) {
+            guard fm.fileExists(atPath: m4aURL(folder, stream).path), (try? AVAudioFile(forReading: m4aURL(folder, stream))) != nil
+            else { continue }
+            try? fm.removeItem(at: cafURL(folder, stream))
+        }
     }
 
     // MARK: AudioSampleReader
@@ -160,12 +184,23 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
         return Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
     }
 
-    private func openForReading(_ stream: TranscriptEvent.Stream) throws -> AVAudioFile {
+    /// The file `stream` is recorded in now: its CAF, else its m4a; nil when there is neither. With one
+    /// source, `.mixed` is the mic recording.
+    public nonisolated func recordingURL(of stream: TranscriptEvent.Stream) -> URL? {
         let fm = FileManager.default
-        for url in [Self.cafURL(folder, stream), Self.m4aURL(folder, stream)] where fm.fileExists(atPath: url.path) {
-            return try AVAudioFile(forReading: url)
+        let folder = self.folder
+        func recording(_ s: TranscriptEvent.Stream) -> URL? {
+            [Self.cafURL(folder, s), Self.m4aURL(folder, s)].first { fm.fileExists(atPath: $0.path) }
         }
-        throw WriterError.noRecording(stream)
+        if let url = recording(stream) { return url }
+        // One source: its recording is the mix. Two sources and no mix is a meeting from before the mix existed.
+        if stream == .mixed, recording(.system) == nil { return recording(.mic) }
+        return nil
+    }
+
+    private func openForReading(_ stream: TranscriptEvent.Stream) throws -> AVAudioFile {
+        guard let url = recordingURL(of: stream) else { throw WriterError.noRecording(stream) }
+        return try AVAudioFile(forReading: url)
     }
 
     // MARK: Writing

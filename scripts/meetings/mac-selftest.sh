@@ -1,9 +1,10 @@
 #!/bin/bash
-# Headless check of Mac meeting capture: records N seconds (default 15) from the mic and the system audio,
-# plays German and English `say` clips through the speakers meanwhile, and prints the report JSON.
-# Exit 0 when "them" heard something, 1 when it is empty, 2 when the meeting could not start.
+# Headless check of Mac meeting capture: records N seconds (default 15) of one mixed meeting (the mic and the
+# system audio into one engine), plays German and English `say` clips through the speakers meanwhile, and
+# prints the report JSON.
+# Exit 0 when the mixed transcript holds words, 1 when it is empty, 2 when the meeting could not start.
 #
-# The report holds counts (characters, words, segments per stream), never what was said, unless WITH_TEXT=1.
+# The report holds counts (characters, words, segments of the mixed transcript), never what was said, unless WITH_TEXT=1.
 # The self-test exists only in Debug builds of the app; the temporary meeting store is deleted afterwards.
 #
 # The app is launched through `open -W -n` so Legato.app is its own TCC "responsible process" (run from a
@@ -60,7 +61,7 @@ cat "$json"
 python3 -I - "$json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
-if r.get("note") and r.get("themSegments", 0) == 0 and not r.get("engine"):
+if r.get("note") and r.get("segments", 0) == 0 and not r.get("engine"):
     sys.exit(2)
-sys.exit(0 if r.get("themWords", 0) > 0 else 1)
+sys.exit(0 if r.get("words", 0) > 0 else 1)
 PY

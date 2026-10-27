@@ -6,7 +6,10 @@ import Testing
 /// `ModelRegistry.revisionOverrides` is process-wide, so these tests run one at a time and restore it.
 @Suite("Pinned revisions", .serialized)
 struct PinnedRevisionsTests {
-    private static let repos: [Repo] = [.nemotronMultilingual, .parakeetV3, .parakeetUltra, .parakeetEou160, .parakeetEou320]
+    private static let repos: [Repo] = [
+        .nemotronMultilingual, .parakeetV3, .parakeetUltra, .parakeetEou160, .parakeetEou320,
+        .sortformer, .diarizer, .localVqe,
+    ]
 
     private func isCommitHash(_ value: String) -> Bool {
         value.count == 40 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }

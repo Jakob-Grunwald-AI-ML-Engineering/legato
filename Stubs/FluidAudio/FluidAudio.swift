@@ -14,6 +14,7 @@ public typealias ProgressHandler = @Sendable (DownloadProgress) -> Void
 
 public enum Repo: Sendable, CaseIterable {
     case nemotronMultilingual, parakeetV3, parakeetUltra, parakeetEou160, parakeetEou320
+    case sortformer, diarizer, localVqe
     // Plain data (no behaviour): the tests stage files and check pins against these.
     public var folderName: String {
         switch self {
@@ -22,6 +23,9 @@ public enum Repo: Sendable, CaseIterable {
         case .parakeetUltra: "parakeet-ultra"
         case .parakeetEou160: "parakeet-eou-streaming/160ms"
         case .parakeetEou320: "parakeet-eou-streaming/320ms"
+        case .sortformer: "sortformer"
+        case .diarizer: "speaker-diarization"
+        case .localVqe: "localvqe"
         }
     }
     public var remotePath: String {
@@ -31,6 +35,9 @@ public enum Repo: Sendable, CaseIterable {
         case .parakeetUltra: "FluidInference/parakeet-ultra-coreml"
         case .parakeetEou160: "FluidInference/parakeet-realtime-eou-120m-coreml"
         case .parakeetEou320: "FluidInference/parakeet-realtime-eou-120m-coreml"
+        case .sortformer: "FluidInference/diar-streaming-sortformer-coreml"
+        case .diarizer: "FluidInference/speaker-diarization-coreml"
+        case .localVqe: "FluidInference/localvqe-coreml"
         }
     }
 }
@@ -49,6 +56,34 @@ public enum ModelRegistry {
 }
 
 public enum ModelNames {
+    public enum OfflineDiarizer {
+        public static let requiredModels: Set<String> = [
+            "Segmentation.mlmodelc", "FBank.mlmodelc", "Embedding.mlmodelc", "PldaRho.mlmodelc", "plda-parameters.json",
+        ]
+    }
+    public enum Sortformer {
+        public enum ModelPrecision: String, Sendable, CaseIterable {
+            case fp16, palettized
+            public var subdirectory: String {
+                switch self {
+                case .fp16: "v3/fp16"
+                case .palettized: "v3/palettized"
+                }
+            }
+        }
+        public static var defaultBundle: String { "v3/fp16/Sortformer_v2.1.mlmodelc" }
+        public static func bundle(for config: SortformerConfig) -> String? {
+            "\(config.precision.subdirectory)/Sortformer_v2.1.mlmodelc"
+        }
+    }
+    public enum LocalVQE {
+        public static func modelFile(variant: LocalVqeVariant, chunk: LocalVqeChunk) -> String {
+            "localvqe-\(variant.rawValue)-\(variant == .v13 ? "4.8M" : "1.3M")-\(chunk.rawValue).mlmodelc"
+        }
+        public static func variantKey(variant: LocalVqeVariant, chunk: LocalVqeChunk) -> String {
+            "\(variant.rawValue)-\(chunk.rawValue)"
+        }
+    }
     public enum NemotronMultilingualStreaming {
         public static let metadata = "metadata.json"
         public static let tokenizer = "tokenizer.json"
@@ -66,8 +101,8 @@ public enum ModelNames {
 
 public enum ModelHub {
     public static func download(
-        _ repo: Repo, to directory: URL, additionalModelNames: Set<String>,
-        progressHandler: ProgressHandler?
+        _ repo: Repo, to directory: URL, variant: String? = nil, additionalModelNames: Set<String> = [],
+        progressHandler: ProgressHandler? = nil
     ) async throws {
         fatalError("stub: ModelHub.download")
     }
@@ -179,4 +214,127 @@ public actor AsrManager {
 public final class TextNormalizer: Sendable {
     public static let shared = TextNormalizer()
     public func normalizeSentence(_ text: String) -> String { fatalError("stub: normalizeSentence") }
+}
+
+// MARK: Diarization and enhancement
+
+public struct TimedSpeakerSegment: Sendable {
+    public let speakerId: String
+    public let embedding: [Float]
+    public let startTimeSeconds: Float
+    public let endTimeSeconds: Float
+    public let qualityScore: Float
+    public init(speakerId: String, embedding: [Float], startTimeSeconds: Float, endTimeSeconds: Float, qualityScore: Float) {
+        self.speakerId = speakerId
+        self.embedding = embedding
+        self.startTimeSeconds = startTimeSeconds
+        self.endTimeSeconds = endTimeSeconds
+        self.qualityScore = qualityScore
+    }
+}
+
+public struct DiarizationResult: Sendable {
+    public let segments: [TimedSpeakerSegment]
+    public let speakerDatabase: [String: [Float]]?
+    public init(segments: [TimedSpeakerSegment], speakerDatabase: [String: [Float]]? = nil) {
+        self.segments = segments
+        self.speakerDatabase = speakerDatabase
+    }
+}
+
+public enum OfflineDiarizationError: Error {
+    case noSpeechDetected
+}
+
+public struct OfflineDiarizerModels: Sendable {
+    public static func load(from directory: URL, configuration: MLModelConfiguration) async throws -> OfflineDiarizerModels {
+        fatalError("stub: OfflineDiarizerModels.load")
+    }
+}
+
+public struct OfflineDiarizerConfig: Sendable {
+    public struct Clustering: Sendable {
+        public var numSpeakers: Int?
+        public var minSpeakers: Int?
+        public var maxSpeakers: Int?
+    }
+    public var clustering: Clustering
+    public static var `default`: OfflineDiarizerConfig { fatalError("stub: OfflineDiarizerConfig.default") }
+}
+
+public final class OfflineDiarizerManager {
+    public init(config: OfflineDiarizerConfig = .default) {}
+    public func initialize(models: OfflineDiarizerModels) { fatalError("stub: OfflineDiarizerManager.initialize") }
+    public func process(audio: [Float]) async throws -> DiarizationResult {
+        fatalError("stub: OfflineDiarizerManager.process")
+    }
+    public func process(
+        _ url: URL, progressCallback: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> DiarizationResult {
+        fatalError("stub: OfflineDiarizerManager.process(url)")
+    }
+}
+
+public struct SortformerConfig: Sendable {
+    public var precision: ModelNames.Sortformer.ModelPrecision
+    public init(precision: ModelNames.Sortformer.ModelPrecision = .fp16) { self.precision = precision }
+}
+
+public struct SortformerModels {
+    public static func loadFromHuggingFace(
+        config: SortformerConfig, cacheDirectory: URL? = nil, computeUnits: MLComputeUnits? = nil,
+        progressHandler: ProgressHandler? = nil
+    ) async throws -> SortformerModels {
+        fatalError("stub: SortformerModels.loadFromHuggingFace")
+    }
+}
+
+public struct DiarizerSegment: Sendable {
+    public var startTime: Float
+    public var endTime: Float
+}
+
+public class DiarizerSpeaker {
+    public var index: Int
+    public var finalizedSegments: [DiarizerSegment]
+    public var tentativeSegments: [DiarizerSegment]
+    init() { fatalError("stub: DiarizerSpeaker") }
+}
+
+public class DiarizerTimeline {
+    public var speakers: [Int: DiarizerSpeaker] { fatalError("stub: DiarizerTimeline.speakers") }
+}
+
+public struct DiarizerTimelineUpdate: Sendable {}
+
+public final class SortformerDiarizer {
+    public init(config: SortformerConfig) {}
+    public var timeline: DiarizerTimeline { fatalError("stub: SortformerDiarizer.timeline") }
+    public func initialize(models: SortformerModels) { fatalError("stub: SortformerDiarizer.initialize") }
+    @discardableResult
+    public func process(samples: [Float]) throws -> DiarizerTimelineUpdate? { fatalError("stub: SortformerDiarizer.process") }
+    @discardableResult
+    public func finalizeSession() throws -> DiarizerTimelineUpdate? { fatalError("stub: SortformerDiarizer.finalizeSession") }
+}
+
+public enum LocalVqeVariant: String, CaseIterable, Sendable { case v13 = "v1.3", v12 = "v1.2" }
+public enum LocalVqeChunk: String, CaseIterable, Sendable { case realtime16ms = "16ms", batch256ms = "256ms" }
+
+public struct LocalVqeConfig: Sendable {
+    public var variant: LocalVqeVariant
+    public var chunk: LocalVqeChunk
+    public init(variant: LocalVqeVariant = .v13, chunk: LocalVqeChunk = .batch256ms, computeUnits: MLComputeUnits = .cpuOnly) {
+        self.variant = variant
+        self.chunk = chunk
+    }
+}
+
+public actor LocalVqeStream {
+    public func enhance(mic: [Float], reference: [Float]) async throws -> [Float] { fatalError("stub: LocalVqeStream.enhance") }
+    public func flush() async throws -> [Float] { fatalError("stub: LocalVqeStream.flush") }
+}
+
+public actor LocalVqeManager {
+    public init(config: LocalVqeConfig = LocalVqeConfig(), modelDirectory: URL) throws { fatalError("stub: LocalVqeManager.init") }
+    public func makeStream() throws -> LocalVqeStream { fatalError("stub: LocalVqeManager.makeStream") }
 }

@@ -31,6 +31,26 @@ import Testing
         #expect(await h.manager.state(of: "speech-a") == .installed(bytes: 1_000))
     }
 
+    // MARK: the warm rule
+
+    private static func descriptor(_ id: String, _ kind: ModelKind) -> ModelDescriptor {
+        ModelDescriptor(id: id, kind: kind, displayName: id, approxBytes: 1_000, licence: "MIT", family: id)
+    }
+
+    @Test(arguments: [
+        (ModelKind.speechStreaming, 1), (.speakersLive, 1), (.echoNoise, 1), (.llm, 1),
+        (.speechBatch, 0), (.speakersBatch, 0),
+    ])
+    func onlyBatchModelsSkipTheWarmUp(kind: ModelKind, warms: Int) async {
+        let fake = FakeInstaller(folderName: "m")
+        let h = Harness(installers: ["m": fake], catalog: [Self.descriptor("m", kind)])
+        defer { h.cleanUp() }
+        let states = await collect(await h.manager.install("m"))
+        #expect(states.last == .installed(bytes: 1_000))
+        #expect(fake.warmCalls == warms, "\(kind)")
+        #expect(states.contains(.warming) == (warms == 1), "\(kind)")
+    }
+
     @Test func installingAnInstalledModelDoesNotDownloadAgain() async {
         let h = Harness()
         defer { h.cleanUp() }

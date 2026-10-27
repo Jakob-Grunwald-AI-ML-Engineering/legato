@@ -1,14 +1,18 @@
 # Weekly sync
 
 - Date: 2026-10-26 14:30
-- Duration: 02:05
+- Duration: 03:05
 
 ## Transcript
 
-**Me** [00:05] Hello everyone.
+**You** [00:05] Hello everyone.
 
-**Them** [00:09] Hi, thanks for joining.
+**Alice** [00:09] Hi, thanks for joining.
 
-_Me muted 00:30–01:10_
+_Microphone muted 00:30–01:10_
 
-**Me** [01:15] Back again.
+[01:20] Unattributed words.
+
+_Paused 02:00–02:30_
+
+**You** [02:35] Back again.

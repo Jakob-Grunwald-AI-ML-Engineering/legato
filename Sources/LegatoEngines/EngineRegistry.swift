@@ -1,6 +1,7 @@
 import Foundation
 import LegatoAppleSpeech
 import LegatoCore
+import LegatoFluidAudio
 import LegatoModels
 
 /// Live-engine tunables that persist in an injected `UserDefaults`. The chunk tier is not here: it is the
@@ -78,8 +79,11 @@ public struct EngineRegistry: Sendable {
 
     /// The live dictation engine for the persisted `.liveDictation` pick, or Apple Speech when nothing is
     /// picked, the id is unknown, or the model is not installed.
-    public func liveEngine() async -> EngineResolution {
-        let locales = settings.preferredLocales
+    ///
+    /// `localeOverride` is the language of one meeting: it replaces the global preferred locales for this
+    /// engine only (the setting is not touched). `nil` keeps the global locales.
+    public func liveEngine(localeOverride: Locale? = nil) async -> EngineResolution {
+        let locales = localeOverride.map { [$0] } ?? settings.preferredLocales
         let silenceMs = settings.silenceMs
         func apple(_ fallback: EngineFallback?) -> EngineResolution {
             EngineResolution(
@@ -106,5 +110,53 @@ public struct EngineRegistry: Sendable {
             case .installed = await models.state(of: id)
         else { return nil }
         return FluidAudioCatalog.batchTranscriber(id: id, models: models)
+    }
+
+    // MARK: Meeting models
+
+    /// A fresh streaming diarizer for the meeting's live mix, or `nil` when the live speakers model is not
+    /// installed. Uses the `.liveSpeakers` pick, else the catalog's one live speakers model. Each call builds
+    /// a new one: two meetings never share a diarizer's state.
+    public func liveDiarizer() async -> (any SpeakerDiarizer)? {
+        guard let id = await installedModel(role: .liveSpeakers, fallback: FluidAudioModels.sortformerID) else { return nil }
+        return FluidAudioCatalog.liveDiarizer(id: id, models: models)
+    }
+
+    /// A fresh diarizer for a finished recording, or `nil` when the
+    /// after-meeting speakers model is not installed.
+    public func batchDiarizer() async -> (any BatchDiarizer)? {
+        guard let id = await installedModel(role: .meetingSpeakers, fallback: FluidAudioModels.diarizerOfflineID) else {
+            return nil
+        }
+        return FluidAudioCatalog.batchDiarizer(id: id, models: models)
+    }
+
+    /// A fresh mic enhancer (echo and noise cancellation) for one meeting, or `nil` when its model is not installed.
+    public func micEnhancer() async -> (any MicEnhancer)? {
+        guard let id = await installedModel(role: .echoNoiseCancellation, fallback: FluidAudioModels.localVqeID) else {
+            return nil
+        }
+        return FluidAudioCatalog.micEnhancer(id: id, models: models)
+    }
+
+    /// The model a meeting role uses, installed or not: the persisted pick when it is a catalog model of the
+    /// role's kind, else `fallback`. Pure lookup; the caller decides whether to install it.
+    public func meetingModelID(role: ModelRole, fallback: String) async -> String {
+        let catalog = await models.catalog
+        if let picked = await models.selected(role: role), catalog.contains(where: { $0.id == picked && $0.kind == role.kind }) {
+            return picked
+        }
+        return fallback
+    }
+
+    /// The model id for `role` if it is installed: ``meetingModelID(role:fallback:)``, when it is a catalog
+    /// model of the role's kind. Pure lookup, like the rest of the registry.
+    private func installedModel(role: ModelRole, fallback: String) async -> String? {
+        let catalog = await models.catalog
+        let id = await meetingModelID(role: role, fallback: fallback)
+        guard catalog.contains(where: { $0.id == id && $0.kind == role.kind }),
+            case .installed = await models.state(of: id)
+        else { return nil }
+        return id
     }
 }
