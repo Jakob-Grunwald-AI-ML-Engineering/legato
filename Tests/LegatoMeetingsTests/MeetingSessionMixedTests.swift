@@ -13,18 +13,18 @@ import LegatoCore
         let clock = TestClock()
         let micSource = ScriptedSource(), systemSource = ScriptedSource()
         let engine = RecordingEngine(id: "mixed-engine")
-        let diarizer: FakeDiarizer?
+        let diarizer: (any SpeakerDiarizer)?
         let meeting = Meeting(title: "Mixed", date: Date(timeIntervalSince1970: 1), engineID: "fake")
         let session: MeetingSession
 
-        init(sources: Int = 2, diarizer: FakeDiarizer? = nil, locale: Locale? = nil) {
+        init(sources: Int = 2, diarizer: (any SpeakerDiarizer)? = nil, locale: Locale? = nil, feedCapacity: Int = 1_500) {
             store = MeetingStore(root: root)
             self.diarizer = diarizer
             var inputs = [MeetingSource(stream: .mic, source: micSource)]
             if sources > 1 { inputs.append(MeetingSource(stream: .system, source: systemSource)) }
             session = MeetingSession(
                 meeting: meeting, sources: inputs, engine: engine, locale: locale, diarizer: diarizer,
-                store: store, sink: sink, convert: { $0 }, clock: { [clock] in clock.now })
+                store: store, sink: sink, convert: { $0 }, clock: { [clock] in clock.now }, feedCapacity: feedCapacity)
         }
 
         func cleanup() { try? FileManager.default.removeItem(at: root) }
@@ -164,6 +164,54 @@ import LegatoCore
         #expect(rig.engineSamples.count == 80_000)
     }
 
+    @Test func aMicBacklogThatArrivesAtOnceAfterASlowStartIsMixedWhereItWasHeard() async throws {
+        let rig = Rig()
+        defer { rig.cleanup() }
+        let clock = rig.clock, mic = rig.micSource
+        // The system tap takes a second to start; the mic's first second arrives at once when it is up.
+        let slowTap = ScriptedSource(onStart: {
+            clock.now += 1
+            for _ in 0..<10 { mic.push(tone(1_600, 0.2)) }
+        })
+        let session = MeetingSession(
+            meeting: rig.meeting,
+            sources: [MeetingSource(stream: .mic, source: mic), MeetingSource(stream: .system, source: slowTap)],
+            engine: rig.engine, store: rig.store, sink: rig.sink, convert: { $0 }, clock: { clock.now })
+        try await session.start()
+        let ownWrites: @Sendable () -> Int = { rig.sink.calls.filter { if case .write(.mixed, _) = $0 { false } else if case .write = $0 { true } else { false } }.count }
+        _ = await eventually { ownWrites() == 10 }
+        for step in 11...30 {
+            let wanted = ownWrites() + 2
+            clock.now = Double(step) / 10
+            mic.push(tone(1_600, 0.2))
+            slowTap.push(tone(1_600, 0.3))
+            _ = await eventually { ownWrites() >= wanted }
+        }
+        let finished = await session.stop()
+        #expect(finished.duration == 3)
+        let mix = rig.mixWrites
+        try #require(mix.count == 48_000, "the mix is as long as the meeting")
+        #expect(mix[..<16_000].allSatisfy { abs($0 - 0.2) < 1e-5 }, "the backlog is in the first second, where it was heard")
+        #expect(mix[16_000...].allSatisfy { abs($0 - 0.5) < 1e-5 }, "and the mic stays audible next to the system audio")
+    }
+
+    @Test func theMixEndsAtTheStopEvenWhenStoppingTheSourcesTakesAWhile() async throws {
+        let rig = Rig()
+        defer { rig.cleanup() }
+        let slow = SlowStopSource(clock: rig.clock)
+        let session = MeetingSession(
+            meeting: rig.meeting,
+            sources: [MeetingSource(stream: .mic, source: rig.micSource), MeetingSource(stream: .system, source: slow)],
+            engine: rig.engine, store: rig.store, sink: rig.sink, convert: { $0 }, clock: { [clock = rig.clock] in clock.now })
+        try await session.start()
+        rig.micSource.push(tone(8_000))
+        rig.clock.now = 2
+        let finished = await session.stop()  // the tap takes 300 ms (and a clock second) to stop
+        #expect(finished.duration == 2)
+        #expect(rig.engineSamples.count == 32_000, "the mix is as long as the meeting, not as long as the stop took")
+        #expect(rig.mixWrites.count == 32_000)
+    }
+
     // MARK: Mute and pause
 
     @Test func aMutedSourceIsSilentInTheMixButTheOtherIsNot() async throws {
@@ -216,6 +264,20 @@ import LegatoCore
         #expect(finished.pausedRanges == [PausedRange(start: 4, end: 9)])
     }
 
+    @Test func aMuteAfterTheStopRecordsNoRangePastTheEnd() async throws {
+        let rig = Rig()
+        defer { rig.cleanup() }
+        try await rig.session.start()
+        rig.clock.now = 2
+        _ = await rig.session.stop()
+        rig.clock.now = 5
+        await rig.session.setMuted(true, stream: .mic)
+        rig.clock.now = 6
+        await rig.session.setMuted(false, stream: .mic)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(try await rig.store.meeting(id: rig.meeting.id)?.mutedRanges.isEmpty == true)
+    }
+
     @Test func theSnapshotSaysWhetherTheMeetingIsPaused() async throws {
         let rig = Rig()
         defer { rig.cleanup() }
@@ -265,15 +327,6 @@ import LegatoCore
         #expect(await ended.value)
     }
 
-    @Test func discardWorksOnTheTwoEnginePathToo() async throws {
-        let rig = MeetingSessionTests.Rig()
-        defer { rig.cleanup() }
-        try await rig.session.start()
-        await rig.session.discard()
-        #expect(try await rig.store.meeting(id: rig.meeting.id) == nil)
-        #expect(rig.micSource.stopCount == 1)
-    }
-
     // MARK: Diarizer hook
 
     @Test func theDiarizerIsFedTheMix() async throws {
@@ -305,11 +358,66 @@ import LegatoCore
         let saved = try #require(try await rig.store.meeting(id: rig.meeting.id))
         #expect(saved.speakers["P1"]?.name == "Speaker 1" && saved.speakers["P2"]?.name == "Speaker 2")
         #expect(saved.speakers["P1"]?.colorIndex == 0 && saved.speakers["P2"]?.colorIndex == 1)
-        #expect(await eventually {
-            (try? await rig.store.liveTurns(for: rig.meeting.id)) == [
-                SpeakerTurn(speaker: "P1", start: 0, end: 9), SpeakerTurn(speaker: "P2", start: 9, end: 12),
-            ]
-        })
+        // A9: the turns file is append-only; turns still open to revision (the last 3 s) are written at the stop.
+        _ = await rig.session.stop()
+        #expect(try await rig.store.liveTurns(for: rig.meeting.id) == [
+            SpeakerTurn(speaker: "P1", start: 0, end: 9), SpeakerTurn(speaker: "P2", start: 9, end: 12),
+        ])
+    }
+
+    @Test func aTurnIsWrittenOnceWhenItHasSettledAndTheRestAtTheStop() async throws {
+        let diarizer = FakeDiarizer()
+        let rig = Rig(diarizer: diarizer)
+        defer { rig.cleanup() }
+        try await rig.session.start()
+        diarizer.script([SpeakerTurn(speaker: "c0", start: 0, end: 2), SpeakerTurn(speaker: "c1", start: 2, end: 9)])
+        rig.clock.now = 10  // 0-2 s is older than the 3 s a diarizer may revise; 2-9 s is not
+        let settled = [SpeakerTurn(speaker: "P1", start: 0, end: 2)]
+        #expect(await eventually { (try? await rig.store.liveTurns(for: rig.meeting.id)) == settled })
+        rig.clock.now = 10.5  // more rounds of the diarizer, the same answer
+        #expect(await eventually { diarizer.fedSamples >= 103 * 1_600 })
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(try await rig.store.liveTurns(for: rig.meeting.id) == settled, "written once, not rewritten")
+        _ = await rig.session.stop()
+        #expect(try await rig.store.liveTurns(for: rig.meeting.id) == settled + [SpeakerTurn(speaker: "P2", start: 2, end: 9)])
+    }
+
+    @Test func framesALaggingDiarizerNeverSawDoNotShiftItsTurns() async throws {
+        let diarizer = GatedDiarizer()
+        let rig = Rig(diarizer: diarizer, feedCapacity: 5)  // its feed holds one frame
+        defer { rig.cleanup() }
+        try await rig.session.start()
+        await rig.hear(1.0, mic: 0.5)
+        rig.clock.now = 1.2  // ten frames are due; the diarizer is still in its first
+        #expect(await eventually { rig.mixWrites.count >= 16_000 })
+        // It saw 0-0.1 s, then (the rest dropped) 0.9-1.0 s: its own 0.1-0.2 s is the meeting's 0.9-1.0 s.
+        diarizer.script([SpeakerTurn(speaker: "c0", start: 0.1, end: 0.2)])
+        diarizer.open()
+        #expect(await eventually { diarizer.fedSamples == 3_200 })
+        _ = await rig.session.stop()
+        let turns = try await rig.store.liveTurns(for: rig.meeting.id)
+        #expect(turns.count == 1)
+        #expect(abs((turns.first?.start ?? 0) - 0.9) < 1e-6 && abs((turns.first?.end ?? 0) - 1.0) < 1e-6)
+    }
+
+    @Test func snapshotsComeAtMostFourTimesASecond() async throws {
+        let rig = Rig(diarizer: FakeDiarizer())
+        defer { rig.cleanup() }
+        let received = Mutex<(count: Int, last: MeetingSnapshot?)>((0, nil))
+        let snapshots = rig.session.snapshots
+        let collector = Task { for await s in snapshots { received.withLock { $0 = ($0.count + 1, s) } } }
+        defer { collector.cancel() }
+        try await rig.session.start()
+        let began = ContinuousClock.now
+        received.withLock { $0.count = 0 }
+        for i in 0..<100 {  // the engine says something new every 10 ms, the diarizer gets frames
+            rig.engine.emit(TranscriptEvent(stream: .mic, text: "word \(i)", isFinal: false))
+            rig.clock.now += 0.01
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let seconds = Double((ContinuousClock.now - began).components.seconds) + 1
+        #expect(received.withLock { $0.count } <= Int(4 * seconds) + 2)
+        #expect(await eventually { received.withLock { $0.last }?.volatile[.mixed] == "word 99" }, "the newest state still arrives")
         _ = await rig.session.stop()
     }
 
@@ -325,7 +433,7 @@ import LegatoCore
         #expect(await rig.stored().allSatisfy { $0.speaker == nil }, "the diarizer has said nothing yet")
 
         diarizer.script([SpeakerTurn(speaker: "c0", start: 0, end: 20)])
-        rig.micSource.push(tone(1_600))
+        rig.clock.now = 20.3  // the next frames of the mix make the session read the turns
         #expect(await eventually { await rig.stored().last?.speaker == "P1" })
         #expect(await rig.stored().first?.speaker == nil, "older than 3 s: left as it was")
         _ = await rig.session.stop()
@@ -359,4 +467,35 @@ import LegatoCore
         #expect(await rig.stored().first?.speaker == nil)
         _ = await rig.session.stop()
     }
+}
+
+/// A source whose stop takes a while (a system tap's teardown can): the clock moves on meanwhile.
+final class SlowStopSource: AudioSource {
+    let inner = ScriptedSource()
+    let clock: TestClock
+    init(clock: TestClock) { self.clock = clock }
+    func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> { try await inner.start(format: format) }
+    func route() async throws -> AsyncStream<AudioChunk> { try await inner.route() }
+    func detach() async { await inner.detach() }
+    func stop() async {
+        clock.now += 1
+        try? await Task.sleep(for: .milliseconds(300))
+        await inner.stop()
+    }
+}
+
+/// A streaming diarizer that takes its first frame only once the test opens it (one that lags), and answers
+/// with the turns it is given.
+final class GatedDiarizer: SpeakerDiarizer {
+    private let state = Mutex((open: false, fed: 0, turns: [SpeakerTurn]()))
+    var fedSamples: Int { state.withLock { $0.fed } }
+    func open() { state.withLock { $0.open = true } }
+    func script(_ turns: [SpeakerTurn]) { state.withLock { $0.turns = turns } }
+
+    func feed(_ chunk: AudioChunk) async throws {
+        while !state.withLock({ $0.open }) { try? await Task.sleep(for: .milliseconds(2)) }
+        state.withLock { $0.fed += chunk.samples.count }
+    }
+    func turns() async -> [SpeakerTurn] { state.withLock { $0.turns } }
+    func finish() async throws -> [SpeakerTurn] { state.withLock { $0.turns } }
 }

@@ -19,6 +19,8 @@ public struct DiarizationHints: Sendable, Equatable {
 /// Runs the offline diarization pipeline over 16 kHz mono audio.
 protocol OfflineDiarizationRunner: Sendable {
     func run(audio: [Float], hints: DiarizationHints) async throws -> DiarizationResult
+    /// The pipeline over a recording on disk, read as it goes (memory-mapped, converted to 16 kHz).
+    func run(file: URL, hints: DiarizationHints) async throws -> DiarizationResult
 }
 
 /// Speaker labels for a finished recording, from FluidAudio's offline pipeline (segmentation, embeddings and
@@ -47,6 +49,14 @@ public final class OfflineSpeakerDiarizer: BatchDiarizer {
         }
     }
 
+    public func diarize(file: URL) async throws -> [SpeakerTurn] {
+        do {
+            return Self.turns(from: try await runner.run(file: file, hints: hints))
+        } catch OfflineDiarizationError.noSpeechDetected {
+            return []
+        }
+    }
+
     static func turns(from result: DiarizationResult) -> [SpeakerTurn] {
         result.segments
             .filter { $0.endTimeSeconds > $0.startTimeSeconds }
@@ -68,6 +78,14 @@ private final class FluidOfflineRunner: OfflineDiarizationRunner {
     }
 
     func run(audio: [Float], hints: DiarizationHints) async throws -> DiarizationResult {
+        try await manager(hints).process(audio: audio)
+    }
+
+    func run(file: URL, hints: DiarizationHints) async throws -> DiarizationResult {
+        try await manager(hints).process(file)
+    }
+
+    private func manager(_ hints: DiarizationHints) async throws -> OfflineDiarizerManager {
         let loadedModels = try await loaded.get { [models, modelID] in
             try await EngineSupport.requireInstalled(models: models, id: modelID)
             FluidAudioModels.pinRevisions()
@@ -79,7 +97,7 @@ private final class FluidOfflineRunner: OfflineDiarizationRunner {
         config.clustering.maxSpeakers = hints.maxSpeakers
         let manager = OfflineDiarizerManager(config: config)
         manager.initialize(models: loadedModels)
-        return try await manager.process(audio: audio)
+        return manager
     }
 
     private actor LoadedModels {

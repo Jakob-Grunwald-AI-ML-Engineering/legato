@@ -12,6 +12,18 @@ import Synchronization
 
 private final class RecordingFlag: Sendable { let value = Mutex(false) }
 
+/// Why ``MeetingServices`` refused to do something.
+public enum MeetingServicesError: Error, Equatable, LocalizedError {
+    /// A meeting is recording: the heavy models stay off until it ends.
+    case recording
+
+    public var errorDescription: String? {
+        switch self {
+        case .recording: "Not while a meeting is recording. Try again when it has ended."
+        }
+    }
+}
+
 /// What an app needs to record, process and summarise meetings, built on its ``ModelServices``: the live engine
 /// for a meeting, its speaker and microphone-cleaning models, the mixed session, the post-pass model, the
 /// on-device summary backend, and the after-stop chain with the scheduler that waits for an idle machine.
@@ -37,12 +49,15 @@ public final class MeetingServices {
         public let fallbackReason: String?
         /// Why the mic is not cleaned although LocalVQE is chosen (its model is missing), for the UI; `nil` otherwise.
         public let cleaningNote: String?
+        /// Why this meeting has no live speakers although they are on (the model is still downloading); `nil` otherwise.
+        public var speakersNote: String? = nil
 
         /// These engines with `engine` in place of the live one (the end-to-end run's scripted engine).
         public func replacing(engine replacement: any DictationEngine) -> Engines {
             Engines(
                 engine: replacement, engineID: replacement.id, preferredLocales: preferredLocales, diarizer: diarizer,
-                enhancer: enhancer, voiceProcessing: voiceProcessing, fallbackReason: fallbackReason, cleaningNote: cleaningNote)
+                enhancer: enhancer, voiceProcessing: voiceProcessing, fallbackReason: fallbackReason, cleaningNote: cleaningNote,
+                speakersNote: speakersNote)
         }
 
         /// The language the engine prepares for: the meeting's language, or the one language the engine
@@ -53,7 +68,8 @@ public final class MeetingServices {
     /// A meeting's session, and what to tell the user about the microphone while it runs.
     public struct MixedMeeting: Sendable {
         public let session: MeetingSession
-        /// E.g. that LocalVQE fell back to the raw microphone. Ends when the meeting does.
+        /// E.g. that LocalVQE fell back to the raw microphone, or that the speaker model is downloading. Ends when
+        /// the meeting does.
         public let notices: AsyncStream<String>
     }
 
@@ -106,23 +122,48 @@ public final class MeetingServices {
 
     /// What a meeting on `platform` runs on: ONE live engine (in `locale` when the meeting has a language of
     /// its own, else the engine settings' languages), the live diarizer when that setting is on, and the mic
-    /// enhancer when the echo-and-noise setting is LocalVQE. A model that is not installed is simply absent.
+    /// enhancer when the echo-and-noise setting is LocalVQE.
+    ///
+    /// A speaker or LocalVQE model that is wanted but not installed (a fresh install) starts downloading in the
+    /// background now, and this meeting goes on without it: without live speakers (``Engines/speakersNote``
+    /// says so), and, for LocalVQE, with Apple's voice processing on the Mac or the raw mic on the phone
+    /// (``Engines/cleaningNote``). The next meeting has it.
     public func engines(for platform: ModelPlatform = .current, locale: Locale? = nil) async -> Engines {
         let live = await registry.liveEngine(localeOverride: locale)
         let mode = settings.echoNoise
         let diarizer = settings.liveDiarization ? await registry.liveDiarizer() : nil
         let enhancer = mode == .localVQE ? await registry.micEnhancer() : nil
+        if settings.liveDiarization, diarizer == nil { await download(.liveSpeakers, fallback: FluidAudioModels.sortformerID) }
+        if mode == .localVQE, enhancer == nil { await download(.echoNoiseCancellation, fallback: FluidAudioModels.localVqeID) }
         let reason: String? = switch live.fallback {
         case .assetsNotInstalled: "The picked speech model is not installed, so meetings use Apple Speech."
         case .unknownModel: "The picked speech model is not available, so meetings use Apple Speech."
         case nil: nil
         }
+        // LocalVQE chosen but not there yet: Apple's voice processing stands in on the Mac.
+        let standIn = platform == .macOS && mode == .localVQE && enhancer == nil
+        let cleaningNote: String? =
+            if mode == .localVQE, enhancer == nil {
+                standIn
+                    ? "Echo and noise cancellation is downloading, so Apple voice processing cleans the microphone for now."
+                    : "Echo and noise cancellation is downloading, so the raw microphone is used for now."
+            } else { nil }
         return Engines(
             engine: live.engine, engineID: live.engine.id, preferredLocales: live.preferredLocales, diarizer: diarizer,
-            enhancer: enhancer, voiceProcessing: platform == .macOS && mode == .appleVoiceProcessing,
-            fallbackReason: reason,
-            cleaningNote: mode == .localVQE && enhancer == nil
-                ? "Echo and noise cancellation is not downloaded yet, so the raw microphone is used." : nil)
+            enhancer: enhancer, voiceProcessing: platform == .macOS && (mode == .appleVoiceProcessing || standIn),
+            fallbackReason: reason, cleaningNote: cleaningNote,
+            speakersNote: settings.liveDiarization && diarizer == nil
+                ? "The speaker model is downloading, so speakers appear from the next meeting." : nil)
+    }
+
+    /// Starts installing the model for `role` (the pick, else `fallback`) in the background, or joins the
+    /// install already running. Returns at once.
+    private func download(_ role: ModelRole, fallback: String) async {
+        let id = await registry.meetingModelID(role: role, fallback: fallback)
+        let manager = registry.models
+        Task.detached(priority: .utility) {
+            for await _ in await manager.install(id) {}
+        }
     }
 
     /// A new meeting set up from `engines`: its language, and the default summary template.
@@ -147,15 +188,24 @@ public final class MeetingServices {
     ) -> MixedMeeting {
         var micSource = mic
         var systemSource = system
+        let notes = [engines.cleaningNote, engines.speakersNote].compactMap { $0 }
         var notices = AsyncStream<String> { continuation in
-            if let note = engines.cleaningNote { continuation.yield(note) }
+            for note in notes { continuation.yield(note) }
             continuation.finish()
         }
         if let enhancer = engines.enhancer {
             let stage = MicCleaningStage(enhancer: enhancer, clock: clock)
             micSource = stage.mic(mic)
             systemSource = system.map(stage.reference)
-            notices = stage.notices
+            let cleaning = stage.notices
+            notices = AsyncStream { continuation in
+                let relay = Task {
+                    for note in notes { continuation.yield(note) }
+                    for await note in cleaning { continuation.yield(note) }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in relay.cancel() }
+            }
         }
         var sources = [MeetingSource(stream: .mic, source: micSource)]
         if let systemSource { sources.append(MeetingSource(stream: .system, source: systemSource)) }
@@ -182,10 +232,21 @@ public final class MeetingServices {
 
     // MARK: Processing
 
-    /// A meeting records (true) or not. Nothing heavy runs while one does.
+    /// A meeting records (true) or not. Nothing heavy runs while one does: a heavy step already running when a
+    /// recording starts is cut short (its meeting stays queued and runs again, from the step it was in, once
+    /// the machine is idle after the meeting), and the manual actions refuse to start.
     public func setRecording(_ isRecording: Bool) {
-        recording.value.withLock { $0 = isRecording }
+        let started = recording.value.withLock { was -> Bool in
+            defer { was = isRecording }
+            return isRecording && !was
+        }
+        if started {
+            let scheduler = self.scheduler
+            Task { await scheduler.cancelRunning() }
+        }
     }
+
+    private var isRecording: Bool { recording.value.withLock { $0 } }
 
     /// The after-stop chain: m4a, post-pass, speakers, on-device summary. `onStep` reports each finished step.
     /// Run it inside a background task on the phone; see ``MeetingPipeline``.
@@ -218,11 +279,33 @@ public final class MeetingServices {
         await scheduler.processNow(id)
     }
 
-    /// The scheduler's job: the deferred steps. False (stay queued) when cut short.
+    /// "Improve transcript": the post-pass again, then the summary again.
+    /// - Throws: ``MeetingServicesError/recording`` while a meeting records (it would free the live model).
+    @discardableResult
+    public func improveTranscript(meetingID: UUID) async throws -> MeetingPipeline.Outcome {
+        guard !isRecording else { throw MeetingServicesError.recording }
+        return try await pipeline().improveTranscript(meetingID: meetingID)
+    }
+
+    /// Regenerate: the summary again with the on-device backend (the meeting's template, notes and speakers).
+    /// - Throws: ``MeetingServicesError/recording`` while a meeting records; ``LLMError/unavailable(reason:)``
+    ///   when no on-device model is usable.
+    @discardableResult
+    public func regenerate(meetingID: UUID) async throws -> URL {
+        guard !isRecording else { throw MeetingServicesError.recording }
+        guard let backend = await summaryBackend() else {
+            throw LLMError.unavailable(reason: "No on-device model is available for a summary.")
+        }
+        return try await pipeline().summarize(meetingID: meetingID, using: backend)
+    }
+
+    /// The scheduler's job: the deferred steps. False (stay queued) when cut short or to be retried.
     private func runDeferred(_ id: UUID) async -> Bool {
         do {
             let outcome = try await pipeline().runDeferred(meetingID: id)
             onProcessed?(id, outcome, nil)
+            // A step failed: the meeting stays queued and is tried again (a few times; see MeetingPipeline).
+            if outcome.willRetry { return false }
         } catch is CancellationError {
             onProcessed?(id, nil, CancellationError())
             return false
@@ -232,10 +315,13 @@ public final class MeetingServices {
         return true
     }
 
-    /// Summarises one meeting with Claude, after the user asked for it. Writes `summaries/summary/claude.md`.
-    /// - Throws: ``LLMError/unavailable(reason:)`` when there is no key.
+    /// Summarises one meeting with Claude, after the user asked for it. Writes `summaries/<templateID>/claude.md`
+    /// under the meeting's template.
+    /// - Throws: ``MeetingServicesError/recording`` while a meeting records; ``LLMError/unavailable(reason:)``
+    ///   when there is no key.
     @discardableResult
     public func summarizeWithClaude(meetingID: UUID) async throws -> URL {
+        guard !isRecording else { throw MeetingServicesError.recording }
         let claude = claudeBackend()
         if case .unavailable(let reason) = await claude.availability { throw LLMError.unavailable(reason: reason) }
         return try await pipeline().summarize(meetingID: meetingID, using: claude)

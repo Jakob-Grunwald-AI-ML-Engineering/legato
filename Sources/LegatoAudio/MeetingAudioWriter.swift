@@ -184,15 +184,23 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
         return Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
     }
 
-    private func openForReading(_ stream: TranscriptEvent.Stream) throws -> AVAudioFile {
+    /// The file `stream` is recorded in now: its CAF, else its m4a; nil when there is neither. With one
+    /// source, `.mixed` is the mic recording.
+    public nonisolated func recordingURL(of stream: TranscriptEvent.Stream) -> URL? {
         let fm = FileManager.default
+        let folder = self.folder
         func recording(_ s: TranscriptEvent.Stream) -> URL? {
             [Self.cafURL(folder, s), Self.m4aURL(folder, s)].first { fm.fileExists(atPath: $0.path) }
         }
-        if let url = recording(stream) { return try AVAudioFile(forReading: url) }
+        if let url = recording(stream) { return url }
         // One source: its recording is the mix. Two sources and no mix is a meeting from before the mix existed.
-        if stream == .mixed, recording(.system) == nil, let url = recording(.mic) { return try AVAudioFile(forReading: url) }
-        throw WriterError.noRecording(stream)
+        if stream == .mixed, recording(.system) == nil { return recording(.mic) }
+        return nil
+    }
+
+    private func openForReading(_ stream: TranscriptEvent.Stream) throws -> AVAudioFile {
+        guard let url = recordingURL(of: stream) else { throw WriterError.noRecording(stream) }
+        return try AVAudioFile(forReading: url)
     }
 
     // MARK: Writing

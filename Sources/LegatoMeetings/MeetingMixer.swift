@@ -3,14 +3,22 @@ import LegatoCore
 
 /// Sums the audio of a meeting's sources into the one signal the live engine hears.
 ///
-/// Pure and clock-driven: the caller feeds what each source delivered, stamped with the time it arrived
-/// (``append(_:from:at:)``), and asks for the mix up to a point in time (``advance(to:)``), which cuts it into
-/// frames of 100 ms. The mixer never waits: a frame takes whatever each source has delivered for it, and a
-/// source that is late, missing or rebuilding is silence for that frame (audio that turns up after its frame
-/// went out is dropped). Each chunk is placed on the meeting's timeline by its arrival time, so a source that
-/// starts late or comes back after a gap lines up with the others; small jitter is absorbed by treating
-/// consecutive chunks as contiguous.
+/// Pure and clock-driven: the caller feeds what each source delivered (``append(_:from:at:)``) and asks for the
+/// mix up to a point in time (``advance(to:)``), which cuts it into frames of 100 ms. The mixer never waits: a
+/// frame takes whatever each source has delivered for it, and a source that is late, missing or rebuilding is
+/// silence for that frame (audio that turns up after its frame went out is dropped).
 ///
+/// - **Placement by count.** A source starts where ``begin(_:at:)`` puts it (its start on the meeting's
+///   timeline) and then counts its own samples: chunk after chunk follows on, however late or bunched up they
+///   arrive. A backlog delivered at once (audio queued while another source started, or behind a model load)
+///   so lands where it was heard, not where it arrived. Gaps are told, not guessed: ``skip(_:seconds:)`` (the
+///   session calls it when a source resumes after a gap) leaves silence. A source nobody began is placed by its
+///   first chunk's arrival.
+/// - **The clock keeps the count honest.** The arrival time (`at:`) only corrects a count that has gone wrong:
+///   a source cannot deliver audio before it was heard, so a chunk that would end more than ``maxLead`` after
+///   its arrival is pulled back to end there (newer audio replaces what it overlaps); and a source whose audio
+///   keeps arriving too late for its frames for ``lateWindow`` (time it lost without saying) is placed by the
+///   clock again. One late burst never moves a source.
 /// - Mute and pause are applied to a source's samples before they are summed, by time: a frame is silent for
 ///   a source if that source was muted (or the meeting paused) at **any** instant of the frame, and audio that
 ///   belongs to a silenced frame is dropped, never played later. Both are timed with the `at:` the caller
@@ -18,7 +26,6 @@ import LegatoCore
 ///   the clock to let late chunks arrive.
 /// - The sum is scaled down just enough to stay within ±1 when it would clip, frame by frame; quiet mixes
 ///   are never touched.
-/// - A source may hold at most ``maxBacklog`` seconds of audio not yet mixed; beyond that its oldest is dropped.
 /// - The mix is exactly as long as the meeting: ``flush(to:)`` adds the last partial frame.
 public struct MeetingMixer: Sendable {
     /// Length of a frame.
@@ -27,8 +34,10 @@ public struct MeetingMixer: Sendable {
     public let sampleRate: Double
     /// Samples per frame.
     public let frameSamples: Int
-    /// How much unmixed audio a source may hold, in seconds.
-    public let maxBacklog: TimeInterval
+    /// How far a source's count may run ahead of the clock, in seconds.
+    public let maxLead: TimeInterval
+    /// How long a source's audio must keep arriving too late before it is placed by the clock again, in seconds.
+    public let lateWindow: TimeInterval
     /// How many samples of the mix have been handed out so far.
     public private(set) var emittedSamples = 0
 
@@ -36,8 +45,12 @@ public struct MeetingMixer: Sendable {
     private struct Track {
         var base = 0
         var samples: [Float] = []
-        /// Where the next contiguous chunk starts.
+        /// Where the source's next sample goes, by its own count.
         var end = 0
+        /// The source has a place on the timeline (``begin(_:at:)`` or its first chunk).
+        var placed = false
+        /// When the run of chunks that came too late for their frames began.
+        var lateSince: TimeInterval?
     }
 
     private var tracks: [TranscriptEvent.Stream: Track] = [:]
@@ -53,34 +66,67 @@ public struct MeetingMixer: Sendable {
         }
     }
 
-    public init(sampleRate: Double = 16_000, maxBacklog: TimeInterval = 1) {
+    public init(sampleRate: Double = 16_000, maxLead: TimeInterval = 0.5, lateWindow: TimeInterval = 0.5) {
         self.sampleRate = sampleRate
         self.frameSamples = max(1, Int((sampleRate * Self.frameSeconds).rounded()))
-        self.maxBacklog = maxBacklog
+        self.maxLead = maxLead
+        self.lateWindow = lateWindow
     }
 
-    /// Queues what `source` delivered (mono, in the mixer's sample rate) when it arrived at `time`, seconds on
-    /// the meeting's timeline. The chunk is taken to end at `time`; if it starts within
-    /// ``MeetingSilence/tolerance`` of where the source's last chunk ended it continues that chunk, and
-    /// otherwise the gap before it stays silent.
+    /// `source`'s first sample is at `time`, seconds on the meeting's timeline.
+    public mutating func begin(_ source: TranscriptEvent.Stream, at time: TimeInterval) {
+        var track = Track()
+        track.end = max(0, Int((time * sampleRate).rounded()))
+        track.placed = true
+        tracks[source] = track
+    }
+
+    /// `source` delivered nothing for `seconds` (it says so, e.g. it resumed after a restart): that stretch is
+    /// silence and its next sample comes after it.
+    public mutating func skip(_ source: TranscriptEvent.Stream, seconds: TimeInterval) {
+        guard seconds > 0, var track = tracks[source] else { return }
+        track.end += Int((seconds * sampleRate).rounded())
+        tracks[source] = track
+    }
+
+    /// Queues what `source` delivered (mono, in the mixer's sample rate); it arrived at `time`, seconds on the
+    /// meeting's timeline. It follows on from the source's previous audio (see the type's notes).
     public mutating func append(_ samples: [Float], from source: TranscriptEvent.Stream, at time: TimeInterval) {
         guard !samples.isEmpty else { return }
         var track = tracks[source] ?? Track()
-        let tolerance = Int(MeetingSilence.tolerance * sampleRate)
-        let stamped = max(0, Int((time * sampleRate).rounded()) - samples.count)
-        let start = stamped > track.end + tolerance ? stamped : track.end
+        let count = samples.count
+        let arrival = Int((time * sampleRate).rounded())
+        if !track.placed {
+            track.end = max(0, arrival - count)
+            track.placed = true
+        }
+        var start = track.end
+        if start + count > arrival + Int(maxLead * sampleRate) {
+            start = arrival - count  // heard no later than it arrived
+        }
+        if start < emittedSamples {
+            if let since = track.lateSince, time - since >= lateWindow - 1e-9 {
+                start = max(start, arrival - count)
+                track.lateSince = nil
+            } else if track.lateSince == nil {
+                track.lateSince = time
+            }
+        } else {
+            track.lateSince = nil
+        }
+        let queuedEnd = track.base + track.samples.count
         if track.samples.isEmpty {
             track.base = start
-        } else if start > track.base + track.samples.count {
-            track.samples += [Float](repeating: 0, count: start - (track.base + track.samples.count))
+        } else if start >= queuedEnd {
+            track.samples += [Float](repeating: 0, count: start - queuedEnd)
+        } else if start <= track.base {
+            track.samples = []
+            track.base = start
+        } else {
+            track.samples.removeLast(queuedEnd - start)  // newer audio replaces what it overlaps
         }
         track.samples += samples
-        track.end = start + samples.count
-        let cap = Int(maxBacklog * sampleRate)
-        if track.samples.count > cap {
-            track.base += track.samples.count - cap
-            track.samples.removeFirst(track.samples.count - cap)
-        }
+        track.end = start + count
         tracks[source] = track
     }
 

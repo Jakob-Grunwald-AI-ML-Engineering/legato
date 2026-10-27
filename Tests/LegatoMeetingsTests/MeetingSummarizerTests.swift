@@ -32,7 +32,8 @@ private final class LimitedBackend: LLMBackend {
     }
 }
 
-private func isChunk(_ call: LimitedBackend.Call) -> Bool { call.prompt.contains("Me [") || call.prompt.contains("Them [") }
+/// A request that carries transcript lines (`[mm:ss]: s<i> …`), not chunk summaries to merge.
+private func isChunk(_ call: LimitedBackend.Call) -> Bool { call.prompt.contains("]: s") }
 
 private func seg(_ stream: TranscriptEvent.Stream, _ text: String, _ start: TimeInterval, echo: Bool = false) -> MeetingSegment {
     MeetingSegment(stream: stream, text: text, start: start, end: start + 1, echo: echo)
@@ -58,7 +59,8 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
         #expect(result == "SUMMARY")
         let call = try #require(backend.all.first)
         #expect(backend.all.count == 1)
-        #expect(call.prompt == "Me [00:05]: Hello there\nThem [01:10]: Hi, ready?\nMe [62:05]: Late one")
+        // Plan decision 2: old two-stream segments have no speaker, so no label (no Me and Them).
+        #expect(call.prompt == "[00:05]: Hello there\n[01:10]: Hi, ready?\n[62:05]: Late one")
         #expect(call.instructions == MeetingSummarizer.defaultPrompt)
     }
 
@@ -214,8 +216,8 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
     @Test func theNotesGoToEveryChunkAndTheMergeWholeAndOnce() async throws {
         let backend = LimitedBackend(limit: 3_000) { call, i in isChunk(call) ? "c\(i)" : "m\(i)" }
         _ = try await MeetingSummarizer(backend: backend, notes: notes).summarize(segments: transcript(count: 80))
-        let chunks = backend.all.filter { $0.prompt.contains("Me [") || $0.prompt.contains("Them [") }
-        let merges = backend.all.filter { !$0.prompt.contains("Me [") && !$0.prompt.contains("Them [") }
+        let chunks = backend.all.filter(isChunk)
+        let merges = backend.all.filter { !isChunk($0) }
         #expect(chunks.count > 2 && !merges.isEmpty)
         for call in backend.all {
             #expect(call.prompt.components(separatedBy: notesHeader).count == 2, "one notes block per request")

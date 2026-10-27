@@ -65,21 +65,23 @@ import LegatoCore
         #expect(md.contains("_System audio muted 00:05–00:08_"))
     }
 
-    @Test func meetingsFromBeforeSpeakersStillShowMeAndThem() {
+    @Test func meetingsFromBeforeSpeakersShowNoLabel() {
         let old = Meeting(title: "Old", date: Date(timeIntervalSince1970: 1_793_025_000), duration: 20, engineID: "f")
         let segs = [
             MeetingSegment(stream: .mic, text: "Mine.", start: 1, end: 2),
             MeetingSegment(stream: .system, text: "Theirs.", start: 3, end: 4),
         ]
         let md = MarkdownExporter.markdown(meeting: old, segments: segs, summary: nil, timeZone: utc)
-        #expect(md.contains("**Me** [00:01] Mine.") && md.contains("**Them** [00:03] Theirs."))
+        // Plan decision 2: a segment with no speaker has no label; there are no Me and Them any more.
+        #expect(md.contains("\n[00:01] Mine.") && md.contains("\n[00:03] Theirs."))
+        #expect(!md.contains("**Me**") && !md.contains("**Them**"))
     }
 
     @Test func timestampsPastAnHourShowHours() {
         let long = [MeetingSegment(stream: .system, text: "Late.", start: 3725, end: 3727)]
         let m = Meeting(title: "Long", date: Date(timeIntervalSince1970: 1_793_025_000), duration: 3800, engineID: "f")
         let md = MarkdownExporter.markdown(meeting: m, segments: long, summary: nil, timeZone: utc)
-        #expect(md.contains("**Them** [1:02:05] Late."))
+        #expect(md.contains("\n[1:02:05] Late."))
         #expect(md.contains("- Duration: 1:03:20"))
     }
 }

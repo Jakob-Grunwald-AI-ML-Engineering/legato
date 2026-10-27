@@ -144,6 +144,18 @@ private final class FakeOfflineRunner: OfflineDiarizationRunner {
         }
         return try next.get()
     }
+
+    private let fileCalls = Mutex<[URL]>([])
+    var files: [URL] { fileCalls.withLock { $0 } }
+
+    func run(file: URL, hints: DiarizationHints) async throws -> DiarizationResult {
+        fileCalls.withLock { $0.append(file) }
+        let next = state.withLock { s -> Result<DiarizationResult, any Error> in
+            s.calls.append((0, hints))
+            return s.results.isEmpty ? .failure(Boom()) : s.results.removeFirst()
+        }
+        return try next.get()
+    }
 }
 
 private func segment(_ speaker: String, _ start: Float, _ end: Float, _ embedding: [Float]) -> TimedSpeakerSegment {
@@ -183,6 +195,19 @@ struct OfflineSpeakerDiarizerTests {
         await #expect(throws: Boom.self) {
             _ = try await OfflineSpeakerDiarizer(runner: runner).diarize(samples: [Float](repeating: 0, count: 160_000))
         }
+    }
+
+    @Test func aRecordingGoesToTheModelAsAFileSoItIsNeverHeldInMemoryWhole() async throws {
+        let runner = FakeOfflineRunner([.success(result([segment("S1", 0, 2, [1, 0])], database: ["S1": [1, 0]]))])
+        let url = URL(fileURLWithPath: "/meeting/mix.caf")
+        let turns = try await OfflineSpeakerDiarizer(runner: runner).diarize(file: url)
+        #expect(turns == [SpeakerTurn(speaker: "S1", start: 0, end: 2)])
+        #expect(runner.files == [url])
+    }
+
+    @Test func aRecordingFileWithoutSpeechHasNoTurns() async throws {
+        let runner = FakeOfflineRunner([.failure(OfflineDiarizationError.noSpeechDetected)])
+        #expect(try await OfflineSpeakerDiarizer(runner: runner).diarize(file: URL(fileURLWithPath: "/m.caf")).isEmpty)
     }
 
     @Test func speakerCountHintsReachTheModel() async throws {
@@ -416,6 +441,26 @@ struct LocalVqeEnhancerTests {
         _ = await enhancer.enhance(mic: ramp(100), reference: nil)
         _ = await enhancer.enhance(mic: ramp(100), reference: nil)
         #expect(loads.withLock { $0 } == 1)
+    }
+
+    @Test func prepareLoadsTheModelBeforeAnyAudio() async {
+        let loads = Mutex(0)
+        let enhancer = LocalVqeEnhancer(queueLimit: 16_000) {
+            loads.withLock { $0 += 1 }
+            return FakeVqeStream(delay: 0)
+        }
+        await enhancer.prepare()
+        #expect(loads.withLock { $0 } == 1)
+        _ = await enhancer.enhance(mic: ramp(100), reference: nil)
+        #expect(loads.withLock { $0 } == 1, "the first audio finds it loaded")
+        #expect(await enhancer.state() == .active)
+    }
+
+    @Test func aModelThatCannotLoadFallsBackAtPrepareAndPassesTheMicThrough() async {
+        let enhancer = LocalVqeEnhancer(queueLimit: 16_000) { throw Boom() }
+        await enhancer.prepare()
+        #expect(await enhancer.state() == .fellBack(.failed("boom")))
+        #expect(await enhancer.enhance(mic: ramp(160), reference: nil) == ramp(160))
     }
 
     @Test func flushingAnIdleEnhancerReturnsNothing() async {

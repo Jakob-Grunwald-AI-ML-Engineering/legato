@@ -112,7 +112,7 @@ public actor ProcessingScheduler {
         poll()
     }
 
-    /// Cancels the running job (the app is about to be suspended). It stays queued.
+    /// Cancels the running job (the app is about to be suspended, or a meeting starts recording). It stays queued.
     public func cancelRunning() {
         running?.cancel()
     }

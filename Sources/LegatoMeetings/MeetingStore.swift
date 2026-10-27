@@ -8,7 +8,7 @@ import LegatoCore
 /// <id>/segments.jsonl        the live and post-pass ``MeetingSegment``s (append-only while recording)
 /// <id>/segments.live.jsonl   the live text, saved once before the post-pass replaces it
 /// <id>/notes.md              what the user wrote during and after the meeting (private, like every file here)
-/// <id>/turns.live.jsonl      the live diarizer's turns as person ids, rewritten while recording
+/// <id>/turns.live.jsonl      the live diarizer's turns as person ids, appended as they settle while recording
 /// <id>/turns.offline.json    the after-meeting diarizer's turns as person ids (absent until that pass ran)
 /// <id>/summaries/<templateID>/<backendID>.md   a template's summary by a backend
 /// <id>/summary-<backendID>.md                  older summaries: read as the `summary` template
@@ -96,12 +96,14 @@ public actor MeetingStore {
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
     }
 
-    /// Saves the notes. Saving what is already there changes nothing, so it cannot make a summary stale; blank
-    /// notes remove the file.
+    /// Saves the notes. Saving what is already there changes nothing, so it cannot make a summary stale. Blank
+    /// notes empty the file rather than remove it: its modification time still says the notes changed, so a
+    /// summary written with the old notes is stale.
     public func saveNotes(_ text: String, for id: UUID) throws {
         let url = notesURL(for: id)
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try? FileManager.default.removeItem(at: url)
+            guard try notes(for: id) != nil else { return }  // nothing to clear
+            try PrivateFiles.write(Data(), to: url)
             return
         }
         if let existing = try notes(for: id), existing == text { return }
@@ -116,10 +118,18 @@ public actor MeetingStore {
         try await turnFile(liveTurnsURL(for: id)).elements()
     }
 
-    /// Replaces the live turns: the diarizer revises its newest ones, so the file is rewritten.
+    /// Replaces the live turns (a merge of two people rewrites them).
     public func saveLiveTurns(_ turns: [SpeakerTurn], for id: UUID) async throws {
         try createFolder(for: id)
         try await turnFile(liveTurnsURL(for: id)).replaceAll(turns)
+    }
+
+    /// Adds live turns that will not change any more; the recording session writes the file this way.
+    public func appendLiveTurns(_ turns: [SpeakerTurn], for id: UUID) async throws {
+        guard !turns.isEmpty else { return }
+        try createFolder(for: id)
+        let file = turnFile(liveTurnsURL(for: id))
+        for turn in turns { try await file.append(turn) }
     }
 
     /// The after-meeting pass's turns (person ids); nil until that pass ran. An empty array is a result:

@@ -98,6 +98,13 @@ public actor LocalVqeEnhancer: MicEnhancer {
         self.aligner = MicReferenceAligner(limit: queueLimit)
     }
 
+    /// Loads the model now (a meeting calls this before the mic starts). A model that cannot load falls back
+    /// here, so the raw mic passes from the first sample.
+    public func prepare() async {
+        guard fallback == nil, stream == nil else { return }
+        do { _ = try await ready() } catch { fallBack(.failed("\(error)")) }
+    }
+
     public func state() -> MicEnhancerState {
         fallback.map(MicEnhancerState.fellBack) ?? .active
     }

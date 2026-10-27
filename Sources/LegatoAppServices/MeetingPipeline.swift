@@ -11,6 +11,8 @@ public protocol MeetingAudioFinalizing: AudioSampleReader {
     func finalizeAudio() async throws -> [TranscriptEvent.Stream]
     /// Deletes the lossless CAF of every stream that has an m4a. Called once the heavy steps are over.
     func discardLosslessAudio() async
+    /// The file `stream` is recorded in now: its CAF, else its m4a; nil when there is neither.
+    func recordingURL(of stream: TranscriptEvent.Stream) -> URL?
 }
 
 extension MeetingAudioWriter: MeetingAudioFinalizing {
@@ -28,8 +30,12 @@ extension MeetingAudioWriter: MeetingAudioFinalizing {
 /// - ``runDeferred(meetingID:)`` is heavy and runs when the machine is idle (see ``ProcessingScheduler``): the
 ///   post-pass on the mix (Parakeet, if one is picked), the after-meeting speaker pass (if on and installed),
 ///   the on-device summary with the meeting's template, notes, speakers and language, then `finished`. The
-///   post-pass and the speaker pass read the lossless CAF; once both are done or skipped the CAFs are deleted
-///   (kept when one of them failed, for the next run). A meeting whose CAFs are gone is read from the m4a.
+///   post-pass and the speaker pass read the lossless CAF; once both are done or skipped the CAFs are deleted.
+///   A meeting whose CAFs are gone is read from the m4a.
+/// - **A failed step** (post-pass or speaker pass) keeps the CAFs and leaves the meeting `processing`, so the
+///   next run tries it again (``Outcome/willRetry``); the summary is still written from what there is, and
+///   written again once a retry succeeds. After ``maxAttempts`` failed runs in a row the meeting is
+///   `finished` with its CAFs kept, and "Improve transcript" is the way to try again.
 ///
 /// ``run(meetingID:)`` is both, one after the other.
 ///
@@ -42,15 +48,17 @@ extension MeetingAudioWriter: MeetingAudioFinalizing {
 /// about to suspend the app; `onStep` reports progress.
 public struct MeetingPipeline: Sendable {
     /// What a run did that the caller may want to show.
+    /// Failed runs in a row after which the heavy steps are no longer retried by themselves.
+    public static let maxAttempts = 3
+
     public struct Outcome: Sendable, Equatable {
         /// The backend that wrote the automatic summary; `nil` when none did.
         public var summaryBackendID: String?
         /// What was skipped or failed, in words for the log or the detail view.
         public var notes: [String] = []
+        /// A step failed and the meeting stays `processing` for another run.
+        public var willRetry = false
     }
-
-    /// Seconds of the mix read into memory at a time.
-    private static let readWindow: TimeInterval = 300
 
     private let store: MeetingStore
     private let audio: @Sendable (URL) -> any MeetingAudioFinalizing
@@ -117,6 +125,7 @@ public struct MeetingPipeline: Sendable {
         let rest = try await runDeferred(meetingID: meetingID)
         outcome.summaryBackendID = rest.summaryBackendID
         outcome.notes += rest.notes
+        outcome.willRetry = rest.willRetry
         return outcome
     }
 
@@ -145,12 +154,15 @@ public struct MeetingPipeline: Sendable {
         guard let meeting = try await processable(meetingID) else { return outcome }
         let recordings = audio(await store.folder(for: meetingID))
         var stepFailed = false
+        // A step that succeeded after the summary was written (a retry): the summary is written again.
+        var improved = false
 
         if !meeting.completedSteps.contains(.postPass), let batch = await transcriber() {
             await releaseModels()
             do {
                 try await MeetingPostPass(store: store, reader: recordings, transcriber: batch).run(meetingID: meetingID)
                 try await complete(.postPass, meetingID)
+                improved = true
             } catch is CancellationError {
                 await releasePostPassModels()
                 throw CancellationError()
@@ -163,18 +175,29 @@ public struct MeetingPipeline: Sendable {
         }
 
         if !meeting.completedSteps.contains(.diarize), diarizationEnabled(), let diarizer = await batchDiarizer() {
-            let notes = outcome.notes.count
-            try await diarize(meetingID, with: diarizer, recordings: recordings, outcome: &outcome)
-            if outcome.notes.count > notes { stepFailed = true }
+            switch try await diarize(meetingID, with: diarizer, recordings: recordings, outcome: &outcome) {
+            case true?: improved = true
+            case false?: stepFailed = true
+            case nil: break
+            }
         }
 
         if !stepFailed { await recordings.discardLosslessAudio() }
 
-        if !meeting.completedSteps.contains(.summary) {
+        if !meeting.completedSteps.contains(.summary) || improved {
             try await automaticSummary(meetingID, outcome: &outcome)
         }
 
-        try await finish(meetingID)
+        let failedRuns = stepFailed ? meeting.failedRuns + 1 : 0
+        if stepFailed, failedRuns < Self.maxAttempts {
+            try await store.update(id: meetingID) { $0.failedRuns = failedRuns }
+            outcome.willRetry = true
+            return outcome
+        }
+        try await store.update(id: meetingID) { m in
+            m.failedRuns = failedRuns
+            m.state = .finished
+        }
         return outcome
     }
 
@@ -185,6 +208,7 @@ public struct MeetingPipeline: Sendable {
         try await store.update(id: meetingID) { m in
             m.state = .processing
             m.completedSteps.subtract([.postPass, .summary])
+            m.failedRuns = 0
         }
         return try await run(meetingID: meetingID)
     }
@@ -230,31 +254,34 @@ public struct MeetingPipeline: Sendable {
         }
     }
 
-    /// The after-meeting speaker pass over the mix. It maps the offline clusters onto the people the live
-    /// pass already found (keeping their names and merges), adds new people for the rest, and gives every segment its speaker from the new turns. A meeting with no
-    /// mix recording (one from before the mix) is skipped.
+    /// The after-meeting speaker pass over the mix. The diarizer reads the mix recording from disk itself, so
+    /// the meeting is never held in memory whole. It maps the offline clusters onto the people the live pass
+    /// already found (keeping their names and merges), adds new people for the rest, and gives every segment
+    /// its speaker from the new turns. A meeting with no mix recording (one from before the mix) is skipped.
+    /// - Returns: true when the speakers were updated, false when the pass failed, nil when it was skipped.
     private func diarize(
         _ meetingID: UUID, with diarizer: any BatchDiarizer, recordings: any MeetingAudioFinalizing,
         outcome: inout Outcome
-    ) async throws {
+    ) async throws -> Bool? {
         let duration = (try? await recordings.duration(of: .mixed)) ?? 0
-        guard duration > 0 else { return }
+        guard duration > 0, let mix = recordings.recordingURL(of: .mixed) else { return nil }
         let turns: [SpeakerTurn]
         do {
-            let samples = try await Self.read(.mixed, duration: duration, from: recordings)
-            turns = try await diarizer.diarize(samples: samples)
+            try Task.checkCancellation()
+            turns = try await diarizer.diarize(file: mix)
+            try Task.checkCancellation()
         } catch is CancellationError {
             await releaseDiarizer()
             throw CancellationError()
         } catch {
             await releaseDiarizer()
             outcome.notes.append("The speaker pass failed, so the speakers stay as they were: \(error)")
-            return
+            return false
         }
         await releaseDiarizer()
 
-        guard let meeting = try await store.meeting(id: meetingID) else { return }
-        var directory = SpeakerDirectory(meeting.speakers)
+        guard let meeting = try await store.meeting(id: meetingID) else { return nil }
+        var directory = SpeakerDirectory(meeting: meeting)
         let mapped = SpeakerAssigner.mapOffline(
             turns, onto: try await store.liveTurns(for: meetingID), directory: &directory)
 
@@ -264,23 +291,10 @@ public struct MeetingPipeline: Sendable {
         let people = directory.speakers
         // Only the speakers: the meeting may have been renamed, or its people edited, while this ran.
         try await store.update(id: meetingID) { m in
-            for (id, info) in people where m.speakers[id] == nil { m.speakers[id] = info }
+            for (id, info) in people where m.speakers[id] == nil && m.mergedSpeakers[id] == nil { m.speakers[id] = info }
         }
         try await complete(.diarize, meetingID)
-    }
-
-    /// All of `stream` as one array, read a window at a time.
-    private static func read(_ stream: TranscriptEvent.Stream, duration: TimeInterval, from reader: any AudioSampleReader) async throws -> [Float] {
-        var samples: [Float] = []
-        samples.reserveCapacity(Int(duration * 16_000))
-        var start: TimeInterval = 0
-        while start < duration {
-            try Task.checkCancellation()
-            let end = min(duration, start + readWindow)
-            samples += try await reader.samples(of: stream, in: start..<end)
-            start = end
-        }
-        return samples
+        return true
     }
 
     private static func trackName(_ stream: TranscriptEvent.Stream) -> String {
@@ -296,7 +310,4 @@ public struct MeetingPipeline: Sendable {
         onStep(step)
     }
 
-    private func finish(_ meetingID: UUID) async throws {
-        try await store.update(id: meetingID) { $0.state = .finished }
-    }
 }

@@ -4,9 +4,33 @@ import Darwin
 import Foundation
 import Synchronization
 
+/// One reading of the kernel's per-state CPU tick counters (summed over all cores). They are 32-bit and wrap.
+public struct CPUTicks: Sendable, Equatable {
+    public var user: UInt32
+    public var system: UInt32
+    public var idle: UInt32
+    public var nice: UInt32
+
+    public init(user: UInt32, system: UInt32, idle: UInt32, nice: UInt32) {
+        self.user = user
+        self.system = system
+        self.idle = idle
+        self.nice = nice
+    }
+
+    /// System-wide CPU load, 0 to 1, between `before` and these ticks (since boot when `before` is nil).
+    /// Each counter's change is taken modulo 2^32, so a counter that wrapped still counts what passed.
+    public func load(since before: CPUTicks?) -> Double {
+        let then = before ?? CPUTicks(user: 0, system: 0, idle: 0, nice: 0)
+        let busy = UInt64(user &- then.user) + UInt64(system &- then.system) + UInt64(nice &- then.nice)
+        let total = busy + UInt64(idle &- then.idle)
+        return total == 0 ? 0 : min(1, Double(busy) / Double(total))
+    }
+}
+
 /// Reads how busy the Mac is and how long the user has been away, for deciding when heavy background work may run.
 public final class MacActivitySampler: Sendable {
-    private let previous = Mutex<(busy: UInt64, total: UInt64)?>(nil)
+    private let previous = Mutex<CPUTicks?>(nil)
 
     public init() {}
 
@@ -20,16 +44,13 @@ public final class MacActivitySampler: Sendable {
             }
         }
         guard status == KERN_SUCCESS else { return 0 }
-        let ticks = [info.cpu_ticks.0, info.cpu_ticks.1, info.cpu_ticks.2, info.cpu_ticks.3].map(UInt64.init)
-        let idle = ticks[Int(CPU_STATE_IDLE)]
-        let total = ticks.reduce(0, +)
-        let busy = total - idle
-        let before = previous.withLock { state -> (busy: UInt64, total: UInt64)? in
-            defer { state = (busy, total) }
+        let ticks = CPUTicks(
+            user: info.cpu_ticks.0, system: info.cpu_ticks.1, idle: info.cpu_ticks.2, nice: info.cpu_ticks.3)
+        let before = previous.withLock { state -> CPUTicks? in
+            defer { state = ticks }
             return state
         }
-        let dBusy = busy - (before?.busy ?? 0), dTotal = total - (before?.total ?? 0)
-        return dTotal == 0 ? 0 : min(1, Double(dBusy) / Double(dTotal))
+        return ticks.load(since: before)
     }
 
     /// Seconds since the last keyboard, mouse or trackpad event of the session.

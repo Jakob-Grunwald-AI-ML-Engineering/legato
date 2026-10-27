@@ -5,8 +5,8 @@ import LegatoCore
 ///
 /// The transcript is one paragraph per segment, `**Alice** [mm:ss] text` named by the meeting's speakers, in
 /// time order, with muted and paused ranges noted where they begin (`_Microphone muted 00:30–01:10_`,
-/// `_Paused 02:00–02:30_`). A segment with no speaker has no name, except those of older two-stream meetings:
-/// `**Me**` for the mic and `**Them**` for the system stream. Echoes are left out.
+/// `_Paused 02:00–02:30_`). A segment with no speaker has no name, those of older two-stream meetings included.
+/// Echoes are left out.
 public enum MarkdownExporter {
     /// - Parameters:
     ///   - summary: Markdown placed verbatim after the header (it carries its own headings); omitted when nil.
@@ -62,12 +62,7 @@ public enum MarkdownExporter {
     }
 
     private static func label(_ segment: MeetingSegment, speakers: [PersonID: SpeakerInfo]) -> String? {
-        if let id = segment.speaker { return speakers[id]?.name }
-        switch segment.stream {
-        case .mic: return "Me"
-        case .system: return "Them"
-        case .mixed: return nil
-        }
+        segment.speaker.flatMap { speakers[$0]?.name }
     }
 
     private static func source(_ stream: TranscriptEvent.Stream) -> String {

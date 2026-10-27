@@ -119,16 +119,76 @@ import LegatoCore
         #expect(approx(mixer.advance(to: 0.2)[0], 0.5))
     }
 
-    @Test func aSourceThatRunsFarAheadKeepsOnlyItsNewestSecond() {
-        var mixer = MeetingMixer(sampleRate: 16_000, maxBacklog: 1)
+    // A1: a source is placed by counting its own samples from its start, so a backlog that arrives at once
+    // keeps its place on the timeline; only a count that runs ahead of the clock is pulled back.
+    @Test func aBacklogThatArrivesAtOnceKeepsItsPlaceOnTheTimeline() {
+        var mixer = MeetingMixer(sampleRate: 16_000)
+        mixer.begin(.mic, at: 0)
         mixer.append(constant(0.1, 32_000) + constant(0.9, 16_000), from: .mic, at: 3)  // 3 s of audio at once
         let frames = mixer.advance(to: 3)
         #expect(frames.count == 30)
-        #expect(frames[..<20].allSatisfy { approx($0, 0) })
+        #expect(frames[..<20].allSatisfy { approx($0, 0.1) })
         #expect(frames[20...].allSatisfy { approx($0, 0.9) })
     }
 
-    @Test func aChunkIsPlacedWhereItsArrivalTimePutsIt() {
+    @Test func aCountThatRunsAheadOfTheClockIsPulledBackToIt() {
+        var mixer = MeetingMixer(sampleRate: 16_000, maxLead: 0.5)
+        mixer.begin(.mic, at: 0)
+        mixer.append(constant(0.1, 8_000), from: .mic, at: 0.5)
+        mixer.append(constant(0.9, 32_000), from: .mic, at: 0.6)  // 2 s more by 0.6 s: impossible, so it ends at 0.6 s
+        let frames = mixer.advance(to: 0.6)
+        #expect(frames.count == 6)
+        #expect(frames.allSatisfy { approx($0, 0.9) }, "the newest audio is where the clock puts it")
+    }
+
+    @Test func aBurstAfterADelayedStartStaysAlignedAndAudibleAndTheMixIsAsLongAsTheMeeting() {
+        var mixer = MeetingMixer(sampleRate: 16_000)
+        mixer.begin(.mic, at: 0)
+        mixer.begin(.system, at: 1.0)  // the system tap took a second to start
+        // The mic's first second was queued meanwhile and arrives at once, in small chunks.
+        for _ in 0..<50 { mixer.append(constant(0.25, 320), from: .mic, at: 1.0) }
+        var mix: [Float] = []
+        for step in 11...50 {
+            let t = Double(step) / 10
+            mixer.append(constant(0.25, 1_600), from: .mic, at: t)
+            mixer.append(constant(0.5, 1_600), from: .system, at: t)
+            mix += mixer.advance(to: t - 0.2).flatMap { $0 }  // the session runs the mix 0.2 s behind the clock
+        }
+        mix += mixer.flush(to: 5.0).flatMap { $0 }
+        #expect(mix.count == 80_000, "5 s of meeting, 5 s of mix")
+        #expect(approx(Array(mix[..<16_000]), 0.25), "the queued second is where it was heard")
+        #expect(approx(Array(mix[16_000...]), 0.75), "the mic stays audible next to the system audio")
+    }
+
+    @Test func aSourceThatStartsLateLinesUpWithWhereItStarted() {
+        var mixer = MeetingMixer(sampleRate: 16_000)
+        mixer.begin(.system, at: 0.5)
+        mixer.append(constant(0.5, 1_600), from: .system, at: 0.65)  // delivered a little after it was heard
+        let frames = mixer.advance(to: 0.7)
+        #expect(frames[..<5].allSatisfy { approx($0, 0) })
+        #expect(approx(frames[5], 0.5), "0.5-0.6 s, where its first sample belongs")
+        #expect(approx(frames[6], 0))
+    }
+
+    @Test func aSourceThatStaysLateIsPlacedByTheClockAgain() {
+        var mixer = MeetingMixer(sampleRate: 16_000)
+        mixer.begin(.mic, at: 0)
+        var frames: [[Float]] = []
+        for step in 1...10 {  // live until 1 s
+            mixer.append(constant(0.3, 1_600), from: .mic, at: Double(step) / 10)
+            frames += mixer.advance(to: Double(step) / 10 - 0.2)
+        }
+        for step in 11...15 { frames += mixer.advance(to: Double(step) / 10 - 0.2) }  // half a second lost, unreported
+        for step in 16...30 {
+            mixer.append(constant(0.3, 1_600), from: .mic, at: Double(step) / 10)
+            frames += mixer.advance(to: Double(step) / 10 - 0.2)
+        }
+        #expect(frames.count == 28)
+        #expect(frames[..<10].allSatisfy { approx($0, 0.3) })
+        #expect(frames[21...].allSatisfy { approx($0, 0.3) }, "within half a second it is heard again")
+    }
+
+    @Test func aSourceNobodyBeganIsPlacedByItsFirstChunksArrival() {
         var mixer = MeetingMixer(sampleRate: 16_000)
         mixer.append(constant(0.5, frame), from: .system, at: 1.0)  // a source that starts late: 0.9-1.0 s
         let frames = mixer.advance(to: 1.0)
@@ -136,10 +196,12 @@ import LegatoCore
         #expect(approx(frames[9], 0.5))
     }
 
-    @Test func aGapInASourcesAudioStaysSilent() {
+    @Test func aGapTheSourceReportsStaysSilent() {
         var mixer = MeetingMixer(sampleRate: 16_000)
         mixer.append(constant(0.2, frame), from: .mic, at: 0.1)
-        mixer.append(constant(0.4, frame), from: .mic, at: 0.5)  // came back after 0.3 s of nothing
+        // A1: gaps come from the session (a source's resumption), not from arrival times.
+        mixer.skip(.mic, seconds: 0.3)  // came back after 0.3 s of nothing
+        mixer.append(constant(0.4, frame), from: .mic, at: 0.5)
         let frames = mixer.advance(to: 0.5)
         #expect(approx(frames[0], 0.2))
         #expect(frames[1...3].allSatisfy { approx($0, 0) })

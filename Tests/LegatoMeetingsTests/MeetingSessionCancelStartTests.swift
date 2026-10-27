@@ -46,11 +46,8 @@ final class UncancellableEngine: DictationEngine {
         let meeting = Meeting(title: "Cancelled", date: Date(timeIntervalSince1970: 1), engineID: "fake")
         let s = MeetingSession(
             meeting: meeting,
-            inputs: [
-                MeetingInput(stream: .mic, source: mic, engine: engine),
-                MeetingInput(stream: .system, source: system, engine: RecordingEngine()),
-            ],
-            store: store, sink: RecordingSink(), convert: { $0 }, clock: { 0 })
+            sources: [MeetingSource(stream: .mic, source: mic), MeetingSource(stream: .system, source: system)],
+            engine: engine, store: store, sink: RecordingSink(), convert: { $0 }, clock: { 0 })
         return (s, meeting.id)
     }
 

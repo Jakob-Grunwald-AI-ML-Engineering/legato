@@ -480,10 +480,10 @@ final class MeetingController {
     /// Gives a person a name. The same name as another person's merges the two everywhere: segments and turns.
     func renameSpeaker(_ person: PersonID, to name: String, in id: UUID) async {
         guard id != liveMeetingID, let meeting = try? await store.meeting(id: id) else { return }
-        var directory = SpeakerDirectory(meeting.speakers)
+        var directory = SpeakerDirectory(meeting: meeting)
         let merge = directory.rename(person, to: name)
-        let speakers = directory.speakers
-        _ = try? await store.update(id: id) { $0.speakers = speakers }
+        let renamed = directory
+        _ = try? await store.update(id: id) { renamed.save(into: &$0) }
         if let merge {
             try? await store.replaceSegments(merge.apply(to: await transcript(of: id)), for: id)
             if let live = try? await store.liveTurns(for: id), !live.isEmpty {
@@ -503,12 +503,12 @@ final class MeetingController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                guard let backend = await services.summaryBackend() else {
+                guard await services.summaryBackend() != nil else {
                     notice = "No on-device model is available for a summary."
                     busy.remove(id)
                     return
                 }
-                try await services.pipeline().summarize(meetingID: id, using: backend)
+                try await services.regenerate(meetingID: id)
             } catch {
                 if !(error is CancellationError) { notice = "The summary failed: \(error.localizedDescription)" }
             }
@@ -558,7 +558,7 @@ final class MeetingController {
     /// "Improve transcript": the post-pass again, then the summary again.
     func improve(_ id: UUID) {
         run(id, label: "Improving the transcript") { services in
-            try await services.pipeline().improveTranscript(meetingID: id)
+            try await services.improveTranscript(meetingID: id)
         }
     }
 

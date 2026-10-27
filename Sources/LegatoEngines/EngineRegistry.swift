@@ -139,14 +139,21 @@ public struct EngineRegistry: Sendable {
         return FluidAudioCatalog.micEnhancer(id: id, models: models)
     }
 
-    /// The model id for `role` if it is installed: the persisted pick when it is a catalog model of the role's
-    /// kind, else `fallback`. Pure lookup, like the rest of the registry.
+    /// The model a meeting role uses, installed or not: the persisted pick when it is a catalog model of the
+    /// role's kind, else `fallback`. Pure lookup; the caller decides whether to install it.
+    public func meetingModelID(role: ModelRole, fallback: String) async -> String {
+        let catalog = await models.catalog
+        if let picked = await models.selected(role: role), catalog.contains(where: { $0.id == picked && $0.kind == role.kind }) {
+            return picked
+        }
+        return fallback
+    }
+
+    /// The model id for `role` if it is installed: ``meetingModelID(role:fallback:)``, when it is a catalog
+    /// model of the role's kind. Pure lookup, like the rest of the registry.
     private func installedModel(role: ModelRole, fallback: String) async -> String? {
         let catalog = await models.catalog
-        var id = fallback
-        if let picked = await models.selected(role: role), catalog.contains(where: { $0.id == picked && $0.kind == role.kind }) {
-            id = picked
-        }
+        let id = await meetingModelID(role: role, fallback: fallback)
         guard catalog.contains(where: { $0.id == id && $0.kind == role.kind }),
             case .installed = await models.state(of: id)
         else { return nil }

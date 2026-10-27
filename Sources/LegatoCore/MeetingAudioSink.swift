@@ -64,6 +64,10 @@ public protocol SpeakerDiarizer: Sendable {
 public protocol BatchDiarizer: Sendable {
     /// Turns of `samples`: 16 kHz mono Float32 (``BatchAudio/sampleRate``), in time order.
     func diarize(samples: [Float]) async throws -> [SpeakerTurn]
+
+    /// Turns of the recording at `file` (a CAF or m4a), in time order. The file is read from disk as needed,
+    /// never held in memory whole, so a long meeting costs no more memory than a short one.
+    func diarize(file: URL) async throws -> [SpeakerTurn]
 }
 
 /// Whether a ``MicEnhancer`` is cleaning the mic or has handed the raw mic through.
@@ -99,4 +103,12 @@ public protocol MicEnhancer: Sendable {
 
     /// Whether the enhancer is still cleaning.
     func state() async -> MicEnhancerState
+
+    /// Loads the model now, before any audio, so the first samples do not queue up behind the load. A model
+    /// that cannot load falls back here (see ``state()``). Optional: the first ``enhance(mic:reference:)`` loads it too.
+    func prepare() async
+}
+
+extension MicEnhancer {
+    public func prepare() async {}
 }

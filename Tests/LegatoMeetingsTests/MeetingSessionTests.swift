@@ -4,6 +4,8 @@ import Testing
 import LegatoCore
 @testable import LegatoMeetings
 
+/// The basics of a session: segments, timing, mute, conversion, stop and snapshots. Ported from the two-engine
+/// session to the mixed one (one engine on the mix of every source).
 @Suite struct MeetingSessionTests {
     struct Rig {
         let root = tempRoot()
@@ -11,7 +13,7 @@ import LegatoCore
         let sink = RecordingSink()
         let clock = TestClock()
         let micSource = ScriptedSource(), systemSource = ScriptedSource()
-        let micEngine = RecordingEngine(id: "mic-engine"), systemEngine = RecordingEngine(id: "sys-engine")
+        let engine = RecordingEngine(id: "mixed-engine")
         let meeting = Meeting(title: "Sync", date: Date(timeIntervalSince1970: 1), engineID: "fake")
         let session: MeetingSession
 
@@ -19,30 +21,36 @@ import LegatoCore
             store = MeetingStore(root: root)
             session = MeetingSession(
                 meeting: meeting,
-                inputs: [
-                    MeetingInput(stream: .mic, source: micSource, engine: micEngine),
-                    MeetingInput(stream: .system, source: systemSource, engine: systemEngine),
-                ],
-                store: store, sink: sink, convert: convert, clock: { [clock] in clock.now })
+                sources: [MeetingSource(stream: .mic, source: micSource), MeetingSource(stream: .system, source: systemSource)],
+                engine: engine, store: store, sink: sink, convert: convert, clock: { [clock] in clock.now })
         }
 
         func cleanup() { try? FileManager.default.removeItem(at: root) }
         func stored() async -> [MeetingSegment] { (try? await store.segments(for: meeting.id)) ?? [] }
+        /// What the sink got for `stream`'s own track.
+        func calls(_ stream: TranscriptEvent.Stream) -> [RecordingSink.Call] {
+            sink.calls.filter {
+                switch $0 {
+                case .write(let s, _), .silence(let s, _): s == stream
+                case .finish: false
+                }
+            }
+        }
     }
 
-    @Test func twoStreamsProduceOrderedRetaggedSegments() async throws {
+    @Test func segmentsAreSavedAsTheyArriveInTimeOrderAndSurviveAReopenedStore() async throws {
         let rig = Rig()
         defer { rig.cleanup() }
         try await rig.session.start()
 
-        // Apple Speech tags every event `.mic`; the session re-tags by the input the event came from.
-        rig.micEngine.emit(finalEvent("My point.", 5..<6))
-        rig.systemEngine.emit(finalEvent("Their point.", 2..<3, stream: .mic))
+        // Apple Speech tags every event `.mic`; the session tags what the mix engine says `.mixed`.
+        rig.engine.emit(finalEvent("My point.", 5..<6))
+        rig.engine.emit(finalEvent("Their point.", 2..<3, stream: .mic))
 
         #expect(await eventually { await rig.stored().count == 2 })
         let segments = await rig.stored()
         #expect(segments.map(\.text) == ["Their point.", "My point."])
-        #expect(segments.map(\.stream) == [.system, .mic])
+        #expect(segments.map(\.stream) == [.mixed, .mixed])
         #expect(segments.map(\.start) == [2, 5])
         #expect(segments.map(\.end) == [3, 6])
         #expect(segments.allSatisfy { $0.origin == .live && !$0.echo })
@@ -63,10 +71,10 @@ import LegatoCore
         try await rig.session.start()
 
         rig.clock.now = 7
-        rig.micEngine.emit(TranscriptEvent(stream: .mic, text: "Thinking", isFinal: false))
-        #expect(await eventually { latest.withLock { $0 }?.volatile[.mic] == "Thinking" })  // heard at 7, whatever the load
+        rig.engine.emit(TranscriptEvent(stream: .mic, text: "Thinking", isFinal: false))
+        #expect(await eventually { latest.withLock { $0 }?.volatile[.mixed] == "Thinking" })  // heard at 7, whatever the load
         rig.clock.now = 8
-        rig.micEngine.emit(finalEvent("Thinking aloud."))
+        rig.engine.emit(finalEvent("Thinking aloud."))
 
         #expect(await eventually { await rig.stored().count == 1 })
         let seg = try #require(await rig.stored().first)
@@ -75,23 +83,21 @@ import LegatoCore
         _ = await rig.session.stop()
     }
 
-    @Test func aMutedStreamFeedsSilenceToEngineAndSinkAndRecordsTheRange() async throws {
+    @Test func aMutedStreamIsRecordedAsSilenceAndItsRangeIsKept() async throws {
         let rig = Rig()
         defer { rig.cleanup() }
         try await rig.session.start()
 
         rig.micSource.push(tone(1_600))  // 0.1 s while live
-        #expect(await eventually { rig.micEngine.chunks.count == 1 })
+        #expect(await eventually { rig.calls(.mic).count == 1 })
 
         rig.clock.now = 10
         await rig.session.setMuted(true, stream: .mic)
         rig.micSource.push(tone(1_600))
-        #expect(await eventually { rig.micEngine.chunks.count == 2 })
+        #expect(await eventually { rig.calls(.mic).count == 2 })
 
-        // Silence of the same size reaches the engine, and the sink records silence instead of the voice.
-        #expect(rig.micEngine.chunks[0].samples == Array(repeating: 0.5, count: 1_600))
-        #expect(rig.micEngine.chunks[1].samples == Array(repeating: 0, count: 1_600))
-        #expect(rig.sink.calls == [.write(.mic, Array(repeating: 0.5, count: 1_600)), .silence(.mic, 0.1)])
+        // The sink records silence of the same length instead of the voice.
+        #expect(rig.calls(.mic) == [.write(.mic, Array(repeating: 0.5, count: 1_600)), .silence(.mic, 0.1)])
 
         rig.clock.now = 12
         await rig.session.setMuted(false, stream: .mic)
@@ -109,9 +115,8 @@ import LegatoCore
         await rig.session.setMuted(true, stream: .mic)
 
         rig.systemSource.push(tone(800))
-        #expect(await eventually { rig.systemEngine.chunks.count == 1 })
-        #expect(rig.systemEngine.chunks[0].samples == Array(repeating: 0.5, count: 800))
-        #expect(rig.sink.calls == [.write(.system, Array(repeating: 0.5, count: 800))])
+        #expect(await eventually { rig.calls(.system).count == 1 })
+        #expect(rig.calls(.system) == [.write(.system, Array(repeating: 0.5, count: 800))])
         _ = await rig.session.stop()
     }
 
@@ -126,48 +131,17 @@ import LegatoCore
         #expect(finished.mutedRanges == [MutedRange(stream: .mic, start: 4, end: 9)])
     }
 
-    @Test func theSinkGetsConvertedAudioAndTheEngineGetsTheSourceFormat() async throws {
+    @Test func theSinkGetsConvertedAudioAndTheEngineGetsTheMixInItsOwnFormat() async throws {
         let rig = Rig(convert: { AudioChunk(samples: $0.samples.map { $0 * 2 }, format: $0.format) })
         defer { rig.cleanup() }
         try await rig.session.start()
 
-        rig.micSource.push(tone(100, 0.25))
-        #expect(await eventually { rig.micEngine.chunks.count == 1 && rig.sink.calls.count == 1 })
-        #expect(rig.micEngine.chunks[0].samples == Array(repeating: 0.25, count: 100))
-        #expect(rig.sink.calls == [.write(.mic, Array(repeating: 0.5, count: 100))])
+        rig.micSource.push(tone(1_600, 0.25))
+        #expect(await eventually { rig.calls(.mic).count == 1 })
+        #expect(rig.calls(.mic) == [.write(.mic, Array(repeating: 0.5, count: 1_600))])
+        rig.clock.now = 0.1
         _ = await rig.session.stop()
-    }
-
-    @Test func anEchoIsMarkedAndAMicSegmentWithOtherWordsIsKept() async throws {
-        let rig = Rig()
-        defer { rig.cleanup() }
-        try await rig.session.start()
-
-        rig.systemEngine.emit(finalEvent("the quarterly numbers look good", 10..<13))
-        #expect(await eventually { await rig.stored().count == 1 })
-        rig.micEngine.emit(finalEvent("The quarterly numbers look good.", 10.5..<13.5))
-        rig.micEngine.emit(finalEvent("I disagree with that plan", 20..<22))
-
-        #expect(await eventually { await rig.stored().count == 3 })
-        let byText = Dictionary(uniqueKeysWithValues: await rig.stored().map { ($0.text, $0) })
-        #expect(byText["The quarterly numbers look good."]?.echo == true)
-        #expect(byText["I disagree with that plan"]?.echo == false)
-        #expect(byText["the quarterly numbers look good"]?.echo == false)
-        _ = await rig.session.stop()
-    }
-
-    @Test func aLateSystemSegmentMarksTheMicSegmentThatWasAlreadySaved() async throws {
-        let rig = Rig()
-        defer { rig.cleanup() }
-        try await rig.session.start()
-
-        rig.micEngine.emit(finalEvent("the quarterly numbers look good", 10.5..<13.5))
-        #expect(await eventually { await rig.stored().count == 1 })
-        rig.systemEngine.emit(finalEvent("the quarterly numbers look good", 10..<13))
-
-        #expect(await eventually { await rig.stored().count == 2 })
-        #expect(await eventually { await rig.stored().first { $0.stream == .mic }?.echo == true })
-        _ = await rig.session.stop()
+        #expect(rig.engine.chunks.flatMap(\.samples) == Array(repeating: 0.25, count: 1_600))
     }
 
     @Test func stopFinishesEverythingAndMovesTheMeetingToProcessing() async throws {
@@ -182,7 +156,7 @@ import LegatoCore
         #expect(try await rig.store.meeting(id: rig.meeting.id) == finished)
         #expect(rig.sink.calls.last == .finish)
         #expect(rig.micSource.stopCount == 1 && rig.systemSource.stopCount == 1)
-        #expect(rig.micEngine.finishCount == 1 && rig.systemEngine.finishCount == 1)
+        #expect(rig.engine.finishCount == 1)
     }
 
     @Test func startPersistsTheMeetingAsRecording() async throws {
@@ -201,35 +175,13 @@ import LegatoCore
         let collector = Task { for await s in snapshots { latest.withLock { $0 = s } } }
         defer { collector.cancel() }
         try await rig.session.start()
-        rig.micEngine.emit(TranscriptEvent(stream: .mic, text: "Hel", isFinal: false))
+        rig.engine.emit(TranscriptEvent(stream: .mic, text: "Hel", isFinal: false))
         await rig.session.setMuted(true, stream: .mic)
 
         #expect(await eventually {
             let s = latest.withLock { $0 }
-            return s?.volatile[.mic] == "Hel" && s?.mutedStreams == [.mic]
+            return s?.volatile[.mixed] == "Hel" && s?.mutedStreams == [.mic]
         })
         _ = await rig.session.stop()
-    }
-
-    @Test func pauseSilencesEveryStreamOnTheTwoEnginePathAndIsNotAMute() async throws {
-        let rig = Rig()
-        defer { rig.cleanup() }
-        try await rig.session.start()
-        rig.clock.now = 3
-        await rig.session.pause()
-        rig.micSource.push(tone(1_600))
-        rig.systemSource.push(tone(800))
-        #expect(await eventually { rig.micEngine.chunks.count == 1 && rig.systemEngine.chunks.count == 1 })
-        #expect(rig.micEngine.chunks[0].samples == Array(repeating: 0, count: 1_600))
-        #expect(rig.systemEngine.chunks[0].samples == Array(repeating: 0, count: 800))
-        #expect(await eventually { rig.sink.calls.count == 2 })
-        #expect(rig.sink.calls.allSatisfy { if case .silence = $0 { true } else { false } })
-
-        rig.clock.now = 5
-        await rig.session.resume()
-        rig.clock.now = 6
-        let finished = await rig.session.stop()
-        #expect(finished.pausedRanges == [PausedRange(start: 3, end: 5)])
-        #expect(finished.mutedRanges.isEmpty)
     }
 }

@@ -389,6 +389,33 @@ import LegatoCore
         #expect(try await store.summaries(for: m.id).first?.isStale == false)
     }
 
+    @Test func clearingTheNotesAfterASummaryMarksItStale() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        try await store.saveNotes("first", for: m.id)
+        try await store.saveSummary("S", backendID: "fm", for: m.id)
+        try setModified(await store.notesURL(for: m.id), secondsAgo: 100)
+        try setModified(await store.summaryURL(for: m.id, backendID: "fm"), secondsAgo: 50)
+
+        try await store.saveNotes("", for: m.id)  // the user deleted every note: the summary still has them
+        #expect(try await store.notes(for: m.id) == nil)
+        #expect(try await store.summaries(for: m.id).first?.isStale == true)
+    }
+
+    @Test func clearingNotesThatWereNeverThereLeavesTheSummaryFresh() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        try await store.saveSummary("S", backendID: "fm", for: m.id)
+        try await store.saveNotes("  ", for: m.id)
+        #expect(try await store.summaries(for: m.id).first?.isStale == false)
+    }
+
     @Test func aSummaryOfAMeetingWithoutNotesIsNeverStale() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }

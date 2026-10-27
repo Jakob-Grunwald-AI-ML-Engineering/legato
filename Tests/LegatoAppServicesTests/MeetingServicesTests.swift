@@ -42,6 +42,16 @@ private func sameInstance(_ a: any DictationEngine, _ b: (any DictationEngine)?)
     return x === y
 }
 
+/// Polls an async `condition` until it holds or `timeout` passes.
+private func eventually(timeout: Duration, _ condition: @Sendable () async -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    return await condition()
+}
+
 private let nemotron = "nemotron-multilingual-560"
 private let parakeetEOU = "parakeet-eou-320"
 
@@ -182,7 +192,11 @@ private struct Rig {
         let rig = Rig()
         let missing = await rig.services().engines(for: .macOS)
         #expect(missing.enhancer == nil)
-        #expect(missing.cleaningNote?.contains("raw microphone") == true, "LocalVQE is chosen but not downloaded")
+        // A15: until LocalVQE is downloaded the Mac falls back to Apple voice processing, not to the raw mic.
+        #expect(missing.voiceProcessing, "LocalVQE is chosen but not downloaded: Apple voice processing stands in")
+        #expect(missing.cleaningNote?.contains("Apple voice processing") == true)
+        let phone = await Rig().services().engines(for: .iOS)  // a fresh install: the first call starts the download
+        #expect(!phone.voiceProcessing && phone.cleaningNote?.contains("raw microphone") == true, "the phone has no stand-in")
 
         await rig.install(FluidAudioModels.localVqeID)
         let on = await rig.services().engines(for: .macOS)
@@ -197,6 +211,41 @@ private struct Rig {
         rig.settings.echoNoise = .off
         let off = await rig.services().engines(for: .macOS)
         #expect(off.enhancer == nil && !off.voiceProcessing && off.cleaningNote == nil)
+    }
+
+    // MARK: Models missing on a fresh install
+
+    private func installed(_ rig: Rig, _ id: String) async -> Bool {
+        if case .installed = await rig.models.manager.state(of: id) { return true }
+        return false
+    }
+
+    @Test func aMeetingWithLiveSpeakersOnStartsDownloadingTheMissingModelAndGoesOnWithout() async throws {
+        let rig = Rig()
+        let engines = await rig.services().engines(for: .macOS)
+        #expect(engines.diarizer == nil, "this meeting runs without live speakers")
+        #expect(engines.speakersNote?.localizedCaseInsensitiveContains("speaker") == true)
+        #expect(await eventually(timeout: .seconds(3)) { await installed(rig, FluidAudioModels.sortformerID) }, "downloaded in the background")
+        let next = await rig.services().engines(for: .macOS)
+        #expect(next.diarizer != nil && next.speakersNote == nil, "the next meeting has live speakers")
+    }
+
+    @Test func aMissingLocalVqeIsDownloadedWhenAMeetingStarts() async throws {
+        let rig = Rig()
+        _ = await rig.services().engines(for: .macOS)
+        #expect(await eventually(timeout: .seconds(3)) { await installed(rig, FluidAudioModels.localVqeID) })
+        #expect(await rig.services().engines(for: .macOS).enhancer != nil)
+    }
+
+    @Test func nothingIsDownloadedForWhatIsSwitchedOff() async throws {
+        let rig = Rig()
+        rig.settings.liveDiarization = false
+        rig.settings.echoNoise = .appleVoiceProcessing
+        let engines = await rig.services().engines(for: .macOS)
+        #expect(engines.speakersNote == nil)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await !installed(rig, FluidAudioModels.sortformerID))
+        #expect(await !installed(rig, FluidAudioModels.localVqeID))
     }
 
     // MARK: Backends
@@ -265,6 +314,19 @@ private struct Rig {
             cleanup: CleanupRegistry(models: rig.models.manager, foundationModels: capture))
         _ = try await services.pipeline().run(meetingID: id)
         #expect(capture.instructions.withLock { $0.first } == "Only list decisions.")
+    }
+}
+
+/// Its first answer takes two seconds, unless the task is cancelled first; later answers come at once.
+private final class BlockingLLM: LLMBackend {
+    let id = "blocking"
+    let calls = Mutex(0)
+    var maxPromptCharacters: Int? { nil }
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        let n = calls.withLock { $0 += 1; return $0 }
+        if n == 1 { try await Task.sleep(for: .seconds(2)) }
+        return "## Summary\nblocking"
     }
 }
 
@@ -507,6 +569,48 @@ private final class TrackSink: MeetingAudioSink {
         try await services.processAfterStop(id)
         await services.scheduler.tick()
         #expect(try await finished(rig, id))
+    }
+
+    @Test func aJobRunningWhenARecordingStartsIsStoppedAndRunsAgainAfterTheMeeting() async throws {
+        let rig = Rig()
+        let blocking = BlockingLLM()
+        let services = MeetingServices(
+            models: rig.models, store: rig.store, settings: rig.settings, keyStore: rig.keys,
+            cleanup: CleanupRegistry(models: rig.models.manager, foundationModels: blocking),
+            sampler: { .idle }, immediateProcessing: false, pollInterval: nil)
+        let id = try await seed(rig)
+        try await services.processAfterStop(id)
+        let tick = Task { await services.scheduler.tick() }
+        #expect(await eventually { blocking.calls.withLock { $0 } == 1 }, "the summary is being written")
+
+        services.setRecording(true)
+        await tick.value
+        #expect(try await finished(rig, id) == false, "the heavy step stopped for the recording")
+        #expect(await services.scheduler.queued == [id], "and waits to run again")
+
+        services.setRecording(false)
+        await services.scheduler.tick()
+        #expect(try await finished(rig, id))
+        #expect(try await rig.store.summaries(for: id).map(\.backendID) == ["blocking"])
+    }
+
+    @Test func manualProcessingIsRefusedWhileAMeetingRecords() async throws {
+        let rig = Rig()
+        let services = rig.services(claudeBackend: rig.claude)
+        let id = UUID()
+        try await rig.store.create(Meeting(id: id, title: "Done", date: Date(), duration: 10, engineID: "live", state: .finished, completedSteps: [.audio, .summary]))
+        try await rig.store.appendSegment(MeetingSegment(stream: .mixed, text: "we ship friday", start: 0, end: 3), to: id)
+        services.setRecording(true)
+        await #expect(throws: MeetingServicesError.recording) { try await services.improveTranscript(meetingID: id) }
+        await #expect(throws: MeetingServicesError.recording) { try await services.regenerate(meetingID: id) }
+        await #expect(throws: MeetingServicesError.recording) { try await services.summarizeWithClaude(meetingID: id) }
+        #expect(try await rig.store.meeting(id: id)?.state == .finished, "nothing was started")
+        #expect(try await rig.store.summaries(for: id).isEmpty)
+        #expect(rig.foundation.calls.withLock { $0 } == 0 && rig.claude.calls.withLock { $0 } == 0)
+
+        services.setRecording(false)
+        try await services.regenerate(meetingID: id)
+        #expect(try await rig.store.summaries(for: id).map(\.backendID) == ["fake-fm"])
     }
 
     @Test func aMeetingCutShortLeavesTheQueueAlone() async throws {

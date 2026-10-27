@@ -67,13 +67,9 @@ struct MeetingTranscriptView: View {
         }
     }
 
-    /// The speaker's name; meetings from before speakers say Me and Them; none when unknown.
+    /// The speaker's name; none when unknown (meetings from before speakers included).
     private func name(of segment: MeetingSegment) -> String? {
-        switch segment.stream {
-        case .mic: "Me"
-        case .system: "Them"
-        case .mixed: segment.speaker.flatMap { speakers[$0]?.name }
-        }
+        segment.speaker.flatMap { speakers[$0]?.name }
     }
 
     private func color(of segment: MeetingSegment) -> Color {

@@ -41,8 +41,16 @@ private final class FakeAudio: MeetingAudioFinalizing {
         self.systemLevel = systemLevel
     }
 
+    /// Seconds of the mix read into memory.
+    let mixRead = Mutex<TimeInterval>(0)
+    static let mixURL = URL(fileURLWithPath: "/meeting/mix.caf")
+
     func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval { stream == .mixed ? mixDuration : 20 }
+    func recordingURL(of stream: TranscriptEvent.Stream) -> URL? {
+        stream == .mixed && mixDuration > 0 ? Self.mixURL : URL(fileURLWithPath: "/meeting/\(stream.rawValue).caf")
+    }
     func samples(of stream: TranscriptEvent.Stream, in range: Range<TimeInterval>) async throws -> [Float] {
+        if stream == .mixed { mixRead.withLock { $0 += range.upperBound - range.lowerBound } }
         let level = stream == .system ? systemLevel : stream == .mic ? micLevel : 0.5
         return [Float](repeating: level, count: Int((range.upperBound - range.lowerBound) * 16_000))
     }
@@ -77,11 +85,30 @@ private final class FakeDiarizer: BatchDiarizer {
     let result: [SpeakerTurn]
     let log: Log
     let sampleCounts = Mutex<[Int]>([])
+    let files = Mutex<[URL]>([])
     init(_ result: [SpeakerTurn], log: Log) { self.result = result; self.log = log }
     func diarize(samples: [Float]) async throws -> [SpeakerTurn] {
         log.add("diarize")
         sampleCounts.withLock { $0.append(samples.count) }
         return result
+    }
+    func diarize(file: URL) async throws -> [SpeakerTurn] {
+        log.add("diarize")
+        files.withLock { $0.append(file) }
+        return result
+    }
+}
+
+/// Fails while `broken` is set (each run of the post-pass), then transcribes like ``FakeTranscriber``.
+private final class FlakyTranscriber: BatchTranscriber {
+    let id = "flaky-batch"
+    let broken = Mutex(true)
+    let log: Log
+    init(log: Log) { self.log = log }
+    func transcribe(samples: [Float], stream: TranscriptEvent.Stream) async throws -> [TranscriptEvent] {
+        if broken.withLock({ $0 }) { throw LLMError.failed("boom") }
+        log.add("post-pass")
+        return [TranscriptEvent(stream: stream, text: "accurate \(stream.rawValue)", isFinal: true, range: 0..<5)]
     }
 }
 
@@ -308,6 +335,63 @@ private struct Rig {
         #expect(rig.log.count("caf-deleted") == 0)
     }
 
+    @Test func aFailedStepLeavesTheMeetingForAnotherRunAndGivesUpAfterThree() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let broken = FailingTranscriber()
+        let pipeline = MeetingPipeline(
+            store: rig.store, audio: { _ in rig.audio }, transcriber: { broken }, backend: { nil },
+            releaseModels: {}, releasePostPassModels: {})
+        let first = try await pipeline.run(meetingID: rig.id)
+        #expect(try await rig.meeting().state == .processing, "kept, so the next run tries the post-pass again")
+        #expect(first.willRetry)
+        let second = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(try await rig.meeting().state == .processing)
+        #expect(second.willRetry)
+
+        let third = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(try await rig.meeting().state == .finished, "three failed runs: it stops trying by itself")
+        #expect(!third.willRetry)
+        #expect(rig.log.count("caf-deleted") == 0, "the CAFs stay for Improve transcript")
+    }
+
+    @Test func aStepThatWorksOnTheRetryRedoesTheSummaryAndThenDropsTheCafs() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let flaky = FlakyTranscriber(log: rig.log)
+        let llm = rig.llm, audio = rig.audio
+        let pipeline = MeetingPipeline(
+            store: rig.store, audio: { _ in audio }, transcriber: { flaky }, backend: { llm },
+            releaseModels: {}, releasePostPassModels: {})
+        _ = try await pipeline.run(meetingID: rig.id)
+        #expect(rig.log.count("summary") == 1, "the chain goes on with the live text")
+        #expect(try await rig.meeting().state == .processing)
+
+        flaky.broken.withLock { $0 = false }
+        let retry = try await pipeline.runDeferred(meetingID: rig.id)
+        let meeting = try await rig.meeting()
+        #expect(meeting.state == .finished && !retry.willRetry)
+        #expect(meeting.completedSteps.contains(.postPass))
+        #expect(rig.log.count("summary") == 2, "the summary is written again from the better transcript")
+        #expect(rig.llm.prompts.withLock { $0.last }?.contains("accurate mic") == true)
+        #expect(rig.log.count("caf-deleted") == 1)
+    }
+
+    @Test func improveTranscriptAfterGivingUpTriesAgainFromTheStart() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let flaky = FlakyTranscriber(log: rig.log)
+        let llm = rig.llm, audio = rig.audio
+        let pipeline = MeetingPipeline(
+            store: rig.store, audio: { _ in audio }, transcriber: { flaky }, backend: { llm },
+            releaseModels: {}, releasePostPassModels: {})
+        for _ in 0..<3 { _ = try await pipeline.run(meetingID: rig.id) }
+        #expect(try await rig.meeting().state == .finished)
+
+        _ = try await pipeline.improveTranscript(meetingID: rig.id)  // still broken: a fresh set of tries
+        #expect(try await rig.meeting().state == .processing, "Improve transcript starts the count again")
+    }
+
     // MARK: Audio now, the rest later
 
     @Test func theAudioStepAloneConvertsTheRecordingsAndLeavesTheMeetingProcessing() async throws {
@@ -358,7 +442,10 @@ private struct Rig {
         let diarizer = FakeDiarizer(turns, log: rig.log)
         _ = try await rig.pipeline(transcriber: false, diarizer: diarizer).run(meetingID: rig.id)
 
-        #expect(diarizer.sampleCounts.withLock { $0 } == [20 * 16_000], "the whole mix went in")
+        // A6: the diarizer reads the mix recording from disk itself; the mix is never held in memory whole.
+        #expect(diarizer.files.withLock { $0 } == [FakeAudio.mixURL], "the mix recording went in, as a file")
+        #expect(diarizer.sampleCounts.withLock { $0 }.isEmpty)
+        #expect(rig.audio.mixRead.withLock { $0 } == 0, "nothing of the mix was read into memory")
         let segments = try await rig.store.segments(for: rig.id)
         #expect(segments.map(\.speaker) == ["P1", "P2"])
         let meeting = try await rig.meeting()
@@ -489,7 +576,9 @@ private struct Rig {
             releaseModels: { log.add("release") }, releasePostPassModels: { log.add("release-post-pass") })
         let outcome = try await pipeline.run(meetingID: rig.id)
         let meeting = try await rig.meeting()
-        #expect(meeting.state == .finished)
+        // A5: a failed step leaves the meeting `processing` for another run (it finishes after three).
+        #expect(meeting.state == .processing)
+        #expect(meeting.completedSteps.contains(.summary), "the chain went on to the summary")
         #expect(!meeting.completedSteps.contains(.postPass))
         #expect(outcome.notes.contains { $0.localizedCaseInsensitiveContains("post-pass") })
         #expect(try await rig.store.segments(for: rig.id).map(\.text).contains("live mine"))

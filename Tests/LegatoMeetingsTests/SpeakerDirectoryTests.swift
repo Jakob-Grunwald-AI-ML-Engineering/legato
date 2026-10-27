@@ -73,6 +73,31 @@ import LegatoCore
         #expect(directory.add() == "P5")
     }
 
+    @Test func anIdMergedAwayIsNeverGivenToSomeoneElse() {
+        var directory = SpeakerDirectory()
+        let a = directory.add(), _ = directory.add(), c = directory.add()
+        directory.merge(c, into: a)
+        #expect(directory.add() == "P4", "P3 went into P1; a new person is not P3 again")
+
+        // Also once the meeting was saved and read back.
+        var meeting = Meeting(title: "M", date: Date(timeIntervalSince1970: 1), engineID: "f")
+        directory.save(into: &meeting)
+        var reread = SpeakerDirectory(meeting: meeting)
+        reread.merge("P4", into: a)
+        reread.save(into: &meeting)
+        #expect(SpeakerDirectory(meeting: meeting).speakers.keys.sorted() == ["P1", "P2"])
+        var again = SpeakerDirectory(meeting: meeting)
+        #expect(again.add() == "P5")
+    }
+
+    @Test func aMeetingFromBeforeMergesWereRecordedDecodes() throws {
+        let old = Meeting(title: "Old", date: Date(timeIntervalSince1970: 1), engineID: "f")
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as! [String: Any]
+        json.removeValue(forKey: "mergedSpeakers")
+        let decoded = try JSONDecoder().decode(Meeting.self, from: JSONSerialization.data(withJSONObject: json))
+        #expect(decoded.mergedSpeakers.isEmpty)
+    }
+
     @Test func aStoredIsYouKeyStillDecodesAndIsIgnored() throws {
         let old = Data(#"{"name":"You","colorIndex":2,"isYou":true}"#.utf8)
         let info = try JSONDecoder().decode(SpeakerInfo.self, from: old)

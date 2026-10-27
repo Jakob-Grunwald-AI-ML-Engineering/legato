@@ -4,7 +4,7 @@ import LegatoCore
 /// Summarises a meeting transcript with an ``LLMBackend``, however long it is.
 ///
 /// The transcript becomes lines `Alice [mm:ss]: …`, labelled with the speaker's name (echoes left out; a
-/// segment with no speaker has no name, except old two-stream segments, which are `Me` and `Them`). They are
+/// segment with no speaker, old two-stream ones included, has no name). They are
 /// cut at segment boundaries into chunks that fit the backend's ``LLMBackend/maxPromptCharacters`` together
 /// with the instructions. Each chunk is summarised; the partial summaries are then merged, batch by batch,
 /// until one request holds them all. A backend that refuses a chunk as too long gets it back in halves; one
@@ -100,12 +100,7 @@ public struct MeetingSummarizer: Sendable {
     }
 
     private static func label(of segment: MeetingSegment, speakers: [PersonID: SpeakerInfo]) -> String? {
-        if let id = segment.speaker { return speakers[id]?.name }
-        switch segment.stream {
-        case .mic: return "Me"
-        case .system: return "Them"
-        case .mixed: return nil
-        }
+        segment.speaker.flatMap { speakers[$0]?.name }
     }
 
     private static func clock(_ seconds: TimeInterval) -> String {

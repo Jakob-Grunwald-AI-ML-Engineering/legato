@@ -268,6 +268,11 @@ public final class OfflineDiarizerManager {
     public func process(audio: [Float]) async throws -> DiarizationResult {
         fatalError("stub: OfflineDiarizerManager.process")
     }
+    public func process(
+        _ url: URL, progressCallback: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> DiarizationResult {
+        fatalError("stub: OfflineDiarizerManager.process(url)")
+    }
 }
 
 public struct SortformerConfig: Sendable {

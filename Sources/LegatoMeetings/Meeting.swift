@@ -81,6 +81,8 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public var pausedRanges: [PausedRange]
     /// Everyone heard in the meeting, by stable person id.
     public var speakers: [PersonID: SpeakerInfo]
+    /// Every id merged away, and the person it went into. Such an id is never given to anyone else.
+    public var mergedSpeakers: [PersonID: PersonID]
     /// The language the live engine was asked for (a locale identifier); nil is Auto.
     public var locale: String?
     /// The summary template picked for this meeting.
@@ -88,12 +90,14 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public var state: State
     /// The after-stop steps already done. Empty for a meeting that has not been processed.
     public var completedSteps: Set<Step>
+    /// Runs of the heavy steps in a row in which one of them failed; the pipeline stops retrying after a few.
+    public var failedRuns: Int
 
     public init(
         id: UUID = UUID(), title: String, date: Date, duration: TimeInterval = 0, engineID: String,
         postPassID: String? = nil, mutedRanges: [MutedRange] = [], pausedRanges: [PausedRange] = [],
-        speakers: [PersonID: SpeakerInfo] = [:], locale: String? = nil, templateID: String = SummaryTemplate.summaryID,
-        state: State = .recording, completedSteps: Set<Step> = []
+        speakers: [PersonID: SpeakerInfo] = [:], mergedSpeakers: [PersonID: PersonID] = [:], locale: String? = nil, templateID: String = SummaryTemplate.summaryID,
+        state: State = .recording, completedSteps: Set<Step> = [], failedRuns: Int = 0
     ) {
         self.id = id
         self.title = title
@@ -104,13 +108,16 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         self.mutedRanges = mutedRanges
         self.pausedRanges = pausedRanges
         self.speakers = speakers
+        self.mergedSpeakers = mergedSpeakers
         self.locale = locale
         self.templateID = templateID
         self.state = state
         self.completedSteps = completedSteps
+        self.failedRuns = failedRuns
     }
 
-    // Meetings saved before a field existed decode with its default: no steps done, nobody paused, no speakers.
+    // Meetings saved before a field existed decode with its default: no steps done, nobody paused, no speakers,
+    // nothing merged, no failed runs.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -122,9 +129,11 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         mutedRanges = try c.decode([MutedRange].self, forKey: .mutedRanges)
         pausedRanges = try c.decodeIfPresent([PausedRange].self, forKey: .pausedRanges) ?? []
         speakers = try c.decodeIfPresent([PersonID: SpeakerInfo].self, forKey: .speakers) ?? [:]
+        mergedSpeakers = try c.decodeIfPresent([PersonID: PersonID].self, forKey: .mergedSpeakers) ?? [:]
         locale = try c.decodeIfPresent(String.self, forKey: .locale)
         templateID = try c.decodeIfPresent(String.self, forKey: .templateID) ?? SummaryTemplate.summaryID
         state = try c.decode(State.self, forKey: .state)
         completedSteps = try c.decodeIfPresent(Set<Step>.self, forKey: .completedSteps) ?? []
+        failedRuns = try c.decodeIfPresent(Int.self, forKey: .failedRuns) ?? 0
     }
 }

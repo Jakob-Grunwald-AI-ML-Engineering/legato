@@ -4,7 +4,8 @@ import LegatoCore
 /// The people of one meeting: renaming, merging, and colours. A value type over
 /// ``Meeting/speakers``; the caller saves the result and applies any ``Merge`` to the segments and turns.
 ///
-/// - Ids are `P1`, `P2`, …: a new person gets the number after the highest one in use.
+/// - Ids are `P1`, `P2`, …: a new person gets the number after the highest one ever used, so an id merged away
+///   (``Meeting/mergedSpeakers``) is never given to someone else.
 /// - A new person is named "Speaker N" (N is the id's number) and takes the lowest colour no one uses.
 /// - Renaming to a name someone else already has (ignoring case and surrounding space) **merges** the two.
 public struct SpeakerDirectory: Sendable, Equatable {
@@ -38,13 +39,27 @@ public struct SpeakerDirectory: Sendable, Equatable {
     }
 
     public private(set) var speakers: [PersonID: SpeakerInfo]
+    /// Every id merged away, and the person it went into.
+    public private(set) var merged: [PersonID: PersonID]
 
-    public init(_ speakers: [PersonID: SpeakerInfo] = [:]) { self.speakers = speakers }
+    public init(_ speakers: [PersonID: SpeakerInfo] = [:], merged: [PersonID: PersonID] = [:]) {
+        self.speakers = speakers
+        self.merged = merged
+    }
+
+    /// The people of `meeting`, and the ids merged away in it.
+    public init(meeting: Meeting) { self.init(meeting.speakers, merged: meeting.mergedSpeakers) }
+
+    /// Writes the people, and the ids merged away, back onto `meeting`.
+    public func save(into meeting: inout Meeting) {
+        meeting.speakers = speakers
+        meeting.mergedSpeakers = merged
+    }
 
     /// Adds a person and returns its id.
     @discardableResult
     public mutating func add() -> PersonID {
-        let number = (speakers.keys.compactMap(Self.number).max() ?? 0) + 1
+        let number = ((Array(speakers.keys) + Array(merged.keys)).compactMap(Self.number).max() ?? 0) + 1
         let id = "P\(number)"
         let used = Set(speakers.values.map(\.colorIndex))
         let color = (0...).first { !used.contains($0) } ?? 0
@@ -76,7 +91,10 @@ public struct SpeakerDirectory: Sendable, Equatable {
     @discardableResult
     public mutating func merge(_ id: PersonID, into target: PersonID) -> Merge {
         let merge = Merge(from: id, into: target)
-        guard id != target, speakers.removeValue(forKey: id) != nil, speakers[target] != nil else { return merge }
+        guard id != target, speakers[target] != nil, speakers.removeValue(forKey: id) != nil else { return merge }
+        merged[id] = target
+        // Whoever went into `id` earlier is now in `target` too.
+        for (from, into) in merged where into == id { merged[from] = target }
         return merge
     }
 
