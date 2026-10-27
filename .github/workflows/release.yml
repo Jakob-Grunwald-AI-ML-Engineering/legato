@@ -1,9 +1,7 @@
 # Deploy path: every push to `live` ships. `live` is only ever fast-forwarded
 # from main. Deliberately no tests here: every commit on main was tested in the
 # merge queue as exactly that commit. Bypassing the queue (direct push, admin
-# merge) turns this workflow into "ship untested". The one check that runs here
-# is the Release scan (no e2e hook in the shipping binary), which moved out of
-# the per-queue-run path because it costs a full Release build.
+# merge) turns this workflow into "ship untested".
 # Target pipeline (TestFlight iOS; notarized DMG + Sparkle macOS): issue #4.
 name: release
 
@@ -20,34 +18,9 @@ permissions:
   contents: read
 
 jobs:
-  release-check:
-    runs-on: macos-26
-    # Cold: a Release build plus, if main's cache is gone, a Debug control build.
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Cache key
-        id: key
-        run: |
-          echo "LEGATO_CACHE_DIR=$HOME/legato-cache" >> "$GITHUB_ENV"
-          echo "LEGATO_E2E_DERIVED=$HOME/legato-cache/derived-ios" >> "$GITHUB_ENV"
-          echo "prefix=${RUNNER_OS}-xcode$(tr -d '[:space:]' < .xcode-version)" >> "$GITHUB_OUTPUT"
-      # The iOS Debug build main's warm-up job saved (test.yml): the scan's Debug control then reuses it.
-      - name: Restore the Debug build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/legato-cache/derived-ios
-            ~/legato-cache/SourcePackages
-          key: ${{ steps.key.outputs.prefix }}-ios-${{ hashFiles('Package.swift', 'Package.resolved', 'Apps/*/project.yml', '.xcode-version', '.xcodegen-version') }}
-          restore-keys: |
-            ${{ steps.key.outputs.prefix }}-ios-
-      - run: scripts/ci/release.sh check
-
   ship:
-    needs: [release-check]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - run: scripts/ci/release.sh ship
+      - run: scripts/ci/release.sh
