@@ -32,53 +32,97 @@ public struct PostProcessingPipeline: Sendable {
     }
 
     public func process(_ text: String, locale: Locale) async -> String {
-        guard !text.allSatisfy(\.isWhitespace) else { return text }
-        var current = text
+        await processReporting(text, locale: locale).text
+    }
+
+    /// What a run did beyond its text, for live cleanup's trace.
+    public struct Report: Sendable, Equatable {
+        public var text: String
+        /// A stage ran past the timeout (its input was kept).
+        public var timedOut: Bool
+        /// A language model's reply was rejected by the cleanup guard (its input was kept, all or in part).
+        public var guardRejected: Bool
+    }
+
+    /// ``process(_:locale:)`` with what happened on the way.
+    public func processReporting(_ text: String, locale: Locale) async -> Report {
+        var report = Report(text: text, timedOut: false, guardRejected: false)
+        guard !text.allSatisfy(\.isWhitespace) else { return report }
         for stage in stages {
-            current = await run(stage, current, locale: locale)
+            switch await run(stage, report.text, locale: locale) {
+            case .text(let out, let rejected):
+                if !out.allSatisfy(\.isWhitespace) { report.text = out }
+                report.guardRejected = report.guardRejected || rejected
+            case .timedOut:
+                report.timedOut = true
+            case .failed:
+                break
+            }
         }
-        return current
+        return report
     }
 
     /// Runs one stage against the deadline. The stage and the timer race as unstructured tasks; the first
     /// result resumes the caller. A stage that outlives the deadline is cancelled and left to wind down in
     /// the background, so a stage that never checks for cancellation (a cold model load) cannot hold the
     /// pipeline past the timeout.
-    private func run(_ stage: any TranscriptPostProcessor, _ text: String, locale: Locale) async -> String {
+    private func run(_ stage: any TranscriptPostProcessor, _ text: String, locale: Locale) async -> StageOutcome {
         let timeout = timeout
         let sleeper = sleeper
         let race = StageRace()
-        let result: String? = await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<StageOutcome, Never>) in
                 race.begin(continuation)
-                let work = Task { race.finish(try? await stage.process(text, locale: locale)) }
+                let work = Task {
+                    do {
+                        if let guarded = stage as? any GuardedStage {
+                            let out = try await guarded.processGuarded(text, locale: locale)
+                            race.finish(.text(out.text, rejected: out.rejected))
+                        } else {
+                            race.finish(.text(try await stage.process(text, locale: locale), rejected: false))
+                        }
+                    } catch {
+                        race.finish(.failed)
+                    }
+                }
                 // The timer fires only when the sleeper returns; a cancelled sleeper throws.
-                let timer = Task { if (try? await sleeper(timeout)) != nil { race.finish(nil) } }
+                let timer = Task { if (try? await sleeper(timeout)) != nil { race.finish(.timedOut) } }
                 race.attach([work, timer])
             }
         } onCancel: {
-            race.finish(nil)
+            race.finish(.failed)
         }
-        guard let result, !result.allSatisfy(\.isWhitespace) else { return text }
-        return result
     }
 }
 
-/// Decides a stage's run exactly once: the stage's text, or `nil` for a timeout, a failure or a cancelled
-/// caller. Whoever decides cancels both tasks and resumes the caller.
+/// How one stage's run ended.
+enum StageOutcome: Sendable {
+    case text(String, rejected: Bool)
+    case timedOut
+    /// It threw, or the caller was cancelled.
+    case failed
+}
+
+/// A stage that can tell when the cleanup guard rejected a reply (and the input was kept).
+protocol GuardedStage: TranscriptPostProcessor {
+    func processGuarded(_ text: String, locale: Locale) async throws -> (text: String, rejected: Bool)
+}
+
+/// Decides a stage's run exactly once: its outcome, a timeout or a failure (a cancelled caller included).
+/// Whoever decides cancels both tasks and resumes the caller.
 private final class StageRace: Sendable {
     private struct State {
-        var continuation: CheckedContinuation<String?, Never>?
+        var continuation: CheckedContinuation<StageOutcome, Never>?
         var decided = false
-        var outcome: String?
+        var outcome: StageOutcome = .failed
         var tasks: [Task<Void, Never>] = []
     }
 
     private let state = Mutex(State())
 
-    func begin(_ continuation: CheckedContinuation<String?, Never>) {
-        let early: String?? = state.withLock { state in
-            if state.decided { return .some(state.outcome) }
+    func begin(_ continuation: CheckedContinuation<StageOutcome, Never>) {
+        let early: StageOutcome? = state.withLock { state in
+            if state.decided { return state.outcome }
             state.continuation = continuation
             return nil
         }
@@ -93,8 +137,8 @@ private final class StageRace: Sendable {
         if decided { tasks.forEach { $0.cancel() } }
     }
 
-    func finish(_ outcome: String?) {
-        let (continuation, tasks) = state.withLock { state -> (CheckedContinuation<String?, Never>?, [Task<Void, Never>]) in
+    func finish(_ outcome: StageOutcome) {
+        let (continuation, tasks) = state.withLock { state -> (CheckedContinuation<StageOutcome, Never>?, [Task<Void, Never>]) in
             guard !state.decided else { return (nil, []) }
             state.decided = true
             state.outcome = outcome

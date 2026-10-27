@@ -1,5 +1,28 @@
 // swift-tools-version: 6.2
+import Foundation
 import PackageDescription
+
+// CI-ONLY SWITCH. With LEGATO_STUB_DEPS=1 the four heavy remote dependencies (FluidAudio, mlx-swift-lm,
+// swift-huggingface, swift-transformers; MLX comes in through mlx-swift-lm) are dropped and replaced by local
+// stub targets in Stubs/<Module> with the same module names. CI uses that to compile and test the package
+// in seconds instead of minutes; the stubs have no behaviour (`fatalError`). Unset, the manifest is the real one.
+// A dependency bump or a new call into one of these libraries needs the matching Stubs/<Module> file updated.
+let stubDeps = ProcessInfo.processInfo.environment["LEGATO_STUB_DEPS"] == "1"
+
+/// A product of a heavy remote package, or the same-named local stub target in stub mode.
+func heavy(_ name: String, _ package: String) -> Target.Dependency {
+    stubDeps ? .target(name: name) : .product(name: name, package: package)
+}
+
+/// Local stand-ins for the heavy modules (stub mode only). Version 5 mode: they are throwaway shims.
+let stubTargets: [Target] = [
+    .target(name: "MLX", path: "Stubs/MLX", swiftSettings: [.swiftLanguageMode(.v5)]),
+    .target(name: "MLXLMCommon", dependencies: ["MLX"], path: "Stubs/MLXLMCommon", swiftSettings: [.swiftLanguageMode(.v5)]),
+    .target(name: "MLXLLM", dependencies: ["MLXLMCommon"], path: "Stubs/MLXLLM", swiftSettings: [.swiftLanguageMode(.v5)]),
+    .target(name: "FluidAudio", path: "Stubs/FluidAudio", swiftSettings: [.swiftLanguageMode(.v5)]),
+    .target(name: "HuggingFace", path: "Stubs/HuggingFace", swiftSettings: [.swiftLanguageMode(.v5)]),
+    .target(name: "Tokenizers", path: "Stubs/Tokenizers", swiftSettings: [.swiftLanguageMode(.v5)]),
+]
 
 let package = Package(
     name: "LegatoKit",
@@ -19,7 +42,7 @@ let package = Package(
         .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
     ],
-    dependencies: [
+    dependencies: stubDeps ? [] : [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", exact: "3.32.3", traits: []),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", exact: "1.0.0"),
@@ -46,14 +69,14 @@ let package = Package(
             dependencies: [
                 "LegatoCore",
                 "LegatoModels",
-                .product(name: "FluidAudio", package: "FluidAudio"),
+                heavy("FluidAudio", "FluidAudio"),
             ]
         ),
         .testTarget(
             name: "LegatoFluidAudioTests",
             dependencies: [
                 "LegatoFluidAudio", "LegatoCore", "LegatoModels",
-                .product(name: "FluidAudio", package: "FluidAudio"),
+                heavy("FluidAudio", "FluidAudio"),
             ],
             resources: [.copy("Fixtures")]
         ),
@@ -74,15 +97,15 @@ let package = Package(
             name: "LegatoMLX",
             dependencies: [
                 "LegatoCore", "LegatoModels", "LegatoPostProcessing",
-                .product(name: "MLXLLM", package: "mlx-swift-lm"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
-                .product(name: "HuggingFace", package: "swift-huggingface"),
-                .product(name: "Tokenizers", package: "swift-transformers"),
+                heavy("MLXLLM", "mlx-swift-lm"),
+                heavy("MLXLMCommon", "mlx-swift-lm"),
+                heavy("HuggingFace", "swift-huggingface"),
+                heavy("Tokenizers", "swift-transformers"),
             ]
         ),
         .target(
             name: "LegatoPostProcessing",
-            dependencies: ["LegatoCore", .product(name: "FluidAudio", package: "FluidAudio")]
+            dependencies: ["LegatoCore", heavy("FluidAudio", "FluidAudio")]
         ),
         .testTarget(
             name: "LegatoMLXTests",
@@ -123,6 +146,6 @@ let package = Package(
         // The Claude API as an opt-in summary backend, and where its key lives. Core only.
         .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoClaudeTests", dependencies: ["LegatoClaude", "LegatoCore"]),
-    ],
+    ] + (stubDeps ? stubTargets : []),
     swiftLanguageModes: [.v6]
 )

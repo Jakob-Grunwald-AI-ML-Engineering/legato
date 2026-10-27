@@ -135,6 +135,8 @@ public final class DictationCoordinator {
     /// The epoch the current run's session was built in.
     private var runEpoch = 0
     private var run: DictationRun?
+    /// The current run's text was sent from the field it streamed into (a sent boundary): it is never copied.
+    private var runWasSent = false
     /// A held lease being released right now (`endKeepAlive`); a start waits for it.
     private var pendingRelease: Task<Void, Never>?
     /// The abort the session's `onRunAborted` set going, so a start that finds its run already dead can
@@ -381,6 +383,7 @@ public final class DictationCoordinator {
 
         let thisRun = DictationRun(target: options.target)
         run = thisRun
+        runWasSent = false
         sink?.runStarted(thisRun) // once per press: fallback and settle retries below stay within this run
 
         // A held lease is reused as is. The session re-arms itself under *its own* policy when its mic
@@ -574,7 +577,7 @@ public final class DictationCoordinator {
                 await endActivity(content(.failed))
                 return finishRun(.stopped(nil))
             }
-            await deliver(entry.text, landed: landed)
+            await deliver(entry.text, landed: landed || runWasSent)
             return finishRun(.stopped(entry.text))
         } catch {
             return await abort(s)
@@ -611,8 +614,22 @@ public final class DictationCoordinator {
             return finishRun(.stopped(nil))
         }
         try? await history.append(entry) // the session never saved this run; losing the copy is worse
-        await deliver(entry.text, landed: landed)
+        await deliver(entry.text, landed: landed || runWasSent)
         return finishRun(.stopped(entry.text))
+    }
+
+    /// The field run `runID` streams into was cleared while it showed the run's raw text up to `upTo`
+    /// (shown as revision `shownRevision`, 0 for raw) and the tentative text the sink reports for it
+    /// (`TranscriptSink.sentTentative`): the user sent it (a chat app's Send). The session cleans only what
+    /// comes after it; the run's text is never put on the clipboard, also when the report arrives after the
+    /// session finished, while the stop still waits for the sink. Ignored for any other run, or once the run
+    /// is over.
+    public func liveTextSent(runID: String, upTo boundary: Int, shownRevision: Int) {
+        guard let run, run.id.uuidString == runID, phase == .listening || phase == .stopping || phase == .aborting
+        else { return }
+        runWasSent = true
+        let tentative = sink?.sentTentative(runID: runID, boundary: boundary) ?? ""
+        session?.liveTextSent(upTo: boundary, shownRevision: shownRevision, tentative: tentative)
     }
 
     // MARK: Pieces
@@ -765,6 +782,7 @@ public final class DictationCoordinator {
     private func startFeed(of s: DictationSession) -> EditFeed {
         let sessionFeed = EditFeed()
         let edits = s.edits
+        s.onLiveTrace = { [weak self] in self?.sink?.liveTraced($0) }
         sessionFeed.task = Task { [weak self, sessionFeed] in
             for await edit in edits {
                 guard let self else { return }

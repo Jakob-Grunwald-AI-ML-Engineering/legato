@@ -36,6 +36,10 @@ private struct StagedRoot {
     }
 }
 
+/// CI stub mode (`LEGATO_STUB_DEPS=1`, see Package.swift): the heavy dependencies are no-behaviour stubs, so tests
+/// that exercise their real behaviour are gated on this.
+private let stubDeps = ProcessInfo.processInfo.environment["LEGATO_STUB_DEPS"] == "1"
+
 @Suite("Installers") enum InstallerTests {}
 
 extension InstallerTests {
@@ -159,7 +163,7 @@ struct ParakeetBatch {
         #expect(ParakeetBatchInstaller(model: .ultra).installFolder(root: root).path == "/models/parakeet-ultra")
     }
 
-    @Test(arguments: [(ParakeetBatchModel.v3, "parakeet-tdt-0.6b-v3"), (.ultra, "parakeet-ultra")])
+    @Test(.disabled(if: stubDeps, "needs the real FluidAudio AsrModels.modelsExist"), arguments: [(ParakeetBatchModel.v3, "parakeet-tdt-0.6b-v3"), (.ultra, "parakeet-ultra")])
     func installedWhenModelsAndVocabularyArePresent(model: ParakeetBatchModel, folder: String) async throws {
         let staged = try StagedRoot()
         defer { staged.remove() }

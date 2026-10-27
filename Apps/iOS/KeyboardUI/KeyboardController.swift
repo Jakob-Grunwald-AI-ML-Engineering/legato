@@ -57,6 +57,10 @@ final class KeyboardController {
     @ObservationIgnored private let preferences: () -> KeyboardPreferences
 
     @ObservationIgnored private var cursor: AppliedCursor?
+    /// When the field counts as emptied by the host (a chat app's Send): a cleared field right after this
+    /// keyboard's own edit is looked at again once the field's context has caught up (`clearRecheck`).
+    @ObservationIgnored private var clearWatch = ClearWatch()
+    @ObservationIgnored private var clearRecheck: Task<Void, Never>?
     /// Types the host's text into the field a few characters at a time; `ticker` drives it while it has text left.
     @ObservationIgnored private var reveal = TypewriterReveal()
     @ObservationIgnored private var ticker: Task<Void, Never>?
@@ -163,6 +167,7 @@ final class KeyboardController {
         heartbeat?.cancel()
         heartbeat = nil
         reapply?.cancel()
+        cancelClearRecheck()
         link.writePresence(visible: false, notify: true)
         trace?("visible value=0")
     }
@@ -178,6 +183,7 @@ final class KeyboardController {
         link.stopObserving()
         heartbeat?.cancel()
         reapply?.cancel()
+        cancelClearRecheck()
         hintTimeout?.cancel()
         typing.disappeared()
     }
@@ -192,6 +198,75 @@ final class KeyboardController {
         refreshTraits()
         typing.documentChanged()
         if let versions, versions.documentID != document.documentID { self.versions = nil }
+        if checkForClear() == .sent { applyHost() }
+    }
+
+    private enum ClearCheck { case none, held, sent }
+
+    /// Whether the host emptied the field (a chat app's Send), by `ClearWatch`: the dictation's versions are gone
+    /// with it, and a Live run that is still going gets a sent boundary, which the app is told about
+    /// (`link.applied`): the sent text is never cleaned again, typed or copied, and the rest of the run streams
+    /// into the empty field (`.sent`). An empty field right after this keyboard's own edit is looked at again
+    /// when the field's context has caught up; till then nothing of the run is typed (`.held`).
+    @discardableResult
+    private func checkForClear() -> ClearCheck {
+        let outcome = clearWatch.check(
+            state: host, cursor: cursor, documentID: document.documentID, contextBefore: document.contextBefore,
+            hasText: document.hasText, now: Date())
+        switch outcome {
+        case .notCleared:
+            cancelClearRecheck()
+            return .none
+        case .recheck(let at):
+            scheduleClearRecheck(at: at)
+            return clearWatch.holds ? .held : .none
+        case .cleared(let sent):
+            return takeClear(sent)
+        }
+    }
+
+    /// The field was emptied: the dictation's versions are gone with it; a sent boundary is recorded and told.
+    private func takeClear(_ sent: AppliedCursor?) -> ClearCheck {
+        cancelClearRecheck()
+        if versions?.documentID == document.documentID { versions = nil }
+        guard let sent else { return .none }
+        cursor = sent
+        link.writeApplied(sent, notify: true)
+        trace?("sent at=\(sent.sentBase) shown=\(sent.sentShownRevision) tentative=\(sent.sentTentative.count)")
+        return .sent
+    }
+
+    /// A key is about to land: a clear held for its recheck is taken first, from the field as it is before the
+    /// key (`ClearWatch.resolveHeld`), so the key cannot hide the host's Send.
+    private func resolveHeldClear() {
+        guard clearWatch.holds else { return }
+        let outcome = clearWatch.resolveHeld(
+            state: host, cursor: cursor, documentID: document.documentID, contextBefore: document.contextBefore,
+            hasText: document.hasText)
+        switch outcome {
+        case .cleared(let sent): _ = takeClear(sent)
+        case .notCleared: cancelClearRecheck()
+        case .recheck: break
+        }
+    }
+
+    /// Looks at the field again at `at`, then carries on with the host's text (held back meanwhile).
+    private func scheduleClearRecheck(at: Date) {
+        clearRecheck?.cancel()
+        clearRecheck = Task { [weak self] in
+            let ms = max(0, at.timeIntervalSinceNow * 1000) + 5
+            try? await Task.sleep(for: .milliseconds(Int(ms.rounded(.up))))
+            guard !Task.isCancelled, let self, !self.isTornDown else { return }
+            self.clearRecheck = nil
+            self.trace?("sent recheck")
+            self.checkForClear()
+            self.applyHost()
+        }
+    }
+
+    private func cancelClearRecheck() {
+        clearRecheck?.cancel()
+        clearRecheck = nil
     }
 
     /// Reads the field's traits; only changed values are stored, so the keys redraw only when needed.
@@ -246,7 +321,7 @@ final class KeyboardController {
         guard !isTornDown else { return }
         let decision = HostApplyDecision.decide(
             host: host, cursor: cursor, visible: isVisible, documentID: document.documentID, now: Date())
-        guard case .apply = decision, let host else {
+        guard case .apply = decision, let host, checkForClear() != .held else {
             stopTicker()
             #if DEBUG
             if case .skip(let reason) = decision, host?.insertAt != nil {
@@ -320,6 +395,7 @@ final class KeyboardController {
     }
 
     private func perform(_ ops: [ProxyOp]) {
+        if !ops.isEmpty { clearWatch.ownEdit(at: Date()) }
         for op in ops {
             switch op {
             case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
@@ -331,15 +407,20 @@ final class KeyboardController {
 
     // MARK: Typing
 
+    /// A Return holds no clear back (`ClearWatch.returnTyped`): in a chat app it sends and empties the field.
     func type(_ text: String) {
         versions = nil // the user moved on from the dictation
+        resolveHeldClear()
         beforeUserEdit()
         document.insert(text)
+        if text == "\n" { clearWatch.returnTyped(at: Date()) } else { clearWatch.ownEdit(at: Date()) }
         afterUserEdit()
     }
 
     func deleteBackward() {
         versions = nil
+        resolveHeldClear()
+        clearWatch.ownEdit(at: Date())
         beforeUserEdit()
         document.deleteBackward()
         afterUserEdit()

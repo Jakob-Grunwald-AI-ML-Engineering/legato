@@ -175,9 +175,11 @@ public protocol TranscriptSink: AnyObject {
     func runStarted(_ run: DictationRun)
     /// The run's text so far: everything committed, and the tentative tail.
     func update(committed: String, volatile: String)
-    /// Live cleanup replaced a committed span (`CleanupDelivery.live`); `committed` in later updates stays
-    /// the raw text. Optional (the default does nothing).
+    /// Live cleanup's newest cleaned version of the run's text (`CleanupDelivery.live`), a whole-span
+    /// replacement; `committed` in later updates stays the raw text. Optional (the default does nothing).
     func revised(_ revision: TranscriptRevision)
+    /// Live cleanup's trace (internal builds): each pass and each sent boundary. Optional.
+    func liveTraced(_ event: LiveTraceEvent)
     /// A stop began: no more speech is taken; the text is being finalized (and post-processed). Not
     /// called for a run that aborted or never started. Optional (the default does nothing).
     func runFinishing(_ run: DictationRun)
@@ -188,9 +190,14 @@ public protocol TranscriptSink: AnyObject {
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool
     /// The mic lease between runs: when it ends, or nil when it is not held (ended or expired).
     func leaseChanged(until: Date?)
+    /// Live cleanup: the tentative text the target's field showed after the committed text when it was cleared
+    /// at `boundary` (it went with the sent message), for the coordinator's `liveTextSent`. Optional ("").
+    func sentTentative(runID: String, boundary: Int) -> String
 }
 
 extension TranscriptSink {
     public func runFinishing(_ run: DictationRun) {}
     public func revised(_ revision: TranscriptRevision) {}
+    public func liveTraced(_ event: LiveTraceEvent) {}
+    public func sentTentative(runID: String, boundary: Int) -> String { "" }
 }
