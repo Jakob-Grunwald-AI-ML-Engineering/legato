@@ -76,8 +76,18 @@ final class TypingModel {
         return Alternates.for(own)
     }
 
-    /// The suggestion slots (three, left to right); the prediction engine fills them later.
+    /// The word row's suggestions, best first.
     var suggestions: [String] { controller?.suggestions ?? [] }
+
+    /// The text before the cursor as tracked right after our own edits (the field's report lags behind them).
+    var contextBefore: String { context().before }
+
+    /// The keyboard edited the field itself (a completion, a swap, undo): the text before the cursor is now `contextBefore`.
+    func ownEdit(contextBefore: String) {
+        shadow = (contextBefore, now())
+        lastSpaceAt = nil
+        afterEdit()
+    }
 
     // MARK: Lifecycle
 
@@ -207,13 +217,13 @@ final class TypingModel {
 
     private func insert(_ text: String) {
         let before = context().before
-        controller?.type(text)
+        controller?.type(text, contextBefore: before)
         shadow = (before + text, now())
     }
 
     private func deleteOne() {
         let before = context().before
-        controller?.deleteBackward()
+        controller?.deleteBackward(contextBefore: before)
         shadow = (String(before.dropLast()), now())
         lastSpaceAt = nil
     }

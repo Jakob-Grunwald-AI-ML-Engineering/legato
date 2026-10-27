@@ -4,9 +4,12 @@
 # Layout: Shared/ (the AppIntents and the Live Activity attributes) compiles into the app and the widget
 # extension and must not import LegatoKit. The keyboard compiles [Keyboard, KeyboardUI] and never
 # Shared/: an AppIntent inside a keyboard runs in the keyboard process, which cannot record. It links
-# only LegatoKeyboardCore, and talks to the app over the App Group (link.* keys plus Darwin notes). The
+# only LegatoKeyboardCore and LegatoVocabulary, and talks to the app over the App Group (link.* keys plus
+# Darwin notes, vocabulary.json and the word-pair files read-only). The
 # app compiles KeyboardUI too, for the DEBUG keyboard harness (App/Debug/KeyboardHarness.swift) that
-# the simulator end-to-end run drives. Only the app links the rest of the package.
+# the simulator end-to-end run drives. The keyboard and the app link LegatoVocabulary too (the word row's
+# completions and alternatives read the vocabulary and the word-pair files); only the app links the rest of
+# the package.
 #
 # Each target carries a PrivacyInfo.xcprivacy next to its sources (App/, Widgets/, Keyboard/): the App
 # Group's UserDefaults is the required-reason API every target uses (CA92.1 own defaults, 1C8F.1 same App
@@ -49,6 +52,8 @@ targets:
         product: LegatoAppleSpeech
       - package: LegatoKit
         product: LegatoKeyboardCore
+      - package: LegatoKit
+        product: LegatoVocabulary
       # Downloadable models, engines and cleanup: the app only, never the keyboard or the widgets.
       - package: LegatoKit
         product: LegatoModels
@@ -127,6 +132,8 @@ targets:
     dependencies:
       - package: LegatoKit
         product: LegatoKeyboardCore
+      - package: LegatoKit
+        product: LegatoVocabulary
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.keyboard

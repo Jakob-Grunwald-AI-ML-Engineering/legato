@@ -19,6 +19,10 @@ final class ProxyDocument: TextDocument {
         return NilSafeObjC.uuid("documentIdentifier", of: proxy)?.uuidString
     }
     var contextBefore: String { proxy()?.documentContextBeforeInput ?? "" }
+    var contextAfter: String { proxy()?.documentContextAfterInput ?? "" }
+    var selectedText: String? { proxy()?.selectedText }
+    var isSecureTextEntry: Bool { proxy()?.isSecureTextEntry ?? false }
+    var textContentType: UITextContentType? { proxy()?.textContentType }
     var returnKeyType: UIReturnKeyType { proxy()?.returnKeyType ?? .default }
     var keyboardType: UIKeyboardType { proxy()?.keyboardType ?? .default }
     var autocapitalizationType: UITextAutocapitalizationType { proxy()?.autocapitalizationType ?? .sentences }
@@ -28,4 +32,5 @@ final class ProxyDocument: TextDocument {
 
     func insert(_ text: String) { proxy()?.insertText(text) }
     func deleteBackward() { proxy()?.deleteBackward() }
+    func adjustTextPosition(byCharacterOffset offset: Int) { proxy()?.adjustTextPosition(byCharacterOffset: offset) }
 }

@@ -4,7 +4,7 @@ import Foundation
 public enum KeyboardMode: Sendable, Equatable {
     /// The typing keyboard.
     case full
-    /// One row (`StripRow`): chevron, globe key (when iOS asks for it), status, delete, return, mic key. The "Compact keyboard" setting.
+    /// One row (`StripRow`): chevron, globe key (when iOS asks for it), hotkeys (undo, redo, Refine), delete, return, mic key. The "Compact keyboard" setting.
     case strip
 }
 
@@ -67,6 +67,12 @@ public enum StripHeight {
     public static func next(after height: Double) -> Double {
         guard let index = candidates.firstIndex(of: height) else { return candidates[0] }
         return candidates[(index + 1) % candidates.count]
+    }
+
+    /// The height to request from the system for a strip row of `row` points: the word row goes above it.
+    /// The debug heights that leave nothing to touch (0 and 1) stay as they are.
+    public static func requested(row: Double) -> Double {
+        row >= 30 ? row + WordRowHeight.strip : row
     }
 
     /// The stored starting height when it is a candidate, the standard one otherwise.

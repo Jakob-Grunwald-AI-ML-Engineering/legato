@@ -1,3 +1,4 @@
+import LegatoKeyboardCore
 import UIKit
 
 /// Geometry and colors of the Legato keyboard, matched to the iOS 26 system keyboard.
@@ -29,8 +30,15 @@ import UIKit
 ///    top, radius 12; the highlighted cell is system blue (0,136,255) with white text.
 /// Landscape, 874 pt wide: side margin 79, gap 6, key height 25.33, pitch 35.33, row 1 at 51.
 ///
-/// Top bar (Superwhisper): the mic pill 81 x 43.3, 14.3 from the right edge, 15.7 above the first row;
-/// three suggestion slots of 97.7 left of it with 24 pt dividers.
+/// Legato's top area (the vertical numbers are `KeyboardHeights`, tested in LegatoKeyboardCore): the mic
+/// pill 81 x 43.3 pt (portrait), 14.3 from the right edge and 15.7 above the first row, follows
+/// Superwhisper's iOS keyboard.
+///  - Portrait: the word row (three slots, "2 | 1 | 3", 24 pt dividers) is 32 pt high across the top. Below
+///    it, the hotkey bar (⌄ ↶ ↷ Refine) fills the space left of the pill. The pill's top is 32 pt down, so the
+///    first row sits at 91, not at the 86 it would without the word row: the keyboard is 306 pt high.
+///  - Landscape: one row, as high as the pill (34 pt): hotkeys, then the word slots, then the pill. The
+///    first row is at 51 and the keyboard 190 pt high, as before; below 70 pt a slot, only the best word shows.
+///  - Strip: the word row (30 pt) is a row of its own above the strip's row (`StripHeight.requested`).
 struct KeyGeometry {
     let size: CGSize
 
@@ -58,10 +66,8 @@ struct KeyGeometry {
     static let keyRadius: CGFloat = 8.5
     var radius: CGFloat { Self.keyRadius }
 
-    static func firstRowTop(landscape: Bool) -> CGFloat { landscape ? 51 : 86 }
-    static func height(landscape: Bool) -> CGFloat {
-        landscape ? 51 + 3 * 35.33 + 25.33 + 8 : 86 + 3 * 54 + 43 + 10
-    }
+    static func firstRowTop(landscape: Bool) -> CGFloat { CGFloat(KeyboardHeights.firstRowTop(landscape: landscape)) }
+    static func height(landscape: Bool) -> CGFloat { CGFloat(KeyboardHeights.height(landscape: landscape)) }
 
     /// Key widths relative to the portrait or landscape reference.
     private var unit: CGFloat { keyWidth / (landscape ? 66.2 : 33.6) }
@@ -81,18 +87,35 @@ struct KeyGeometry {
 
     // MARK: Top bar
 
-    var pillSize: CGSize { CGSize(width: 81, height: (landscape ? 34 : 43.3) * vScale) }
+    var pillSize: CGSize { CGSize(width: 81, height: CGFloat(KeyboardHeights.pillHeight(landscape: landscape)) * vScale) }
     var pillFrame: CGRect {
         let h = pillSize.height
-        let gapToRow: CGFloat = (landscape ? 9 : 15.7) * vScale
+        let gapToRow = CGFloat(KeyboardHeights.pillGapToRow(landscape: landscape)) * vScale
         return CGRect(x: size.width - (landscape ? marginX : 14.3) - pillSize.width, y: firstRowTop - gapToRow - h, width: pillSize.width, height: h)
     }
-    /// Where the three suggestion slots go (left of the pill).
-    var suggestionFrame: CGRect {
+    /// The word row's own height (portrait; in landscape the word slots share the pill's row).
+    var wordRowHeight: CGFloat { CGFloat(KeyboardHeights.wordRowHeight(landscape: landscape)) * vScale }
+    private var barLeft: CGFloat { landscape ? marginX + 7.7 : 13.7 }
+    /// Landscape, where the hotkeys take only what they need: the collapse key 44 wide, the three others 76 ("Refine" fits).
+    private static let landscapeHotkeyWidth: CGFloat = 76
+
+    /// Where the hotkeys go: left of the pill, in the pill's row. In landscape a fixed width for `buttons` (3, or 4 with the collapse key).
+    func hotkeyFrame(buttons: Int) -> CGRect {
         let pill = pillFrame
-        let left = landscape ? marginX + 7.7 : 13.7
-        return CGRect(x: left, y: pill.minY, width: pill.minX - left, height: pill.height)
+        let width = landscape ? CGFloat(buttons - 3) * 44 + 3 * Self.landscapeHotkeyWidth : pill.minX - barLeft
+        return CGRect(x: barLeft, y: pill.minY, width: width, height: pill.height)
     }
+
+    /// Where the word slots go: portrait, the row across the top; landscape, between the hotkeys and the pill.
+    func wordRowFrame(buttons: Int) -> CGRect {
+        guard landscape else {
+            return CGRect(x: barLeft, y: 0, width: size.width - 2 * barLeft, height: wordRowHeight)
+        }
+        let pill = pillFrame
+        let left = hotkeyFrame(buttons: buttons).maxX + 8
+        return CGRect(x: left, y: pill.minY, width: max(pill.minX - 8 - left, 0), height: pill.height)
+    }
+
 
     // MARK: Popups
 

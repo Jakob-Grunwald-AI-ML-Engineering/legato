@@ -25,6 +25,7 @@ public struct LearningHistoryStore: HistoryStore {
 
     public func delete(id: UUID) async throws {
         try await base.delete(id: id)
-        vocabulary.forget(dictationID: id)
+        // After the base delete, so the pair rebuild reads history without the dictation.
+        vocabulary.forget(dictationID: id, remainingHistory: base)
     }
 }

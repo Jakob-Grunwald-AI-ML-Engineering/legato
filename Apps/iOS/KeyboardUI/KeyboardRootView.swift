@@ -2,7 +2,7 @@ import LegatoKeyboardCore
 import SwiftUI
 import UIKit
 
-/// The keyboard: a top bar (three suggestion slots, the mic pill) over the key grid, which is one touch
+/// The keyboard: the word row and the hotkeys (and the mic pill) over the key grid, which is one touch
 /// surface; the globe key is a view on top of its place in the layout. Geometry: `KeyboardMetrics.swift`.
 struct KeyboardRootView: View {
     let controller: KeyboardController
@@ -20,35 +20,26 @@ struct KeyboardRootView: View {
                 if controller.mode == .strip {
                     strip(typing: typing, size: geometry.size)
                 } else {
-                    // Under the grid: popups and the alternates strip are drawn over the top bar, and the grid
-                    // only takes touches from the first row down (`KeyGridView.point(inside:with:)`).
-                    suggestionBar(g)
+                    // Under the grid: popups and the alternates strip are drawn over the top area, and the grid
+                    // only takes touches from the first row down (`KeyGridView.point(inside:with:)`, at
+                    // `firstRowTop - gap`, below the word row, the hotkeys and the pill).
                     if controller.expansion.control == .collapse {
-                        // The top bar above the first row takes a swipe down, as do the pill and the chevron on top of it.
+                        // The area above the first row takes a swipe down, as do the controls on top of it.
                         place(CGRect(x: 0, y: 0, width: geometry.size.width, height: g.firstRowTop)) {
                             Color.clear.contentShape(Rectangle()).gesture(swipe)
                         }
                     }
-                    if showsVersionBar {
-                        // Above the swipe layer, which would take the taps; right of the collapse chevron, which
-                        // sits in the first slot.
-                        let bar = g.suggestionFrame
-                        let inset = controller.expansion.control == .collapse ? g.marginX + 44 : 0
-                        place(CGRect(x: bar.minX + inset, y: bar.minY, width: bar.width - inset, height: bar.height)) {
-                            VersionBar(controller: controller).simultaneousGesture(swipe)
-                        }
+                    let buttons = controller.expansion.control == .collapse ? 4 : 3
+                    let wordFrame = g.wordRowFrame(buttons: buttons)
+                    place(wordFrame) {
+                        WordRowView(
+                            controller: controller, slots: WordRowLayout.visibleSlots(width: Double(wordFrame.width)), swipe: swipe)
                     }
+                    place(g.hotkeyFrame(buttons: buttons)) { HotkeyBar(controller: controller, swipe: swipe) }
                     place(g.pillFrame) { MicKey(controller: controller).simultaneousGesture(swipe) }
                     KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance)
                     if controller.showsGlobe, let frame = frames["globe"] {
                         place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing) }
-                    }
-                    if controller.expansion.control == .collapse {
-                        // In the top bar's first suggestion slot (empty for now), above the first row.
-                        let bar = g.suggestionFrame
-                        place(CGRect(x: g.marginX, y: bar.minY, width: 44, height: bar.height)) {
-                            ExpansionKey(controller: controller, symbol: "chevron.down").simultaneousGesture(swipe)
-                        }
                     }
                 }
             }
@@ -57,19 +48,48 @@ struct KeyboardRootView: View {
         .environment(\.colorScheme, scheme)
     }
 
-    /// The compact layout, one row as high as the keyboard view: the chevron that opens the full keyboard,
-    /// the globe key (when iOS asks for it), the dictation status, delete, return and the mic key at the full
+    /// The compact layout: the word row above one row as high as `stripHeight`: the chevron that opens the full
+    /// keyboard, the globe key (when iOS asks for it), the hotkeys (↶ ↷ and an icon-only Refine), delete, return and the mic key at the full
     /// keyboard's pill size. `StripRow` decides the slots and widths for the keyboard width and the
-    /// touch areas that tile the row.
+    /// touch areas that tile the row. Status and hints show in the word row.
     private func strip(typing: TypingModel, size: CGSize) -> some View {
+        // The word row goes above the strip's row (the height requested is the row plus the word row); the
+        // debug heights that leave nothing to touch have none.
+        let wordRowHeight = CGFloat(StripHeight.requested(row: controller.stripHeight) - controller.stripHeight)
+        let rowHeight = max(size.height - wordRowHeight, 0)
         // At the full keyboard's height: the strip's own height would scale the pill down (`vScale`).
         let fullHeight = KeyGeometry.height(landscape: KeyGeometry.isLandscape(width: size.width))
         let pill = KeyGeometry(size: CGSize(width: size.width, height: fullHeight)).pillSize
-        let controlHeight = max(min(size.height - 6, pill.height), 0)
+        let controlHeight = max(min(rowHeight - 6, pill.height), 0)
         let returnStyle: StripReturnStyle = KeyLabels.returnSymbol(for: typing.presentation.returnLabel) == nil ? .text : .glyph
         let row = StripRow.make(width: size.width, showsGlobe: controller.showsGlobe, returnStyle: returnStyle)
-        let vertical = max((size.height - controlHeight) / 2, 0)
-        return HStack(spacing: 0) {
+        let vertical = max((rowHeight - controlHeight) / 2, 0)
+        return VStack(spacing: 0) {
+            if wordRowHeight > 0 {
+                stripWordRow(width: size.width)
+                    .frame(width: size.width, height: wordRowHeight)
+            }
+            stripRow(typing: typing, row: row, size: CGSize(width: size.width, height: rowHeight), controlHeight: controlHeight, vertical: vertical)
+        }
+        .frame(width: size.width, height: size.height, alignment: .top)
+    }
+
+    private func stripWordRow(width: CGFloat) -> some View {
+        let inset: CGFloat = StripRow.margin
+        let slots = WordRowLayout.visibleSlots(width: Double(width - 2 * inset))
+        return WordRowView(controller: controller, slots: slots, swipe: swipe)
+            .padding(.horizontal, inset)
+            // Not clear: the keyboard gets no touches on fully clear pixels.
+            .background(Color.black.opacity(0.001).gesture(swipe))
+            #if DEBUG
+            .simultaneousGesture(LongPressGesture(minimumDuration: 0.8).onEnded { _ in controller.cycleStripHeight() })
+            #endif
+    }
+
+    private func stripRow(
+        typing: TypingModel, row: StripRow, size: CGSize, controlHeight: CGFloat, vertical: CGFloat
+    ) -> some View {
+        HStack(spacing: 0) {
             ForEach(row.cells, id: \.slot) { cell in
                 // The key is drawn inside its touch area (`StripCell` insets, and the strip's full height).
                 let insets = EdgeInsets(top: vertical, leading: cell.leadingInset, bottom: vertical, trailing: cell.trailingInset)
@@ -85,15 +105,10 @@ struct KeyboardRootView: View {
                             .padding(.leading, cell.leadingInset)
                             .padding(.trailing, cell.trailingInset)
                             .simultaneousGesture(swipe)
-                    case .status:
-                        if showsVersionBar {
-                            VersionBar(controller: controller)
-                                .padding(.leading, cell.leadingInset)
-                                .simultaneousGesture(swipe)
-                        } else {
-                            stripStatus(visible: row.statusTextVisible, leading: cell.leadingInset)
-                                .simultaneousGesture(swipe)
-                        }
+                    case .hotkeys:
+                        HotkeyButtons(controller: controller, iconOnlyRefine: true, dividers: false, showsRedo: row.showsRedo, swipe: swipe)
+                            .padding(.leading, cell.leadingInset)
+                            .padding(.trailing, cell.trailingInset)
                     case .delete:
                         StripDeleteKey(typing: typing, insets: insets)
                             .simultaneousGesture(swipe)
@@ -128,23 +143,6 @@ struct KeyboardRootView: View {
             }
     }
 
-    private func stripStatus(visible: Bool, leading: CGFloat) -> some View {
-        Text(visible ? (controller.statusText ?? "Legato") : "")
-            .font(.system(size: 15))
-            .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-            .lineLimit(1)
-            .truncationMode(controller.hint == nil ? .head : .tail) // live dictated text: its end matters
-            .minimumScaleFactor(0.7)
-            .padding(.leading, leading)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .background(Color.black.opacity(0.001))
-            .contentShape(Rectangle())
-            .accessibilityIdentifier("keyboard.hint")
-            #if DEBUG
-            .onLongPressGesture { controller.cycleStripHeight() }
-            #endif
-    }
-
     private var scheme: ColorScheme {
         switch controller.appearance {
         case .dark: .dark
@@ -157,110 +155,5 @@ struct KeyboardRootView: View {
         content()
             .frame(width: frame.width, height: frame.height)
             .position(x: frame.midX, y: frame.midY)
-    }
-
-    /// After a dictation landed (and nothing else claims the bar): the version keys take the slots' place
-    /// (the full keyboard's top bar) or the status text's (the strip).
-    private var showsVersionBar: Bool {
-        controller.versions != nil && controller.statusText == nil && controller.suggestions.isEmpty
-    }
-
-    /// Three slots with thin dividers, the best suggestion in the middle. A hint or the dictation status takes
-    /// the bar's place.
-    private func suggestionBar(_ g: KeyGeometry) -> some View {
-        let frame = g.suggestionFrame
-        let slots = SuggestionSlots.arrange(controller.suggestions)
-        return Group {
-            if showsVersionBar {
-                Color.clear
-            } else if let status = controller.statusText {
-                Text(status)
-                    .font(.system(size: 15))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                    .lineLimit(2)
-                    .truncationMode(.head)
-                    .minimumScaleFactor(0.8)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 8)
-                    .accessibilityIdentifier("keyboard.hint")
-            } else {
-                HStack(spacing: 0) {
-                    ForEach(0..<3, id: \.self) { index in
-                        Text(slots[index] ?? "")
-                            .font(.system(size: 17))
-                            .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                            .frame(maxWidth: .infinity)
-                            .overlay(alignment: .trailing) {
-                                if index < 2 {
-                                    Rectangle().fill(Color(uiColor: KeyColors.divider)).frame(width: 0.67, height: 24)
-                                }
-                            }
-                    }
-                }
-            }
-        }
-        .frame(width: frame.width, height: frame.height)
-        .position(x: frame.midX, y: frame.midY)
-        .allowsHitTesting(false)
-    }
-}
-
-/// The version keys of the last dictation, in the suggestion slots: the previous version, Refine (a
-/// stronger rewrite by the app), the next version. Styled like the suggestion slots.
-struct VersionBar: View {
-    let controller: KeyboardController
-
-    var body: some View {
-        let versions = controller.versions
-        HStack(spacing: 0) {
-            key(enabled: versions?.hasPrevious == true, id: "keyboard.version.previous", label: "Previous version") {
-                controller.showPreviousVersion()
-            } content: {
-                Image(systemName: "chevron.left")
-            }
-            divider
-            key(enabled: !controller.isRefining, id: "keyboard.version.refine", label: "Refine") {
-                controller.refine()
-            } content: {
-                if controller.isRefining {
-                    ProgressView()
-                } else {
-                    HStack(spacing: 4) {
-                        Text("Refine")
-                        if let versions, versions.texts.count > 1 {
-                            Text("\(versions.current + 1)/\(versions.texts.count)").font(.system(size: 12)).monospacedDigit()
-                        }
-                    }
-                }
-            }
-            divider
-            key(enabled: versions?.hasNext == true, id: "keyboard.version.next", label: "Next version") {
-                controller.showNextVersion()
-            } content: {
-                Image(systemName: "chevron.right")
-            }
-        }
-    }
-
-    private var divider: some View {
-        Rectangle().fill(Color(uiColor: KeyColors.divider)).frame(width: 0.67, height: 24)
-    }
-
-    private func key<Content: View>(
-        enabled: Bool, id: String, label: String, action: @escaping () -> Void, @ViewBuilder content: () -> Content
-    ) -> some View {
-        Button(action: action) {
-            content()
-                .font(.system(size: 17))
-                .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(enabled ? 1 : 0.35))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier(id)
     }
 }

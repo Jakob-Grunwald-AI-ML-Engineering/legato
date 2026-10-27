@@ -12,12 +12,12 @@ import Testing
 
     // MARK: order
 
-    @Test func theRowIsChevronStatusDeleteReturnMic() {
-        #expect(row(402).cells.map(\.slot) == [.expand, .status, .delete, .returnKey, .mic])
+    @Test func theRowIsChevronHotkeysDeleteReturnMic() {
+        #expect(row(402).cells.map(\.slot) == [.expand, .hotkeys, .delete, .returnKey, .mic])
     }
 
     @Test func theGlobeSitsRightOfTheChevronWhenIOSAsksForIt() {
-        #expect(row(402, globe: true).cells.map(\.slot) == [.expand, .globe, .status, .delete, .returnKey, .mic])
+        #expect(row(402, globe: true).cells.map(\.slot) == [.expand, .globe, .hotkeys, .delete, .returnKey, .mic])
     }
 
     // MARK: sizes on a regular phone
@@ -35,9 +35,9 @@ import Testing
         #expect(cell(r, .mic).maxX == 402 - 8)
     }
 
-    @Test func theStatusTakesWhatTheControlsLeave() {
+    @Test func theHotkeysTakeWhatTheControlsLeave() {
         // 402 - 2 x 8 margin - 4 gaps x 8 - 3 keys x 44 - pill 81
-        #expect(cell(row(402), .status).width == 141)
+        #expect(cell(row(402), .hotkeys).width == 141)
     }
 
     @Test func aTextReturnLabelGetsAWiderKey() {
@@ -59,32 +59,75 @@ import Testing
         }
     }
 
-    @Test func aNarrowPhoneWithAGlobeShrinksTheKeysToKeepTheStatusReadable() {
-        // 375: keys at 44 would leave the status 62 wide with a globe; with a text return key 46.
+    @Test func aNarrowPhoneWithAGlobeKeepsTheKeysUsableAndDropsRedoForRoom() {
+        // 375 with a globe and a text return: keys at 44 would leave the hotkeys 46 wide.
         let r = row(375, globe: true, returnStyle: .text)
-        let status = cell(r, .status)
-        #expect(status.width >= StripRow.minStatusWidth - 0.0001)
-        #expect(r.statusTextVisible)
-        #expect(cell(r, .expand).width < 44)
-        #expect(cell(r, .expand).width >= StripRow.minKeyWidth)
+        #expect(!r.showsRedo)
+        #expect(cell(r, .hotkeys).width >= StripRow.minCompactHotkeysWidth - 0.0001)
+        #expect(cell(r, .expand).width >= StripRow.minKeyWidth - 0.0001)
         #expect(cell(r, .mic).width == 81)
     }
 
-    @Test func whenNoSpaceIsLeftForTheStatusTheKeysKeepTheirSizeAndTheStatusHides() {
-        // iPhone SE 1st gen, 320 pt, with the globe: even at the smallest keys the status cannot get its minimum.
+    @Test func theHotkeyButtonsAreThirtyPointsAndTheKeyFloorIsThirtySix() {
+        #expect(StripRow.hotkeyButtonWidth == 30)
+        #expect(StripRow.minHotkeysWidth == 3 * StripRow.hotkeyButtonWidth)
+        #expect(StripRow.minCompactHotkeysWidth == 2 * StripRow.hotkeyButtonWidth)
+        #expect(StripRow.minKeyWidth == 36)
+    }
+
+    @Test func fromThePhoneSizesUpEveryKeyKeepsItsFloorAndTheHotkeysTheirRoom() {
+        for width in stride(from: 375.0, through: 932, by: 1) {
+            for globe in [false, true] {
+                for style in [StripReturnStyle.glyph, .text] {
+                    let r = row(width, globe: globe, returnStyle: style)
+                    let need = r.showsRedo ? StripRow.minHotkeysWidth : StripRow.minCompactHotkeysWidth
+                    #expect(cell(r, .hotkeys).width >= need - 0.0001, "w=\(width) globe=\(globe) \(style)")
+                    for slot in [StripSlot.expand, .delete] + (style == .glyph ? [.returnKey] : []) + (globe ? [.globe] : []) {
+                        #expect(cell(r, slot).width >= StripRow.minKeyWidth - 0.0001, "w=\(width) globe=\(globe) \(style) \(slot)")
+                    }
+                }
+            }
+        }
+    }
+
+    @Test func redoStaysWheneverThreeButtonsFitAtTheKeyFloor() {
+        #expect(row(402).showsRedo)
+        #expect(row(402, globe: true).showsRedo)
+        #expect(row(430, globe: true, returnStyle: .text).showsRedo)
+    }
+
+    @Test func atTheSmallestWidthTheHotkeysStillFitAndTheMicKeepsItsSize() {
+        // iPhone SE 1st gen, 320 pt, with the globe: below the phone sizes the keys give up space, the hotkeys do not.
         let r = row(320, globe: true)
-        #expect(!r.statusTextVisible)
-        #expect(cell(r, .expand).width == 44)
+        #expect(cell(r, .hotkeys).width >= StripRow.minCompactHotkeysWidth - 0.0001)
         #expect(cell(r, .mic).width == 81)
         #expect(cell(r, .mic).maxX == 320 - 8)
-        #expect(cell(r, .status).width >= 0)
     }
 
-    @Test func theStatusShowsAtItsMinimumWidth() {
-        // Without a globe 320 leaves 320 - 16 - 32 - 132 - 81 = 59.
-        let r = row(320)
-        #expect(r.statusTextVisible)
-        #expect(cell(r, .status).width == 59)
+    @Test func theNumbersAtTheSmallestCommonWidths() {
+        // 375, globe, text return: 178 left for 3 keys and the hotkeys; three buttons would squeeze the keys
+        // to 29, so redo goes and the keys get (178 - 60) / 3.
+        let narrow = row(375, globe: true, returnStyle: .text)
+        #expect(abs(cell(narrow, .expand).width - 118.0 / 3) < 0.0001)
+        #expect(cell(narrow, .hotkeys).width == StripRow.minCompactHotkeysWidth)
+        // 320 without a globe: 191 left; the keys are back to their usual 44 at most.
+        let se = row(320)
+        #expect(!se.showsRedo)
+        #expect(abs(cell(se, .expand).width - 131.0 / 3) < 0.0001)
+        #expect(cell(se, .hotkeys).width == StripRow.minCompactHotkeysWidth)
+    }
+
+    @Test func noKeyEverCollapsesToNothing() {
+        for width in stride(from: 320.0, through: 932, by: 4) {
+            for globe in [false, true] {
+                for style in [StripReturnStyle.glyph, .text] {
+                    let r = row(width, globe: globe, returnStyle: style)
+                    for slot in [StripSlot.expand, .delete, .returnKey] {
+                        #expect(cell(r, slot).width > 0, "w=\(width) \(slot)")
+                    }
+                }
+            }
+        }
     }
 
     @Test func everyWidthFromSEToLandscapeFitsWithAMicPillOfFullSize() {
@@ -95,9 +138,11 @@ import Testing
                     #expect(r.cells.first!.x >= 8 - 0.0001, "w=\(width)")
                     #expect(r.cells.last!.maxX <= width - 8 + 0.0001, "w=\(width) globe=\(globe) \(style)")
                     #expect(cell(r, .mic).width == 81, "w=\(width)")
-                    #expect(cell(r, .status).width >= 0, "w=\(width)")
-                    for slot in [StripSlot.expand, .delete, .returnKey] {
-                        #expect(cell(r, slot).width >= StripRow.minKeyWidth - 0.0001, "w=\(width) \(slot)")
+                    #expect(cell(r, .hotkeys).width >= StripRow.minCompactHotkeysWidth - 0.0001, "w=\(width)")
+                    if width >= 375 {
+                        for slot in [StripSlot.expand, .delete, .returnKey] {
+                            #expect(cell(r, slot).width >= StripRow.minKeyWidth - 0.0001, "w=\(width) globe=\(globe) \(style) \(slot)")
+                        }
                     }
                 }
             }
