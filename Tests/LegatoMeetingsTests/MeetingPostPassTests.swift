@@ -171,6 +171,25 @@ private final class BurstTranscriber: BatchTranscriber {
         #expect(after.contains { $0.text == "kept" && $0.origin == .live })
         #expect(after.filter { $0.stream == .mic }.count == 4)
     }
+
+    @Test func aRenameDuringThePostPassSurvives() async throws {
+        let (store, meeting, root) = try await setUp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        struct Renaming: BatchTranscriber {
+            let id = "renaming"
+            let store: MeetingStore
+            let meetingID: UUID
+            func transcribe(samples: [Float], stream: TranscriptEvent.Stream) async throws -> [TranscriptEvent] {
+                try await store.update(id: meetingID) { $0.title = "Renamed while processing" }
+                return []
+            }
+        }
+        try await MeetingPostPass(store: store, reader: FakeRecording(), transcriber: Renaming(store: store, meetingID: meeting.id))
+            .run(meetingID: meeting.id)
+        let saved = try #require(try await store.meeting(id: meeting.id))
+        #expect(saved.title == "Renamed while processing")
+        #expect(saved.postPassID == "renaming")
+    }
 }
 
 @Suite struct AudioWindowingTests {

@@ -146,6 +146,19 @@ private let ok = #"{"id":"msg_1","type":"message","role":"assistant","content":[
         #expect(sleeps.values == [.seconds(2)])
     }
 
+    @Test(arguments: [
+        ("inf", Duration.seconds(1)), ("-inf", .seconds(1)), ("nan", .seconds(1)), ("garbage", .seconds(1)),
+        ("1e30", .seconds(60)), ("99999", .seconds(60)), ("-5", .seconds(0)), ("2.2", .seconds(3)),
+    ]) func aHostileRetryAfterIsClampedNotTrapped(header: String, expected: Duration) async throws {
+        StubProtocol.reset([
+            .init(status: 429, headers: ["retry-after": header], body: "{}"),
+            .init(status: 200, body: ok),
+        ])
+        let (backend, sleeps) = rig()
+        #expect(try await backend.respond(instructions: "I", prompt: "P") == "Hello there")
+        #expect(sleeps.values == [expected])
+    }
+
     @Test func promptTooLongIsContextTooLong() async {
         StubProtocol.reset([.init(status: 400, body: #"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#)])
         let (backend, _) = rig()
@@ -175,6 +188,49 @@ private let ok = #"{"id":"msg_1","type":"message","role":"assistant","content":[
         } catch {
             Issue.record("wrong error \(error)")
         }
+    }
+
+    private func plainBackend() -> ClaudeBackend {
+        ClaudeBackend(keyStore: InMemoryAPIKeyStore(apiKey: "sk-test"), session: session(), sleep: { _ in })
+    }
+
+    private func failure(_ reply: StubProtocol.Reply) async -> String? {
+        StubProtocol.reset([reply])
+        do {
+            _ = try await plainBackend().respond(instructions: "I", prompt: "P")
+            return nil
+        } catch let LLMError.failed(message) {
+            return message
+        } catch {
+            return nil
+        }
+    }
+
+    @Test func aBodyThatIsNotAnthropicErrorJSONNeverReachesTheMessage() async throws {
+        let message = try #require(await failure(.init(status: 502, body: "<html>Bad gateway for the meeting about SECRET-LAYOFFS</html>")))
+        #expect(message.contains("502"))
+        #expect(!message.contains("SECRET-LAYOFFS") && !message.contains("html"))
+    }
+
+    @Test func jsonThatIsNotAnErrorEnvelopeNeverReachesTheMessage() async throws {
+        let message = try #require(await failure(.init(status: 500, body: #"{"echo":"SECRET-LAYOFFS"}"#)))
+        #expect(message.contains("500"))
+        #expect(!message.contains("SECRET-LAYOFFS"))
+    }
+
+    @Test func anAnthropicErrorGivesItsTypeAndMessage() async throws {
+        let message = try #require(await failure(.init(status: 500, body: #"{"type":"error","error":{"type":"api_error","message":"boom"}}"#)))
+        #expect(message.contains("500") && message.contains("api_error") && message.contains("boom"))
+    }
+}
+
+@Suite struct ClaudeSessionTests {
+    @Test func theDefaultTransportKeepsNothingOnDisk() {
+        let config = ClaudeBackend.defaultSessionConfiguration()
+        #expect(config.urlCache == nil)
+        #expect(config.urlCredentialStorage == nil)
+        #expect(config.httpCookieStorage == nil)
+        #expect(config.requestCachePolicy == .reloadIgnoringLocalCacheData)
     }
 }
 

@@ -7,11 +7,14 @@ import LegatoMeetings
 /// A meeting's recorded audio, read for the post-pass and then converted from CAF to m4a.
 public protocol MeetingAudioFinalizing: AudioSampleReader {
     /// Converts the recordings to m4a. Safe to repeat: with nothing left to convert it does nothing.
-    func finalizeAudio() async throws
+    /// - Returns: the streams that could not be converted (their CAF is kept); empty when all went well.
+    func finalizeAudio() async throws -> [TranscriptEvent.Stream]
 }
 
 extension MeetingAudioWriter: MeetingAudioFinalizing {
-    public func finalizeAudio() async throws { _ = try finalize() }
+    public func finalizeAudio() async throws -> [TranscriptEvent.Stream] {
+        Array(finalize().failed.keys).sorted { $0.rawValue < $1.rawValue }
+    }
 }
 
 /// The after-stop chain of a meeting: post-pass, CAF to m4a, automatic summary, then `finished`.
@@ -37,6 +40,7 @@ public struct MeetingPipeline: Sendable {
     private let backend: @Sendable () async -> (any LLMBackend)?
     private let prompt: @Sendable () -> String
     private let releaseModels: @Sendable () async -> Void
+    private let releasePostPassModels: @Sendable () async -> Void
     private let onStep: @Sendable (Meeting.Step) -> Void
 
     /// - Parameters:
@@ -45,6 +49,7 @@ public struct MeetingPipeline: Sendable {
     ///   - backend: the on-device summary backend, if one is usable. Never Claude.
     ///   - prompt: the custom summary prompt; empty means the default.
     ///   - releaseModels: frees the live models before the post-pass model loads.
+    ///   - releasePostPassModels: frees the post-pass model once the post-pass is over, before the summary model loads.
     public init(
         store: MeetingStore,
         audio: @escaping @Sendable (URL) -> any MeetingAudioFinalizing,
@@ -52,6 +57,7 @@ public struct MeetingPipeline: Sendable {
         backend: @escaping @Sendable () async -> (any LLMBackend)?,
         prompt: @escaping @Sendable () -> String,
         releaseModels: @escaping @Sendable () async -> Void = { await releaseCachedNemotronModels() },
+        releasePostPassModels: @escaping @Sendable () async -> Void = { await releaseCachedParakeetModels() },
         onStep: @escaping @Sendable (Meeting.Step) -> Void = { _ in }
     ) {
         self.store = store
@@ -60,6 +66,7 @@ public struct MeetingPipeline: Sendable {
         self.backend = backend
         self.prompt = prompt
         self.releaseModels = releaseModels
+        self.releasePostPassModels = releasePostPassModels
         self.onStep = onStep
     }
 
@@ -68,7 +75,8 @@ public struct MeetingPipeline: Sendable {
         let previous = self.onStep
         return MeetingPipeline(
             store: store, audio: audio, transcriber: transcriber, backend: backend, prompt: prompt,
-            releaseModels: releaseModels, onStep: { previous($0); onStep($0) })
+            releaseModels: releaseModels, releasePostPassModels: releasePostPassModels,
+            onStep: { previous($0); onStep($0) })
     }
 
     // MARK: Chain
@@ -88,15 +96,23 @@ public struct MeetingPipeline: Sendable {
                 try await MeetingPostPass(store: store, reader: recordings, transcriber: batch).run(meetingID: meetingID)
                 try await complete(.postPass, meetingID)
             } catch is CancellationError {
+                await releasePostPassModels()
                 throw CancellationError()
             } catch {
                 outcome.notes.append("The post-pass failed, so the live transcript stays: \(error)")
             }
+            // The summary model needs the memory the batch model held.
+            await releasePostPassModels()
         }
 
         if !meeting.completedSteps.contains(.audio) {
-            try await recordings.finalizeAudio()
-            try await complete(.audio, meetingID)
+            let failed = try await recordings.finalizeAudio()
+            if failed.isEmpty {
+                try await complete(.audio, meetingID)
+            } else {
+                let names = failed.map { $0 == .mic ? "mic" : "system" }.joined(separator: " and ")
+                outcome.notes.append("The \(names) audio could not be converted to m4a, so its CAF recording is kept.")
+            }
         }
 
         if !meeting.completedSteps.contains(.summary) {
@@ -110,10 +126,11 @@ public struct MeetingPipeline: Sendable {
     /// "Improve transcript": the post-pass again (from the m4a), then the summary again.
     @discardableResult
     public func improveTranscript(meetingID: UUID) async throws -> Outcome {
-        guard var meeting = try await store.meeting(id: meetingID), meeting.state != .recording else { return Outcome() }
-        meeting.state = .processing
-        meeting.completedSteps.subtract([.postPass, .summary])
-        try await store.update(meeting)
+        guard let meeting = try await store.meeting(id: meetingID), meeting.state != .recording else { return Outcome() }
+        try await store.update(id: meetingID) { m in
+            m.state = .processing
+            m.completedSteps.subtract([.postPass, .summary])
+        }
         return try await run(meetingID: meetingID)
     }
 
@@ -146,15 +163,11 @@ public struct MeetingPipeline: Sendable {
     }
 
     private func complete(_ step: Meeting.Step, _ meetingID: UUID) async throws {
-        guard var meeting = try await store.meeting(id: meetingID) else { return }
-        meeting.completedSteps.insert(step)
-        try await store.update(meeting)
+        guard try await store.update(id: meetingID, { $0.completedSteps.insert(step) }) != nil else { return }
         onStep(step)
     }
 
     private func finish(_ meetingID: UUID) async throws {
-        guard var meeting = try await store.meeting(id: meetingID) else { return }
-        meeting.state = .finished
-        try await store.update(meeting)
+        try await store.update(id: meetingID) { $0.state = .finished }
     }
 }

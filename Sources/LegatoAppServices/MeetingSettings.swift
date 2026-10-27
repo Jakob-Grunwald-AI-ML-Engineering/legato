@@ -1,4 +1,5 @@
 import Foundation
+import LegatoClaude
 
 /// The meeting settings in an injected `UserDefaults` (the App Group's on the phone, the app's on the Mac).
 /// Custom summary prompt empty (the default prompt), backend Auto, voice processing on, auto-mute on.
@@ -11,6 +12,7 @@ public struct MeetingSettings: Sendable {
         static let backend = "meeting.summaryBackend"
         static let voiceProcessing = "meeting.voiceProcessing"
         static let autoMute = "meeting.autoMute"
+        static let claudeDisclosure = "meeting.claudeDisclosureAccepted"
     }
 
     public init(defaults: UserDefaults) {
@@ -40,5 +42,20 @@ public struct MeetingSettings: Sendable {
     public var autoMute: Bool {
         get { defaults.object(forKey: Key.autoMute) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Key.autoMute) }
+    }
+
+    /// The user has read what leaves the device when Claude summarises a meeting. Valid for one key:
+    /// ``storeClaudeKey(_:in:)`` resets it.
+    public var claudeDisclosureAccepted: Bool {
+        get { defaults.bool(forKey: Key.claudeDisclosure) }
+        nonmutating set { defaults.set(newValue, forKey: Key.claudeDisclosure) }
+    }
+
+    /// Stores `key` (trimmed) in `store`, or removes the key when it is empty, and forgets the disclosure:
+    /// a new key or a removed one asks the user again. A store that fails changes nothing.
+    public func storeClaudeKey(_ key: String, in store: any APIKeyStore) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { try store.deleteKey() } else { try store.save(apiKey: trimmed) }
+        claudeDisclosureAccepted = false
     }
 }

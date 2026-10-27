@@ -129,12 +129,7 @@ final class KeyboardController {
 
     /// While the app records a meeting dictation is blocked, and the keyboard says why instead of offering to
     /// dictate. Believed only while the app keeps beating: an app that died mid-meeting leaves the flag behind.
-    var meetingNotice: String? {
-        guard let host, host.meetingRecording == true,
-              Date().timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness
-        else { return nil }
-        return "Meeting recording"
-    }
+    var meetingNotice: String? { host?.meetingNotice(now: Date()) }
 
     // MARK: Visibility
 

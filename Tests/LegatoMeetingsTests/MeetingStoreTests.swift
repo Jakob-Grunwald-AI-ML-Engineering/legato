@@ -108,4 +108,52 @@ import LegatoCore
         #expect(try await store.saveLiveSegmentsOnce(second, for: id) == false)
         #expect(try await store.liveSegments(for: id) == first)
     }
+
+    private func permissions(_ url: URL) throws -> Int {
+        try #require(try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
+    }
+
+    #if os(macOS)
+    @Test func theMeetingsRootAndFoldersAreOwnerOnly() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // A root an earlier version created with the default permissions is tightened too.
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        let store = MeetingStore(root: root)
+        let m = meeting("Sync", at: 1)
+        try await store.create(m)
+        try await store.saveSummary("## Summary", backendID: "fm", for: m.id)
+
+        #expect(try permissions(root) == 0o700)
+        #expect(try permissions(await store.folder(for: m.id)) == 0o700)
+        #expect(try permissions(await store.folder(for: m.id).appendingPathComponent("meeting.json")) == 0o600)
+        #expect(try permissions(await store.summaryURL(for: m.id, backendID: "fm")) == 0o600)
+    }
+
+    @Test func aNewRootIsOwnerOnlyEvenWhenItsParentIsMissing() async throws {
+        let parent = tempRoot()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("Legato/Meetings")
+        let store = MeetingStore(root: root)
+        let folder = try await store.createFolder(for: UUID())
+        #expect(try permissions(root) == 0o700)
+        #expect(try permissions(folder) == 0o700)
+    }
+    #endif
+
+    @Test func updateMergesOntoWhatIsOnDisk() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("Sync", at: 1)
+        try await store.create(m)
+        var renamed = m
+        renamed.title = "Renamed"
+        try await store.update(renamed)
+
+        let merged = try await store.update(id: m.id) { $0.duration = 42 }
+        #expect(merged?.title == "Renamed" && merged?.duration == 42)
+        #expect(try await store.meeting(id: m.id) == merged)
+        #expect(try await store.update(id: UUID()) { $0.duration = 1 } == nil)
+    }
 }

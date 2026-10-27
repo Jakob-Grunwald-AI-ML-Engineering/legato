@@ -41,13 +41,13 @@ struct MeetingLiveView: View {
                 Text(engine).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if meetings.autoMute, !meetings.manualMute {
+            if meetings.autoMute {
                 Text("Auto-muted: the call app closed its mic").font(.caption).foregroundStyle(.secondary)
             }
             Button {
                 meetings.toggleManualMute()
             } label: {
-                Label(meetings.manualMute ? "Unmute me" : "Mute me",
+                Label(meetings.isMuted ? "Unmute me" : "Mute me",
                       systemImage: meetings.isMuted ? "mic.slash.fill" : "mic.fill")
             }
             Button("Stop") { Task { await meetings.stop() } }

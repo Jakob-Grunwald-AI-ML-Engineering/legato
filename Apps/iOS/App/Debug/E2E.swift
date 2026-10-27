@@ -47,7 +47,7 @@ import os
 /// sends requests, and applies the streamed text with the real `ProxyEditPlanner`. Commands
 /// `kbd-visible`, `kbd-hidden`, `kbd-request-start|stop|end-keep-alive`, `kbd-hop-arm` (the mic key with no
 /// lease: the arm request, then the URL), `kbd-hop-arm-url-first` (the URL, then the request),
-/// `kbd-forged-url` (an arm URL no request backs).
+/// `kbd-hop-start` (a start the host answered with `hop`, then its URL), `kbd-forged-url` (an arm URL no request backs).
 ///
 /// Every line is logged at notice level as `e2e <event> key=value ...` (subsystem de.gruenwald.legato,
 /// category e2e).
@@ -332,7 +332,7 @@ extension E2E {
         "toggle", "interrupt", "interrupt-end", "copy-last", "foreground", "background", "toggle-after-hop",
         "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-export", "meeting-route-change",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
-        "kbd-hop-arm", "kbd-hop-arm-url-first", "kbd-forged-url",
+        "kbd-hop-arm", "kbd-hop-start", "kbd-hop-arm-url-first", "kbd-forged-url",
         "harness-mic", "harness-mic-hop", "harness-type", "harness-numbers",
     ]
 

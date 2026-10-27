@@ -26,12 +26,23 @@ public struct ClaudeBackend: LLMBackend {
     ///   - session: the transport; tests pass one with a `URLProtocol` stub.
     ///   - sleep: waits out `retry-after`; tests record it instead.
     public init(
-        keyStore: any APIKeyStore, session: URLSession = .shared,
+        keyStore: any APIKeyStore, session: URLSession = URLSession(configuration: ClaudeBackend.defaultSessionConfiguration()),
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.keyStore = keyStore
         self.session = session
         self.sleep = sleep
+    }
+
+    /// A transport that keeps nothing on disk: no cache, cookies or credentials, so a transcript sent for a
+    /// summary leaves no trace in the app's `URLSession` stores.
+    public static func defaultSessionConfiguration() -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.urlCredentialStorage = nil
+        config.httpCookieStorage = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return config
     }
 
     private static let noKey = "No Claude API key"
@@ -62,19 +73,30 @@ public struct ClaudeBackend: LLMBackend {
             case 429, 529:
                 guard !retried else { throw LLMError.failed("Claude is busy (HTTP \(response.statusCode))") }
                 retried = true
-                let seconds = response.value(forHTTPHeaderField: "retry-after").flatMap { Double($0) }.map { Int($0.rounded(.up)) } ?? 1
-                try await sleep(.seconds(min(max(seconds, 0), Self.maxRetryAfter)))
+                try await sleep(.seconds(Self.retryDelay(header: response.value(forHTTPHeaderField: "retry-after"))))
             case 413:
                 throw LLMError.contextTooLong
             default:
-                let message = Self.errorMessage(from: data)
-                if response.statusCode == 400, message.lowercased().contains("too long") { throw LLMError.contextTooLong }
-                throw LLMError.failed("Claude HTTP \(response.statusCode): \(message)")
+                let error = Self.apiError(from: data)
+                if response.statusCode == 400, error?.message.lowercased().contains("too long") == true {
+                    throw LLMError.contextTooLong
+                }
+                // Only what Anthropic's error envelope says; any other body might echo the transcript.
+                let detail = error.map { ": \($0.type): \($0.message)" } ?? ""
+                throw LLMError.failed("Claude HTTP \(response.statusCode)\(detail)")
             }
         }
     }
 
     // MARK: Internals
+
+    /// Whole seconds to wait for a `retry-after` header: 1 when it is missing or not a finite number, never
+    /// negative, never more than ``maxRetryAfter``. The clamp comes before the conversion to `Int`, which
+    /// traps on infinity, NaN and anything that does not fit.
+    static func retryDelay(header: String?) -> Int {
+        guard let header, let value = Double(header.trimmingCharacters(in: .whitespaces)), value.isFinite else { return 1 }
+        return Int(min(max(value, 0), Double(maxRetryAfter)).rounded(.up))
+    }
 
     private func makeRequest(key: String, instructions: String, examples: [LLMExample], prompt: String) throws -> URLRequest {
         var messages: [[String: String]] = []
@@ -122,12 +144,13 @@ public struct ClaudeBackend: LLMBackend {
         return text
     }
 
-    private static func errorMessage(from data: Data) -> String {
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let error = json["error"] as? [String: Any], let message = error["message"] as? String
-        {
-            return message
-        }
-        return String(decoding: data.prefix(200), as: UTF8.self)
+    /// The error type and message of an Anthropic error envelope (`{"type":"error","error":{...}}`); nil for
+    /// any other body.
+    private static func apiError(from data: Data) -> (type: String, message: String)? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["type"] as? String == "error", let error = json["error"] as? [String: Any],
+            let type = error["type"] as? String, let message = error["message"] as? String
+        else { return nil }
+        return (String(type.prefix(60)), String(message.prefix(300)))
     }
 }

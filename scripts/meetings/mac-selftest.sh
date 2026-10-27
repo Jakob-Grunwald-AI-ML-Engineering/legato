@@ -3,13 +3,17 @@
 # plays German and English `say` clips through the speakers meanwhile, and prints the report JSON.
 # Exit 0 when "them" heard something, 1 when it is empty, 2 when the meeting could not start.
 #
+# The report holds counts (characters, words, segments per stream), never what was said, unless WITH_TEXT=1.
+# The self-test exists only in Debug builds of the app; the temporary meeting store is deleted afterwards.
+#
 # The app is launched through `open -W -n` so Legato.app is its own TCC "responsible process" (run from a
 # terminal, the permissions would be attributed to the terminal). First run: macOS asks for Microphone,
 # Speech Recognition and System Audio Recording; grant them to Legato and run again.
 #
 # Usage: scripts/meetings/mac-selftest.sh [seconds]
-#   LEGATO_APP=/path/Legato.app   use this build instead of building one
+#   LEGATO_APP=/path/Legato.app   a Debug build (a Release build has no self-test and would just open)
 #   OUT_DIR=/path                 where selftest.json and selftest.log go (default /private/tmp/legato-meeting-selftest)
+#   WITH_TEXT=1                   also put the transcript text in the report (--meeting-selftest-text)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root="$(pwd)"
@@ -18,7 +22,10 @@ out_dir="${OUT_DIR:-/private/tmp/legato-meeting-selftest}"
 json="$out_dir/selftest.json"
 log="$out_dir/selftest.log"
 mkdir -p "$out_dir"
+chmod 700 "$out_dir"
 rm -f "$json" "$log"
+extra=()
+[ "${WITH_TEXT:-0}" = 1 ] && extra=(--meeting-selftest-text)
 
 app="${LEGATO_APP:-}"
 if [ -z "$app" ]; then
@@ -42,7 +49,7 @@ speaker=$!
 trap 'kill "$speaker" 2>/dev/null || true' EXIT
 
 open -W -n --stdout "$log" --stderr "$log" "$app" \
-  --args --meeting-selftest "$seconds" "--meeting-selftest-out=$json"
+  --args --meeting-selftest "$seconds" "--meeting-selftest-out=$json" "${extra[@]+"${extra[@]}"}"
 
 echo "report: $json"
 if [ ! -f "$json" ]; then
@@ -55,5 +62,5 @@ import json, sys
 r = json.load(open(sys.argv[1]))
 if r.get("note") and r.get("themSegments", 0) == 0 and not r.get("engine"):
     sys.exit(2)
-sys.exit(0 if r.get("themText", "").strip() else 1)
+sys.exit(0 if r.get("themWords", 0) > 0 else 1)
 PY

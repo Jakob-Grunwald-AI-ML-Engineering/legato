@@ -29,102 +29,6 @@ struct MeetingAudioEnvironment: Sendable {
     }
 }
 
-/// One microphone stream that survives engine restarts: an interruption or a route change (AirPods) stops
-/// the `AVAudioEngine`, and `restart()` builds a fresh one behind the same stream, so the meeting's session
-/// keeps reading it. What the mic did not deliver in between (the wall clock ran on) is filled with
-/// silence before the first new chunk, so the recording stays on the meeting's timeline.
-final class ResumableMicSource: AudioSource {
-    private struct State {
-        var inner: (any AudioSource)?
-        var pump: Task<Void, Never>?
-        var continuation: AsyncStream<AudioChunk>.Continuation?
-        var format: AudioFormatSpec?
-        var began: ContinuousClock.Instant?
-        /// Seconds of audio put on the stream so far, silence fills included.
-        var delivered: TimeInterval = 0
-    }
-
-    private let state = Mutex(State())
-    private let make: @Sendable () -> any AudioSource
-    private let fill: @Sendable (TimeInterval) async -> Void
-
-    /// - Parameters:
-    ///   - make: builds a fresh microphone.
-    ///   - fill: writes seconds of silence to the recording, awaited before the restarted mic's audio flows.
-    init(make: @escaping @Sendable () -> any AudioSource, fill: @escaping @Sendable (TimeInterval) async -> Void) {
-        self.make = make
-        self.fill = fill
-    }
-
-    func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
-        let inner = make()
-        let chunks = try await inner.start(format: format)
-        let (stream, continuation) = AsyncStream.makeStream(of: AudioChunk.self)
-        state.withLock {
-            $0.inner = inner
-            $0.continuation = continuation
-            $0.format = format
-            $0.began = .now
-            $0.delivered = 0
-        }
-        pump(chunks)
-        return stream
-    }
-
-    /// Replaces the engine with a fresh one. Throws when the new engine does not start; the stream stays
-    /// open, and calling again retries.
-    func restart() async throws {
-        let (old, oldPump, format) = state.withLock { s -> ((any AudioSource)?, Task<Void, Never>?, AudioFormatSpec?) in
-            defer { s.inner = nil; s.pump = nil }
-            return (s.inner, s.pump, s.format)
-        }
-        guard let format else { throw MicSourceError.notArmed }
-        await old?.stop()
-        await oldPump?.value // what the old engine still had reaches the stream first
-        let inner = make()
-        let chunks = try await inner.start(format: format)
-        let (elapsed, delivered) = state.withLock { s -> (TimeInterval, TimeInterval) in
-            let gap = s.began.map { ContinuousClock.now - $0 } ?? .zero
-            return (Double(gap.components.seconds) + Double(gap.components.attoseconds) / 1e18, s.delivered)
-        }
-        let silence = MeetingSilence.deficit(elapsed: elapsed, delivered: delivered)
-        if silence > 0 {
-            await fill(silence)
-            state.withLock { $0.delivered += silence }
-        }
-        state.withLock { $0.inner = inner }
-        pump(chunks)
-    }
-
-    private func pump(_ chunks: AsyncStream<AudioChunk>) {
-        let task = Task { [weak self] in
-            for await chunk in chunks {
-                guard let self else { return }
-                let seconds = Double(chunk.samples.count) / (chunk.format.sampleRate * Double(max(1, chunk.format.channelCount)))
-                let continuation = state.withLock { s -> AsyncStream<AudioChunk>.Continuation? in
-                    s.delivered += seconds
-                    return s.continuation
-                }
-                continuation?.yield(chunk)
-            }
-        }
-        state.withLock { $0.pump = task }
-    }
-
-    func route() async throws -> AsyncStream<AudioChunk> { throw MicSourceError.notArmed }
-    func detach() async {}
-
-    func stop() async {
-        let (inner, pump, continuation) = state.withLock { s -> ((any AudioSource)?, Task<Void, Never>?, AsyncStream<AudioChunk>.Continuation?) in
-            defer { s.inner = nil; s.pump = nil; s.continuation = nil; s.format = nil }
-            return (s.inner, s.pump, s.continuation)
-        }
-        await inner?.stop()
-        await pump?.value
-        continuation?.finish()
-    }
-}
-
 /// An iOS background task that ends exactly once, from the pipeline finishing or from its expiry.
 @MainActor
 private final class BackgroundToken {
@@ -157,7 +61,6 @@ private final class BackgroundToken {
 @MainActor @Observable
 final class MeetingController {
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "meetings")
-    private static let claudeDisclosureKey = "meeting.claudeDisclosureAccepted"
 
     enum Phase: Equatable { case idle, starting, recording, stopping }
 
@@ -174,6 +77,8 @@ final class MeetingController {
     private(set) var interrupted = false
     private(set) var busy: Set<UUID> = []
     private(set) var notice: String?
+    /// A Claude key is stored. Read from the Keychain at launch and when the key changes, not per view update.
+    private(set) var hasClaudeKey = false
     /// Bumped when a meeting finished or changed on disk, so open detail views reload.
     private(set) var revision = 0
 
@@ -205,7 +110,6 @@ final class MeetingController {
     @ObservationIgnored private var muteCommands: AsyncStream<Bool>.Continuation?
     @ObservationIgnored private var interruptions = MeetingInterruptions()
     @ObservationIgnored private var resuming = false
-    @ObservationIgnored private var begin: TimeInterval = 0
     @ObservationIgnored private var startedAt = Date()
     @ObservationIgnored private var recovered = false
 
@@ -218,6 +122,7 @@ final class MeetingController {
         self.defaults = defaults
         self.audio = audio
         keyStore = keys
+        hasClaudeKey = Self.keyExists(keys)
         services = MeetingServices(models: models, store: store, settings: settings, keyStore: keys)
     }
 
@@ -272,8 +177,8 @@ final class MeetingController {
         engineFallback = engines.fallbackReason
 
         let meeting = Meeting(id: UUID(), title: Self.defaultTitle(Date()), date: Date(), engineID: engineID)
-        let folder = await store.folder(for: meeting.id)
-        do { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) } catch {
+        let folder: URL
+        do { folder = try await store.createFolder(for: meeting.id) } catch {
             await abortStart(notice: "Could not create the meeting folder: \(error.localizedDescription)", folder: nil)
             return
         }
@@ -286,16 +191,15 @@ final class MeetingController {
         var failure: (any Error)?
         for attempt in 0..<2 {
             let writer = MeetingAudioWriter(folder: folder)
-            let mic = ResumableMicSource(
-                make: audio.makeMic, fill: { seconds in try? await writer.writeSilence(seconds: seconds, stream: .mic) })
-            let begin = ProcessInfo.processInfo.systemUptime
+            let mic = ResumableMicSource(make: audio.makeMic)
             let session = MeetingSession(
-                meeting: meeting, inputs: [MeetingInput(stream: .mic, source: mic, engine: engine)],
+                meeting: meeting,
+                inputs: [MeetingInput(stream: .mic, source: mic, engine: engine, locale: engines.locale)],
                 store: store, sink: writer, convert: { $0 },
-                clock: { ProcessInfo.processInfo.systemUptime - begin })
+                clock: { ProcessInfo.processInfo.systemUptime })
             do {
                 try await session.start()
-                beginObserving(session: session, mic: mic, begin: begin)
+                beginObserving(session: session, mic: mic)
                 phase = .recording
                 #if DEBUG
                 E2E.log("meeting.started id=\(meeting.id.uuidString) engine=\(engineID)")
@@ -378,7 +282,7 @@ final class MeetingController {
     /// A call, Siri or another app took the microphone: mute (silence and a marked range) until it is back.
     func interruptionBegan() {
         guard phase == .recording else { return }
-        if interruptions.began(at: ProcessInfo.processInfo.systemUptime - begin) {
+        if interruptions.began(at: session?.elapsed ?? 0) {
             interrupted = true
             reevaluateMute()
         }
@@ -412,8 +316,11 @@ final class MeetingController {
         resumeProcessing()
     }
 
+    /// Restarts the microphone. The meeting may stop at any suspension point in here, so the phase is checked
+    /// again after each one: a stopped meeting must not reactivate the audio session, and the restart itself
+    /// stops an engine it created when the meeting stopped while it started.
     private func resumeCapture(reactivating: Bool = true) async {
-        guard let mic, !resuming else { return }
+        guard phase == .recording, let mic, !resuming else { return }
         resuming = true
         defer { resuming = false }
         var failure: (any Error)?
@@ -425,14 +332,16 @@ final class MeetingController {
                 break
             } catch {
                 failure = error
-                guard attempt == 0, SystemStartEnvironment.isNoInput(error), !isInBackground() else { break }
+                guard phase == .recording, attempt == 0, SystemStartEnvironment.isNoInput(error), !isInBackground() else { break }
                 try? await Task.sleep(for: DictationCoordinator.settleDelay) // 0 Hz right after activation
+                guard phase == .recording else { return }
             }
         }
+        guard phase == .recording else { return }
         guard failure == nil else {
             // Stay muted; the next time the app is in the foreground the meeting tries again.
             if interruptions.openSince == nil {
-                _ = interruptions.began(at: ProcessInfo.processInfo.systemUptime - begin)
+                _ = interruptions.began(at: session?.elapsed ?? 0)
                 interrupted = true
                 reevaluateMute()
             }
@@ -443,7 +352,7 @@ final class MeetingController {
             #endif
             return
         }
-        if interruptions.resumed(at: ProcessInfo.processInfo.systemUptime - begin) != nil {
+        if interruptions.resumed(at: session?.elapsed ?? 0) != nil {
             interrupted = false
             notice = nil
             reevaluateMute()
@@ -455,10 +364,9 @@ final class MeetingController {
 
     // MARK: Observing a running meeting
 
-    private func beginObserving(session: MeetingSession, mic: ResumableMicSource, begin: TimeInterval) {
+    private func beginObserving(session: MeetingSession, mic: ResumableMicSource) {
         self.session = session
         self.mic = mic
-        self.begin = begin
         manualMute = false
         interrupted = false
         interruptions = MeetingInterruptions()
@@ -467,7 +375,7 @@ final class MeetingController {
         }
         clockTask = Task { [weak self] in
             while !Task.isCancelled {
-                self?.elapsed = ProcessInfo.processInfo.systemUptime - begin
+                self?.elapsed = session.elapsed
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -505,14 +413,19 @@ final class MeetingController {
     func recoverAtLaunch() async {
         guard !recovered else { return }
         recovered = true
-        _ = try? await MeetingRecovery.run(store: store)
+        // A meeting that started while the app was launching is alive, not crashed.
+        _ = try? await MeetingRecovery.run(store: store, excluding: liveMeetingIDs)
         await refresh()
         resumeProcessing()
     }
 
+    /// The meeting a live session owns, if any: recovery and the after-stop chain leave it alone.
+    private var liveMeetingIDs: Set<UUID> { session.map { [$0.meetingID] } ?? [] }
+
     /// Meetings whose after-stop chain was cut short (killed, or the background time ran out) continue now.
     func resumeProcessing() {
-        for meeting in meetings where (meeting.state == .processing || meeting.state == .interrupted) && !busy.contains(meeting.id) {
+        let live = liveMeetingIDs
+        for meeting in meetings where (meeting.state == .processing || meeting.state == .interrupted) && !busy.contains(meeting.id) && !live.contains(meeting.id) {
             process(meeting.id)
         }
     }
@@ -535,9 +448,8 @@ final class MeetingController {
 
     func rename(_ meeting: Meeting, to title: String) async {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, var current = try? await store.meeting(id: meeting.id) else { return }
-        current.title = trimmed
-        try? await store.update(current)
+        guard !trimmed.isEmpty else { return }
+        _ = try? await store.update(id: meeting.id) { $0.title = trimmed }
         await refresh()
     }
 
@@ -545,6 +457,7 @@ final class MeetingController {
 
     /// The after-stop chain (or its remainder) for a meeting.
     func process(_ id: UUID) {
+        guard !liveMeetingIDs.contains(id) else { return }
         run(id, label: "Processing") { services in
             try await services.pipeline().run(meetingID: id)
         }
@@ -594,22 +507,23 @@ final class MeetingController {
     // MARK: Claude
 
     var claudeDisclosureAccepted: Bool {
-        get { defaults.bool(forKey: Self.claudeDisclosureKey) }
-        set { defaults.set(newValue, forKey: Self.claudeDisclosureKey) }
+        get { settings.claudeDisclosureAccepted }
+        set { settings.claudeDisclosureAccepted = newValue }
     }
 
-    var hasClaudeKey: Bool { ((try? keyStore.apiKey()) ?? nil)?.isEmpty == false }
-
     /// Stores the key in the Keychain. The key itself is never logged or kept in an observable property.
+    /// A new or removed key asks for the disclosure again.
     func saveClaudeKey(_ key: String) -> String? {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            if trimmed.isEmpty { try keyStore.deleteKey() } else { try keyStore.save(apiKey: trimmed) }
+            try settings.storeClaudeKey(key, in: keyStore)
+            hasClaudeKey = Self.keyExists(keyStore)
             return nil
         } catch {
             return "The Keychain refused the key (\((error as NSError).code))."
         }
     }
+
+    private static func keyExists(_ store: KeychainKeyStore) -> Bool { ((try? store.apiKey()) ?? nil)?.isEmpty == false }
 
     /// One meeting's summary from Claude. The caller has shown the one-time disclosure.
     func summarizeWithClaude(_ id: UUID) {

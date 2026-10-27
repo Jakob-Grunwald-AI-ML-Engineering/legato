@@ -69,7 +69,8 @@ import LegatoCore
         try await writer.finish()
 
         let recovered = try await MeetingAudioWriter.recover(folder: copy)
-        #expect(recovered == [.system])
+        #expect(recovered.converted == [.system])
+        #expect(recovered.failed.isEmpty)
         let m4a = copy.appendingPathComponent("system.m4a")
         let file = try AVAudioFile(forReading: m4a)
         #expect(file.length > 0)
@@ -114,4 +115,35 @@ import LegatoCore
         let d = try await writer.duration(of: .mic)
         #expect(abs(d - 1) < 0.05)
     }
+
+    @Test func aStreamThatCannotBeConvertedIsReportedAndItsCafKept() async throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = MeetingAudioWriter(folder: folder)
+        for s in 0..<3 { try await writer.write(tone(seconds: 1, from: s * 16_000), stream: .mic) }
+        // The system recording is damaged (not a CAF at all).
+        try Data("garbage".utf8).write(to: folder.appendingPathComponent("system.caf"))
+
+        let report = try await writer.finalize()
+
+        #expect(report.converted == [.mic])
+        #expect(Set(report.failed.keys) == [.system])
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mic.m4a").path))
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("system.caf").path))
+    }
+
+    #if os(macOS)
+    @Test func recordingsAreOwnerOnly() async throws {
+        let parent = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let folder = parent.appendingPathComponent("meeting")
+        let writer = MeetingAudioWriter(folder: folder)
+        try await writer.write(tone(seconds: 1), stream: .mic)
+        func mode(_ url: URL) throws -> Int? { try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int }
+        #expect(try mode(folder) == 0o700)
+        #expect(try mode(folder.appendingPathComponent("mic.caf")) == 0o600)
+        try await writer.finalize()
+        #expect(try mode(folder.appendingPathComponent("mic.m4a")) == 0o600)
+    }
+    #endif
 }

@@ -27,6 +27,10 @@ public final class MeetingServices {
         public let preferredLocales: [Locale]
         /// Why Apple Speech runs although another model is picked, for the UI; `nil` otherwise.
         public let fallbackReason: String?
+
+        /// The language the engines prepare for: the one language the engine settings name, else `nil`
+        /// (the engine chooses). Pass it as ``MeetingInput/locale``.
+        public var locale: Locale? { preferredLocales.count == 1 ? preferredLocales[0] : nil }
     }
 
     public let settings: MeetingSettings
@@ -43,7 +47,7 @@ public final class MeetingServices {
     ///   - claudeBackend: replaces the Claude backend (tests); nil builds a ``ClaudeBackend`` over `keyStore`.
     public init(
         models: ModelServices, store: MeetingStore, settings: MeetingSettings, keyStore: any APIKeyStore,
-        claudeSession: URLSession = .shared, cleanup: CleanupRegistry? = nil,
+        claudeSession: URLSession? = nil, cleanup: CleanupRegistry? = nil,
         claudeBackend: (any LLMBackend)? = nil, background: CleanupRegistry.BackgroundCleanup = .cpu
     ) {
         self.store = store
@@ -51,7 +55,7 @@ public final class MeetingServices {
         self.registry = models.engines
         self.cleanup = cleanup ?? models.cleanup
         self.background = background
-        self.makeClaude = { claudeBackend ?? ClaudeBackend(keyStore: keyStore, session: claudeSession) }
+        self.makeClaude = { claudeBackend ?? claudeSession.map { ClaudeBackend(keyStore: keyStore, session: $0) } ?? ClaudeBackend(keyStore: keyStore) }
     }
 
     // MARK: Engines

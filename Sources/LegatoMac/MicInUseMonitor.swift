@@ -10,7 +10,7 @@ public struct AudioProcessInfo: Sendable, Equatable {
     public var isRunningOutput: Bool
 }
 
-/// Reads which processes have the mic open (`kAudioProcessPropertyIsRunningInput`). Feeds
+/// Reads which processes have the mic and the speakers open (`kAudioProcessPropertyIsRunningInput` / `IsRunningOutput`). Feeds
 /// `AutoMutePolicy`; which call apps close the mic on mute is a device measurement (spike task 0).
 public struct MicInUseMonitor: Sendable {
     public let interval: Duration
@@ -38,21 +38,23 @@ public struct MicInUseMonitor: Sendable {
         }
     }
 
-    /// PIDs with a mic input running now (our own included; `AutoMutePolicy` drops it).
-    public func inputPIDs() throws -> Set<Int32> {
-        Set(try snapshot().filter(\.isRunningInput).map(\.pid))
+    /// The processes with the mic or the speakers running now (our own included; `AutoMutePolicy` drops it).
+    public func activeProcesses() throws -> [AutoMuteProcess] {
+        try snapshot().filter { $0.isRunningInput || $0.isRunningOutput }.map {
+            AutoMuteProcess(pid: $0.pid, isRunningInput: $0.isRunningInput, isRunningOutput: $0.isRunningOutput)
+        }
     }
 
-    /// The input PIDs, polled every `interval`; yields on change (and once at the start).
+    /// The active processes, polled every `interval`; yields on change (and once at the start).
     /// Read errors are skipped. Ends when the consumer stops iterating.
-    public func inputPIDChanges() -> AsyncStream<Set<Int32>> {
+    public func processChanges() -> AsyncStream<[AutoMuteProcess]> {
         let monitor = self
         return AsyncStream { continuation in
             let task = Task {
-                var last: Set<Int32>?
+                var last: Set<AutoMuteProcess>?
                 while !Task.isCancelled {
-                    if let now = try? monitor.inputPIDs(), now != last {
-                        last = now
+                    if let now = try? monitor.activeProcesses(), Set(now) != last {
+                        last = Set(now)
                         continuation.yield(now)
                     }
                     try? await Task.sleep(for: monitor.interval)

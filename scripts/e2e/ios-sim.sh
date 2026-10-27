@@ -121,7 +121,7 @@ if [ "$mode" = release-check ]; then
     AudioDiagnostics session.deactivate.skipped audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
     LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoFakeRefusalInForeground LegatoFakeRefusalCount LegatoAudioPolicy
     start.route start.fallback toggle-after-hop
-    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-arm kbd-forged-url kbd.forged-url
+    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-arm kbd-hop-start kbd-forged-url kbd.forged-url
     "keyboard.url admission" kbd.apply "link.host phase=" debugForceTapToCopy debugShowPauseOthers
     KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers LegatoHarnessAppearance
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
@@ -1104,9 +1104,12 @@ scenario_x() {
   wait_log "meeting.refused source=toggle" 10
   trigger kbd-hop-arm
   wait_log "meeting.refused source=keyboard-arm" 10
+  trigger kbd-hop-start
+  wait_log "meeting.refused source=keyboard notice" 10
   sleep 0.5
   assert_log "a press during a meeting gets 'Meeting recording'" 'meeting.refused source=toggle notice="Meeting recording"'
   assert_log "the keyboard's arm gets 'Meeting recording'" 'meeting.refused source=keyboard-arm notice="Meeting recording"'
+  assert_log "the keyboard's start request gets 'Meeting recording'" 'meeting.refused source=keyboard notice="Meeting recording"'
   assert_no_log "no dictation session built" "session.make"
   assert_no_log "no dictation mic started" "audio.start"
   assert_no_log "no dictation activity requested" "activity.request phase="

@@ -19,7 +19,7 @@ public struct MeetingPostPass: Sendable {
     }
 
     public func run(meetingID: UUID) async throws {
-        guard var meeting = try await store.meeting(id: meetingID) else { return }
+        guard try await store.meeting(id: meetingID) != nil else { return }
         var segments = try await store.segments(for: meetingID)
         _ = try await store.saveLiveSegmentsOnce(segments, for: meetingID)
 
@@ -33,8 +33,9 @@ public struct MeetingPostPass: Sendable {
 
         let ordered = MeetingStore.ordered(EchoDeduper.mark(segments))
         try await store.replaceSegments(ordered, for: meetingID)
-        meeting.postPassID = transcriber.id
-        try await store.update(meeting)
+        // Only this field: the meeting may have been renamed while the post-pass ran.
+        let postPassID = transcriber.id
+        try await store.update(id: meetingID) { $0.postPassID = postPassID }
     }
 
     private func transcribe(_ stream: TranscriptEvent.Stream, duration: TimeInterval) async throws -> [MeetingSegment] {

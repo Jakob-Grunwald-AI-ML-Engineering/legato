@@ -75,7 +75,7 @@ final class FirstBufferProbe: Sendable {
 }
 
 /// Microphone `AudioSource`. The engine runs for a whole lease; runs attach and detach streams.
-public final class MicSource: AudioSource {
+public final class MicSource: ResumableAudioSource {
     private struct State {
         var engine: EngineBox?
         /// Bumped by every start and stop, so a restart that lost the race to either drops its engine.
@@ -127,6 +127,11 @@ public final class MicSource: AudioSource {
     private let onAttempt: (@Sendable (Attempt) -> Void)?
     private let onFirstBuffer: (@Sendable (FirstBuffer) -> Void)?
     private let voiceProcessing: Bool
+    private let resumeSink: AsyncStream<Void>.Continuation
+
+    /// Yields each time the engine was rebuilt after a device or format change (macOS), so a meeting can
+    /// fill the time the mic did not deliver. A rebuild that fails ends the chunk stream instead.
+    public let resumptions: AsyncStream<Void>
 
     /// - Parameters:
     ///   - voiceProcessing: macOS only; ignored on iOS. Turns on Apple's voice processing (echo
@@ -143,6 +148,7 @@ public final class MicSource: AudioSource {
         self.onAttempt = onAttempt
         self.onFirstBuffer = onFirstBuffer
         self.voiceProcessing = voiceProcessing
+        (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
     }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
@@ -276,6 +282,7 @@ public final class MicSource: AudioSource {
         }
         if kept {
             installConfigurationObserver(for: fresh)
+            resumeSink.yield()
         } else {
             fresh.engine.inputNode.removeTap(onBus: 0)
             fresh.engine.stop()

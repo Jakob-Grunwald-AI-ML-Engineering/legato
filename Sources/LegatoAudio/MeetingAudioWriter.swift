@@ -15,6 +15,14 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
         case noRecording(TranscriptEvent.Stream)
     }
 
+    /// What converting the leftover CAFs to m4a achieved, per stream.
+    public struct ConversionReport: Sendable, Equatable {
+        /// Streams now available as m4a.
+        public var converted: [TranscriptEvent.Stream] = []
+        /// Streams that could not be converted, with why; their CAF is kept.
+        public var failed: [TranscriptEvent.Stream: String] = [:]
+    }
+
     public static let recordingSpec = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
     private static let allStreams: [TranscriptEvent.Stream] = [.mic, .system]
 
@@ -65,32 +73,30 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
     // MARK: Conversion
 
     /// Converts each stream's CAF in this folder to m4a, removing the CAF once the m4a reads back.
-    /// Returns the streams converted.
+    /// A stream that fails keeps its CAF and is listed in the report, whatever the other streams did.
     @discardableResult
-    public func finalize() throws -> [TranscriptEvent.Stream] {
+    public func finalize() -> ConversionReport {
         finish()
-        return try Self.convertLeftovers(in: folder)
+        return Self.convertLeftovers(in: folder)
     }
 
-    /// Converts CAFs left in `folder` (after a crash) to m4a. Returns the streams converted.
+    /// Converts CAFs left in `folder` (after a crash) to m4a.
     @discardableResult
-    public static func recover(folder: URL) throws -> [TranscriptEvent.Stream] {
-        try convertLeftovers(in: folder)
+    public static func recover(folder: URL) -> ConversionReport {
+        convertLeftovers(in: folder)
     }
 
-    private static func convertLeftovers(in folder: URL) throws -> [TranscriptEvent.Stream] {
-        var done: [TranscriptEvent.Stream] = []
-        var firstError: Error?
+    private static func convertLeftovers(in folder: URL) -> ConversionReport {
+        var report = ConversionReport()
         for stream in allStreams where FileManager.default.fileExists(atPath: cafURL(folder, stream).path) {
             do {
                 try convert(caf: cafURL(folder, stream), to: m4aURL(folder, stream))
-                done.append(stream)
+                report.converted.append(stream)
             } catch {
-                firstError = firstError ?? error
+                report.failed[stream] = "\(error)"
             }
         }
-        if let firstError, done.isEmpty { throw firstError }
-        return done
+        return report
     }
 
     private static func convert(caf: URL, to m4a: URL) throws {
@@ -121,6 +127,7 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
             try? FileManager.default.removeItem(at: m4a)
             throw error
         }
+        PrivateFiles.protect(fileAt: m4a)
         // Verify before deleting the CAF: the m4a must open and be about as long as the source.
         let check = try AVAudioFile(forReading: m4a)
         guard check.length > 0 || expected == 0, abs(check.length - expected) <= 4_096 else {
@@ -177,7 +184,7 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
 
     private func openForWriting(_ stream: TranscriptEvent.Stream) throws -> AVAudioFile {
         if let f = files[stream] { return f }
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try PrivateFiles.createDirectory(folder)
         let url = Self.cafURL(folder, stream)
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
@@ -190,6 +197,7 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
         // A new writer on an existing folder truncates its CAFs: one writer per meeting run.
         let file = try AVAudioFile(forWriting: url, settings: settings,
                                    commonFormat: .pcmFormatFloat32, interleaved: false)
+        PrivateFiles.protect(fileAt: url)
         files[stream] = file
         return file
     }

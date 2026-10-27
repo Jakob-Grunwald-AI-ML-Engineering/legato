@@ -37,7 +37,6 @@ struct MeetingSettingsView: View {
 
             Section {
                 SecureField("Claude API key", text: $keyDraft)
-                    .textContentType(.password)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button("Save key") { saveKey() }.disabled(keyDraft.isEmpty)

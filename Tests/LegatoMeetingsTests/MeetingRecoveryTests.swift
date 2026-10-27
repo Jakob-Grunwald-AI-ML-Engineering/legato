@@ -57,4 +57,19 @@ import LegatoCore
         _ = try await MeetingRecovery.run(store: store)
         #expect(try await MeetingRecovery.run(store: store).isEmpty)
     }
+
+    @Test func aMeetingOwnedByALiveSessionIsNotRecovered() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let live = meeting(.recording), crashed = meeting(.recording)
+        try await store.create(live)
+        try await store.create(crashed)
+
+        let queued = try await MeetingRecovery.run(store: store, excluding: [live.id])
+
+        #expect(queued == [crashed.id])
+        #expect(try await store.meeting(id: live.id)?.state == .recording)
+        #expect(try await store.meeting(id: crashed.id)?.state == .interrupted)
+    }
 }

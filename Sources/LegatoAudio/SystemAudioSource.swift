@@ -34,7 +34,7 @@ public enum SystemAudioSourceError: Error, Sendable, Equatable {
 /// The tap is rebuilt when the default output device changes, and when `TapWatchdog` sees only zeros
 /// while another process plays. The first needs no permission; the first start of a tap triggers the
 /// System Audio Recording prompt. Not covered by unit tests (real hardware); the app self-test does.
-public final class SystemAudioSource: AudioSource {
+public final class SystemAudioSource: ResumableAudioSource {
     private struct Handles {
         var tap = AudioObjectID(kAudioObjectUnknown)
         var aggregate = AudioObjectID(kAudioObjectUnknown)
@@ -76,7 +76,11 @@ public final class SystemAudioSource: AudioSource {
     /// Status changes, for the app to show. One consumer.
     public let statuses: AsyncStream<SystemAudioStatus>
 
+    /// Yields each time the tap was rebuilt and delivers again, so a meeting can fill the time it was away.
+    public let resumptions: AsyncStream<Void>
+
     private let statusSink: AsyncStream<SystemAudioStatus>.Continuation
+    private let resumeSink: AsyncStream<Void>.Continuation
     private let state = Mutex(State())
     private let router = TapRouter()
     private let watch = Watch()
@@ -85,6 +89,7 @@ public final class SystemAudioSource: AudioSource {
 
     public init() {
         (statuses, statusSink) = AsyncStream.makeStream(of: SystemAudioStatus.self)
+        (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
     }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
@@ -238,7 +243,12 @@ public final class SystemAudioSource: AudioSource {
             s.rebuilding = false
             return s.generation != generation || !s.armed
         }
-        if stale { tearDownTap() } else { statusSink.yield(failure) }
+        if stale {
+            tearDownTap()
+        } else {
+            statusSink.yield(failure)
+            if failure == .running { resumeSink.yield() }
+        }
     }
 
     private func handle(_ action: TapWatchdog.Action) {

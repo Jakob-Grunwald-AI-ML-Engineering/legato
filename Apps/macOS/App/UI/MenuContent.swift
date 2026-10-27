@@ -66,7 +66,7 @@ struct MenuContent: View {
             }
             if meetings.phase == .recording {
                 Toggle("Mute my mic", isOn: Binding(
-                    get: { meetings.manualMute }, set: { _ in meetings.toggleManualMute() }))
+                    get: { meetings.isMuted }, set: { _ in meetings.toggleManualMute() }))
                     .toggleStyle(.switch)
                     .controlSize(.small)
                 if meetings.autoMute {

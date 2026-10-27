@@ -140,8 +140,8 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
             return isChunk(call) ? "c\(i)" : "m\(i)"
         }
         let result = try await MeetingSummarizer(backend: backend).summarize(segments: segments)
-        #expect(result.contains("m") || result.contains("c"))
-        #expect(result.localizedCaseInsensitiveContains("skipped"))
+        // The note says what was left out and why, once, for the one chunk the model declined.
+        #expect(result.contains("> Note: 1 part of the transcript was skipped because the model declined to summarize it."))
         #expect(!backend.all.filter { !isChunk($0) }.contains { $0.prompt.contains("s3 ") })
     }
 

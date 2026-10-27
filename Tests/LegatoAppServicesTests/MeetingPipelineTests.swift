@@ -16,16 +16,30 @@ private final class Log: Sendable {
 private final class FakeAudio: MeetingAudioFinalizing {
     let log: Log
     let failFinalize: Mutex<Int>
-    init(log: Log, failFinalizeTimes: Int = 0) { self.log = log; failFinalize = Mutex(failFinalizeTimes) }
+    /// Streams `finalizeAudio` reports as not converted.
+    let unconvertible: [TranscriptEvent.Stream]
+    /// Runs inside `finalizeAudio`, e.g. to edit the meeting while the chain is working.
+    let onFinalize: @Sendable () async -> Void
+    init(
+        log: Log, failFinalizeTimes: Int = 0, unconvertible: [TranscriptEvent.Stream] = [],
+        onFinalize: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.log = log
+        failFinalize = Mutex(failFinalizeTimes)
+        self.unconvertible = unconvertible
+        self.onFinalize = onFinalize
+    }
 
     func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval { 20 }
     func samples(of stream: TranscriptEvent.Stream, in range: Range<TimeInterval>) async throws -> [Float] {
         [Float](repeating: 0.5, count: Int((range.upperBound - range.lowerBound) * 16_000))
     }
-    func finalizeAudio() async throws {
+    func finalizeAudio() async throws -> [TranscriptEvent.Stream] {
         let fail = failFinalize.withLock { n -> Bool in if n > 0 { n -= 1; return true }; return false }
         if fail { throw CancellationError() }
+        await onFinalize()
         log.add("m4a")
+        return unconvertible
     }
 }
 
@@ -60,9 +74,9 @@ private struct Rig {
     let audio: FakeAudio
     let id = UUID()
 
-    init(failFinalizeTimes: Int = 0) {
+    init(failFinalizeTimes: Int = 0, unconvertible: [TranscriptEvent.Stream] = [], onFinalize: @escaping @Sendable () async -> Void = {}) {
         llm = FakeLLM(log: log)
-        audio = FakeAudio(log: log, failFinalizeTimes: failFinalizeTimes)
+        audio = FakeAudio(log: log, failFinalizeTimes: failFinalizeTimes, unconvertible: unconvertible, onFinalize: onFinalize)
     }
 
     func seed(state: Meeting.State = .processing, steps: Set<Meeting.Step> = []) async throws {
@@ -80,7 +94,8 @@ private struct Rig {
             transcriber: { transcriber ? batch : nil },
             backend: { backend ? llm : nil },
             prompt: { prompt },
-            releaseModels: { log.add("release") })
+            releaseModels: { log.add("release") },
+            releasePostPassModels: { log.add("release-post-pass") })
     }
 
     func meeting() async throws -> Meeting { try #require(try await store.meeting(id: id)) }
@@ -204,7 +219,7 @@ private struct Rig {
         }
         let pipeline = MeetingPipeline(
             store: rig.store, audio: { _ in audio }, transcriber: { Broken() }, backend: { llm }, prompt: { "" },
-            releaseModels: { log.add("release") })
+            releaseModels: { log.add("release") }, releasePostPassModels: { log.add("release-post-pass") })
         let outcome = try await pipeline.run(meetingID: rig.id)
         let meeting = try await rig.meeting()
         #expect(meeting.state == .finished)
@@ -247,5 +262,71 @@ private struct Rig {
         #expect(url.lastPathComponent == "summary-claude.md")
         #expect(try await rig.store.summaries(for: rig.id).map(\.backendID) == ["claude"])
         #expect(try await rig.meeting().state == .finished)
+    }
+
+    @Test func theLiveEngineIsReleasedBeforeThePostPassAndTheBatchModelBeforeTheSummary() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        _ = try await rig.pipeline().run(meetingID: rig.id)
+        let order = rig.log.all
+        #expect(order.firstIndex(of: "release")! < order.firstIndex(of: "post-pass")!)
+        #expect(order.lastIndex(of: "post-pass")! < order.firstIndex(of: "release-post-pass")!)
+        #expect(order.firstIndex(of: "release-post-pass")! < order.firstIndex(of: "summary")!)
+        #expect(rig.log.count("release-post-pass") == 1)
+    }
+
+    @Test func theBatchModelIsReleasedEvenWhenThePostPassFails() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let log = rig.log, audio = rig.audio, llm = rig.llm
+        struct Broken: BatchTranscriber {
+            let id = "broken"
+            func transcribe(samples: [Float], stream: TranscriptEvent.Stream) async throws -> [TranscriptEvent] {
+                throw DictationError.assetsNotInstalled
+            }
+        }
+        let pipeline = MeetingPipeline(
+            store: rig.store, audio: { _ in audio }, transcriber: { Broken() }, backend: { llm }, prompt: { "" },
+            releaseModels: { log.add("release") }, releasePostPassModels: { log.add("release-post-pass") })
+        _ = try await pipeline.run(meetingID: rig.id)
+        #expect(log.all.firstIndex(of: "release-post-pass")! < log.all.firstIndex(of: "summary")!)
+    }
+
+    @Test func noPostPassMeansNothingToRelease() async throws {
+        let rig = Rig()
+        try await rig.seed(steps: [.postPass])
+        _ = try await rig.pipeline().run(meetingID: rig.id)
+        #expect(rig.log.count("release-post-pass") == 0)
+    }
+
+    @Test func aStreamThatCouldNotBeConvertedLeavesAudioUnfinishedWithANote() async throws {
+        let rig = Rig(unconvertible: [.system])
+        try await rig.seed()
+        let outcome = try await rig.pipeline().run(meetingID: rig.id)
+        let meeting = try await rig.meeting()
+        #expect(!meeting.completedSteps.contains(.audio))
+        #expect(meeting.completedSteps.contains(.summary))
+        #expect(outcome.notes.contains { $0.contains("system") && $0.localizedCaseInsensitiveContains("audio") })
+    }
+
+    @Test func aRenameWhileTheChainRunsSurvivesEveryStep() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appending(path: "legato-pipeline-\(UUID().uuidString)"))
+        let id = UUID()
+        let rig = Rig(onFinalize: {
+            _ = try? await store.update(id: id) { $0.title = "Renamed mid-chain" }
+        })
+        // Rig's own store is a fresh one; build the pipeline over the shared store instead.
+        try await store.create(Meeting(id: id, title: "Sync", date: Date(), duration: 20, engineID: "live", state: .processing))
+        try await store.appendSegment(MeetingSegment(stream: .mic, text: "live mine", start: 0, end: 4), to: id)
+        let log = rig.log, audio = rig.audio, llm = rig.llm
+        let batch = FakeTranscriber(log: log)
+        let pipeline = MeetingPipeline(
+            store: store, audio: { _ in audio }, transcriber: { batch }, backend: { llm }, prompt: { "" },
+            releaseModels: {}, releasePostPassModels: {})
+        _ = try await pipeline.run(meetingID: id)
+        let saved = try #require(try await store.meeting(id: id))
+        #expect(saved.title == "Renamed mid-chain")
+        #expect(saved.state == .finished)
+        #expect(saved.completedSteps == [.postPass, .audio, .summary])
     }
 }

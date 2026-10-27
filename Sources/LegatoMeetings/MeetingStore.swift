@@ -15,6 +15,7 @@ import LegatoCore
 public actor MeetingStore {
     public let root: URL
     private var segmentFiles: [URL: JSONLFile<MeetingSegment>] = [:]
+    private var rootIsPrivate = false
 
     public init(root: URL) { self.root = root }
 
@@ -25,10 +26,31 @@ public actor MeetingStore {
     public func liveSegmentsURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("segments.live.jsonl") }
     private func meetingURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("meeting.json") }
 
+    /// Creates (if needed) the folder of a meeting, private like the root, and returns it. A recording
+    /// holds what people said, so the folders are `0700` on the Mac and protected until first unlock on iOS.
+    @discardableResult
+    public func createFolder(for id: UUID) throws -> URL {
+        try ensurePrivateRoot()
+        let folder = folder(for: id)
+        try PrivateFiles.createDirectory(folder)
+        return folder
+    }
+
     // MARK: Meetings
 
     public func create(_ meeting: Meeting) throws { try write(meeting) }
     public func update(_ meeting: Meeting) throws { try write(meeting) }
+
+    /// Re-reads the meeting, applies `transform` and writes it back, all without a suspension point, so
+    /// writers that each own a few fields (the session, the post-pass, the pipeline, a rename) never
+    /// overwrite one another with a stale copy. Returns the saved meeting, nil when it does not exist.
+    @discardableResult
+    public func update(id: UUID, _ transform: @Sendable (inout Meeting) -> Void) throws -> Meeting? {
+        guard var current = try meeting(id: id) else { return nil }
+        transform(&current)
+        try write(current)
+        return current
+    }
 
     public func meeting(id: UUID) throws -> Meeting? {
         let url = meetingURL(for: id)
@@ -97,8 +119,8 @@ public actor MeetingStore {
 
     /// Writes `text` as the backend's summary of the meeting, replacing that backend's earlier one.
     public func saveSummary(_ text: String, backendID: String, for id: UUID) throws {
-        try FileManager.default.createDirectory(at: folder(for: id), withIntermediateDirectories: true)
-        try Data(text.utf8).write(to: summaryURL(for: id, backendID: backendID), options: .atomic)
+        try createFolder(for: id)
+        try PrivateFiles.write(Data(text.utf8), to: summaryURL(for: id, backendID: backendID))
     }
 
     /// Every summary of the meeting, newest first.
@@ -123,6 +145,12 @@ public actor MeetingStore {
 
     // MARK: Internals
 
+    private func ensurePrivateRoot() throws {
+        guard !rootIsPrivate else { return }
+        try PrivateFiles.createDirectory(root)
+        rootIsPrivate = true
+    }
+
     private func file(_ url: URL) -> JSONLFile<MeetingSegment> {
         if let existing = segmentFiles[url] { return existing }
         let created = JSONLFile<MeetingSegment>(fileURL: url)
@@ -131,8 +159,8 @@ public actor MeetingStore {
     }
 
     private func write(_ meeting: Meeting) throws {
-        try FileManager.default.createDirectory(at: folder(for: meeting.id), withIntermediateDirectories: true)
-        try Self.makeEncoder().encode(meeting).write(to: meetingURL(for: meeting.id), options: .atomic)
+        try createFolder(for: meeting.id)
+        try PrivateFiles.write(try Self.makeEncoder().encode(meeting), to: meetingURL(for: meeting.id))
     }
 
     private static func makeEncoder() -> JSONEncoder {

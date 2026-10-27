@@ -93,7 +93,7 @@ targets:
         NSSupportsLiveActivities: true
         # Only Apple's own encryption (TLS, system frameworks): exempt, so App Store Connect stops asking.
         ITSAppUsesNonExemptEncryption: false
-        NSMicrophoneUsageDescription: Legato records your voice to turn it into text.
+        NSMicrophoneUsageDescription: Legato records your voice to turn it into text. For meeting notes it also saves the meeting audio on this device.
         NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this device.
         CFBundleURLTypes:
           - CFBundleURLName: de.gruenwald.legato

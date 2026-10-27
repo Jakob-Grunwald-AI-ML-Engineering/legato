@@ -63,8 +63,10 @@ final class MacAppController {
     @ObservationIgnored let meetings: MeetingController
     /// Matches the meeting mute hotkey; rebuilt when the hotkey changes.
     @ObservationIgnored private var muteDetector: HotkeyPressDetector?
+    #if DEBUG
     /// Kept alive for the `--meeting-selftest` run.
     @ObservationIgnored private var selfTestController: MeetingController?
+    #endif
     /// What the last cleanup (or refine) did.
     let cleanupReports: CleanupReports
     /// The live engine (resolved from the pick); `session` is rebuilt with it before the next run.
@@ -238,16 +240,19 @@ final class MacAppController {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        #if DEBUG
         if let selfTest = Self.meetingSelfTestArguments() {
             runMeetingSelfTest(selfTest)
             return
         }
+        #endif
         Task { [weak self] in
+            // First, before a meeting can start: a recording meeting found later could be a live one.
+            await self?.meetings.recoverAtLaunch()
             await self?.refreshRecent()
             await self?.refreshEngine() // also checks Apple Speech's assets when it is the live engine
             self?.pollSystem()
             if self?.needsSetup == true { self?.requestOnboarding() }
-            await self?.meetings.recoverAtLaunch()
         }
     }
 
@@ -478,7 +483,7 @@ final class MacAppController {
         if muteDetector?.spec != spec { muteDetector = HotkeyPressDetector(spec: spec) }
         guard muteDetector?.feed(event) == true, meetings.phase == .recording else { return }
         meetings.toggleManualMute()
-        hud.show(toast: meetings.manualMute ? "Muted in the meeting." : "Unmuted.")
+        hud.show(toast: meetings.isMuted ? "Muted in the meeting." : "Unmuted.")
     }
 
     private func dispatch(_ action: HotkeyGesture.Action?) {
@@ -732,14 +737,16 @@ final class MacAppController {
         }
     }
 
+    #if DEBUG
     // MARK: Meeting self-test
 
     private struct SelfTestArguments {
         var seconds: Double
         var out: URL
+        var includeText: Bool
     }
 
-    /// `--meeting-selftest <seconds> [--meeting-selftest-out=<json path>]`.
+    /// `--meeting-selftest <seconds> [--meeting-selftest-out=<json path>] [--meeting-selftest-text]`.
     private static func meetingSelfTestArguments() -> SelfTestArguments? {
         let args = CommandLine.arguments
         guard let index = args.firstIndex(of: "--meeting-selftest") else { return nil }
@@ -747,7 +754,7 @@ final class MacAppController {
         let out = args.first { $0.hasPrefix("--meeting-selftest-out=") }
             .map { URL(fileURLWithPath: String($0.dropFirst("--meeting-selftest-out=".count))) }
             ?? URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "legato-meeting-selftest/selftest.json")
-        return SelfTestArguments(seconds: seconds, out: out)
+        return SelfTestArguments(seconds: seconds, out: out, includeText: args.contains("--meeting-selftest-text"))
     }
 
     /// A throwaway meeting against its own store next to the JSON, so the user's meetings stay untouched.
@@ -755,6 +762,7 @@ final class MacAppController {
         let root = arguments.out.deletingLastPathComponent().appending(path: "store", directoryHint: .isDirectory)
         let tester = MeetingController(models: models, root: root)
         selfTestController = tester
-        Task { await tester.runSelfTest(seconds: arguments.seconds, out: arguments.out) }
+        Task { await tester.runSelfTest(seconds: arguments.seconds, out: arguments.out, includeText: arguments.includeText) }
     }
+    #endif
 }

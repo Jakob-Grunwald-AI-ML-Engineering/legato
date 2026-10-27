@@ -122,4 +122,12 @@ public struct HostState: Codable, Sendable, Equatable {
     public func isLive(now: Date) -> Bool {
         phase == .idle || now.timeIntervalSince(beatAt) < LinkChannel.beatFreshness
     }
+
+    /// What the keyboard says while the app records a meeting and dictation is blocked, instead of offering
+    /// to dictate. Believed only while the app keeps beating: an app that died mid-meeting leaves the flag
+    /// behind. The words are `AudioPolicy.dictationNotice` in LegatoCore, which this module cannot import.
+    public func meetingNotice(now: Date) -> String? {
+        guard meetingRecording == true, now.timeIntervalSince(beatAt) < LinkChannel.beatFreshness else { return nil }
+        return "Meeting recording"
+    }
 }

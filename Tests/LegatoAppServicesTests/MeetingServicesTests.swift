@@ -90,6 +90,19 @@ private struct Rig {
         #expect(!sameInstance(engines.mic, engines.system), "one instance per stream")
     }
 
+    @Test func enginesPrepareForTheSingleChosenLanguageElseNone() async throws {
+        let rig = Rig()
+        try await rig.pick(nemotron)
+        #expect(await rig.services().engines(for: .macOS).locale == nil)
+
+        rig.models.engineSettings.preferredLocales = [Locale(identifier: "de-DE")]
+        #expect(await rig.services().engines(for: .macOS).locale == Locale(identifier: "de-DE"))
+        #expect(await rig.services().engines(for: .iOS).locale == Locale(identifier: "de-DE"))
+
+        rig.models.engineSettings.preferredLocales = [Locale(identifier: "de-DE"), Locale(identifier: "en-US")]
+        #expect(await rig.services().engines(for: .macOS).locale == nil)
+    }
+
     @Test func iOSKeepsEOUOnItsOneStream() async throws {
         let rig = Rig()
         try await rig.pick(parakeetEOU)
