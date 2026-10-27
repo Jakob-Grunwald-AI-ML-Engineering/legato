@@ -60,16 +60,20 @@ struct VocabularyRig {
         .appending(path: "legato-vocab-\(UUID().uuidString)", directoryHint: .isDirectory)
         .appending(path: "vocabulary.json")
     let service: VocabularyService
+    /// Where the dictated word pairs live when the rig was built `withPairs`; the keyboard's file sits beside it.
+    var pairsURL: URL { url.deletingLastPathComponent().appending(path: "wordpairs-dictated.json") }
+    var typedPairsURL: URL { url.deletingLastPathComponent().appending(path: VocabularyService.typedPairsFileName) }
 
     init(
         spellChecker: (any SpellChecking)? = nil, spans: [EntitySpan] = [],
         known: Set<String> = ["we", "met", "with", "today", "ask", "about", "it", "this", "is", "at", "the"],
-        languages: @escaping @Sendable () -> [String] = { ["de", "en"] }
+        languages: @escaping @Sendable () -> [String] = { ["de", "en"] }, withPairs: Bool = false
     ) {
         service = VocabularyService(
             fileURL: url, languages: languages,
             spellChecker: spellChecker ?? FakeSpellChecker(known: ["de": known, "en": known]),
-            tagger: FakeTagger(spans: spans), now: { Date(timeIntervalSince1970: 1_700_000_000) })
+            tagger: FakeTagger(spans: spans), now: { Date(timeIntervalSince1970: 1_700_000_000) },
+            pairsFileURL: withPairs ? url.deletingLastPathComponent().appending(path: "wordpairs-dictated.json") : nil)
     }
 
     func cleanUp() { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

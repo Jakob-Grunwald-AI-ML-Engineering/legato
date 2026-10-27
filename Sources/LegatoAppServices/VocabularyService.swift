@@ -25,7 +25,15 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     /// Hints per engine (decision: 50 terms each).
     public static let engineHintLimit = 50
 
+    /// How many of the newest history entries the dictated word-pair model is built from (backfill, rebuild).
+    public static let pairHistoryLimit = 500
+    /// The keyboard's own pair file, next to the dictated one; wiped with it.
+    public static let typedPairsFileName = "wordpairs-typed.json"
+
     public let store: VocabularyStore
+    /// The dictated word-pair model (`wordpairs-dictated.json`); nil where nothing predicts (the Mac).
+    public let pairs: WordPairStore?
+    private let pairsFileURL: URL?
     private let languages: @Sendable () -> [String]
     private let spellChecker: any SpellChecking
     private let tagger: any EntityTagging
@@ -44,12 +52,16 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     ///   - fileURL: where `vocabulary.json` lives.
     ///   - languages: the configured language codes ("de", "en"), read on every use; a word is common when
     ///     any of them knows it.
+    ///   - pairsFileURL: where `wordpairs-dictated.json` lives; nil (the default) learns no word pairs. The
+    ///     backfill marker and the keyboard's `wordpairs-typed.json` sit in the same directory.
     public init(
         fileURL: URL, languages: @escaping @Sendable () -> [String], spellChecker: any SpellChecking = PlatformSpellChecker(),
         tagger: any EntityTagging = NLEntityTagger(), halfLife: TimeInterval = Decay.defaultHalfLife,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() }, pairsFileURL: URL? = nil
     ) {
         store = VocabularyStore(fileURL: fileURL)
+        self.pairsFileURL = pairsFileURL
+        pairs = pairsFileURL.map { WordPairStore(fileURL: $0, languages: languages()) }
         self.languages = languages
         self.spellChecker = spellChecker
         self.tagger = tagger
@@ -102,8 +114,50 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     // MARK: learning
 
     /// Learns from the final text of dictation `id`. Returns at once.
+    /// The dictated word pairs learn from the same final text.
     public func learnFromDictation(text: String, locale: Locale, id: UUID) {
-        spawn { [self] in await learner.observe(text: text, locale: locale, dictationID: id) }
+        spawn { [self] in
+            await learner.observe(text: text, locale: locale, dictationID: id)
+            try? await pairs?.observe(text: text, now: now())
+        }
+    }
+
+    /// Learns from a tapped alternative in the keyboard (see ``VocabularyLearner/recordChoice(original:chosen:fromVocabulary:)``).
+    /// Returns at once.
+    public func recordChoice(original: String, chosen: String, fromVocabulary: Bool) {
+        spawn { [self] in await learner.recordChoice(original: original, chosen: chosen, fromVocabulary: fromVocabulary) }
+    }
+
+    /// Builds the dictated pair model from the newest history entries, once: a marker file next to the pairs
+    /// file stops a repeat. Returns at once; a no-op without a pair store.
+    public func backfillPairsIfNeeded(history: any HistoryStore) {
+        guard let pairs, let marker = backfillMarker else { return }
+        spawn { [self] in
+            guard !FileManager.default.fileExists(atPath: marker.path) else { return }
+            guard await rebuildPairs(pairs, from: history) else { return }
+            try? Data().write(to: marker, options: .atomic)
+        }
+    }
+
+    /// Forgets the dictated word pairs and removes the keyboard's typed ones (history was cleared). Returns at
+    /// once; runs after every learning task started before it.
+    public func wipeWordPairs() {
+        guard let pairsFileURL else { return }
+        let typed = pairsFileURL.deletingLastPathComponent().appending(path: Self.typedPairsFileName)
+        spawn { [pairs] in
+            try? await pairs?.wipe()
+            try? FileManager.default.removeItem(at: typed)
+        }
+    }
+
+    private var backfillMarker: URL? {
+        pairsFileURL.map { $0.deletingPathExtension().appendingPathExtension("backfilled") }
+    }
+
+    /// Replaces the model with the pairs of `history`'s newest entries; false when history can't be read.
+    private func rebuildPairs(_ pairs: WordPairStore, from history: any HistoryStore) async -> Bool {
+        guard let recent = try? await history.recent(limit: Self.pairHistoryLimit) else { return false }
+        return (try? await pairs.rebuild(from: recent.reversed().map(\.text), now: now())) != nil
     }
 
     /// Learns from what cleanup run `runID` changed. Returns at once. `suggested`: the terms the model was
@@ -124,8 +178,14 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
 
     /// Takes dictation `id` back out of what it taught (the user deleted or cancelled it): see
     /// ``VocabularySnapshot/forget(_:)``. Returns at once; it runs after every learning task started before it.
-    public func forget(dictationID id: UUID) {
-        spawn { [store] in try? await store.forget(id: id) }
+    ///
+    /// With `history` (already without the dictation), the dictated pair model is rebuilt from its newest
+    /// entries: it is derived data and can't be taken apart per dictation.
+    public func forget(dictationID id: UUID, remainingHistory history: (any HistoryStore)? = nil) {
+        spawn { [self] in
+            try? await store.forget(id: id)
+            if let history, let pairs { _ = await rebuildPairs(pairs, from: history) }
+        }
     }
 
     static func learningStyle(_ style: CleanupStyle) -> CleanupLearningStyle {
