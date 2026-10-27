@@ -61,6 +61,13 @@ struct CleanupSettingsView: View {
                     : "Message: also drops fillers and false starts and applies corrections like \"Friday, no wait, Thursday\". The keyboard's Refine key always uses Message.")
             }
 
+            #if ANE_CLEANUP_SPIKE
+            Section("Backend") {
+                LabeledContent("Cleanup", value: "ANEMLL Qwen3-1.7B")
+                Text("CPU + Neural Engine requested. Weights stay loaded; microphone readiness follows Keep ready. Physical ANE placement remains unverified.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            #else
             Section {
                 backendRow("Auto", detail: "Your MLX model when one is picked, else Apple Foundation Models", choice: .auto)
                 backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence)", choice: .foundationModels)
@@ -91,6 +98,8 @@ struct CleanupSettingsView: View {
             } footer: {
                 Text(Self.explain(background))
             }
+
+            #endif
 
             Section {
                 Toggle("Number normalization (ITN)", isOn: $itn)

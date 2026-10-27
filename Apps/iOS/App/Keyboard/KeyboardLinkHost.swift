@@ -19,9 +19,12 @@ final class KeyboardLinkHost: TranscriptSink {
     /// The run's text for the app's own screen (the hop view), after every update.
     var onTranscript: (@MainActor (_ committed: String, _ volatile: String) -> Void)?
     /// A run began (true) or ended (false).
+    var onRunStarted: (@MainActor (String) -> Void)?
     var onRunActivity: (@MainActor (Bool) -> Void)?
     /// The mic lease between runs: when it ends, or nil when it is not held.
     var onLease: (@MainActor (Date?) -> Void)?
+    /// Optional operational evidence: no transcript leaves this callback.
+    var onDelivery: (@MainActor (_ runID: String, _ confirmed: Bool) -> Void)?
     /// How a run that starts now delivers its cleaned text (nil with cleanup off); asked once per run.
     var deliveryForRun: @MainActor () -> HostDelivery? = { nil }
 
@@ -105,6 +108,7 @@ final class KeyboardLinkHost: TranscriptSink {
     // MARK: TranscriptSink
 
     func runStarted(_ run: DictationRun) {
+        onRunStarted?(run.id.uuidString)
         // Cleanup delivery is about the keyboard's field: a run for the app's own screen or the activity's
         // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
         runDelivery = run.target == .keyboard ? deliveryForRun() : nil
@@ -160,9 +164,11 @@ final class KeyboardLinkHost: TranscriptSink {
             #if LEGATO_INTERNAL
             trace.runEnded(applied: nil, confirmed: false)
             #endif
+            onDelivery?(run.id.uuidString, false)
             return false
         }
         let applied = await link.awaitFinalApplied(runID: run.id.uuidString, timeout: Self.appliedTimeout)
+        onDelivery?(run.id.uuidString, applied)
         #if LEGATO_INTERNAL
         trace.runEnded(applied: link.appliedCursor(), confirmed: applied)
         #endif

@@ -87,6 +87,8 @@ public struct StartContext: Sendable, Equatable {
 public enum ForegroundReason: String, Sendable, Equatable {
     /// A background start was tried and the system refused it.
     case backgroundStartRefused
+    /// The cleanup model must be prepared before recording starts.
+    case modelPreparationRequired
 }
 
 /// The system facts behind the foreground/background routing of a start. Keeps AVFoundation out of the core.

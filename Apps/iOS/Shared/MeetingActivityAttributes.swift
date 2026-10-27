@@ -1,3 +1,6 @@
+#if APP_TARGET
+import LegatoKeyboardCore
+#endif
 import ActivityKit
 import Foundation
 
@@ -21,5 +24,5 @@ struct MeetingActivityAttributes: ActivityAttributes {
     }
 
     /// Tapping the activity opens the Meetings screen.
-    static let openURL = URL(string: "legato://meetings")!
+    static let openURL = URL(string: "\(RuntimeIdentity.current.urlScheme)://meetings")!
 }

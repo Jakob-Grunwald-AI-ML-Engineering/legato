@@ -6,13 +6,14 @@ import LegatoCore
 import Synchronization
 
 /// Serial ownership extends through actual worker settlement, including cancellation and cold loading.
-public actor ANEMLLBackend: LLMBackend {
+public actor ANEMLLBackend: ParityRuntime {
     public nonisolated let id = "anemll-coreml"
     public nonisolated let maxPromptCharacters: Int? = nil
     public nonisolated let folder: URL
     public nonisolated let family: PromptFamily
     public nonisolated let lease = RunLease()
     private var runtime: Runtime?
+    private let requiresPreparation: Bool
     private var prepared: (config: YAMLConfig, tokenizer: AnemllCore.Tokenizer)?
     private let event: @Sendable (String, [String: String]) -> Void
     private var metadataDigest: String?
@@ -44,8 +45,8 @@ public actor ANEMLLBackend: LLMBackend {
         public let stopReason: String
         public let sampledPeakBytes: UInt64
     }
-    public init(folder: URL, family: PromptFamily, event: @escaping @Sendable (String, [String: String]) -> Void = { _, _ in }) {
-        self.folder = folder; self.family = family; self.event = event
+    public init(folder: URL, family: PromptFamily, requiresPreparation: Bool = false, event: @escaping @Sendable (String, [String: String]) -> Void = { _, _ in }) {
+        self.folder = folder; self.family = family; self.requiresPreparation = requiresPreparation; self.event = event
     }
     public var availability: LLMAvailability {
         FileManager.default.fileExists(atPath: folder.appending(path: "meta.yaml").path)
@@ -80,6 +81,9 @@ public actor ANEMLLBackend: LLMBackend {
         try await run(instructions: "Continue writing a long numbered list until stopped.", examples: [], prompt: "", syntheticTotal: totalInputTokens)
     }
     private func run(instructions: String, examples: [LLMExample], prompt: String, syntheticTotal: Int?) async throws -> String {
+        if requiresPreparation, runtime == nil {
+            throw LLMError.unavailable(reason: "Foreground model preparation is required")
+        }
         try lease.begin()
         metrics = nil; inputCount = nil; candidate = nil
         defer { lease.settle(); event("worker.settled", [:]) }
@@ -100,23 +104,8 @@ public actor ANEMLLBackend: LLMBackend {
             }
         }
         defer { sampling.cancel() }
-        let metadata = try Data(contentsOf: folder.appending(path: "meta.yaml"))
-        let currentDigest = SHA256.hash(data: metadata).map { String(format: "%02x", $0) }.joined()
-        if let metadataDigest, metadataDigest != currentDigest {
-            throw LLMError.failed("Checkpoint metadata changed while weights/tokenizer are cached; unload before changing artifacts")
-        }
-        metadataDigest = currentDigest
         let tokenizerLoadStart = ContinuousClock.now
-        if prepared == nil {
-            let config = try YAMLConfig.load(from: folder.appending(path: "meta.yaml").path)
-            for name in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
-                guard FileManager.default.fileExists(atPath: folder.appending(path: name).path) else {
-                    throw LLMError.unavailable(reason: "Missing \(name)")
-                }
-            }
-            let tokenizer = try await AnemllCore.Tokenizer(modelPath: folder.path, template: family.rawValue, debugLevel: 0)
-            prepared = (config, tokenizer)
-        }
+        try await prepareTokenizer()
         let tokenizerLoadMs = ms(tokenizerLoadStart)
         guard let prepared else { throw LLMError.failed("Tokenizer unavailable") }
         try lease.check()
@@ -148,28 +137,10 @@ public actor ANEMLLBackend: LLMBackend {
         // Invalid/infeasible prompts exit before any large MLModel weights or KV state are loaded.
         let modelWasLoaded = runtime != nil
         let loadStart = ContinuousClock.now
-        if runtime == nil {
-            event("model.load.begin", [:])
-            let config = prepared.config
-            let progress = ModelLoadTrace(event: event)
-            defer { withExtendedLifetime(progress) {} }
-            let loader = ModelLoader(progressDelegate: progress)
-            let models = try await withTaskCancellationHandler {
-                try await loader.loadModel(from: config, configuration: .init(computeUnits: .cpuAndNeuralEngine))
-            } onCancel: { Task { await loader.cancelLoading() } }
-            try lease.check()
-            let manager = try InferenceManager(
-                models: models, contextLength: config.contextLength, batchSize: config.batchSize,
-                splitLMHead: config.splitLMHead, debugLevel: 0, v110: config.configVersion == "0.1.1",
-                argmaxInModel: config.argmaxInModel, slidingWindow: config.slidingWindow,
-                updateMaskPrefill: config.updateMaskPrefill, prefillDynamicSlice: config.prefillDynamicSlice,
-                modelPrefix: config.modelPrefix, vocabSize: config.vocabSize, lmHeadChunkSizes: config.lmHeadChunkSizes)
-            manager.setSamplingConfig(.greedy)
-            let lease = lease
-            manager.cancellationCheck = { try lease.check() }
-            runtime = Runtime(config: config, tokenizer: prepared.tokenizer, manager: manager)
-            event("model.load.end", [:])
+        if requiresPreparation, runtime == nil {
+            throw LLMError.unavailable(reason: "Foreground model preparation is required")
         }
+        try await loadRuntime()
         let loadMs = ms(loadStart)
         guard let runtime else { throw LLMError.failed("No loaded runtime") }
         try lease.check()
@@ -209,6 +180,63 @@ public actor ANEMLLBackend: LLMBackend {
         candidate = reply
         guard result.2 == "eos_token" else { throw LLMError.failed("Output capped; cleanup is incomplete") }
         return reply
+    }
+    /// Loads weights/tokenizer only: no dummy turn, prefill, or response is generated.
+    public func prepare() async throws {
+        try lease.begin()
+        defer { lease.settle(); event("prepare.settled", [:]) }
+        let lease = lease
+        try await withTaskCancellationHandler {
+            try lease.check(); try Task.checkCancellation()
+            try await prepareTokenizer()
+            try lease.check(); try Task.checkCancellation()
+            try await loadRuntime()
+            try lease.check(); try Task.checkCancellation()
+        } onCancel: { lease.cancel() }
+    }
+    private func prepareTokenizer() async throws {
+        let metadata = try Data(contentsOf: folder.appending(path: "meta.yaml"))
+        let currentDigest = SHA256.hash(data: metadata).map { String(format: "%02x", $0) }.joined()
+        if let metadataDigest, metadataDigest != currentDigest {
+            throw LLMError.failed("Checkpoint metadata changed while weights/tokenizer are cached; unload before changing artifacts")
+        }
+        metadataDigest = currentDigest
+        if prepared == nil {
+            let config = try YAMLConfig.load(from: folder.appending(path: "meta.yaml").path)
+            for name in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
+                guard FileManager.default.fileExists(atPath: folder.appending(path: name).path) else {
+                    throw LLMError.unavailable(reason: "Missing \(name)")
+                }
+            }
+            let tokenizer = try await AnemllCore.Tokenizer(modelPath: folder.path, template: family.rawValue, debugLevel: 0)
+            prepared = (config, tokenizer)
+        }
+    }
+    private func loadRuntime() async throws {
+        try lease.check(); try Task.checkCancellation()
+        if runtime == nil {
+            event("model.load.begin", [:])
+            guard let prepared else { throw LLMError.failed("Tokenizer unavailable") }
+            let config = prepared.config
+            let progress = ModelLoadTrace(event: event)
+            defer { withExtendedLifetime(progress) {} }
+            let loader = ModelLoader(progressDelegate: progress)
+            let models = try await withTaskCancellationHandler {
+                try await loader.loadModel(from: config, configuration: .init(computeUnits: .cpuAndNeuralEngine))
+            } onCancel: { Task { await loader.cancelLoading() } }
+            try lease.check()
+            let manager = try InferenceManager(
+                models: models, contextLength: config.contextLength, batchSize: config.batchSize,
+                splitLMHead: config.splitLMHead, debugLevel: 0, v110: config.configVersion == "0.1.1",
+                argmaxInModel: config.argmaxInModel, slidingWindow: config.slidingWindow,
+                updateMaskPrefill: config.updateMaskPrefill, prefillDynamicSlice: config.prefillDynamicSlice,
+                modelPrefix: config.modelPrefix, vocabSize: config.vocabSize, lmHeadChunkSizes: config.lmHeadChunkSizes)
+            manager.setSamplingConfig(.greedy)
+            let lease = lease
+            manager.cancellationCheck = { try lease.check() }
+            runtime = Runtime(config: config, tokenizer: prepared.tokenizer, manager: manager)
+            event("model.load.end", [:])
+        }
     }
     private func ms(_ start: ContinuousClock.Instant) -> Double { Double(start.duration(to: .now) / .milliseconds(1)) }
 }

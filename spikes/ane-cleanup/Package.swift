@@ -15,7 +15,15 @@ let package = Package(
             .product(name: "LegatoAudio", package: "LegatoKit"),
             .product(name: "LegatoAppleSpeech", package: "LegatoKit"),
             .product(name: "LegatoCore", package: "LegatoKit"),
+            .product(name: "LegatoAppServices", package: "LegatoKit"),
+            .product(name: "LegatoVocabulary", package: "LegatoKit"),
             .product(name: "LegatoMLX", package: "LegatoKit"),
+            .product(name: "LegatoPostProcessing", package: "LegatoKit"),
+        ]),
+        .testTarget(name: "ANECleanupParityTests", dependencies: [
+            "ANECleanupCore",
+            .product(name: "LegatoCore", package: "LegatoKit"),
+            .product(name: "LegatoAppServices", package: "LegatoKit"),
             .product(name: "LegatoPostProcessing", package: "LegatoKit"),
         ]),
     ]

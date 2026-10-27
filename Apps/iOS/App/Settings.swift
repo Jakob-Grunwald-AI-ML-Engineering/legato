@@ -4,7 +4,7 @@ import LegatoKeyboardCore
 
 /// The App Group, shared with the widget extension and (later) the keyboard.
 enum AppGroup {
-    static let id = "group.de.gruenwald.legato"
+    static let id = LinkChannel.appGroupID
 
     static var defaults: UserDefaults { UserDefaults(suiteName: id) ?? .standard }
     static var containerURL: URL? { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id) }

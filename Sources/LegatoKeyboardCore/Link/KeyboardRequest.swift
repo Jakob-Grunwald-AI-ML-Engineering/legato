@@ -56,16 +56,16 @@ public struct KeyboardPresence: Codable, Sendable, Equatable {
 
 /// `legato://keyboard?cmd=<command>&req=<id>`: how the keyboard asks the app to be opened.
 public enum KeyboardURL {
-    public static func make(command: RequestCommand, requestID: String) -> URL {
+    public static func make(command: RequestCommand, requestID: String, identity: RuntimeIdentity = .current) -> URL {
         var parts = URLComponents()
-        parts.scheme = "legato"
+        parts.scheme = identity.urlScheme
         parts.host = "keyboard"
         parts.queryItems = [URLQueryItem(name: "cmd", value: command.rawValue), URLQueryItem(name: "req", value: requestID)]
         return parts.url!
     }
 
-    public static func parse(_ url: URL) -> (command: RequestCommand, requestID: String)? {
-        guard url.scheme == "legato", url.host == "keyboard",
+    public static func parse(_ url: URL, identity: RuntimeIdentity = .current) -> (command: RequestCommand, requestID: String)? {
+        guard url.scheme == identity.urlScheme, url.host == "keyboard",
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
               let raw = items.first(where: { $0.name == "cmd" })?.value, let command = RequestCommand(rawValue: raw),
               let id = items.first(where: { $0.name == "req" })?.value, !id.isEmpty

@@ -1,0 +1,103 @@
+name: ANECleanupFixture
+options:
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: XWSGN23W75
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: NO
+    TARGETED_DEVICE_FAMILY: "1"
+packages:
+  ANECleanupSpike:
+    path: .
+targets:
+  ANECleanupSpike:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes: [Fixtures]
+      - path: App/Fixtures
+        type: folder
+      - path: Shared
+    dependencies:
+      - target: ANESpikeKeyboard
+      - target: ANESpikeWidgets
+      - package: ANECleanupSpike
+        product: ANECleanupCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.ane-spike
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) SPIKE_APP"
+    entitlements:
+      path: Gen/App.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato.ane-spike]
+    info:
+      path: Gen/App-Info.plist
+      properties:
+        CFBundleDisplayName: ANE Cleanup Spike
+        SpikeBuildID: $(SPIKE_BUILD_ID)
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        NSSupportsLiveActivities: true
+        NSMicrophoneUsageDescription: The spike records dictation to measure cleanup after real recording.
+        NSSpeechRecognitionUsageDescription: The spike uses on-device Apple Speech for the real recording path.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        ITSAppUsesNonExemptEncryption: false
+        CFBundleURLTypes:
+          - CFBundleURLName: de.gruenwald.legato.ane-spike
+            CFBundleURLSchemes: [anecleanup39]
+  ANESpikeKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Keyboard
+      - path: Shared/SpikeLink.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.ane-spike.keyboard
+        APPLICATION_EXTENSION_API_ONLY: YES
+    entitlements:
+      path: Gen/Keyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato.ane-spike]
+    info:
+      path: Gen/Keyboard-Info.plist
+      properties:
+        CFBundleDisplayName: ANE Spike Keyboard
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrefersRightToLeft: false
+            PrimaryLanguage: en-US
+            RequestsOpenAccess: true
+  ANESpikeWidgets:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.ane-spike.widgets
+    entitlements:
+      path: Gen/Widgets.entitlements
+      properties:
+        com.apple.security.application-groups: [group.de.gruenwald.legato.ane-spike]
+    info:
+      path: Gen/Widgets-Info.plist
+      properties:
+        CFBundleDisplayName: ANE Spike Activity
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+schemes:
+  ANECleanupSpike:
+    build:
+      targets:
+        ANECleanupSpike: all
