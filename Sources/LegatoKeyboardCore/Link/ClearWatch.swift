@@ -38,6 +38,19 @@ public struct ClearWatch: Sendable, Equatable {
         lastOwnEditAt = nil
     }
 
+    /// The user is about to press a key (typed, delete, Return, a suggestion): a clear held back for its recheck
+    /// is resolved now, against the field as it is before the key, so the key cannot hide it. Nothing held, or a
+    /// field with text again: `.notCleared`.
+    public mutating func resolveHeld(
+        state: HostState?, cursor: AppliedCursor?, documentID: String?, contextBefore: String, hasText: Bool
+    ) -> Outcome {
+        guard holds else { return .notCleared }
+        lastOwnEditAt = nil // the window is for the field's lag after an edit; the key has not edited anything yet
+        return check(
+            state: state, cursor: cursor, documentID: documentID, contextBefore: contextBefore, hasText: hasText,
+            now: Date())
+    }
+
     /// Looks at the field as it is now: on the field's change, before each edit of the run, and at a recheck.
     public mutating func check(
         state: HostState?, cursor: AppliedCursor?, documentID: String?, contextBefore: String, hasText: Bool, now: Date

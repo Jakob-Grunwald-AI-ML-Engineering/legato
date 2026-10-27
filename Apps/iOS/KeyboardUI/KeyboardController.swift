@@ -217,13 +217,32 @@ final class KeyboardController {
             scheduleClearRecheck(at: at)
             return clearWatch.holds ? .held : .none
         case .cleared(let sent):
-            cancelClearRecheck()
-            if versions?.documentID == document.documentID { versions = nil }
-            guard let sent else { return .none }
-            cursor = sent
-            link.writeApplied(sent, notify: true)
-            trace?("sent at=\(sent.sentBase) shown=\(sent.sentShownRevision) tentative=\(sent.sentTentative.count)")
-            return .sent
+            return takeClear(sent)
+        }
+    }
+
+    /// The field was emptied: the dictation's versions are gone with it; a sent boundary is recorded and told.
+    private func takeClear(_ sent: AppliedCursor?) -> ClearCheck {
+        cancelClearRecheck()
+        if versions?.documentID == document.documentID { versions = nil }
+        guard let sent else { return .none }
+        cursor = sent
+        link.writeApplied(sent, notify: true)
+        trace?("sent at=\(sent.sentBase) shown=\(sent.sentShownRevision) tentative=\(sent.sentTentative.count)")
+        return .sent
+    }
+
+    /// A key is about to land: a clear held for its recheck is taken first, from the field as it is before the
+    /// key (`ClearWatch.resolveHeld`), so the key cannot hide the host's Send.
+    private func resolveHeldClear() {
+        guard clearWatch.holds else { return }
+        let outcome = clearWatch.resolveHeld(
+            state: host, cursor: cursor, documentID: document.documentID, contextBefore: document.contextBefore,
+            hasText: document.hasText)
+        switch outcome {
+        case .cleared(let sent): _ = takeClear(sent)
+        case .notCleared: cancelClearRecheck()
+        case .recheck: break
         }
     }
 
@@ -387,6 +406,7 @@ final class KeyboardController {
     /// A Return holds no clear back (`ClearWatch.returnTyped`): in a chat app it sends and empties the field.
     func type(_ text: String) {
         versions = nil // the user moved on from the dictation
+        resolveHeldClear()
         beforeUserEdit()
         document.insert(text)
         if text == "\n" { clearWatch.returnTyped(at: Date()) } else { clearWatch.ownEdit(at: Date()) }
@@ -395,6 +415,7 @@ final class KeyboardController {
 
     func deleteBackward() {
         versions = nil
+        resolveHeldClear()
         clearWatch.ownEdit(at: Date())
         beforeUserEdit()
         document.deleteBackward()

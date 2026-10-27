@@ -209,10 +209,26 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
         #expect(ProxyEditPlanner.fieldCleared(
             state: liveState(committed: "hello world ", revision: nil), cursor: liveCursor(committedCount: 12),
             documentID: "doc-B", contextBefore: "", hasText: false) == nil)
+        var landed = liveCursor(committedCount: 12)
+        landed.finalApplied = true
         #expect(ProxyEditPlanner.fieldCleared(
             state: liveState(phase: .idle, committed: "hello world ", revision: nil),
-            cursor: liveCursor(committedCount: 12), documentID: "doc-A", contextBefore: "", hasText: false) == nil,
-            "a finished run has nothing left to rebase")
+            cursor: landed, documentID: "doc-A", contextBefore: "", hasText: false) == nil,
+            "a finished run, all of it in the field, has nothing left to rebase")
+    }
+
+    @Test func aClearWhileTheFinalStateIsStillBeingTypedIsABoundary() {
+        // The final state is out (idle) but the keyboard has typed only "hello world " of it so far.
+        let final = liveState(phase: .idle, committed: "hello world how are you ", revision: nil)
+        let typing = liveCursor(committedCount: 12)
+        #expect(!typing.finalApplied)
+        let sent = ProxyEditPlanner.fieldCleared(
+            state: final, cursor: typing, documentID: "doc-A", contextBefore: "", hasText: false)
+        #expect(sent?.sentBase == 12)
+        #expect(sent?.sentCount == 1)
+        let plan = ProxyEditPlanner.plan(state: final, cursor: sent, contextBefore: "", documentID: "doc-A")
+        #expect(plan.ops == [.insert("how are you ")], "nothing of the sent part is typed again")
+        #expect(plan.cursor?.finalApplied == true)
     }
 
     @Test func afterABoundaryTheRestStreamsIntoTheEmptyFieldWithoutASeparator() {

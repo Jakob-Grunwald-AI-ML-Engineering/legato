@@ -193,16 +193,17 @@ public enum ProxyEditPlanner {
 
     /// The keyboard saw its field change (the host's own edit): when the field is now empty although it showed
     /// the run's text (a chat app sent it), returns the cursor with a sent boundary at what was typed; nil for
-    /// anything else (no run text there, another field, a finished run, an edit that left text). Only a `.live`
-    /// run that is still going has boundaries. Everything the field showed went: the committed text up to the
-    /// boundary and the tentative text after it (`sentTentative`, which the boundary moves past once it is
+    /// anything else (no run text there, another field, a run all in the field, an edit that left text). Only a
+    /// `.live` run that is still going, or whose final state is still being typed, has boundaries. Everything
+    /// the field showed went: the committed text up to the boundary and the tentative text after it (`sentTentative`, which the boundary moves past once it is
     /// committed: `awaitsSentTentative`). The field then shows nothing of the run: the rest streams into it
     /// afresh, without a separator, and revisions start over after the boundary.
     public static func fieldCleared(
         state: HostState, cursor: AppliedCursor?, documentID: String?, contextBefore: String, hasText: Bool
     ) -> AppliedCursor? {
-        guard state.delivery == .live, state.target == .keyboard, !state.isFinal, let runID = state.runID,
+        guard state.delivery == .live, state.target == .keyboard, let runID = state.runID,
               var current = cursor, current.runID == runID, current.documentID == documentID,
+              !state.isFinal || !current.finalApplied, // the final state still being typed is a run going on
               !hasText, contextBefore.allSatisfy(\.isWhitespace)
         else { return nil }
         let shown = runText(cursor: current, committed: state.committed, upTo: current.committedCount) + current.volatile

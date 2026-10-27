@@ -64,6 +64,38 @@ private func sentBase(_ outcome: ClearWatch.Outcome) -> Int? {
         #expect(!watch.holds)
     }
 
+    @Test func aKeyWhileAClearIsHeldTakesTheClearAsTheFieldWasBeforeTheKey() {
+        var watch = ClearWatch()
+        watch.ownEdit(at: at(0))
+        _ = checkEmpty(&watch, at: 40)
+        #expect(watch.holds)
+        let outcome = watch.resolveHeld(
+            state: live("hello world "), cursor: cursor(committedCount: 12), documentID: "doc-A", contextBefore: "",
+            hasText: false)
+        #expect(sentBase(outcome) == 12, "the key must not hide the host's Send")
+        #expect(!watch.holds)
+    }
+
+    @Test func aKeyWhileAHeldFieldShowsTextAgainTakesNothing() {
+        var watch = ClearWatch()
+        watch.ownEdit(at: at(0))
+        _ = checkEmpty(&watch, at: 40)
+        let outcome = watch.resolveHeld(
+            state: live("hello world "), cursor: cursor(committedCount: 12), documentID: "doc-A",
+            contextBefore: "hello world ", hasText: true)
+        #expect(outcome == .notCleared)
+        #expect(!watch.holds)
+    }
+
+    @Test func aKeyWithNothingHeldTakesNothing() {
+        var watch = ClearWatch()
+        watch.ownEdit(at: at(0))
+        let outcome = watch.resolveHeld(
+            state: live("hello world "), cursor: cursor(committedCount: 12), documentID: "doc-A", contextBefore: "",
+            hasText: false)
+        #expect(outcome == .notCleared, "no clear was held: the field is looked at by the usual checks")
+    }
+
     @Test func anEmptyFieldWithoutTheRunsTextIsRecheckedButHoldsNothingBack() {
         var watch = ClearWatch()
         watch.ownEdit(at: at(0))
@@ -115,6 +147,17 @@ private struct TickRig {
         }
     }
 
+    /// The user presses a key: a held clear is resolved first, then the key lands in the field.
+    mutating func userKey(_ text: String, _ state: HostState) {
+        if case .cleared(let sent) = watch.resolveHeld(
+            state: state, cursor: cursor, documentID: "doc-A", contextBefore: field, hasText: !field.isEmpty) {
+            recheckAt = nil
+            if let sent { cursor = sent }
+        }
+        field += text
+        watch.ownEdit(at: at(ms))
+    }
+
     mutating func drain(_ state: HostState, ticks: Int = 120) {
         for _ in 0..<ticks { tick(state) }
     }
@@ -158,5 +201,42 @@ private struct TickRig {
         #expect(rig.cursor?.sentBase == 12)
         rig.drain(live("hello world see you "))
         #expect(rig.field == "see you ")
+    }
+
+    @Test(arguments: [30.0, 100.0, 200.0])
+    func aKeyBeforeTheRecheckStillRecordsTheHostsSend(afterMs: Double) {
+        var rig = TickRig()
+        rig.drain(live("hello world "))
+        let phrase = live("hello world how are you ")
+        rig.tick(phrase)
+        let typed = rig.field.count
+        #expect(typed > 12)
+        rig.ms += afterMs
+        rig.field = "" // the host's Send, the field empties within the own-edit window
+        let typeable = rig.look(phrase)
+        #expect(!typeable, "the clear is held back")
+        rig.ms += 5
+        rig.userKey("O", phrase)
+        #expect(rig.cursor?.sentBase == typed, "the boundary is recorded before the key")
+        #expect(rig.cursor?.sentCount == 1)
+        rig.drain(phrase)
+        #expect(rig.field.hasPrefix("O"), "the key stays")
+        #expect(rig.field == "O" + String("hello world how are you ".dropFirst(typed)), "only what was not sent goes in")
+    }
+
+    @Test func aHostClearWhileTheFinalStateIsStillTypedIsASentBoundary() {
+        var rig = TickRig()
+        let final = live("hello world how are you ", phase: .idle)
+        rig.tick(final)
+        #expect(rig.cursor?.finalApplied != true, "the typewriter has not finished the final state")
+        let typed = rig.field.count
+        #expect(typed > 0 && typed < 24)
+        rig.ms += ClearWatch.ownEditWindowMs + 100
+        rig.field = ""
+        _ = rig.look(final)
+        rig.drain(final)
+        #expect(rig.cursor?.sentBase == typed)
+        #expect(rig.field == String("hello world how are you ".dropFirst(typed)), "only what was not sent goes in")
+        #expect(rig.cursor?.finalApplied == true)
     }
 }
