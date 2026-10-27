@@ -189,7 +189,9 @@ build_app() { # build_app <configuration> <extra xcodebuild args...>
 
 if [ "$mode" = release-check ]; then
   build_app Release CODE_SIGNING_ALLOWED=NO
-  build_app Debug CODE_SIGNING_ALLOWED=NO   # positive control for the scan below
+  # Positive control for the scan below. Same DerivedData and flags as scripts/ci/test.sh's Debug app build, so
+  # with a restored cache this is an up-to-date no-op rather than a second full build.
+  build_app Debug CODE_SIGNING_ALLOWED=NO
   app="$DERIVED/Build/Products/Release-iphonesimulator/Legato.app"
   debug_app="$DERIVED/Build/Products/Debug-iphonesimulator/Legato.app"
   # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.

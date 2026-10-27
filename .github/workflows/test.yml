@@ -1,7 +1,19 @@
 # The gate. Each tree is tested in full once: in the merge queue, on the commit
 # that will land (main + the queued PRs ahead + this one). PRs get a quick build
-# for early feedback. No push trigger: the queue's commit IS what main becomes,
-# so main and live never re-test. `gate` is the check the merge queue requires.
+# for early feedback. Nothing re-TESTS on main or live: the queue's commit IS what
+# main becomes. `gate` is the check the merge queue requires.
+#
+# Cost: the apps link MLX and FluidAudio, which are slow to compile. Three
+# independent legs run as parallel jobs (scripts/ci/test.sh quick|full <leg>), each
+# restoring its build outputs from the Actions cache. The repo is public, so macOS
+# minutes are free: parallel jobs trade runner minutes for wall-clock time.
+#
+# Cache warm-up: caches saved on a PR or merge-queue ref are readable only by that
+# ref, but caches saved on main are readable by everyone. Nothing runs on main, so
+# the push/schedule triggers below run a BUILD-ONLY pass (the `quick` mode, no tests)
+# when something that changes the cache key moves, plus weekly so the entries are
+# not evicted (unused caches go after 7 days; the repo cap is 10 GB). PR and queue
+# runs only restore.
 name: test
 
 on:
@@ -9,36 +21,121 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
+  push:
+    branches: [main]
+    paths:
+      - Package.swift
+      - Package.resolved
+      - .xcode-version
+      - .xcodegen-version
+      - Apps/*/project.yml
+      - .github/workflows/test.yml
+      - scripts/ci/**
+      - scripts/e2e/ios-sim.sh
+  schedule:
+    - cron: "17 4 * * 1"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "full / quick, or release-check (dry run of the live-path scan; ships nothing)"
+        type: choice
+        options: [full, quick, release-check]
+        default: full
+      save_cache:
+        description: "Save the build caches under this ref (measuring a branch)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'schedule' }}
 
 permissions:
   contents: read
 
 jobs:
   build-test:
+    name: ${{ matrix.leg }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode != 'release-check' }}
     # Xcode is selected from .xcode-version by scripts/ci/lib.sh.
     runs-on: macos-26
-    # The apps link MLX and FluidAudio: a PR build takes ~28 min, the full queue run longer.
-    timeout-minutes: 75
+    # Warm-cache times are in the PR description; the headroom is for a cold cache (a Package.resolved or
+    # Xcode change before main has re-warmed), where each leg compiles MLX and FluidAudio from scratch.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: packages
+            cache_paths: .build
+          - leg: ios
+            cache_paths: |
+              ~/legato-cache/derived-ios
+              ~/legato-cache/SourcePackages
+          - leg: mac
+            cache_paths: |
+              ~/legato-cache/derived-mac
+              ~/legato-cache/SourcePackages
+    env:
+      # pull_request: quick; merge_group: full; push/schedule (cache warm-up): quick; dispatch: the input.
+      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event_name == 'merge_group' && 'full' || 'quick') }}
+      SAVE_CACHE: ${{ github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.save_cache) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      # The mode is picked in shell, not by `if:`, so no step can silently skip.
-      - name: Build (PR) or full test (merge queue, dispatch)
-        env:
-          EVENT: ${{ github.event_name }}
+      - name: Cache key
+        id: key
         run: |
-          if [ "$EVENT" = "pull_request" ]; then
-            scripts/ci/test.sh quick
-          else
-            scripts/ci/test.sh full
-          fi
+          echo "LEGATO_CACHE_DIR=$HOME/legato-cache" >> "$GITHUB_ENV"
+          echo "LEGATO_E2E_DERIVED=$HOME/legato-cache/derived-ios" >> "$GITHUB_ENV"
+          echo "prefix=${RUNNER_OS}-xcode$(tr -d '[:space:]' < .xcode-version)-${{ matrix.leg }}" >> "$GITHUB_OUTPUT"
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.cache_paths }}
+          # Exact: same Package.resolved, manifests, app specs and Xcode. Otherwise the newest entry of the same
+          # Xcode and leg is restored, and only what changed rebuilds.
+          key: ${{ steps.key.outputs.prefix }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Apps/*/project.yml', '.xcode-version', '.xcodegen-version') }}
+          restore-keys: |
+            ${{ steps.key.outputs.prefix }}-
+      # The mode is picked via env, not by `if:`, so no step can silently skip.
+      - name: Build (quick) or test (full)
+        run: scripts/ci/test.sh "$MODE" ${{ matrix.leg }}
+      - name: Save build cache
+        if: ${{ !cancelled() && env.SAVE_CACHE == 'true' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.cache_paths }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # Dispatch-only dry run of the release path's scan (scripts/ci/release.sh check): the same steps as the
+  # release workflow's release-check job, without touching `live`.
+  release-check-dry-run:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'release-check' }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Cache key
+        id: key
+        run: |
+          echo "LEGATO_CACHE_DIR=$HOME/legato-cache" >> "$GITHUB_ENV"
+          echo "LEGATO_E2E_DERIVED=$HOME/legato-cache/derived-ios" >> "$GITHUB_ENV"
+          echo "prefix=${RUNNER_OS}-xcode$(tr -d '[:space:]' < .xcode-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the Debug build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/legato-cache/derived-ios
+            ~/legato-cache/SourcePackages
+          key: ${{ steps.key.outputs.prefix }}-ios-${{ hashFiles('Package.swift', 'Package.resolved', 'Apps/*/project.yml', '.xcode-version', '.xcodegen-version') }}
+          restore-keys: |
+            ${{ steps.key.outputs.prefix }}-ios-
+      - run: scripts/ci/release.sh check
 
   # The ONE required check. always() so a failed or cancelled needed job fails
   # this one instead of skipping it (a skipped required check reads as passing).
+  # (A release-check dispatch skips build-test, so its gate reads red; the dry run is not gated.)
   gate:
     needs: [build-test]
     if: ${{ always() }}
