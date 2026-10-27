@@ -231,7 +231,7 @@ private final class BurstTranscriber: BatchTranscriber {
 }
 
 /// Shorter recordings (11 minutes, enough for two windows) keep these cheap next to the 25-minute ones above.
-@Suite struct MeetingPostPassOnTheMixTests {
+@Suite(.serialized) struct MeetingPostPassOnTheMixTests {
     func setUp() async throws -> (MeetingStore, Meeting, URL) {
         let root = tempRoot()
         let store = MeetingStore(root: root)
