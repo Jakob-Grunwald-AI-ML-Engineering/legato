@@ -200,9 +200,13 @@ private final class RecordingProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+/// CI stub mode (`LEGATO_STUB_DEPS=1`, see Package.swift): the heavy dependencies are no-behaviour stubs, so tests
+/// that exercise their real behaviour are gated on this.
+private let stubDeps = ProcessInfo.processInfo.environment["LEGATO_STUB_DEPS"] == "1"
+
 @Suite("HubFileFetcher", .serialized)
 struct HubFileFetcherTests {
-    @Test func askForThePinnedCommitWithoutSendingAnyToken() async {
+    @Test(.disabled(if: stubDeps, "needs the real swift-huggingface HubClient")) func askForThePinnedCommitWithoutSendingAnyToken() async {
         RecordingProtocol.requests.withLock { $0 = [] }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RecordingProtocol.self]
