@@ -102,14 +102,20 @@ struct PipelineTests {
         #expect(await pipeline.process("x", locale: en) == "x!")
     }
 
-    @Test func aStageThatIgnoresCancellationStillCannotHoldThePipelineBeyondTheTimeout() async {
+    // A pipeline that waited for the stage would never return: the limit turns that hang into a failure.
+    @Test(.timeLimit(.minutes(1)))
+    func aStageThatIgnoresCancellationStillCannotHoldThePipelineBeyondTheTimeout() async {
         let log = CallLog()
         let finished = FlagBox()
+        // The stage ends only once released, after `process` returned: a return can only come from the deadline,
+        // however slow the runner (no wall-clock bound to miss).
+        let release = AsyncStream<Void>.makeStream()
+        defer { release.continuation.finish() }
         let pipeline = PostProcessingPipeline(
             stages: [
-                // A cold model load: nothing in it checks for cancellation, and it takes 2 s.
+                // A cold model load: nothing in it checks for cancellation.
                 SpyStage("stubborn", log: log) { _ in
-                    await Task.detached { try? await Task.sleep(for: .seconds(2)) }.value
+                    await Task.detached { for await _ in release.stream {} }.value
                     finished.set()
                     return "too late"
                 },
@@ -118,14 +124,10 @@ struct PipelineTests {
             timeout: .milliseconds(100),
             sleeper: { try await Task.sleep(for: $0) })
 
-        let clock = ContinuousClock()
-        let started = clock.now
         let out = await pipeline.process("x", locale: en)
-        let elapsed = clock.now - started
 
         #expect(out == "x!", "the input goes on to the next stage")
-        #expect(elapsed < .seconds(1), "returned at the deadline, not when the stage ended: \(elapsed)")
-        #expect(!finished.isSet, "the stage was still running when the pipeline returned")
+        #expect(!finished.isSet, "returned at the deadline while the stage was still running")
     }
 
     @Test func aTimedOutStageIsCancelled() async {
