@@ -71,16 +71,24 @@ public final class HostLink {
         state.delivery = delivery
         state.finalText = nil
         state.insertAt = nil
-        state.revisions = nil
+        state.revision = nil
+        reportedSentBase = 0
         publish()
     }
 
-    /// Live cleanup replaced a committed span (`HostDelivery.live`): published at once.
+    /// Live cleanup's newest cleaned version of the run's text (`HostDelivery.live`): replaces the one
+    /// before (a keyboard needs only the newest), published at once.
     public func revise(_ revision: HostRevision) {
-        guard state.runID != nil else { return }
-        state.revisions = (state.revisions ?? []) + [revision]
+        guard state.runID != nil, revision.n > (state.revision?.n ?? 0) else { return }
+        state.revision = revision
         publish()
     }
+
+    /// The keyboard reported a sent boundary for the running run (`AppliedCursor.sentBase`: its field was
+    /// cleared, as by sending a message): the run ID, the boundary in `committed`, and the revision the field
+    /// showed for the text before it (0: raw). Called once per boundary, from `appliedDidChange()`.
+    public var onSent: (@MainActor (_ runID: String, _ boundary: Int, _ shownRevision: Int) -> Void)?
+    private var reportedSentBase = 0
 
     /// A stop began: published at once. Updates that still arrive while the engine finalizes keep the phase.
     public func runFinishing() {
@@ -104,7 +112,7 @@ public final class HostLink {
         state.volatile = ""
         state.delivery = nil // an insert is typed as it is: no cleanup swap, no hold
         state.finalText = nil
-        state.revisions = nil
+        state.revision = nil
         state.insertAt = now()
         publish()
         scheduleScrub()
@@ -153,7 +161,7 @@ public final class HostLink {
         state.finalText = nil
         state.delivery = nil
         state.insertAt = nil
-        state.revisions = nil
+        state.revision = nil
         publish()
     }
 
@@ -342,8 +350,17 @@ public final class HostLink {
 
     /// The Darwin note for `link.applied` arrived.
     public func appliedDidChange() {
+        reportSentBoundary()
         guard let waiter = appliedWaiter, finalApplied(runID: waiter.runID) else { return }
         resolveAppliedWaiter(true)
+    }
+
+    private func reportSentBoundary() {
+        guard isRunning, let runID = state.runID, let cursor = appliedCursor(), cursor.runID == runID,
+              cursor.sentBase > reportedSentBase
+        else { return }
+        reportedSentBase = cursor.sentBase
+        onSent?(runID, cursor.sentBase, cursor.sentShownRevision)
     }
 
     /// What the keyboard last reported it applied (`link.applied`), whichever run it was for.

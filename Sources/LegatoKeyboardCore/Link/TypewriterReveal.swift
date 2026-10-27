@@ -20,10 +20,10 @@ import Foundation
 ///   With `.replace` the streamed text is revealed like any other; the swap for the final text waits until
 ///   all of it is in the field and the field's context shows it (`settleLimitMs` at most), and is then one
 ///   edit. With `.clipboard` the streamed text is the result.
-///   With `.live` a revision (`HostState.revisions`) is applied by the planner only to text the reveal has
-///   typed (the planner sees the state cut to the revealed part, so a revision waits until its raw span is
-///   covered), and, like the swap, only once the field's context shows the raw text typed on earlier ticks
-///   (`settleLimitMs` at most): a revision that finds nothing to replace is skipped for good.
+///   With `.live` a revision (`HostState.revision`) is applied by the planner only to text the reveal has
+///   typed (the planner sees the state cut to the revealed part, so a revision waits until the text it covers
+///   is revealed), and, like the swap, only once the field's context shows the run text typed on earlier
+///   ticks (`settleLimitMs` at most): a revision that finds the field changed is skipped for good.
 public struct TypewriterReveal: Sendable, Equatable {
     /// How long a tick waits for the field's context to show the tentative text before giving up.
     public static let settleLimitMs = 250.0
@@ -104,18 +104,16 @@ public struct TypewriterReveal: Sendable, Equatable {
         return plan
     }
 
-    /// `.live`: a revision not yet handled reaches back into raw text typed on earlier ticks, which the
-    /// planner looks for at the end of the field's context (before the tentative text). True while the
-    /// context does not show that text yet.
+    /// `.live`: a revision not yet handled replaces the run text typed on earlier ticks, which the planner looks
+    /// for at the end of the field's context (before the tentative text). True while the context does not
+    /// show that text yet.
     private static func revisionAwaitsContext(state: HostState, cursor: AppliedCursor?, contextBefore: String) -> Bool {
-        guard state.delivery == .live, let cursor, cursor.runID == state.runID,
-              let revisions = state.revisions, cursor.revisionsHandled < revisions.count
+        guard state.delivery == .live, let cursor, cursor.runID == state.runID, let revision = state.revision,
+              revision.n > cursor.revisionHandled, revision.start == cursor.sentBase, !cursor.revisionSkipped
         else { return false }
-        let start = revisions[cursor.revisionsHandled].start
         let typed = min(cursor.committedCount, state.committed.count)
-        guard start >= 0, start < typed else { return false }
-        let raw = String(state.committed.dropFirst(start).prefix(typed - start))
-        return !contextBefore.hasSuffix(raw + cursor.volatile)
+        let shown = ProxyEditPlanner.runText(cursor: cursor, committed: state.committed, upTo: typed)
+        return !contextBefore.hasSuffix(shown + cursor.volatile)
     }
 
     /// `state` cut to its first `count` characters of `committed + volatile`.
