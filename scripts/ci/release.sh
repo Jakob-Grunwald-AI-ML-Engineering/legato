@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Usage: release.sh check|mac-build|ship
+# Usage: release.sh check|mac-build|real-deps|ship
 #   check      iOS: Release build (arm64 simulator) + scan that no e2e/fake code is in the binary.
 #   mac-build  macOS: Release build, unsigned.
+#   real-deps  `swift test` against the real MLX, FluidAudio, swift-huggingface and swift-transformers (the gate
+#              tests against stubs; tests that need the real libraries run only here).
 #   ship       the release pipeline (not implemented yet, #4).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-mode="${1:?usage: release.sh check|mac-build|ship}"
+mode="${1:?usage: release.sh check|mac-build|real-deps|ship}"
 
 case "$mode" in
   check)
@@ -21,6 +23,10 @@ case "$mode" in
     (cd Apps/macOS && "$XCODEGEN" generate)
     xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato -configuration Release \
       -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO
+    ;;
+  real-deps)
+    select_xcode
+    swift test
     ;;
   ship)
     if ! has_app_targets; then

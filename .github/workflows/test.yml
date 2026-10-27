@@ -2,10 +2,10 @@
 # Runs only in the merge queue (and by hand), on the commit that will land (main + the queued PRs ahead + this
 # one), so main and live never re-test. `gate` is the one check the main ruleset requires.
 #
-# It covers the Swift package: the cleanup e2e test and `swift test` (builds the package, runs its tests).
-# It does NOT compile the apps or run the simulator scenarios: the iOS app takes ~8 min cold, the Mac app ~9,
-# the iOS package build-for-testing ~11. The apps are compiled on the release path (release-checks.yml, on
-# every push to `live`) and by local work (scripts/e2e/ios-sim.sh).
+# It covers the cleanup e2e test, `swift test` and both app builds, all against CI-only stubs of MLX,
+# FluidAudio and the Hugging Face libraries (Stubs/, LEGATO_STUB_DEPS=1), so only our own code compiles.
+# The real libraries, the Release builds and the binary scan run on the release path (release-checks.yml,
+# on every push to `live`). Simulator scenarios are local only (scripts/e2e/ios-sim.sh).
 #
 # Pull requests build nothing; `gate` only reports there, so the queue accepts them.
 name: test

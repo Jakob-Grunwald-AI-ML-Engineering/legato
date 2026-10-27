@@ -2,8 +2,8 @@
 # from main. Deliberately no tests here: every commit on main was tested in the
 # merge queue as exactly that commit. Bypassing the queue (direct push, admin
 # merge) turns this workflow into "ship untested".
-# The apps are not built by the gate, so both release checks (release-checks.yml: iOS Release build + binary
-# scan, Mac Release build) must pass before `ship`. To run only the checks, dispatch release-checks.
+# The gate builds against stubs, so the release checks (release-checks.yml: iOS Release build + binary
+# scan, Mac Release build, real-library `swift test`) must pass before `ship`. To run only the checks, dispatch release-checks.
 # Target pipeline (TestFlight iOS; notarized DMG + Sparkle macOS): issue #4.
 name: release
 
