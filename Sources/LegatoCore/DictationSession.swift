@@ -4,12 +4,19 @@ import Foundation
 /// (one engine transcription each). With a `linger` the lease outlives a run so the next
 /// run reuses the armed mic without re-activating the session.
 ///
-/// Live cleanup (the post-processor's `cleansSegmentsLive`, read when a run starts): every committed
-/// segment is cleaned in the background, one at a time and in order, with the cleaned text before it as
-/// context, and published as a `.revise` edit; recognition never waits for it. At the stop the segment in
-/// flight finishes, the segments still raw are cleaned in one pass, and the entry keeps the revised text
-/// (`rawText` the engine's). Both share one deadline, the processor's `liveStopTimeLimit`: past it they are
-/// cancelled and the rest stays raw. An abort cancels the cleanup and revises nothing more.
+/// Live cleanup (the post-processor's `cleansSegmentsLive`, read when a run starts): after each commit a
+/// rolling pass cleans the run's whole raw text so far (raw only, never an earlier pass's output, so errors
+/// don't compound) and publishes it as one `.revise` edit, a whole-span replacement (`TranscriptRevision`).
+/// Latest wins: at most one pass runs; commits during it start one pass over the newest raw text when it
+/// ends. Past ``liveWholeTextCharacters`` the text cleaned so far is frozen and passes cover only the
+/// trailing window, with the frozen text as read-only context. Recognition never waits for a pass.
+///
+/// At the stop one final pass covers the whole raw text (a pass in flight over all of it is that pass; one
+/// over older text gives way), within the processor's `liveStopTimeLimit`: past it the entry keeps the
+/// newest published text and the raw tail. The entry's `rawText` is the whole raw text, `text` the final
+/// cleaned one. A sent boundary (``liveTextSent(upTo:shownRevision:tentative:)``) closes the text before it,
+/// and the tentative text sent with it once that is committed: it is not cleaned again and later passes
+/// (the stop's too) start after it. An abort cancels the cleanup and revises nothing more.
 @MainActor
 public final class DictationSession {
     public enum LeaseState: Sendable, Equatable { case idle, arming, armed }
@@ -55,26 +62,51 @@ public final class DictationSession {
     /// The run's own abort teardown (stream failure) is in progress.
     private var isAborting = false
 
-    /// One committed segment of a live-cleaned run.
-    private struct LiveSegment {
-        /// Where it starts in the raw committed text, in characters.
-        let start: Int
-        let raw: String
-        /// What the revised text shows for it once handled (its cleaned text, or its raw text when cleanup
-        /// failed or changed nothing; empty for a segment a multi-segment revision covered). Nil: not yet.
-        var shown: String?
+    /// Whole-text passes cover at most this many raw characters of the current segment; past it the text
+    /// cleaned so far is frozen and a pass cleans only what follows (at most this much again).
+    public static let liveWholeTextCharacters = 2_000
+
+    /// Live trace (internal builds): every pass's outcome, every sent boundary. Lengths and times only.
+    public var onLiveTrace: (@MainActor (LiveTraceEvent) -> Void)?
+
+    /// The pass in flight.
+    private struct LivePass {
+        let n: Int
+        /// The raw span it cleans ends here (what was committed when it began).
+        let end: Int
+        /// Its input starts here: the segment base, or past the cap the end of the frozen text.
+        let from: Int
+        /// The text shown for the raw text before `from` in the segment (empty without a frozen part).
+        let frozenText: String
+        let inputCharacters: Int
+        let atStop: Bool
+        let started: ContinuousClock.Instant
+        var task: Task<Void, Never>?
     }
 
-    /// The current run cleans its segments live.
+    /// The current run cleans live.
     private var cleansLive = false
-    private var segments: [LiveSegment] = []
-    /// The first segment not cleaned (or being cleaned) yet.
-    private var nextToClean = 0
-    private var cleaner: Task<Void, Never>?
-    /// A stop began: the cleaner takes no further segment (the stop pass cleans the rest).
+    /// Where the current segment starts in the raw committed text: 0, or the last sent boundary.
+    private var liveBase = 0
+    /// The text the field showed for the parts sent so far (cleaned as far as it was), in order.
+    private var sentText = ""
+    /// Tentative text the field showed after `liveBase` when it was sent: until the committed text shows where it
+    /// ends (`SentTentative`), no pass starts; then `liveBase` moves past it.
+    private var sentTentative = ""
+    /// The stop's final pass has begun and the stop's cleanup is not over: a send now starts a stop pass of its own.
+    private var stopPassOpen = false
+    /// The revisions published for the current segment, oldest first; the last one is what clients show.
+    private var segmentRevisions: [TranscriptRevision] = []
+    private var revisionCount = 0
+    private var passCount = 0
+    /// The raw end the last finished pass covered, whatever came of it: a stop with nothing past it needs no pass.
+    private var lastPassEnd = 0
+    /// Past the cap: the frozen start of the segment (its raw end, the text shown for it).
+    private var frozen: (end: Int, text: String)?
+    private var pass: LivePass?
+    /// A stop began: no pass starts but the stop's own.
     private var liveStopping = false
-    /// How much of the cleaned text before a segment it gets as context (its end).
-    static let liveContextCharacters = 400
+    private let passClock = ContinuousClock()
     private var settleWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(
@@ -236,8 +268,16 @@ public final class DictationSession {
             runLocale = locale
             cleansLive = postProcessor?.cleansSegmentsLive ?? false
             if cleansLive { postProcessor?.liveRunStarts() }
-            segments = []
-            nextToClean = 0
+            liveBase = 0
+            sentText = ""
+            sentTentative = ""
+            stopPassOpen = false
+            segmentRevisions = []
+            revisionCount = 0
+            passCount = 0
+            lastPassEnd = 0
+            frozen = nil
+            pass = nil
             liveStopping = false
             let events = engine.transcribe(input)
             runState = .listening
@@ -265,7 +305,7 @@ public final class DictationSession {
                 guard gen == generation else { return }
                 for edit in assembler.apply(event) {
                     publish(edit)
-                    if cleansLive, case .commit(let delta) = edit { addLiveSegment(delta) }
+                    if cleansLive, case .commit = edit { liveCommitted() }
                 }
             }
         } catch {
@@ -294,106 +334,236 @@ public final class DictationSession {
 
     // MARK: Live cleanup
 
-    private func addLiveSegment(_ raw: String) {
-        let start = segments.last.map { $0.start + $0.raw.count } ?? 0
-        segments.append(LiveSegment(start: start, raw: raw))
-        startCleaner()
+    /// A commit: a pass starts over the newest raw text unless one runs (it starts the next when it ends).
+    private func liveCommitted() {
+        resolveSentTentative(complete: false)
+        guard !liveStopping, pass == nil, assembler.committedText.count > lastPassEnd else { return }
+        startPass(atStop: false)
     }
 
-    /// Starts the cleaner unless it runs already: it works through the segments in order, one at a time.
-    private func startCleaner() {
-        guard cleaner == nil, !liveStopping, nextToClean < segments.count, let processor = postProcessor else { return }
-        let gen = generation
-        cleaner = Task { await self.cleanSegments(with: processor, generation: gen) }
-    }
-
-    private func cleanSegments(with processor: any TranscriptPostProcessor, generation gen: Int) async {
-        while gen == generation, !liveStopping, !Task.isCancelled, nextToClean < segments.count {
-            let index = nextToClean
-            nextToClean += 1
-            let raw = segments[index].raw
-            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            var out: String?
-            if !text.isEmpty {
-                out = try? await processor.processSegment(
-                    text, context: liveContext(before: index), locale: runLocale ?? Locale.current, atStop: false)
-            }
-            guard gen == generation, !Task.isCancelled else { return }
-            settle(index..<index + 1, cleaned: out)
+    private func startPass(atStop: Bool) {
+        guard let processor = postProcessor, sentTentative.isEmpty else { return }
+        let raw = Array(assembler.committedText)
+        let end = raw.count
+        guard end > liveBase else { return }
+        let (from, frozenText) = passWindow(end: end, raw: raw)
+        let input = String(raw[from..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        passCount += 1
+        let n = passCount
+        pass = LivePass(
+            n: n, end: end, from: from, frozenText: frozenText, inputCharacters: input.count, atStop: atStop,
+            started: passClock.now)
+        guard !input.isEmpty else {
+            passEnded(n, generation: generation, .success(LivePassResult(text: "")))
+            return
         }
-        if gen == generation { cleaner = nil }
+        let gen = generation
+        let context = frozenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let locale = runLocale ?? Locale.current
+        pass?.task = Task {
+            let result: Result<LivePassResult, any Error>
+            do {
+                result = .success(try await processor.cleanLivePass(input, context: context, locale: locale, atStop: atStop))
+            } catch {
+                result = .failure(error)
+            }
+            self.passEnded(n, generation: gen, result)
+        }
     }
 
-    /// At the stop: lets the segment in flight finish, then cleans the segments still raw in one pass, all
-    /// within the processor's `liveStopTimeLimit` when it has one. At that deadline both are cancelled and
-    /// what was not cleaned keeps its raw text.
+    /// Where a pass that ends at `end` starts, and the frozen text before it. Within the cap: the segment
+    /// base, nothing frozen. Past it: the frozen part stays while the window after it fits; otherwise the
+    /// newest published text is frozen (it is what clients show), or, without one that leaves a window
+    /// within the cap, the shown text up to a word near the cap.
+    private func passWindow(end: Int, raw: [Character]) -> (from: Int, frozenText: String) {
+        let cap = Self.liveWholeTextCharacters
+        guard end - liveBase > cap else {
+            frozen = nil
+            return (liveBase, "")
+        }
+        if let frozen, end - frozen.end <= cap { return (frozen.end, frozen.text) }
+        if let newest = segmentRevisions.last, end - newest.end <= cap {
+            frozen = (newest.end, newest.text)
+        } else {
+            var split = end - cap
+            while split < end, !raw[split - 1].isWhitespace { split += 1 }
+            if split == end { split = end - cap }
+            frozen = (split, shownText(upTo: split, raw: raw))
+        }
+        return (frozen!.end, frozen!.text)
+    }
+
+    /// What clients show for the current segment's raw text up to `end`: the newest revision and the raw
+    /// text after it, or the raw text.
+    private func shownText(upTo end: Int, raw: [Character]) -> String {
+        if let newest = segmentRevisions.last, newest.end <= end {
+            return newest.text + String(raw[newest.end..<end])
+        }
+        return String(raw[liveBase..<end])
+    }
+
+    private func passEnded(_ n: Int, generation gen: Int, _ result: Result<LivePassResult, any Error>) {
+        guard gen == generation, let p = pass, p.n == n else { return } // dropped: cancelled, aborted, superseded
+        pass = nil
+        lastPassEnd = max(lastPassEnd, p.end)
+        let raw = Array(assembler.committedText)
+        let final = p.atStop || (liveStopping && p.end == raw.count)
+        switch result {
+        case .failure:
+            trace(p, output: 0, .error, final: final)
+        case .success(let out):
+            let cleaned = out.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let window = String(raw[p.from..<p.end])
+            let outcome: LivePassReport.Outcome
+            if cleaned.isEmpty || cleaned == window.trimmingCharacters(in: .whitespacesAndNewlines) {
+                outcome = out.timedOut ? .timeout : out.guardRejected ? .guardRejected : .unchanged
+            } else if let newest = segmentRevisions.last, newest.end >= p.end {
+                outcome = .superseded
+            } else {
+                let text = p.frozenText + TranscriptRevision.keepingWhitespace(of: window, around: cleaned)
+                if text == shownText(upTo: p.end, raw: raw) {
+                    outcome = .unchanged
+                } else {
+                    revisionCount += 1
+                    let revision = TranscriptRevision(
+                        n: revisionCount, start: liveBase, raw: String(raw[liveBase..<p.end]), text: text)
+                    segmentRevisions.append(revision)
+                    publish(.revise(revision))
+                    outcome = .published
+                }
+            }
+            trace(p, output: cleaned.count, outcome, final: final, backend: out.backend, device: out.device)
+        }
+        if !liveStopping, raw.count > p.end { startPass(atStop: false) }
+    }
+
+    /// Drops the pass in flight (its result is never published) and traces it with `outcome`.
+    @discardableResult
+    private func cancelPass(_ outcome: LivePassReport.Outcome, final: Bool) -> Bool {
+        guard let p = pass else { return false }
+        pass = nil
+        p.task?.cancel()
+        trace(p, output: 0, outcome, final: final)
+        return true
+    }
+
+    private func trace(
+        _ p: LivePass, output: Int, _ outcome: LivePassReport.Outcome, final: Bool, backend: String? = nil,
+        device: String? = nil
+    ) {
+        let ms = Int(p.started.duration(to: passClock.now) / .milliseconds(1))
+        onLiveTrace?(.pass(LivePassReport(
+            n: p.n, inputCharacters: p.inputCharacters, outputCharacters: output, milliseconds: ms, outcome: outcome,
+            final: final, backend: backend, device: device)))
+    }
+
+    /// The field the run streams into was cleared (the user sent what it showed, as in a chat app) when it
+    /// held the run's raw text up to `boundary`, shown as revision `shownRevision` (0: raw), and then
+    /// `tentative`, tentative text not committed yet. That text is done: it is recorded as it was shown, never
+    /// cleaned again, and passes start after it; for the tentative text, after the committed text that
+    /// finalizes it, once that shows where it ends (`SentTentative`, the keyboard's rule). A pass in flight over
+    /// it is dropped; a send during the stop's cleanup starts the stop pass again after it. A boundary that does
+    /// not move forward (and sends no tentative text) is ignored.
+    /// Returns whether the boundary was taken.
+    @discardableResult
+    public func liveTextSent(upTo boundary: Int, shownRevision: Int, tentative: String = "") -> Bool {
+        guard cleansLive, runState == .listening || runState == .finishing else { return false }
+        // An earlier send's tentative text is placed by now: the keyboard typed after it before this send.
+        resolveSentTentative(complete: false)
+        resolveSentTentative(complete: true)
+        let raw = Array(assembler.committedText)
+        let end = min(boundary, raw.count)
+        let sentNow = tentative.allSatisfy(\.isWhitespace) ? "" : tentative
+        guard end > liveBase || (end == liveBase && !sentNow.isEmpty) else { return false }
+        let shown: String
+        if let revision = segmentRevisions.first(where: { $0.n == shownRevision }), revision.end <= end {
+            shown = revision.text + String(raw[revision.end..<end])
+        } else {
+            shown = String(raw[liveBase..<end])
+        }
+        let cancelled = cancelPass(.superseded, final: false) ? 1 : 0
+        onLiveTrace?(.sent(LiveSentReport(
+            rawCharacters: end - liveBase, shownCharacters: shown.count + sentNow.count, cancelledPasses: cancelled)))
+        sentText += shown
+        liveBase = end
+        segmentRevisions = []
+        frozen = nil
+        lastPassEnd = max(lastPassEnd, end)
+        sentTentative = sentNow
+        resolveSentTentative(complete: stopPassOpen)
+        if sentTentative.isEmpty, raw.count > liveBase {
+            if !liveStopping {
+                startPass(atStop: false)
+            } else if stopPassOpen {
+                startPass(atStop: true)
+            }
+        }
+        return true
+    }
+
+    /// Moves `liveBase` past the tentative text sent with the last boundary once the committed text shows where it
+    /// ends (`complete`: the engine is done, all of it counts). The field showed it as it was: so it is recorded.
+    private func resolveSentTentative(complete: Bool) {
+        guard !sentTentative.isEmpty else { return }
+        let raw = Array(assembler.committedText)
+        guard let covered = SentTentative.coveredCount(
+            of: sentTentative, in: String(raw[liveBase...]), complete: complete)
+        else { return }
+        let end = liveBase + covered
+        sentText += sentTentative + String(raw[liveBase..<end].reversed().prefix(while: \.isWhitespace).reversed())
+        liveBase = end
+        lastPassEnd = max(lastPassEnd, end)
+        sentTentative = ""
+    }
+
+    /// At the stop: one final pass over the whole raw text, unless the last pass covered it already (a pass
+    /// in flight over all of it is awaited; one over older text gives way), within the processor's
+    /// `liveStopTimeLimit` when it has one. At that deadline the pass is cancelled; the newest published
+    /// text and the raw tail stay.
     private func finishLiveCleanup(with processor: any TranscriptPostProcessor) async {
+        defer { stopPassOpen = false }
+        if let p = pass, p.end < assembler.committedText.count { cancelPass(.superseded, final: false) }
         guard let limit = processor.liveStopTimeLimit else {
-            await cleanRemainingSegments(with: processor)
+            await runFinalPass()
             return
         }
         let race = StopRace()
-        let work = Task { await self.cleanRemainingSegments(with: processor); race.cleanupEnded() }
+        let work = Task { await self.runFinalPass(); race.cleanupEnded() }
         let sleep = self.sleep
         let timer = Task { if (try? await sleep(limit)) != nil { race.finish() } }
         await race.wait()
         timer.cancel()
         guard !race.cleanupDone else { return }
         work.cancel()
-        cancelLiveCleanup()
-        nextToClean = segments.count
+        cancelPass(.timeout, final: true)
     }
 
-    private func cleanRemainingSegments(with processor: any TranscriptPostProcessor) async {
-        await cleaner?.value
-        cleaner = nil
-        guard !Task.isCancelled else { return }
-        let pending = nextToClean..<segments.count
-        guard !pending.isEmpty else { return }
-        nextToClean = segments.count
-        let raw = segments[pending].map(\.raw).joined()
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        var out: String?
-        if !text.isEmpty {
-            out = try? await processor.processSegment(
-                text, context: liveContext(before: pending.lowerBound), locale: runLocale ?? Locale.current,
-                atStop: true)
+    /// The stop pass; a send while it runs drops it and starts one after the sent text, which is awaited too.
+    private func runFinalPass() async {
+        stopPassOpen = true
+        resolveSentTentative(complete: true)
+        if pass == nil, assembler.committedText.count > max(lastPassEnd, liveBase) { startPass(atStop: true) }
+        var awaited: Task<Void, Never>?
+        while let task = pass?.task, task != awaited {
+            awaited = task
+            await task.value
         }
-        guard !Task.isCancelled else { return }
-        settle(pending, cleaned: out)
     }
 
-    /// Records the outcome for `range` and publishes its revision when the cleaned text differs.
-    private func settle(_ range: Range<Int>, cleaned out: String?) {
-        let raw = segments[range].map(\.raw).joined()
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleaned = out?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !cleaned.isEmpty, cleaned != text else {
-            for i in range { segments[i].shown = segments[i].raw }
-            return
-        }
-        let revision = TranscriptRevision.cleaning(raw, at: segments[range.lowerBound].start, to: cleaned)
-        for i in range { segments[i].shown = i == range.lowerBound ? revision.text : "" }
-        publish(.revise(revision))
-    }
-
-    /// The revised text before segment `index`, its end only, trimmed.
-    private func liveContext(before index: Int) -> String {
-        let text = segments[..<index].map { $0.shown ?? $0.raw }.joined()
-        return String(text.suffix(Self.liveContextCharacters)).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// The entry of a live-cleaned run: the revised text, with the engine's as `rawText` when they differ.
+    /// The entry of a live-cleaned run: the sent parts as they were shown, then what clients show for the
+    /// rest; the engine's text as `rawText` when they differ.
     private func applyLiveCleanup(to entry: inout DictationEntry) {
-        let revised = segments.map { $0.shown ?? $0.raw }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !revised.isEmpty, revised != entry.text else { return }
+        resolveSentTentative(complete: true)
+        let raw = Array(assembler.committedText)
+        let shown = (sentText + shownText(upTo: raw.count, raw: raw)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !shown.isEmpty, shown != entry.text else { return }
         entry.rawText = entry.text
-        entry.text = revised
+        entry.text = shown
     }
 
     private func cancelLiveCleanup() {
-        cleaner?.cancel()
-        cleaner = nil
+        pass?.task?.cancel()
+        pass = nil
     }
 
     /// The stop's cleanup against its deadline: whichever ends first resumes the stop.

@@ -256,21 +256,23 @@ private struct SlowFoundationModels: LLMBackend {
         }
     }
 
-    @Test func aSegmentIsCleanedWithItsContextAndWithoutTheCleaningUpPhase() async throws {
+    @Test func aPassIsCleanedWithItsContextAndWithoutTheCleaningUpPhase() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         store.enabled = true
         store.delivery = .live
         let fm = EchoingFoundationModels()
         let recorder = Recorder()
         let out = try await processor(store, fm: fm, recorder: recorder)
-            .processSegment("how are you", context: "Hello world.", locale: Locale(identifier: "en_US"), atStop: false)
-        #expect(out == "How are you?")
+            .cleanLivePass("how are you", context: "Hello world.", locale: Locale(identifier: "en_US"), atStop: false)
+        #expect(out.text == "How are you?")
+        #expect(out.backend == "Apple Foundation Models")
+        #expect(!out.guardRejected && !out.timedOut)
         #expect(fm.sent.first?.hasPrefix("<before>\nHello world.\n</before>\n") == true)
         #expect(recorder.starts == 0, "the run is still listening")
         #expect(recorder.reports.count == 1)
     }
 
-    @Test func theReadoutOfALiveRunCoversAllItsSegments() async throws {
+    @Test func theReadoutOfALiveRunCoversAllItsPasses() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         store.enabled = true
         store.delivery = .live
@@ -280,11 +282,11 @@ private struct SlowFoundationModels: LLMBackend {
             report: { recorder.record($0) })
         let en = Locale(identifier: "en_US")
         p.liveRunStarts()
-        _ = try await p.processSegment("how are you", context: "", locale: en, atStop: false) // changed
-        _ = try await p.processSegment("How are you?", context: "How are you?", locale: en, atStop: false) // unchanged
+        _ = try await p.cleanLivePass("how are you", context: "", locale: en, atStop: false) // changed
+        _ = try await p.cleanLivePass("How are you?", context: "How are you?", locale: en, atStop: false) // unchanged
         let last = try #require(recorder.reports.last)
-        #expect(last.changed, "a segment changed, so the run did")
-        #expect(last.milliseconds >= 2 * SlowFoundationModels.delayMs, "the time of both segments")
+        #expect(last.changed, "a pass changed, so the run did")
+        #expect(last.milliseconds >= 2 * SlowFoundationModels.delayMs, "the time of both passes")
         #expect(last.backend == "Apple Foundation Models")
         #expect(last.refine == false)
     }
@@ -299,11 +301,11 @@ private struct SlowFoundationModels: LLMBackend {
             report: { recorder.record($0) })
         let en = Locale(identifier: "en_US")
         p.liveRunStarts()
-        _ = try await p.processSegment("how are you", context: "", locale: en, atStop: false)
+        _ = try await p.cleanLivePass("how are you", context: "", locale: en, atStop: false)
         p.liveRunStarts()
-        _ = try await p.processSegment("How are you?", context: "", locale: en, atStop: false)
+        _ = try await p.cleanLivePass("How are you?", context: "", locale: en, atStop: false)
         let last = try #require(recorder.reports.last)
-        #expect(!last.changed, "only this run's segment counts")
+        #expect(!last.changed, "only this run's pass counts")
         #expect(last.milliseconds < 2 * SlowFoundationModels.delayMs + SlowFoundationModels.delayMs / 2)
     }
 
@@ -313,7 +315,37 @@ private struct SlowFoundationModels: LLMBackend {
         store.delivery = .live
         let recorder = Recorder()
         _ = try await processor(store, fm: EchoingFoundationModels(), recorder: recorder)
-            .processSegment("how are you", context: "", locale: Locale(identifier: "en_US"), atStop: true)
+            .cleanLivePass("how are you", context: "", locale: Locale(identifier: "en_US"), atStop: true)
         #expect(recorder.starts == 1)
     }
+
+    @Test func aPassWhoseReplyTheGuardRejectsSaysSo() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        store.delivery = .live
+        let p = CleanupProcessor(
+            registry: CleanupRegistry(
+                models: emptyManager(), foundationModels: AnsweringFoundationModels(reply: "The capital of France is Paris, a city on the Seine with many museums.")),
+            settings: store, report: { _ in })
+        let out = try await p.cleanLivePass(
+            "what is the capital of france", context: "", locale: Locale(identifier: "en_US"), atStop: false)
+        #expect(out.text == "what is the capital of france", "the raw text is kept")
+        #expect(out.guardRejected)
+    }
+
+    @Test func withCleanupOffAPassChangesNothing() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        let out = try await processor(store, fm: EchoingFoundationModels(), recorder: Recorder())
+            .cleanLivePass("how are you", context: "", locale: Locale(identifier: "en_US"), atStop: false)
+        #expect(out == LivePassResult(text: "how are you"))
+    }
+}
+
+/// Foundation Models stand-in that answers every prompt with `reply`.
+private struct AnsweringFoundationModels: LLMBackend {
+    let reply: String
+    let id = "fm"
+    let maxPromptCharacters: Int? = nil
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String { "<text>\(reply)</text>" }
 }

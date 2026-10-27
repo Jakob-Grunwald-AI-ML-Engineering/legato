@@ -20,10 +20,12 @@ import Foundation
 ///   With `.replace` the streamed text is revealed like any other; the swap for the final text waits until
 ///   all of it is in the field and the field's context shows it (`settleLimitMs` at most), and is then one
 ///   edit. With `.clipboard` the streamed text is the result.
-///   With `.live` a revision (`HostState.revisions`) is applied by the planner only to text the reveal has
-///   typed (the planner sees the state cut to the revealed part, so a revision waits until its raw span is
-///   covered), and, like the swap, only once the field's context shows the raw text typed on earlier ticks
-///   (`settleLimitMs` at most): a revision that finds nothing to replace is skipped for good.
+///   With `.live` a revision (`HostState.revision`) is applied by the planner only to text the reveal has
+///   typed (the planner sees the state cut to the revealed part, so a revision waits until the text it covers
+///   is revealed), and, like the swap, only once the field's context shows the run text typed on earlier
+///   ticks (`settleLimitMs` at most): a revision that finds the field changed is skipped for good. After a sent
+///   boundary the reveal goes on from the boundary; tentative text sent with the message holds it until the
+///   committed text shows where that text ends (`ProxyEditPlanner.awaitsSentTentative`, on the whole state).
 public struct TypewriterReveal: Sendable, Equatable {
     /// How long a tick waits for the field's context to show the tentative text before giving up.
     public static let settleLimitMs = 250.0
@@ -35,6 +37,8 @@ public struct TypewriterReveal: Sendable, Equatable {
     private var text = ""
     private var revealed = 0
     private var waitedMs = 0.0
+    /// The cursor's `sentCount` last seen: a new sent boundary empties the field of the run.
+    private var sentCount = 0
 
     public init() {}
 
@@ -57,6 +61,7 @@ public struct TypewriterReveal: Sendable, Equatable {
         if runID != self.runID {
             self.runID = runID
             waitedMs = 0
+            sentCount = cursor?.runID == runID ? cursor?.sentCount ?? 0 : 0
             if let cursor, cursor.runID == runID {
                 revealed = min(total, cursor.committedCount + cursor.volatile.count)
             } else {
@@ -66,6 +71,23 @@ public struct TypewriterReveal: Sendable, Equatable {
             revealed = total
         }
         text = target
+
+        // `.live` after a sent boundary: the field shows the run only from the boundary on, and tentative text
+        // sent with the message holds everything back until the committed text shows where it ends. This is
+        // decided on the host's whole state, never on the revealed part of it.
+        var cursor = cursor
+        if state.delivery == .live, var sent = cursor, sent.runID == runID {
+            if sent.sentCount != sentCount {
+                sentCount = sent.sentCount
+                revealed = min(total, sent.committedCount + sent.volatile.count)
+            }
+            if ProxyEditPlanner.awaitsSentTentative(state: state, cursor: &sent) {
+                revealed = min(total, sent.committedCount)
+                return ProxyPlan(ops: [], cursor: sent)
+            }
+            revealed = max(revealed, min(total, sent.sentBase))
+            cursor = sent
+        }
 
         // A swap for the cleaned text is due: it needs all of the streamed text in the field first.
         let swapDue = state.isFinal && state.delivery == .replace && ProxyEditPlanner.cleanedText(state) != nil
@@ -104,18 +126,16 @@ public struct TypewriterReveal: Sendable, Equatable {
         return plan
     }
 
-    /// `.live`: a revision not yet handled reaches back into raw text typed on earlier ticks, which the
-    /// planner looks for at the end of the field's context (before the tentative text). True while the
-    /// context does not show that text yet.
+    /// `.live`: a revision not yet handled replaces the run text typed on earlier ticks, which the planner looks
+    /// for at the end of the field's context (before the tentative text). True while the context does not
+    /// show that text yet.
     private static func revisionAwaitsContext(state: HostState, cursor: AppliedCursor?, contextBefore: String) -> Bool {
-        guard state.delivery == .live, let cursor, cursor.runID == state.runID,
-              let revisions = state.revisions, cursor.revisionsHandled < revisions.count
+        guard state.delivery == .live, let cursor, cursor.runID == state.runID, let revision = state.revision,
+              revision.n > cursor.revisionHandled, revision.start == cursor.sentBase, !cursor.revisionSkipped
         else { return false }
-        let start = revisions[cursor.revisionsHandled].start
         let typed = min(cursor.committedCount, state.committed.count)
-        guard start >= 0, start < typed else { return false }
-        let raw = String(state.committed.dropFirst(start).prefix(typed - start))
-        return !contextBefore.hasSuffix(raw + cursor.volatile)
+        let shown = ProxyEditPlanner.runText(cursor: cursor, committed: state.committed, upTo: typed)
+        return !contextBefore.hasSuffix(shown + cursor.volatile)
     }
 
     /// `state` cut to its first `count` characters of `committed + volatile`.

@@ -1,8 +1,8 @@
 import Testing
 @testable import LegatoKeyboardCore
 
-/// A Live run as the keyboard meets it: partials, finals one phrase at a time, and each phrase's revision
-/// arriving while the next one is being spoken (and revealed).
+/// A Live run as the keyboard meets it: partials, finals one phrase at a time, and a rolling pass's revision
+/// of the whole text so far arriving while the next phrase is being spoken (and revealed).
 private struct FlowRig {
     var reveal = TypewriterReveal()
     var field: String
@@ -46,20 +46,23 @@ private struct FlowRig {
 }
 
 private func live(
-    _ committed: String, _ volatile: String = "", revisions: [HostRevision]? = nil, phase: HostPhase = .listening
+    _ committed: String, _ volatile: String = "", revision: HostRevision? = nil, phase: HostPhase = .listening
 ) -> HostState {
     var host = hostState(phase: phase, committed: committed, volatile: volatile)
     host.delivery = .live
-    host.revisions = revisions
+    host.revision = revision
     return host
 }
 
 @Suite struct TypewriterRevealLiveFlowTests {
     private let s1 = "hallo wie gehts"
     private let s2 = " ich wollte fragen ob du morgen zeit hast"
-    private let r1 = HostRevision(start: 0, raw: "hallo wie gehts", text: "Hallo, wie gehts?")
+    private let r1 = HostRevision(n: 1, start: 0, raw: "hallo wie gehts", text: "Hallo, wie gehts?")
+    /// The next pass covers both phrases.
     private var r2: HostRevision {
-        HostRevision(start: 15, raw: " ich wollte fragen ob du morgen zeit hast", text: " Ich wollte fragen, ob du morgen Zeit hast.")
+        HostRevision(
+            n: 2, start: 0, raw: "hallo wie gehts ich wollte fragen ob du morgen zeit hast",
+            text: "Hallo, wie gehts? Ich wollte fragen, ob du morgen Zeit hast.")
     }
 
     private func run(lagging: Bool, prefix: String = "") -> (rig: FlowRig, midRun: String) {
@@ -75,16 +78,16 @@ private func live(
         rig.feed(live(s1, " ich wollte"))
         rig.ticks(live(s1, " ich wollte"), 2)
         // Segment 1's revision arrives while segment 2 is spoken.
-        rig.feed(live(s1, " ich wollte", revisions: [r1]))
-        rig.ticks(live(s1, " ich wollte", revisions: [r1]), 3)
-        rig.feed(live(s1, " ich wollte fragen ob", revisions: [r1]))
-        rig.ticks(live(s1, " ich wollte fragen ob", revisions: [r1]), 3)
+        rig.feed(live(s1, " ich wollte", revision: r1))
+        rig.ticks(live(s1, " ich wollte", revision: r1), 3)
+        rig.feed(live(s1, " ich wollte fragen ob", revision: r1))
+        rig.ticks(live(s1, " ich wollte fragen ob", revision: r1), 3)
         let midRun = rig.field
-        rig.feed(live(s1 + s2, revisions: [r1]))
-        rig.ticks(live(s1 + s2, revisions: [r1]), 4)
-        rig.feed(live(s1 + s2, revisions: [r1, r2]))
-        rig.drain(live(s1 + s2, revisions: [r1, r2]))
-        let final = live(s1 + s2, revisions: [r1, r2], phase: .idle)
+        rig.feed(live(s1 + s2, revision: r1))
+        rig.ticks(live(s1 + s2, revision: r1), 4)
+        rig.feed(live(s1 + s2, revision: r2))
+        rig.drain(live(s1 + s2, revision: r2))
+        let final = live(s1 + s2, revision: r2, phase: .idle)
         rig.feed(final)
         rig.drain(final)
         return (rig, midRun)
