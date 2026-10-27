@@ -1,6 +1,10 @@
 import AVFAudio
 import LegatoCore
 import Synchronization
+#if os(macOS)
+import AudioToolbox
+import CoreAudio
+#endif
 
 public enum MicSourceError: Error, Sendable, Equatable {
     /// `route()` without a preceding `start(format:)`, or after the engine stopped.
@@ -127,6 +131,7 @@ public final class MicSource: ResumableAudioSource {
     private let onAttempt: (@Sendable (Attempt) -> Void)?
     private let onFirstBuffer: (@Sendable (FirstBuffer) -> Void)?
     private let voiceProcessing: Bool
+    private let device: UInt32?
     private let resumeSink: AsyncStream<Void>.Continuation
 
     /// Yields each time the engine was rebuilt after a device or format change (macOS), so a meeting can
@@ -140,14 +145,19 @@ public final class MicSource: ResumableAudioSource {
     ///     and the converter takes channel 0 (the processed voice; an assumption from the spike).
     ///   - onAttempt: called after every start attempt, success or failure (diagnostics only).
     ///   - onFirstBuffer: called once per started engine, after ~0.5 s of input (diagnostics only).
+    ///   - device: macOS only; ignored on iOS. The Core Audio input device to record from, set on every engine
+    ///     before its format is read. nil (the default) records from the system default input and follows it.
+    ///     A device that cannot be set (gone) falls back to the default input.
     public init(
         onAttempt: (@Sendable (Attempt) -> Void)? = nil,
         onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil,
-        voiceProcessing: Bool = false
+        voiceProcessing: Bool = false,
+        device: UInt32? = nil
     ) {
         self.onAttempt = onAttempt
         self.onFirstBuffer = onFirstBuffer
         self.voiceProcessing = voiceProcessing
+        self.device = device
         (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -187,6 +197,8 @@ public final class MicSource: ResumableAudioSource {
                 input.voiceProcessingOtherAudioDuckingConfiguration = AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
                     enableAdvancedDucking: false, duckingLevel: .min)
             }
+            // After voice processing (which replaces the unit's devices), before the format is read.
+            if let device { Self.select(device, on: input) }
             #endif
             let inFormat = input.outputFormat(forBus: 0)
             let report = { [onAttempt] (error: (any Error)?) in
@@ -288,6 +300,18 @@ public final class MicSource: ResumableAudioSource {
             fresh.engine.stop()
         }
     }
+
+    #if os(macOS)
+    /// Points the input node's unit at `device`. A failure leaves it on the default input.
+    @discardableResult
+    private static func select(_ device: UInt32, on input: AVAudioInputNode) -> Bool {
+        guard let unit = input.audioUnit else { return false }
+        var id = AudioDeviceID(device)
+        return AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+            &id, UInt32(MemoryLayout<AudioDeviceID>.size)) == noErr
+    }
+    #endif
 
     private func makeStream() -> AsyncStream<AudioChunk> {
         let (stream, continuation) = AsyncStream.makeStream(of: AudioChunk.self)

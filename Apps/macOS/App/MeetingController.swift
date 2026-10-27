@@ -13,7 +13,8 @@ import os
 /// Records meetings: the mic and the system audio are mixed into one stream of one `MeetingSession`, with
 /// one live engine and speakers told apart by diarization.
 ///
-/// - `start` opens the mic first (with a fallback to no voice processing when it does not work), then the system-audio tap (the tap excludes our own process, which only
+/// - `start` opens the mic first, on the call app's input device (with a fallback to no voice processing when it does
+///   not work, and a notice when it hears nothing), then the system-audio tap (the tap excludes our own process, which only
 ///   exists for Core Audio once the mic has touched it).
 /// - `stop` ends the capture and runs the after-stop chain (post-pass, m4a, on-device summary) in a task.
 /// - Pause silences everything and keeps the timeline; End and Discard are the window's own, behind a confirmation.
@@ -204,7 +205,14 @@ final class MeetingController {
             try? FileManager.default.removeItem(at: folder)
             return
         }
-        let mic = VoiceProcessingFallbackMic(voiceProcessing: engines.voiceProcessing)
+        // The mic the call app records from, not just the default input (which may be a headset mic nobody uses).
+        let monitor = MicInUseMonitor()
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let mic = VoiceProcessingFallbackMic(
+            voiceProcessing: engines.voiceProcessing, device: monitor.meetingMic(ownPID: ownPID).pinned,
+            devices: MicDevices(
+                defaultInput: { AudioDevices.defaultInput() }, name: { AudioDevices.name(of: $0) },
+                callInput: { monitor.meetingMic(ownPID: ownPID).pinned }))
         let system = SystemAudioSource()
         #if DEBUG
         let counter = ZeroCountingSource(system)
@@ -350,11 +358,17 @@ final class MeetingController {
         cleaningNoticeTask = Task { [weak self] in
             for await text in cleaningNotices { self?.notice = text }
         }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
         autoMuteTask = Task { [weak self] in
             for await processes in MicInUseMonitor().processChanges() {
                 guard let self else { return }
                 lastProcesses = processes
                 reevaluateMute()
+                // A call that starts later, or moves to another mic, takes the meeting mic along. A call app that
+                // closes its mic (muted) leaves it where it is.
+                if let device = MeetingMicRoute.choose(processes: processes, ownPID: ownPID, defaultInput: nil).pinned {
+                    await mic.follow(device: device)
+                }
             }
         }
         clockTask = Task { [weak self] in

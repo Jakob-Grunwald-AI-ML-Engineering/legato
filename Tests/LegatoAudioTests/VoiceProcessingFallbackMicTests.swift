@@ -9,6 +9,7 @@ private struct StartFailed: Error {}
 /// A microphone the test drives; remembers whether it was asked for voice processing.
 private final class FakeMic: ResumableAudioSource {
     let voiceProcessing: Bool
+    let device: UInt32?
     private let failStart: Bool
     private let continuation = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
     private let stops = Mutex(0)
@@ -16,8 +17,9 @@ private final class FakeMic: ResumableAudioSource {
     let resumptions: AsyncStream<Void>
     var stopCount: Int { stops.withLock { $0 } }
 
-    init(voiceProcessing: Bool, failStart: Bool = false) {
+    init(voiceProcessing: Bool, device: UInt32? = nil, failStart: Bool = false) {
         self.voiceProcessing = voiceProcessing
+        self.device = device
         self.failStart = failStart
         (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self)
     }
@@ -27,6 +29,7 @@ private final class FakeMic: ResumableAudioSource {
         let chunk = AudioChunk(samples: Array(repeating: level, count: count), format: AudioFormatSpec(sampleRate: 16_000, channelCount: 1))
         continuation.withLock { _ = $0?.yield(chunk) }
     }
+    func push(_ chunk: AudioChunk) { continuation.withLock { _ = $0?.yield(chunk) } }
     func resume() { resumeSink.yield() }
 
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
@@ -48,9 +51,9 @@ private final class Factory: Sendable {
     private let plan: Mutex<[(vp: Bool, fail: Bool)]>
     let made = Mutex<[FakeMic]>([])
     init(_ plan: [(vp: Bool, fail: Bool)]) { self.plan = Mutex(plan) }
-    func make(_ vp: Bool) -> any AudioSource {
+    func make(_ vp: Bool, _ device: UInt32? = nil) -> any AudioSource {
         let next = plan.withLock { $0.isEmpty ? (vp: vp, fail: false) : $0.removeFirst() }
-        let mic = FakeMic(voiceProcessing: vp, failStart: next.fail)
+        let mic = FakeMic(voiceProcessing: vp, device: device, failStart: next.fail)
         made.withLock { $0.append(mic) }
         return mic
     }
@@ -126,7 +129,7 @@ private func eventually(_ condition: @Sendable () -> Bool) async -> Bool {
     @Test func aMicThatStaysSilentIsRestartedWithoutVoiceProcessingOnTheSameStream() async throws {
         let factory = Factory([])
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: true, guardian: MicSilenceGuard(window: 1, peakThreshold: 0.01), make: { factory.make($0) })
+            voiceProcessing: true, guardian: MicSilenceGuard(window: 1, grace: 0), make: { factory.make($0) })
         let notices = Tally(source.notices), resumptions = Tally(source.resumptions)
         let stream = try await source.start(format: format)
         let (got, reader) = collect(stream)
@@ -153,6 +156,112 @@ private func eventually(_ condition: @Sendable () -> Bool) async -> Bool {
         for _ in 0..<30 { factory.mics[0].push(0) }
         #expect(await eventually { got.values.count == 30 })
         #expect(factory.mics.count == 1)
+        await source.stop()
+        await reader.value
+    }
+
+    /// The field bug: a plain meeting mic on an unused AirPods mic recorded nothing, and nobody was told.
+    @Test func aPlainMicThatHearsOnlyANoiseFloorSaysSo() async throws {
+        let factory = Factory([])
+        let source = VoiceProcessingFallbackMic(voiceProcessing: false, make: { factory.make($0) })
+        let notices = Tally(source.notices)
+        let stream = try await source.start(format: format)
+        let (_, reader) = collect(stream)
+        for chunk in MicSignals.chunks(MicSignals.deadAirPods()) { factory.mics[0].push(chunk) }
+        #expect(await eventually { notices.values == ["Your mic hears nothing — check the input in System Settings → Sound"] })
+        #expect(factory.mics.count == 1, "no other device to switch to")
+        await source.stop()
+        await reader.value
+    }
+
+    private let builtIn: UInt32 = 92
+    private let airPods: UInt32 = 122
+
+    /// The AirPods are the default input; the call app records from the built-in mic (or from `call`).
+    private func devices(call: UInt32?) -> MicDevices {
+        MicDevices(
+            defaultInput: { 122 },
+            name: { [92: "MacBook Pro Microphone", 122: "AirPods Pro"][$0] },
+            callInput: { call })
+    }
+
+    @Test func aDeadMicNamesTheCallsDeviceAndSwitchesToIt() async throws {
+        let factory = Factory([])
+        let source = VoiceProcessingFallbackMic(
+            voiceProcessing: false, devices: devices(call: builtIn), makeMic: { factory.make($0, $1) })
+        let notices = Tally(source.notices), resumptions = Tally(source.resumptions)
+        let stream = try await source.start(format: format)
+        let (got, reader) = collect(stream)
+        for chunk in MicSignals.chunks(MicSignals.deadAirPods()) { factory.mics[0].push(chunk) }
+
+        #expect(await eventually { notices.values == ["Your mic (AirPods Pro) hears nothing — the call uses MacBook Pro Microphone"] })
+        try #require(await eventually { factory.mics.count == 2 })
+        #expect(factory.mics.map(\.device) == [nil, builtIn])
+        #expect(await eventually { resumptions.values.count == 1 }, "the meeting is told to fill the gap")
+        factory.mics[1].push(0.5)
+        #expect(await eventually { got.values.last == 0.5 })
+        await source.stop()
+        await reader.value
+    }
+
+    @Test func aDeadMicOnTheCallsOwnDeviceIsOnlyReported() async throws {
+        let factory = Factory([])
+        let source = VoiceProcessingFallbackMic(
+            voiceProcessing: false, device: builtIn, devices: devices(call: builtIn), makeMic: { factory.make($0, $1) })
+        let notices = Tally(source.notices)
+        _ = try await source.start(format: format)
+        for chunk in MicSignals.chunks(MicSignals.deadAirPods()) { factory.mics[0].push(chunk) }
+        #expect(await eventually {
+            notices.values == ["Your mic (MacBook Pro Microphone) hears nothing — check the input in System Settings → Sound"]
+        })
+        #expect(factory.mics.count == 1)
+        await source.stop()
+    }
+
+    @Test func followingTheCallAppMovesTheMicOnTheSameStream() async throws {
+        let factory = Factory([])
+        let source = VoiceProcessingFallbackMic(
+            voiceProcessing: false, devices: devices(call: nil), makeMic: { factory.make($0, $1) })
+        let resumptions = Tally(source.resumptions)
+        let stream = try await source.start(format: format)
+        let (got, reader) = collect(stream)
+        factory.mics[0].push(0.1)
+
+        await source.follow(device: builtIn) // the call started after the meeting
+        try #require(factory.mics.map(\.device) == [nil, builtIn])
+        #expect(factory.mics[0].stopCount == 1)
+        #expect(await eventually { resumptions.values.count == 1 })
+        factory.mics[1].push(0.2)
+        #expect(await eventually { got.values == [0.1, 0.2] })
+
+        await source.follow(device: builtIn) // already there
+        #expect(factory.mics.count == 2)
+        await source.stop()
+        await reader.value
+    }
+
+    @Test func aFollowedDeviceIsUsedFromTheStart() async throws {
+        let factory = Factory([])
+        let source = VoiceProcessingFallbackMic(voiceProcessing: true, device: builtIn, makeMic: { factory.make($0, $1) })
+        _ = try await source.start(format: format)
+        #expect(factory.mics.map(\.device) == [builtIn])
+        #expect(factory.mics[0].voiceProcessing)
+        await source.stop()
+    }
+
+    @Test func aRestartOfTheMicIsJudgedAgain() async throws {
+        let factory = Factory([])
+        let source = VoiceProcessingFallbackMic(
+            voiceProcessing: false, guardian: MicSilenceGuard(window: 1, grace: 0), make: { factory.make($0) })
+        let notices = Tally(source.notices), resumptions = Tally(source.resumptions)
+        let stream = try await source.start(format: format)
+        let (got, reader) = collect(stream)
+        for _ in 0..<10 { factory.mics[0].push(0.3) } // working
+        #expect(await eventually { got.values.count == 10 })
+        factory.mics[0].resume() // the engine was rebuilt after a device change
+        #expect(await eventually { resumptions.values.count == 1 })
+        for _ in 0..<10 { factory.mics[0].push(0) } // and the new device hears nothing
+        #expect(await eventually { notices.values == ["Your mic hears nothing — check the input in System Settings → Sound"] })
         await source.stop()
         await reader.value
     }
