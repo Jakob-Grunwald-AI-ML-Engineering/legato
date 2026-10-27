@@ -303,10 +303,16 @@ private struct SlowFoundationModels: LLMBackend {
         p.liveRunStarts()
         _ = try await p.cleanLivePass("how are you", context: "", locale: en, atStop: false)
         p.liveRunStarts()
+        let clock = ContinuousClock()
+        let started = clock.now
         _ = try await p.cleanLivePass("How are you?", context: "", locale: en, atStop: false)
+        let elapsed = started.duration(to: clock.now)
         let last = try #require(recorder.reports.last)
         #expect(!last.changed, "only this run's pass counts")
-        #expect(last.milliseconds < 2 * SlowFoundationModels.delayMs + SlowFoundationModels.delayMs / 2)
+        // The readout fits inside this pass's own wall time, so the first run's pass (at least delayMs) is not in it.
+        // Relative to the measured pass, not a fixed bound, so a slow runner can't fail it.
+        let elapsedMs = Int((Double(elapsed.components.attoseconds) / 1e15).rounded(.up)) + Int(elapsed.components.seconds) * 1000
+        #expect(last.milliseconds <= elapsedMs, "this pass took \(elapsedMs) ms")
     }
 
     @Test func theStopPassAnnouncesItself() async throws {

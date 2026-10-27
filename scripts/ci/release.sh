@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Usage: release.sh check|mac-build|real-deps|ship
 #   check      iOS: Release build (arm64 simulator) + scan that no e2e/fake code is in the binary.
-#   mac-build  macOS: Release build, unsigned.
+#   mac-build  macOS: Debug build, arm64, unsigned (a Release build of MLX takes over 12 min cold; the signed
+#              Release build belongs to the ship pipeline, #4).
 #   real-deps  `swift test` against the real MLX, FluidAudio, swift-huggingface and swift-transformers (the gate
 #              tests against stubs; tests that need the real libraries run only here).
 #   ship       the release pipeline (not implemented yet, #4).
@@ -21,8 +22,8 @@ case "$mode" in
     select_xcode
     ensure_xcodegen
     (cd Apps/macOS && "$XCODEGEN" generate)
-    xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato -configuration Release \
-      -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO
+    xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato -configuration Debug \
+      -destination 'generic/platform=macOS' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
     ;;
   real-deps)
     select_xcode
