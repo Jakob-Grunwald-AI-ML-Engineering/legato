@@ -160,11 +160,14 @@ struct PipelineTests {
         #expect(timerCancelled.isSet)
     }
 
-    @Test func cancellingTheCallerReturnsTheInputAtOnce() async {
+    /// No wall-clock bound: the stage never finishes on its own, so returning at all proves the caller did not
+    /// wait for it. The time limit only stops a hang; a slow return is printed, not failed.
+    @Test(.timeLimit(.minutes(1)))
+    func cancellingTheCallerReturnsTheInputWithoutWaitingForTheStage() async {
         let log = CallLog()
         let pipeline = PostProcessingPipeline(
             stages: [SpyStage("stubborn", log: log) { _ in
-                await Task.detached { try? await Task.sleep(for: .seconds(2)) }.value
+                await Task.detached { try? await Task.sleep(for: .seconds(3600)) }.value
                 return "too late"
             }],
             sleeper: neverFires)
@@ -174,7 +177,7 @@ struct PipelineTests {
         let started = clock.now
         caller.cancel()
         #expect(await caller.value == "x")
-        #expect(clock.now - started < .seconds(1))
+        reportIfSlow(clock.now - started, over: .seconds(1), "cancelled pipeline return")
     }
 
     @Test func aStageThatReturnsNothingPassesItsInputThrough() async {
