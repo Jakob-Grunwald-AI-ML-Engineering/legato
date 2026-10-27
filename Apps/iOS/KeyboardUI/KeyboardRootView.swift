@@ -165,10 +165,11 @@ struct KeyboardRootView: View {
         controller.versions != nil && controller.statusText == nil && controller.suggestions.isEmpty
     }
 
-    /// Three slots with thin dividers. A hint or the dictation status takes the bar's place.
+    /// Three slots with thin dividers, the best suggestion in the middle. A hint or the dictation status takes
+    /// the bar's place.
     private func suggestionBar(_ g: KeyGeometry) -> some View {
         let frame = g.suggestionFrame
-        let slots = controller.suggestions
+        let slots = SuggestionSlots.arrange(controller.suggestions)
         return Group {
             if showsVersionBar {
                 Color.clear
@@ -185,7 +186,7 @@ struct KeyboardRootView: View {
             } else {
                 HStack(spacing: 0) {
                     ForEach(0..<3, id: \.self) { index in
-                        Text(index < slots.count ? slots[index] : "")
+                        Text(slots[index] ?? "")
                             .font(.system(size: 17))
                             .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                             .lineLimit(1)

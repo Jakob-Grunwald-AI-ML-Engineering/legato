@@ -75,6 +75,18 @@ public enum ModelHub {
 
 public struct SharedNemotronMultilingualModels: Sendable {}
 
+// Plain data (no behaviour): the vocabulary tests read the terms Legato builds.
+public struct CustomVocabularyTerm: Sendable {
+    public let text: String
+    public let weight: Float?
+    public let aliases: [String]?
+    public init(text: String, weight: Float? = nil, aliases: [String]? = nil) {
+        self.text = text
+        self.weight = weight
+        self.aliases = aliases
+    }
+}
+
 public actor StreamingNemotronMultilingualAsrManager {
     public init(configuration: MLModelConfiguration) {}
     public static func downloadVariant(
@@ -91,6 +103,7 @@ public actor StreamingNemotronMultilingualAsrManager {
         fatalError("stub: loadFromShared")
     }
     public func setLanguage(_ hint: String) async { fatalError("stub: setLanguage") }
+    public func setCustomVocabulary(_ terms: [CustomVocabularyTerm]) async { fatalError("stub: setCustomVocabulary") }
     public func setPartialCallback(_ callback: @escaping @Sendable (String) -> Void) async {
         fatalError("stub: setPartialCallback")
     }

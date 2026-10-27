@@ -39,6 +39,7 @@ let package = Package(
         .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
+        .library(name: "LegatoVocabulary", targets: ["LegatoVocabulary"]),
     ],
     dependencies: stubDeps ? [] : [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
@@ -52,6 +53,10 @@ let package = Package(
         // The keyboard extension links only this (Foundation only; it must not depend on LegatoCore).
         .target(name: "LegatoKeyboardCore"),
         .testTarget(name: "LegatoKeyboardCoreTests", dependencies: ["LegatoKeyboardCore"]),
+        // The personal vocabulary (Foundation and NaturalLanguage only; like the keyboard core, it must not
+        // depend on LegatoCore, so the keyboard extension can link it).
+        .target(name: "LegatoVocabulary"),
+        .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore"]),
         .target(name: "LegatoAppleSpeech", dependencies: ["LegatoCore"]),
@@ -84,11 +89,11 @@ let package = Package(
         ),
         .testTarget(
             name: "LegatoEnginesTests",
-            dependencies: ["LegatoEngines", "LegatoCore", "LegatoModels"]
+            dependencies: ["LegatoEngines", "LegatoCore", "LegatoModels", "LegatoAppleSpeech", "LegatoFluidAudio"]
         ),
         .testTarget(
             name: "LegatoPostProcessingTests",
-            dependencies: ["LegatoPostProcessing", "LegatoCore", "LegatoModels", "LegatoMLX"],
+            dependencies: ["LegatoPostProcessing", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoVocabulary"],
             resources: [.copy("Fixtures")]
         ),
         .target(
@@ -103,7 +108,7 @@ let package = Package(
         ),
         .target(
             name: "LegatoPostProcessing",
-            dependencies: ["LegatoCore", heavy("FluidAudio", "FluidAudio")]
+            dependencies: ["LegatoCore", "LegatoVocabulary", heavy("FluidAudio", "FluidAudio")]
         ),
         .testTarget(
             name: "LegatoMLXTests",
@@ -122,11 +127,15 @@ let package = Package(
             name: "LegatoAppServices",
             dependencies: [
                 "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoPostProcessing",
+                "LegatoVocabulary",
             ]
         ),
         .testTarget(
             name: "LegatoAppServicesTests",
-            dependencies: ["LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing"]
+            dependencies: [
+                "LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing", "LegatoVocabulary",
+                "LegatoEngines",
+            ]
         ),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),

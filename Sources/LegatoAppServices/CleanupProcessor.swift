@@ -53,14 +53,21 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     let report: @Sendable (CleanupRunReport) async -> Void
     /// What the passes of the current live run did so far.
     private let liveRun = LiveRunTally()
+    /// The id of the current live run, for the vocabulary: every segment of one run counts as one run. A box,
+    /// because the processor is a struct.
+    private let liveRunID = LiveRunID()
+    /// Supplies the `<terms>` for the model and learns from what a run changed; nil: neither.
+    private let vocabulary: VocabularyService?
 
     public init(
         registry: CleanupRegistry,
         settings: CleanupSettingsStore,
         preferredLocale: @escaping @Sendable () -> Locale? = { nil },
         willRun: @escaping @Sendable () async -> Void = {},
+        vocabulary: VocabularyService? = nil,
         report: @escaping @Sendable (CleanupRunReport) async -> Void
     ) {
+        self.vocabulary = vocabulary
         self.registry = registry
         self.settings = settings
         self.preferredLocale = preferredLocale
@@ -74,7 +81,8 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         await willRun()
         return await Self.run(
             text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
-            timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report)
+            timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report,
+            vocabulary: vocabulary, runID: UUID())
     }
 
     /// Cleanup on with delivery Live: the session cleans the run's text in rolling passes while it goes on.
@@ -84,7 +92,10 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     }
 
     /// A live run starts: its readout begins afresh.
-    public func liveRunStarts() { liveRun.reset() }
+    public func liveRunStarts() {
+        liveRun.reset()
+        liveRunID.renew()
+    }
 
     /// The stop of a live run spends at most the setting's time limit on cleanup, the pass in flight and
     /// the final pass together.
@@ -106,7 +117,8 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         let ran = await Self.runReporting(
             text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
             timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry,
-            report: { await report(liveRun.adding($0)) }, context: context)
+            report: { await report(liveRun.adding($0)) }, context: context,
+            vocabulary: vocabulary, runID: liveRunID.current)
         return LivePassResult(
             text: ran.pipeline.text, guardRejected: ran.pipeline.guardRejected, timedOut: ran.pipeline.timedOut,
             backend: ran.report.backend, device: ran.report.device)
@@ -114,14 +126,18 @@ public struct CleanupProcessor: TranscriptPostProcessor {
 
     /// One cleanup in `style`, whatever the on/off switch says (refine uses it directly). ITN and the backend
     /// come from `settings`. `context`: the frozen cleaned text before `text` (a live pass past the length cap).
+    /// `vocabulary`: its terms go to the model, and what the run changed teaches it (as run `runID`), in the
+    /// background, except a swap to one of the terms the model was given (not independent evidence). A run has
+    /// no dictation id, so deleting a dictation does not unlearn its run's pending fixes (see
+    /// ``VocabularyService/learnFromCleanup``).
     public static func run(
         _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
         settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
-        context: String = ""
+        context: String = "", vocabulary: VocabularyService? = nil, runID: UUID = UUID()
     ) async -> String {
         await runReporting(
             text, locale: locale, style: style, refine: refine, timeout: timeout, settings: settings, registry: registry,
-            report: report, context: context).pipeline.text
+            report: report, context: context, vocabulary: vocabulary, runID: runID).pipeline.text
     }
 
     /// ``run(_:locale:style:refine:timeout:settings:registry:report:context:)`` with the pipeline's report and
@@ -129,15 +145,20 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     static func runReporting(
         _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
         settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
-        context: String = ""
+        context: String = "", vocabulary: VocabularyService? = nil, runID: UUID = UUID()
     ) async -> (pipeline: PostProcessingPipeline.Report, report: CleanupRunReport) {
         let clock = ContinuousClock()
         let start = clock.now
         let itn = settings.itn
+        let terms = await vocabulary?.cleanupTerms(for: text) ?? []
         let (pipeline, resolution) = await registry.pipeline(
             style: style, itn: itn, preference: settings.backend.preference, background: settings.backgroundCleanup,
-            timeout: timeout, context: context)
+            timeout: timeout, context: context, vocabulary: terms)
         let out = await pipeline.processReporting(text, locale: locale)
+        if out.text != text {
+            vocabulary?.learnFromCleanup(
+                raw: text, cleaned: out.text, style: style, runID: runID, locale: locale, suggested: terms)
+        }
         let elapsed = start.duration(to: clock.now)
         let run = CleanupRunReport(
             backend: name(resolution.choice, itn: itn), skipped: resolution.skipped.map(\.description), style: style,
@@ -154,6 +175,13 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         case .itnOnly: itn ? "ITN only (no language model)" : "None (no language model)"
         }
     }
+}
+
+/// The id of the current live run.
+final class LiveRunID: Sendable {
+    private let id = Mutex(UUID())
+    var current: UUID { id.withLock { $0 } }
+    func renew() { id.withLock { $0 = UUID() } }
 }
 
 /// The sum of a live run's pass reports: total time, changed when any pass changed, every backend
