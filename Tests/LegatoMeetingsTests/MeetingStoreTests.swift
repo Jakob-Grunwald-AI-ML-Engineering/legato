@@ -169,4 +169,253 @@ import LegatoCore
         #expect(try await store.meeting(id: m.id) == merged)
         #expect(try await store.update(id: UUID()) { $0.duration = 1 } == nil)
     }
+
+    // MARK: Old data
+
+    @Test func meetingsSavedBeforeTheRedesignDecodeWithDefaults() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let id = UUID()
+        let folder = try await store.createFolder(for: id)
+        let json = """
+            {"id": "\(id.uuidString)", "title": "Old", "date": 1000, "duration": 60, "engineID": "e",
+             "mutedRanges": [{"stream": "mic", "start": 1, "end": 2}], "state": "finished"}
+            """
+        try Data(json.utf8).write(to: folder.appendingPathComponent("meeting.json"))
+        let m = try #require(try await store.meeting(id: id))
+        #expect(m.speakers.isEmpty && m.pausedRanges.isEmpty && m.locale == nil)
+        #expect(m.templateID == SummaryTemplate.summaryID && m.completedSteps.isEmpty)
+        #expect(m.mutedRanges == [MutedRange(stream: .mic, start: 1, end: 2)])
+    }
+
+    @Test func theNewMeetingFieldsRoundTrip() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        var m = meeting("New", at: 1)
+        m.speakers = ["P1": SpeakerInfo(name: "You", colorIndex: 0, isYou: true), "P2": SpeakerInfo(name: "Alice", colorIndex: 1, isYou: false)]
+        m.pausedRanges = [PausedRange(start: 120, end: 150)]
+        m.locale = "de-DE"
+        m.templateID = "action-items"
+        m.completedSteps = [.audio, .diarize]
+        try await store.create(m)
+        #expect(try await store.meeting(id: m.id) == m)
+    }
+
+    @Test func segmentsSavedBeforeSpeakersExistedDecodeWithoutOne() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let id = UUID()
+        let folder = try await store.createFolder(for: id)
+        let line = """
+            {"id": "\(UUID().uuidString)", "stream": "system", "text": "Hi", "start": 1, "end": 2, "origin": "live", "echo": false}
+            """
+        try Data((line + "\n").utf8).write(to: folder.appendingPathComponent("segments.jsonl"))
+        let segments = try await store.segments(for: id)
+        #expect(segments.count == 1 && segments[0].speaker == nil && segments[0].stream == .system)
+    }
+
+    @Test func aSegmentsSpeakerRoundTrips() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        let s = MeetingSegment(stream: .mixed, text: "x", start: 1, end: 2, speaker: "P3")
+        try await store.appendSegment(s, to: m.id)
+        #expect(try await store.segments(for: m.id) == [s])
+    }
+
+    // MARK: Notes
+
+    @Test func notesAreSavedAndReadBack() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("N", at: 1)
+        try await store.create(m)
+        #expect(try await store.notes(for: m.id) == nil)
+        try await store.saveNotes("- ask about budget", for: m.id)
+        #expect(try await store.notes(for: m.id) == "- ask about budget")
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent(m.id.uuidString).appendingPathComponent("notes.md").path))
+    }
+
+    @Test func emptyNotesAreNoNotes() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("N", at: 1)
+        try await store.create(m)
+        try await store.saveNotes("x", for: m.id)
+        try await store.saveNotes("  \n", for: m.id)
+        #expect(try await store.notes(for: m.id) == nil)
+    }
+
+    #if os(macOS)
+    @Test func notesAndTurnsAreOwnerOnly() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("N", at: 1)
+        try await store.create(m)
+        try await store.saveNotes("private", for: m.id)
+        try await store.saveLiveTurns([SpeakerTurn(speaker: "P1", start: 0, end: 1)], for: m.id)
+        try await store.saveOfflineTurns([SpeakerTurn(speaker: "P1", start: 0, end: 1)], for: m.id)
+        let folder = await store.folder(for: m.id)
+        #expect(try permissions(folder.appendingPathComponent("notes.md")) == 0o600)
+        #expect(try permissions(folder.appendingPathComponent("turns.live.jsonl")) == 0o600)
+        #expect(try permissions(folder.appendingPathComponent("turns.offline.json")) == 0o600)
+    }
+
+    @Test func summariesLiveInPrivateTemplateFolders() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        try await store.saveSummary("## Summary", backendID: "fm", templateID: "action-items", for: m.id)
+        let folder = await store.folder(for: m.id).appendingPathComponent("summaries")
+        #expect(try permissions(folder) == 0o700)
+        #expect(try permissions(folder.appendingPathComponent("action-items")) == 0o700)
+        #expect(try permissions(folder.appendingPathComponent("action-items/fm.md")) == 0o600)
+    }
+    #endif
+
+    // MARK: Turns
+
+    @Test func liveTurnsAreRewrittenAndReadBack() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let id = UUID()
+        #expect(try await store.liveTurns(for: id).isEmpty)
+        try await store.saveLiveTurns([SpeakerTurn(speaker: "P1", start: 0, end: 2)], for: id)
+        let second = [SpeakerTurn(speaker: "P1", start: 0, end: 3), SpeakerTurn(speaker: "P2", start: 3, end: 4)]
+        try await store.saveLiveTurns(second, for: id)
+        #expect(try await MeetingStore(root: root).liveTurns(for: id) == second)
+    }
+
+    @Test func offlineTurnsAreNilUntilSavedAndKeepAnEmptyResult() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let id = UUID()
+        #expect(try await store.offlineTurns(for: id) == nil)
+        try await store.saveOfflineTurns([], for: id)
+        #expect(try await store.offlineTurns(for: id) == [], "an offline pass that found nobody is still a result")
+        let turns = [SpeakerTurn(speaker: "P2", start: 1, end: 2)]
+        try await store.saveOfflineTurns(turns, for: id)
+        #expect(try await store.offlineTurns(for: id) == turns)
+    }
+
+    // MARK: Summaries by template
+
+    @Test func summariesAreSavedPerTemplateAndBackend() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        try await store.saveSummary("A", backendID: "mlx/qwen 3", templateID: "action-items", for: m.id)
+        try await store.saveSummary("B", backendID: "mlx/qwen 3", for: m.id)  // the default template
+        let url = await store.summaryURL(for: m.id, templateID: "action-items", backendID: "mlx/qwen 3")
+        #expect(url.path.hasSuffix("\(m.id.uuidString)/summaries/action-items/mlx-qwen-3.md"))
+        #expect(await store.summaryURL(for: m.id, backendID: "mlx/qwen 3").path.hasSuffix("/summaries/summary/mlx-qwen-3.md"))
+
+        let all = try await store.summaries(for: m.id)
+        #expect(Set(all.map { "\($0.templateID)/\($0.backendID)=\($0.text)" }) == ["action-items/mlx-qwen-3=A", "summary/mlx-qwen-3=B"])
+        #expect(try await store.summaries(for: m.id, templateID: "action-items").map(\.text) == ["A"])
+    }
+
+    @Test func aLegacySummaryFileReadsAsTheSummaryTemplate() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        let folder = await store.folder(for: m.id)
+        try Data("old".utf8).write(to: folder.appendingPathComponent("summary-foundation-models.md"))
+        try Data("claude old".utf8).write(to: folder.appendingPathComponent("summary-claude.md"))
+
+        let all = try await store.summaries(for: m.id)
+        #expect(Set(all.map { "\($0.templateID)/\($0.backendID)=\($0.text)" }) == ["summary/foundation-models=old", "summary/claude=claude old"])
+
+        // A fresh summary of the same template and backend supersedes the legacy file.
+        try await store.saveSummary("new", backendID: "foundation-models", for: m.id)
+        let after = try await store.summaries(for: m.id, templateID: "summary")
+        #expect(after.filter { $0.backendID == "foundation-models" }.map(\.text) == ["new"])
+        #expect(after.count == 2)
+    }
+
+    // MARK: Stale summaries
+
+    private func setModified(_ url: URL, secondsAgo: TimeInterval) throws {
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -secondsAgo)], ofItemAtPath: url.path)
+    }
+
+    @Test func aNotesEditAfterASummaryMarksItStale() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        try await store.saveNotes("first", for: m.id)
+        try await store.saveSummary("S", backendID: "fm", for: m.id)
+        try setModified(await store.notesURL(for: m.id), secondsAgo: 100)
+        try setModified(await store.summaryURL(for: m.id, backendID: "fm"), secondsAgo: 50)
+        #expect(try await store.summaries(for: m.id).first?.isStale == false)
+
+        try await store.saveNotes("first, edited", for: m.id)  // now: after the summary
+        #expect(try await store.summaries(for: m.id).first?.isStale == true)
+
+        // Regenerating brings it up to date.
+        try await store.saveSummary("S2", backendID: "fm", for: m.id)
+        #expect(try await store.summaries(for: m.id).first?.isStale == false)
+    }
+
+    @Test func savingTheSameNotesAgainDoesNotMakeASummaryStale() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        try await store.saveNotes("same", for: m.id)
+        try await store.saveSummary("S", backendID: "fm", for: m.id)
+        try setModified(await store.notesURL(for: m.id), secondsAgo: 100)
+        try setModified(await store.summaryURL(for: m.id, backendID: "fm"), secondsAgo: 50)
+        try await store.saveNotes("same", for: m.id)
+        #expect(try await store.summaries(for: m.id).first?.isStale == false)
+    }
+
+    @Test func aSummaryOfAMeetingWithoutNotesIsNeverStale() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        try await store.saveSummary("S", backendID: "fm", for: m.id)
+        #expect(try await store.summaries(for: m.id).first?.isStale == false)
+    }
+
+    // MARK: Discard
+
+    @Test func deletingAMeetingRemovesItsFolderAndWhatIsCachedForIt() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let keep = meeting("Keep", at: 1), drop = meeting("Drop", at: 2)
+        try await store.create(keep)
+        try await store.create(drop)
+        try await store.appendSegment(seg("x", 1), to: drop.id)
+        try await store.saveNotes("n", for: drop.id)
+
+        try await store.deleteMeeting(id: drop.id)
+        #expect(try await store.meeting(id: drop.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: await store.folder(for: drop.id).path))
+        #expect(try await store.meetings().map(\.title) == ["Keep"])
+        #expect(try await store.segments(for: drop.id).isEmpty)
+        try await store.deleteMeeting(id: drop.id)  // already gone: not an error
+    }
 }

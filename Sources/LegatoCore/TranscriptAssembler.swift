@@ -1,7 +1,8 @@
 import Foundation
 
 public struct TranscriptEvent: Sendable, Equatable {
-    public enum Stream: String, Sendable, Equatable, Codable { case mic, system }
+    /// Where the audio came from. `.mixed` is the sum of a meeting's sources, which the one live engine hears.
+    public enum Stream: String, Sendable, Equatable, Codable { case mic, system, mixed }
 
     public var stream: Stream
     public var text: String

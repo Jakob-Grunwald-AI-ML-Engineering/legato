@@ -30,7 +30,8 @@ private final class FakeAudio: MeetingAudioFinalizing {
         self.onFinalize = onFinalize
     }
 
-    func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval { 20 }
+    /// Two per-stream recordings, like a meeting from before the mix track existed (the post-pass runs per stream).
+    func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval { stream == .mixed ? 0 : 20 }
     func samples(of stream: TranscriptEvent.Stream, in range: Range<TimeInterval>) async throws -> [Float] {
         [Float](repeating: 0.5, count: Int((range.upperBound - range.lowerBound) * 16_000))
     }
@@ -259,7 +260,7 @@ private struct Rig {
         try await rig.seed(state: .finished, steps: [.postPass, .audio, .summary])
         let claude = FakeLLM(id: "claude", log: rig.log)
         let url = try await rig.pipeline().summarize(meetingID: rig.id, using: claude)
-        #expect(url.lastPathComponent == "summary-claude.md")
+        #expect(url.path.hasSuffix("/summaries/summary/claude.md"))
         #expect(try await rig.store.summaries(for: rig.id).map(\.backendID) == ["claude"])
         #expect(try await rig.meeting().state == .finished)
     }

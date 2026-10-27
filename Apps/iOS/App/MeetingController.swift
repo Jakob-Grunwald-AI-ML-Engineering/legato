@@ -546,7 +546,8 @@ final class MeetingController {
     func markdown(for meeting: Meeting) async -> String {
         let segments = await transcript(of: meeting.id)
         let summary = await summaries(of: meeting.id).first?.text
-        return MarkdownExporter.markdown(meeting: meeting, segments: segments, summary: summary)
+        let notes = try? await store.notes(for: meeting.id)
+        return MarkdownExporter.markdown(meeting: meeting, segments: segments, summary: summary, notes: notes)
     }
 
     /// The files the share sheet offers: the Markdown (written to a temporary file) and the recording (m4a,

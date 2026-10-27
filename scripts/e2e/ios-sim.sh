@@ -292,8 +292,8 @@ meeting_field() {
 audio_seconds() { afinfo "$1" 2> /dev/null | sed -n 's/^estimated duration: \([0-9.]*\) sec.*/\1/p'; }
 # True when |a - b| <= tolerance.
 near() { python3 -I -c 'import sys; a, b, t = map(float, sys.argv[1:]); sys.exit(0 if abs(a - b) <= t else 1)' "$1" "$2" "$3"; }
-# The Markdown MarkdownExporter must produce for a meeting folder, rebuilt from meeting.json, segments.jsonl and
-# the newest summary-*.md, written to <out>.
+# The Markdown MarkdownExporter must produce for a meeting folder, rebuilt from meeting.json, segments.jsonl, notes.md
+# and the newest summary (summaries/<template>/<backend>.md, or an older summary-<backend>.md), written to <out>.
 expected_markdown() { # expected_markdown <folder> <out>
   python3 -I - "$1" "$2" <<'PY'
 import datetime, glob, json, os, sys
@@ -304,17 +304,28 @@ segs = [s for _, s in sorted(enumerate(segs), key=lambda p: (p[1]["start"], p[0]
 def clock(t):
     t = max(0, int(t)); h, mi, s = t // 3600, t // 60 % 60, t % 60
     return f"{h}:{mi:02d}:{s:02d}" if h else f"{mi:02d}:{s:02d}"
-label = lambda st: "Me" if st == "mic" else "Them"
+speakers = m.get("speakers", {})
+def label(s):  # a speaker's name; older two-stream segments are Me and Them; a mixed one with no speaker has none
+    if s.get("speaker"):
+        return speakers.get(s["speaker"], {}).get("name")
+    return {"mic": "Me", "system": "Them"}.get(s["stream"])
+source = {"mic": "Microphone", "system": "System audio"}
 date = datetime.datetime.fromtimestamp(m["date"] / 1000).strftime("%Y-%m-%d %H:%M")
 blocks = [f"# {m['title']}", f"- Date: {date}\n- Duration: {clock(m['duration'])}"]
-summaries = sorted(glob.glob(d + "/summary-*.md"), key=os.path.getmtime, reverse=True)
+summaries = glob.glob(d + "/summaries/*/*.md") + glob.glob(d + "/summary-*.md")
+summaries.sort(key=os.path.getmtime, reverse=True)
 if summaries:
     text = open(summaries[0]).read()
     if text:
         blocks.append(text)
+if os.path.exists(d + "/notes.md"):
+    notes = open(d + "/notes.md").read().strip()
+    if notes:
+        blocks.append("## Notes\n\n" + notes)
 blocks.append("## Transcript")
-items = [(r["start"], f"_{label(r['stream'])} muted {clock(r['start'])}\u2013{clock(r['end'])}_") for r in m["mutedRanges"]]
-items += [(s["start"], f"**{label(s['stream'])}** [{clock(s['start'])}] {s['text']}") for s in segs if not s["echo"]]
+items = [(r["start"], f"_{source.get(r['stream'], 'Audio')} muted {clock(r['start'])}\u2013{clock(r['end'])}_") for r in m["mutedRanges"]]
+items += [(r["start"], f"_Paused {clock(r['start'])}\u2013{clock(r['end'])}_") for r in m.get("pausedRanges", [])]
+items += [(s["start"], (f"**{label(s)}** " if label(s) else "") + f"[{clock(s['start'])}] {s['text']}") for s in segs if not s["echo"]]
 items = [it for _, it in sorted(enumerate(items), key=lambda p: (p[1][0], p[0]))]
 blocks += [text for _, text in items]
 open(out, "w").write("\n\n".join(blocks) + "\n")
@@ -1144,8 +1155,8 @@ scenario_x() {
   expected_markdown "$dir" "$WORK/expected.md"
   if [ -f "$md" ] && cmp -s "$md" "$WORK/expected.md"; then record PASS "the exported Markdown matches the saved meeting"
   else record FAIL "the exported Markdown matches the saved meeting" "$(diff "$md" "$WORK/expected.md" 2>&1 | head -5)"; fi
-  if grep -q '^_Me muted ' "$md" 2> /dev/null; then record PASS "the export notes the muted range"
-  else record FAIL "the export notes the muted range" "no '_Me muted' line"; fi
+  if grep -q '^_Microphone muted ' "$md" 2> /dev/null; then record PASS "the export notes the muted range"
+  else record FAIL "the export notes the muted range" "no '_Microphone muted' line"; fi
 }
 
 scenario_y() {

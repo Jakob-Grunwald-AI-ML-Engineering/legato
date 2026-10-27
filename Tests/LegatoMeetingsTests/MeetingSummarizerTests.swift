@@ -65,7 +65,8 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
     @Test func defaultPromptAsksForTheThreeSectionsInTheTranscriptsLanguage() {
         let p = MeetingSummarizer.defaultPrompt
         #expect(p.contains("## Summary") && p.contains("## Decisions") && p.contains("## Action items"))
-        #expect(p.contains("Me") && p.contains("Them"))
+        #expect(p.localizedCaseInsensitiveContains("speaker"))
+        #expect(!p.contains("\"Me\"") && !p.contains("\"Them\""))
         #expect(p.localizedCaseInsensitiveContains("same language"))
     }
 
@@ -165,6 +166,77 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
         _ = try await MeetingSummarizer(backend: backend).summarize(segments: [seg(.mic, long, 0)])
         #expect(backend.all.count > 1)
         for call in backend.all { #expect(call.size <= 3_000) }
+    }
+}
+
+@Suite struct MeetingSummarizerContextTests {
+    let notes = "Budget is 5k. Maria owns the launch."
+    let notesHeader = "Notes from the user (treat as facts)"
+
+    private func mixed(_ text: String, _ start: TimeInterval, speaker: String?) -> MeetingSegment {
+        MeetingSegment(stream: .mixed, text: text, start: start, end: start + 1, speaker: speaker)
+    }
+
+    @Test func linesAreLabelledBySpeakerNameNotMeAndThem() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        let speakers = [
+            "P1": SpeakerInfo(name: "You", colorIndex: 0, isYou: true),
+            "P2": SpeakerInfo(name: "Alice", colorIndex: 1, isYou: false),
+        ]
+        _ = try await MeetingSummarizer(backend: backend, speakers: speakers).summarize(segments: [
+            mixed("Hello", 5, speaker: "P1"), mixed("Hi!", 70, speaker: "P2"), mixed("Unlabelled", 80, speaker: nil),
+        ])
+        #expect(backend.all[0].prompt == "You [00:05]: Hello\nAlice [01:10]: Hi!\n[01:20]: Unlabelled")
+    }
+
+    @Test func theTemplatesPromptIsTheInstructions() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        _ = try await MeetingSummarizer(backend: backend, template: .actionItems).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == SummaryTemplate.actionItems.prompt)
+    }
+
+    @Test func theLanguageIsNamedInTheInstructionsOfEveryStep() async throws {
+        let backend = LimitedBackend(limit: 1_500) { call, i in isChunk(call) ? "c\(i) " + String(repeating: "y", count: 100) : "m\(i)" }
+        _ = try await MeetingSummarizer(backend: backend, template: .brainstorm, language: "de-DE").summarize(segments: transcript(count: 40))
+        #expect(backend.all.count > 2)
+        for call in backend.all {
+            #expect(call.instructions.contains("German"), "every request, merge included, asks for the meeting's language")
+            #expect(call.instructions.contains(SummaryTemplate.brainstorm.prompt))
+        }
+    }
+
+    @Test func autoLanguageAddsNothingToTheTemplate() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        _ = try await MeetingSummarizer(backend: backend, template: .summary, language: nil).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == SummaryTemplate.summary.prompt)
+    }
+
+    @Test func theNotesGoToEveryChunkAndTheMergeWholeAndOnce() async throws {
+        let backend = LimitedBackend(limit: 3_000) { call, i in isChunk(call) ? "c\(i)" : "m\(i)" }
+        _ = try await MeetingSummarizer(backend: backend, notes: notes).summarize(segments: transcript(count: 80))
+        let chunks = backend.all.filter { $0.prompt.contains("Me [") || $0.prompt.contains("Them [") }
+        let merges = backend.all.filter { !$0.prompt.contains("Me [") && !$0.prompt.contains("Them [") }
+        #expect(chunks.count > 2 && !merges.isEmpty)
+        for call in backend.all {
+            #expect(call.prompt.components(separatedBy: notesHeader).count == 2, "one notes block per request")
+            #expect(call.prompt.contains(notes), "the notes are never cut")
+            #expect(call.size <= 3_000)
+        }
+    }
+
+    @Test func noNotesMeansNoNotesBlock() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        _ = try await MeetingSummarizer(backend: backend, notes: "  \n").summarize(segments: transcript(count: 2))
+        #expect(!backend.all[0].prompt.contains(notesHeader))
+    }
+
+    @Test func notesTooLongToLeaveRoomForTheTranscriptFailInsteadOfBeingSplit() async {
+        let backend = LimitedBackend(limit: 1_000) { _, _ in "S" }
+        let huge = String(repeating: "important ", count: 100)
+        await #expect(throws: LLMError.self) {
+            try await MeetingSummarizer(backend: backend, notes: huge).summarize(segments: transcript(count: 4))
+        }
+        #expect(backend.all.isEmpty)
     }
 }
 

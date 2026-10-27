@@ -56,11 +56,15 @@ import LegatoCore
     @Test func aSegmentWithoutARangeIsTimedByTheClock() async throws {
         let rig = Rig()
         defer { rig.cleanup() }
+        let latest = Mutex<MeetingSnapshot?>(nil)
+        let snapshots = rig.session.snapshots
+        let collector = Task { for await s in snapshots { latest.withLock { $0 = s } } }
+        defer { collector.cancel() }
         try await rig.session.start()
 
         rig.clock.now = 7
         rig.micEngine.emit(TranscriptEvent(stream: .mic, text: "Thinking", isFinal: false))
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { latest.withLock { $0 }?.volatile[.mic] == "Thinking" })  // heard at 7, whatever the load
         rig.clock.now = 8
         rig.micEngine.emit(finalEvent("Thinking aloud."))
 
@@ -205,5 +209,27 @@ import LegatoCore
             return s?.volatile[.mic] == "Hel" && s?.mutedStreams == [.mic]
         })
         _ = await rig.session.stop()
+    }
+
+    @Test func pauseSilencesEveryStreamOnTheTwoEnginePathAndIsNotAMute() async throws {
+        let rig = Rig()
+        defer { rig.cleanup() }
+        try await rig.session.start()
+        rig.clock.now = 3
+        await rig.session.pause()
+        rig.micSource.push(tone(1_600))
+        rig.systemSource.push(tone(800))
+        #expect(await eventually { rig.micEngine.chunks.count == 1 && rig.systemEngine.chunks.count == 1 })
+        #expect(rig.micEngine.chunks[0].samples == Array(repeating: 0, count: 1_600))
+        #expect(rig.systemEngine.chunks[0].samples == Array(repeating: 0, count: 800))
+        #expect(await eventually { rig.sink.calls.count == 2 })
+        #expect(rig.sink.calls.allSatisfy { if case .silence = $0 { true } else { false } })
+
+        rig.clock.now = 5
+        await rig.session.resume()
+        rig.clock.now = 6
+        let finished = await rig.session.stop()
+        #expect(finished.pausedRanges == [PausedRange(start: 3, end: 5)])
+        #expect(finished.mutedRanges.isEmpty)
     }
 }

@@ -3,29 +3,23 @@ import LegatoCore
 
 /// Summarises a meeting transcript with an ``LLMBackend``, however long it is.
 ///
-/// The transcript becomes lines `Me [mm:ss]: …` / `Them [mm:ss]: …` (echoes left out), cut at segment
-/// boundaries into chunks that fit the backend's ``LLMBackend/maxPromptCharacters`` together with the
-/// instructions. Each chunk is summarised; the partial summaries are then merged, batch by batch, until one
-/// request holds them all. A backend that refuses a chunk as too long gets it back in halves; one that
-/// refuses it as unsafe has the chunk skipped, and the summary says so.
+/// The transcript becomes lines `Alice [mm:ss]: …`, labelled with the speaker's name (echoes left out; a
+/// segment with no speaker has no name, except old two-stream segments, which are `Me` and `Them`). They are
+/// cut at segment boundaries into chunks that fit the backend's ``LLMBackend/maxPromptCharacters`` together
+/// with the instructions. Each chunk is summarised; the partial summaries are then merged, batch by batch,
+/// until one request holds them all. A backend that refuses a chunk as too long gets it back in halves; one
+/// that refuses it as unsafe has the chunk skipped, and the summary says so.
+///
+/// - The instructions are the template's prompt (or the custom `prompt`), plus the language to write in.
+/// - The user's **notes** go in a "Notes from the user (treat as facts)" block at the start of every request,
+///   the merge steps included. They are never split or shortened: the transcript chunks shrink to leave room,
+///   and notes too long to leave any room fail the summary.
 public struct MeetingSummarizer: Sendable {
-    /// The prompt used when the user's custom prompt is empty.
-    public static let defaultPrompt = """
-        You write meeting notes from a transcript. Lines starting with "Me" are the user, lines starting with \
-        "Them" are everyone else on the call. Write in the same language as the transcript, as Markdown with \
-        exactly these sections:
+    /// The prompt used when the user's custom prompt is empty: the built-in Summary template's.
+    public static let defaultPrompt = SummaryTemplate.summary.prompt
 
-        ## Summary
-        A short paragraph or a few bullets on what the meeting covered.
-
-        ## Decisions
-        Bullets for each decision made. Write "None." if there were none.
-
-        ## Action items
-        Bullets for each task, with the owner (Me or Them) where it is clear. Write "None." if there were none.
-
-        Use only what the transcript says. Do not invent names, dates or commitments.
-        """
+    /// Heads the user's notes in a request.
+    static let notesHeader = "Notes from the user (treat as facts):"
 
     /// Below this many characters of room for the transcript, summarising cannot work.
     private static let minimumBudget = 200
@@ -33,11 +27,27 @@ public struct MeetingSummarizer: Sendable {
 
     private let backend: any LLMBackend
     private let instructions: String
+    private let notesBlock: String
+    private let speakers: [PersonID: SpeakerInfo]
 
-    /// - Parameter prompt: the user's custom instructions; blank means ``defaultPrompt``.
-    public init(backend: any LLMBackend, prompt: String = "") {
+    /// - Parameters:
+    ///   - prompt: custom instructions that replace the template's; blank means the template's.
+    ///   - template: the instructions to follow; the default Summary template when nil.
+    ///   - notes: what the user wrote during the meeting; blank means none.
+    ///   - language: the locale identifier to write in (`de-DE`); nil is Auto, which leaves it to the
+    ///     transcript's language.
+    ///   - speakers: the meeting's people, to name the lines.
+    public init(
+        backend: any LLMBackend, prompt: String = "", template: SummaryTemplate? = nil, notes: String = "",
+        language: String? = nil, speakers: [PersonID: SpeakerInfo] = [:]
+    ) {
         self.backend = backend
-        self.instructions = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultPrompt : prompt
+        let custom = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = custom.isEmpty ? (template?.prompt ?? Self.defaultPrompt) : prompt
+        self.instructions = base + Self.languageLine(language)
+        let trimmedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.notesBlock = trimmedNotes.isEmpty ? "" : "\(Self.notesHeader)\n\(trimmedNotes)\n\n"
+        self.speakers = speakers
     }
 
     /// The summary, in Markdown.
@@ -45,13 +55,16 @@ public struct MeetingSummarizer: Sendable {
     /// - Throws: ``LLMError/emptyResponse`` when nothing was spoken; ``LLMError/guardrail`` or
     ///   ``LLMError/contextTooLong`` when no part could be summarised; the backend's other errors as they are.
     public func summarize(segments: [MeetingSegment]) async throws -> String {
-        let lines = Self.lines(of: segments)
+        let lines = Self.lines(of: segments, speakers: speakers)
         guard !lines.isEmpty else { throw LLMError.emptyResponse }
 
         let mergeInstructions = Self.mergeInstructions(for: instructions)
-        let budget = backend.maxPromptCharacters.map { $0 - max(instructions.count, mergeInstructions.count) }
-        if let budget, budget < Self.minimumBudget {
-            throw LLMError.failed("The summary prompt is too long for this model")
+        let room = backend.maxPromptCharacters.map { $0 - max(instructions.count, mergeInstructions.count) }
+        let budget = room.map { $0 - notesBlock.count }
+        if let room, let budget, budget < Self.minimumBudget {
+            throw LLMError.failed(
+                room < Self.minimumBudget || notesBlock.isEmpty
+                    ? "The summary prompt is too long for this model" : "The notes are too long for this model")
         }
 
         var skips = Skips()
@@ -66,13 +79,32 @@ public struct MeetingSummarizer: Sendable {
         return merged + skips.note
     }
 
+    /// "Write the summary in German." for `de-DE`; nothing for Auto.
+    private static func languageLine(_ identifier: String?) -> String {
+        guard let identifier, !identifier.isEmpty else { return "" }
+        let code = Locale(identifier: identifier).language.languageCode?.identifier ?? identifier
+        let name = Locale(identifier: "en_US").localizedString(forLanguageCode: code) ?? identifier
+        return "\n\nWrite the summary in \(name)."
+    }
+
     // MARK: Transcript
 
-    static func lines(of segments: [MeetingSegment]) -> [String] {
+    static func lines(of segments: [MeetingSegment], speakers: [PersonID: SpeakerInfo] = [:]) -> [String] {
         segments.filter { !$0.echo }.compactMap { segment in
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
-            return "\(segment.stream == .mic ? "Me" : "Them") [\(clock(segment.start))]: \(text)"
+            let stamp = "[\(clock(segment.start))]: \(text)"
+            guard let name = label(of: segment, speakers: speakers) else { return stamp }
+            return "\(name) \(stamp)"
+        }
+    }
+
+    private static func label(of segment: MeetingSegment, speakers: [PersonID: SpeakerInfo]) -> String? {
+        if let id = segment.speaker { return speakers[id]?.name }
+        switch segment.stream {
+        case .mic: return "Me"
+        case .system: return "Them"
+        case .mixed: return nil
         }
     }
 
@@ -149,7 +181,7 @@ public struct MeetingSummarizer: Sendable {
 
     private func summarizeChunk(_ chunk: String, skips: inout Skips) async throws -> [String] {
         do {
-            return [try await backend.respond(instructions: instructions, prompt: chunk)]
+            return [try await backend.respond(instructions: instructions, prompt: notesBlock + chunk)]
         } catch LLMError.contextTooLong {
             guard let (first, second) = Self.halves(of: chunk) else {
                 skips.tooLong += 1
@@ -201,7 +233,7 @@ public struct MeetingSummarizer: Sendable {
             try Task.checkCancellation()
             if budget == nil || Self.mergePrompt(parts).count <= budget! {
                 do {
-                    return try await backend.respond(instructions: instructions, prompt: Self.mergePrompt(parts))
+                    return try await backend.respond(instructions: instructions, prompt: notesBlock + Self.mergePrompt(parts))
                 } catch LLMError.contextTooLong, LLMError.guardrail, LLMError.emptyResponse {
                     return parts.joined(separator: "\n\n")
                 }
@@ -211,7 +243,7 @@ public struct MeetingSummarizer: Sendable {
             for batch in batches {
                 guard batch.count > 1 else { next += batch; continue }
                 do {
-                    next.append(try await backend.respond(instructions: instructions, prompt: Self.mergePrompt(batch)))
+                    next.append(try await backend.respond(instructions: instructions, prompt: notesBlock + Self.mergePrompt(batch)))
                 } catch LLMError.contextTooLong, LLMError.guardrail, LLMError.emptyResponse {
                     next += batch
                 }

@@ -178,7 +178,7 @@ private struct Rig {
         let services = rig.services(claudeBackend: rig.claude)
         _ = try await services.pipeline().run(meetingID: id)
         let url = try await services.summarizeWithClaude(meetingID: id)
-        #expect(url.lastPathComponent == "summary-claude.md")
+        #expect(url.path.hasSuffix("/summaries/summary/claude.md"))
         #expect(rig.claude.calls.withLock { $0 } == 1)
         #expect(Set(try await rig.store.summaries(for: id).map(\.backendID)) == ["fake-fm", "claude"])
         #expect(try await rig.store.summaries(for: id).first?.backendID == "claude", "newest first")

@@ -5,17 +5,28 @@ import LegatoCore
 @testable import LegatoMeetings
 
 /// A 25-minute recording synthesised on demand: a constant tone with 2 s gaps at 585-587 s and 1170-1172 s
-/// (the quiet points), and a muted (all-zero) range at 700-760 s.
+/// (the quiet points), and a muted (all-zero) range at 700-760 s. By default it has the two per-stream
+/// recordings of an old meeting; with `hasMix` it has the one mix track of a new one and nothing else.
 private final class FakeRecording: AudioSampleReader {
     static let rate = 16_000
-    let length: TimeInterval = 1_500
+    let length: TimeInterval
     let gaps: [Range<TimeInterval>] = [585..<587, 1170..<1172, 700..<760]
+    let hasMix: Bool
     let requests = Mutex<[Range<TimeInterval>]>([])
+    let streamsRead = Mutex<Set<TranscriptEvent.Stream>>([])
 
-    func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval { length }
+    init(hasMix: Bool = false, length: TimeInterval = 1_500) {
+        self.hasMix = hasMix
+        self.length = length
+    }
+
+    func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval {
+        (stream == .mixed) == hasMix ? length : 0
+    }
 
     func samples(of stream: TranscriptEvent.Stream, in range: Range<TimeInterval>) async throws -> [Float] {
         requests.withLock { $0.append(range) }
+        streamsRead.withLock { _ = $0.insert(stream) }
         let lo = max(0, Int(range.lowerBound * Double(Self.rate))), hi = min(Int(length * Double(Self.rate)), Int(range.upperBound * Double(Self.rate)))
         guard lo < hi else { return [] }
         var out = [Float](repeating: 0.5, count: hi - lo)
@@ -191,6 +202,69 @@ private final class BurstTranscriber: BatchTranscriber {
         #expect(saved.postPassID == "renaming")
     }
 }
+
+/// Shorter recordings (11 minutes, enough for two windows) keep these cheap next to the 25-minute ones above.
+@Suite struct MeetingPostPassOnTheMixTests {
+    func setUp() async throws -> (MeetingStore, Meeting, URL) {
+        let root = tempRoot()
+        let store = MeetingStore(root: root)
+        let meeting = Meeting(title: "Sync", date: Date(timeIntervalSince1970: 0), duration: 700, engineID: "live-fake", state: .processing)
+        try await store.create(meeting)
+        return (store, meeting, root)
+    }
+
+    @Test func runsOnceOnTheMixInsteadOfOncePerStream() async throws {
+        let (store, meeting, root) = try await setUp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reader = FakeRecording(hasMix: true, length: 700)
+        let transcriber = BurstTranscriber(text: { _ in "mixed words" })
+        try await MeetingPostPass(store: store, reader: reader, transcriber: transcriber).run(meetingID: meeting.id)
+
+        #expect(transcriber.windowLengths.withLock { $0 }.count == 2, "two windows of the one track, not four")
+        #expect(reader.streamsRead.withLock { $0 } == [.mixed])
+        let after = try await store.segments(for: meeting.id)
+        #expect(after.count == 2)
+        #expect(after.allSatisfy { $0.stream == .mixed && $0.origin == .postPass && !$0.echo })
+    }
+
+    @Test func aReaderThatThrowsForTheMixFallsBackToTheStreams() async throws {
+        struct NoMixReader: AudioSampleReader {
+            let inner = FakeRecording(length: 700)
+            func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval {
+                if stream == .mixed { throw MixMissing() }
+                return try await inner.duration(of: stream)
+            }
+            func samples(of stream: TranscriptEvent.Stream, in range: Range<TimeInterval>) async throws -> [Float] {
+                try await inner.samples(of: stream, in: range)
+            }
+        }
+        let (store, meeting, root) = try await setUp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await MeetingPostPass(store: store, reader: NoMixReader(), transcriber: BurstTranscriber()).run(meetingID: meeting.id)
+        let after = try await store.segments(for: meeting.id)
+        #expect(after.count == 4)
+        #expect(Set(after.map(\.stream)) == [.mic, .system])
+    }
+
+    @Test func newTextGetsItsSpeakersFromTheBestTurns() async throws {
+        let (store, meeting, root) = try await setUp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // Runs of sound: 0-585 and 587-700.
+        try await store.saveLiveTurns([SpeakerTurn(speaker: "P1", start: 0, end: 600), SpeakerTurn(speaker: "P2", start: 600, end: 700)], for: meeting.id)
+        let pass = MeetingPostPass(store: store, reader: FakeRecording(hasMix: true, length: 700), transcriber: BurstTranscriber(text: { _ in "words" }))
+        try await pass.run(meetingID: meeting.id)
+        var after = try await store.segments(for: meeting.id)
+        #expect(after.map(\.speaker) == ["P1", "P2"])
+
+        // Offline turns, once they exist, win over the live ones.
+        try await store.saveOfflineTurns([SpeakerTurn(speaker: "P3", start: 0, end: 700)], for: meeting.id)
+        try await pass.run(meetingID: meeting.id)
+        after = try await store.segments(for: meeting.id)
+        #expect(after.allSatisfy { $0.speaker == "P3" })
+    }
+}
+
+private struct MixMissing: Error {}
 
 @Suite struct AudioWindowingTests {
     @Test func quietestPointPicksLowestEnergyFrame() {

@@ -117,7 +117,7 @@ public final class MeetingServices {
             onStep: onStep)
     }
 
-    /// Summarises one meeting with Claude, after the user asked for it. Writes `summary-claude.md`.
+    /// Summarises one meeting with Claude, after the user asked for it. Writes `summaries/summary/claude.md`.
     /// - Throws: ``LLMError/unavailable(reason:)`` when there is no key.
     @discardableResult
     public func summarizeWithClaude(meetingID: UUID) async throws -> URL {
