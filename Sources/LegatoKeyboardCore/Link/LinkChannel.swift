@@ -22,6 +22,8 @@ public enum LinkChannel {
         public static let refine = "link.refine"
         /// app -> keyboard: `RefineReply` (the keyboard removes it once read).
         public static let refined = "link.refined"
+        /// keyboard -> app: one `ChoiceRecord` per key, `link.choice.<uuid>` (the app removes each once read).
+        public static let choicePrefix = "link.choice."
     }
 
     /// Darwin notification names, one per key.
@@ -33,6 +35,7 @@ public enum LinkChannel {
         public static let applied = "\(RuntimeIdentity.current.notificationNamespace).link.applied"
         public static let refine = "\(RuntimeIdentity.current.notificationNamespace).link.refine"
         public static let refined = "\(RuntimeIdentity.current.notificationNamespace).link.refined"
+        public static let choice = "\(RuntimeIdentity.current.notificationNamespace).link.choice"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.
@@ -55,6 +58,8 @@ public enum LinkChannel {
     public static let insertMaxAge: TimeInterval = 10
     /// A request older than this is ignored (a leftover in the inbox).
     public static let requestMaxAge: TimeInterval = 10
+    /// A choice record older than this is dropped unread (the app was away for a week).
+    public static let choiceMaxAge: TimeInterval = 7 * 24 * 3600
     /// How long the keyboard waits for a refined text once the app acked the request (a language model
     /// that loads cold takes a while).
     public static let refineTimeout: TimeInterval = 20

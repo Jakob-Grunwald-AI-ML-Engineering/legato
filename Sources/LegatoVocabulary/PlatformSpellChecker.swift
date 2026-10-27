@@ -116,3 +116,55 @@ public struct PlatformSpellChecker: SpellChecking {
     public func guesses(for word: String, language: String) async -> [String] { [] }
     #endif
 }
+
+// MARK: completions
+
+extension PlatformSpellChecker: WordCompleting {
+    /// Round-robin over the per-language lists, dropping repeats (case-insensitively), so the first language
+    /// does not crowd out the others.
+    static func interleave(_ lists: [[String]]) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        for i in 0..<(lists.map(\.count).max() ?? 0) {
+            for list in lists where i < list.count && seen.insert(list[i].lowercased()).inserted { out.append(list[i]) }
+        }
+        return out
+    }
+
+    /// The most completions asked of one language.
+    static let completionsPerLanguage = 6
+
+    #if canImport(UIKit)
+    public func completions(prefix: String, languages: [String]) async -> [String] {
+        await MainActor.run {
+            let ns = prefix as NSString
+            guard ns.length > 0 else { return [] }
+            let checker = UITextChecker()
+            let available = UITextChecker.availableLanguages
+            return Self.interleave(languages.map { code in
+                let found = checker.completions(
+                    forPartialWordRange: NSRange(location: 0, length: ns.length), in: prefix,
+                    language: Self.resolve(code, available: available)) ?? []
+                return Array(found.prefix(Self.completionsPerLanguage))
+            })
+        }
+    }
+    #elseif canImport(AppKit)
+    public func completions(prefix: String, languages: [String]) async -> [String] {
+        await MainActor.run {
+            let ns = prefix as NSString
+            guard ns.length > 0 else { return [] }
+            let checker = NSSpellChecker.shared
+            let available = checker.availableLanguages
+            return Self.interleave(languages.map { code in
+                let found = checker.completions(
+                    forPartialWordRange: NSRange(location: 0, length: ns.length), in: prefix,
+                    language: Self.resolve(code, available: available), inSpellDocumentWithTag: 0) ?? []
+                return Array(found.prefix(Self.completionsPerLanguage))
+            })
+        }
+    }
+    #else
+    public func completions(prefix: String, languages: [String]) async -> [String] { [] }
+    #endif
+}

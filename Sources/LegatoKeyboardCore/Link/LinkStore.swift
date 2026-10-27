@@ -5,6 +5,8 @@ import Synchronization
 public protocol LinkValueStore: Sendable {
     func data(forKey key: String) -> Data?
     func set(_ data: Data?, forKey key: String)
+    /// Every stored key that starts with `prefix` (the per-choice keys are listed this way).
+    func keys(withPrefix prefix: String) -> [String]
 }
 
 public final class MemoryLinkStore: LinkValueStore {
@@ -12,6 +14,7 @@ public final class MemoryLinkStore: LinkValueStore {
     public init() {}
     public func data(forKey key: String) -> Data? { values.withLock { $0[key] } }
     public func set(_ data: Data?, forKey key: String) { values.withLock { $0[key] = data } }
+    public func keys(withPrefix prefix: String) -> [String] { values.withLock { $0.keys.filter { $0.hasPrefix(prefix) }.sorted() } }
 }
 
 /// The App Group's `UserDefaults` (thread-safe by contract, hence `@unchecked`). Read fresh after every
@@ -28,6 +31,9 @@ public struct UserDefaultsLinkStore: LinkValueStore, @unchecked Sendable {
     public func data(forKey key: String) -> Data? { defaults.data(forKey: key) }
     public func set(_ data: Data?, forKey key: String) {
         if let data { defaults.set(data, forKey: key) } else { defaults.removeObject(forKey: key) }
+    }
+    public func keys(withPrefix prefix: String) -> [String] {
+        defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix(prefix) }.sorted()
     }
 }
 
@@ -55,4 +61,6 @@ public struct LinkStore: Sendable {
     }
 
     public func remove(forKey key: String) { backing.set(nil, forKey: key) }
+
+    public func keys(withPrefix prefix: String) -> [String] { backing.keys(withPrefix: prefix) }
 }

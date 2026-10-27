@@ -53,6 +53,12 @@ final class LinkClient {
         DarwinObserver.post(LinkChannel.Note.refine)
     }
 
+    /// Reports a word-row choice for the app to learn from (`link.choice.<uuid>`); no-op without the App Group.
+    func writeChoice(_ record: ChoiceRecord) {
+        guard let store else { return }
+        ChoiceWriter.write(record, to: store)
+    }
+
     /// The app's reply to refine request `id`, or nil when none arrives within `timeout`. The reply leaves
     /// the App Group once read (it carries dictated text).
     func awaitRefined(id: String, timeout: TimeInterval) async -> RefineReply? {

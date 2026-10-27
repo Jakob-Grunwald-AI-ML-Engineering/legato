@@ -25,6 +25,8 @@ final class KeyboardLinkHost: TranscriptSink {
     var onLease: (@MainActor (Date?) -> Void)?
     /// Optional operational evidence: no transcript leaves this callback.
     var onDelivery: (@MainActor (_ runID: String, _ confirmed: Bool) -> Void)?
+    /// The keyboard's choices, drained from the App Group (on its note and when listening starts).
+    var onChoices: (@MainActor ([ChoiceRecord]) -> Void)?
     /// How a run that starts now delivers its cleaned text (nil with cleanup off); asked once per run.
     var deliveryForRun: @MainActor () -> HostDelivery? = { nil }
 
@@ -68,7 +70,17 @@ final class KeyboardLinkHost: TranscriptSink {
             DarwinObserver(name: LinkChannel.Note.refine) {
                 Task { @MainActor in await link.processRefine() }
             },
+            DarwinObserver(name: LinkChannel.Note.choice) { [weak self] in
+                Task { @MainActor in self?.drainChoices() }
+            },
         ]
+        drainChoices() // choices made while the app was away
+    }
+
+    /// Reads the queued choices now (the app came to the foreground; the Darwin note can be missed in the background).
+    func drainChoices() {
+        let records = link.drainChoices()
+        if !records.isEmpty { onChoices?(records) }
     }
 
     var keyboardIsVisible: Bool { link.keyboardIsVisible() }

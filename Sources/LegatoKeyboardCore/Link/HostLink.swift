@@ -171,6 +171,25 @@ public final class HostLink {
         publish()
     }
 
+    /// The word choices the keyboard queued (`link.choice.*`), oldest first. Every key read is deleted, the
+    /// ones older than `LinkChannel.choiceMaxAge` and the ones that don't decode included. Not cleared at
+    /// init: choices made while the app was away are still wanted.
+    public func drainChoices(now: Date? = nil) -> [ChoiceRecord] {
+        let cutoff = (now ?? self.now()).addingTimeInterval(-LinkChannel.choiceMaxAge)
+        var fresh: [ChoiceRecord] = []
+        for key in store.keys(withPrefix: LinkChannel.Key.choicePrefix) {
+            if let record = store.read(ChoiceRecord.self, forKey: key), record.at >= cutoff { fresh.append(record) }
+            store.remove(forKey: key)
+        }
+        return fresh.sorted { $0.at < $1.at }
+    }
+
+    /// Removes the queued word choices unread. For when the user deletes history; the retention timer's
+    /// ``scrubText()`` leaves them, since the app has not read them yet.
+    public func removePendingChoices() {
+        for key in store.keys(withPrefix: LinkChannel.Key.choicePrefix) { store.remove(forKey: key) }
+    }
+
     private func scheduleScrub() {
         cancelScrub()
         let sleep = self.sleep

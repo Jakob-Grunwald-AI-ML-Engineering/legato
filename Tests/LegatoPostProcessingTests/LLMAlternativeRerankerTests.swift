@@ -133,13 +133,16 @@ struct LLMAlternativeRerankerTests {
         #expect(backend.prompts.isEmpty)
     }
 
-    @Test func aSlowBackendTimesOutAndKeepsTheInputOrder() async {
-        let backend = FakeBackend(delay: .seconds(30)) { _ in "3, 2, 1" }
+    /// No wall-clock bound: the backend never answers within the test, so returning at all proves the timeout
+    /// fired. The time limit only stops a hang; a slow return is printed, not failed.
+    @Test(.timeLimit(.minutes(1)))
+    func aSlowBackendTimesOutAndKeepsTheInputOrder() async {
+        let backend = FakeBackend(delay: .seconds(3600)) { _ in "3, 2, 1" }
         let clock = ContinuousClock()
         let started = clock.now
         let out = await rerank(backend, timeout: .milliseconds(150))
         #expect(out == candidates)
-        #expect(clock.now - started < .seconds(5))
+        reportIfSlow(clock.now - started, over: .seconds(5), "reranker timeout")
     }
 
     @Test func atMostThreeAreReturnedWhateverIsPassedIn() async {

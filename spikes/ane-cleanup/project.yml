@@ -140,6 +140,8 @@ targets:
     dependencies:
     - package: LegatoKit
       product: LegatoKeyboardCore
+    - package: LegatoKit
+      product: LegatoVocabulary
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.ane-spike.keyboard

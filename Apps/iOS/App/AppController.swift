@@ -98,10 +98,12 @@ final class AppController {
         let languageSettings = EngineSettings(defaults: AppGroup.defaults)
         let vocabulary = VocabularyService(
             fileURL: directory.appending(path: "vocabulary.json"),
-            languages: { VocabularyService.configuredLanguages(languageSettings) })
+            languages: { VocabularyService.configuredLanguages(languageSettings) },
+            pairsFileURL: directory.appending(path: "wordpairs-dictated.json"))
         self.vocabulary = vocabulary
         let history: any HistoryStore = LearningHistoryStore(
             JSONLHistoryStore(fileURL: directory.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        vocabulary.backfillPairsIfNeeded(history: history) // once; a background task behind the learning queue
         let models = ModelServices(root: ModelServices.phoneModelsRoot, defaults: AppGroup.defaults, vocabulary: vocabulary)
         self.models = models
         appleSpeech = AppleSpeechEngine(vocabulary: vocabulary)
@@ -209,6 +211,13 @@ final class AppController {
             // The keyboard's field was cleared mid-run (a chat app sent it): later cleanup covers only what follows.
             keyboardLink.link.onSent = { [weak self] runID, boundary, shownRevision in
                 self?.coordinator.liveTextSent(runID: runID, upTo: boundary, shownRevision: shownRevision)
+            }
+            // The keyboard's tapped alternatives teach the vocabulary: on its note and when listening starts.
+            keyboardLink.onChoices = { [vocabulary] records in
+                for record in records {
+                    vocabulary.recordChoice(
+                        original: record.original, chosen: record.chosen, fromVocabulary: record.fromVocabulary)
+                }
             }
             keyboardLink.startListening()
         }
@@ -799,6 +808,7 @@ final class AppController {
     func deleteEntry(id: UUID) async {
         try? await history.delete(id: id)
         keyboardLink?.link.scrubText() // a deleted dictation must not linger in the App Group
+        keyboardLink?.link.removePendingChoices() // nor the words the keyboard queued from it
         await refreshLastTranscript()
     }
 
@@ -809,6 +819,7 @@ final class AppController {
     /// The app came to the foreground: a meeting that could not resume, or whose after-stop chain was cut
     /// short, continues.
     func appBecameActive() {
+        keyboardLink?.drainChoices() // choices whose Darwin note arrived while the app was suspended
         self.meetings.appBecameActive()
     }
 
