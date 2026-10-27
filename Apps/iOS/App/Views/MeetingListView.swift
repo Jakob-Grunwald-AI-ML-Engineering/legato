@@ -100,7 +100,7 @@ struct MeetingListView: View {
         case .noMeetings:
             ContentUnavailableView(
                 "No meetings yet", systemImage: "person.2.wave.2",
-                description: Text("Record a meeting in the room. Legato transcribes it as it goes and writes a summary afterwards."))
+                description: Text("Record a meeting in the room. Legato transcribes it as it goes; afterwards you name the speakers and summarize it."))
         case .searching:
             ProgressView("Searching…")
         case .noMatch:

@@ -3,11 +3,13 @@ import LegatoMeetings
 import LegatoModels
 import SwiftUI
 
-/// Settings > Meetings: summary templates and backend, speakers, processing, language, echo and noise, mute, and the optional Claude key.
+/// Settings > Meetings: summary sections, when and with which backend the summary is written, speakers, processing,
+/// language, echo and noise, mute, and the optional Claude key.
 struct MeetingSettingsView: View {
     @Environment(MacAppController.self) private var app
 
     @State private var backend = CleanupBackendChoice.auto
+    @State private var summarizeAutomatically = false
     @State private var echoNoise = EchoNoiseMode.localVQE
     @State private var liveDiarization = true
     @State private var offlineDiarization = true
@@ -27,9 +29,10 @@ struct MeetingSettingsView: View {
 
     var body: some View {
         Form {
-            MeetingTemplatesView(settings: meetings.settings)
+            MeetingSectionsView(settings: meetings.settings)
 
             Section {
+                Toggle("Summarize automatically after the meeting", isOn: $summarizeAutomatically)
                 Picker("Backend", selection: $backend) {
                     Text("Auto").tag(CleanupBackendChoice.auto)
                     Text("Apple Foundation Models").tag(CleanupBackendChoice.foundationModels)
@@ -38,7 +41,7 @@ struct MeetingSettingsView: View {
             } header: {
                 Text("Summary")
             } footer: {
-                Text("The automatic summary runs on this Mac with the backend above (the MLX model is the one picked in Cleanup).")
+                Text("Off: each meeting has a Summarize button, so you can name the speakers first. On: the summary is written once the other after-meeting steps are done. Either way it runs on this Mac with the backend above (the MLX model is the one picked in Cleanup).")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
@@ -70,7 +73,7 @@ struct MeetingSettingsView: View {
             } header: {
                 Text("After-meeting processing")
             } footer: {
-                Text("The transcript pass, the speaker check and the summary run when no meeting records and the Mac is quiet. Process now in a meeting skips the wait. Off runs them right after the meeting.")
+                Text("The transcript pass, the speaker check (and the summary, when it is automatic) run when no meeting records and the Mac is quiet. Process now in a meeting skips the wait. Off runs them right after the meeting.")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
@@ -141,6 +144,7 @@ struct MeetingSettingsView: View {
         .frame(width: 540, height: 760)
         .onAppear {
             backend = meetings.settings.backend
+            summarizeAutomatically = meetings.settings.summarizeAutomatically
             echoNoise = meetings.settings.echoNoise
             liveDiarization = meetings.settings.liveDiarization
             offlineDiarization = meetings.settings.offlineDiarization
@@ -152,6 +156,7 @@ struct MeetingSettingsView: View {
             postPass = models.selected(.postPass)
         }
         .onChange(of: backend) { _, new in meetings.settings.backend = new }
+        .onChange(of: summarizeAutomatically) { _, new in meetings.settings.summarizeAutomatically = new }
         .onChange(of: echoNoise) { _, new in meetings.settings.echoNoise = new }
         .onChange(of: liveDiarization) { _, new in meetings.settings.liveDiarization = new }
         .onChange(of: offlineDiarization) { _, new in meetings.settings.offlineDiarization = new }

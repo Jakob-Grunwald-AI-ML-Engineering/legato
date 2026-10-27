@@ -211,26 +211,56 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
         #expect(backend.all[0].prompt == "You [00:05]: Hello\nAlice [01:10]: Hi!\n[01:20]: Unlabelled")
     }
 
-    @Test func theTemplatesPromptIsTheInstructions() async throws {
+    private func section(_ id: String) throws -> SummarySection { try #require(SummarySection.find(id, custom: [])) }
+
+    @Test func theTickedSectionsAreTheInstructions() async throws {
         let backend = LimitedBackend(limit: nil) { _, _ in "S" }
-        _ = try await MeetingSummarizer(backend: backend, template: .actionItems).summarize(segments: transcript(count: 2))
-        #expect(backend.all[0].instructions == SummaryTemplate.actionItems.prompt)
+        _ = try await MeetingSummarizer(backend: backend, sections: [try section("action-items")]).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == SummarySection.instructions(for: [try section("action-items")]))
+        #expect(backend.all[0].instructions.contains("## Action items"))
+        #expect(!backend.all[0].instructions.contains("## Summary"))
+    }
+
+    @Test func noSectionsMeansTheDefaultOnes() async throws {
+        let backend = LimitedBackend(limit: nil) { _, _ in "S" }
+        _ = try await MeetingSummarizer(backend: backend, sections: []).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == MeetingSummarizer.defaultPrompt)
+    }
+
+    @Test func eachChunkNotesWhatBelongsInTheTickedSectionsAndTheMergeWritesThem() async throws {
+        let ticked = [try section("decisions"), try section("open-questions")]
+        let backend = LimitedBackend(limit: 3_000) { call, i in isChunk(call) ? "c\(i)" : "m\(i)" }
+        _ = try await MeetingSummarizer(backend: backend, sections: ticked).summarize(segments: transcript(count: 80))
+        let chunks = backend.all.filter(isChunk)
+        let merges = backend.all.filter { !isChunk($0) }
+        #expect(chunks.count > 2 && !merges.isEmpty)
+        let document = SummarySection.instructions(for: ticked)
+        for call in chunks {
+            #expect(call.instructions != document, "a part is noted, not written up as the document")
+            #expect(call.instructions.localizedCaseInsensitiveContains("part"))
+            #expect(call.instructions.contains("## Decisions") && call.instructions.contains("## Open questions"))
+            #expect(!call.instructions.contains("## Summary") && !call.instructions.contains("## Action items"))
+        }
+        for call in merges {
+            #expect(call.instructions.contains(document), "the merge writes exactly the ticked sections")
+        }
     }
 
     @Test func theLanguageIsNamedInTheInstructionsOfEveryStep() async throws {
         let backend = LimitedBackend(limit: 1_500) { call, i in isChunk(call) ? "c\(i) " + String(repeating: "y", count: 100) : "m\(i)" }
-        _ = try await MeetingSummarizer(backend: backend, template: .brainstorm, language: "de-DE").summarize(segments: transcript(count: 40))
+        _ = try await MeetingSummarizer(backend: backend, sections: [try section("brainstorm")], language: "de-DE").summarize(segments: transcript(count: 40))
         #expect(backend.all.count > 2)
         for call in backend.all {
             #expect(call.instructions.contains("German"), "every request, merge included, asks for the meeting's language")
-            #expect(call.instructions.contains(SummaryTemplate.brainstorm.prompt))
+            #expect(call.instructions.contains("## Brainstorm"))
         }
     }
 
-    @Test func autoLanguageAddsNothingToTheTemplate() async throws {
+    @Test func autoLanguageAddsNothingToTheInstructions() async throws {
         let backend = LimitedBackend(limit: nil) { _, _ in "S" }
-        _ = try await MeetingSummarizer(backend: backend, template: .summary, language: nil).summarize(segments: transcript(count: 2))
-        #expect(backend.all[0].instructions == SummaryTemplate.summary.prompt)
+        let ticked = [try section("summary")]
+        _ = try await MeetingSummarizer(backend: backend, sections: ticked, language: nil).summarize(segments: transcript(count: 2))
+        #expect(backend.all[0].instructions == SummarySection.instructions(for: ticked))
     }
 
     @Test func theNotesGoToEveryChunkAndTheMergeWholeAndOnce() async throws {

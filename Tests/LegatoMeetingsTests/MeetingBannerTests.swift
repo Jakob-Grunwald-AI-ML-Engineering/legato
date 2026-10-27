@@ -101,6 +101,19 @@ import Testing
         #expect(banner(meeting(.finished, steps: [.audio, .summary]), stage: .running(.summary)).kind == .hidden)
     }
 
+    /// Jakob: "trigger it via a click instead of auto-triggering after the meeting." A summary asked for on a
+    /// finished meeting shows its progress where the summary goes, not in the processing banner.
+    @Test func aSummaryRunningOnAnyMeetingShowsItsProgressWhereTheSummaryGoes() {
+        let running = MeetingBanner.summarizing(stage: .running(.summary, progress: 0.4))
+        #expect(running.kind == .working)
+        #expect(running.text == "Writing the summary… 40%")
+        #expect(running.progress == 0.4)
+        #expect(MeetingBanner.summarizing(stage: .running(.summary)).text == "Writing the summary…")
+        #expect(MeetingBanner.summarizing(stage: .running(.postPass, progress: 0.4)) == .hidden, "another step")
+        #expect(MeetingBanner.summarizing(stage: .queued) == .hidden)
+        #expect(MeetingBanner.summarizing(stage: nil) == .hidden)
+    }
+
     @Test func anInterruptedMeetingSaysItWasCutShort() {
         let b = banner(meeting(.interrupted, steps: []), stage: .queued)
         #expect(b.kind == .waitingForIdle)

@@ -2,8 +2,8 @@ import LegatoAppServices
 import LegatoMeetings
 import SwiftUI
 
-/// The left pane: the title, the template, the summary (with Regenerate and the stale-notes prompt) and the
-/// private notes, which feed the summary.
+/// The left pane: the title, the summary's sections as chips, the summary (Summarize, then Regenerate and the
+/// stale prompt) and the private notes, which feed the summary.
 struct MeetingDocumentView: View {
     @Environment(MacAppController.self) private var app
     let meeting: Meeting
@@ -15,15 +15,13 @@ struct MeetingDocumentView: View {
     @FocusState private var titleFocused: Bool
 
     private var meetings: MeetingController { app.meetings }
-    private var templates: [SummaryTemplate] { meetings.settings.allTemplates }
-    private var shown: MeetingStore.Summary? { MeetingListLogic.shownSummary(in: summaries, templateID: meeting.templateID) }
+    private var sections: [SummarySection] { meetings.settings.allSections }
+    private var ticked: [SectionID] { meetings.tickedSections(of: meeting) }
+    private var shown: MeetingStore.Summary? { MeetingListLogic.shownSummary(in: summaries) }
     /// Something runs on this meeting now: a step of the heavy chain, Regenerate, Claude.
     private var working: Bool { meetings.isWorking(meeting.id) }
-    /// The summary step itself runs, so "Writing the summary…" is true.
-    private var writingSummary: Bool {
-        if case .running(let step, _)? = meetings.processing[meeting.id] { return step == .summary }
-        return false
-    }
+    /// The summary being written, with its progress; hidden when it is not.
+    private var summarizing: MeetingBanner { MeetingBanner.summarizing(stage: meetings.processing[meeting.id]) }
     private var processingBanner: MeetingBanner { meetings.banner(for: meeting) }
 
     var body: some View {
@@ -32,8 +30,12 @@ struct MeetingDocumentView: View {
                 header
                 banners
                 if isLive {
-                    Text("The summary is written after the meeting, from the transcript and your notes.")
-                        .foregroundStyle(.secondary)
+                    Text(
+                        meetings.settings.summarizeAutomatically
+                            ? "The summary is written after the meeting, from the transcript and your notes."
+                            : "After the meeting, name the speakers, tick the sections you want and click Summarize. Your notes are used too."
+                    )
+                    .foregroundStyle(.secondary)
                 } else {
                     summarySection
                 }
@@ -68,7 +70,6 @@ struct MeetingDocumentView: View {
                     Text("· \(Locale.current.localizedString(forIdentifier: locale) ?? locale)")
                 }
                 Spacer()
-                if !isLive { templateMenu }
             }
             .font(.callout).foregroundStyle(.secondary)
         }
@@ -83,23 +84,6 @@ struct MeetingDocumentView: View {
             title = trimmed
             Task { await meetings.rename(meeting, to: trimmed) }
         }
-    }
-
-    private var templateMenu: some View {
-        Menu {
-            ForEach(templates) { template in
-                Button {
-                    Task { await meetings.setTemplate(template.id, for: meeting.id) }
-                } label: {
-                    if template.id == meeting.templateID { Label(template.name, systemImage: "checkmark") } else { Text(template.name) }
-                }
-            }
-        } label: {
-            Label(templates.first { $0.id == meeting.templateID }?.name ?? "Summary", systemImage: "doc.text")
-        }
-        .menuStyle(.button).buttonStyle(.bordered).controlSize(.small).fixedSize()
-        .help("The summary template for this meeting")
-        .accessibilityIdentifier("meeting.template")
     }
 
     @ViewBuilder private var banners: some View {
@@ -168,39 +152,94 @@ struct MeetingDocumentView: View {
     }
 
     @ViewBuilder private var summarySection: some View {
-        if let summary = shown {
-            if summary.isStale {
-                // The one Regenerate of a stale summary is in this banner.
-                banner(
-                    symbol: "pencil.and.list.clipboard", text: "Your notes changed after this summary was written.",
-                    action: working ? nil : ("Regenerate", { meetings.regenerate(meeting.id) }), tint: .orange)
-            }
-            SummaryMarkdownView(text: summary.text)
-            if !summary.isStale || working {
-                HStack {
-                    Button { meetings.regenerate(meeting.id) } label: { Label("Regenerate", systemImage: "arrow.clockwise") }
-                        .controlSize(.small)
-                        .disabled(working)
-                    if working { ProgressView().controlSize(.small) }
-                    Spacer()
+        VStack(alignment: .leading, spacing: 12) {
+            sectionChips
+            if summarizing.kind == .working { summaryProgress }
+            if let summary = shown {
+                if let stale = MeetingListLogic.staleness(of: summary, ticked: ticked) {
+                    // The one Regenerate of a stale summary is in this banner.
+                    banner(
+                        symbol: stale == .sections ? "checklist" : "pencil.and.list.clipboard", text: stale.text,
+                        action: working || ticked.isEmpty ? nil : ("Regenerate", { meetings.regenerate(meeting.id) }), tint: .orange)
                 }
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(summaryPlaceholder).foregroundStyle(.secondary)
-                if !working {
-                    Button { meetings.regenerate(meeting.id) } label: { Label("Generate", systemImage: "sparkles") }
-                        .controlSize(.small)
+                SummaryMarkdownView(text: summary.text)
+                if MeetingListLogic.staleness(of: summary, ticked: ticked) == nil || working {
+                    HStack {
+                        Button { meetings.regenerate(meeting.id) } label: { Label("Regenerate", systemImage: "arrow.clockwise") }
+                            .controlSize(.small)
+                            .disabled(working || ticked.isEmpty)
+                            .accessibilityIdentifier("meeting.regenerate")
+                        Spacer()
+                    }
                 }
+            } else if summarizing.kind != .working {
+                summarizeButton
             }
         }
     }
 
-    private var summaryPlaceholder: String {
-        if writingSummary { return "Writing the summary…" }
-        if working { return "The summary is written after the other steps." }
+    /// The sections the summary holds, ticked for this meeting; a tap ticks or unticks one.
+    private var sectionChips: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(sections) { section in
+                let on = ticked.contains(section.id)
+                Button { Task { await meetings.toggleSection(section.id, for: meeting) } } label: {
+                    Label(section.heading, systemImage: on ? "checkmark" : "plus")
+                        .font(.callout)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(on ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08), in: Capsule())
+                        .overlay(Capsule().strokeBorder(on ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.25)))
+                        .foregroundStyle(on ? Color.primary : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(working)
+                .accessibilityAddTraits(on ? .isSelected : [])
+                .help(on ? "In the summary. Click to leave it out." : "Not in the summary. Click to add it.")
+                .accessibilityIdentifier("meeting.section.\(section.id)")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Summary sections")
+        .accessibilityIdentifier("meeting.sections")
+    }
+
+    private var summaryProgress: some View {
+        HStack(spacing: 10) {
+            if let progress = summarizing.progress {
+                ProgressView(value: progress).progressViewStyle(.circular).controlSize(.small)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+            Text(summarizing.text).font(.callout)
+            Spacer(minLength: 8)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("meeting.summary.progress")
+    }
+
+    /// Where the summary goes, before there is one: Summarize, with what it will do.
+    private var summarizeButton: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { meetings.regenerate(meeting.id) } label: {
+                Label("Summarize", systemImage: "sparkles").padding(.horizontal, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(working || ticked.isEmpty)
+            .accessibilityIdentifier("meeting.summarize")
+            Text(summaryHint).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var summaryHint: String {
+        if ticked.isEmpty { return "Tick at least one section above." }
+        if working { return "Summarize is ready once the current step is done." }
         let waiting = processingBanner.kind == .waitingForIdle || processingBanner.kind == .waitingForRecording
-        return waiting ? "The summary is written when processing runs. You can also generate it now." : "No summary for this template yet."
+        if waiting { return "The transcript and speakers are not final yet. You can summarize now, or after processing." }
+        return "Writes the ticked sections on this Mac, from the transcript, the speakers' names and your notes. Name the speakers first for a better summary."
     }
 
     private var notesSection: some View {
@@ -254,5 +293,47 @@ struct SummaryMarkdownView: View {
 
     private static func inline(_ text: String) -> AttributedString {
         (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    }
+}
+
+/// Lays its children out in rows, left to right, wrapping to a new row when one is full (the section chips).
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = rows(for: subviews, width: proposal.width ?? .infinity)
+        let width = rows.map { row in row.map(\.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1)) }.max() ?? 0
+        let height = rows.map { $0.map(\.height).max() ?? 0 }.reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        var index = 0
+        for row in rows(for: subviews, width: bounds.width) {
+            var x = bounds.minX
+            let height = row.map(\.height).max() ?? 0
+            for size in row {
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+                index += 1
+            }
+            y += height + spacing
+        }
+    }
+
+    private func rows(for subviews: Subviews, width: CGFloat) -> [[CGSize]] {
+        var rows: [[CGSize]] = [[]]
+        var x: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width {
+                rows.append([])
+                x = 0
+            }
+            rows[rows.count - 1].append(size)
+            x += size.width + spacing
+        }
+        return rows
     }
 }

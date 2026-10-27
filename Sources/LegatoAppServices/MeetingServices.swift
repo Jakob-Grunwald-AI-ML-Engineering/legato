@@ -170,13 +170,13 @@ public final class MeetingServices {
         }
     }
 
-    /// A new meeting set up from `engines`: its language, and the default summary template.
+    /// A new meeting set up from `engines`: its language, and the default summary sections ticked.
     public func newMeeting(
         id: UUID = UUID(), title: String, date: Date = Date(), engines: Engines
     ) -> Meeting {
         Meeting(
             id: id, title: title, date: date, engineID: engines.engineID, locale: engines.locale?.identifier,
-            templateID: settings.defaultTemplateID)
+            sections: settings.defaultSectionIDs)
     }
 
     /// The mixed session for `meeting`: `mic` (and `system`, on the Mac) summed into one signal for the one
@@ -226,7 +226,7 @@ public final class MeetingServices {
         await registry.postPassTranscriber()
     }
 
-    /// The on-device backend for the automatic summary, as the stored choice resolves. Never Claude.
+    /// The on-device backend for Summarize (and the automatic summary), as the stored choice resolves. Never Claude.
     public func summaryBackend() async -> (any LLMBackend)? {
         await cleanup.resolve(preference: settings.backend.preference, background: background).backend
     }
@@ -285,7 +285,8 @@ public final class MeetingServices {
 
     private var isRecording: Bool { recording.value.withLock { $0 } }
 
-    /// The after-stop chain: m4a, post-pass, speakers, on-device summary. `onStep` reports each finished step.
+    /// The after-stop chain: m4a, post-pass, speakers, and the on-device summary when it is automatic. `onStep`
+    /// reports each finished step.
     /// Run it inside a background task on the phone; see ``MeetingPipeline``.
     public func pipeline(onStep: @escaping @Sendable (Meeting.Step) -> Void = { _ in }) -> MeetingPipeline {
         let registry = self.registry, cleanup = self.cleanup, settings = self.settings
@@ -295,7 +296,8 @@ public final class MeetingServices {
             audio: { MeetingAudioWriter(folder: $0) },
             transcriber: { await registry.postPassTranscriber() },
             backend: { await cleanup.resolve(preference: settings.backend.preference, background: background).backend },
-            templates: { settings.customTemplates },
+            sections: { settings.sections(for: $0) },
+            summarizeAutomatically: { settings.summarizeAutomatically },
             batchDiarizer: { await registry.batchDiarizer() },
             diarizationEnabled: { settings.offlineDiarization },
             onStep: onStep)
@@ -318,7 +320,7 @@ public final class MeetingServices {
         await scheduler.processNow(id)
     }
 
-    /// "Improve transcript": the post-pass again, then the summary again.
+    /// "Improve transcript": the post-pass again, then the summary again when there was one (or it is automatic).
     /// - Throws: ``MeetingServicesError/recording`` while a meeting records (it would free the live model).
     @discardableResult
     public func improveTranscript(meetingID: UUID) async throws -> MeetingPipeline.Outcome {
@@ -328,7 +330,8 @@ public final class MeetingServices {
         }
     }
 
-    /// Regenerate: the summary again with the on-device backend (the meeting's template, notes and speakers).
+    /// Summarize, and Regenerate: the summary with the on-device backend (the meeting's ticked sections, notes,
+    /// speakers and language). It shows as the meeting's `.summary` stage while it runs.
     /// - Throws: ``MeetingServicesError/recording`` while a meeting records; ``LLMError/unavailable(reason:)``
     ///   when no on-device model is usable.
     @discardableResult
@@ -362,8 +365,8 @@ public final class MeetingServices {
         return true
     }
 
-    /// Summarises one meeting with Claude, after the user asked for it. Writes `summaries/<templateID>/claude.md`
-    /// under the meeting's template.
+    /// Summarises one meeting with Claude, after the user asked for it, with the meeting's ticked sections.
+    /// Writes `summaries/claude.md`.
     /// - Throws: ``MeetingServicesError/recording`` while a meeting records; ``LLMError/unavailable(reason:)``
     ///   when there is no key.
     @discardableResult

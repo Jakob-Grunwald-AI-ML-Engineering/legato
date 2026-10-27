@@ -185,7 +185,7 @@ import LegatoCore
         try Data(json.utf8).write(to: folder.appendingPathComponent("meeting.json"))
         let m = try #require(try await store.meeting(id: id))
         #expect(m.speakers.isEmpty && m.pausedRanges.isEmpty && m.locale == nil)
-        #expect(m.templateID == SummaryTemplate.summaryID && m.completedSteps.isEmpty)
+        #expect(m.sections == nil && m.completedSteps.isEmpty, "no sections of its own: the settings' default ticks")
         #expect(m.mutedRanges == [MutedRange(stream: .mic, start: 1, end: 2)])
     }
 
@@ -197,10 +197,38 @@ import LegatoCore
         m.speakers = ["P1": SpeakerInfo(name: "You", colorIndex: 0), "P2": SpeakerInfo(name: "Alice", colorIndex: 1)]
         m.pausedRanges = [PausedRange(start: 120, end: 150)]
         m.locale = "de-DE"
-        m.templateID = "action-items"
+        m.sections = ["decisions", "open-questions"]
         m.completedSteps = [.audio, .diarize]
         try await store.create(m)
         #expect(try await store.meeting(id: m.id) == m)
+    }
+
+    @Test func aMeetingSavedWithATemplateDecodesWithThatTemplatesSections() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        func decoded(template: String) async throws -> Meeting? {
+            let id = UUID()
+            let folder = try await store.createFolder(for: id)
+            let json = """
+                {"id": "\(id.uuidString)", "title": "Old", "date": 1000, "duration": 60, "engineID": "e",
+                 "mutedRanges": [], "state": "finished", "templateID": "\(template)"}
+                """
+            try Data(json.utf8).write(to: folder.appendingPathComponent("meeting.json"))
+            return try await store.meeting(id: id)
+        }
+        #expect(try await decoded(template: "summary")?.sections == ["summary", "decisions", "action-items"])
+        #expect(try await decoded(template: "action-items")?.sections == ["action-items"])
+        #expect(try await decoded(template: "my-template")?.sections == ["my-notes"])
+        #expect(try await decoded(template: "custom-1")?.sections == ["custom-1"])
+
+        // Saved again, it keeps its sections and no longer has a template.
+        var m = try #require(try await decoded(template: "brainstorm"))
+        m.title = "Again"
+        try await store.update(m)
+        let raw = try String(decoding: Data(contentsOf: await store.folder(for: m.id).appendingPathComponent("meeting.json")), as: UTF8.self)
+        #expect(!raw.contains("templateID"))
+        #expect(try await store.meeting(id: m.id)?.sections == ["brainstorm"])
     }
 
     @Test func segmentsSavedBeforeSpeakersExistedDecodeWithoutOne() async throws {
@@ -269,17 +297,16 @@ import LegatoCore
         #expect(try permissions(folder.appendingPathComponent("turns.offline.json")) == 0o600)
     }
 
-    @Test func summariesLiveInPrivateTemplateFolders() async throws {
+    @Test func summariesLiveInAPrivateFolder() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MeetingStore(root: root)
         let m = meeting("S", at: 1)
         try await store.create(m)
-        try await store.saveSummary("## Summary", backendID: "fm", templateID: "action-items", for: m.id)
+        try await store.saveSummary("## Summary", backendID: "fm", sections: ["summary"], for: m.id)
         let folder = await store.folder(for: m.id).appendingPathComponent("summaries")
         #expect(try permissions(folder) == 0o700)
-        #expect(try permissions(folder.appendingPathComponent("action-items")) == 0o700)
-        #expect(try permissions(folder.appendingPathComponent("action-items/fm.md")) == 0o600)
+        #expect(try permissions(folder.appendingPathComponent("fm.md")) == 0o600)
     }
     #endif
 
@@ -310,26 +337,81 @@ import LegatoCore
         #expect(try await store.offlineTurns(for: id) == turns)
     }
 
-    // MARK: Summaries by template
+    // MARK: Summaries: one per backend
 
-    @Test func summariesAreSavedPerTemplateAndBackend() async throws {
+    @Test func aSummaryIsSavedPerBackendWithTheSectionsItWasWrittenWith() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MeetingStore(root: root)
         let m = meeting("S", at: 1)
         try await store.create(m)
-        try await store.saveSummary("A", backendID: "mlx/qwen 3", templateID: "action-items", for: m.id)
-        try await store.saveSummary("B", backendID: "mlx/qwen 3", for: m.id)  // the default template
-        let url = await store.summaryURL(for: m.id, templateID: "action-items", backendID: "mlx/qwen 3")
-        #expect(url.path.hasSuffix("\(m.id.uuidString)/summaries/action-items/mlx-qwen-3.md"))
-        #expect(await store.summaryURL(for: m.id, backendID: "mlx/qwen 3").path.hasSuffix("/summaries/summary/mlx-qwen-3.md"))
+        try await store.saveSummary("A", backendID: "mlx/qwen 3", sections: ["summary", "decisions"], for: m.id)
+        try await store.saveSummary("B", backendID: "claude", sections: ["brainstorm"], for: m.id)
+        let url = await store.summaryURL(for: m.id, backendID: "mlx/qwen 3")
+        #expect(url.path.hasSuffix("\(m.id.uuidString)/summaries/mlx-qwen-3.md"))
+        #expect(try String(decoding: Data(contentsOf: url), as: UTF8.self) == "A", "the file is the summary as written")
 
         let all = try await store.summaries(for: m.id)
-        #expect(Set(all.map { "\($0.templateID)/\($0.backendID)=\($0.text)" }) == ["action-items/mlx-qwen-3=A", "summary/mlx-qwen-3=B"])
-        #expect(try await store.summaries(for: m.id, templateID: "action-items").map(\.text) == ["A"])
+        #expect(Set(all.map { "\($0.backendID)=\($0.text)" }) == ["mlx-qwen-3=A", "claude=B"])
+        #expect(all.first { $0.backendID == "mlx-qwen-3" }?.sections == ["summary", "decisions"])
+        #expect(all.first { $0.backendID == "claude" }?.sections == ["brainstorm"])
+
+        // Written again with other sections: still one summary for the backend.
+        try await store.saveSummary("A2", backendID: "mlx/qwen 3", sections: ["open-questions"], for: m.id)
+        let again = try await store.summaries(for: m.id).filter { $0.backendID == "mlx-qwen-3" }
+        #expect(again.map(\.text) == ["A2"])
+        #expect(again.first?.sections == ["open-questions"])
     }
 
-    @Test func aLegacySummaryFileReadsAsTheSummaryTemplate() async throws {
+    @Test func aTemplateFolderSummaryReadsWithItsTemplatesSections() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        let summaries = await store.folder(for: m.id).appendingPathComponent("summaries")
+        try FileManager.default.createDirectory(at: summaries.appendingPathComponent("action-items"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: summaries.appendingPathComponent("summary"), withIntermediateDirectories: true)
+        try Data("tasks".utf8).write(to: summaries.appendingPathComponent("action-items/fm.md"))
+        try Data("overview".utf8).write(to: summaries.appendingPathComponent("summary/claude.md"))
+
+        let all = try await store.summaries(for: m.id)
+        #expect(all.first { $0.backendID == "fm" }?.sections == ["action-items"])
+        #expect(all.first { $0.backendID == "fm" }?.text == "tasks")
+        #expect(all.first { $0.backendID == "claude" }?.sections == ["summary", "decisions", "action-items"])
+    }
+
+    @Test func theNewestFileOfABackendWinsWhateverItsLayout() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("S", at: 1)
+        try await store.create(m)
+        let folder = await store.folder(for: m.id)
+        let summaries = folder.appendingPathComponent("summaries")
+        try FileManager.default.createDirectory(at: summaries.appendingPathComponent("brainstorm"), withIntermediateDirectories: true)
+        let legacy = folder.appendingPathComponent("summary-fm.md")
+        let templated = summaries.appendingPathComponent("brainstorm/fm.md")
+        try Data("legacy".utf8).write(to: legacy)
+        try Data("templated".utf8).write(to: templated)
+        try await store.saveSummary("current", backendID: "fm", sections: ["decisions"], for: m.id)
+        let current = await store.summaryURL(for: m.id, backendID: "fm")
+        try setModified(legacy, secondsAgo: 300)
+        try setModified(templated, secondsAgo: 200)
+        try setModified(current, secondsAgo: 100)
+        #expect(try await store.summaries(for: m.id).map(\.text) == ["current"])
+
+        try setModified(templated, secondsAgo: 10)
+        let shown = try await store.summaries(for: m.id)
+        #expect(shown.map(\.text) == ["templated"], "an older layout's file that is newer still wins")
+        #expect(shown.first?.sections == ["brainstorm"])
+
+        try setModified(legacy, secondsAgo: 1)
+        #expect(try await store.summaries(for: m.id).map(\.text) == ["legacy"])
+        #expect(try await store.summaries(for: m.id).first?.sections == ["summary", "decisions", "action-items"])
+    }
+
+    @Test func aLegacySummaryFileReadsAsTheOldSummaryTemplatesSections() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MeetingStore(root: root)
@@ -338,13 +420,15 @@ import LegatoCore
         let folder = await store.folder(for: m.id)
         try Data("old".utf8).write(to: folder.appendingPathComponent("summary-foundation-models.md"))
         try Data("claude old".utf8).write(to: folder.appendingPathComponent("summary-claude.md"))
+        try setModified(folder.appendingPathComponent("summary-foundation-models.md"), secondsAgo: 100)
 
         let all = try await store.summaries(for: m.id)
-        #expect(Set(all.map { "\($0.templateID)/\($0.backendID)=\($0.text)" }) == ["summary/foundation-models=old", "summary/claude=claude old"])
+        #expect(Set(all.map { "\($0.backendID)=\($0.text)" }) == ["foundation-models=old", "claude=claude old"])
+        #expect(all.allSatisfy { $0.sections == ["summary", "decisions", "action-items"] })
 
-        // A fresh summary of the same template and backend supersedes the legacy file.
-        try await store.saveSummary("new", backendID: "foundation-models", for: m.id)
-        let after = try await store.summaries(for: m.id, templateID: "summary")
+        // A fresh summary of the same backend supersedes the legacy file.
+        try await store.saveSummary("new", backendID: "foundation-models", sections: ["summary"], for: m.id)
+        let after = try await store.summaries(for: m.id)
         #expect(after.filter { $0.backendID == "foundation-models" }.map(\.text) == ["new"])
         #expect(after.count == 2)
     }

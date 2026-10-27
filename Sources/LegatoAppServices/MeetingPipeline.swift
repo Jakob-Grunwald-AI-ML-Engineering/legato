@@ -37,12 +37,13 @@ public enum PipelineStepEvent: Sendable, Equatable {
 ///   (`mix.m4a` too), so the meeting plays from the m4a. The CAFs stay.
 /// - ``runDeferred(meetingID:)`` is heavy and runs when the machine is idle (see ``ProcessingScheduler``): the
 ///   post-pass on the mix (Parakeet, if one is picked), the after-meeting speaker pass (if on and installed),
-///   the on-device summary with the meeting's template, notes, speakers and language, then `finished`. The
-///   post-pass and the speaker pass read the lossless CAF; once both are done or skipped the CAFs are deleted.
-///   A meeting whose CAFs are gone is read from the m4a.
+///   then `finished`. The on-device summary (the meeting's sections, notes, speakers and language) runs here only
+///   when it is automatic; otherwise the user asks for it (``summarize(meetingID:using:)``) once they have named
+///   the speakers. The post-pass and the speaker pass read the lossless CAF; once both are done or skipped the
+///   CAFs are deleted. A meeting whose CAFs are gone is read from the m4a.
 /// - **A failed step** (post-pass or speaker pass) keeps the CAFs and leaves the meeting `processing`, so the
-///   next run tries it again (``Outcome/willRetry``); the summary is still written from what there is, and
-///   written again once a retry succeeds. After ``maxAttempts`` failed runs in a row the meeting is
+///   next run tries it again (``Outcome/willRetry``); an automatic summary is still written from what there is,
+///   and written again once a retry succeeds. After ``maxAttempts`` failed runs in a row the meeting is
 ///   `finished` with its CAFs kept, and "Improve transcript" is the way to try again.
 ///
 /// ``run(meetingID:)`` is both, one after the other.
@@ -72,7 +73,8 @@ public struct MeetingPipeline: Sendable {
     private let audio: @Sendable (URL) -> any MeetingAudioFinalizing
     private let transcriber: @Sendable () async -> (any BatchTranscriber)?
     private let backend: @Sendable () async -> (any LLMBackend)?
-    private let templates: @Sendable () -> [SummaryTemplate]
+    private let sections: @Sendable (Meeting) -> [SummarySection]
+    private let summarizeAutomatically: @Sendable () -> Bool
     private let batchDiarizer: @Sendable () async -> (any BatchDiarizer)?
     private let diarizationEnabled: @Sendable () -> Bool
     private let releaseDiarizer: @Sendable () async -> Void
@@ -85,7 +87,9 @@ public struct MeetingPipeline: Sendable {
     ///   - audio: the recordings of the meeting whose folder is given.
     ///   - transcriber: the post-pass model, if one is installed.
     ///   - backend: the on-device summary backend, if one is usable. Never Claude.
-    ///   - templates: the user's own summary templates; a meeting's template is looked up among the built-ins and these.
+    ///   - sections: the sections a meeting's summary holds (its ticks in the configured order); the default
+    ///     sections when it returns none.
+    ///   - summarizeAutomatically: the setting that adds the summary to the deferred steps.
     ///   - batchDiarizer: the after-meeting speaker model, if installed.
     ///   - diarizationEnabled: the setting for the after-meeting speaker pass.
     ///   - releaseDiarizer: frees the speaker model once its step is over.
@@ -96,7 +100,10 @@ public struct MeetingPipeline: Sendable {
         audio: @escaping @Sendable (URL) -> any MeetingAudioFinalizing,
         transcriber: @escaping @Sendable () async -> (any BatchTranscriber)?,
         backend: @escaping @Sendable () async -> (any LLMBackend)?,
-        templates: @escaping @Sendable () -> [SummaryTemplate] = { [] },
+        sections: @escaping @Sendable (Meeting) -> [SummarySection] = {
+            SummarySection.resolve($0.sections ?? SummarySection.defaultIDs, in: SummarySection.builtIns)
+        },
+        summarizeAutomatically: @escaping @Sendable () -> Bool = { false },
         batchDiarizer: @escaping @Sendable () async -> (any BatchDiarizer)? = { nil },
         diarizationEnabled: @escaping @Sendable () -> Bool = { true },
         releaseDiarizer: @escaping @Sendable () async -> Void = {},
@@ -108,7 +115,8 @@ public struct MeetingPipeline: Sendable {
         self.audio = audio
         self.transcriber = transcriber
         self.backend = backend
-        self.templates = templates
+        self.sections = sections
+        self.summarizeAutomatically = summarizeAutomatically
         self.batchDiarizer = batchDiarizer
         self.diarizationEnabled = diarizationEnabled
         self.releaseDiarizer = releaseDiarizer
@@ -139,8 +147,12 @@ public struct MeetingPipeline: Sendable {
     /// The audio step, then the deferred steps. A meeting that is not `processing` or `interrupted` is left alone.
     @discardableResult
     public func run(meetingID: UUID) async throws -> Outcome {
+        try await run(meetingID: meetingID, summary: summarizeAutomatically())
+    }
+
+    private func run(meetingID: UUID, summary: Bool) async throws -> Outcome {
         var outcome = try await runAudio(meetingID: meetingID)
-        let rest = try await runDeferred(meetingID: meetingID)
+        let rest = try await runDeferred(meetingID: meetingID, summary: summary)
         outcome.summaryBackendID = rest.summaryBackendID
         outcome.notes += rest.notes
         outcome.willRetry = rest.willRetry
@@ -164,11 +176,16 @@ public struct MeetingPipeline: Sendable {
         return outcome
     }
 
-    /// The heavy steps that are not done yet, in order (post-pass, speakers, summary), then `finished`.
-    /// Models are released as soon as their step is over: the live ones before the post-pass loads, the
-    /// post-pass and speaker models after their steps.
+    /// The heavy steps that are not done yet, in order (post-pass, speakers, and the summary when it is
+    /// automatic), then `finished`. Models are released as soon as their step is over: the live ones before the
+    /// post-pass loads, the post-pass and speaker models after their steps.
     @discardableResult
     public func runDeferred(meetingID: UUID) async throws -> Outcome {
+        try await runDeferred(meetingID: meetingID, summary: summarizeAutomatically())
+    }
+
+    /// - Parameter summary: write the summary (when it is not done, or a step improved the transcript).
+    private func runDeferred(meetingID: UUID, summary: Bool) async throws -> Outcome {
         var outcome = Outcome()
         guard let meeting = try await processable(meetingID) else { return outcome }
         let recordings = audio(await store.folder(for: meetingID))
@@ -206,7 +223,7 @@ public struct MeetingPipeline: Sendable {
 
         if !stepFailed { await recordings.discardLosslessAudio() }
 
-        if !meeting.completedSteps.contains(.summary) || improved {
+        if summary, !meeting.completedSteps.contains(.summary) || improved {
             await onEvent(.started(.summary))
             try await automaticSummary(meetingID, outcome: &outcome)
         }
@@ -224,33 +241,43 @@ public struct MeetingPipeline: Sendable {
         return outcome
     }
 
-    /// "Improve transcript": the post-pass again (from the m4a, the CAF being gone), then the summary again.
+    /// "Improve transcript": the post-pass again (from the m4a, the CAF being gone), then the summary again when
+    /// there was one (or it is automatic).
     @discardableResult
     public func improveTranscript(meetingID: UUID) async throws -> Outcome {
         guard let meeting = try await store.meeting(id: meetingID), meeting.state != .recording else { return Outcome() }
+        let hadSummary = meeting.completedSteps.contains(.summary)
         try await store.update(id: meetingID) { m in
             m.state = .processing
             m.completedSteps.subtract([.postPass, .summary])
             m.failedRuns = 0
         }
-        return try await run(meetingID: meetingID)
+        return try await run(meetingID: meetingID, summary: hadSummary || summarizeAutomatically())
     }
 
-    /// An explicit summary with `backend` (the per-meeting "Summarize with Claude", and Regenerate): the
-    /// meeting's template, its notes, its speakers' names and its language. Writes the backend's own summary
-    /// file and changes nothing else about the meeting. Returns the file.
+    /// A summary with `backend` (Summarize, Regenerate, "Summarize with Claude", and the automatic one): the
+    /// meeting's ticked sections, its notes, its speakers' names and its language. Writes the backend's summary
+    /// file with the sections it holds, and records the `.summary` step; a meeting that ticked nothing of its own
+    /// keeps the sections it was summarised with, so a later change of the default does not make it stale. Its
+    /// state is left alone. Returns the file.
     @discardableResult
     public func summarize(meetingID: UUID, using backend: any LLMBackend) async throws -> URL {
         let report = onEvent
         let meeting = try await store.meeting(id: meetingID)
         let segments = try await store.segments(for: meetingID)
         let notes = (try? await store.notes(for: meetingID)) ?? ""
-        let template = SummaryTemplate.find(meeting?.templateID ?? SummaryTemplate.summaryID, custom: templates()) ?? .summary
+        let picked = meeting.map(sections) ?? []
+        let ticked = picked.isEmpty ? SummarySection.resolve(SummarySection.defaultIDs, in: SummarySection.builtIns) : picked
         let text = try await MeetingSummarizer(
-            backend: backend, template: template, notes: notes, language: meeting?.locale, speakers: meeting?.speakers ?? [:]
+            backend: backend, sections: ticked, notes: notes, language: meeting?.locale, speakers: meeting?.speakers ?? [:]
         ).summarize(segments: segments, progress: { await report(.progress(.summary, $0)) })
-        try await store.saveSummary(text, backendID: backend.id, templateID: template.id, for: meetingID)
-        return await store.summaryURL(for: meetingID, templateID: template.id, backendID: backend.id)
+        let ids = ticked.map(\.id)
+        try await store.saveSummary(text, backendID: backend.id, sections: ids, for: meetingID)
+        try await store.update(id: meetingID) { m in
+            if m.sections == nil { m.sections = ids }
+        }
+        try await complete(.summary, meetingID)
+        return await store.summaryURL(for: meetingID, backendID: backend.id)
     }
 
     // MARK: Steps
@@ -270,7 +297,6 @@ public struct MeetingPipeline: Sendable {
         do {
             try await summarize(meetingID: meetingID, using: model)
             outcome.summaryBackendID = model.id
-            try await complete(.summary, meetingID)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as LLMError {

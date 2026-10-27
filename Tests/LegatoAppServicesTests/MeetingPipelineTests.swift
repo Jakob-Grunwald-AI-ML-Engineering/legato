@@ -150,12 +150,12 @@ private struct Rig {
     }
 
     func seed(
-        state: Meeting.State = .processing, steps: Set<Meeting.Step> = [], templateID: String = SummaryTemplate.summaryID,
+        state: Meeting.State = .processing, steps: Set<Meeting.Step> = [], sections: [SectionID]? = nil,
         locale: String? = nil, speakers: [PersonID: SpeakerInfo] = [:]
     ) async throws {
         try await store.create(Meeting(
             id: id, title: "Sync", date: Date(), duration: 20, engineID: "live", speakers: speakers, locale: locale,
-            templateID: templateID, state: state, completedSteps: steps))
+            sections: sections, state: state, completedSteps: steps))
         try await store.appendSegment(MeetingSegment(stream: .mic, text: "live mine", start: 0, end: 4), to: id)
         try await store.appendSegment(MeetingSegment(stream: .system, text: "live theirs", start: 5, end: 9), to: id)
     }
@@ -169,9 +169,11 @@ private struct Rig {
         if !liveTurns.isEmpty { try await store.saveLiveTurns(liveTurns, for: id) }
     }
 
+    /// `autoSummary` is the "Summarize automatically after the meeting" setting. It is off by default in the app;
+    /// most tests here are about the chain that includes the summary, so the rig turns it on unless told otherwise.
     func pipeline(
-        transcriber: Bool = true, backend: Bool = true, templates: [SummaryTemplate] = [], diarizer: FakeDiarizer? = nil,
-        diarization: Bool = true
+        transcriber: Bool = true, backend: Bool = true, custom: [SummarySection] = [], diarizer: FakeDiarizer? = nil,
+        diarization: Bool = true, autoSummary: Bool = true
     ) -> MeetingPipeline {
         let log = self.log, audio = self.audio, llm = self.llm
         let batch = FakeTranscriber(log: log)
@@ -180,7 +182,8 @@ private struct Rig {
             audio: { _ in audio },
             transcriber: { transcriber ? batch : nil },
             backend: { backend ? llm : nil },
-            templates: { templates },
+            sections: { SummarySection.resolve($0.sections ?? SummarySection.defaultIDs, in: SummarySection.builtIns + custom) },
+            summarizeAutomatically: { autoSummary },
             batchDiarizer: { diarizer },
             diarizationEnabled: { diarization },
             releaseDiarizer: { log.add("release-diarizer") },
@@ -252,38 +255,41 @@ private struct Rig {
         #expect(try await rig.store.summaries(for: rig.id).isEmpty)
     }
 
-    @Test func theMeetingsCustomTemplateReachesTheBackendAndFilesTheSummaryUnderIt() async throws {
+    @Test func theMeetingsTickedSectionsReachTheBackendAndAreFiledWithTheSummary() async throws {
         let rig = Rig()
-        try await rig.seed(templateID: "mine")
-        let mine = SummaryTemplate(id: "mine", name: "Mine", prompt: "Only list decisions.")
-        _ = try await rig.pipeline(templates: [mine]).run(meetingID: rig.id)
-        #expect(rig.llm.prompts.withLock { $0.first }?.hasPrefix("Only list decisions.||") == true)
-        #expect(try await rig.store.summaries(for: rig.id).map(\.templateID) == ["mine"])
+        let mine = SummarySection(id: "mine", heading: "Risks", instruction: "Bullets for each risk named.")
+        try await rig.seed(sections: ["mine", "decisions"])
+        _ = try await rig.pipeline(custom: [mine]).run(meetingID: rig.id)
+        let sent = try #require(rig.llm.prompts.withLock { $0.first })
+        let decisions = try #require(SummarySection.find("decisions", custom: []))
+        #expect(sent.hasPrefix(SummarySection.instructions(for: [decisions, mine]) + "||"), "the catalog's order: built-ins, then custom")
+        #expect(try await rig.store.summaries(for: rig.id).map(\.sections) == [["decisions", "mine"]])
     }
 
-    @Test func aTemplateThatIsGoneFallsBackToSummary() async throws {
+    @Test func sectionsThatAreAllGoneFallBackToTheDefaultOnes() async throws {
         let rig = Rig()
-        try await rig.seed(templateID: "deleted")
+        try await rig.seed(sections: ["deleted"])
         _ = try await rig.pipeline().run(meetingID: rig.id)
-        #expect(rig.llm.prompts.withLock { $0.first }?.hasPrefix(SummaryTemplate.summary.prompt) == true)
-        #expect(try await rig.store.summaries(for: rig.id).map(\.templateID) == ["summary"])
+        #expect(rig.llm.prompts.withLock { $0.first }?.hasPrefix(MeetingSummarizer.defaultPrompt + "||") == true)
+        #expect(try await rig.store.summaries(for: rig.id).map(\.sections) == [["summary", "decisions", "action-items"]])
     }
 
-    @Test func theSummaryGetsTheTemplateNotesLanguageAndSpeakerNames() async throws {
+    @Test func theSummaryGetsTheSectionsNotesLanguageAndSpeakerNames() async throws {
         let rig = Rig()
         try await rig.seedMixed(speakers: ["P1": SpeakerInfo(name: "Ann", colorIndex: 0)])
-        try await rig.store.update(id: rig.id) { $0.templateID = "action-items"; $0.locale = "de-DE" }
+        try await rig.store.update(id: rig.id) { $0.sections = ["action-items"]; $0.locale = "de-DE" }
         try await rig.store.saveNotes("Budget is fixed at 5k", for: rig.id)
         try await rig.store.replaceSegments(
             [MeetingSegment(stream: .mixed, text: "we ship friday", start: 0, end: 5, speaker: "P1")], for: rig.id)
         _ = try await rig.pipeline(transcriber: false).run(meetingID: rig.id)
 
         let sent = try #require(rig.llm.prompts.withLock { $0.first })
-        #expect(sent.hasPrefix(SummaryTemplate.actionItems.prompt))
+        let actions = try #require(SummarySection.find("action-items", custom: []))
+        #expect(sent.hasPrefix(SummarySection.instructions(for: [actions])))
         #expect(sent.contains("Write the summary in German."))
         #expect(sent.contains("Notes from the user (treat as facts):\nBudget is fixed at 5k"))
         #expect(sent.contains("Ann [00:00]: we ship friday"))
-        #expect(try await rig.store.summaries(for: rig.id).map(\.templateID) == ["action-items"])
+        #expect(try await rig.store.summaries(for: rig.id).map(\.sections) == [["action-items"]])
     }
 
     @Test func anExplicitSummaryAlsoGetsTheNotesAndTheMeetingsLanguage() async throws {
@@ -367,7 +373,7 @@ private struct Rig {
         let flaky = FlakyTranscriber(log: rig.log)
         let llm = rig.llm, audio = rig.audio
         let pipeline = MeetingPipeline(
-            store: rig.store, audio: { _ in audio }, transcriber: { flaky }, backend: { llm },
+            store: rig.store, audio: { _ in audio }, transcriber: { flaky }, backend: { llm }, summarizeAutomatically: { true },
             releaseModels: {}, releasePostPassModels: {})
         _ = try await pipeline.run(meetingID: rig.id)
         #expect(rig.log.count("summary") == 1, "the chain goes on with the live text")
@@ -389,7 +395,7 @@ private struct Rig {
         let flaky = FlakyTranscriber(log: rig.log)
         let llm = rig.llm, audio = rig.audio
         let pipeline = MeetingPipeline(
-            store: rig.store, audio: { _ in audio }, transcriber: { flaky }, backend: { llm },
+            store: rig.store, audio: { _ in audio }, transcriber: { flaky }, backend: { llm }, summarizeAutomatically: { true },
             releaseModels: {}, releasePostPassModels: {})
         for _ in 0..<3 { _ = try await pipeline.run(meetingID: rig.id) }
         #expect(try await rig.meeting().state == .finished)
@@ -537,7 +543,7 @@ private struct Rig {
             func transcribe(samples: [Float], stream: TranscriptEvent.Stream) async throws -> [TranscriptEvent] { throw CancellationError() }
         }
         let cut = MeetingPipeline(
-            store: rig.store, audio: { _ in audio }, transcriber: { Cancelled() }, backend: { llm },
+            store: rig.store, audio: { _ in audio }, transcriber: { Cancelled() }, backend: { llm }, summarizeAutomatically: { true },
             releaseModels: { log.add("release") }, releasePostPassModels: { log.add("release-post-pass") })
         await #expect(throws: CancellationError.self) { try await cut.runDeferred(meetingID: rig.id) }
         #expect(try await rig.meeting().completedSteps == [.audio])
@@ -578,7 +584,7 @@ private struct Rig {
             }
         }
         let pipeline = MeetingPipeline(
-            store: rig.store, audio: { _ in audio }, transcriber: { Broken() }, backend: { llm },
+            store: rig.store, audio: { _ in audio }, transcriber: { Broken() }, backend: { llm }, summarizeAutomatically: { true },
             releaseModels: { log.add("release") }, releasePostPassModels: { log.add("release-post-pass") })
         let outcome = try await pipeline.run(meetingID: rig.id)
         let meeting = try await rig.meeting()
@@ -643,9 +649,92 @@ private struct Rig {
         try await rig.seed(state: .finished, steps: [.postPass, .audio, .summary])
         let claude = FakeLLM(id: "claude", log: rig.log)
         let url = try await rig.pipeline().summarize(meetingID: rig.id, using: claude)
-        #expect(url.path.hasSuffix("/summaries/summary/claude.md"))
+        #expect(url.path.hasSuffix("/summaries/claude.md"))
         #expect(try await rig.store.summaries(for: rig.id).map(\.backendID) == ["claude"])
         #expect(try await rig.meeting().state == .finished)
+    }
+
+    // MARK: Summary on click
+
+    // Jakob: "trigger it via a click instead of auto-triggering after the meeting. That allows for additional
+    // time to name the speakers." With the setting off (the default) the chain ends without a summary.
+
+    @Test func withAutomaticSummaryOffTheChainFinishesWithoutASummary() async throws {
+        let rig = Rig(mixDuration: 20)
+        try await rig.seedMixed()
+        let diarizer = FakeDiarizer([SpeakerTurn(speaker: "c0", start: 0, end: 20)], log: rig.log)
+        let events = Mutex<[PipelineStepEvent]>([])
+        let outcome = try await rig.pipeline(diarizer: diarizer, autoSummary: false)
+            .reportingEvents { event in events.withLock { $0.append(event) } }
+            .run(meetingID: rig.id)
+        let meeting = try await rig.meeting()
+        #expect(meeting.state == .finished, "finished once the steps other than the summary are done")
+        #expect(meeting.completedSteps == [.audio, .postPass, .diarize])
+        #expect(rig.log.count("post-pass") == 1 && rig.log.count("diarize") == 1, "the post-pass and the speaker pass still run")
+        #expect(rig.log.count("summary") == 0)
+        #expect(try await rig.store.summaries(for: rig.id).isEmpty)
+        #expect(outcome.summaryBackendID == nil)
+        #expect(!outcome.notes.contains { $0.localizedCaseInsensitiveContains("summary") }, "nothing failed")
+        #expect(!events.withLock { $0 }.contains(.started(.summary)))
+        #expect(rig.log.all.contains("caf-deleted"))
+    }
+
+    @Test func aSummaryAskedForAfterwardsIsWrittenAndRecordedAsTheSummaryStep() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let pipeline = rig.pipeline(autoSummary: false)
+        _ = try await pipeline.run(meetingID: rig.id)
+        #expect(!(try await rig.meeting().completedSteps.contains(.summary)))
+
+        let url = try await pipeline.summarize(meetingID: rig.id, using: rig.llm)
+        #expect(url.path.hasSuffix("/summaries/fake-llm.md"))
+        let meeting = try await rig.meeting()
+        #expect(meeting.completedSteps.contains(.summary), "a summary exists now")
+        #expect(meeting.state == .finished)
+        #expect(try await rig.store.summaries(for: rig.id).map(\.text) == ["## Summary\nDone."])
+    }
+
+    @Test func aSummaryOfAMeetingWithTheDefaultTicksPinsThemOnTheMeeting() async throws {
+        let rig = Rig()
+        try await rig.seed(state: .finished, steps: [.audio])
+        #expect(try await rig.meeting().sections == nil)
+        _ = try await rig.pipeline(autoSummary: false).summarize(meetingID: rig.id, using: rig.llm)
+        #expect(try await rig.meeting().sections == ["summary", "decisions", "action-items"], "a later change of the default does not make it stale")
+    }
+
+    @Test func improveTranscriptRewritesASummaryTheUserAskedFor() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let pipeline = rig.pipeline(autoSummary: false)
+        _ = try await pipeline.run(meetingID: rig.id)
+        _ = try await pipeline.summarize(meetingID: rig.id, using: rig.llm)
+        #expect(rig.log.count("summary") == 1)
+
+        _ = try await pipeline.improveTranscript(meetingID: rig.id)
+        #expect(rig.log.count("summary") == 2, "the summary there was follows the better transcript")
+        #expect(try await rig.meeting().completedSteps.contains(.summary))
+        #expect(try await rig.meeting().state == .finished)
+    }
+
+    @Test func improveTranscriptWritesNoSummaryWhenThereWasNone() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let pipeline = rig.pipeline(autoSummary: false)
+        _ = try await pipeline.run(meetingID: rig.id)
+        _ = try await pipeline.improveTranscript(meetingID: rig.id)
+        #expect(rig.log.count("post-pass") == 4, "both streams, twice")
+        #expect(rig.log.count("summary") == 0)
+        #expect(try await rig.meeting().state == .finished)
+    }
+
+    @Test func aRetryThatImprovesTheTranscriptWritesNoSummaryWhenItIsOff() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let pipeline = rig.pipeline(autoSummary: false)
+        _ = try await pipeline.run(meetingID: rig.id)
+        try await rig.store.update(id: rig.id) { $0.state = .processing; $0.completedSteps.remove(.postPass) }
+        _ = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(rig.log.count("summary") == 0)
     }
 
     @Test func theLiveEngineIsReleasedBeforeThePostPassAndTheBatchModelBeforeTheSummary() async throws {
@@ -670,7 +759,7 @@ private struct Rig {
             }
         }
         let pipeline = MeetingPipeline(
-            store: rig.store, audio: { _ in audio }, transcriber: { Broken() }, backend: { llm },
+            store: rig.store, audio: { _ in audio }, transcriber: { Broken() }, backend: { llm }, summarizeAutomatically: { true },
             releaseModels: { log.add("release") }, releasePostPassModels: { log.add("release-post-pass") })
         _ = try await pipeline.run(meetingID: rig.id)
         #expect(log.all.firstIndex(of: "release-post-pass")! < log.all.firstIndex(of: "summary")!)
@@ -705,7 +794,7 @@ private struct Rig {
         let log = rig.log, audio = rig.audio, llm = rig.llm
         let batch = FakeTranscriber(log: log)
         let pipeline = MeetingPipeline(
-            store: store, audio: { _ in audio }, transcriber: { batch }, backend: { llm },
+            store: store, audio: { _ in audio }, transcriber: { batch }, backend: { llm }, summarizeAutomatically: { true },
             releaseModels: {}, releasePostPassModels: {})
         _ = try await pipeline.run(meetingID: id)
         let saved = try #require(try await store.meeting(id: id))

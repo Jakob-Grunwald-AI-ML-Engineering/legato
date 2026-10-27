@@ -3,12 +3,13 @@ import LegatoMeetings
 import LegatoModels
 import SwiftUI
 
-/// Settings > Meetings: summary templates and backend, language, speakers, processing, the noise filter,
-/// the after-meeting pass, and the optional Claude key.
+/// Settings > Meetings: summary sections, when and with which backend the summary is written, language, speakers,
+/// processing, the noise filter, the after-meeting pass, and the optional Claude key.
 struct MeetingSettingsView: View {
     let controller: AppController
 
     @State private var backend = CleanupBackendChoice.auto
+    @State private var summarizeAutomatically = false
     @State private var noiseFilter = true
     @State private var liveDiarization = true
     @State private var offlineDiarization = true
@@ -27,9 +28,11 @@ struct MeetingSettingsView: View {
 
     var body: some View {
         Form {
-            MeetingTemplatesSection(settings: meetings.settings)
+            MeetingSectionsSection(settings: meetings.settings)
 
             Section {
+                Toggle("Summarize automatically after the meeting", isOn: $summarizeAutomatically)
+                    .accessibilityIdentifier("settings.summarizeAutomatically")
                 Picker("Backend", selection: $backend) {
                     Text("Auto").tag(CleanupBackendChoice.auto)
                     Text("Apple Foundation Models").tag(CleanupBackendChoice.foundationModels)
@@ -38,7 +41,7 @@ struct MeetingSettingsView: View {
             } header: {
                 Text("Summary")
             } footer: {
-                Text("The automatic summary runs on this iPhone with the backend above (the MLX model is the one picked in Cleanup).")
+                Text("Off: each meeting has a Summarize button, so you can name the speakers first. On: the summary is written once the other after-meeting steps are done. Either way it runs on this iPhone with the backend above (the MLX model is the one picked in Cleanup).")
             }
 
             Section {
@@ -67,7 +70,7 @@ struct MeetingSettingsView: View {
             } header: {
                 Text("After-meeting processing")
             } footer: {
-                Text("The transcript pass, the speaker check and the summary run when no meeting records and Legato is open; iOS can also run them later in the background. Process now in a meeting skips the wait. Off runs them right after the meeting.")
+                Text("The transcript pass, the speaker check (and the summary, when it is automatic) run when no meeting records and Legato is open; iOS can also run them later in the background. Process now in a meeting skips the wait. Off runs them right after the meeting.")
             }
 
             Section {
@@ -137,6 +140,7 @@ struct MeetingSettingsView: View {
         .navigationTitle("Meetings")
         .onAppear {
             backend = meetings.settings.backend
+            summarizeAutomatically = meetings.settings.summarizeAutomatically
             noiseFilter = meetings.settings.echoNoise != .off
             liveDiarization = meetings.settings.liveDiarization
             offlineDiarization = meetings.settings.offlineDiarization
@@ -147,6 +151,7 @@ struct MeetingSettingsView: View {
             postPass = models.selected(.postPass)
         }
         .onChange(of: backend) { _, new in meetings.settings.backend = new }
+        .onChange(of: summarizeAutomatically) { _, new in meetings.settings.summarizeAutomatically = new }
         .onChange(of: noiseFilter) { _, new in meetings.settings.echoNoise = new ? .localVQE : .off }
         .onChange(of: liveDiarization) { _, new in meetings.settings.liveDiarization = new }
         .onChange(of: offlineDiarization) { _, new in meetings.settings.offlineDiarization = new }
@@ -227,116 +232,146 @@ struct MeetingSettingsView: View {
     }
 }
 
-/// Summary templates: the built-ins (read only), your own (add, edit, delete) and which one new meetings use.
-private struct MeetingTemplatesSection: View {
+/// Summary sections: the built-ins (read only), your own (add, edit, delete), their order in the summary, and which
+/// are ticked for new meetings.
+private struct MeetingSectionsSection: View {
     let settings: MeetingSettings
 
     private struct Draft: Identifiable {
         var id: String?
-        var name: String
-        var prompt: String
+        var heading: String
+        var instruction: String
         var readOnly: Bool
         var key: String { id ?? "new" }
     }
 
-    @State private var custom: [SummaryTemplate] = []
-    @State private var defaultID = SummaryTemplate.summaryID
+    @State private var all: [SummarySection] = []
+    @State private var ticked: Set<SectionID> = []
     @State private var draft: Draft?
 
     var body: some View {
         Section {
-            ForEach(SummaryTemplate.builtIns + custom) { template in row(template) }
-            Button { draft = Draft(id: nil, name: "", prompt: "", readOnly: false) } label: {
-                Label("Add template", systemImage: "plus")
+            ForEach(Array(all.enumerated()), id: \.element.id) { index, section in row(section, at: index) }
+            Button { draft = Draft(id: nil, heading: "", instruction: "", readOnly: false) } label: {
+                Label("Add section", systemImage: "plus")
             }
-            .accessibilityIdentifier("templates.add")
+            .accessibilityIdentifier("sections.add")
         } header: {
-            Text("Summary templates")
+            Text("Summary sections")
         } footer: {
-            Text("A template is the instruction the summary follows. The checked one is used for new meetings; each meeting can pick another. The built-in ones can be read, not changed.")
+            Text("A summary holds the ticked sections, each under its heading, in this order. New meetings tick the checked ones; each meeting can tick others above its summary. Touch and hold a section to move it. The built-in ones can be read, not changed.")
         }
         .onAppear(perform: reload)
         .sheet(item: $draft) { draft in
-            TemplateEditor(draft: draft, onSave: { name, prompt in save(draft, name: name, prompt: prompt) }, onCancel: { self.draft = nil })
+            SectionEditor(
+                draft: draft, onSave: { heading, instruction in save(draft, heading: heading, instruction: instruction) },
+                onCancel: { self.draft = nil })
         }
     }
 
-    private func row(_ template: SummaryTemplate) -> some View {
-        HStack {
-            Button { settings.defaultTemplateID = template.id; reload() } label: {
-                Image(systemName: defaultID == template.id ? "largecircle.fill.circle" : "circle")
+    private func row(_ section: SummarySection, at index: Int) -> some View {
+        let on = ticked.contains(section.id)
+        return HStack {
+            Button { setDefault(section.id, !on) } label: {
+                Image(systemName: on ? "checkmark.circle.fill" : "circle").imageScale(.large)
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel("Use for new meetings")
+            .accessibilityLabel(on ? "Ticked for new meetings" : "Not ticked for new meetings")
+            .accessibilityIdentifier("sections.default.\(section.id)")
             Button {
-                draft = Draft(id: template.id, name: template.name, prompt: template.prompt, readOnly: template.isBuiltIn)
+                draft = Draft(id: section.id, heading: section.heading, instruction: section.instruction, readOnly: section.isBuiltIn)
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(template.name).foregroundStyle(.primary)
-                    if template.isBuiltIn { Text("Built in").font(.caption).foregroundStyle(.secondary) }
+                    Text(section.heading).foregroundStyle(.primary)
+                    if section.isBuiltIn { Text("Built in").font(.caption).foregroundStyle(.secondary) }
                 }
             }
             Spacer()
         }
-        .swipeActions {
-            if !template.isBuiltIn {
-                Button("Delete", role: .destructive) { settings.deleteTemplate(id: template.id); reload() }
+        .contextMenu {
+            Button { move(index, by: -1) } label: { Label("Move up", systemImage: "arrow.up") }.disabled(index == 0)
+            Button { move(index, by: 1) } label: { Label("Move down", systemImage: "arrow.down") }.disabled(index == all.count - 1)
+            if !section.isBuiltIn {
+                Button(role: .destructive) { settings.deleteSection(id: section.id); reload() } label: { Label("Delete", systemImage: "trash") }
             }
         }
+        .swipeActions {
+            if !section.isBuiltIn {
+                Button("Delete", role: .destructive) { settings.deleteSection(id: section.id); reload() }
+            }
+        }
+        .accessibilityAction(named: "Move up") { move(index, by: -1) }
+        .accessibilityAction(named: "Move down") { move(index, by: 1) }
+    }
+
+    private func setDefault(_ id: SectionID, _ on: Bool) {
+        var ids = Set(settings.defaultSectionIDs)
+        if on { ids.insert(id) } else { ids.remove(id) }
+        settings.defaultSectionIDs = Array(ids)
+        reload()
+    }
+
+    private func move(_ index: Int, by offset: Int) {
+        let target = index + offset
+        guard all.indices.contains(target) else { return }
+        settings.moveSections(fromOffsets: IndexSet(integer: index), toOffset: offset > 0 ? target + 1 : target)
+        reload()
     }
 
     private func reload() {
-        custom = settings.customTemplates
-        defaultID = settings.defaultTemplateID
+        all = settings.allSections
+        ticked = Set(settings.defaultSectionIDs)
     }
 
-    private func save(_ draft: Draft, name: String, prompt: String) {
+    private func save(_ draft: Draft, heading: String, instruction: String) {
         if let id = draft.id {
-            settings.updateTemplate(SummaryTemplate(id: id, name: name, prompt: prompt))
+            settings.updateSection(SummarySection(id: id, heading: heading, instruction: instruction))
         } else {
-            settings.addTemplate(name: name, prompt: prompt)
+            settings.addSection(heading: heading, instruction: instruction)
         }
         self.draft = nil
         reload()
     }
 
-    private struct TemplateEditor: View {
+    private struct SectionEditor: View {
         let draft: Draft
         let onSave: (String, String) -> Void
         let onCancel: () -> Void
-        @State private var name = ""
-        @State private var prompt = ""
+        @State private var heading = ""
+        @State private var instruction = ""
 
         var body: some View {
             NavigationStack {
                 Form {
                     Section {
-                        TextField("Name", text: $name).disabled(draft.readOnly)
+                        TextField("Heading", text: $heading).disabled(draft.readOnly)
                     }
                     Section {
-                        TextEditor(text: $prompt)
+                        TextEditor(text: $instruction)
                             .font(.body.monospaced())
-                            .frame(minHeight: 260)
+                            .frame(minHeight: 200)
                             .disabled(draft.readOnly)
                     } footer: {
-                        Text("The language and your meeting notes are added automatically.")
+                        Text("What to write under the heading. The language, the speakers' names and your meeting notes are added automatically.")
                     }
                 }
-                .navigationTitle(draft.readOnly ? "Template" : draft.id == nil ? "New template" : "Edit template")
+                .navigationTitle(draft.readOnly ? "Section" : draft.id == nil ? "New section" : "Edit section")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button(draft.readOnly ? "Close" : "Cancel", action: onCancel) }
                     if !draft.readOnly {
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("Save") { onSave(name.trimmingCharacters(in: .whitespacesAndNewlines), prompt) }
-                                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            Button("Save") { onSave(heading.trimmingCharacters(in: .whitespacesAndNewlines), instruction) }
+                                .disabled(
+                                    heading.trimmingCharacters(in: .whitespaces).isEmpty
+                                        || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
                 }
             }
             .onAppear {
-                name = draft.name
-                prompt = draft.prompt
+                heading = draft.heading
+                instruction = draft.instruction
             }
         }
     }

@@ -69,6 +69,13 @@ public struct MeetingBanner: Sendable, Equatable {
         return MeetingBanner(kind: .waitingForIdle, text: text, progress: nil, offersProcessNow: true)
     }
 
+    /// What the summary's place in the document shows while a summary is written for the meeting, whatever its
+    /// state (Summarize and Regenerate run on finished meetings): the step and its progress. Hidden otherwise.
+    public static func summarizing(stage: ProcessingStage?) -> MeetingBanner {
+        guard case .running(.summary?, let progress)? = stage else { return .hidden }
+        return working(.summary, progress: progress)
+    }
+
     private static func working(_ step: Meeting.Step?, progress: Double?) -> MeetingBanner {
         let name =
             switch step {

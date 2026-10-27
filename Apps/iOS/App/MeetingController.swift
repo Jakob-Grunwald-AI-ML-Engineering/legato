@@ -541,21 +541,22 @@ final class MeetingController {
         #endif
     }
 
-    /// Reads the card line of every meeting that changed since its last read: its state, its template, or the
-    /// summary its card shows (written again by Regenerate or Claude).
+    /// Reads the card line of every meeting that changed since its last read: its state, its ticked sections, or
+    /// the summary its card shows (written again by Summarize, Regenerate or Claude).
     private func updateCards() async {
         var next: [UUID: String] = [:]
         for meeting in meetings where meeting.state != .recording {
             let summaries = (try? await store.summaries(for: meeting.id)) ?? []
-            let signature = MeetingListLogic.cardSignature(meeting: meeting, summaries: summaries)
+            let ticked = tickedSections(of: meeting)
+            let signature = MeetingListLogic.cardSignature(meeting: meeting, ticked: ticked, summaries: summaries)
             if cardSignatures[meeting.id] == signature, let line = cards[meeting.id] {
                 next[meeting.id] = line
                 continue
             }
-            var line = MeetingListLogic.cardLine(meeting: meeting, summaries: summaries, segments: [])
+            var line = MeetingListLogic.cardLine(meeting: meeting, ticked: ticked, summaries: summaries, segments: [])
             if line.isEmpty {
                 let segments = (try? await store.segments(for: meeting.id)) ?? []
-                line = MeetingListLogic.cardLine(meeting: meeting, summaries: [], segments: segments)
+                line = MeetingListLogic.cardLine(meeting: meeting, ticked: ticked, summaries: [], segments: segments)
             }
             next[meeting.id] = line
             cardSignatures[meeting.id] = signature
@@ -620,9 +621,15 @@ final class MeetingController {
         revision += 1
     }
 
-    /// The meeting's template: the next Regenerate (or Generate) uses it.
-    func setTemplate(_ templateID: String, for id: UUID) async {
-        _ = try? await store.update(id: id) { $0.templateID = templateID }
+    /// The sections the meeting's summary holds (its ticks, else the default ones), in the configured order.
+    func tickedSections(of meeting: Meeting) -> [SectionID] { settings.sections(for: meeting).map(\.id) }
+
+    /// Ticks or unticks a section of the meeting: the next Summarize (or Regenerate) writes the ticked ones. A
+    /// summary written with other sections shows as stale.
+    func toggleSection(_ section: SectionID, for meeting: Meeting) async {
+        let ticks = settings.ticks(of: meeting, toggling: section)
+        if let index = meetings.firstIndex(where: { $0.id == meeting.id }) { meetings[index].sections = ticks }
+        _ = try? await store.update(id: meeting.id) { $0.sections = ticks }
         await refresh()
     }
 
@@ -650,7 +657,8 @@ final class MeetingController {
         await refresh()
     }
 
-    /// Writes the summary again with the on-device backend: the meeting's template, notes and speakers.
+    /// Summarize (and Regenerate): the summary with the on-device backend, from the meeting's ticked sections,
+    /// notes and speakers.
     func regenerate(_ id: UUID) {
         guard !busy.contains(id) else { return }
         busy.insert(id)

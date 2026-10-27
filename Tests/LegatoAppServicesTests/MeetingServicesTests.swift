@@ -80,6 +80,8 @@ private struct Rig {
         models = ModelServices(root: root, defaults: modelDefaults, platform: .macOS, installers: installers)
         store = MeetingStore(root: root.appending(path: "Meetings"))
         settings = MeetingSettings(defaults: UserDefaults(suiteName: suite + ".c")!)
+        // The heavy step most tests here watch is the automatic summary; the app's default is off (tests below).
+        settings.summarizeAutomatically = true
     }
 
     let load = SamplerBox(IdleSample(cpuLoad: 0.9, secondsSinceInput: 1))
@@ -164,15 +166,15 @@ private struct Rig {
         #expect(rig.models.engineSettings.preferredLocales.map(\.identifier) == ["de-DE", "en-US"])
     }
 
-    @Test func aNewMeetingCarriesItsLanguageAndTheDefaultTemplate() async throws {
+    @Test func aNewMeetingCarriesItsLanguageAndTheDefaultTicks() async throws {
         let rig = Rig()
-        let mine = rig.settings.addTemplate(name: "Mine", prompt: "p")
-        rig.settings.defaultTemplateID = mine.id
+        let mine = rig.settings.addSection(heading: "Mine", instruction: "p")
+        rig.settings.defaultSectionIDs = [mine.id, "decisions"]
         let services = rig.services()
         let german = await services.engines(locale: Locale(identifier: "de-DE"))
         let meeting = services.newMeeting(title: "Sync", engines: german)
         #expect(meeting.locale == "de-DE")
-        #expect(meeting.templateID == mine.id)
+        #expect(meeting.sections == ["decisions", mine.id], "in the configured order")
         #expect(meeting.engineID == "apple-speech")
         let auto = services.newMeeting(title: "Auto", engines: await services.engines())
         #expect(auto.locale == nil, "Auto leaves the language to the engine")
@@ -294,18 +296,18 @@ private struct Rig {
         let services = rig.services(claudeBackend: rig.claude)
         _ = try await services.pipeline().run(meetingID: id)
         let url = try await services.summarizeWithClaude(meetingID: id)
-        #expect(url.path.hasSuffix("/summaries/summary/claude.md"))
+        #expect(url.path.hasSuffix("/summaries/claude.md"))
         #expect(rig.claude.calls.withLock { $0 } == 1)
         #expect(Set(try await rig.store.summaries(for: id).map(\.backendID)) == ["fake-fm", "claude"])
         #expect(try await rig.store.summaries(for: id).first?.backendID == "claude", "newest first")
     }
 
-    @Test func theOldCustomPromptNowRunsAsTheMigratedDefaultTemplate() async throws {
+    @Test func theOldCustomPromptNowRunsAsTheMigratedMyNotesSection() async throws {
         let rig = Rig()
         rig.settings.customPrompt = "Only list decisions."
         let id = UUID()
         try await rig.store.create(Meeting(
-            id: id, title: "Sync", date: Date(), duration: 10, engineID: "live", templateID: rig.settings.defaultTemplateID,
+            id: id, title: "Sync", date: Date(), duration: 10, engineID: "live", sections: rig.settings.defaultSectionIDs,
             state: .processing))
         try await rig.store.appendSegment(MeetingSegment(stream: .mic, text: "we ship friday", start: 0, end: 3), to: id)
         let capture = PromptCapture()
@@ -313,7 +315,43 @@ private struct Rig {
             models: rig.models, store: rig.store, settings: rig.settings, keyStore: rig.keys,
             cleanup: CleanupRegistry(models: rig.models.manager, foundationModels: capture))
         _ = try await services.pipeline().run(meetingID: id)
-        #expect(capture.instructions.withLock { $0.first } == "Only list decisions.")
+        let sent = try #require(capture.instructions.withLock { $0.first })
+        #expect(sent.contains("## My notes\nOnly list decisions."))
+        #expect(!sent.contains("## Summary"), "the migrated prompt replaced the default, as before")
+    }
+
+    // MARK: Summary on click
+
+    @Test func theAutomaticSummaryIsOffByDefault() {
+        let settings = MeetingSettings(defaults: UserDefaults(suiteName: "legato.meeting-services.\(UUID().uuidString)")!)
+        #expect(!settings.summarizeAutomatically)
+    }
+
+    @Test func withTheSettingOffTheChainFinishesWithoutCallingTheModel() async throws {
+        let rig = Rig()
+        rig.settings.summarizeAutomatically = false
+        let id = try await seedProcessing(rig)
+        let outcome = try await rig.services(claudeBackend: rig.claude).pipeline().run(meetingID: id)
+        #expect(outcome.summaryBackendID == nil)
+        #expect(rig.foundation.calls.withLock { $0 } == 0)
+        #expect(try await rig.store.summaries(for: id).isEmpty)
+        let meeting = try #require(try await rig.store.meeting(id: id))
+        #expect(meeting.state == .finished)
+        #expect(!meeting.completedSteps.contains(.summary))
+    }
+
+    @Test func summarizeOnAFinishedMeetingUsesItsTickedSectionsAndTheOnDeviceBackend() async throws {
+        let rig = Rig()
+        rig.settings.summarizeAutomatically = false
+        let id = try await seedProcessing(rig)
+        let services = rig.services(claudeBackend: rig.claude)
+        _ = try await services.pipeline().run(meetingID: id)
+        try await rig.store.update(id: id) { $0.sections = ["open-questions"] }
+        let url = try await services.regenerate(meetingID: id)
+        #expect(url.path.hasSuffix("/summaries/fake-fm.md"))
+        #expect(try await rig.store.summaries(for: id).map(\.sections) == [["open-questions"]])
+        #expect(rig.claude.calls.withLock { $0 } == 0)
+        #expect(try await rig.store.meeting(id: id)?.completedSteps.contains(.summary) == true)
     }
 }
 

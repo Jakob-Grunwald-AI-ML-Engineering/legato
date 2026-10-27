@@ -80,7 +80,10 @@ struct MeetingDetailView: View {
             Button("End meeting") { Task { await meetings.stop() } }
             Button("Keep recording", role: .cancel) {}
         } message: {
-            Text("The recording is saved and the summary is prepared.")
+            Text(
+                meetings.settings.summarizeAutomatically
+                    ? "The recording is saved and the summary is prepared."
+                    : "The recording is saved. Name the speakers, then summarize it.")
         }
         .confirmationDialog("Discard this meeting?", isPresented: $confirmDiscard, titleVisibility: .visible) {
             Button("Discard meeting", role: .destructive) {

@@ -10,8 +10,9 @@ public enum EchoNoiseMode: String, Sendable, Equatable, CaseIterable {
 }
 
 /// The meeting settings in an injected `UserDefaults` (the App Group's on the phone, the app's on the Mac).
-/// Defaults: Summary template, backend Auto, echo and noise cancellation LocalVQE, live and after-meeting
-/// diarization on, idle processing on, language Auto, auto-mute on.
+/// Defaults: summary on click (not automatic) with the sections Summary, Decisions and Action items ticked, backend
+/// Auto, echo and noise cancellation LocalVQE, live and after-meeting diarization on, idle processing on, language
+/// Auto, auto-mute on.
 public struct MeetingSettings: Sendable {
     // UserDefaults is documented thread-safe but not annotated Sendable.
     nonisolated(unsafe) private let defaults: UserDefaults
@@ -22,6 +23,12 @@ public struct MeetingSettings: Sendable {
         static let voiceProcessing = "meeting.voiceProcessing"
         static let autoMute = "meeting.autoMute"
         static let claudeDisclosure = "meeting.claudeDisclosureAccepted"
+        static let summarizeAutomatically = "meeting.summarizeAutomatically"
+        static let sections = "meeting.sections"
+        static let sectionOrder = "meeting.sectionOrder"
+        static let defaultSections = "meeting.defaultSections"
+        static let sectionsMigrated = "meeting.sectionsMigrated"
+        // Before sections: the user's templates, the one new meetings used, and whether the old prompt moved in.
         static let templates = "meeting.templates"
         static let templatesMigrated = "meeting.templatesMigrated"
         static let defaultTemplate = "meeting.defaultTemplate"
@@ -36,8 +43,8 @@ public struct MeetingSettings: Sendable {
         self.defaults = defaults
     }
 
-    /// The summary prompt from before templates existed. Kept so it can move into "My template"
-    /// (see ``customTemplates``); new prompts belong in templates.
+    /// The summary prompt from before templates existed. Kept so it can move into the "My notes" section
+    /// (see ``customSections``); new instructions belong in sections.
     public var customPrompt: String {
         get { defaults.string(forKey: Key.prompt) ?? "" }
         nonmutating set { defaults.set(newValue, forKey: Key.prompt) }
@@ -81,74 +88,138 @@ public struct MeetingSettings: Sendable {
         claudeDisclosureAccepted = false
     }
 
-    // MARK: Summary templates
+    // MARK: Summary
 
-    /// The user's own templates, in the order they were made. The pre-template `meeting.summaryPrompt`, if the
-    /// user set one, becomes "My template" the first time templates are read (see ``SummaryTemplate/migratingLegacyPrompt(_:into:)``)
-    /// and the default template, so the prompt keeps being used; this happens once.
-    public var customTemplates: [SummaryTemplate] {
-        migrateLegacyPromptIfNeeded()
-        return storedTemplates()
+    /// Write the summary on its own after the meeting, once the other steps are done. Default off: the user
+    /// names the speakers first and asks for it with Summarize.
+    public var summarizeAutomatically: Bool {
+        get { defaults.bool(forKey: Key.summarizeAutomatically) }
+        nonmutating set { defaults.set(newValue, forKey: Key.summarizeAutomatically) }
     }
 
-    /// The five built-in templates, then the user's.
-    public var allTemplates: [SummaryTemplate] { SummaryTemplate.builtIns + customTemplates }
+    // MARK: Summary sections
 
-    public func template(id: String) -> SummaryTemplate? { SummaryTemplate.find(id, custom: customTemplates) }
+    /// The user's own sections, in the order they were made. An older install's custom templates, its pre-template
+    /// prompt ("My notes") and its default template move in the first time sections are read, once.
+    public var customSections: [SummarySection] {
+        migrateTemplatesIfNeeded()
+        return storedSections()
+    }
 
-    /// The template new meetings use; Summary when none was chosen or the chosen one is gone.
-    public var defaultTemplateID: String {
+    /// Every section, built in and custom, in the order the user gave them (new ones last).
+    public var allSections: [SummarySection] {
+        let all = SummarySection.builtIns + customSections
+        let order = defaults.stringArray(forKey: Key.sectionOrder) ?? []
+        let rank = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        return all.enumerated()
+            .sorted { (rank[$0.element.id] ?? order.count + $0.offset) < (rank[$1.element.id] ?? order.count + $1.offset) }
+            .map(\.element)
+    }
+
+    public func section(id: SectionID) -> SummarySection? { SummarySection.find(id, custom: customSections) }
+
+    /// What a new meeting ticks, in the configured order; sections that are gone are left out. Default: Summary,
+    /// Decisions, Action items.
+    public var defaultSectionIDs: [SectionID] {
         get {
-            _ = customTemplates
-            let id = defaults.string(forKey: Key.defaultTemplate) ?? SummaryTemplate.summaryID
-            return template(id: id) == nil ? SummaryTemplate.summaryID : id
+            let catalog = allSections
+            let ids = defaults.stringArray(forKey: Key.defaultSections) ?? SummarySection.defaultIDs
+            return SummarySection.resolve(ids, in: catalog).map(\.id)
         }
-        nonmutating set { defaults.set(newValue, forKey: Key.defaultTemplate) }
+        nonmutating set { defaults.set(newValue, forKey: Key.defaultSections) }
     }
 
-    /// Adds a custom template under a new unique id.
+    /// Adds a custom section under a new unique id; it goes last.
     @discardableResult
-    public func addTemplate(name: String, prompt: String) -> SummaryTemplate {
-        let made = SummaryTemplate(id: "custom-\(UUID().uuidString.lowercased())", name: name, prompt: prompt)
-        storeTemplates(customTemplates + [made])
+    public func addSection(heading: String, instruction: String) -> SummarySection {
+        let made = SummarySection(id: "custom-\(UUID().uuidString.lowercased())", heading: heading, instruction: instruction)
+        storeSections(customSections + [made])
         return made
     }
 
-    /// Replaces the custom template with `template`'s id. Built-ins and unknown ids are left alone.
-    public func updateTemplate(_ template: SummaryTemplate) {
-        var all = customTemplates
-        guard let index = all.firstIndex(where: { $0.id == template.id }) else { return }
-        all[index] = template
-        storeTemplates(all)
+    /// Replaces the custom section with `section`'s id. Built-ins and unknown ids are left alone.
+    public func updateSection(_ section: SummarySection) {
+        var all = customSections
+        guard let index = all.firstIndex(where: { $0.id == section.id }) else { return }
+        all[index] = section
+        storeSections(all)
     }
 
-    /// Removes a custom template. Built-ins stay. A deleted "My template" is not made again from the old prompt.
-    public func deleteTemplate(id: String) {
-        let all = customTemplates
+    /// Removes a custom section (from the default ticks too). Built-ins stay.
+    public func deleteSection(id: SectionID) {
+        let all = customSections
         guard all.contains(where: { $0.id == id }) else { return }
-        storeTemplates(all.filter { $0.id != id })
-        if id == SummaryTemplate.migratedID { defaults.set(true, forKey: Key.templatesMigrated) }
+        storeSections(all.filter { $0.id != id })
     }
 
-    private func storedTemplates() -> [SummaryTemplate] {
-        defaults.data(forKey: Key.templates).flatMap { try? JSONDecoder().decode([SummaryTemplate].self, from: $0) } ?? []
+    /// Moves the sections at `source` (offsets in ``allSections``) to before `destination`, as a list's move does.
+    public func moveSections(fromOffsets source: IndexSet, toOffset destination: Int) {
+        var ids = allSections.map(\.id)
+        let moving = source.filter { $0 < ids.count }.map { ids[$0] }
+        let before = source.filter { $0 < destination }.count
+        for index in source.sorted(by: >) where index < ids.count { ids.remove(at: index) }
+        ids.insert(contentsOf: moving, at: min(max(0, destination - before), ids.count))
+        defaults.set(ids, forKey: Key.sectionOrder)
     }
 
-    private func storeTemplates(_ templates: [SummaryTemplate]) {
-        defaults.set(try? JSONEncoder().encode(templates), forKey: Key.templates)
+    /// The sections a meeting's summary holds: its ticks (the default ticks when it has none of its own), in the
+    /// configured order, without any that are gone.
+    public func sections(for meeting: Meeting) -> [SummarySection] {
+        let catalog = allSections
+        return SummarySection.resolve(meeting.sections ?? defaultSectionIDs, in: catalog)
     }
 
-    private func migrateLegacyPromptIfNeeded() {
-        guard !defaults.bool(forKey: Key.templatesMigrated) else { return }
-        let stored = storedTemplates()
-        let migrated = SummaryTemplate.migratingLegacyPrompt(customPrompt, into: stored)
-        // Nothing to move (no prompt, or the default one): stay open, so a prompt set later still moves.
-        guard migrated.count != stored.count else { return }
-        storeTemplates(migrated)
-        defaults.set(true, forKey: Key.templatesMigrated)
-        if defaults.string(forKey: Key.defaultTemplate) == nil {
-            defaults.set(SummaryTemplate.migratedID, forKey: Key.defaultTemplate)
+    /// The meeting's ticks after its chip for `id` is tapped: ticked when it was not, unticked when it was, in the
+    /// configured order.
+    public func ticks(of meeting: Meeting, toggling id: SectionID) -> [SectionID] {
+        var ticked = Set(sections(for: meeting).map(\.id))
+        if ticked.contains(id) { ticked.remove(id) } else { ticked.insert(id) }
+        return allSections.map(\.id).filter(ticked.contains)
+    }
+
+    private func storedSections() -> [SummarySection] {
+        defaults.data(forKey: Key.sections).flatMap { try? JSONDecoder().decode([SummarySection].self, from: $0) } ?? []
+    }
+
+    private func storeSections(_ sections: [SummarySection]) {
+        defaults.set(try? JSONEncoder().encode(sections), forKey: Key.sections)
+    }
+
+    /// A summary template as an older install stored it.
+    private struct LegacyTemplate: Decodable {
+        var id: String
+        var name: String
+        var prompt: String
+    }
+
+    /// Templates become sections, once: each custom template a custom section with its id ("My template" becomes
+    /// "My notes"), the pre-template prompt "My notes" unless it already moved, and the default template the
+    /// default ticks. Nothing to move leaves the migration open, so a prompt set later still moves.
+    private func migrateTemplatesIfNeeded() {
+        guard !defaults.bool(forKey: Key.sectionsMigrated) else { return }
+        let templates = defaults.data(forKey: Key.templates).flatMap { try? JSONDecoder().decode([LegacyTemplate].self, from: $0) } ?? []
+        var sections = storedSections()
+        for template in templates where !sections.contains(where: { $0.id == SummarySection.sections(forTemplate: template.id).first }) {
+            if template.id == SummarySection.legacyMigratedTemplateID {
+                let heading = template.name == "My template" ? "My notes" : template.name
+                sections.append(SummarySection(id: SummarySection.migratedID, heading: heading, instruction: template.prompt))
+            } else if SummarySection.find(template.id, custom: []) == nil {
+                sections.append(SummarySection(id: template.id, heading: template.name, instruction: template.prompt))
+            }
         }
+        var defaultTemplate = defaults.string(forKey: Key.defaultTemplate)
+        if !defaults.bool(forKey: Key.templatesMigrated) {
+            let before = sections.count
+            sections = SummarySection.migratingLegacyPrompt(customPrompt, into: sections)
+            // As before: the user's prompt keeps being used, unless they had picked a default.
+            if sections.count > before, defaultTemplate == nil { defaultTemplate = SummarySection.legacyMigratedTemplateID }
+        }
+        guard !templates.isEmpty || defaultTemplate != nil || sections.count != storedSections().count else { return }
+        storeSections(sections)
+        if defaults.stringArray(forKey: Key.defaultSections) == nil, let defaultTemplate {
+            defaults.set(SummarySection.sections(forTemplate: defaultTemplate), forKey: Key.defaultSections)
+        }
+        defaults.set(true, forKey: Key.sectionsMigrated)
     }
 
     // MARK: Speakers, processing, language

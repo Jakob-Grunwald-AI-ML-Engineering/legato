@@ -3,9 +3,9 @@ import Foundation
 /// Finds meetings the app died in the middle of.
 public enum MeetingRecovery {
     /// Marks every meeting still `recording` as `interrupted` (its duration becomes the end of its last
-    /// saved segment, if later) and returns their ids: the meetings that need the after-stop chain
-    /// (post-pass, m4a, summary), which the caller queues. Meetings in any other state are left alone, so a
-    /// second run returns nothing.
+    /// saved segment, if later) and returns their ids: the meetings that need the after-stop chain (m4a,
+    /// post-pass, speakers, and the summary when it is automatic), which the caller queues. Meetings in any
+    /// other state are left alone, so a second run returns nothing.
     ///
     /// - Parameter excluding: meetings a live session owns right now; they are `recording` for a good reason
     ///   and are not touched.

@@ -101,14 +101,32 @@ import LegatoCore
         #expect(MeetingListLogic.clock(-4) == "0:00")
     }
 
-    @Test func theStaleBannerShowsOnlyForTheChosenTemplatesNewestStaleSummary() {
-        func summary(_ template: String, _ backend: String, stale: Bool, _ day: Double) -> MeetingStore.Summary {
-            MeetingStore.Summary(templateID: template, backendID: backend, text: "t", date: Date(timeIntervalSince1970: day), isStale: stale)
-        }
-        let list = [summary("summary", "a", stale: true, 3), summary("brainstorm", "a", stale: false, 2)]
-        #expect(MeetingListLogic.shownSummary(in: list, templateID: "summary")?.isStale == true)
-        #expect(MeetingListLogic.shownSummary(in: list, templateID: "brainstorm")?.isStale == false)
-        #expect(MeetingListLogic.shownSummary(in: list, templateID: "one-on-one") == nil)
+    private func written(_ backend: String, sections: [SectionID]?, stale: Bool = false, _ day: Double) -> MeetingStore.Summary {
+        MeetingStore.Summary(sections: sections, backendID: backend, text: "t", date: Date(timeIntervalSince1970: day), isStale: stale)
+    }
+
+    @Test func theDocumentShowsTheNewestSummaryOfAnyBackend() {
+        let list = [written("fm", sections: ["summary"], 2), written("claude", sections: ["decisions"], 5)]
+        #expect(MeetingListLogic.shownSummary(in: list)?.backendID == "claude")
+        #expect(MeetingListLogic.shownSummary(in: []) == nil)
+    }
+
+    @Test func aSummaryIsStaleWhenTheNotesOrTheTickedSectionsChangedAfterIt() {
+        let fresh = written("fm", sections: ["summary", "decisions"], 1)
+        #expect(MeetingListLogic.staleness(of: fresh, ticked: ["summary", "decisions"]) == nil)
+        #expect(MeetingListLogic.staleness(of: fresh, ticked: ["decisions", "summary"]) == nil, "the ticks are a set")
+        #expect(MeetingListLogic.staleness(of: fresh, ticked: ["summary"]) == .sections)
+        #expect(MeetingListLogic.staleness(of: fresh, ticked: ["summary", "decisions", "brainstorm"]) == .sections)
+        let notes = written("fm", sections: ["summary"], stale: true, 1)
+        #expect(MeetingListLogic.staleness(of: notes, ticked: ["summary"]) == .notes)
+        #expect(MeetingListLogic.staleness(of: notes, ticked: ["decisions"]) == .sections, "the sections say more")
+        let unknown = written("fm", sections: nil, 1)
+        #expect(MeetingListLogic.staleness(of: unknown, ticked: ["brainstorm"]) == nil, "nothing to compare with")
+    }
+
+    @Test func theStaleTextsSayWhatChanged() {
+        #expect(MeetingListLogic.StaleReason.sections.text == "Sections changed after this summary was written.")
+        #expect(MeetingListLogic.StaleReason.notes.text == "Your notes changed after this summary was written.")
     }
 
     // MARK: Pill
@@ -125,39 +143,46 @@ import LegatoCore
 
     // MARK: Card line and signature
 
-    private func summary(_ template: String, _ text: String, _ day: Double = 1) -> MeetingStore.Summary {
-        MeetingStore.Summary(templateID: template, backendID: "fm", text: text, date: Date(timeIntervalSince1970: day), isStale: false)
+    private func summary(_ text: String, _ day: Double = 1, sections: [SectionID]? = ["summary"]) -> MeetingStore.Summary {
+        MeetingStore.Summary(sections: sections, backendID: "fm", text: text, date: Date(timeIntervalSince1970: day), isStale: false)
     }
 
-    @Test func theCardLineIsTheSelectedTemplatesSummaryEvenWhenAnotherTemplatesIsNewer() {
-        var m = meeting("Sync", at: "2026-10-27T09:00:00Z")
-        m.templateID = "action-items"
-        let list = [
-            summary("brainstorm", "## Summary\nA newer brainstorm.", 9),
-            summary("action-items", "## Summary\nThe action items one.", 2),
-        ]
-        #expect(MeetingListLogic.cardLine(meeting: m, summaries: list, segments: []) == "The action items one.")
-    }
-
-    @Test func withoutASummaryForTheSelectedTemplateTheCardFallsBackToTheTranscript() {
-        var m = meeting("Sync", at: "2026-10-27T09:00:00Z")
-        m.templateID = "one-on-one"
-        let segments = [MeetingSegment(stream: .mixed, text: "Hello there.", start: 0, end: 1)]
-        let list = [summary("summary", "## Summary\nWrong template.")]
-        #expect(MeetingListLogic.cardLine(meeting: m, summaries: list, segments: segments) == "Hello there.")
-    }
-
-    @Test func theCardSignatureChangesWhenASummaryIsRewrittenOrTheTemplateChanges() {
+    @Test func withSummaryTickedTheCardLineIsTheFirstSentenceOfTheSummarySection() {
         let m = meeting("Sync", at: "2026-10-27T09:00:00Z")
-        let before = MeetingListLogic.cardSignature(meeting: m, summaries: [summary("summary", "old", 1)])
-        #expect(before == MeetingListLogic.cardSignature(meeting: m, summaries: [summary("summary", "old", 1)]))
-        #expect(before != MeetingListLogic.cardSignature(meeting: m, summaries: [summary("summary", "new text", 5)]), "Regenerate / Claude")
-        var other = m
-        other.templateID = "brainstorm"
-        #expect(before != MeetingListLogic.cardSignature(meeting: other, summaries: [summary("summary", "old", 1)]), "template change")
+        let text = "## Decisions\n- Ship it.\n\n## Summary\nThe team reviewed launch readiness. More."
+        let line = MeetingListLogic.cardLine(meeting: m, ticked: ["summary", "decisions"], summaries: [summary(text)], segments: [])
+        #expect(line == "The team reviewed launch readiness.")
+    }
+
+    @Test func withoutSummaryTickedTheCardLineIsTheFirstLineOfTheFirstSection() {
+        let m = meeting("Sync", at: "2026-10-27T09:00:00Z")
+        let text = "## Action items\n- [ ] **Sam**: send the deck. Then more.\n- [ ] Ana: book the room\n\n## Open questions\n- Budget?"
+        let line = MeetingListLogic.cardLine(meeting: m, ticked: ["action-items", "open-questions"], summaries: [summary(text)], segments: [])
+        #expect(line == "Sam: send the deck. Then more.")
+    }
+
+    @Test func theCardLineIsTheNewestSummarysEvenFromAnotherBackend() {
+        let m = meeting("Sync", at: "2026-10-27T09:00:00Z")
+        let list = [summary("## Summary\nOlder one.", 2), summary("## Summary\nThe newer one.", 9)]
+        #expect(MeetingListLogic.cardLine(meeting: m, ticked: ["summary"], summaries: list, segments: []) == "The newer one.")
+    }
+
+    @Test func withoutASummaryTheCardFallsBackToTheTranscript() {
+        let m = meeting("Sync", at: "2026-10-27T09:00:00Z")
+        let segments = [MeetingSegment(stream: .mixed, text: "Hello there.", start: 0, end: 1)]
+        #expect(MeetingListLogic.cardLine(meeting: m, ticked: ["summary"], summaries: [], segments: segments) == "Hello there.")
+        #expect(MeetingListLogic.cardLine(meeting: m, ticked: ["summary"], summaries: [summary("  \n")], segments: segments) == "Hello there.")
+    }
+
+    @Test func theCardSignatureChangesWhenASummaryIsRewrittenOrTheTicksChange() {
+        let m = meeting("Sync", at: "2026-10-27T09:00:00Z")
+        let before = MeetingListLogic.cardSignature(meeting: m, ticked: ["summary"], summaries: [summary("old", 1)])
+        #expect(before == MeetingListLogic.cardSignature(meeting: m, ticked: ["summary"], summaries: [summary("old", 1)]))
+        #expect(before != MeetingListLogic.cardSignature(meeting: m, ticked: ["summary"], summaries: [summary("new text", 5)]), "Regenerate / Claude")
+        #expect(before != MeetingListLogic.cardSignature(meeting: m, ticked: ["decisions"], summaries: [summary("old", 1)]), "ticks changed")
         var renamed = m
         renamed.title = "Renamed"
-        #expect(before != MeetingListLogic.cardSignature(meeting: renamed, summaries: [summary("summary", "old", 1)]))
+        #expect(before != MeetingListLogic.cardSignature(meeting: renamed, ticked: ["summary"], summaries: [summary("old", 1)]))
     }
 
     // MARK: Empty state

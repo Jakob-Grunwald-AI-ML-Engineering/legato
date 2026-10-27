@@ -56,7 +56,7 @@ struct SettingsView: View {
                 NavigationLink {
                     MeetingSettingsView(controller: controller)
                 } label: {
-                    Text("Templates, speakers and processing")
+                    Text("Sections, speakers and processing")
                 }
                 .accessibilityIdentifier("settings.meetings")
             } header: {

@@ -375,7 +375,8 @@ audio_seconds() { afinfo "$1" 2> /dev/null | sed -n 's/^estimated duration: \([0
 # True when |a - b| <= tolerance.
 near() { python3 -I -c 'import sys; a, b, t = map(float, sys.argv[1:]); sys.exit(0 if abs(a - b) <= t else 1)' "$1" "$2" "$3"; }
 # The Markdown MarkdownExporter must produce for a meeting folder, rebuilt from meeting.json, segments.jsonl, notes.md
-# and the newest summary (summaries/<template>/<backend>.md, or an older summary-<backend>.md), written to <out>.
+# and the newest summary (summaries/<backend>.md, an older summaries/<template>/<backend>.md or summary-<backend>.md),
+# written to <out>.
 expected_markdown() { # expected_markdown <folder> <out>
   python3 -I - "$1" "$2" <<'PY'
 import datetime, glob, json, os, sys
@@ -394,7 +395,7 @@ def label(s):  # a speaker's name; older two-stream segments are Me and Them; a 
 source = {"mic": "Microphone", "system": "System audio"}
 date = datetime.datetime.fromtimestamp(m["date"] / 1000).strftime("%Y-%m-%d %H:%M")
 blocks = [f"# {m['title']}", f"- Date: {date}\n- Duration: {clock(m['duration'])}"]
-summaries = glob.glob(d + "/summaries/*/*.md") + glob.glob(d + "/summary-*.md")
+summaries = glob.glob(d + "/summaries/*.md") + glob.glob(d + "/summaries/*/*.md") + glob.glob(d + "/summary-*.md")
 summaries.sort(key=os.path.getmtime, reverse=True)
 if summaries:
     text = open(summaries[0]).read()
@@ -1166,6 +1167,20 @@ scenario_w() {
 # A meeting: the scripted engine and a tone for a microphone. 16 words at 400 ms is about 6.4 s of transcript.
 MEETING_TEXT="one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
 
+# assert_no_summary <folder>: the summary is written on click (Summarize), not by the after-stop chain, so a
+# finished meeting has none: no `.summary` step and no summary file in any layout.
+assert_no_summary() {
+  assert_eq "finished without a summary (summary on click)" "no" \
+    "$(meeting_field "$1" '"yes" if "summary" in m.get("completedSteps", []) else "no"')"
+  assert_eq "no summary file was written" "0" \
+    "$(ls "$1"/summaries/*.md "$1"/summaries/*/*.md "$1"/summary-*.md 2> /dev/null | wc -l | tr -d ' ')"
+}
+# assert_export_without_summary <md>: the export has the transcript but no summary section.
+assert_export_without_summary() {
+  if [ -f "$1" ] && ! grep -q '^## Summary' "$1" && grep -q '^## Transcript' "$1"; then record PASS "the export has no summary section"
+  else record FAIL "the export has no summary section" "$(grep -n '^## ' "$1" 2>&1 | head -5)"; fi
+}
+
 # meeting_stop_and_wait: stops the meeting and waits until the after-stop chain finished it.
 meeting_stop_and_wait() {
   trigger meeting-stop
@@ -1215,6 +1230,7 @@ scenario_x() {
   local dir; dir="$(meeting_dir)"
   [ -n "$dir" ] || { record FAIL "a meeting folder exists in the App Group container" "none under Meetings/"; return; }
   assert_eq "meeting finished" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_no_summary "$dir"
   assert_eq "engine recorded" "e2e-scripted" "$(meeting_field "$dir" 'm["engineID"]')"
   local segs; segs="$(grep -c . "$dir/segments.jsonl" 2> /dev/null)"
   if [ "${segs:-0}" -ge 5 ]; then record PASS "the live transcript was saved ($segs segments)"
@@ -1239,6 +1255,7 @@ scenario_x() {
   else record FAIL "the exported Markdown matches the saved meeting" "$(diff "$md" "$WORK/expected.md" 2>&1 | head -5)"; fi
   if grep -q '^_Microphone muted ' "$md" 2> /dev/null; then record PASS "the export notes the muted range"
   else record FAIL "the export notes the muted range" "no '_Microphone muted' line"; fi
+  assert_export_without_summary "$md"
 }
 
 # The number of meeting folders in the container's Meetings/.
@@ -1262,6 +1279,7 @@ scenario_x2() {
   local dir; dir="$(meeting_dir)"
   [ -n "$dir" ] || { record FAIL "a meeting folder exists in the App Group container" "none under Meetings/"; return; }
   assert_eq "meeting finished" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_no_summary "$dir"
   assert_eq "the pause left one marked range" "1" "$(meeting_field "$dir" 'len(m["pausedRanges"])')"
   assert_eq "the paused range is about the 2 s paused" "ok" \
     "$(meeting_field "$dir" '"ok" if 1.5 <= m["pausedRanges"][0]["end"] - m["pausedRanges"][0]["start"] <= 3.5 else "bad"')"
@@ -1276,6 +1294,7 @@ scenario_x2() {
   else record FAIL "the exported Markdown matches the saved meeting" "$(diff "$md" "$WORK/expected.md" 2>&1 | head -5)"; fi
   if grep -q '^_Paused ' "$md" 2> /dev/null; then record PASS "the export notes the paused range"
   else record FAIL "the export notes the paused range" "no '_Paused' line"; fi
+  assert_export_without_summary "$md"
   # Discard: the folder and the list entry go.
   local before; before="$(meeting_count)"
   trigger meeting-start
@@ -1320,6 +1339,7 @@ scenario_y() {
   local dir; dir="$(meeting_dir)"
   [ -n "$dir" ] || { record FAIL "a meeting folder exists" "none under Meetings/"; return; }
   assert_eq "meeting finished" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_no_summary "$dir"
   assert_eq "the interruption left one marked range" "1" "$(meeting_field "$dir" 'len(m["mutedRanges"])')"
   assert_eq "the range is about the 3 s the mic was gone" "ok" \
     "$(meeting_field "$dir" '"ok" if 2.5 <= m["mutedRanges"][0]["end"] - m["mutedRanges"][0]["start"] <= 5.5 else "bad"')"
@@ -1337,6 +1357,7 @@ scenario_z() {
   relaunch -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO LegatoMeetingProcessImmediately || return   # kills the app
   wait_log "e2e meeting.pipeline.done" 60
   assert_eq "recovery finished the interrupted meeting" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_no_summary "$dir"
   assert_eq "the recording survived as an m4a" "yes" "$([ -f "$dir/mic.m4a" ] && echo yes || echo no)"
   local segs; segs="$(grep -c . "$dir/segments.jsonl" 2> /dev/null)"
   if [ "${segs:-0}" -ge 3 ]; then record PASS "the transcript so far survived ($segs segments)"

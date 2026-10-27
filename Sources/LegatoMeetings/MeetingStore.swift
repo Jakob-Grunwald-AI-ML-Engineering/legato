@@ -10,8 +10,10 @@ import LegatoCore
 /// <id>/notes.md              what the user wrote during and after the meeting (private, like every file here)
 /// <id>/turns.live.jsonl      the live diarizer's turns as person ids, appended as they settle while recording
 /// <id>/turns.offline.json    the after-meeting diarizer's turns as person ids (absent until that pass ran)
-/// <id>/summaries/<templateID>/<backendID>.md   a template's summary by a backend
-/// <id>/summary-<backendID>.md                  older summaries: read as the `summary` template
+/// <id>/summaries/<backendID>.md              a backend's summary, as written (the ticked sections)
+/// <id>/summaries/<backendID>.sections.json   the sections it was written with
+/// <id>/summaries/<templateID>/<backendID>.md   older: one template's summary, read with that template's sections
+/// <id>/summary-<backendID>.md                  older still: read as the Summary template's sections
 /// <id>/mic.caf|m4a, system.caf|m4a, mix.caf|m4a   written by other components
 /// ```
 ///
@@ -187,71 +189,88 @@ public actor MeetingStore {
 
     // MARK: Summaries
 
-    /// A summary some backend wrote for a meeting.
+    /// A summary some backend wrote for a meeting. A backend has one: the newest file it wrote, whatever the layout.
     public struct Summary: Sendable, Equatable {
-        /// The template it follows (``SummaryTemplate/id``); `summary` for the older, template-less files.
-        public var templateID: String
+        /// The sections it was written with; nil when that is not known.
+        public var sections: [SectionID]?
         /// The backend that wrote it (as made safe for a file name).
         public var backendID: String
         public var text: String
         public var date: Date
         /// The user's notes changed after it was written, so it does not reflect them: offer Regenerate.
         public var isStale: Bool
+
+        public init(sections: [SectionID]?, backendID: String, text: String, date: Date, isStale: Bool) {
+            self.sections = sections
+            self.backendID = backendID
+            self.text = text
+            self.date = date
+            self.isStale = isStale
+        }
     }
 
-    /// Where a backend's summary for a template lives; the default template when `templateID` is left out.
-    public func summaryURL(for id: UUID, templateID: String = SummaryTemplate.summaryID, backendID: String) -> URL {
-        summariesFolder(for: id)
-            .appendingPathComponent(Self.fileSafe(templateID), isDirectory: true)
-            .appendingPathComponent("\(Self.fileSafe(backendID)).md")
+    /// Where a backend's summary of the meeting lives.
+    public func summaryURL(for id: UUID, backendID: String) -> URL {
+        summariesFolder(for: id).appendingPathComponent("\(Self.fileSafe(backendID)).md")
     }
 
-    /// Writes `text` as the backend's summary of the meeting for the template, replacing that pair's earlier one.
-    public func saveSummary(_ text: String, backendID: String, templateID: String = SummaryTemplate.summaryID, for id: UUID) throws {
+    private func sectionsURL(for id: UUID, backendID: String) -> URL {
+        summariesFolder(for: id).appendingPathComponent("\(Self.fileSafe(backendID)).sections.json")
+    }
+
+    /// Writes `text` as the backend's summary of the meeting, replacing its earlier one, with the sections it
+    /// was written with.
+    public func saveSummary(_ text: String, backendID: String, sections: [SectionID]? = nil, for id: UUID) throws {
         try createFolder(for: id)
-        let url = summaryURL(for: id, templateID: templateID, backendID: backendID)
         try PrivateFiles.createDirectory(summariesFolder(for: id))
-        try PrivateFiles.createDirectory(url.deletingLastPathComponent())
-        try PrivateFiles.write(Data(text.utf8), to: url)
+        let sidecar = sectionsURL(for: id, backendID: backendID)
+        if let sections {
+            try PrivateFiles.write(try JSONEncoder().encode(sections), to: sidecar)
+        } else if FileManager.default.fileExists(atPath: sidecar.path) {
+            try FileManager.default.removeItem(at: sidecar)
+        }
+        // Written last: its date is the summary's.
+        try PrivateFiles.write(Data(text.utf8), to: summaryURL(for: id, backendID: backendID))
     }
 
-    /// Every summary of the meeting, newest first (optionally only a template's). Older `summary-<backend>.md`
-    /// files count as the `summary` template, unless a newer file for the same template and backend exists.
-    public func summaries(for id: UUID, templateID: String? = nil) throws -> [Summary] {
+    /// Every backend's summary of the meeting, newest first. A backend's newest file wins, whichever layout it is
+    /// in: `summaries/<backend>.md`, an older `summaries/<template>/<backend>.md` (read with that template's
+    /// sections) or `summary-<backend>.md` (the Summary template's).
+    public func summaries(for id: UUID) throws -> [Summary] {
         let dir = folder(for: id)
         guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.contentModificationDateKey]
-        let notesDate = (try? notesURL(for: id).resourceValues(forKeys: Set(keys)).contentModificationDate)
-        func read(_ url: URL, template: String, backend: String) -> Summary? {
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            let date = (try? url.resourceValues(forKeys: Set(keys)).contentModificationDate) ?? .distantPast
-            return Summary(
-                templateID: template, backendID: backend, text: String(decoding: data, as: UTF8.self), date: date,
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isDirectoryKey]
+        let notesDate = (try? notesURL(for: id).resourceValues(forKeys: keys).contentModificationDate)
+        var found: [String: Summary] = [:]  // by backend
+        func consider(_ url: URL, backend: String, sections: [SectionID]?) {
+            guard let data = try? Data(contentsOf: url) else { return }
+            let date = (try? url.resourceValues(forKeys: keys).contentModificationDate) ?? .distantPast
+            if let existing = found[backend], existing.date > date { return }  // an equal date: the later layout wins
+            found[backend] = Summary(
+                sections: sections, backendID: backend, text: String(decoding: data, as: UTF8.self), date: date,
                 isStale: notesDate.map { $0 > date } ?? false)
         }
 
-        var found: [String: Summary] = [:]  // "template/backend"
         for url in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
             let name = url.lastPathComponent
             guard name.hasPrefix("summary-"), name.hasSuffix(".md") else { continue }
-            let backend = String(name.dropFirst(8).dropLast(3))
-            if let summary = read(url, template: SummaryTemplate.summaryID, backend: backend) {
-                found["\(summary.templateID)/\(backend)"] = summary
+            consider(url, backend: String(name.dropFirst(8).dropLast(3)), sections: SummarySection.sections(forTemplate: "summary"))
+        }
+        let entries = (try? fm.contentsOfDirectory(at: summariesFolder(for: id), includingPropertiesForKeys: Array(keys))) ?? []
+        for entry in entries where (try? entry.resourceValues(forKeys: keys).isDirectory) == true {
+            let template = entry.lastPathComponent
+            for url in (try? fm.contentsOfDirectory(at: entry, includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "md" {
+                consider(url, backend: url.deletingPathExtension().lastPathComponent, sections: SummarySection.sections(forTemplate: template))
             }
         }
-        let templates = (try? fm.contentsOfDirectory(at: summariesFolder(for: id), includingPropertiesForKeys: nil)) ?? []
-        for templateFolder in templates {
-            for url in (try? fm.contentsOfDirectory(at: templateFolder, includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "md" {
-                let backend = url.deletingPathExtension().lastPathComponent
-                if let summary = read(url, template: templateFolder.lastPathComponent, backend: backend) {
-                    found["\(summary.templateID)/\(backend)"] = summary  // supersedes a legacy file
-                }
-            }
+        for url in entries where url.pathExtension == "md" && (try? url.resourceValues(forKeys: keys).isDirectory) != true {
+            let backend = url.deletingPathExtension().lastPathComponent
+            let sections = (try? Data(contentsOf: sectionsURL(for: id, backendID: backend)))
+                .flatMap { try? JSONDecoder().decode([SectionID].self, from: $0) }
+            consider(url, backend: backend, sections: sections)
         }
-        return found.values
-            .filter { templateID == nil || $0.templateID == Self.fileSafe(templateID!) }
-            .sorted { ($0.date, $1.backendID, $1.templateID) > ($1.date, $0.backendID, $0.templateID) }
+        return found.values.sorted { ($0.date, $1.backendID) > ($1.date, $0.backendID) }
     }
 
     private static func fileSafe(_ id: String) -> String {

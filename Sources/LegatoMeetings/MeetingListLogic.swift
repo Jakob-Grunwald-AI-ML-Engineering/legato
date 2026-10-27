@@ -54,8 +54,8 @@ public struct MeetingPillState: Sendable, Equatable {
     public var controlsEnabled: Bool { phase == .recording }
 }
 
-/// The meetings list's pure rules: grouping by day, the card's one line, search, and which summary a
-/// meeting's document shows.
+/// The meetings list's pure rules: grouping by day, the card's one line, search, which summary a meeting's
+/// document shows and whether it is stale.
 public enum MeetingListLogic {
     /// Meetings grouped by calendar day, newest day first and newest meeting first within it.
     public static func groupByDay(_ meetings: [Meeting], calendar: Calendar = .current) -> [MeetingDayGroup] {
@@ -101,19 +101,49 @@ public enum MeetingListLogic {
         return words.allSatisfy { haystack.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 
-    /// The card's line for a meeting: the first sentence of the summary of the meeting's own template (not another
-    /// template's, newer or not), else the first line of the transcript. Empty when there is neither.
-    public static func cardLine(meeting: Meeting, summaries: [MeetingStore.Summary], segments: [MeetingSegment]) -> String {
-        let shown = shownSummary(in: summaries, templateID: meeting.templateID)
-        return oneLiner(summary: shown?.text, segments: segments)
+    /// Why a summary no longer matches its meeting, so the document offers Regenerate.
+    public enum StaleReason: Sendable, Equatable {
+        /// The notes changed after it was written.
+        case notes
+        /// The ticked sections are not the ones it was written with.
+        case sections
+
+        public var text: String {
+            switch self {
+            case .notes: "Your notes changed after this summary was written."
+            case .sections: "Sections changed after this summary was written."
+            }
+        }
+    }
+
+    /// Whether `summary` is stale for a meeting that ticks `ticked` now: other sections (the ticks are a set; a
+    /// summary whose sections are not known never is), else notes edited since.
+    public static func staleness(of summary: MeetingStore.Summary, ticked: [SectionID]) -> StaleReason? {
+        if let written = summary.sections, Set(written) != Set(ticked) { return .sections }
+        return summary.isStale ? .notes : nil
+    }
+
+    /// The card's line for a meeting: from the newest summary, the first sentence of its Summary section when
+    /// Summary is ticked, else the first line of its first section; without a summary (or with an empty one), the
+    /// first line of the transcript. Empty when there is none of these.
+    public static func cardLine(meeting: Meeting, ticked: [SectionID], summaries: [MeetingStore.Summary], segments: [MeetingSegment]) -> String {
+        if let text = shownSummary(in: summaries)?.text {
+            if ticked.contains(SummarySection.summary.id), let section = section(titled: "Summary", in: text),
+                let first = firstSentence(of: strip(section)), !first.isEmpty
+            {
+                return first
+            }
+            if let first = firstLineOfFirstSection(text) { return first }
+        }
+        return oneLiner(summary: nil, segments: segments)
     }
 
     /// What decides whether a card's line has to be read again: the meeting's state, steps, length, title and
-    /// template, and which summary is shown (its template, backend and when it was written).
-    public static func cardSignature(meeting: Meeting, summaries: [MeetingStore.Summary]) -> String {
-        let shown = shownSummary(in: summaries, templateID: meeting.templateID)
-        let summary = shown.map { "\($0.templateID)/\($0.backendID)/\($0.date.timeIntervalSince1970)/\($0.text.count)" } ?? "none"
-        return "\(meeting.state.rawValue)/\(meeting.completedSteps.count)/\(Int(meeting.duration))/\(meeting.title)/\(meeting.templateID)/\(summary)"
+    /// ticks, and which summary is shown (its backend, when it was written, its length).
+    public static func cardSignature(meeting: Meeting, ticked: [SectionID], summaries: [MeetingStore.Summary]) -> String {
+        let shown = shownSummary(in: summaries)
+        let summary = shown.map { "\($0.backendID)/\($0.date.timeIntervalSince1970)/\($0.text.count)" } ?? "none"
+        return "\(meeting.state.rawValue)/\(meeting.completedSteps.count)/\(Int(meeting.duration))/\(meeting.title)/\(ticked.joined(separator: ","))/\(summary)"
     }
 
     /// What the list shows when it has no cards: nothing, "no meetings", "searching…" or "no match". A search that
@@ -133,14 +163,30 @@ public enum MeetingListLogic {
             : String(format: "%d:%02d", total / 60, total % 60)
     }
 
-    /// The newest summary of the template the meeting is set to; nil when there is none (the document offers Generate).
-    public static func shownSummary(in summaries: [MeetingStore.Summary], templateID: String) -> MeetingStore.Summary? {
-        summaries.filter { $0.templateID == templateID }.max { $0.date < $1.date }
+    /// The summary the document shows: the newest one, whichever backend wrote it; nil when there is none (the
+    /// document offers Summarize).
+    public static func shownSummary(in summaries: [MeetingStore.Summary]) -> MeetingStore.Summary? {
+        summaries.max { $0.date < $1.date }
     }
 
     // MARK: Text
 
-    private static func summarySection(of markdown: String) -> String? {
+    private static func summarySection(of markdown: String) -> String? { section(titled: "Summary", in: markdown) }
+
+    /// The first non-empty line of the text's first section (or of the text, when it has no heading), bullets and
+    /// emphasis taken off.
+    private static func firstLineOfFirstSection(_ markdown: String) -> String? {
+        let lines = markdown.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let body = lines.firstIndex { $0.hasPrefix("#") }.map { Array(lines[(lines.index(after: $0))...]) } ?? lines
+        for line in body {
+            if line.hasPrefix("#") { break }
+            let cleaned = strip(line).trimmingCharacters(in: .whitespaces)
+            if !cleaned.isEmpty { return cleaned }
+        }
+        return nil
+    }
+
+    private static func section(titled heading: String, in markdown: String) -> String? {
         var inSection = false
         var lines: [String] = []
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -148,7 +194,7 @@ public enum MeetingListLogic {
             if trimmed.hasPrefix("#") {
                 if inSection { break }
                 let title = trimmed.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
-                inSection = title.caseInsensitiveCompare("Summary") == .orderedSame
+                inSection = title.caseInsensitiveCompare(heading) == .orderedSame
             } else if inSection {
                 lines.append(String(line))
             }

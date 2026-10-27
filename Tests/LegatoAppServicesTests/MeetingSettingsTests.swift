@@ -64,93 +64,173 @@ import Testing
     }
 }
 
-@Suite struct MeetingSettingsTemplateTests {
+/// Jakob: "I would prefer to not have the templates as single-select. Multiple select of sections/items feels
+/// better." Settings hold the sections (built in and custom), their order and the default ticks.
+@Suite struct MeetingSettingsSectionTests {
     private let suite = "legato.meeting-settings.\(UUID().uuidString)"
     private func settings() -> MeetingSettings { MeetingSettings(defaults: UserDefaults(suiteName: suite)!) }
+    private var defaults: UserDefaults { UserDefaults(suiteName: suite)! }
+    private let builtInIDs = ["summary", "decisions", "action-items", "open-questions", "email-follow-up", "one-on-one", "brainstorm"]
 
-    @Test func withNothingSetTheTemplatesAreTheFiveBuiltInsAndSummaryIsTheDefault() {
-        let s = settings()
-        #expect(s.customTemplates.isEmpty)
-        #expect(s.allTemplates.map(\.id) == ["summary", "action-items", "email-follow-up", "one-on-one", "brainstorm"])
-        #expect(s.defaultTemplateID == "summary")
-        #expect(s.template(id: "brainstorm")?.name == "Brainstorm")
-        #expect(s.template(id: "nope") == nil)
+    /// An older install's templates, as it stored them.
+    private func storeOldTemplates(_ templates: [(id: String, name: String, prompt: String)]) throws {
+        let json = templates.map { ["id": $0.id, "name": $0.name, "prompt": $0.prompt] }
+        defaults.set(try JSONSerialization.data(withJSONObject: json), forKey: "meeting.templates")
     }
 
-    @Test func customTemplatesAreAddedEditedAndDeleted() {
+    @Test func withNothingSetTheSectionsAreTheBuiltInsAndTheDefaultTicksAreSummaryDecisionsAndActionItems() {
         let s = settings()
-        let a = s.addTemplate(name: "Standup", prompt: "List blockers.")
-        let b = s.addTemplate(name: "Standup", prompt: "Second.")
-        #expect(a.id != b.id, "ids are unique even for equal names")
-        #expect(s.customTemplates.map(\.name) == ["Standup", "Standup"])
-        #expect(s.allTemplates.count == 7)
+        #expect(s.customSections.isEmpty)
+        #expect(s.allSections.map(\.id) == builtInIDs)
+        #expect(s.defaultSectionIDs == ["summary", "decisions", "action-items"])
+        #expect(s.section(id: "brainstorm")?.heading == "Brainstorm")
+        #expect(s.section(id: "nope") == nil)
+    }
+
+    @Test func theAutomaticSummaryIsOffByDefaultAndPersists() {
+        let s = settings()
+        #expect(!s.summarizeAutomatically)
+        s.summarizeAutomatically = true
+        #expect(MeetingSettings(defaults: UserDefaults(suiteName: suite)!).summarizeAutomatically)
+    }
+
+    @Test func customSectionsAreAddedEditedAndDeleted() {
+        let s = settings()
+        let a = s.addSection(heading: "Risks", instruction: "Bullets for each risk.")
+        let b = s.addSection(heading: "Risks", instruction: "Second.")
+        #expect(a.id != b.id, "ids are unique even for equal headings")
+        #expect(s.customSections.map(\.heading) == ["Risks", "Risks"])
+        #expect(s.allSections.map(\.id) == builtInIDs + [a.id, b.id], "a new section goes last")
 
         var edited = a
-        edited.name = "Daily"
-        edited.prompt = "List blockers and wins."
-        s.updateTemplate(edited)
-        #expect(s.template(id: a.id) == edited)
+        edited.heading = "Blockers"
+        edited.instruction = "Bullets for each blocker."
+        s.updateSection(edited)
+        #expect(s.section(id: a.id) == edited)
 
-        s.deleteTemplate(id: a.id)
-        #expect(s.customTemplates.map(\.id) == [b.id])
-        // Persisted.
-        #expect(MeetingSettings(defaults: UserDefaults(suiteName: suite)!).customTemplates.map(\.id) == [b.id])
+        s.deleteSection(id: a.id)
+        #expect(s.customSections.map(\.id) == [b.id])
+        #expect(MeetingSettings(defaults: UserDefaults(suiteName: suite)!).customSections.map(\.id) == [b.id], "persisted")
     }
 
-    @Test func builtInsCannotBeEditedOrDeleted() {
+    @Test func builtInsCannotBeEditedOrDeleted() throws {
         let s = settings()
-        var changed = SummaryTemplate.summary
-        changed.prompt = "Hacked"
-        s.updateTemplate(changed)
-        s.deleteTemplate(id: "summary")
-        #expect(s.template(id: "summary") == .summary)
-        #expect(s.allTemplates.count == 5)
+        var changed = try #require(s.section(id: "summary"))
+        let original = changed
+        changed.instruction = "Hacked"
+        s.updateSection(changed)
+        s.deleteSection(id: "summary")
+        #expect(s.section(id: "summary") == original)
+        #expect(s.allSections.count == 7)
     }
 
-    @Test func theDefaultTemplateIsRememberedAndFallsBackToSummaryWhenItsTemplateIsDeleted() {
+    @Test func sectionsAreReorderedAndTheOrderPersists() {
         let s = settings()
-        let mine = s.addTemplate(name: "Mine", prompt: "p")
-        s.defaultTemplateID = mine.id
-        #expect(MeetingSettings(defaults: UserDefaults(suiteName: suite)!).defaultTemplateID == mine.id)
-        s.deleteTemplate(id: mine.id)
-        #expect(s.defaultTemplateID == "summary")
-        s.defaultTemplateID = "no-such-template"
-        #expect(s.defaultTemplateID == "summary", "an unknown id is not a default")
+        let mine = s.addSection(heading: "Risks", instruction: "r")
+        s.moveSections(fromOffsets: IndexSet(integer: 7), toOffset: 0)  // the custom one first
+        #expect(s.allSections.first?.id == mine.id)
+        s.moveSections(fromOffsets: IndexSet(integer: 2), toOffset: 1)  // decisions (now third) above summary
+        #expect(Array(s.allSections.map(\.id).prefix(3)) == [mine.id, "decisions", "summary"])
+        #expect(MeetingSettings(defaults: UserDefaults(suiteName: suite)!).allSections.map(\.id) == s.allSections.map(\.id))
     }
 
-    @Test func theOldPromptMigratesIntoMyTemplateAndBecomesTheDefault() {
+    @Test func theDefaultTicksAreRememberedInTheConfiguredOrderAndForgetWhatIsGone() {
+        let s = settings()
+        let mine = s.addSection(heading: "Risks", instruction: "r")
+        s.defaultSectionIDs = [mine.id, "brainstorm", "no-such-section"]
+        #expect(MeetingSettings(defaults: UserDefaults(suiteName: suite)!).defaultSectionIDs == ["brainstorm", mine.id])
+        s.deleteSection(id: mine.id)
+        #expect(s.defaultSectionIDs == ["brainstorm"])
+        s.defaultSectionIDs = []
+        #expect(s.defaultSectionIDs == [], "no default ticks is a choice")
+    }
+
+    @Test func aMeetingsSectionsAreItsTicksOrTheDefaultInTheConfiguredOrder() {
+        let s = settings()
+        s.defaultSectionIDs = ["decisions"]
+        let plain = Meeting(title: "T", date: Date(), engineID: "e")
+        #expect(s.sections(for: plain).map(\.id) == ["decisions"], "nil: the default ticks")
+        let ticked = Meeting(title: "T", date: Date(), engineID: "e", sections: ["brainstorm", "gone", "summary"])
+        #expect(s.sections(for: ticked).map(\.id) == ["summary", "brainstorm"])
+    }
+
+    @Test func togglingAChipTicksOrUnticksItInTheConfiguredOrder() {
+        let s = settings()
+        let plain = Meeting(title: "T", date: Date(), engineID: "e")  // the default ticks
+        #expect(s.ticks(of: plain, toggling: "open-questions") == ["summary", "decisions", "action-items", "open-questions"])
+        #expect(s.ticks(of: plain, toggling: "decisions") == ["summary", "action-items"])
+        let mine = Meeting(title: "T", date: Date(), engineID: "e", sections: ["brainstorm", "gone"])
+        #expect(s.ticks(of: mine, toggling: "summary") == ["summary", "brainstorm"], "what is gone drops out")
+        #expect(s.ticks(of: mine, toggling: "brainstorm") == [])
+    }
+
+    // MARK: Migration from templates
+
+    @Test func oldCustomTemplatesBecomeCustomSections() throws {
+        try storeOldTemplates([("custom-1", "Standup", "List blockers."), ("custom-2", "Retro", "What went well.")])
+        let s = settings()
+        #expect(s.customSections.map(\.id) == ["custom-1", "custom-2"])
+        #expect(s.customSections.map(\.heading) == ["Standup", "Retro"])
+        #expect(s.customSections.map(\.instruction) == ["List blockers.", "What went well."])
+        #expect(s.defaultSectionIDs == ["summary", "decisions", "action-items"])
+    }
+
+    @Test func theOldDefaultTemplateBecomesTheDefaultTicks() throws {
+        try storeOldTemplates([("custom-1", "Standup", "List blockers.")])
+        defaults.set("custom-1", forKey: "meeting.defaultTemplate")
+        #expect(settings().defaultSectionIDs == ["custom-1"])
+
+        let brainstorm = "legato.meeting-settings.\(UUID().uuidString)"
+        UserDefaults(suiteName: brainstorm)!.set("brainstorm", forKey: "meeting.defaultTemplate")
+        #expect(MeetingSettings(defaults: UserDefaults(suiteName: brainstorm)!).defaultSectionIDs == ["brainstorm"])
+
+        let summary = "legato.meeting-settings.\(UUID().uuidString)"
+        UserDefaults(suiteName: summary)!.set("action-items", forKey: "meeting.defaultTemplate")
+        #expect(MeetingSettings(defaults: UserDefaults(suiteName: summary)!).defaultSectionIDs == ["action-items"])
+    }
+
+    @Test func theOldPromptBecomesMyNotesAndTheDefaultTicks() {
         let s = settings()
         s.customPrompt = "Only list decisions."
-        #expect(s.customTemplates.map(\.name) == ["My template"])
-        #expect(s.customTemplates.first?.prompt == "Only list decisions.")
-        #expect(s.customTemplates.first?.id == SummaryTemplate.migratedID)
-        #expect(s.defaultTemplateID == SummaryTemplate.migratedID, "the user's prompt keeps being used")
-        #expect(s.allTemplates.count == 6)
+        #expect(s.customSections.map(\.heading) == ["My notes"])
+        #expect(s.customSections.first?.instruction == "Only list decisions.")
+        #expect(s.customSections.first?.id == SummarySection.migratedID)
+        #expect(s.defaultSectionIDs == [SummarySection.migratedID], "the user's prompt keeps being used")
     }
 
-    @Test func theMigrationRunsOnce() {
+    @Test func anAlreadyMigratedMyTemplateBecomesMyNotes() throws {
+        try storeOldTemplates([("my-template", "My template", "Only list decisions.")])
+        defaults.set(true, forKey: "meeting.templatesMigrated")
+        defaults.set("my-template", forKey: "meeting.defaultTemplate")
+        defaults.set("Only list decisions.", forKey: "meeting.summaryPrompt")
+        let s = settings()
+        #expect(s.customSections.map(\.id) == [SummarySection.migratedID])
+        #expect(s.customSections.map(\.heading) == ["My notes"])
+        #expect(s.defaultSectionIDs == [SummarySection.migratedID])
+    }
+
+    @Test func theMigrationRunsOnce() throws {
         let s = settings()
         s.customPrompt = "Only list decisions."
-        _ = s.customTemplates
-        var mine = try! #require(s.template(id: SummaryTemplate.migratedID))
-        mine.prompt = "Edited since."
-        s.updateTemplate(mine)
-        s.defaultTemplateID = "summary"
+        var mine = try #require(s.section(id: SummarySection.migratedID))
+        mine.instruction = "Edited since."
+        s.updateSection(mine)
+        s.defaultSectionIDs = ["summary"]
         s.customPrompt = "A later change to the old setting."
-        #expect(s.template(id: SummaryTemplate.migratedID)?.prompt == "Edited since.")
-        #expect(s.defaultTemplateID == "summary")
+        #expect(s.section(id: SummarySection.migratedID)?.instruction == "Edited since.")
+        #expect(s.defaultSectionIDs == ["summary"])
 
-        s.deleteTemplate(id: SummaryTemplate.migratedID)
-        #expect(s.customTemplates.isEmpty, "a deleted My template does not come back")
+        s.deleteSection(id: SummarySection.migratedID)
+        #expect(s.customSections.isEmpty, "a deleted My notes does not come back")
     }
 
     @Test func anEmptyOrDefaultOldPromptMigratesNothing() {
         let empty = settings()
-        #expect(empty.customTemplates.isEmpty)
+        #expect(empty.customSections.isEmpty)
         let same = MeetingSettings(defaults: UserDefaults(suiteName: "legato.meeting-settings.\(UUID().uuidString)")!)
-        same.customPrompt = SummaryTemplate.summary.prompt
-        #expect(same.customTemplates.isEmpty)
-        #expect(same.defaultTemplateID == "summary")
+        same.customPrompt = SummarySection.legacyDefaultPrompt
+        #expect(same.customSections.isEmpty)
+        #expect(same.defaultSectionIDs == ["summary", "decisions", "action-items"])
     }
 }
 
