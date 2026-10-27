@@ -26,22 +26,27 @@ public enum HostDelivery: String, Codable, Sendable, Equatable {
     case clipboard
     /// Type nothing while listening; insert the final text (`finalText`, else the committed text) at the end.
     case hold
-    /// Stream while listening; each `HostState.revisions` entry (a cleaned segment) replaces its raw span
-    /// while the field still ends with it from there; a span the user typed around is skipped.
+    /// Stream while listening; the newest `HostState.revision` (a rolling cleanup of the run's whole text)
+    /// replaces what the field shows for the run while the field still ends with it; once the user edited
+    /// it, revisions are skipped. A cleared field (a sent message) is a boundary the app is told about.
     case live
 }
 
-/// A committed span the app's live cleanup replaced (`HostDelivery.live`). Positions count characters of
-/// `HostState.committed`, which stays the raw text; a run's revisions never overlap and come in order.
+/// Live cleanup's cleaned version of the run's text (`HostDelivery.live`), a whole-span replacement: the
+/// keyboard replaces what the field shows for the run from `start` with `text` followed by the raw text of
+/// `HostState.committed` from `end` on. Positions count characters of `committed`, which stays the raw text.
 public struct HostRevision: Codable, Sendable, Equatable {
-    /// Where the span starts in `committed`.
+    /// Counts the run's revisions from 1; only a newer one than the keyboard handled is applied.
+    public var n: Int
+    /// Where the span starts in `committed`: 0, or the last sent boundary.
     public var start: Int
-    /// The span's raw text.
+    /// The raw text the pass cleaned (from `start`).
     public var raw: String
     /// What replaces it (the cleaned text with the raw span's surrounding whitespace).
     public var text: String
 
-    public init(start: Int, raw: String, text: String) {
+    public init(n: Int, start: Int, raw: String, text: String) {
+        self.n = n
         self.start = start
         self.raw = raw
         self.text = text
@@ -80,15 +85,15 @@ public struct HostState: Codable, Sendable, Equatable {
     /// visible keyboard types it without having followed the run, while the request is fresh
     /// (`LinkChannel.insertMaxAge`). Nil for every other state.
     public var insertAt: Date?
-    /// `.live`: the revisions of this run so far, in order; nil before the first.
-    public var revisions: [HostRevision]?
+    /// `.live`: the newest revision of this run; nil before the first.
+    public var revision: HostRevision?
     /// A meeting is recording: dictation is blocked. Absent (nil) otherwise, so older readers see the same state.
     public var meetingRecording: Bool?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,
         beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool, delivery: HostDelivery? = nil,
-        finalText: String? = nil, insertAt: Date? = nil, revisions: [HostRevision]? = nil
+        finalText: String? = nil, insertAt: Date? = nil, revision: HostRevision? = nil
     ) {
         self.v = Self.version
         self.runID = runID
@@ -103,7 +108,7 @@ public struct HostState: Codable, Sendable, Equatable {
         self.delivery = delivery
         self.finalText = finalText
         self.insertAt = insertAt
-        self.revisions = revisions
+        self.revision = revision
     }
 
     /// The state carries an insert request that is still recent enough to act on.

@@ -29,6 +29,7 @@ public struct DictationVersions: Sendable, Equatable {
         guard state.isFinal, let runID = state.runID, let cursor, cursor.runID == runID, cursor.finalApplied else {
             return nil
         }
+        if state.delivery == .live, cursor.sentBase > 0 { return landedAfterSent(state: state, cursor: cursor, runID: runID) }
         let raw = state.committed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return nil }
         var texts = [raw]
@@ -51,6 +52,19 @@ public struct DictationVersions: Sendable, Equatable {
             return DictationVersions(
                 runID: runID, documentID: cursor.documentID, texts: texts, current: current, trailing: streamedTrailing)
         }
+    }
+
+    /// A live run that was sent (the field cleared) part of the way: the field holds only the text after the
+    /// last boundary, so the versions cover that (raw, and what the field shows); nil when nothing followed.
+    private static func landedAfterSent(state: HostState, cursor: AppliedCursor, runID: String) -> DictationVersions? {
+        let raw = String(state.committed.dropFirst(cursor.sentBase)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        let shown = ProxyEditPlanner.runText(cursor: cursor, committed: state.committed, upTo: state.committed.count)
+        let cleaned = shown.trimmingCharacters(in: .whitespacesAndNewlines)
+        let texts = cleaned.isEmpty || cleaned == raw ? [raw] : [raw, cleaned]
+        return DictationVersions(
+            runID: runID, documentID: cursor.documentID, texts: texts, current: texts.count - 1,
+            trailing: ProxyEditPlanner.trailingWhitespace(of: shown))
     }
 
     /// Exactly what the field ends with while it shows the current version.

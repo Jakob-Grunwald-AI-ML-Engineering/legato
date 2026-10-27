@@ -131,7 +131,7 @@ extension CleanupDelivery {
         case .hold:
             "Nothing is typed while you speak (the floating panel shows the live text); the cleaned text is inserted when you stop."
         case .live:
-            "Each phrase is cleaned while you speak the next and replaces its raw text in place; at the end only the last phrases are left to clean. A phrase you typed around keeps its raw text."
+            "After each phrase the whole text so far is cleaned again and replaces what you see, so a later \"no wait, Thursday\" can fix an earlier phrase; a last pass runs when you stop. Once you edit the text it stays as you left it."
         }
     }
 }

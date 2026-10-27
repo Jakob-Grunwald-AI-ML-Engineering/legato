@@ -33,7 +33,7 @@ struct CleanupSettingsView: View {
                 Toggle("Clean up dictation", isOn: $enabled)
                     .accessibilityIdentifier("cleanup.enabled")
             } footer: {
-                Text("A language model on this iPhone adds punctuation and fixes misheard words (after you stop, or phrase by phrase with Live). History keeps the raw text next to the cleaned one.")
+                Text("A language model on this iPhone adds punctuation and fixes misheard words (after you stop, or continuously while you speak with Live). History keeps the raw text next to the cleaned one.")
             }
 
             Section {
@@ -179,7 +179,7 @@ struct CleanupSettingsView: View {
         case .hold:
             "Hold: nothing is typed while you speak (the keyboard's top bar shows the live text); the cleaned text is inserted when you stop."
         case .live:
-            "Live: each phrase is cleaned while you speak the next and replaces its raw text in place; when you stop only the last phrases are left. A phrase you typed around keeps its raw text."
+            "Live: after each phrase the whole text so far is cleaned again and replaces what you see, so a later \"no wait, Thursday\" can fix an earlier phrase; a last pass runs when you stop. Once you edit the text it stays as you left it. Sending the message (the field clears) keeps going with a fresh text."
         }
     }
 }
