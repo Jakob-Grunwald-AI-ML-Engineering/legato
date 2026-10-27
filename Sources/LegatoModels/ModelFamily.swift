@@ -63,6 +63,9 @@ public struct ModelFamily: Sendable, Hashable, Identifiable {
         members.first { $0.id == modelID }?.tierMs
     }
 
+    /// What the family is for and how far it reaches (see ``ModelDescriptor/roleLine``); `nil` for a non-speech model.
+    public var roleLine: String? { members.first?.roleLine }
+
     /// "de, en · 665 MB per tier · OpenMDW-1.1": what a row shows under the family name.
     public var detailsLine: String {
         var parts: [String] = []

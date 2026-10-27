@@ -233,6 +233,13 @@ struct CatalogRows {
         #expect(descriptor("parakeet-v3").languages.count == 25)
     }
 
+    @Test func everySpeechModelStatesItsRoleAndReach() {
+        let streaming = ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechStreaming)
+        #expect(streaming.map(\.roleLine) == ["Live dictation", "Live dictation", "English only · live dictation"])
+        let batch = FluidAudioModels.descriptors.filter { $0.kind == .speechBatch }
+        #expect(batch.map(\.roleLine) == ["After meetings · not live", "After meetings · not live"])
+    }
+
     @Test func tiersHaveNamedChunks() {
         #expect(NemotronInstaller.supportedChunks == [560, 1120, 2240])
     }

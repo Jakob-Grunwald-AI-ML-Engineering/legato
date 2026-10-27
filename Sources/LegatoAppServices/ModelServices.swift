@@ -69,6 +69,8 @@ public final class ModelServices {
 
     /// Live dictation models for this device, in catalog order.
     public var streamingModels: [ModelDescriptor] { catalog.filter { $0.kind == .speechStreaming } }
+    /// The models the after-meeting pass can use on this device, in catalog order.
+    public var postPassModels: [ModelDescriptor] { catalog.filter { $0.kind == ModelRole.postPass.kind } }
     /// Cleanup language models for this device.
     public var cleanupModels: [ModelDescriptor] { catalog.filter { $0.kind == .llm } }
 

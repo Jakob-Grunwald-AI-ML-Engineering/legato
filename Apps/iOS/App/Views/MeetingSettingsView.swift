@@ -1,4 +1,5 @@
 import LegatoAppServices
+import LegatoModels
 import SwiftUI
 
 /// Settings > Meetings: the summary prompt and backend, and the optional Claude key.
@@ -10,8 +11,12 @@ struct MeetingSettingsView: View {
     @State private var keyDraft = ""
     @State private var hasKey = false
     @State private var keyError: String?
+    @State private var postPass: String?
+    @State private var pending: String?
+    @State private var failures: [String: String] = [:]
 
     private var meetings: MeetingController { controller.meetings }
+    private var models: ModelServices { controller.models }
 
     var body: some View {
         Form {
@@ -33,6 +38,39 @@ struct MeetingSettingsView: View {
                 Text("Summary")
             } footer: {
                 Text("Your instructions replace the default prompt for the automatic summary after a meeting. It runs on this iPhone with the backend above (the MLX model is the one picked in Cleanup).")
+            }
+
+            Section {
+                Button {
+                    pending = nil
+                    models.clearPick(.postPass)
+                    postPass = models.selected(.postPass)
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Off")
+                            Text("Keep the live text; nothing to download").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if postPass == nil { Image(systemName: "checkmark").foregroundStyle(.tint) }
+                    }
+                }
+                .foregroundStyle(.primary)
+                ForEach(models.postPassModels) { descriptor in
+                    ModelRow(
+                        descriptor: descriptor, manager: models.manager,
+                        isSelected: postPass == descriptor.id,
+                        isPending: pending == descriptor.id, failure: failures[descriptor.id],
+                        onCancel: { cancelPostPass(descriptor.id) }
+                    ) { pickPostPass(descriptor.id) }
+                    .swipeActions {
+                        Button("Delete", role: .destructive) { deletePostPass(descriptor.id) }
+                    }
+                }
+            } header: {
+                Text("After-meeting pass")
+            } footer: {
+                Text("Runs after you stop a meeting and re-reads the saved audio with this model, which is more accurate than the live text. It covers 25 European languages (bg, hr, cs, da, nl, en, et, fi, fr, de, el, hu, it, lv, lt, mt, pl, pt, ro, sk, sl, es, sv, ru, uk). Off keeps the live text. Picking a model downloads it first.")
             }
 
             Section {
@@ -60,6 +98,7 @@ struct MeetingSettingsView: View {
             prompt = meetings.settings.customPrompt
             backend = meetings.settings.backend
             hasKey = meetings.hasClaudeKey
+            postPass = models.selected(.postPass)
         }
         .onChange(of: prompt) { _, new in meetings.settings.customPrompt = new }
         .onChange(of: backend) { _, new in meetings.settings.backend = new }
@@ -69,5 +108,27 @@ struct MeetingSettingsView: View {
         keyError = meetings.saveClaudeKey(keyDraft)
         if keyError == nil { keyDraft = "" }
         hasKey = meetings.hasClaudeKey
+    }
+
+    private func pickPostPass(_ id: String) {
+        failures[id] = nil
+        pending = id
+        models.pick(id, role: .postPass) { error in
+            if pending == id { pending = nil }
+            if let error { failures[id] = String(describing: error) } else { postPass = models.selected(.postPass) }
+        }
+    }
+
+    private func cancelPostPass(_ id: String) {
+        if pending == id { pending = nil }
+        Task { await models.cancelDownload(id) }
+    }
+
+    private func deletePostPass(_ id: String) {
+        if pending == id { pending = nil }
+        Task {
+            await models.manager.delete(id)
+            postPass = models.selected(.postPass)
+        }
     }
 }
