@@ -195,6 +195,7 @@ public struct MeetingPipeline: Sendable {
 
         if !meeting.completedSteps.contains(.postPass), let batch = await transcriber() {
             await onEvent(.started(.postPass))
+            try Task.checkCancellation()  // never free the live models for a job that was just cut short
             await releaseModels()
             do {
                 let report = onEvent

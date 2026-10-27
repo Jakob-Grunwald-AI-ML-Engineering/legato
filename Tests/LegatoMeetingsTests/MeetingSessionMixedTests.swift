@@ -164,6 +164,47 @@ import LegatoCore
         #expect(rig.engineSamples.count == 80_000)
     }
 
+    @Test func aRestartedSourceIsMixedFromWhereItCameBack() async throws {
+        let rig = Rig()
+        defer { rig.cleanup() }
+        try await rig.session.start()
+        rig.clock.now = 1
+        rig.micSource.push(tone(16_000, 0.2))  // 0-1 s
+        #expect(await eventually { rig.sink.calls.contains(.write(.mic, Array(repeating: 0.2, count: 16_000))) })
+        rig.clock.now = 5  // 4 s pass with nothing from the mic, then it comes back
+        rig.micSource.resume()
+        #expect(await eventually { rig.sink.calls.contains(.silence(.mic, 4)) })
+        rig.clock.now = 5.1
+        rig.micSource.push(tone(1_600, 0.4))  // heard 5.0-5.1 s
+        #expect(await eventually { rig.sink.calls.contains(.write(.mic, Array(repeating: 0.4, count: 1_600))) })
+        _ = await rig.session.stop()
+        let mix = rig.mixWrites
+        try #require(mix.count == 81_600)
+        #expect(mix[..<16_000].allSatisfy { abs($0 - 0.2) < 1e-5 })
+        #expect(mix[16_000..<80_000].allSatisfy { $0 == 0 }, "the gap is silence in the mix")
+        #expect(mix[80_000...].allSatisfy { abs($0 - 0.4) < 1e-5 }, "the audio after the restart is where it was heard")
+    }
+
+    @Test func aRestartGapShorterThanTheToleranceIsStillMixedFromWhereTheSourceCameBack() async throws {
+        let rig = Rig()
+        defer { rig.cleanup() }
+        try await rig.session.start()
+        rig.clock.now = 1
+        rig.micSource.push(tone(16_000, 0.2))  // 0-1 s
+        #expect(await eventually { rig.sink.calls.contains(.write(.mic, Array(repeating: 0.2, count: 16_000))) })
+        rig.clock.now = 1.12  // a quick restart: 0.12 s with nothing
+        rig.micSource.resume()
+        try await Task.sleep(for: .milliseconds(100))
+        rig.clock.now = 1.22
+        rig.micSource.push(tone(1_600, 0.4))  // heard 1.12-1.22 s
+        #expect(await eventually { rig.sink.calls.contains(.write(.mic, Array(repeating: 0.4, count: 1_600))) })
+        _ = await rig.session.stop()
+        let mix = rig.mixWrites
+        try #require(mix.count == 19_520)
+        #expect(mix[16_000..<17_920].allSatisfy { $0 == 0 })
+        #expect(mix[17_920...].allSatisfy { abs($0 - 0.4) < 1e-5 }, "the audio after the restart is where it was heard")
+    }
+
     @Test func aMicBacklogThatArrivesAtOnceAfterASlowStartIsMixedWhereItWasHeard() async throws {
         let rig = Rig()
         defer { rig.cleanup() }

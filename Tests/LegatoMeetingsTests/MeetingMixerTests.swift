@@ -230,4 +230,84 @@ import LegatoCore
         let frames = mixer.advance(to: 0.1)
         #expect(frames.count == 1 && frames[0].count == 4_800)
     }
+
+    // MARK: A source that runs behind the clock
+
+    /// Drives `mixer` the way the session does: a ticker every 50 ms cuts the mix 0.2 s behind the clock, and
+    /// the mic delivers chunk `k` (its samples all `value(k)`) at `arrival(k)`. At the end the mix is flushed to
+    /// the last arrival, the meeting's end. Calls `each` with every frame of the mix.
+    func runOnTheSessionCadence(
+        _ mixer: inout MeetingMixer, chunks: Int, chunkSamples: Int, arrival: (Int) -> TimeInterval,
+        value: (Int) -> Float = { _ in 0.25 }, each: ([Float]) -> Void
+    ) -> TimeInterval {
+        var tick = 0.05
+        var meetingEnd: TimeInterval = 0
+        for k in 0..<chunks {
+            let at = arrival(k)
+            while tick < at - 1e-9 {
+                for frame in mixer.advance(to: max(0, tick - 0.2)) { each(frame) }
+                tick += 0.05
+            }
+            mixer.append(constant(value(k), chunkSamples), from: .mic, at: at)
+            meetingEnd = at
+        }
+        for frame in mixer.flush(to: meetingEnd) { each(frame) }
+        return meetingEnd
+    }
+
+    @Test func aSourceThatRunsBehindTheClockLosesNothingOnTheSessionCadence() {
+        var mixer = MeetingMixer(sampleRate: 16_000)
+        mixer.begin(.mic, at: 0)
+        let chunk = 1_360  // 85 ms, a mic tap's buffer
+        // Chunk k was heard over [0.085 k, 0.085 (k + 1)) and arrives 0.15 s after it ended.
+        var heard = [Int: Int]()
+        _ = runOnTheSessionCadence(
+            &mixer, chunks: 118, chunkSamples: chunk, arrival: { 0.085 * Double($0 + 1) + 0.15 },
+            value: { Float($0 + 1) / 1_024 }
+        ) { frame in
+            for v in frame where v != 0 { heard[Int((v * 1_024).rounded()) - 1, default: 0] += 1 }
+        }
+        let afterOneSecond = (0..<118).filter { 0.085 * Double($0 + 1) + 0.15 > 1 }
+        let lost = afterOneSecond.filter { heard[$0, default: 0] != chunk }
+        #expect(lost.isEmpty, "chunks cut short after the first second: \(lost.count) of \(afterOneSecond.count)")
+    }
+
+    @Test func aDeviceClockSlowerThanTheHostLosesAlmostNothingOverALongMeeting() {
+        // A low sample rate keeps half an hour of audio cheap; the timing is the same as at 16 kHz.
+        let rate = 1_600.0
+        var mixer = MeetingMixer(sampleRate: rate)
+        mixer.begin(.mic, at: 0)
+        let chunk = 136  // 85 ms
+        let chunks = 21_000  // ~30 min
+        let slow = 1 + 100e-6  // +100 ppm: the device's second lasts a little longer than the host's
+        var mixed = 0, length = 0
+        let end = runOnTheSessionCadence(
+            &mixer, chunks: chunks, chunkSamples: chunk, arrival: { 0.085 * Double($0 + 1) * slow + 0.01 }
+        ) { frame in
+            length += frame.count
+            mixed += frame.reduce(0) { $0 + (abs($1 - 0.25) < 1e-6 ? 1 : 0) }
+        }
+        let delivered = chunks * chunk
+        let lost = Double(delivered - mixed) / Double(delivered)
+        #expect(lost < 0.001, "lost \(lost * 100) % of the mic")
+        #expect(length == Int((end * rate).rounded()), "the mix is as long as the meeting")
+    }
+
+    @Test func aRestartGapNobodyReportedLosesNothingAfterIt() {
+        var mixer = MeetingMixer(sampleRate: 16_000)
+        mixer.begin(.mic, at: 0)
+        let chunk = 1_360
+        // At chunk 60 (~5 s) the mic restarts: 0.12 s pass with nothing, below the session's gap tolerance,
+        // so nobody tells the mixer.
+        let gap = 0.12
+        var heard = [Int: Int]()
+        _ = runOnTheSessionCadence(
+            &mixer, chunks: 140, chunkSamples: chunk,
+            arrival: { 0.085 * Double($0 + 1) + 0.01 + ($0 >= 60 ? gap : 0) }, value: { Float($0 + 1) / 1_024 }
+        ) { frame in
+            for v in frame where v != 0 { heard[Int((v * 1_024).rounded()) - 1, default: 0] += 1 }
+        }
+        let lost = (60..<140).filter { heard[$0, default: 0] != chunk }
+        #expect(lost.isEmpty, "chunks cut short after the gap: \(lost.count) of 80")
+    }
 }

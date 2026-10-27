@@ -75,7 +75,8 @@ public final class MeetingServices {
 
     public let settings: MeetingSettings
     public let store: MeetingStore
-    /// Runs the heavy after-meeting steps one at a time once the machine is idle.
+    /// The one lane of every heavy job: the after-meeting steps once the machine is idle, and the manual actions
+    /// (Improve transcript, Summarize, Regenerate, Claude), one at a time.
     public private(set) lazy var scheduler = ProcessingScheduler(
         clock: { ProcessInfo.processInfo.systemUptime }, sample: sampler, isRecording: { [recording] in recording.value.withLock { $0 } },
         immediate: immediateProcessing, pollInterval: pollInterval,
@@ -260,37 +261,65 @@ public final class MeetingServices {
         pipeline().reportingEvents { [weak self] event in await self?.apply(event, to: id) }
     }
 
-    /// Runs `work` with the meeting's stage at `stage`; afterwards the meeting is waiting again if it was queued
-    /// before, else it has no stage.
-    private func running<T>(_ id: UUID, _ stage: ProcessingStage, _ work: () async throws -> T) async rethrows -> T {
-        let before = stages[id]
-        setStage(id, stage)
-        defer { setStage(id, before == .queued ? .queued : nil) }
-        return try await work()
+    /// A manual action on meeting `id` as a job in the scheduler's one lane (see ``ProcessingScheduler``): it
+    /// waits for the job that runs now, never runs next to another one, and is cut short by a recording (then it
+    /// runs again after the recording). The stage is set by the job itself, in the lane: `stage` while it
+    /// runs, then waiting if the meeting is still queued for its deferred steps (or the job waits for the
+    /// recording to end), else none. `settle` runs in the lane too, after `work`, before the next job starts.
+    /// - Throws: ``MeetingServicesError/recording`` while a meeting records; what `work` throws.
+    private func manual<T: Sendable>(
+        _ id: UUID, _ stage: ProcessingStage,
+        settle: @escaping @Sendable @MainActor (Result<T, any Error>) async -> Void = { _ in },
+        _ work: @escaping @Sendable @MainActor () async throws -> T
+    ) async throws -> T {
+        guard !isRecording else { throw MeetingServicesError.recording }
+        return try await scheduler.perform(for: id) { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            setStage(id, stage)
+            let result: Result<T, any Error>
+            do { result = .success(try await work()) } catch { result = .failure(error) }
+            await settle(result)
+            if case .failure(let error) = result, error is CancellationError, isRecording {
+                setStage(id, .queued)  // runs again after the recording
+            } else {
+                setStage(id, await scheduler.queued.contains(id) ? .queued : nil)
+            }
+            return try result.get()
+        }
     }
 
-    /// A meeting records (true) or not. Nothing heavy runs while one does: a heavy step already running when a
-    /// recording starts is cut short (its meeting stays queued and runs again, from the step it was in, once
-    /// the machine is idle after the meeting), and the manual actions refuse to start.
+    /// Queues the deferred steps of `id`: for an idle machine, or at once when idle processing is off.
+    private func queueDeferred(_ id: UUID) async {
+        if settings.idleProcessing { await scheduler.enqueue(id) } else { await scheduler.processNow(id) }
+    }
+
+    /// A meeting records (true) or not. Nothing heavy runs while one does: a heavy job already running when a
+    /// recording starts is cut short, manual or deferred. A deferred job stays queued and runs again, from the
+    /// step it was in, once the machine is idle after the meeting; a manual one runs again as soon as the
+    /// meeting ends. The manual actions refuse to start while one records.
     public func setRecording(_ isRecording: Bool) {
-        let started = recording.value.withLock { was -> Bool in
+        let (started, ended) = recording.value.withLock { was -> (Bool, Bool) in
             defer { was = isRecording }
-            return isRecording && !was
+            return (isRecording && !was, !isRecording && was)
         }
-        if started {
-            let scheduler = self.scheduler
-            Task { await scheduler.cancelRunning() }
-        }
+        let scheduler = self.scheduler
+        if started { Task { await scheduler.cancelRunning() } }
+        if ended { Task { await scheduler.recordingEnded() } }
     }
 
     private var isRecording: Bool { recording.value.withLock { $0 } }
+
+    /// Replaces the after-stop chain's models and recordings (tests).
+    var pipelineOverride: (@MainActor () -> MeetingPipeline)?
 
     /// The after-stop chain: m4a, post-pass, speakers, and the on-device summary when it is automatic. `onStep`
     /// reports each finished step.
     /// Run it inside a background task on the phone; see ``MeetingPipeline``.
     public func pipeline(onStep: @escaping @Sendable (Meeting.Step) -> Void = { _ in }) -> MeetingPipeline {
+        if let pipelineOverride { return pipelineOverride().reporting(onStep) }
         let registry = self.registry, cleanup = self.cleanup, settings = self.settings
         let background = self.background
+        let recording = self.recording
         return MeetingPipeline(
             store: store,
             audio: { MeetingAudioWriter(folder: $0) },
@@ -300,6 +329,8 @@ public final class MeetingServices {
             summarizeAutomatically: { settings.summarizeAutomatically },
             batchDiarizer: { await registry.batchDiarizer() },
             diarizationEnabled: { settings.offlineDiarization },
+            // A recording that just started has the live model loading: the job is about to be cut short.
+            releaseModels: { if !recording.value.withLock({ $0 }) { await releaseCachedNemotronModels() } },
             onStep: onStep)
     }
 
@@ -310,7 +341,7 @@ public final class MeetingServices {
     public func processAfterStop(_ id: UUID) async throws -> MeetingPipeline.Outcome {
         let outcome = try await pipeline().runAudio(meetingID: id)
         setStage(id, stages[id] ?? .queued)
-        if settings.idleProcessing { await scheduler.enqueue(id) } else { await scheduler.processNow(id) }
+        await queueDeferred(id)
         return outcome
     }
 
@@ -321,27 +352,39 @@ public final class MeetingServices {
     }
 
     /// "Improve transcript": the post-pass again, then the summary again when there was one (or it is automatic).
+    /// A manual job in the scheduler's lane. It does the meeting's deferred steps too, so it takes the meeting
+    /// out of the queue; when a step failed and will be retried (``MeetingPipeline/Outcome/willRetry``), or the
+    /// job was cut short, the meeting is queued again.
     /// - Throws: ``MeetingServicesError/recording`` while a meeting records (it would free the live model).
     @discardableResult
-    public func improveTranscript(meetingID: UUID) async throws -> MeetingPipeline.Outcome {
-        guard !isRecording else { throw MeetingServicesError.recording }
-        return try await running(meetingID, .running(nil)) {
-            try await pipeline(reportingFor: meetingID).improveTranscript(meetingID: meetingID)
+    public func improveTranscript(meetingID id: UUID) async throws -> MeetingPipeline.Outcome {
+        try await manual(id, .running(nil), settle: { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let outcome) where !outcome.willRetry: await scheduler.dequeue(id)
+            case .success, .failure(is CancellationError): await queueDeferred(id)
+            case .failure: break
+            }
+        }) { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await pipeline(reportingFor: id).improveTranscript(meetingID: id)
         }
     }
 
     /// Summarize, and Regenerate: the summary with the on-device backend (the meeting's ticked sections, notes,
-    /// speakers and language). It shows as the meeting's `.summary` stage while it runs.
+    /// speakers and language), as a manual job in the scheduler's lane. It shows as the meeting's `.summary`
+    /// stage while it runs.
     /// - Throws: ``MeetingServicesError/recording`` while a meeting records; ``LLMError/unavailable(reason:)``
     ///   when no on-device model is usable.
     @discardableResult
-    public func regenerate(meetingID: UUID) async throws -> URL {
+    public func regenerate(meetingID id: UUID) async throws -> URL {
         guard !isRecording else { throw MeetingServicesError.recording }
         guard let backend = await summaryBackend() else {
             throw LLMError.unavailable(reason: "No on-device model is available for a summary.")
         }
-        return try await running(meetingID, .running(.summary)) {
-            try await pipeline(reportingFor: meetingID).summarize(meetingID: meetingID, using: backend)
+        return try await manual(id, .running(.summary)) { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await pipeline(reportingFor: id).summarize(meetingID: id, using: backend)
         }
     }
 
@@ -365,17 +408,18 @@ public final class MeetingServices {
         return true
     }
 
-    /// Summarises one meeting with Claude, after the user asked for it, with the meeting's ticked sections.
-    /// Writes `summaries/claude.md`.
+    /// Summarises one meeting with Claude, after the user asked for it, with the meeting's ticked sections, as a
+    /// manual job in the scheduler's lane. Writes `summaries/claude.md`.
     /// - Throws: ``MeetingServicesError/recording`` while a meeting records; ``LLMError/unavailable(reason:)``
     ///   when there is no key.
     @discardableResult
-    public func summarizeWithClaude(meetingID: UUID) async throws -> URL {
+    public func summarizeWithClaude(meetingID id: UUID) async throws -> URL {
         guard !isRecording else { throw MeetingServicesError.recording }
         let claude = claudeBackend()
         if case .unavailable(let reason) = await claude.availability { throw LLMError.unavailable(reason: reason) }
-        return try await running(meetingID, .running(.summary)) {
-            try await pipeline(reportingFor: meetingID).summarize(meetingID: meetingID, using: claude)
+        return try await manual(id, .running(.summary)) { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await pipeline(reportingFor: id).summarize(meetingID: id, using: claude)
         }
     }
 }

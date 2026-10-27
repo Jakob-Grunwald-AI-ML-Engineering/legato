@@ -730,14 +730,7 @@ final class MeetingController {
     func process(_ id: UUID) {
         guard !liveMeetingIDs.contains(id), !busy.contains(id), processing[id] == nil else { return }
         busy.insert(id)  // only for the audio step: waiting for idle is not being busy
-        // If the system suspends the app before the heavy steps ran, iOS wakes it later to finish them.
-        MeetingBackgroundTask.schedule()
-        let token = BackgroundToken()
-        tokens[id] = token
-        token.begin(name: "legato.meeting.pipeline") { [weak self] in
-            guard let self else { return }
-            Task { await self.services.scheduler.cancelRunning() }
-        }
+        coverDeferredSteps(id)
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -781,6 +774,20 @@ final class MeetingController {
         }
     }
 
+    /// The deferred steps of `id` are queued: they run inside an iOS background task, and if the system suspends
+    /// the app before they ran, iOS wakes it later to finish them. When the background time runs out the running
+    /// step is cancelled and the meeting stays queued.
+    private func coverDeferredSteps(_ id: UUID) {
+        MeetingBackgroundTask.schedule()
+        guard tokens[id] == nil else { return }
+        let token = BackgroundToken()
+        tokens[id] = token
+        token.begin(name: "legato.meeting.pipeline") { [weak self] in
+            guard let self else { return }
+            Task { await self.services.scheduler.cancelRunning() }
+        }
+    }
+
     /// The heavy steps of `id` ended (or were cut short): free its busy mark and background time.
     private func finishProcessing(_ id: UUID) {
         busy.remove(id)
@@ -795,15 +802,18 @@ final class MeetingController {
         }
     }
 
-    /// "Improve transcript": the post-pass again, then the summary again.
+    /// "Improve transcript": the post-pass again, then the summary again. Like Summarize and Claude it is a job in
+    /// the services' one heavy lane: this only awaits it.
     func improve(_ id: UUID) {
         run(id, label: "Improving the transcript") { services in
             try await services.improveTranscript(meetingID: id)
         }
     }
 
-    /// Runs `work` inside an iOS background task. When the system is about to suspend the app the work is
-    /// cancelled: the meeting stays `processing` and `resumeProcessing` continues it in the foreground.
+    /// Awaits `work` (a job in the services' heavy lane) inside an iOS background task. When the system is about
+    /// to suspend the app the job is cancelled: the meeting is queued again and continues in the foreground. A
+    /// job that leaves the meeting queued (a step that will be retried) has its deferred steps covered by
+    /// background time like the after-stop chain.
     private func run(
         _ id: UUID, label: String,
         _ work: @escaping @MainActor (MeetingServices) async throws -> MeetingPipeline.Outcome
@@ -813,16 +823,18 @@ final class MeetingController {
         notices.clear(kind: .action, meeting: id)
         let task = Task { [weak self] in
             guard let self else { return }
+            var cancelled = false
             do {
                 let outcome = try await work(services)
                 notices.set(outcome.notes, kind: .processing, meeting: id)
             } catch is CancellationError {
-                // Out of background time: the meeting stays `processing` and resumes in the foreground.
+                cancelled = true  // out of background time: queued again, resumed in the foreground
             } catch {
                 Self.log.error("\(label, privacy: .public) failed: \(String(describing: type(of: error)), privacy: .public)")
                 notices.post("\(label) failed: \(error.localizedDescription)", kind: .action, meeting: id)
             }
             busy.remove(id)
+            if !cancelled, services.stage(of: id) == .queued { coverDeferredSteps(id) }
             await refresh()
             #if DEBUG
             let state = meetings.first { $0.id == id }?.state.rawValue ?? "missing"
@@ -867,6 +879,7 @@ final class MeetingController {
             guard let self else { return }
             do {
                 try await services.summarizeWithClaude(meetingID: id)
+            } catch is CancellationError {
             } catch {
                 notices.post("Claude summary failed: \(error.localizedDescription)", kind: .action, meeting: id)
             }

@@ -368,6 +368,84 @@ private final class BlockingLLM: LLMBackend {
     }
 }
 
+/// Its first answer waits up to ten seconds and records whether it was cancelled; later answers come at once.
+private final class HoldingLLM: LLMBackend {
+    let id = "holding"
+    let calls = Mutex(0)
+    let cancelled = Mutex(0)
+    var maxPromptCharacters: Int? { nil }
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        let n = calls.withLock { $0 += 1; return $0 }
+        if n == 1 {
+            do { try await Task.sleep(for: .seconds(10)) } catch {
+                cancelled.withLock { $0 += 1 }
+                throw error
+            }
+        }
+        return "## Summary\nholding"
+    }
+}
+
+/// How many heavy model calls run at once, across the fakes.
+private final class HeavyMeter: Sendable {
+    private let state = Mutex((now: 0, max: 0))
+    var max: Int { state.withLock { $0.max } }
+    func enter() { state.withLock { $0.now += 1; $0.max = Swift.max($0.max, $0.now) } }
+    func leave() { state.withLock { $0.now -= 1 } }
+}
+
+/// A post-pass model on the meter. With `holdFirst` its first call waits for ``release()``; with `fails` every
+/// call fails.
+private final class MeteredTranscriber: BatchTranscriber {
+    let id = "metered-batch"
+    let meter: HeavyMeter
+    let fails: Bool
+    let calls = Mutex(0)
+    private let held: Mutex<Bool>
+    init(meter: HeavyMeter, holdFirst: Bool = false, fails: Bool = false) {
+        self.meter = meter
+        self.fails = fails
+        held = Mutex(holdFirst)
+    }
+    func release() { held.withLock { $0 = false } }
+    func transcribe(samples: [Float], stream: TranscriptEvent.Stream) async throws -> [TranscriptEvent] {
+        meter.enter()
+        defer { meter.leave() }
+        let first = calls.withLock { $0 += 1; return $0 == 1 }
+        try await Task.sleep(for: .milliseconds(50))
+        while first, held.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(5)) }
+        if fails { throw LLMError.failed("boom") }
+        return [TranscriptEvent(stream: stream, text: "accurate", isFinal: true, range: 0..<2)]
+    }
+}
+
+/// An on-device summary model on the meter.
+private final class MeteredLLM: LLMBackend {
+    let id = "metered"
+    let meter: HeavyMeter
+    init(meter: HeavyMeter) { self.meter = meter }
+    var maxPromptCharacters: Int? { nil }
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        meter.enter()
+        defer { meter.leave() }
+        try await Task.sleep(for: .milliseconds(20))
+        return "## Summary\nmetered"
+    }
+}
+
+/// Two seconds of a silent mix, already converted.
+private struct SilentRecordings: MeetingAudioFinalizing {
+    func duration(of stream: TranscriptEvent.Stream) async throws -> TimeInterval { stream == .mixed ? 2 : 0 }
+    func samples(of stream: TranscriptEvent.Stream, in range: Range<TimeInterval>) async throws -> [Float] {
+        [Float](repeating: 0, count: Int((min(range.upperBound, 2) - range.lowerBound) * 16_000))
+    }
+    func finalizeAudio() async throws -> [TranscriptEvent.Stream] { [] }
+    func discardLosslessAudio() async {}
+    func recordingURL(of stream: TranscriptEvent.Stream) -> URL? { nil }
+}
+
 private final class PromptCapture: LLMBackend {
     let id = "capture"
     let instructions = Mutex<[String]>([])
@@ -715,6 +793,106 @@ private final class TrackSink: MeetingAudioSink {
         services.setRecording(false)
         try await services.regenerate(meetingID: id)
         #expect(try await rig.store.summaries(for: id).map(\.backendID) == ["fake-fm"])
+    }
+
+    // MARK: Manual and automatic jobs share one lane
+
+    private func finishedMeeting(_ rig: Rig) async throws -> UUID {
+        let id = UUID()
+        try await rig.store.create(Meeting(id: id, title: "Done", date: Date(), duration: 10, engineID: "live", state: .finished, completedSteps: [.audio, .postPass, .summary]))
+        try await rig.store.appendSegment(MeetingSegment(stream: .mixed, text: "we ship friday", start: 0, end: 3), to: id)
+        return id
+    }
+
+    private func meteredPipeline(_ rig: Rig, _ transcriber: MeteredTranscriber, _ llm: MeteredLLM) -> @MainActor () -> MeetingPipeline {
+        let store = rig.store
+        return {
+            MeetingPipeline(
+                store: store, audio: { _ in SilentRecordings() }, transcriber: { transcriber }, backend: { llm },
+                summarizeAutomatically: { true }, releaseModels: {}, releasePostPassModels: {})
+        }
+    }
+
+    @Test func aManualSummaryRunningWhenARecordingStartsIsCancelledAndRunsAgainAfterTheMeeting() async throws {
+        let rig = Rig()
+        let llm = HoldingLLM()
+        let services = MeetingServices(
+            models: rig.models, store: rig.store, settings: rig.settings, keyStore: rig.keys,
+            cleanup: CleanupRegistry(models: rig.models.manager, foundationModels: llm),
+            sampler: { .idle }, immediateProcessing: false, pollInterval: nil)
+        let id = try await finishedMeeting(rig)
+        let summary = Task { try await services.regenerate(meetingID: id) }
+        #expect(await eventually(timeout: .seconds(2)) { llm.calls.withLock { $0 } == 1 }, "the summary is being written")
+
+        services.setRecording(true)
+        #expect(await eventually(timeout: .seconds(2)) { llm.cancelled.withLock { $0 } == 1 }, "the summary stopped for the recording")
+        #expect(try await rig.store.summaries(for: id).isEmpty)
+
+        services.setRecording(false)
+        let url = try await summary.value
+        #expect(url.path.hasSuffix("/summaries/holding.md"), "it ran again once the meeting ended")
+        #expect(llm.calls.withLock { $0 } == 2)
+    }
+
+    @Test func aManualImproveAndADeferredJobOnTheSameMeetingNeverRunAtOnce() async throws {
+        let rig = Rig()
+        let services = rig.services()
+        let meter = HeavyMeter()
+        let transcriber = MeteredTranscriber(meter: meter, holdFirst: true)
+        let llm = MeteredLLM(meter: meter)
+        services.pipelineOverride = meteredPipeline(rig, transcriber, llm)
+        let id = try await seed(rig)
+        try await services.processAfterStop(id)
+        rig.load.value = .idle
+        let deferred = Task { await services.scheduler.tick() }
+        #expect(await eventually(timeout: .seconds(2)) { transcriber.calls.withLock { $0 } == 1 }, "the deferred post-pass runs")
+
+        let improve = Task { try await services.improveTranscript(meetingID: id) }
+        try await Task.sleep(for: .milliseconds(300))
+        transcriber.release()
+        await deferred.value
+        _ = try await improve.value
+        #expect(transcriber.calls.withLock { $0 } == 2, "both ran")
+        #expect(meter.max == 1, "one heavy model at a time")
+    }
+
+    @Test func aManualJobEndingNeverOverwritesTheStageOfTheJobThatRuns() async throws {
+        let rig = Rig()
+        let services = rig.services()
+        let meter = HeavyMeter()
+        let transcriber = MeteredTranscriber(meter: meter, holdFirst: true)
+        services.pipelineOverride = meteredPipeline(rig, transcriber, MeteredLLM(meter: meter))
+        let id = try await seed(rig)
+        try await services.processAfterStop(id)
+        rig.load.value = .idle
+        let deferred = Task { await services.scheduler.tick() }
+        #expect(await eventually(timeout: .seconds(2)) { transcriber.calls.withLock { $0 } == 1 })
+        #expect(services.stage(of: id) == .running(.postPass))
+
+        let ended = Mutex(false)
+        let regenerate = Task {
+            _ = try await services.regenerate(meetingID: id)
+            ended.withLock { $0 = true }
+        }
+        _ = await eventually(timeout: .milliseconds(500)) { ended.withLock { $0 } }
+        #expect(services.stage(of: id)?.isRunning == true, "the deferred job still runs, and its stage says so")
+
+        transcriber.release()
+        await deferred.value
+        try await regenerate.value
+        #expect(services.stage(of: id) == nil, "both are done")
+    }
+
+    @Test func anImproveThatWillRetryQueuesTheMeetingAgain() async throws {
+        let rig = Rig()
+        let services = rig.services()
+        let meter = HeavyMeter()
+        services.pipelineOverride = meteredPipeline(rig, MeteredTranscriber(meter: meter, fails: true), MeteredLLM(meter: meter))
+        let id = try await finishedMeeting(rig)
+        let outcome = try await services.improveTranscript(meetingID: id)
+        #expect(outcome.willRetry)
+        #expect(await services.scheduler.queued == [id], "queued to be tried again")
+        #expect(services.stage(of: id) == .queued)
     }
 
     @Test func aMeetingCutShortLeavesTheQueueAlone() async throws {

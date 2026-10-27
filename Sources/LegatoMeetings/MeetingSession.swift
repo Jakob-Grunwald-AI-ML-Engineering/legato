@@ -66,7 +66,8 @@ struct DiarizerTimeline: Sendable {
 /// - **One timeline.** The meeting begins when the first source has started (`t0`); each source is routed from
 ///   the moment it starts. A source that starts later has its lead (`offset`) written to its own track as
 ///   silence, and a source that restarts (it reports ``ResumableAudioSource/resumptions``) has the missing time
-///   filled with silence, so every recording and every segment time is seconds since `t0`. In the mix each
+///   filled with silence and is mixed on from the restart, so every recording and every segment time is
+///   seconds since `t0`. In the mix each
 ///   source is placed by counting its own samples from its start (see ``MeetingMixer``): a backlog that arrives
 ///   at once keeps its place, so no source runs ahead of the others or falls silent.
 /// - **The mix.** It is cut every 100 ms, a little behind the clock so late chunks still make it; at the stop
@@ -246,16 +247,18 @@ public actor MeetingSession {
         publishNow()
     }
 
-    /// Fills what a stream's recording is missing, up to now, with silence (its own track and its place in the
-    /// mix). A source that restarts calls this through ``ResumableAudioSource/resumptions``; shortfalls under
-    /// ``MeetingSilence/tolerance`` are jitter and ignored. Chunks delivered right after the restart may land
-    /// just ahead of the silence, which shifts them by no more than their own length.
+    /// A source restarted (it calls this through ``ResumableAudioSource/resumptions``): in the mix its next
+    /// sample comes no earlier than now, however short the gap; its own track has what it is missing, up to now,
+    /// filled with silence, where shortfalls under ``MeetingSilence/tolerance`` are jitter and ignored. Chunks
+    /// delivered right after the restart may land just ahead of the silence, which shifts them by no more than
+    /// their own length.
     public func fillGap(stream: TranscriptEvent.Stream) async {
         guard started, !stopped, !tearingDown, let have = covered[stream] else { return }
-        let missing = MeetingSilence.deficit(elapsed: elapsed, delivered: have)
+        let now = elapsed
+        mixer.skip(stream, until: now)
+        let missing = MeetingSilence.deficit(elapsed: now, delivered: have)
         guard missing > 0 else { return }
         covered[stream] = have + missing
-        mixer.skip(stream, seconds: missing)
         await writeSilence(missing, stream: stream)
     }
 

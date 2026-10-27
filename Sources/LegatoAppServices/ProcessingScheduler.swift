@@ -45,15 +45,24 @@ public struct IdlePredicate: Sendable {
     }
 }
 
-/// Runs the heavy after-meeting steps (post-pass, speakers, summary) one at a time, at background priority, once
-/// the machine is idle.
+/// The one lane every heavy job of the meetings runs in: the after-meeting steps (post-pass, speakers, summary)
+/// that wait for an idle machine, and the actions the user asks for (Improve transcript, Summarize, Regenerate,
+/// Claude). One job runs at a time, so two models never load next to each other and a job never sees another
+/// one's steps.
 ///
-/// Meetings are queued by id and run in order. Nothing runs while a meeting records. A meeting that
-/// ``processNow(_:)`` names, or any meeting when `immediate` is set (the debug launch argument
-/// `LegatoMeetingProcessImmediately`), skips the wait for idleness, but never runs during a recording.
+/// - **Deferred jobs** are meetings queued by id; they run in order, at background priority, once the machine is
+///   idle. A meeting that ``processNow(_:)`` names, or any meeting when `immediate` is set (the debug launch
+///   argument `LegatoMeetingProcessImmediately`), skips the wait for idleness.
+/// - **Manual jobs** (``perform(for:_:)``) go ahead of the deferred ones: they skip the wait for idleness and
+///   run as soon as the job that runs now has ended. The caller awaits the job's result.
+/// - **Recordings come first.** Nothing starts while a meeting records, and a manual job is refused then.
+///   ``cancelRunning()`` (a recording starts, or the app is about to be suspended) cuts the running job short. A
+///   deferred job stays queued. A manual job cut short by a recording stays queued too and runs again once the
+///   recording has ended (``recordingEnded()``), and its caller gets that run's result; cut short for any other
+///   reason, it ends with `CancellationError`. Cancelling the caller's task cancels its manual job.
 ///
 /// The clock and the samplers are injected. With a `pollInterval` the scheduler looks again by itself while
-/// meetings wait; without one the caller drives it with ``tick()``.
+/// meetings wait; without one the caller drives the deferred jobs with ``tick()``.
 public actor ProcessingScheduler {
     private let clock: @Sendable () -> TimeInterval
     private let sample: @Sendable () -> IdleSample
@@ -62,10 +71,23 @@ public actor ProcessingScheduler {
     private let pollInterval: Duration?
     private let work: @Sendable (UUID) async -> Bool
 
+    private struct ManualJob {
+        let id: UUID
+        let meeting: UUID
+        let work: @Sendable () async throws -> any Sendable
+        let done: CheckedContinuation<any Sendable, any Error>
+        /// Its caller was cancelled: it ends with what the run gives, never runs again.
+        var abandoned = false
+    }
+
     private var queue: [UUID] = []
     private var forced: Set<UUID> = []
+    /// Manual jobs, in the order they were asked for; the first one runs when the lane is free.
+    private var manual: [ManualJob] = []
     private var predicate = IdlePredicate()
+    /// The job in the lane, and the id of the manual job when it is one.
     private var running: Task<Void, Never>?
+    private var runningManual: UUID?
     private var polling: Task<Void, Never>?
 
     /// Whether the debug launch argument asks for processing without the wait. Always false in release builds.
@@ -96,13 +118,19 @@ public actor ProcessingScheduler {
         self.work = work
     }
 
-    /// The meetings waiting, in the order they will run.
+    /// The meetings waiting for their deferred job, in the order they will run.
     public var queued: [UUID] { queue }
 
     /// Queues a meeting (once) and, if the scheduler polls, starts looking for the moment to run it.
     public func enqueue(_ id: UUID) {
         if !queue.contains(id) { queue.append(id) }
         poll()
+    }
+
+    /// Takes a meeting out of the queue (a manual job did its deferred work).
+    public func dequeue(_ id: UUID) {
+        queue.removeAll { $0 == id }
+        forced.remove(id)
     }
 
     /// Runs this meeting as soon as nothing records and nothing else runs, without waiting for idleness.
@@ -112,16 +140,42 @@ public actor ProcessingScheduler {
         poll(lookNow: true)
     }
 
-    /// Cancels the running job (the app is about to be suspended, or a meeting starts recording). It stays queued.
+    /// Cancels the running job, manual or deferred (the app is about to be suspended, or a meeting starts
+    /// recording). See the type's notes for what becomes of it.
     public func cancelRunning() {
         running?.cancel()
     }
 
-    /// Looks once: runs every meeting that may run now, one after another. Returns when none may, or when the
-    /// work of one was cut short.
+    /// The recording that held the lane has ended: a manual job waiting for it runs now.
+    public func recordingEnded() {
+        pump()
+    }
+
+    /// A manual job on `meeting`: runs `work` in the lane, ahead of the deferred jobs and without waiting for
+    /// idleness, and returns its result.
+    /// - Throws: ``MeetingServicesError/recording`` while a meeting records; what `work` throws;
+    ///   `CancellationError` when cut short (see the type's notes).
+    public func perform<T: Sendable>(for meeting: UUID, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        guard !isRecording() else { throw MeetingServicesError.recording }
+        let id = UUID()
+        let result = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (done: CheckedContinuation<any Sendable, any Error>) in
+                manual.append(ManualJob(id: id, meeting: meeting, work: { try await work() }, done: done))
+                pump()
+            }
+        } onCancel: {
+            Task { await self.abandon(id) }
+        }
+        guard let value = result as? T else { throw CancellationError() }
+        return value
+    }
+
+    /// Looks once: runs every meeting that may run now, one after another. Returns when none may, when the
+    /// work of one was cut short, or when a manual job takes the lane.
     public func tick() async {
         guard running == nil else { return }
         while true {
+            guard manual.isEmpty else { return pump() }
             let recording = isRecording()
             let idle = predicate.update(sample(), isRecording: recording, now: clock())
             guard !recording,
@@ -133,9 +187,49 @@ public actor ProcessingScheduler {
                 running = Task(priority: .background) { continuation.resume(returning: await work(id)) }
             }
             running = nil
-            guard done else { return }
+            guard done else { return pump() }
             queue.removeAll { $0 == id }
             forced.remove(id)
+        }
+    }
+
+    // MARK: Manual jobs
+
+    /// Starts the first manual job if the lane is free and nothing records.
+    private func pump() {
+        guard running == nil, !isRecording(), let job = manual.first else { return }
+        let (id, work) = (job.id, job.work)
+        runningManual = id
+        running = Task(priority: .userInitiated) { [self] in
+            let result: Result<any Sendable, any Error>
+            do { result = .success(try await work()) } catch { result = .failure(error) }
+            manualEnded(id, result)
+        }
+    }
+
+    private func manualEnded(_ id: UUID, _ result: Result<any Sendable, any Error>) {
+        running = nil
+        runningManual = nil
+        if let index = manual.firstIndex(where: { $0.id == id }) {
+            let job = manual[index]
+            let cutByRecording = if case .failure(let error) = result { error is CancellationError && !job.abandoned && isRecording() } else { false }
+            if !cutByRecording {  // else it stays first in line and runs again after the recording
+                manual.remove(at: index)
+                job.done.resume(with: result)
+            }
+        }
+        pump()
+        if running == nil, !queue.isEmpty { poll(lookNow: true) }
+    }
+
+    /// The caller of a manual job was cancelled: a waiting job ends now, a running one is cancelled.
+    private func abandon(_ id: UUID) {
+        guard let index = manual.firstIndex(where: { $0.id == id }) else { return }
+        if runningManual == id {
+            manual[index].abandoned = true
+            running?.cancel()
+        } else {
+            manual.remove(at: index).done.resume(throwing: CancellationError())
         }
     }
 

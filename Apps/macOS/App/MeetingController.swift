@@ -619,7 +619,9 @@ final class MeetingController {
         Task { await services.processNow(id) }
     }
 
-    /// "Improve transcript": the post-pass again, then the summary again.
+    /// "Improve transcript": the post-pass again, then the summary again. Like Summarize and Claude it is a job in
+    /// the services' one heavy lane: this only awaits it. A step that will be retried queues the meeting again
+    /// (the services do), so the banner says waiting.
     func improve(_ id: UUID) {
         run(id, label: "Improving the transcript") { services in
             try await services.improveTranscript(meetingID: id)
@@ -639,7 +641,7 @@ final class MeetingController {
                 let outcome = try await work(services)
                 notices.set(outcome.notes, kind: .processing, meeting: id)
             } catch is CancellationError {
-                // The meeting stays `processing` and resumes at the next launch.
+                // Cut short: the meeting is queued again and its steps run when the Mac is idle.
             } catch {
                 Self.log.error("\(label, privacy: .public) failed: \(String(describing: type(of: error)), privacy: .public)")
                 notices.post("\(label) failed: \(error.localizedDescription)", kind: .action, meeting: id)
@@ -679,6 +681,7 @@ final class MeetingController {
             guard let self else { return }
             do {
                 try await services.summarizeWithClaude(meetingID: id)
+            } catch is CancellationError {
             } catch {
                 notices.post("Claude summary failed: \(error.localizedDescription)", kind: .action, meeting: id)
             }

@@ -11,14 +11,19 @@ import LegatoCore
 /// - **Placement by count.** A source starts where ``begin(_:at:)`` puts it (its start on the meeting's
 ///   timeline) and then counts its own samples: chunk after chunk follows on, however late or bunched up they
 ///   arrive. A backlog delivered at once (audio queued while another source started, or behind a model load)
-///   so lands where it was heard, not where it arrived. Gaps are told, not guessed: ``skip(_:seconds:)`` (the
-///   session calls it when a source resumes after a gap) leaves silence. A source nobody began is placed by its
-///   first chunk's arrival.
+///   so lands where it was heard, not where it arrived. Gaps are told, not guessed: ``skip(_:until:)`` (the
+///   session calls it when a source resumes after a restart) and ``skip(_:seconds:)`` leave silence. A source
+///   nobody began is placed by its first chunk's arrival.
 /// - **The clock keeps the count honest.** The arrival time (`at:`) only corrects a count that has gone wrong:
 ///   a source cannot deliver audio before it was heard, so a chunk that would end more than ``maxLead`` after
-///   its arrival is pulled back to end there (newer audio replaces what it overlaps); and a source whose audio
-///   keeps arriving too late for its frames for ``lateWindow`` (time it lost without saying) is placed by the
-///   clock again. One late burst never moves a source.
+///   its arrival is pulled back to end there (newer audio replaces what it overlaps).
+/// - **Nothing is lost to lateness.** A chunk whose count puts it behind what the mix already handed out (a
+///   device clock slower than the host's, a restart or other time the source lost without saying) is placed by
+///   the clock again at once: it ends where it arrived, never before the first sample not yet handed out, and
+///   the source counts on from there. The frames that already went out had silence for it, and none of its
+///   audio is cut; a slow drift so costs a short silence now and then, never a run of clipped chunks. Only audio
+///   that arrives after its frame went out *and* could not have been heard that late (it would end more than
+///   ``maxLead`` after its arrival) is dropped.
 /// - Mute and pause are applied to a source's samples before they are summed, by time: a frame is silent for
 ///   a source if that source was muted (or the meeting paused) at **any** instant of the frame, and audio that
 ///   belongs to a silenced frame is dropped, never played later. Both are timed with the `at:` the caller
@@ -36,8 +41,6 @@ public struct MeetingMixer: Sendable {
     public let frameSamples: Int
     /// How far a source's count may run ahead of the clock, in seconds.
     public let maxLead: TimeInterval
-    /// How long a source's audio must keep arriving too late before it is placed by the clock again, in seconds.
-    public let lateWindow: TimeInterval
     /// How many samples of the mix have been handed out so far.
     public private(set) var emittedSamples = 0
 
@@ -49,8 +52,6 @@ public struct MeetingMixer: Sendable {
         var end = 0
         /// The source has a place on the timeline (``begin(_:at:)`` or its first chunk).
         var placed = false
-        /// When the run of chunks that came too late for their frames began.
-        var lateSince: TimeInterval?
     }
 
     private var tracks: [TranscriptEvent.Stream: Track] = [:]
@@ -66,11 +67,10 @@ public struct MeetingMixer: Sendable {
         }
     }
 
-    public init(sampleRate: Double = 16_000, maxLead: TimeInterval = 0.5, lateWindow: TimeInterval = 0.5) {
+    public init(sampleRate: Double = 16_000, maxLead: TimeInterval = 0.5) {
         self.sampleRate = sampleRate
         self.frameSamples = max(1, Int((sampleRate * Self.frameSeconds).rounded()))
         self.maxLead = maxLead
-        self.lateWindow = lateWindow
     }
 
     /// `source`'s first sample is at `time`, seconds on the meeting's timeline.
@@ -89,6 +89,14 @@ public struct MeetingMixer: Sendable {
         tracks[source] = track
     }
 
+    /// `source` delivered nothing before `time` (seconds on the meeting's timeline; it restarted and is back
+    /// now): its next sample comes no earlier than `time`, however short the gap.
+    public mutating func skip(_ source: TranscriptEvent.Stream, until time: TimeInterval) {
+        guard var track = tracks[source] else { return }
+        track.end = max(track.end, Int((time * sampleRate).rounded()))
+        tracks[source] = track
+    }
+
     /// Queues what `source` delivered (mono, in the mixer's sample rate); it arrived at `time`, seconds on the
     /// meeting's timeline. It follows on from the source's previous audio (see the type's notes).
     public mutating func append(_ samples: [Float], from source: TranscriptEvent.Stream, at time: TimeInterval) {
@@ -101,18 +109,11 @@ public struct MeetingMixer: Sendable {
             track.placed = true
         }
         var start = track.end
+        if start < emittedSamples {
+            start = max(emittedSamples, arrival - count)  // fallen behind the mix: placed by the clock, nothing cut
+        }
         if start + count > arrival + Int(maxLead * sampleRate) {
             start = arrival - count  // heard no later than it arrived
-        }
-        if start < emittedSamples {
-            if let since = track.lateSince, time - since >= lateWindow - 1e-9 {
-                start = max(start, arrival - count)
-                track.lateSince = nil
-            } else if track.lateSince == nil {
-                track.lateSince = time
-            }
-        } else {
-            track.lateSince = nil
         }
         let queuedEnd = track.base + track.samples.count
         if track.samples.isEmpty {
