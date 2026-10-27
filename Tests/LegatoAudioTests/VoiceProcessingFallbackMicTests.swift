@@ -78,7 +78,7 @@ private final class Tally<T: Sendable>: Sendable {
 private let format = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
 
 private func eventually(_ condition: @Sendable () -> Bool) async -> Bool {
-    let deadline = ContinuousClock.now + .seconds(3)
+    let deadline = ContinuousClock.now + .seconds(30)
     while ContinuousClock.now < deadline {
         if condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))

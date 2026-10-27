@@ -65,9 +65,13 @@ import LegatoCore
         try await rig.session.start()
         #expect(rig.session.elapsed == 2)  // the mic started at 5000, the system source finished at 5002
 
+        let latest = Mutex<MeetingSnapshot?>(nil)
+        let snapshots = rig.session.snapshots
+        let collector = Task { for await s in snapshots { latest.withLock { $0 = s } } }
+        defer { collector.cancel() }
         rig.clock.now = 5_007
         rig.micEngine.emit(TranscriptEvent(stream: .mic, text: "Thinking", isFinal: false))
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { latest.withLock { $0 }?.volatile[.mic] == "Thinking" })  // heard at the clock time, whatever the load
         rig.clock.now = 5_008
         rig.micEngine.emit(finalEvent("Thinking aloud."))
         #expect(await eventually { await rig.stored().count == 1 })
