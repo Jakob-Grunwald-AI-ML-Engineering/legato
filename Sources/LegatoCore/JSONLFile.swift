@@ -11,8 +11,14 @@ import Foundation
 /// entries. There is no file locking.
 public actor JSONLFile<Element: Codable & Sendable> {
     public let fileURL: URL
+    private let ownerOnly: Bool
 
-    public init(fileURL: URL) { self.fileURL = fileURL }
+    /// - Parameter ownerOnly: make the file private (``PrivateFiles``) whenever this instance creates or
+    ///   rewrites it. Off by default, which leaves dictation history's files as they were.
+    public init(fileURL: URL, ownerOnly: Bool = false) {
+        self.fileURL = fileURL
+        self.ownerOnly = ownerOnly
+    }
 
     private static var newline: UInt8 { UInt8(ascii: "\n") }
 
@@ -35,6 +41,7 @@ public actor JSONLFile<Element: Codable & Sendable> {
             guard fm.createFile(atPath: fileURL.path, contents: nil) else {
                 throw CocoaError(.fileWriteUnknown)
             }
+            if ownerOnly { PrivateFiles.protect(fileAt: fileURL) }
         }
         var line = try Self.makeEncoder().encode(element)
         line.append(Self.newline)
@@ -88,6 +95,7 @@ public actor JSONLFile<Element: Codable & Sendable> {
             out.append(Self.newline)
         }
         try out.write(to: fileURL, options: .atomic)
+        if ownerOnly { PrivateFiles.protect(fileAt: fileURL) }
     }
 
     private func rawLines() throws -> [Data] {

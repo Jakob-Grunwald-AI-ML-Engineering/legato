@@ -51,10 +51,10 @@ struct MenuContent: View {
         let meetings = controller.meetings
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Button(meetings.phase == .recording ? "Stop meeting" : "Start meeting") {
-                    Task { await meetings.toggle() }
+                Button(meetings.phase == .recording ? "Stop meeting" : meetings.phase == .starting ? "Cancel start" : "Start meeting") {
+                    if meetings.phase == .starting { meetings.cancelStart() } else { Task { await meetings.toggle() } }
                 }
-                .disabled(meetings.phase == .starting || meetings.phase == .stopping)
+                .disabled(meetings.phase == .stopping)
                 if meetings.phase == .recording {
                     Text(Self.clock(meetings.elapsed)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 }
@@ -63,6 +63,10 @@ struct MenuContent: View {
                     NSApp.activate()
                     openWindow(id: MeetingController.windowID)
                 }
+            }
+            if meetings.phase == .starting {
+                Text("Loading the speech model — the first time can take a few minutes.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if meetings.phase == .recording {
                 Toggle("Mute my mic", isOn: Binding(

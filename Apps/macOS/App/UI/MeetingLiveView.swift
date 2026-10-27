@@ -9,8 +9,36 @@ struct MeetingLiveView: View {
     private var meetings: MeetingController { app.meetings }
 
     var body: some View {
+        if meetings.phase == .starting {
+            startingView
+        } else {
+            liveBody
+        }
+    }
+
+    /// While the speech model loads (minutes the first time), with a way out.
+    private var startingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Starting meeting…").font(.headline)
+            Text("Loading the speech model — the first time can take a few minutes.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Cancel") { meetings.cancelStart() }
+                .keyboardShortcut(.cancelAction)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
+    }
+
+    private var liveBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            if let notice = meetings.notice {
+                Label(notice, systemImage: "info.circle")
+                    .font(.callout).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let warning = meetings.systemAudioWarning {
                 Label(warning, systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.orange)

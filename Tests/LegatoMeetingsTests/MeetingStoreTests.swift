@@ -130,6 +130,19 @@ import LegatoCore
         #expect(try permissions(await store.summaryURL(for: m.id, backendID: "fm")) == 0o600)
     }
 
+    @Test func theSegmentFilesAreOwnerOnlyWhetherAppendedOrRewritten() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let id = UUID()
+        try await store.appendSegment(seg("one", 1), to: id)
+        #expect(try permissions(await store.segmentsURL(for: id)) == 0o600, "appended")
+        try await store.replaceSegments([seg("two", 2)], for: id)
+        #expect(try permissions(await store.segmentsURL(for: id)) == 0o600, "rewritten")
+        _ = try await store.saveLiveSegmentsOnce([seg("live", 3)], for: id)
+        #expect(try permissions(await store.liveSegmentsURL(for: id)) == 0o600, "live text")
+    }
+
     @Test func aNewRootIsOwnerOnlyEvenWhenItsParentIsMissing() async throws {
         let parent = tempRoot()
         defer { try? FileManager.default.removeItem(at: parent) }

@@ -153,7 +153,7 @@ public actor MeetingStore {
 
     private func file(_ url: URL) -> JSONLFile<MeetingSegment> {
         if let existing = segmentFiles[url] { return existing }
-        let created = JSONLFile<MeetingSegment>(fileURL: url)
+        let created = JSONLFile<MeetingSegment>(fileURL: url, ownerOnly: true)
         segmentFiles[url] = created
         return created
     }

@@ -32,10 +32,12 @@ final class TestClock: Sendable {
 final class ScriptedSource: ResumableAudioSource {
     private let continuation = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
     private let stops = Mutex(0)
+    private let starts = Mutex(0)
     private let onStart: @Sendable () -> Void
     private let resumeSink: AsyncStream<Void>.Continuation
     let resumptions: AsyncStream<Void>
     var stopCount: Int { stops.withLock { $0 } }
+    var startCount: Int { starts.withLock { $0 } }
 
     /// - Parameter onStart: runs inside `start`, e.g. to let the test clock move the way a slow start would.
     init(onStart: @escaping @Sendable () -> Void = {}) {
@@ -55,6 +57,7 @@ final class ScriptedSource: ResumableAudioSource {
         return stream
     }
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
+        starts.withLock { $0 += 1 }
         onStart()
         return makeStream()
     }

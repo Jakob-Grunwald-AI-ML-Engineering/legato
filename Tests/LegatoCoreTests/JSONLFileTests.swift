@@ -25,6 +25,37 @@ import Testing
         #expect(try await file.elements() == [row(1), row(2), row(3)])
     }
 
+    private func permissions(_ url: URL) throws -> Int {
+        try #require(try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
+    }
+
+    #if os(macOS)
+    @Test func anOwnerOnlyFileStaysPrivateThroughAppendRewriteAndRemove() async throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let file = JSONLFile<Row>(fileURL: url, ownerOnly: true)
+        try await file.append(row(1))
+        #expect(try permissions(url) == 0o600)
+        try await file.replaceAll([row(1), row(2)])
+        #expect(try permissions(url) == 0o600)
+        try await file.remove(where: { $0.id == 2 })
+        #expect(try permissions(url) == 0o600)
+    }
+
+    @Test func aDefaultFileKeepsTheSystemDefaultPermissions() async throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let control = url.deletingLastPathComponent().appendingPathComponent("control")
+        try FileManager.default.createDirectory(at: control.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: control.path, contents: nil)
+        let file = JSONLFile<Row>(fileURL: url)
+        try await file.append(row(1))
+        #expect(try permissions(url) == permissions(control), "history's file is created as before")
+        try await file.replaceAll([row(1), row(2)])
+        #expect(try permissions(url) == permissions(control))
+    }
+    #endif
+
     @Test func missingFileIsEmpty() async throws {
         #expect(try await JSONLFile<Row>(fileURL: tempURL()).elements().isEmpty)
     }

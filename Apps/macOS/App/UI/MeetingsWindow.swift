@@ -19,12 +19,15 @@ struct MeetingsWindow: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    Task { await meetings.toggle() }
+                    if meetings.phase == .starting { meetings.cancelStart() } else { Task { await meetings.toggle() } }
                 } label: {
-                    Label(meetings.phase == .recording ? "Stop meeting" : "Start meeting",
-                          systemImage: meetings.phase == .recording ? "stop.circle.fill" : "record.circle")
+                    switch meetings.phase {
+                    case .recording: Label("Stop meeting", systemImage: "stop.circle.fill")
+                    case .starting: Label("Cancel start", systemImage: "xmark.circle")
+                    default: Label("Start meeting", systemImage: "record.circle")
+                    }
                 }
-                .disabled(meetings.phase == .starting || meetings.phase == .stopping)
+                .disabled(meetings.phase == .stopping)
             }
         }
         .task { await meetings.refresh() }

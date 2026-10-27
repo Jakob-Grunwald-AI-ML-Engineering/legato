@@ -124,18 +124,25 @@ public actor MeetingSession {
     }
 
     /// Prepares every engine, starts every source, and saves the meeting as `recording`.
-    /// If anything fails, the sources already running are stopped and the error is rethrown.
+    /// If anything fails, or the calling task is cancelled (checked after each engine and source, since a
+    /// model load cannot be interrupted), the sources already running are stopped and the error is rethrown.
     public func start() async throws {
         guard !started else { return }
         started = true
         var running: [(input: MeetingInput, chunks: AsyncStream<AudioChunk>, startedAt: TimeInterval)] = []
         do {
             var formats: [TranscriptEvent.Stream: AudioFormatSpec] = [:]
-            for input in inputs { formats[input.stream] = try await input.engine.prepare(locale: input.locale) }
             for input in inputs {
+                formats[input.stream] = try await input.engine.prepare(locale: input.locale)
+                // A model load cannot be interrupted; once it returns, a cancelled start stops here.
+                try Task.checkCancellation()
+            }
+            for input in inputs {
+                try Task.checkCancellation()
                 let chunks = try await input.source.start(format: formats[input.stream] ?? AudioFormatSpec(sampleRate: 16_000, channelCount: 1))
                 running.append((input, chunks, clock()))
             }
+            try Task.checkCancellation()
             engineFormats = formats
             let t0 = running.first?.startedAt ?? clock()
             origin.withLock { $0 = t0 }

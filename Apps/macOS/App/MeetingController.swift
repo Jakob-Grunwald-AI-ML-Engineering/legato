@@ -12,7 +12,7 @@ import os
 
 /// Records meetings: the mic ("me") and the system audio ("them") as two streams of one `MeetingSession`.
 ///
-/// - `start` opens the mic first, then the system-audio tap (the tap excludes our own process, which only
+/// - `start` opens the mic first (with a fallback to no voice processing when it does not work), then the system-audio tap (the tap excludes our own process, which only
 ///   exists for Core Audio once the mic has touched it).
 /// - `stop` ends the capture and runs the after-stop chain (post-pass, m4a, on-device summary) in a task.
 /// - The mic is muted when `AutoMutePolicy` says the call app closed its mic, or when the user says so.
@@ -61,6 +61,8 @@ final class MeetingController {
     @ObservationIgnored private var session: MeetingSession?
     @ObservationIgnored private var snapshotTask: Task<Void, Never>?
     @ObservationIgnored private var tapTask: Task<Void, Never>?
+    @ObservationIgnored private var micNoticeTask: Task<Void, Never>?
+    @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var autoMuteTask: Task<Void, Never>?
     @ObservationIgnored private var clockTask: Task<Void, Never>?
     @ObservationIgnored private var muteWriter: Task<Void, Never>?
@@ -115,9 +117,31 @@ final class MeetingController {
 
     func start() async {
         guard phase == .idle else { return }
+        guard startTask == nil else {
+            notice = "Still cancelling the last start. Try again in a moment."
+            return
+        }
         notice = nil
         phase = .starting
+        let task = Task { await performStart() }
+        startTask = task
+        await task.value
+        startTask = nil
+    }
+
+    /// Cancel while "Starting meeting…". The window is free at once; the start winds down behind it (a model
+    /// load cannot be interrupted, so it ends when the load returns), stops what it started and removes the
+    /// meeting folder. A new start waits until then.
+    func cancelStart() {
+        guard phase == .starting, let startTask else { return }
+        startTask.cancel()
+        phase = .idle
+        notice = "Meeting start cancelled."
+    }
+
+    private func performStart() async {
         let engines = await services.engines()
+        guard !Task.isCancelled else { return }
         guard let systemEngine = engines.system else {
             phase = .idle
             notice = "Meetings need a second engine for system audio, which this Mac setup does not provide."
@@ -131,11 +155,16 @@ final class MeetingController {
             id: id, title: Self.defaultTitle(Date()), date: Date(), engineID: engines.engineID)
         let folder: URL
         do { folder = try await store.createFolder(for: id) } catch {
+            guard !Task.isCancelled else { return }
             phase = .idle
             notice = "Could not create the meeting folder: \(error.localizedDescription)"
             return
         }
-        let mic = MicSource(voiceProcessing: settings.voiceProcessing)
+        guard !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: folder)
+            return
+        }
+        let mic = VoiceProcessingFallbackMic(voiceProcessing: settings.voiceProcessing)
         let system = SystemAudioSource()
         #if DEBUG
         let counter = ZeroCountingSource(system)
@@ -156,13 +185,20 @@ final class MeetingController {
         do {
             try await session.start()
         } catch {
+            try? FileManager.default.removeItem(at: folder)
+            // A cancelled start already told the user and freed the window.
+            guard !(error is CancellationError), !Task.isCancelled else { return }
             Self.log.error("meeting start failed: \(String(describing: type(of: error)), privacy: .public)")
             phase = .idle
             notice = "Could not start the meeting: \(error.localizedDescription)"
+            return
+        }
+        guard !Task.isCancelled else {
+            _ = await session.stop()
             try? FileManager.default.removeItem(at: folder)
             return
         }
-        beginObserving(session: session, system: system)
+        beginObserving(session: session, system: system, mic: mic)
         phase = .recording
         windowRequests += 1
     }
@@ -212,7 +248,7 @@ final class MeetingController {
 
     // MARK: Observing a running meeting
 
-    private func beginObserving(session: MeetingSession, system: SystemAudioSource) {
+    private func beginObserving(session: MeetingSession, system: SystemAudioSource, mic: VoiceProcessingFallbackMic) {
         self.session = session
         mute = MeetingMuteState()
         policy = AutoMutePolicy(ownPID: ProcessInfo.processInfo.processIdentifier)
@@ -226,6 +262,9 @@ final class MeetingController {
                 self?.tapStatus = status
                 self?.reevaluateMute()
             }
+        }
+        micNoticeTask = Task { [weak self, notices = mic.notices] in
+            for await text in notices { self?.notice = text }
         }
         autoMuteTask = Task { [weak self] in
             for await processes in MicInUseMonitor().processChanges() {
@@ -256,6 +295,8 @@ final class MeetingController {
         autoMuteTask?.cancel()
         clockTask?.cancel()
         tapTask?.cancel()
+        micNoticeTask?.cancel()
+        micNoticeTask = nil
         muteCommands?.finish()
         autoMuteTask = nil
         clockTask = nil

@@ -31,14 +31,21 @@ public enum SystemAudioSourceError: Error, Sendable, Equatable {
 /// touched Core Audio, and the tap excludes it (so a meeting window playing sound cannot feed back).
 /// If the object is still missing, the lookup is retried a few times, then the tap runs without the exclusion.
 ///
-/// The tap is rebuilt when the default output device changes, and when `TapWatchdog` sees only zeros
-/// while another process plays. The first needs no permission; the first start of a tap triggers the
+/// The tap is rebuilt when the default output device changes, when its sample rate changes (AirPods leaving
+/// A2DP for the headset profile once the mic starts), and when `TapWatchdog` sees only zeros while another
+/// process plays. The converter is built for the rate the aggregate device runs at (`TapRate`), which is
+/// read after the device exists and checked again every second. The first needs no permission; the first start of a tap triggers the
 /// System Audio Recording prompt. Not covered by unit tests (real hardware); the app self-test does.
 public final class SystemAudioSource: ResumableAudioSource {
     private struct Handles {
         var tap = AudioObjectID(kAudioObjectUnknown)
         var aggregate = AudioObjectID(kAudioObjectUnknown)
         var proc: AudioDeviceIOProcID?
+        /// The sample rate the converter was built for.
+        var rate = 0.0
+        /// Devices whose nominal sample rate is watched, and the one listener on them.
+        var rateDevices: [AudioObjectID] = []
+        var rateListener: ListenerBox?
     }
 
     private struct State {
@@ -162,18 +169,11 @@ public final class SystemAudioSource: ResumableAudioSource {
 
         var handles = Handles()
         func fail(_ call: String, _ status: OSStatus) -> SystemAudioSourceError {
-            Self.destroy(handles)
+            Self.destroy(handles, queue: queue)
             return .coreAudio(call: call, status: status)
         }
         var err = AudioHardwareCreateProcessTap(desc, &handles.tap)
         guard err == noErr else { throw fail("AudioHardwareCreateProcessTap", err) }
-
-        var asbd = AudioStreamBasicDescription()
-        err = Self.read(handles.tap, kAudioTapPropertyFormat, &asbd)
-        guard err == noErr else { throw fail("kAudioTapPropertyFormat", err) }
-        guard let tapFormat = AVAudioFormat(streamDescription: &asbd),
-            let converter = BufferConverter(from: tapFormat, to: spec)
-        else { throw fail("tap format", -1) }
 
         var outputID = AudioDeviceID(kAudioObjectUnknown)
         err = Self.read(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, &outputID)
@@ -197,6 +197,19 @@ public final class SystemAudioSource: ResumableAudioSource {
         err = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &handles.aggregate)
         guard err == noErr else { throw fail("AudioHardwareCreateAggregateDevice", err) }
 
+        // The format is read now that the aggregate device exists: before, the tap can still describe the
+        // output as it was (48 kHz) while the device already runs at another rate (24 kHz headset).
+        var asbd = AudioStreamBasicDescription()
+        err = Self.read(handles.tap, kAudioTapPropertyFormat, &asbd)
+        guard err == noErr else { throw fail("kAudioTapPropertyFormat", err) }
+        var nominal = Float64(0)
+        let nominalErr = Self.read(handles.aggregate, kAudioDevicePropertyNominalSampleRate, &nominal)
+        asbd.mSampleRate = TapRate.effective(reported: asbd.mSampleRate, deviceNominal: nominalErr == noErr ? nominal : nil)
+        guard let tapFormat = AVAudioFormat(streamDescription: &asbd),
+            let converter = BufferConverter(from: tapFormat, to: spec)
+        else { throw fail("tap format", -1) }
+        handles.rate = asbd.mSampleRate
+
         let block = Self.ioBlock(
             format: tapFormat, converter: converter, router: router, watch: watch,
             onAction: { [weak self] action in self?.handle(action) })
@@ -207,7 +220,30 @@ public final class SystemAudioSource: ResumableAudioSource {
         guard err == noErr else { throw fail("AudioDeviceStart", err) }
 
         watch.reset()
+        installRateListener(on: [outputID, handles.aggregate], into: &handles)
         state.withLock { $0.handles = handles }
+    }
+
+    /// Rebuilds when the output device or the aggregate device changes its nominal sample rate.
+    private func installRateListener(on devices: [AudioObjectID], into handles: inout Handles) {
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            Task { await self.rebuildIfRateChanged() }
+        }
+        var addr = Self.address(kAudioDevicePropertyNominalSampleRate)
+        for device in devices where AudioObjectAddPropertyListenerBlock(device, &addr, queue, listener) == noErr {
+            handles.rateDevices.append(device)
+        }
+        if !handles.rateDevices.isEmpty { handles.rateListener = ListenerBox(listener) }
+    }
+
+    /// The listener and the once-a-second check both land here; a rate the tap was built for does nothing.
+    private func rebuildIfRateChanged() async {
+        let (aggregate, built) = state.withLock { ($0.handles.aggregate, $0.handles.rate) }
+        guard aggregate != kAudioObjectUnknown else { return }
+        var nominal = Float64(0)
+        guard Self.read(aggregate, kAudioDevicePropertyNominalSampleRate, &nominal) == noErr else { return }
+        if TapRate.needsRebuild(built: built, deviceNominal: nominal) { await rebuild() }
     }
 
     private func tearDownTap() {
@@ -215,10 +251,14 @@ public final class SystemAudioSource: ResumableAudioSource {
             defer { s.handles = Handles() }
             return s.handles
         }
-        Self.destroy(handles)
+        Self.destroy(handles, queue: queue)
     }
 
-    private static func destroy(_ h: Handles) {
+    private static func destroy(_ h: Handles, queue: DispatchQueue) {
+        if let listener = h.rateListener {
+            var addr = address(kAudioDevicePropertyNominalSampleRate)
+            for device in h.rateDevices { AudioObjectRemovePropertyListenerBlock(device, &addr, queue, listener.block) }
+        }
         if h.aggregate != kAudioObjectUnknown {
             AudioDeviceStop(h.aggregate, h.proc)
             if let proc = h.proc { AudioDeviceDestroyIOProcID(h.aggregate, proc) }
@@ -271,13 +311,14 @@ public final class SystemAudioSource: ResumableAudioSource {
         if err == noErr { state.withLock { $0.listener = ListenerBox(listener) } }
     }
 
-    /// Refreshes "does another process have output running" once a second for the watchdog.
+    /// Once a second: refreshes "does another process have output running" for the watchdog and checks the sample rate.
     private func startPolling() {
         let (watch, own) = (watch, ownPID)
-        let task = Task.detached {
+        let task = Task.detached { [weak self] in
             while !Task.isCancelled {
                 let others = (try? Self.outputPIDs()) ?? []
                 watch.setOutputting(others.contains { $0 != own })
+                await self?.rebuildIfRateChanged() // backs up the property listener
                 try? await Task.sleep(for: .seconds(1))
             }
         }
