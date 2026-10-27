@@ -158,6 +158,7 @@ public final class HostLink {
         store.remove(forKey: LinkChannel.Key.applied)
         store.remove(forKey: LinkChannel.Key.refine)
         store.remove(forKey: LinkChannel.Key.refined)
+        removeChoices()
         guard state.runID != nil || !state.committed.isEmpty || !state.volatile.isEmpty || state.finalText != nil
         else { return }
         state.runID = nil
@@ -169,6 +170,23 @@ public final class HostLink {
         state.insertAt = nil
         state.revision = nil
         publish()
+    }
+
+    /// The word choices the keyboard queued (`link.choice.*`), oldest first. Every key read is deleted, the
+    /// ones older than `LinkChannel.choiceMaxAge` and the ones that don't decode included. Not cleared at
+    /// init: choices made while the app was away are still wanted.
+    public func drainChoices(now: Date? = nil) -> [ChoiceRecord] {
+        let cutoff = (now ?? self.now()).addingTimeInterval(-LinkChannel.choiceMaxAge)
+        var fresh: [ChoiceRecord] = []
+        for key in store.keys(withPrefix: LinkChannel.Key.choicePrefix) {
+            if let record = store.read(ChoiceRecord.self, forKey: key), record.at >= cutoff { fresh.append(record) }
+            store.remove(forKey: key)
+        }
+        return fresh.sorted { $0.at < $1.at }
+    }
+
+    private func removeChoices() {
+        for key in store.keys(withPrefix: LinkChannel.Key.choicePrefix) { store.remove(forKey: key) }
     }
 
     private func scheduleScrub() {
