@@ -12,8 +12,8 @@ import LegatoCore
             duration: 185, engineID: "fake", mutedRanges: [MutedRange(stream: .mic, start: 30, end: 70)], state: .finished)
         m.pausedRanges = [PausedRange(start: 120, end: 150)]
         m.speakers = [
-            "P1": SpeakerInfo(name: "You", colorIndex: 0, isYou: true),
-            "P2": SpeakerInfo(name: "Alice", colorIndex: 1, isYou: false),
+            "P1": SpeakerInfo(name: "You", colorIndex: 0),
+            "P2": SpeakerInfo(name: "Alice", colorIndex: 1),
         ]
         return m
     }

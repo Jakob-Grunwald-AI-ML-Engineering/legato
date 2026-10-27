@@ -50,10 +50,6 @@ public struct SpeakerTurn: Sendable, Equatable, Codable {
 /// Feeding is serial. An implementation may lag behind the audio by about a second, and may revise its most
 /// recent turns, so ``turns()`` always answers with every turn so far.
 public protocol SpeakerDiarizer: Sendable {
-    /// Teaches the diarizer one known voice (the user's enrolment sample: 16 kHz mono Float32) and returns the
-    /// cluster id its turns will carry.
-    func enroll(samples: [Float]) async throws -> String
-
     /// Appends audio. Chunks are in the recording rate (16 kHz mono) and arrive in time order.
     func feed(_ chunk: AudioChunk) async throws
 
@@ -68,26 +64,6 @@ public protocol SpeakerDiarizer: Sendable {
 public protocol BatchDiarizer: Sendable {
     /// Turns of `samples`: 16 kHz mono Float32 (``BatchAudio/sampleRate``), in time order.
     func diarize(samples: [Float]) async throws -> [SpeakerTurn]
-}
-
-/// What a batch diarizer found, and which of its speakers matched the user's enrolled voice.
-public struct BatchDiarization: Sendable, Equatable {
-    public var turns: [SpeakerTurn]
-    /// The cluster id (a ``SpeakerTurn/speaker`` value) whose voice matched the enrolment sample; nil when no
-    /// sample was given or no cluster matched.
-    public var youCluster: String?
-
-    public init(turns: [SpeakerTurn], youCluster: String? = nil) {
-        self.turns = turns
-        self.youCluster = youCluster
-    }
-}
-
-/// A ``BatchDiarizer`` that can also tell which speaker is the user, by comparing voices with the enrolment
-/// sample (the after-meeting pass when live diarization was off).
-public protocol EnrollmentBatchDiarizer: BatchDiarizer {
-    /// Turns of `samples` plus the cluster matching `enrollment` (16 kHz mono Float32, the user's voice sample).
-    func diarize(samples: [Float], enrollment: [Float]?) async throws -> BatchDiarization
 }
 
 /// Whether a ``MicEnhancer`` is cleaning the mic or has handed the raw mic through.

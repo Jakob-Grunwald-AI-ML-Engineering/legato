@@ -4,26 +4,32 @@ import LegatoCore
 import LegatoFluidAudio
 import LegatoMeetings
 
-/// A meeting's recorded audio, read for the post-pass and then converted from CAF to m4a.
+/// A meeting's recorded audio: converted to m4a at stop, read lossless (CAF) by the heavy steps, then the CAF dropped.
 public protocol MeetingAudioFinalizing: AudioSampleReader {
-    /// Converts the recordings to m4a. Safe to repeat: with nothing left to convert it does nothing.
+    /// Converts the recordings to m4a, keeping the CAFs. Safe to repeat.
     /// - Returns: the streams that could not be converted (their CAF is kept); empty when all went well.
     func finalizeAudio() async throws -> [TranscriptEvent.Stream]
+    /// Deletes the lossless CAF of every stream that has an m4a. Called once the heavy steps are over.
+    func discardLosslessAudio() async
 }
 
 extension MeetingAudioWriter: MeetingAudioFinalizing {
     public func finalizeAudio() async throws -> [TranscriptEvent.Stream] {
         Array(finalize().failed.keys).sorted { $0.rawValue < $1.rawValue }
     }
+
+    public func discardLosslessAudio() async { discardLossless() }
 }
 
 /// The after-stop chain of a meeting, in two parts.
 ///
 /// - ``runAudio(meetingID:)`` is cheap and runs at once when the meeting stops: the CAF tracks become m4a
-///   (`mix.m4a` too), so the meeting plays from the m4a.
+///   (`mix.m4a` too), so the meeting plays from the m4a. The CAFs stay.
 /// - ``runDeferred(meetingID:)`` is heavy and runs when the machine is idle (see ``ProcessingScheduler``): the
 ///   post-pass on the mix (Parakeet, if one is picked), the after-meeting speaker pass (if on and installed),
-///   the on-device summary with the meeting's template, notes, speakers and language, then `finished`.
+///   the on-device summary with the meeting's template, notes, speakers and language, then `finished`. The
+///   post-pass and the speaker pass read the lossless CAF; once both are done or skipped the CAFs are deleted
+///   (kept when one of them failed, for the next run). A meeting whose CAFs are gone is read from the m4a.
 ///
 /// ``run(meetingID:)`` is both, one after the other.
 ///
@@ -51,7 +57,7 @@ public struct MeetingPipeline: Sendable {
     private let transcriber: @Sendable () async -> (any BatchTranscriber)?
     private let backend: @Sendable () async -> (any LLMBackend)?
     private let templates: @Sendable () -> [SummaryTemplate]
-    private let batchDiarizer: @Sendable () async -> (any EnrollmentBatchDiarizer)?
+    private let batchDiarizer: @Sendable () async -> (any BatchDiarizer)?
     private let diarizationEnabled: @Sendable () -> Bool
     private let releaseDiarizer: @Sendable () async -> Void
     private let releaseModels: @Sendable () async -> Void
@@ -74,7 +80,7 @@ public struct MeetingPipeline: Sendable {
         transcriber: @escaping @Sendable () async -> (any BatchTranscriber)?,
         backend: @escaping @Sendable () async -> (any LLMBackend)?,
         templates: @escaping @Sendable () -> [SummaryTemplate] = { [] },
-        batchDiarizer: @escaping @Sendable () async -> (any EnrollmentBatchDiarizer)? = { nil },
+        batchDiarizer: @escaping @Sendable () async -> (any BatchDiarizer)? = { nil },
         diarizationEnabled: @escaping @Sendable () -> Bool = { true },
         releaseDiarizer: @escaping @Sendable () async -> Void = {},
         releaseModels: @escaping @Sendable () async -> Void = { await releaseCachedNemotronModels() },
@@ -138,6 +144,7 @@ public struct MeetingPipeline: Sendable {
         var outcome = Outcome()
         guard let meeting = try await processable(meetingID) else { return outcome }
         let recordings = audio(await store.folder(for: meetingID))
+        var stepFailed = false
 
         if !meeting.completedSteps.contains(.postPass), let batch = await transcriber() {
             await releaseModels()
@@ -148,6 +155,7 @@ public struct MeetingPipeline: Sendable {
                 await releasePostPassModels()
                 throw CancellationError()
             } catch {
+                stepFailed = true
                 outcome.notes.append("The post-pass failed, so the live transcript stays: \(error)")
             }
             // The next model needs the memory the batch model held.
@@ -155,8 +163,12 @@ public struct MeetingPipeline: Sendable {
         }
 
         if !meeting.completedSteps.contains(.diarize), diarizationEnabled(), let diarizer = await batchDiarizer() {
+            let notes = outcome.notes.count
             try await diarize(meetingID, with: diarizer, recordings: recordings, outcome: &outcome)
+            if outcome.notes.count > notes { stepFailed = true }
         }
+
+        if !stepFailed { await recordings.discardLosslessAudio() }
 
         if !meeting.completedSteps.contains(.summary) {
             try await automaticSummary(meetingID, outcome: &outcome)
@@ -166,7 +178,7 @@ public struct MeetingPipeline: Sendable {
         return outcome
     }
 
-    /// "Improve transcript": the post-pass again (from the m4a), then the summary again.
+    /// "Improve transcript": the post-pass again (from the m4a, the CAF being gone), then the summary again.
     @discardableResult
     public func improveTranscript(meetingID: UUID) async throws -> Outcome {
         guard let meeting = try await store.meeting(id: meetingID), meeting.state != .recording else { return Outcome() }
@@ -222,15 +234,15 @@ public struct MeetingPipeline: Sendable {
     /// pass already found (keeping their names and merges), adds new people for the rest, and gives every segment its speaker from the new turns. A meeting with no
     /// mix recording (one from before the mix) is skipped.
     private func diarize(
-        _ meetingID: UUID, with diarizer: any EnrollmentBatchDiarizer, recordings: any MeetingAudioFinalizing,
+        _ meetingID: UUID, with diarizer: any BatchDiarizer, recordings: any MeetingAudioFinalizing,
         outcome: inout Outcome
     ) async throws {
         let duration = (try? await recordings.duration(of: .mixed)) ?? 0
         guard duration > 0 else { return }
-        let result: BatchDiarization
+        let turns: [SpeakerTurn]
         do {
             let samples = try await Self.read(.mixed, duration: duration, from: recordings)
-            result = try await diarizer.diarize(samples: samples, enrollment: nil)
+            turns = try await diarizer.diarize(samples: samples)
         } catch is CancellationError {
             await releaseDiarizer()
             throw CancellationError()
@@ -244,7 +256,7 @@ public struct MeetingPipeline: Sendable {
         guard let meeting = try await store.meeting(id: meetingID) else { return }
         var directory = SpeakerDirectory(meeting.speakers)
         let mapped = SpeakerAssigner.mapOffline(
-            result.turns, onto: try await store.liveTurns(for: meetingID), directory: &directory)
+            turns, onto: try await store.liveTurns(for: meetingID), directory: &directory)
 
         try await store.saveOfflineTurns(mapped, for: meetingID)
         let segments = try await store.segments(for: meetingID)

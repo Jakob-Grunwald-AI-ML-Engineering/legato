@@ -4,12 +4,12 @@ import LegatoCore
 
 /// Records a meeting's tracks into one folder: `mic.caf` / `system.caf` and, with several sources, `mix.caf`
 /// (what the live engine heard; Int16 PCM, 16 kHz mono) while recording, then the same as `.m4a` (AAC,
-/// ~32 kbps) after ``finalize()``. The tracks come from the session: it writes each source on its own and the
+/// ~32 kbps) after ``finalize()``, which keeps the CAFs until ``discardLossless()``. The tracks come from the session: it writes each source on its own and the
 /// mix on `.mixed`. A meeting with one source (the phone) has no `mix` file; asking the reader for `.mixed` then
 /// answers with the mic recording, which is the mix.
 ///
 /// CAF is written first because it survives a crash; ``finish()`` only closes it so the post-pass can
-/// read full quality. The reader prefers a CAF and falls back to the m4a. Being an actor, writes happen
+/// read full quality. The reader prefers a CAF and falls back to the m4a once it is discarded. Being an actor, writes happen
 /// off the audio thread and in order.
 public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
     public enum WriterError: Error, Equatable {
@@ -80,8 +80,9 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
 
     // MARK: Conversion
 
-    /// Converts each stream's CAF in this folder to m4a, removing the CAF once the m4a reads back.
-    /// A stream that fails keeps its CAF and is listed in the report, whatever the other streams did.
+    /// Converts each stream's CAF in this folder to m4a and keeps the CAF: the post-pass and the speaker pass
+    /// read it at full quality; ``discardLossless()`` removes it afterwards. A stream that fails is listed in
+    /// the report, whatever the other streams did.
     @discardableResult
     public func finalize() -> ConversionReport {
         finish()
@@ -136,13 +137,28 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
             throw error
         }
         PrivateFiles.protect(fileAt: m4a)
-        // Verify before deleting the CAF: the m4a must open and be about as long as the source.
+        // Verify: the m4a must open and be about as long as the source. The CAF stays (see ``discardLossless()``).
         let check = try AVAudioFile(forReading: m4a)
         guard check.length > 0 || expected == 0, abs(check.length - expected) <= 4_096 else {
             try? FileManager.default.removeItem(at: m4a)
             throw WriterError.unreadable(m4a.lastPathComponent)
         }
-        try FileManager.default.removeItem(at: caf)
+    }
+
+    /// Deletes each CAF that has a readable m4a, once the steps that want full quality are over. A stream
+    /// with no m4a keeps its CAF.
+    public func discardLossless() {
+        Self.discardLossless(in: folder)
+    }
+
+    /// ``discardLossless()`` for a folder (a meeting whose writer is gone).
+    public static func discardLossless(in folder: URL) {
+        let fm = FileManager.default
+        for stream in allStreams where fm.fileExists(atPath: cafURL(folder, stream).path) {
+            guard fm.fileExists(atPath: m4aURL(folder, stream).path), (try? AVAudioFile(forReading: m4aURL(folder, stream))) != nil
+            else { continue }
+            try? fm.removeItem(at: cafURL(folder, stream))
+        }
     }
 
     // MARK: AudioSampleReader

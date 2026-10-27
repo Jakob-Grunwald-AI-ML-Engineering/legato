@@ -3,12 +3,6 @@ import Foundation
 import LegatoCore
 import LegatoModels
 
-/// Why a diarizer could not do what was asked.
-public enum DiarizationError: Error, Sendable, Equatable {
-    /// The enrolment sample held no voice the model could place in a speaker slot.
-    case enrollmentFailed
-}
-
 /// One stretch of one Sortformer speaker slot, as the model reports it.
 struct SortformerSlotSegment: Sendable, Equatable {
     var slot: Int
@@ -19,8 +13,6 @@ struct SortformerSlotSegment: Sendable, Equatable {
 /// The Sortformer model as the diarizer drives it. The real one wraps FluidAudio's (not thread-safe)
 /// `SortformerDiarizer`; the diarizer actor is its only caller.
 protocol SortformerBackend: Sendable {
-    /// Teaches the model the voice in `samples` and returns the slot it landed in; nil when no voice was found.
-    func enroll(samples: [Float]) throws -> Int?
     /// Appends 16 kHz mono audio.
     func feed(_ samples: [Float]) throws
     /// Every segment so far, settled and still open.
@@ -32,9 +24,8 @@ protocol SortformerBackend: Sendable {
 /// Live speaker labels from FluidAudio's streaming Sortformer (palettized build, at most 4 speakers, a new
 /// result about every 480 ms, a second or so behind the audio).
 ///
-/// Cluster ids are the model's slots, `S0`…`S3`. The slot the user's enrolment sample landed in is the id
-/// ``enroll(samples:)`` returns, and the meeting maps it to the person flagged "You". The model loads on first
-/// use, so building one is free; it needs the live speakers model installed. Feeding is serial.
+/// Cluster ids are the model's slots, `S0`…`S3`. The model loads on first use, so building one is free; it
+/// needs the live speakers model installed. Feeding is serial.
 public actor SortformerSpeakerDiarizer: SpeakerDiarizer {
     /// The cluster id of a Sortformer slot (`S2` for slot 2).
     public static func clusterID(slot: Int) -> String { "S\(slot)" }
@@ -57,12 +48,6 @@ public actor SortformerSpeakerDiarizer: SpeakerDiarizer {
 
     init(loading load: @escaping @Sendable () async throws -> any SortformerBackend) {
         self.load = load
-    }
-
-    public func enroll(samples: [Float]) async throws -> String {
-        let backend = try await ready()
-        guard let slot = try backend.enroll(samples: samples) else { throw DiarizationError.enrollmentFailed }
-        return Self.clusterID(slot: slot)
     }
 
     public func feed(_ chunk: AudioChunk) async throws {
@@ -121,10 +106,6 @@ final class FluidSortformerBackend: SortformerBackend, @unchecked Sendable {
         let diarizer = SortformerDiarizer(config: config)
         diarizer.initialize(models: models)
         return FluidSortformerBackend(diarizer: diarizer)
-    }
-
-    func enroll(samples: [Float]) throws -> Int? {
-        try diarizer.enrollSpeaker(withAudio: samples)?.index
     }
 
     func feed(_ samples: [Float]) throws {

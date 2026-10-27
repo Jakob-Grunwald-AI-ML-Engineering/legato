@@ -8,8 +8,8 @@ import LegatoCore
         var directory = SpeakerDirectory()
         let a = directory.add(), b = directory.add()
         #expect(a == "P1" && b == "P2")
-        #expect(directory.speakers["P1"] == SpeakerInfo(name: "Speaker 1", colorIndex: 0, isYou: false))
-        #expect(directory.speakers["P2"] == SpeakerInfo(name: "Speaker 2", colorIndex: 1, isYou: false))
+        #expect(directory.speakers["P1"] == SpeakerInfo(name: "Speaker 1", colorIndex: 0))
+        #expect(directory.speakers["P2"] == SpeakerInfo(name: "Speaker 2", colorIndex: 1))
     }
 
     @Test func aFreedColourIsReusedByTheNextPerson() {
@@ -58,43 +58,25 @@ import LegatoCore
         #expect(merge.apply(to: turns).map(\.speaker) == ["P1", "P3"])
     }
 
-    @Test func mergingKeepsTheSurvivorsLookAndYouIfEitherWasYou() {
+    @Test func mergingKeepsTheSurvivorsLook() {
         var directory = SpeakerDirectory()
         let a = directory.add(), b = directory.add()
-        directory.markAsYou(b)
         directory.merge(b, into: a)
-        #expect(directory.speakers[a]?.isYou == true)
         #expect(directory.speakers[a]?.colorIndex == 0)
         #expect(directory.speakers[b] == nil)
     }
 
-    @Test func onlyOnePersonIsYou() {
-        var directory = SpeakerDirectory()
-        let a = directory.add(), b = directory.add()
-        directory.markAsYou(b)
-        #expect(directory.speakers[b] == SpeakerInfo(name: "You", colorIndex: 1, isYou: true))
-        directory.markAsYou(a)
-        #expect(directory.speakers[a]?.isYou == true && directory.speakers[a]?.name == "You")
-        #expect(directory.speakers[b] == SpeakerInfo(name: "Speaker 2", colorIndex: 1, isYou: false))
-    }
-
-    @Test func youKeepsTheFlagWhenRenamed() {
-        var directory = SpeakerDirectory()
-        let a = directory.add(isYou: true)
-        directory.rename(a, to: "Jakob")
-        #expect(directory.speakers[a] == SpeakerInfo(name: "Jakob", colorIndex: 0, isYou: true))
-    }
-
-    @Test func aPersonAddedAsYouIsNamedYou() {
-        var directory = SpeakerDirectory()
-        let a = directory.add(isYou: true)
-        #expect(directory.speakers[a]?.name == "You" && directory.speakers[a]?.isYou == true)
-    }
-
     @Test func idsContinueAfterTheHighestExistingOne() {
         var directory = SpeakerDirectory([
-            "P4": SpeakerInfo(name: "Speaker 4", colorIndex: 0, isYou: false)
+            "P4": SpeakerInfo(name: "Speaker 4", colorIndex: 0)
         ])
         #expect(directory.add() == "P5")
+    }
+
+    @Test func aStoredIsYouKeyStillDecodesAndIsIgnored() throws {
+        let old = Data(#"{"name":"You","colorIndex":2,"isYou":true}"#.utf8)
+        let info = try JSONDecoder().decode(SpeakerInfo.self, from: old)
+        #expect(info == SpeakerInfo(name: "You", colorIndex: 2))
+        #expect(!String(decoding: try JSONEncoder().encode(info), as: UTF8.self).contains("isYou"))
     }
 }

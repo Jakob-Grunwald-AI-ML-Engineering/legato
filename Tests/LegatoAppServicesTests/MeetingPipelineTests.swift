@@ -53,6 +53,7 @@ private final class FakeAudio: MeetingAudioFinalizing {
         log.add("m4a")
         return unconvertible
     }
+    func discardLosslessAudio() async { log.add("caf-deleted") }
 }
 
 private final class FakeTranscriber: BatchTranscriber {
@@ -65,13 +66,19 @@ private final class FakeTranscriber: BatchTranscriber {
     }
 }
 
-private final class FakeDiarizer: EnrollmentBatchDiarizer {
-    let result: BatchDiarization
+private struct FailingTranscriber: BatchTranscriber {
+    let id = "failing-batch"
+    func transcribe(samples: [Float], stream: TranscriptEvent.Stream) async throws -> [TranscriptEvent] {
+        throw LLMError.failed("boom")
+    }
+}
+
+private final class FakeDiarizer: BatchDiarizer {
+    let result: [SpeakerTurn]
     let log: Log
     let sampleCounts = Mutex<[Int]>([])
-    init(_ result: BatchDiarization, log: Log) { self.result = result; self.log = log }
-    func diarize(samples: [Float]) async throws -> [SpeakerTurn] { result.turns }
-    func diarize(samples: [Float], enrollment: [Float]?) async throws -> BatchDiarization {
+    init(_ result: [SpeakerTurn], log: Log) { self.result = result; self.log = log }
+    func diarize(samples: [Float]) async throws -> [SpeakerTurn] {
         log.add("diarize")
         sampleCounts.withLock { $0.append(samples.count) }
         return result
@@ -192,7 +199,7 @@ private struct Rig {
         _ = try await rig.pipeline(transcriber: false).run(meetingID: rig.id)
         #expect(rig.log.count("post-pass") == 0)
         #expect(rig.log.count("release") == 0)
-        #expect(rig.log.all == ["m4a", "summary"])
+        #expect(rig.log.all == ["m4a", "caf-deleted", "summary"])
         let meeting = try await rig.meeting()
         #expect(meeting.state == .finished)
         #expect(meeting.postPassID == nil)
@@ -231,7 +238,7 @@ private struct Rig {
 
     @Test func theSummaryGetsTheTemplateNotesLanguageAndSpeakerNames() async throws {
         let rig = Rig()
-        try await rig.seedMixed(speakers: ["P1": SpeakerInfo(name: "Ann", colorIndex: 0, isYou: false)])
+        try await rig.seedMixed(speakers: ["P1": SpeakerInfo(name: "Ann", colorIndex: 0)])
         try await rig.store.update(id: rig.id) { $0.templateID = "action-items"; $0.locale = "de-DE" }
         try await rig.store.saveNotes("Budget is fixed at 5k", for: rig.id)
         try await rig.store.replaceSegments(
@@ -257,6 +264,50 @@ private struct Rig {
         #expect(sent.contains("Mention the audit"))
     }
 
+    // MARK: Lossless audio for the heavy steps
+
+    @Test func theLosslessCafsAreDeletedOnlyAfterThePostPassAndTheSpeakerPass() async throws {
+        let rig = Rig(mixDuration: 20)
+        try await rig.seedMixed()
+        let diarizer = FakeDiarizer([SpeakerTurn(speaker: "S1", start: 0, end: 20)], log: rig.log)
+        _ = try await rig.pipeline(diarizer: diarizer).run(meetingID: rig.id)
+
+        let order = rig.log.all
+        let deleted = try #require(order.firstIndex(of: "caf-deleted"), "the CAFs are deleted at the end")
+        #expect(rig.log.count("caf-deleted") == 1)
+        #expect(order.firstIndex(of: "m4a")! < order.firstIndex(of: "post-pass")!, "m4a written at stop, CAF still there")
+        #expect(order.lastIndex(of: "post-pass")! < deleted)
+        #expect(order.lastIndex(of: "diarize")! < deleted)
+    }
+
+    @Test func theAudioStepAloneKeepsTheCafs() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        _ = try await rig.pipeline().runAudio(meetingID: rig.id)
+        #expect(rig.log.all == ["m4a"])
+    }
+
+    @Test func aMeetingInterruptedAfterTheAudioStepStillDeletesItsCafsAfterTheDeferredSteps() async throws {
+        let rig = Rig()
+        try await rig.seed(state: .interrupted, steps: [.audio])
+        _ = try await rig.pipeline().runDeferred(meetingID: rig.id)
+        let order = rig.log.all
+        #expect(!order.contains("m4a"))
+        let deleted = try #require(order.firstIndex(of: "caf-deleted"))
+        #expect(order.firstIndex(of: "post-pass")! < deleted)
+    }
+
+    @Test func aFailedPostPassKeepsTheCafsForTheNextRun() async throws {
+        let rig = Rig()
+        try await rig.seed()
+        let broken = FailingTranscriber()
+        let pipeline = MeetingPipeline(
+            store: rig.store, audio: { _ in rig.audio }, transcriber: { broken }, backend: { nil },
+            releaseModels: {}, releasePostPassModels: {})
+        _ = try await pipeline.run(meetingID: rig.id)
+        #expect(rig.log.count("caf-deleted") == 0)
+    }
+
     // MARK: Audio now, the rest later
 
     @Test func theAudioStepAloneConvertsTheRecordingsAndLeavesTheMeetingProcessing() async throws {
@@ -277,14 +328,14 @@ private struct Rig {
         let rig = Rig(mixDuration: 20)
         try await rig.seedMixed()
         let diarizer = FakeDiarizer(
-            BatchDiarization(turns: [SpeakerTurn(speaker: "c0", start: 0, end: 10), SpeakerTurn(speaker: "c1", start: 10, end: 20)]),
+            [SpeakerTurn(speaker: "c0", start: 0, end: 10), SpeakerTurn(speaker: "c1", start: 10, end: 20)],
             log: rig.log)
         let pipeline = rig.pipeline(diarizer: diarizer)
         _ = try await pipeline.runAudio(meetingID: rig.id)
         rig.log.reset()
         _ = try await pipeline.runDeferred(meetingID: rig.id)
 
-        #expect(rig.log.all == ["release", "post-pass", "release-post-pass", "diarize", "release-diarizer", "summary"])
+        #expect(rig.log.all == ["release", "post-pass", "release-post-pass", "diarize", "release-diarizer", "caf-deleted", "summary"])
         let meeting = try await rig.meeting()
         #expect(meeting.state == .finished)
         #expect(meeting.completedSteps == [.audio, .postPass, .diarize, .summary])
@@ -304,7 +355,7 @@ private struct Rig {
         let rig = Rig(mixDuration: 20)
         try await rig.seedMixed()
         let turns = [SpeakerTurn(speaker: "c0", start: 0, end: 10), SpeakerTurn(speaker: "c1", start: 10, end: 20)]
-        let diarizer = FakeDiarizer(BatchDiarization(turns: turns), log: rig.log)
+        let diarizer = FakeDiarizer(turns, log: rig.log)
         _ = try await rig.pipeline(transcriber: false, diarizer: diarizer).run(meetingID: rig.id)
 
         #expect(diarizer.sampleCounts.withLock { $0 } == [20 * 16_000], "the whole mix went in")
@@ -319,8 +370,8 @@ private struct Rig {
     @Test func theOfflineClustersKeepTheLivePeopleAndTheirNames() async throws {
         let rig = Rig(mixDuration: 20)
         let people = [
-            "P1": SpeakerInfo(name: "Ann", colorIndex: 0, isYou: false),
-            "P2": SpeakerInfo(name: "Bob", colorIndex: 1, isYou: false),
+            "P1": SpeakerInfo(name: "Ann", colorIndex: 0),
+            "P2": SpeakerInfo(name: "Bob", colorIndex: 1),
         ]
         try await rig.seedMixed(
             speakers: people,
@@ -330,7 +381,7 @@ private struct Rig {
             SpeakerTurn(speaker: "x", start: 10.5, end: 19), SpeakerTurn(speaker: "y", start: 0, end: 9.5),
             SpeakerTurn(speaker: "z", start: 19.2, end: 20),
         ]
-        let diarizer = FakeDiarizer(BatchDiarization(turns: turns), log: rig.log)
+        let diarizer = FakeDiarizer(turns, log: rig.log)
         _ = try await rig.pipeline(transcriber: false, diarizer: diarizer).run(meetingID: rig.id)
 
         let meeting = try await rig.meeting()
@@ -343,7 +394,7 @@ private struct Rig {
     @Test func theOfflinePassIsSkippedWhenOffNotInstalledOrThereIsNoMix() async throws {
         let off = Rig(mixDuration: 20)
         try await off.seedMixed()
-        let diarizer = FakeDiarizer(BatchDiarization(turns: [SpeakerTurn(speaker: "c0", start: 0, end: 20)]), log: off.log)
+        let diarizer = FakeDiarizer([SpeakerTurn(speaker: "c0", start: 0, end: 20)], log: off.log)
         _ = try await off.pipeline(transcriber: false, diarizer: diarizer, diarization: false).run(meetingID: off.id)
         #expect(off.log.count("diarize") == 0)
         #expect(!(try await off.meeting().completedSteps.contains(.diarize)))
@@ -356,7 +407,7 @@ private struct Rig {
 
         let legacy = Rig(mixDuration: 0)  // two per-stream recordings, no mix
         try await legacy.seed()
-        let other = FakeDiarizer(BatchDiarization(turns: []), log: legacy.log)
+        let other = FakeDiarizer([], log: legacy.log)
         _ = try await legacy.pipeline(transcriber: false, diarizer: other).run(meetingID: legacy.id)
         #expect(legacy.log.count("diarize") == 0)
         #expect(try await legacy.store.segments(for: legacy.id).allSatisfy { $0.speaker == nil })

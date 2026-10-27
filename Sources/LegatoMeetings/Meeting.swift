@@ -33,17 +33,13 @@ public struct PausedRange: Sendable, Equatable, Codable {
 public typealias PersonID = String
 
 public struct SpeakerInfo: Sendable, Equatable, Codable {
-    /// What the app shows; "Speaker N" until the user renames the person, "You" for the user.
+    /// What the app shows; "Speaker N" until the user renames the person.
     public var name: String
     /// Which colour of the app's palette marks the person.
     public var colorIndex: Int
-    /// The user. At most one person per meeting.
-    public var isYou: Bool
-
-    public init(name: String, colorIndex: Int, isYou: Bool) {
+    public init(name: String, colorIndex: Int) {
         self.name = name
         self.colorIndex = colorIndex
-        self.isYou = isYou
     }
 }
 

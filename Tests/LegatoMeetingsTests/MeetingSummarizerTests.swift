@@ -180,8 +180,8 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
     @Test func linesAreLabelledBySpeakerNameNotMeAndThem() async throws {
         let backend = LimitedBackend(limit: nil) { _, _ in "S" }
         let speakers = [
-            "P1": SpeakerInfo(name: "You", colorIndex: 0, isYou: true),
-            "P2": SpeakerInfo(name: "Alice", colorIndex: 1, isYou: false),
+            "P1": SpeakerInfo(name: "You", colorIndex: 0),
+            "P2": SpeakerInfo(name: "Alice", colorIndex: 1),
         ]
         _ = try await MeetingSummarizer(backend: backend, speakers: speakers).summarize(segments: [
             mixed("Hello", 5, speaker: "P1"), mixed("Hi!", 70, speaker: "P2"), mixed("Unlabelled", 80, speaker: nil),

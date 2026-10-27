@@ -109,49 +109,6 @@ struct RealDiarizationTests {
         #expect(seconds.count >= 2)
     }
 
-    /// Enrolling Samantha's solo clip makes her the enrolled slot; the same voice speaks every even sentence of the mixed clip.
-    @Test(.enabled(if: realEngineEnabled, Comment(rawValue: gate)))
-    func liveEnrolmentRecognisesTheEnrolledVoiceInALongerClip() async throws {
-        let manager = makeManager()
-        try await ensureInstalled(manager, FluidAudioModels.sortformerID)
-        let audio = try mixedLong()
-        var enrolledShares: [String: Double] = [:]
-        var clusters: [String: String] = [:]
-        for voice in ["en", "de"] {
-            let diarizer = SortformerSpeakerDiarizer(models: manager)
-            let cluster = try await diarizer.enroll(samples: try benchClip(voice))
-            for frame in frames(audio) { try await diarizer.feed(AudioChunk(samples: frame, format: spec)) }
-            let seconds = speechSeconds(try await diarizer.finish())
-            let total = seconds.values.reduce(0, +)
-            enrolledShares[voice] = (seconds[cluster] ?? 0) / max(total, 1)
-            clusters[voice] = cluster
-            print("LIVE-ENROL \(voice): enrolled slot \(cluster), share of speech \(enrolledShares[voice]!), all \(seconds)")
-        }
-        // Each voice's enrolled slot carries a real share of the clip (about half: the voices alternate). Both
-        // enrolments land in the first free slot, so the slot id cannot tell them apart; the speech does: enrolling
-        // Samantha (the English sentences) gives her slot a larger share than enrolling Anna does.
-        for voice in ["en", "de"] { #expect((0.25...0.75).contains(enrolledShares[voice] ?? 0), "\(voice)") }
-        #expect((enrolledShares["en"] ?? 0) > (enrolledShares["de"] ?? 1))
-        print("LIVE-ENROL slots: \(clusters)")
-    }
-
-    @Test(.enabled(if: realEngineEnabled, Comment(rawValue: gate)))
-    func offlineEnrolmentMatchesTheEnrolledVoiceInALongerClip() async throws {
-        let manager = makeManager()
-        try await ensureInstalled(manager, FluidAudioModels.diarizerOfflineID)
-        let audio = try mixedLong()
-        let diarizer = OfflineSpeakerDiarizer(models: manager)
-        var you: [String: String?] = [:]
-        for voice in ["en", "de"] {
-            let outcome = try await diarizer.diarize(samples: audio, enrollment: try benchClip(voice))
-            you[voice] = outcome.youCluster
-            print("OFFLINE-ENROL \(voice): you = \(outcome.youCluster ?? "nobody"), speech \(speechSeconds(outcome.turns))")
-        }
-        #expect(you["en"].flatMap { $0 } != nil)
-        #expect(you["de"].flatMap { $0 } != nil)
-        #expect(you["en"] != you["de"], "the two voices are two different clusters")
-    }
-
     @Test(.enabled(if: realEngineEnabled, Comment(rawValue: gate)))
     func localVqeOutputKeepsTheInputLengthWithAndWithoutAReference() async throws {
         let manager = makeManager()

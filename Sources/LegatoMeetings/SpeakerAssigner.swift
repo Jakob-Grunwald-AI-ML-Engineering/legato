@@ -9,19 +9,10 @@ import LegatoCore
 ///   arrives: ``relabelRecent(_:turns:now:window:)`` re-assigns only the segments that ended within
 ///   ``recentWindow`` seconds, and older segments are final.
 /// - The after-meeting pass has clusters of its own; ``mapOffline(_:onto:directory:)`` maps each onto the
-///   person it overlaps most, so names, merges and "You" survive, and gives an unmatched cluster a new person.
-/// - On the Mac, with no enrolled voice, ``youPerson(turns:micEnergy:systemEnergy:)`` finds the user as the
-///   speaker whose voice is mostly on the microphone rather than on the system audio.
+///   person it overlaps most, so names and merges survive, and gives an unmatched cluster a new person.
 public enum SpeakerAssigner {
     /// How far back from the newest audio a live relabel reaches, in seconds.
     public static let recentWindow: TimeInterval = 3
-
-    /// The user must have at least this much speech for the energy rule to name them, in seconds.
-    public static let minimumYouSpeech: TimeInterval = 10
-    /// Mic energy must be at least this many times the system energy ...
-    public static let youEnergyRatio = 3.0
-    /// ... over at least this share of the person's turn time.
-    public static let youShare = 0.6
 
     // MARK: Segments
 
@@ -103,38 +94,5 @@ public enum SpeakerAssigner {
             result.append(mapped)
         }
         return result
-    }
-
-    // MARK: You
-
-    /// The person who is the user by the energy rule, or nil. A person qualifies with at least
-    /// ``minimumYouSpeech`` seconds of turns and mic energy at least ``youEnergyRatio`` times the system
-    /// energy over at least ``youShare`` of those seconds (judged in 1 s windows); if several qualify, the
-    /// one with the most such time.
-    ///
-    /// - Parameters:
-    ///   - turns: turns of persons (person ids).
-    ///   - micEnergy: the microphone's energy within a time range, in seconds from the start of the meeting.
-    ///   - systemEnergy: the system audio's energy within the same range.
-    public static func youPerson(
-        turns: [SpeakerTurn], micEnergy: (Range<TimeInterval>) -> Double, systemEnergy: (Range<TimeInterval>) -> Double
-    ) -> PersonID? {
-        var total: [PersonID: TimeInterval] = [:]
-        var micDominated: [PersonID: TimeInterval] = [:]
-        for turn in turns where turn.duration > 0 {
-            var t = turn.start
-            while t < turn.end {
-                let upper = min(turn.end, t + 1)
-                let window = t..<upper
-                total[turn.speaker, default: 0] += upper - t
-                let (mic, system) = (micEnergy(window), systemEnergy(window))
-                if mic > 0, mic >= youEnergyRatio * system { micDominated[turn.speaker, default: 0] += upper - t }
-                t = upper
-            }
-        }
-        let qualified = total.filter { id, seconds in
-            seconds >= minimumYouSpeech && (micDominated[id] ?? 0) / seconds >= youShare - 1e-9
-        }
-        return qualified.max { (micDominated[$0.key] ?? 0, $1.key) < (micDominated[$1.key] ?? 0, $0.key) }?.key
     }
 }

@@ -116,9 +116,9 @@ public struct EngineRegistry: Sendable {
         return FluidAudioCatalog.liveDiarizer(id: id, models: models)
     }
 
-    /// A fresh diarizer for a finished recording (it can also find the user by enrolment), or `nil` when the
+    /// A fresh diarizer for a finished recording, or `nil` when the
     /// after-meeting speakers model is not installed.
-    public func batchDiarizer() async -> (any EnrollmentBatchDiarizer)? {
+    public func batchDiarizer() async -> (any BatchDiarizer)? {
         guard let id = await installedModel(role: .meetingSpeakers, fallback: FluidAudioModels.diarizerOfflineID) else {
             return nil
         }

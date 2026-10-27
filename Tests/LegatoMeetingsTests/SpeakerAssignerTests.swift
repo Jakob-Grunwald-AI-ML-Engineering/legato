@@ -75,9 +75,9 @@ import LegatoCore
 
     // MARK: Offline clusters onto persons
 
-    @Test func offlineClustersMapOntoPersonsByMaximumOverlapKeepingNamesAndYou() {
+    @Test func offlineClustersMapOntoPersonsByMaximumOverlapKeepingNames() {
         var directory = SpeakerDirectory()
-        let p1 = directory.add(isYou: true), p2 = directory.add()
+        let p1 = directory.add(), p2 = directory.add()
         directory.rename(p2, to: "Alice")
         let live = [turn(p1, 0, 10), turn(p2, 10, 20)]
         let offline = [turn("a", 0, 9.5), turn("b", 10.5, 19), turn("a", 20, 22)]
@@ -85,7 +85,7 @@ import LegatoCore
         let result = SpeakerAssigner.mapOffline(offline, onto: live, directory: &directory)
         #expect(result.map(\.speaker) == [p1, p2, p1])
         #expect(directory.speakers.count == 2)
-        #expect(directory.speakers[p1]?.isYou == true && directory.speakers[p2]?.name == "Alice")
+        #expect(directory.speakers[p1]?.name == "Speaker 1" && directory.speakers[p2]?.name == "Alice")
     }
 
     @Test func aClusterNothingOverlapsBecomesANewPerson() {
@@ -96,7 +96,6 @@ import LegatoCore
         #expect(result[0].speaker == p1)
         #expect(result[1].speaker == "P2")
         #expect(directory.speakers["P2"]?.name == "Speaker 2")
-        #expect(directory.speakers["P2"]?.isYou == false)
     }
 
     @Test func clustersAreNewPeopleWhenThereWasNoLiveDiarization() {
@@ -122,50 +121,5 @@ import LegatoCore
         let result = SpeakerAssigner.mapOffline(
             [turn("a", 0, 10)], onto: [turn(p1, 0, 3), turn(p2, 3, 10)], directory: &directory)
         #expect(result[0].speaker == p2)
-    }
-
-    // MARK: You by energy (Mac, nothing enrolled)
-
-    /// 1 s windows: energy `mic`/`system` as functions of the window's start.
-    func you(
-        _ turns: [SpeakerTurn], mic: @escaping @Sendable (TimeInterval) -> Double,
-        system: @escaping @Sendable (TimeInterval) -> Double
-    ) -> String? {
-        SpeakerAssigner.youPerson(turns: turns, micEnergy: { mic($0.lowerBound) }, systemEnergy: { system($0.lowerBound) })
-    }
-
-    @Test func theMicDominatedSpeakerIsYou() {
-        let turns = [turn("P1", 0, 20), turn("P2", 20, 40)]
-        let who = you(turns, mic: { $0 < 20 ? 10 : 1 }, system: { $0 < 20 ? 1 : 5 })
-        #expect(who == "P1")
-    }
-
-    @Test func nobodyIsYouWhenNobodyIsMicDominated() {
-        let turns = [turn("P1", 0, 20), turn("P2", 20, 40)]
-        #expect(you(turns, mic: { _ in 2 }, system: { _ in 1 }) == nil)  // 2:1 is not 3:1
-    }
-
-    @Test func exactlyThreeToOneCounts() {
-        #expect(you([turn("P1", 0, 20)], mic: { _ in 3 }, system: { _ in 1 }) == "P1")
-    }
-
-    @Test func fewerThanTenSecondsOfSpeechIsNotEnough() {
-        #expect(you([turn("P1", 0, 9)], mic: { _ in 10 }, system: { _ in 1 }) == nil)
-        #expect(you([turn("P1", 0, 10)], mic: { _ in 10 }, system: { _ in 1 }) == "P1")
-    }
-
-    @Test func sixtyPercentOfTheTurnTimeIsTheThreshold() {
-        let turns = [turn("P1", 0, 20)]
-        #expect(you(turns, mic: { $0 < 11 ? 10 : 1 }, system: { _ in 1 }) == nil)  // 55 %
-        #expect(you(turns, mic: { $0 < 12 ? 10 : 1 }, system: { _ in 1 }) == "P1")  // 60 %
-    }
-
-    @Test func silenceOnBothTracksIsNeverYou() {
-        #expect(you([turn("P1", 0, 20)], mic: { _ in 0 }, system: { _ in 0 }) == nil)
-    }
-
-    @Test func aPersonsTurnsAddUp() {
-        let turns = [turn("P1", 0, 6), turn("P2", 6, 30), turn("P1", 30, 36)]
-        #expect(you(turns, mic: { $0 < 6 || $0 >= 30 ? 9 : 1 }, system: { _ in 1 }) == "P1")  // 12 s together
     }
 }

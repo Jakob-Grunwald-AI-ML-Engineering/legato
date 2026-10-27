@@ -194,7 +194,7 @@ import LegatoCore
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MeetingStore(root: root)
         var m = meeting("New", at: 1)
-        m.speakers = ["P1": SpeakerInfo(name: "You", colorIndex: 0, isYou: true), "P2": SpeakerInfo(name: "Alice", colorIndex: 1, isYou: false)]
+        m.speakers = ["P1": SpeakerInfo(name: "You", colorIndex: 0), "P2": SpeakerInfo(name: "Alice", colorIndex: 1)]
         m.pausedRanges = [PausedRange(start: 120, end: 150)]
         m.locale = "de-DE"
         m.templateID = "action-items"

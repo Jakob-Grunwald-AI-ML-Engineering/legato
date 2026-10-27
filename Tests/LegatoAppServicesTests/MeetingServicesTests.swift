@@ -324,9 +324,7 @@ private final class HalvingEnhancer: MicEnhancer {
 }
 
 private final class ScriptedDiarizer: SpeakerDiarizer {
-    let enrolled = Mutex<[[Float]]>([])
     let fedSamples = Mutex(0)
-    func enroll(samples: [Float]) async throws -> String { enrolled.withLock { $0.append(samples) }; return "slot0" }
     func feed(_ chunk: AudioChunk) async throws { fedSamples.withLock { $0 += chunk.samples.count } }
     func turns() async -> [SpeakerTurn] { [] }
     func finish() async throws -> [SpeakerTurn] { [] }
@@ -394,7 +392,6 @@ private final class TrackSink: MeetingAudioSink {
         #expect(mix.count == 16_000, "the mix is as long as the meeting")
         #expect(mix.suffix(1_600).allSatisfy { abs($0 - 0.4) < 1e-5 }, "0.2 cleaned mic + 0.2 system, once both are in; the mixer never waits for a late source")
         #expect(diarizer.fedSamples.withLock { $0 } == 16_000, "the diarizer hears the same mix")
-        #expect(diarizer.enrolled.withLock { $0.isEmpty }, "no voice enrolment")
         #expect(enhancer.references.withLock { $0.contains(true) }, "the system audio reached the enhancer as the reference")
         #expect(meeting.state == .processing && abs(meeting.duration - 1) < 0.001)
     }

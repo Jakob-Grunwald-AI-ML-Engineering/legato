@@ -15,22 +15,13 @@ private struct Boom: Error, CustomStringConvertible {
 
 /// Plays the part of the Sortformer model: records what it is fed and answers with scripted segments.
 private final class FakeSortformer: SortformerBackend {
-    private let state = Mutex((fed: [[Float]](), enrolled: [[Float]](), finished: 0, segments: [SortformerSlotSegment](), failFeed: false))
-    private let enrolledSlot: Int?
-
-    init(enrolledSlot: Int? = 2) { self.enrolledSlot = enrolledSlot }
-
+    private let state = Mutex((fed: [[Float]](), finished: 0, segments: [SortformerSlotSegment](), failFeed: false))
     func failFeeds() { state.withLock { $0.failFeed = true } }
 
     var fed: [[Float]] { state.withLock { $0.fed } }
-    var enrolled: [[Float]] { state.withLock { $0.enrolled } }
     var finished: Int { state.withLock { $0.finished } }
     func script(_ segments: [SortformerSlotSegment]) { state.withLock { $0.segments = segments } }
 
-    func enroll(samples: [Float]) throws -> Int? {
-        state.withLock { $0.enrolled.append(samples) }
-        return enrolledSlot
-    }
     func feed(_ samples: [Float]) throws {
         if state.withLock({ $0.failFeed }) { throw Boom() }
         state.withLock { $0.fed.append(samples) }
@@ -55,27 +46,6 @@ struct SortformerSpeakerDiarizerTests {
     @Test func clusterIDsNameTheSortformerSlot() {
         #expect(SortformerSpeakerDiarizer.clusterID(slot: 0) == "S0")
         #expect(SortformerSpeakerDiarizer.clusterID(slot: 3) == "S3")
-    }
-
-    @Test func enrollmentReturnsTheClusterIDItsTurnsWillCarry() async throws {
-        let backend = FakeSortformer(enrolledSlot: 2)
-        let diarizer = make(backend)
-        let sample = [Float](repeating: 0.1, count: 80_000)
-
-        let cluster = try await diarizer.enroll(samples: sample)
-        #expect(cluster == "S2")
-        #expect(backend.enrolled == [sample])
-
-        backend.script([SortformerSlotSegment(slot: 2, start: 1, end: 3), SortformerSlotSegment(slot: 0, start: 3, end: 4)])
-        let turns = await diarizer.turns()
-        #expect(turns.first?.speaker == cluster, "the enrolled slot's turns carry the id enrolment returned")
-    }
-
-    @Test func enrollmentThatFindsNoVoiceThrows() async {
-        let diarizer = make(FakeSortformer(enrolledSlot: nil))
-        await #expect(throws: DiarizationError.enrollmentFailed) {
-            _ = try await diarizer.enroll(samples: [Float](repeating: 0, count: 80_000))
-        }
     }
 
     @Test func turnsAreSortedByStartAndNamedBySlot() async throws {
@@ -186,11 +156,6 @@ private func result(_ segments: [TimedSpeakerSegment], database: [String: [Float
 
 @Suite("Offline speaker diarizer")
 struct OfflineSpeakerDiarizerTests {
-    /// Unit vectors at known angles: the cosine of a pair is the cosine of the angle between them.
-    static let voice: [Float] = [1, 0]
-    static let nearVoice: [Float] = [cosf(0.7), sinf(0.7)]  // cos 0.7 rad = 0.765
-    static let farVoice: [Float] = [cosf(1.0), sinf(1.0)]  // cos 1.0 rad = 0.540
-
     @Test func turnsAreTheSegmentsInTimeOrderNamedByCluster() async throws {
         let runner = FakeOfflineRunner([
             .success(result([segment("S2", 6, 9, [0, 1]), segment("S1", 0, 5.5, [1, 0])], database: ["S1": [1, 0], "S2": [0, 1]]))
@@ -225,110 +190,6 @@ struct OfflineSpeakerDiarizerTests {
         let hints = DiarizationHints(numSpeakers: nil, minSpeakers: 2, maxSpeakers: 4)
         _ = try await OfflineSpeakerDiarizer(runner: runner, hints: hints).diarize(samples: [Float](repeating: 0.1, count: 16_000))
         #expect(runner.calls.map(\.hints) == [hints])
-    }
-
-    // MARK: "You" by enrolment
-
-    @Test func theClusterWhoseVoiceMatchesTheEnrolmentSampleIsYou() async throws {
-        let runner = FakeOfflineRunner([
-            // The meeting: S1 is another voice, S2 is the user.
-            .success(result(
-                [segment("S1", 0, 4, [0, 1]), segment("S2", 4, 9, Self.nearVoice)],
-                database: ["S1": [0, 1], "S2": Self.nearVoice])),
-            // The enrolment sample, run through the pipeline: one speaker whose voice is `voice`.
-            .success(result([segment("S1", 0, 5, Self.voice)], database: ["S1": Self.voice])),
-        ])
-        let outcome = try await OfflineSpeakerDiarizer(runner: runner)
-            .diarize(samples: [Float](repeating: 0.1, count: 160_000), enrollment: [Float](repeating: 0.1, count: 80_000))
-        #expect(outcome.youCluster == "S2")
-        #expect(outcome.turns.map(\.speaker) == ["S1", "S2"])
-        #expect(runner.calls.count == 2)
-        #expect(runner.calls[0].count == 160_000)
-        #expect(runner.calls[1].count == 80_000, "the enrolment sample runs through the same pipeline")
-        #expect(runner.calls[1].hints.numSpeakers == 1, "one person recorded the enrolment sample")
-    }
-
-    @Test func nobodyIsYouWhenNoClusterReachesTheThreshold() async throws {
-        let runner = FakeOfflineRunner([
-            .success(result([segment("S1", 0, 5, Self.farVoice)], database: ["S1": Self.farVoice])),
-            .success(result([segment("S1", 0, 5, Self.voice)], database: ["S1": Self.voice])),
-        ])
-        let outcome = try await OfflineSpeakerDiarizer(runner: runner)
-            .diarize(samples: [Float](repeating: 0.1, count: 160_000), enrollment: [Float](repeating: 0.1, count: 80_000))
-        #expect(outcome.youCluster == nil)
-        #expect(outcome.turns.count == 1)
-    }
-
-    @Test func anEnrolmentSampleThatYieldsNoVoiceStillLetsTheMeetingBeDiarized() async throws {
-        let runner = FakeOfflineRunner([
-            .success(result([segment("S1", 0, 5, Self.voice)], database: ["S1": Self.voice])),
-            .failure(OfflineDiarizationError.noSpeechDetected),
-        ])
-        let outcome = try await OfflineSpeakerDiarizer(runner: runner)
-            .diarize(samples: [Float](repeating: 0.1, count: 160_000), enrollment: [Float](repeating: 0, count: 16_000))
-        #expect(outcome.youCluster == nil)
-        #expect(outcome.turns == [SpeakerTurn(speaker: "S1", start: 0, end: 5)])
-    }
-
-    @Test func withoutAnEnrolmentSampleTheModelRunsOnceAndNobodyIsYou() async throws {
-        let runner = FakeOfflineRunner([.success(result([segment("S1", 0, 5, Self.voice)], database: ["S1": Self.voice]))])
-        let outcome = try await OfflineSpeakerDiarizer(runner: runner)
-            .diarize(samples: [Float](repeating: 0.1, count: 160_000), enrollment: nil)
-        #expect(outcome.youCluster == nil)
-        #expect(runner.calls.count == 1)
-    }
-
-    @Test func theEnrolmentVoiceIsTheSpeakerWithTheMostSpeechInTheSample() async throws {
-        let runner = FakeOfflineRunner([
-            .success(result(
-                [segment("S1", 0, 3, [0, 1]), segment("S2", 3, 6, Self.nearVoice)],
-                database: ["S1": [0, 1], "S2": Self.nearVoice])),
-            // A cough or a second voice in the sample: S2 talks 1 s, S1 talks 4 s.
-            .success(result(
-                [segment("S2", 0, 1, [0, 1]), segment("S1", 1, 5, Self.voice)],
-                database: ["S1": Self.voice, "S2": [0, 1]])),
-        ])
-        let outcome = try await OfflineSpeakerDiarizer(runner: runner)
-            .diarize(samples: [Float](repeating: 0.1, count: 160_000), enrollment: [Float](repeating: 0.1, count: 80_000))
-        #expect(outcome.youCluster == "S2")
-    }
-}
-
-@Suite("Enrolment matcher")
-struct EnrollmentMatcherTests {
-    @Test func theThresholdIs0Point7() {
-        #expect(EnrollmentMatcher.threshold == 0.7)
-    }
-
-    @Test func cosineOfKnownVectors() {
-        #expect(EnrollmentMatcher.cosine([1, 0], [1, 0]) == 1)
-        #expect(abs(EnrollmentMatcher.cosine([1, 0], [0, 1])) < 1e-6)
-        #expect(abs(EnrollmentMatcher.cosine([1, 0], [-1, 0]) + 1) < 1e-6)
-        #expect(abs(EnrollmentMatcher.cosine([3, 4], [6, 8]) - 1) < 1e-6, "length does not matter")
-    }
-
-    @Test func cosineOfDegenerateInputsIsZero() {
-        #expect(EnrollmentMatcher.cosine([], [1]) == 0)
-        #expect(EnrollmentMatcher.cosine([0, 0], [1, 0]) == 0)
-        #expect(EnrollmentMatcher.cosine([1, 0], [1, 0, 0]) == 0, "different sizes never match")
-    }
-
-    @Test func picksTheBestClusterAtOrAboveTheThreshold() {
-        let enrolment: [Float] = [1, 0]
-        let at71: [Float] = [0.71, sqrtf(1 - 0.71 * 0.71)]
-        let at95: [Float] = [0.95, sqrtf(1 - 0.95 * 0.95)]
-        #expect(EnrollmentMatcher.bestMatch(enrollment: enrolment, clusters: ["S1": at71, "S2": at95, "S3": [0, 1]]) == "S2")
-        #expect(EnrollmentMatcher.bestMatch(enrollment: enrolment, clusters: ["S1": at71]) == "S1")
-    }
-
-    @Test func belowTheThresholdNobodyMatches() {
-        let at69: [Float] = [0.69, sqrtf(1 - 0.69 * 0.69)]
-        #expect(EnrollmentMatcher.bestMatch(enrollment: [1, 0], clusters: ["S1": at69]) == nil)
-        #expect(EnrollmentMatcher.bestMatch(enrollment: [1, 0], clusters: [:]) == nil)
-    }
-
-    @Test func aTieGoesToTheSmallerClusterID() {
-        #expect(EnrollmentMatcher.bestMatch(enrollment: [1, 0], clusters: ["S2": [1, 0], "S1": [1, 0]]) == "S1")
     }
 }
 

@@ -57,7 +57,7 @@ public struct MeetingSnapshot: Sendable, Equatable {
 
 /// A running meeting, in one of two modes.
 ///
-/// - **Mixed** (``init(meeting:sources:engine:locale:diarizer:enrollment:store:sink:convert:clock:feedCapacity:)``):
+/// - **Mixed** (``init(meeting:sources:engine:locale:diarizer:store:sink:convert:clock:feedCapacity:)``):
 ///   several ``MeetingSource``s are summed by a ``MeetingMixer`` and ONE engine transcribes the mix, so the
 ///   transcript is one continuous stream of `.mixed` segments. The mix is cut every 100 ms, a little behind the
 ///   clock so late chunks still make it, and the last partial frame is added at the stop: the mix is as long as
@@ -109,7 +109,6 @@ public actor MeetingSession {
     private let slots: [EngineSlot]
     private let isMixed: Bool
     private let diarizer: (any SpeakerDiarizer)?
-    private let enrollment: [Float]?
     private let store: MeetingStore
     private let sink: any MeetingAudioSink
     private let convert: MeetingAudioConverter
@@ -126,7 +125,6 @@ public actor MeetingSession {
     private var directory: SpeakerDirectory
     /// Diarizer cluster id → person id, for the live turns.
     private var clusterPerson: [String: PersonID] = [:]
-    private var enrolledCluster: String?
     private var liveTurns: [SpeakerTurn] = []
     private var diarizerError: String?
     /// When the meeting was paused, while it is.
@@ -171,7 +169,7 @@ public actor MeetingSession {
         self.init(
             meeting: meeting, sources: inputs.map { MeetingSource(stream: $0.stream, source: $0.source) },
             slots: inputs.map { EngineSlot(channel: $0.stream, engine: $0.engine, locale: $0.locale) }, isMixed: false,
-            diarizer: nil, enrollment: nil, store: store, sink: sink, convert: convert, clock: clock,
+            diarizer: nil, store: store, sink: sink, convert: convert, clock: clock,
             feedCapacity: feedCapacity)
     }
 
@@ -179,23 +177,22 @@ public actor MeetingSession {
     /// - Parameters:
     ///   - locale: the language `engine` prepares for; nil lets it choose.
     ///   - diarizer: tells speakers apart in the mix while the meeting runs; nil leaves segments without speakers.
-    ///   - enrollment: the user's voice sample (16 kHz mono) to teach the diarizer; its speaker becomes "You".
     ///   - feedCapacity: as for the other initializer; the mix feed holds a fifth as many (100 ms) frames.
     public init(
         meeting: Meeting, sources: [MeetingSource], engine: any DictationEngine, locale: Locale? = nil,
-        diarizer: (any SpeakerDiarizer)? = nil, enrollment: [Float]? = nil, store: MeetingStore,
+        diarizer: (any SpeakerDiarizer)? = nil, store: MeetingStore,
         sink: any MeetingAudioSink, convert: @escaping MeetingAudioConverter,
         clock: @escaping @Sendable () -> TimeInterval, feedCapacity: Int = 1_500
     ) {
         self.init(
             meeting: meeting, sources: sources, slots: [EngineSlot(channel: .mixed, engine: engine, locale: locale)],
-            isMixed: true, diarizer: diarizer, enrollment: enrollment, store: store, sink: sink, convert: convert,
+            isMixed: true, diarizer: diarizer, store: store, sink: sink, convert: convert,
             clock: clock, feedCapacity: feedCapacity)
     }
 
     private init(
         meeting: Meeting, sources: [MeetingSource], slots: [EngineSlot], isMixed: Bool,
-        diarizer: (any SpeakerDiarizer)?, enrollment: [Float]?, store: MeetingStore, sink: any MeetingAudioSink,
+        diarizer: (any SpeakerDiarizer)?, store: MeetingStore, sink: any MeetingAudioSink,
         convert: @escaping MeetingAudioConverter, clock: @escaping @Sendable () -> TimeInterval, feedCapacity: Int
     ) {
         self.meeting = meeting
@@ -204,7 +201,6 @@ public actor MeetingSession {
         self.slots = slots
         self.isMixed = isMixed
         self.diarizer = diarizer
-        self.enrollment = enrollment
         self.directory = SpeakerDirectory(meeting.speakers)
         self.store = store
         self.sink = sink
@@ -236,10 +232,6 @@ public actor MeetingSession {
                 formats[slot.channel] = try await slot.engine.prepare(locale: slot.locale)
                 // A model load cannot be interrupted; once it returns, a cancelled start stops here.
                 try Task.checkCancellation()
-            }
-            if let diarizer, let enrollment {
-                // Without the enrolled voice the diarizer still works; "You" is then found by other means.
-                do { enrolledCluster = try await diarizer.enroll(samples: enrollment) } catch { diarizerError = "\(error)" }
             }
             for entry in sources {
                 try Task.checkCancellation()
@@ -574,7 +566,7 @@ public actor MeetingSession {
 
     private func person(for cluster: String) -> PersonID {
         if let known = clusterPerson[cluster] { return known }
-        let id = directory.add(isYou: cluster == enrolledCluster)
+        let id = directory.add()
         clusterPerson[cluster] = id
         return id
     }

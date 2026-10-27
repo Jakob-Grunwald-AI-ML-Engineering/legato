@@ -90,7 +90,7 @@ public enum FluidAudioCatalog {
     }
 
     /// The after-meeting diarizer for a catalog id, or `nil` when the id is not an after-meeting speakers model.
-    public static func batchDiarizer(id: String, models: ModelManager) -> (any EnrollmentBatchDiarizer)? {
+    public static func batchDiarizer(id: String, models: ModelManager) -> (any BatchDiarizer)? {
         id == FluidAudioModels.diarizerOfflineID ? OfflineSpeakerDiarizer(models: models, modelID: id) : nil
     }
 

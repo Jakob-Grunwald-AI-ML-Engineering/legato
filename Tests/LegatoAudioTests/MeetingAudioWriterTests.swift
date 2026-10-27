@@ -42,6 +42,8 @@ import LegatoCore
 
         try await writer.finalize()
         let m4a = folder.appendingPathComponent("mic.m4a")
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mic.caf").path), "the CAF stays for the heavy steps")
+        await writer.discardLossless()
         #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("mic.caf").path))
         let file = try AVAudioFile(forReading: m4a)
         #expect(file.fileFormat.sampleRate == 16_000)
@@ -76,7 +78,7 @@ import LegatoCore
         #expect(file.length > 0)
         let duration = Double(file.length) / file.processingFormat.sampleRate
         #expect(duration > 5 && duration <= 10.2)
-        #expect(!FileManager.default.fileExists(atPath: copy.appendingPathComponent("system.caf").path))
+        #expect(FileManager.default.fileExists(atPath: copy.appendingPathComponent("system.caf").path), "recovery keeps the CAF too")
     }
 
     @Test func readerReturnsRequestedWindowsClamped() async throws {
@@ -161,6 +163,12 @@ import LegatoCore
         AudioChunk(samples: [Float](repeating: level, count: Int(seconds * 16_000)), format: spec)
     }
 
+    private func tone(seconds: Double, from start: Int = 0) -> AudioChunk {
+        let n = Int(seconds * 16_000)
+        let s = (0..<n).map { i in 0.3 * sinf(2 * .pi * 440 * Float(start + i) / 16_000) + 0.1 * sinf(Float(start + i) * 0.37) }
+        return AudioChunk(samples: s, format: spec)
+    }
+
     private func exists(_ folder: URL, _ name: String) -> Bool {
         FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path)
     }
@@ -188,13 +196,43 @@ import LegatoCore
         let report = try await writer.finalize()
         #expect(Set(report.converted) == [.mic, .system, .mixed])
         #expect(report.failed.isEmpty)
-        #expect(exists(folder, "mix.m4a") && !exists(folder, "mix.caf"))
+        #expect(exists(folder, "mix.m4a") && exists(folder, "mix.caf"))
         for name in ["mic.m4a", "system.m4a", "mix.m4a"] {
             #expect(abs(try seconds(folder.appendingPathComponent(name)) - 12) < 0.2, "\(name)")
         }
         #expect(abs(try await writer.duration(of: .mixed) - 12) < 0.2)
         let window = try await writer.samples(of: .mixed, in: 2..<3)
         #expect(abs(window.count - 16_000) <= 1)
+    }
+
+    @Test func afterFinalizeTheReaderStillReadsTheLosslessCafUntilItIsDiscarded() async throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = MeetingAudioWriter(folder: folder)
+        for s in 0..<4 { try await writer.write(tone(seconds: 1, from: s * 16_000), stream: .mixed) }
+        try await writer.finish()
+        let lossless = try await writer.samples(of: .mixed, in: 1..<3)
+
+        let report = await writer.finalize()
+        #expect(report.failed.isEmpty && exists(folder, "mix.m4a"))
+        #expect(try await writer.samples(of: .mixed, in: 1..<3) == lossless, "samples come from the CAF, not the AAC")
+
+        await writer.discardLossless()
+        #expect(!exists(folder, "mix.caf") && exists(folder, "mix.m4a"))
+        let lossy = try await writer.samples(of: .mixed, in: 1..<3)
+        #expect(lossy != lossless && abs(lossy.count - lossless.count) <= 1, "then the m4a answers")
+    }
+
+    @Test func discardingKeepsTheCafOfAStreamWithoutAnM4a() async throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = MeetingAudioWriter(folder: folder)
+        for s in 0..<3 { try await writer.write(tone(seconds: 1, from: s * 16_000), stream: .mic) }
+        try Data("garbage".utf8).write(to: folder.appendingPathComponent("system.caf"))
+        await writer.finalize()
+        await writer.discardLossless()
+        #expect(exists(folder, "mic.m4a") && !exists(folder, "mic.caf"))
+        #expect(exists(folder, "system.caf"), "no m4a, so the CAF is the only copy")
     }
 
     @Test func aLeftoverMixCafIsRecoveredToo() async throws {

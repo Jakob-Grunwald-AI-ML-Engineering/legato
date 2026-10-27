@@ -17,13 +17,13 @@ import LegatoCore
         let meeting = Meeting(title: "Mixed", date: Date(timeIntervalSince1970: 1), engineID: "fake")
         let session: MeetingSession
 
-        init(sources: Int = 2, diarizer: FakeDiarizer? = nil, enrollment: [Float]? = nil, locale: Locale? = nil) {
+        init(sources: Int = 2, diarizer: FakeDiarizer? = nil, locale: Locale? = nil) {
             store = MeetingStore(root: root)
             self.diarizer = diarizer
             var inputs = [MeetingSource(stream: .mic, source: micSource)]
             if sources > 1 { inputs.append(MeetingSource(stream: .system, source: systemSource)) }
             session = MeetingSession(
-                meeting: meeting, sources: inputs, engine: engine, locale: locale, diarizer: diarizer, enrollment: enrollment,
+                meeting: meeting, sources: inputs, engine: engine, locale: locale, diarizer: diarizer,
                 store: store, sink: sink, convert: { $0 }, clock: { [clock] in clock.now })
         }
 
@@ -328,25 +328,6 @@ import LegatoCore
         rig.micSource.push(tone(1_600))
         #expect(await eventually { await rig.stored().last?.speaker == "P1" })
         #expect(await rig.stored().first?.speaker == nil, "older than 3 s: left as it was")
-        _ = await rig.session.stop()
-    }
-
-    @Test func theEnrolledSlotIsYou() async throws {
-        let diarizer = FakeDiarizer(enrolledSlot: "slotY")
-        let rig = Rig(diarizer: diarizer, enrollment: [0.1, 0.2, 0.3])
-        defer { rig.cleanup() }
-        try await rig.session.start()
-        #expect(diarizer.enrolled == [[0.1, 0.2, 0.3]])
-        diarizer.script([SpeakerTurn(speaker: "other", start: 0, end: 3), SpeakerTurn(speaker: "slotY", start: 3, end: 6)])
-        rig.clock.now = 6
-        rig.micSource.push(tone(1_600))
-        rig.engine.emit(finalEvent("Me talking.", 3.5..<5))
-        #expect(await eventually { await rig.stored().first?.speaker != nil })
-        #expect(await eventually { (try? await rig.store.meeting(id: rig.meeting.id))?.speakers.values.contains { $0.isYou } == true })
-        let saved = try #require(try await rig.store.meeting(id: rig.meeting.id))
-        let you = saved.speakers.filter { $0.value.isYou }
-        #expect(you.count == 1 && you.first?.value.name == "You")
-        #expect(await rig.stored().first?.speaker == you.first?.key)
         _ = await rig.session.stop()
     }
 
