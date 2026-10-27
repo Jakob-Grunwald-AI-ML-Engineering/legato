@@ -94,6 +94,7 @@ public actor ModelManager {
     // MARK: install / cancel / delete
 
     /// Installs and warms the model, or joins the install already running, and streams its states.
+    /// Batch speech models are only downloaded: they load, and compile, when the post-pass uses them.
     ///
     /// The stream ends with the install: `installed`, `failed`, or `notInstalled` after a cancel. An
     /// installed model yields `installed` and ends without touching the installer's `install`.
@@ -231,9 +232,13 @@ public actor ModelManager {
                 try InstallMarker.write(in: folder, id: id, stage: .downloaded)
             }
             try Task.checkCancellation()
-            transient[id] = .warming
-            publish(id, .warming)
-            try await installer.warm(root: root)
+            // A batch model's compile takes minutes on first use and would queue the Neural Engine ahead
+            // of a meeting's live engine; it compiles when the post-pass loads it instead.
+            if descriptors[id]?.kind != .speechBatch {
+                transient[id] = .warming
+                publish(id, .warming)
+                try await installer.warm(root: root)
+            }
             try Task.checkCancellation()
             try InstallMarker.write(in: folder, id: id, stage: .installed)
             outcome = .installed(bytes: folderSize(installer.installFolder(root: root)))

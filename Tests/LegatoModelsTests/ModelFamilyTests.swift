@@ -115,6 +115,15 @@ private let batchB = ModelDescriptor(
         #expect(family([560, 1120], languages: many).detailsLine.hasPrefix("a, b, c, d, e, f, g, h +2 · "))
     }
 
+    @Test func roleLineSaysWhatEachKindIsFor() {
+        #expect(family([560, 1120]).roleLine == "Live dictation")
+        #expect(family([160, 320], languages: ["en"]).roleLine == "English only · live dictation")
+        #expect(ModelFamily.groups(of: [batchA], kind: .speechBatch)[0].roleLine == "After meetings · not live")
+        #expect(batchA.roleLine == "After meetings · not live")
+        let llm = ModelDescriptor(id: "l", kind: .llm, displayName: "L", approxBytes: 1, licence: "MIT", family: "l")
+        #expect(llm.roleLine == nil)
+    }
+
     @Test func aLoneModelsSizeIsNotPerTier() {
         let lone = ModelFamily.groups(of: [batchA], kind: .speechBatch)[0]
         let size = ByteCountFormatter.string(fromByteCount: 2_000, countStyle: .file)

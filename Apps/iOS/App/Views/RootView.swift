@@ -25,6 +25,7 @@ struct RootView: View {
             // Back to the app the user came from (or away): the hop screen has done its job.
             if phase == .background { controller.dismissKeyboardHop() }
             guard phase == .active else { return }
+            controller.appBecameActive()
             Task {
                 await controller.refreshReadiness()
                 await controller.refreshLastTranscript()

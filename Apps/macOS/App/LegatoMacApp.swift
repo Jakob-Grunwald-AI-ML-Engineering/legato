@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -25,6 +26,12 @@ struct LegatoMacApp: App {
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
 
+        Window("Meetings", id: MeetingController.windowID) {
+            MeetingsWindow()
+                .environment(controller)
+        }
+        .defaultLaunchBehavior(.suppressed)
+
         Settings {
             SettingsView()
                 .environment(controller)
@@ -46,6 +53,11 @@ private struct MenuBarLabel: View {
                 guard count > 0 else { return }
                 NSApp.activate()
                 openWindow(id: MacAppController.onboardingWindowID)
+            }
+            .onChange(of: controller.meetings.windowRequests) { _, count in
+                guard count > 0 else { return }
+                NSApp.activate()
+                openWindow(id: MeetingController.windowID)
             }
     }
 }

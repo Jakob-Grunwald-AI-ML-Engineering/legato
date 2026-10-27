@@ -38,6 +38,8 @@ let package = Package(
         .library(name: "LegatoMLX", targets: ["LegatoMLX"]),
         .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
+        .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
+        .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
         .library(name: "LegatoVocabulary", targets: ["LegatoVocabulary"]),
     ],
@@ -127,18 +129,28 @@ let package = Package(
             name: "LegatoAppServices",
             dependencies: [
                 "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoPostProcessing",
-                "LegatoVocabulary",
+                "LegatoAppleSpeech", "LegatoAudio", "LegatoMeetings", "LegatoClaude", "LegatoVocabulary",
             ]
         ),
         .testTarget(
             name: "LegatoAppServicesTests",
             dependencies: [
                 "LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing", "LegatoVocabulary",
-                "LegatoEngines",
+                "LegatoEngines", "LegatoMeetings", "LegatoClaude", "LegatoFluidAudio",
             ]
         ),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
+        // Meeting notes: a multi-stream session, its store, recovery, echo de-duplication and export. Core only.
+        .target(name: "LegatoMeetings", dependencies: ["LegatoCore"]),
+        .testTarget(
+            name: "LegatoMeetingsTests",
+            dependencies: ["LegatoMeetings", "LegatoCore"],
+            resources: [.copy("Fixtures")]
+        ),
+        // The Claude API as an opt-in summary backend, and where its key lives. Core only.
+        .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
+        .testTarget(name: "LegatoClaudeTests", dependencies: ["LegatoClaude", "LegatoCore"]),
     ] + (stubDeps ? stubTargets : []),
     swiftLanguageModes: [.v6]
 )

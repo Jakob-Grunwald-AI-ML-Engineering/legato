@@ -50,6 +50,19 @@ import Testing
         #expect(c.options.contains(.allowBluetoothA2DP))
         #expect(c.options.contains(.defaultToSpeaker))
     }
+
+    @Test func meetingConfigMixesAndAllowsBluetoothHFPOnly() {
+        let c = SessionConfig.meeting
+        #expect(c.category == .playAndRecord)
+        #expect(c.mode == .default)
+        #expect(c.options == [.mixWithOthers, .allowBluetoothHFP])
+    }
+
+    @Test func noDictationPolicyAllowsBluetoothHFP() {
+        for policy in AudioPolicy.allCases {
+            #expect(!policy.sessionConfig.options.contains(.allowBluetoothHFP))
+        }
+    }
 }
 
 @Suite struct TranscriptAssemblerTests {

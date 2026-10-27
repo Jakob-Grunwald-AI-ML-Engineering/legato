@@ -29,6 +29,38 @@ import LegatoCore
     }
     #endif
 
+    @Test func meetingSessionMapsMixAndBluetoothHFPOnly() {
+        let d = SessionDescription(SessionConfig.meeting)
+        #expect(d.category == .playAndRecord)
+        #expect(d.mode == .default)
+        #expect(d.mixWithOthers)
+        #expect(d.allowBluetoothHFP)
+        #expect(!d.duckOthers)
+        #expect(!d.allowBluetoothA2DP)
+        #expect(!d.defaultToSpeaker)
+        #expect(!d.interruptSpokenAudio)
+    }
+
+    @Test func onlyDictationPinsTheBuiltInMic() {
+        // A meeting lets a Bluetooth headset be the input (AirPods), so it must not pin the built-in mic.
+        #expect(SessionDescription(SessionConfig.meeting).prefersBuiltInMic == false)
+        for policy in AudioPolicy.allCases {
+            #expect(SessionDescription(policy.sessionConfig).prefersBuiltInMic)
+        }
+    }
+
+    @Test func dictationPoliciesDoNotAllowBluetoothHFP() {
+        for policy in AudioPolicy.allCases {
+            #expect(!SessionDescription(policy.sessionConfig).allowBluetoothHFP)
+        }
+    }
+
+    #if os(iOS)
+    @Test func meetingSessionAvOptions() {
+        #expect(SessionDescription(SessionConfig.meeting).avOptions == [.mixWithOthers, .allowBluetoothHFP])
+    }
+    #endif
+
     @Test func duckOthersHasDuck() {
         let d = SessionDescription(AudioPolicy.duckOthers.sessionConfig)
         #expect(d.duckOthers)

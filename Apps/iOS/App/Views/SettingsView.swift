@@ -52,6 +52,17 @@ struct SettingsView: View {
                 }
             }
 
+            Section {
+                NavigationLink {
+                    MeetingSettingsView(controller: controller)
+                } label: {
+                    Text("Summary and Claude")
+                }
+                .accessibilityIdentifier("settings.meetings")
+            } header: {
+                Text("Meetings")
+            }
+
             lastDictation
 
             Section {

@@ -32,6 +32,7 @@ final class E2EFakeKeyboard {
         case "kbd-request-stop": await send(.stop)
         case "kbd-request-end-keep-alive": await send(.endKeepAlive)
         case "kbd-hop-arm": await hop(urlFirst: false)
+        case "kbd-hop-start": await hop(.start, urlFirst: false)
         case "kbd-hop-arm-url-first": await hop(urlFirst: true)
         case "kbd-forged-url": await forgedURL()
         default: E2E.log("kbd.unknown \(command)")
@@ -97,18 +98,19 @@ final class E2EFakeKeyboard {
         E2E.log("kbd.ack result=timeout")
     }
 
-    /// What the mic key does in `.openApp` mode: the Darwin request and the URL the Link opens. Both ask
-    /// only to arm the microphone.
-    private func hop(urlFirst: Bool) async {
+    /// What the mic key does in `.openApp` mode: the Darwin request and the URL the Link opens. By default
+    /// both ask only to arm the microphone; `kbd-hop-start` is a start the host could not take over the link
+    /// (it answered `hop`), whose URL then reaches the app.
+    private func hop(_ command: RequestCommand = .arm, urlFirst: Bool) async {
         let id = newID()
-        let url = KeyboardURL.make(command: .arm, requestID: id)
+        let url = KeyboardURL.make(command: command, requestID: id)
         if urlFirst {
             // The Link tap writes the request as it opens the URL; the Darwin note comes after the app is up.
-            writeRequest(.arm, id: id)
+            writeRequest(command, id: id)
             await AppController.shared.handle(url)
             DarwinObserver.post(LinkChannel.Note.request)
         } else {
-            post(.arm, id: id)
+            post(command, id: id)
             await AppController.shared.handle(url)
         }
         await awaitAck(id)

@@ -288,6 +288,42 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         #expect(r.host?.leaseUntil == t0.addingTimeInterval(30) && r.host?.runID == "run-2")
     }
 
+    @Test func aMeetingIsPublishedAndKeepsTheBeatGoing() async throws {
+        let r = Rig()
+        #expect(r.host?.meetingRecording == nil)
+        r.link.meetingChanged(active: true)
+        #expect(r.host?.meetingRecording == true)
+        r.env.advance(1)
+        r.env.beat.tick()
+        #expect(await eventually { r.host?.beatAt == t0.addingTimeInterval(1) })
+        r.link.meetingChanged(active: false)
+        #expect(r.host?.meetingRecording == nil)
+        let seq = r.host?.seq
+        r.env.advance(1)
+        r.env.beat.tick()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(r.host?.seq == seq)
+    }
+
+    @Test func aMeetingStaysInTheStateAcrossRunsAndTheScrub() {
+        let r = Rig()
+        r.link.meetingChanged(active: true)
+        r.link.runStarted(id: "run-2", target: .keyboard)
+        #expect(r.host?.meetingRecording == true)
+        r.link.runEnded(committed: "x ")
+        r.link.scrubText()
+        #expect(r.host?.meetingRecording == true)
+    }
+
+    @Test func aStartWhileAMeetingRecordsAsksTheKeyboardToHopSoTheAppCanSayWhy() async {
+        let r = Rig()
+        r.link.meetingChanged(active: true)
+        r.send(.start)
+        await r.link.processInbox()
+        #expect(r.ack?.result == .hop)
+        #expect(r.received.requests.isEmpty)
+    }
+
     // MARK: text does not outlive the run
 
     private func finishedRun(_ r: Rig) {

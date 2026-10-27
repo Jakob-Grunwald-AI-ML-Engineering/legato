@@ -91,6 +91,17 @@ public struct ModelDescriptor: Sendable, Hashable, Identifiable {
         self.tierMs = tierMs
     }
 
+    /// What the model is for and how far it reaches, in words for a row: "Live dictation",
+    /// "English only · live dictation" (a streaming model with the single language `en`) or
+    /// "After meetings · not live" (a batch model). `nil` for a model that is not a speech model.
+    public var roleLine: String? {
+        switch kind {
+        case .speechStreaming: languages == ["en"] ? "English only · live dictation" : "Live dictation"
+        case .speechBatch: "After meetings · not live"
+        case .llm: nil
+        }
+    }
+
     /// Whether the model is flagged to run on `platform`.
     public func supports(_ platform: ModelPlatform = .current) -> Bool {
         platforms.contains(platform)

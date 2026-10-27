@@ -12,7 +12,9 @@
 # stood in for by a fake keyboard inside the app (kbd-* commands) that speaks the real link protocol. Everything else is the real
 # app: ActivityKit (Live Activities), UIPasteboard, the history file in the App Group container, the
 # AVAudioSession interruption observer. Assertions read the app's `e2e` os_log lines
-# (subsystem de.gruenwald.legato), `simctl pbpaste` and the history file.
+# (subsystem de.gruenwald.legato), `simctl pbpaste`, the history file and, for meetings, the App Group
+# container's Meetings/ folder (meeting.json, segments.jsonl, the m4a, the exported Markdown). A meeting
+# records a scripted tone for a microphone, with the scripted engine for its transcript.
 #
 # Environment:
 #   LEGATO_E2E_UDID      use this (already created) simulator; it is shut down afterwards only if the script booted it
@@ -22,6 +24,7 @@
 #                        LEGATO_E2E_KEEP_DAYS (default 7)
 #   LEGATO_CACHE_DIR     root of the shared build caches (default: ~/Library/Caches/legato)
 #   LEGATO_E2E_SHOTS     directory for the keyboard screenshots (scenario s; default: inside the work directory)
+#   LEGATO_E2E_ONLY      space-separated scenario letters to run (for example "x y z"); default: all
 # Without LEGATO_E2E_UDID a simulator named "legato-e2e" is created once (iPhone, newest iOS 26+ runtime),
 # reused by later runs, and shut down at the end.
 #
@@ -200,11 +203,13 @@ if [ "$mode" = release-check ]; then
     AudioDiagnostics session.deactivate.skipped audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
     LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoFakeRefusalInForeground LegatoFakeRefusalCount LegatoAudioPolicy
     start.route start.fallback toggle-after-hop
-    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-arm kbd-forged-url kbd.forged-url
+    E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-arm kbd-hop-start kbd-forged-url kbd.forged-url
     "keyboard.url admission" kbd.apply "link.host phase=" debugForceTapToCopy debugShowPauseOthers
     KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers LegatoHarnessAppearance
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
-    LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document)
+    LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
+    E2EFakeMeetingMic meeting-start meeting-stop meeting-mute meeting-unmute meeting-export meeting-route-change interrupt-end
+    "meeting.started" "meeting.refused" "meeting.pipeline.done" "meeting.export" "meeting.session.activate" "meeting.mic.restart")
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
   }
@@ -350,6 +355,52 @@ for line in open(sys.argv[1]):
 }
 
 # ---------------------------------------------------------------------------------------------- scenarios
+
+# The App Group container of the app on the simulator.
+group_dir() {
+  xcrun simctl get_app_container "$UDID" "$BID" groups | awk -F'\t' '$1 == "group.de.gruenwald.legato" {print $2}'
+}
+# The newest meeting folder in the container's Meetings/.
+meeting_dir() {
+  local group; group="$(group_dir)"
+  [ -n "$group" ] && ls -td "$group"/Meetings/*/ 2> /dev/null | head -1 | sed 's:/$::'
+}
+# meeting_field <folder> <python expression over m, the parsed meeting.json>
+meeting_field() {
+  python3 -I -c 'import json, sys; m = json.load(open(sys.argv[1] + "/meeting.json")); print(eval(sys.argv[2]))' "$1" "$2" 2> /dev/null
+}
+# Seconds of audio in a file, from afinfo.
+audio_seconds() { afinfo "$1" 2> /dev/null | sed -n 's/^estimated duration: \([0-9.]*\) sec.*/\1/p'; }
+# True when |a - b| <= tolerance.
+near() { python3 -I -c 'import sys; a, b, t = map(float, sys.argv[1:]); sys.exit(0 if abs(a - b) <= t else 1)' "$1" "$2" "$3"; }
+# The Markdown MarkdownExporter must produce for a meeting folder, rebuilt from meeting.json, segments.jsonl and
+# the newest summary-*.md, written to <out>.
+expected_markdown() { # expected_markdown <folder> <out>
+  python3 -I - "$1" "$2" <<'PY'
+import datetime, glob, json, os, sys
+d, out = sys.argv[1], sys.argv[2]
+m = json.load(open(d + "/meeting.json"))
+segs = [json.loads(l) for l in open(d + "/segments.jsonl") if l.strip()]
+segs = [s for _, s in sorted(enumerate(segs), key=lambda p: (p[1]["start"], p[0]))]
+def clock(t):
+    t = max(0, int(t)); h, mi, s = t // 3600, t // 60 % 60, t % 60
+    return f"{h}:{mi:02d}:{s:02d}" if h else f"{mi:02d}:{s:02d}"
+label = lambda st: "Me" if st == "mic" else "Them"
+date = datetime.datetime.fromtimestamp(m["date"] / 1000).strftime("%Y-%m-%d %H:%M")
+blocks = [f"# {m['title']}", f"- Date: {date}\n- Duration: {clock(m['duration'])}"]
+summaries = sorted(glob.glob(d + "/summary-*.md"), key=os.path.getmtime, reverse=True)
+if summaries:
+    text = open(summaries[0]).read()
+    if text:
+        blocks.append(text)
+blocks.append("## Transcript")
+items = [(r["start"], f"_{label(r['stream'])} muted {clock(r['start'])}\u2013{clock(r['end'])}_") for r in m["mutedRanges"]]
+items += [(s["start"], f"**{label(s['stream'])}** [{clock(s['start'])}] {s['text']}") for s in segs if not s["echo"]]
+items = [it for _, it in sorted(enumerate(items), key=lambda p: (p[1][0], p[0]))]
+blocks += [text for _, text in items]
+open(out, "w").write("\n\n".join(blocks) + "\n")
+PY
+}
 
 TEXT="hello world from the simulator"
 # 21 words: about 3.2 s of scripted speech, long enough for an interruption mid-way
@@ -1100,13 +1151,142 @@ scenario_w() {
   assert_count "activity ended failed once" "activity.end phase=failed" 1
 }
 
+# A meeting: the scripted engine and a tone for a microphone. 16 words at 400 ms is about 6.4 s of transcript.
+MEETING_TEXT="one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
+
+# meeting_stop_and_wait: stops the meeting and waits until the after-stop chain finished it.
+meeting_stop_and_wait() {
+  trigger meeting-stop
+  wait_log "e2e meeting.pipeline.done" 60
+}
+
+scenario_x() {
+  begin "x. meeting" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  trigger kbd-visible
+  wait_log "kbd.visible value=1" 10
+  trigger meeting-start
+  wait_log "e2e meeting.started" 20
+  assert_log "the meeting started" "e2e meeting.started"
+  assert_order "Live Activity is requested before the audio session activates" "meeting.activity.request" "meeting.session.activate"
+  assert_order "the session is active before the mic starts" "meeting.session.activate" "meeting.mic.start"
+  assert_log "the meeting's Live Activity is up" "meeting.activity.request live=1"
+  assert_log "the keyboard link says a meeting records" "meeting=1"
+  sleep 2.5
+  trigger meeting-mute
+  wait_log "meeting.mute value=1" 10
+  assert_log "the Live Activity shows the mute" "meeting.activity.update phase=muted"
+  sleep 2
+  trigger meeting-unmute
+  wait_log "meeting.mute value=0" 10
+  sleep 1.5
+  # Dictation is blocked: the Action Button path, the keyboard's mic key (the hop) and the in-app button.
+  trigger toggle
+  wait_log "meeting.refused source=toggle" 10
+  trigger kbd-hop-arm
+  wait_log "meeting.refused source=keyboard-arm" 10
+  trigger kbd-hop-start
+  wait_log "meeting.refused source=keyboard notice" 10
+  sleep 0.5
+  assert_log "a press during a meeting gets 'Meeting recording'" 'meeting.refused source=toggle notice="Meeting recording"'
+  assert_log "the keyboard's arm gets 'Meeting recording'" 'meeting.refused source=keyboard-arm notice="Meeting recording"'
+  assert_log "the keyboard's start request gets 'Meeting recording'" 'meeting.refused source=keyboard notice="Meeting recording"'
+  assert_no_log "no dictation session built" "session.make"
+  assert_no_log "no dictation mic started" "audio.start"
+  assert_no_log "no dictation activity requested" "activity.request phase="
+  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+  assert_eq "history empty" "0" "$(history_texts | grep -c .)"
+  meeting_stop_and_wait
+  assert_log "the meeting stopped" "e2e meeting.stopped"
+  assert_log "the meeting's Live Activity ended" "meeting.activity.end live=0"
+  assert_eq "the link says no meeting now" "yes" "$(last_line "link.host" | grep -q ' meeting=0 ' && echo yes || echo no)"
+  local dir; dir="$(meeting_dir)"
+  [ -n "$dir" ] || { record FAIL "a meeting folder exists in the App Group container" "none under Meetings/"; return; }
+  assert_eq "meeting finished" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_eq "engine recorded" "e2e-scripted" "$(meeting_field "$dir" 'm["engineID"]')"
+  local segs; segs="$(grep -c . "$dir/segments.jsonl" 2> /dev/null)"
+  if [ "${segs:-0}" -ge 5 ]; then record PASS "the live transcript was saved ($segs segments)"
+  else record FAIL "the live transcript was saved" "segments.jsonl has ${segs:-0} lines"; fi
+  assert_eq "first segment is the first word, tagged mic" "one mic" \
+    "$(python3 -I -c 'import json, sys; s = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]; s.sort(key=lambda x: x["start"]); print(s[0]["text"].strip(), s[0]["stream"])' "$dir/segments.jsonl")"
+  assert_eq "the mute left one marked range" "1" "$(meeting_field "$dir" 'len(m["mutedRanges"])')"
+  assert_eq "the marked range is the mic's" "mic" "$(meeting_field "$dir" 'm["mutedRanges"][0]["stream"]')"
+  assert_eq "the marked range is about the muted 2 s" "ok" \
+    "$(meeting_field "$dir" '"ok" if 1.5 <= m["mutedRanges"][0]["end"] - m["mutedRanges"][0]["start"] <= 3.5 else "bad"')"
+  assert_eq "the recording is an m4a" "yes" "$([ -f "$dir/mic.m4a" ] && echo yes || echo no)"
+  assert_eq "the CAF is gone" "no" "$([ -f "$dir/mic.caf" ] && echo yes || echo no)"
+  if near "$(audio_seconds "$dir/mic.m4a")" "$(meeting_field "$dir" 'm["duration"]')" 1.5; then record PASS "the m4a is as long as the meeting"
+  else record FAIL "the m4a is as long as the meeting" "audio $(audio_seconds "$dir/mic.m4a") s, meeting $(meeting_field "$dir" 'm["duration"]') s"; fi
+  # Export: what the share sheet offers; the Markdown must be what the exporter makes of the saved meeting.
+  trigger meeting-export
+  wait_log "e2e meeting.export md=" 10
+  local md; md="$(log_field_last "meeting.export" md)"
+  assert_eq "export offers the Markdown and the recording" "2" "$(last_line "meeting.export" | sed -n 's/.* files=\([0-9]*\).*/\1/p')"
+  expected_markdown "$dir" "$WORK/expected.md"
+  if [ -f "$md" ] && cmp -s "$md" "$WORK/expected.md"; then record PASS "the exported Markdown matches the saved meeting"
+  else record FAIL "the exported Markdown matches the saved meeting" "$(diff "$md" "$WORK/expected.md" 2>&1 | head -5)"; fi
+  if grep -q '^_Me muted ' "$md" 2> /dev/null; then record PASS "the export notes the muted range"
+  else record FAIL "the export notes the muted range" "no '_Me muted' line"; fi
+}
+
+scenario_y() {
+  begin "y. meeting interruption" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return
+  trigger meeting-start
+  wait_log "e2e meeting.started" 20
+  sleep 2.5
+  trigger interrupt            # a call takes the mic: the tone stops, the meeting mutes
+  wait_log "meeting.interruption began" 10
+  sleep 3
+  assert_log "the Live Activity shows the pause" "meeting.activity.update phase=interrupted"
+  assert_no_log "the dictation observer did not stop anything" "system-stop"
+  trigger interrupt-end        # the call ends, shouldResume
+  wait_log "meeting.mic.restart reactivated=1" 10
+  assert_log "the session was reactivated as it is" "meeting.session.reactivate"
+  assert_order "reactivated before the engine restarted" "meeting.session.reactivate" "meeting.mic.restart"
+  assert_count "a fresh mic started on resume" "meeting.mic.start" 2
+  sleep 1.5
+  trigger meeting-route-change # AirPods connect: the engine restarts, nothing is muted
+  wait_log_n "e2e meeting.mic.restart" 2 10
+  assert_log "a route change restarts without reactivating" "meeting.mic.restart reactivated=0"
+  assert_count "a third mic started" "meeting.mic.start" 3
+  sleep 1.5
+  meeting_stop_and_wait
+  local dir; dir="$(meeting_dir)"
+  [ -n "$dir" ] || { record FAIL "a meeting folder exists" "none under Meetings/"; return; }
+  assert_eq "meeting finished" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_eq "the interruption left one marked range" "1" "$(meeting_field "$dir" 'len(m["mutedRanges"])')"
+  assert_eq "the range is about the 3 s the mic was gone" "ok" \
+    "$(meeting_field "$dir" '"ok" if 2.5 <= m["mutedRanges"][0]["end"] - m["mutedRanges"][0]["start"] <= 5.5 else "bad"')"
+  if near "$(audio_seconds "$dir/mic.m4a")" "$(meeting_field "$dir" 'm["duration"]')" 1.5; then record PASS "silence filled the gap: the m4a is as long as the meeting"
+  else record FAIL "silence filled the gap: the m4a is as long as the meeting" "audio $(audio_seconds "$dir/mic.m4a") s, meeting $(meeting_field "$dir" 'm["duration"]') s"; fi
+}
+
+scenario_z() {
+  begin "z. meeting survives a kill" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return
+  trigger meeting-start
+  wait_log "e2e meeting.started" 20
+  sleep 4
+  local dir; dir="$(meeting_dir)"
+  assert_eq "while recording the meeting is saved as recording" "recording" "$(meeting_field "$dir" 'm["state"]')"
+  relaunch -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return   # kills the app
+  wait_log "e2e meeting.pipeline.done" 60
+  assert_eq "recovery finished the interrupted meeting" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_eq "the recording survived as an m4a" "yes" "$([ -f "$dir/mic.m4a" ] && echo yes || echo no)"
+  local segs; segs="$(grep -c . "$dir/segments.jsonl" 2> /dev/null)"
+  if [ "${segs:-0}" -ge 3 ]; then record PASS "the transcript so far survived ($segs segments)"
+  else record FAIL "the transcript so far survived" "segments.jsonl has ${segs:-0} lines"; fi
+}
+
 t_run=$SECONDS
-for s in a b c d e f g h i p j o k l m n q t r s u; do "scenario_$s"; done
-scenario_v "retry succeeds" duckOthers 1 2 yes
-scenario_v "default fails twice" duckOthers 9 2 no
-scenario_v "experimental: same policy, then duckOthers" duckMusicPauseSpoken 2 3 yes
-scenario_v "experimental fails thrice" duckMusicPauseSpoken 9 3 no
-scenario_w
+wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
+for s in a b c d e f g h i p j o k l m n q t r s u x y z; do if wanted "$s"; then "scenario_$s"; fi; done
+if wanted v; then
+  scenario_v "retry succeeds" duckOthers 1 2 yes
+  scenario_v "default fails twice" duckOthers 9 2 no
+  scenario_v "experimental: same policy, then duckOthers" duckMusicPauseSpoken 2 3 yes
+  scenario_v "experimental fails thrice" duckMusicPauseSpoken 9 3 no
+fi
+if wanted w; then scenario_w; fi
 stop_log
 
 # ---------------------------------------------------------------------------------------------- report

@@ -221,3 +221,57 @@ public enum HotkeySpec: Sendable, Hashable, Codable {
         109: "F10", 111: "F12", 118: "F4", 120: "F2", 122: "F1", 123: "←", 124: "→", 125: "↓", 126: "↑",
     ]
 }
+
+/// Turns the key events of a second, one-shot hotkey (the meeting mute toggle) into "it fired".
+/// Independent of the dictation hotkey's `HotkeyGesture`, which it never touches.
+///
+/// - Combo: fires once on the key-down; auto-repeat is ignored until the key (or a required modifier) is released.
+/// - Lone modifier: fires on its release, and only when no other key went down while it was held, so
+///   a chord such as Right ⌥ + A does not toggle.
+public struct HotkeyPressDetector: Sendable {
+    public let spec: HotkeySpec
+    private var isDown = false
+    private var spoiled = false
+
+    public init(spec: HotkeySpec) {
+        self.spec = spec
+    }
+
+    /// Whether `event` completes a press of the hotkey.
+    public mutating func feed(_ event: KeyEvent) -> Bool {
+        guard let trigger = spec.triggerEvent(for: event) else { return false }
+        switch (spec, trigger) {
+        case (.combo, .pressed):
+            defer { isDown = true }
+            return !isDown
+        case (.modifier, .pressed):
+            isDown = true
+            spoiled = false
+            return false
+        case (.modifier, .otherKeyDown):
+            if isDown { spoiled = true }
+            return false
+        case (.modifier, .released):
+            defer { reset() }
+            return isDown && !spoiled
+        case (.combo, .released):
+            isDown = false
+            return false
+        case (.combo, .otherKeyDown):
+            return false
+        }
+    }
+
+    /// Forget a press in progress (key events were lost).
+    public mutating func reset() {
+        isDown = false
+        spoiled = false
+    }
+}
+
+extension HotkeySpec {
+    /// Two hotkeys that one key press would both trigger; the recorder refuses such a pair.
+    public func conflicts(with other: HotkeySpec) -> Bool {
+        self == other
+    }
+}

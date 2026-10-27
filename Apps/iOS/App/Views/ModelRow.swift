@@ -36,6 +36,7 @@ struct ModelRow: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(descriptor.displayName).foregroundStyle(.primary)
+                    if let role = descriptor.roleLine { Text(role).font(.caption).foregroundStyle(.tint) }
                     Text(details).font(.caption).foregroundStyle(.secondary)
                     stateLine.font(.caption)
                     if let failure { Text(failure).font(.caption).foregroundStyle(.red) }

@@ -9,8 +9,9 @@
 # the simulator end-to-end run drives. Only the app links the rest of the package.
 #
 # Each target carries a PrivacyInfo.xcprivacy next to its sources (App/, Widgets/, Keyboard/): the App
-# Group's UserDefaults is the one required-reason API in use (CA92.1 own defaults, 1C8F.1 same App Group);
-# no tracking, no collected data.
+# Group's UserDefaults is the required-reason API every target uses (CA92.1 own defaults, 1C8F.1 same App
+# Group); the app also reads file dates in the App Group container (C617.1) and elapsed time (35F9.1) for
+# meetings. No tracking; the app's one collected-data entry is the opt-in "Summarize with Claude" upload.
 #
 # TestFlight builds are Release builds that keep the audio diagnostics and debug switches: pass
 # OTHER_SWIFT_FLAGS='$(inherited) -D LEGATO_INTERNAL' to xcodebuild (leg 5). App Store builds don't.
@@ -61,6 +62,11 @@ targets:
         product: LegatoMLX
       - package: LegatoKit
         product: LegatoAppServices
+      # Meetings: the session, the store and the summaries; Claude is the opt-in summary backend.
+      - package: LegatoKit
+        product: LegatoMeetings
+      - package: LegatoKit
+        product: LegatoClaude
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato
@@ -87,7 +93,7 @@ targets:
         NSSupportsLiveActivities: true
         # Only Apple's own encryption (TLS, system frameworks): exempt, so App Store Connect stops asking.
         ITSAppUsesNonExemptEncryption: false
-        NSMicrophoneUsageDescription: Legato records your voice to turn it into text.
+        NSMicrophoneUsageDescription: Legato records your voice to turn it into text. For meeting notes it also saves the meeting audio on this device.
         NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this device.
         CFBundleURLTypes:
           - CFBundleURLName: de.gruenwald.legato

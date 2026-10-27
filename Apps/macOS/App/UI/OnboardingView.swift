@@ -45,6 +45,14 @@ struct OnboardingView: View {
                 }
             }
 
+            step(4, "Meetings (optional)", done: false) {
+                row("System Audio Recording",
+                    "To transcribe the other side of a meeting. macOS asks the first time you start one; there is no way to check it beforehand.",
+                    granted: false, action: "Open Settings") { permissions.openSystemAudioRecordingSettings() }
+                Text("If Them stays empty, enable Legato under System Audio Recording Only.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+
             HStack {
                 Spacer()
                 Button(controller.needsSetup ? "Finish later" : "Done") { dismissWindow(id: MacAppController.onboardingWindowID) }

@@ -35,4 +35,32 @@ import Testing
         #expect(!edge.isLive(now: now))
         #expect(MicKeyMode.resolve(host: edge, now: now, fullAccess: true) == .openApp) // same verdict
     }
+
+    // MARK: Meeting notice
+
+    private func recording(_ state: HostState) -> HostState {
+        var copy = state
+        copy.meetingRecording = true
+        return copy
+    }
+
+    @Test func aFreshMeetingFlagMakesTheKeyboardSayWhy() {
+        let state = recording(hostState(phase: .idle, beatAt: now.addingTimeInterval(-1)))
+        #expect(state.meetingNotice(now: now) == "Meeting recording")
+    }
+
+    @Test func aMeetingFlagWithAStaleBeatIsADeadApp() {
+        // The app died mid-meeting and left the flag behind: do not keep blocking the keyboard.
+        let state = recording(hostState(phase: .idle, beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness - 0.1)))
+        #expect(state.meetingNotice(now: now) == nil)
+        let edge = recording(hostState(phase: .idle, beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness)))
+        #expect(edge.meetingNotice(now: now) == nil)
+    }
+
+    @Test func noMeetingFlagNoNotice() {
+        #expect(hostState(phase: .idle, beatAt: now).meetingNotice(now: now) == nil)
+        var cleared = recording(hostState(phase: .idle, beatAt: now))
+        cleared.meetingRecording = false
+        #expect(cleared.meetingNotice(now: now) == nil)
+    }
 }

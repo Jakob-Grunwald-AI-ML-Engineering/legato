@@ -10,6 +10,7 @@ import Observation
 final class MacSettings {
     private enum Key {
         static let hotkey = "hotkey"
+        static let muteHotkey = "meetingMuteHotkey"
         static let gestureMode = "gestureMode"
         static let insertionMode = "insertionMode"
         static let restoreClipboard = "restoreClipboard"
@@ -26,6 +27,17 @@ final class MacSettings {
                 defaults.set(data, forKey: Key.hotkey)
             } else {
                 defaults.removeObject(forKey: Key.hotkey)
+            }
+        }
+    }
+
+    /// The meeting mute toggle; nil until the user records one.
+    var muteHotkey: HotkeySpec? {
+        didSet {
+            if let muteHotkey, let data = try? JSONEncoder().encode(muteHotkey) {
+                defaults.set(data, forKey: Key.muteHotkey)
+            } else {
+                defaults.removeObject(forKey: Key.muteHotkey)
             }
         }
     }
@@ -83,6 +95,7 @@ final class MacSettings {
         cleanupITN = cleanup.itn
         cleanupTimeoutSeconds = cleanup.timeoutSeconds
         hotkey = defaults.data(forKey: Key.hotkey).flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) }
+        muteHotkey = defaults.data(forKey: Key.muteHotkey).flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) }
         gestureMode = defaults.string(forKey: Key.gestureMode).flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
         insertionMode = defaults.string(forKey: Key.insertionMode).flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         restoreClipboard = defaults.object(forKey: Key.restoreClipboard) as? Bool ?? true

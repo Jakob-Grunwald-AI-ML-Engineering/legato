@@ -16,9 +16,11 @@ struct HomeView: View {
                     .background(controller.isDictating ? Color.red : Color.accentColor, in: Circle())
             }
             .accessibilityLabel(controller.isDictating ? "Stop dictation" : "Start dictation")
+            .disabled(controller.meetings.isActive)
 
-            Text(controller.isDictating ? "Listening" : "Ready")
+            Text(controller.meetings.isActive ? "Meeting recording" : (controller.isDictating ? "Listening" : "Ready"))
                 .font(.title2.bold())
+                .accessibilityIdentifier("home.status")
 
             if let text = controller.lastTranscript {
                 VStack(alignment: .leading, spacing: 8) {
@@ -35,6 +37,9 @@ struct HomeView: View {
         .toolbar {
             ToolbarItemGroup(placement: .bottomBar) {
                 NavigationLink("History") { HistoryView(controller: controller) }
+                Spacer()
+                NavigationLink("Meetings") { MeetingsView(controller: controller) }
+                    .accessibilityIdentifier("home.meetings")
                 Spacer()
                 NavigationLink("Settings") { SettingsView(controller: controller) }
             }

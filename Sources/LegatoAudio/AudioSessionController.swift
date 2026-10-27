@@ -27,13 +27,19 @@ public struct AudioSessionController: AudioSessionControlling {
         // Category and options must be set before setActive(true).
         try observed(.setCategory) { try session.setCategory(d.avCategory, mode: d.avMode, options: d.avOptions) }
         do {
-            if let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+            if d.prefersBuiltInMic, let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
                 try observed(.setPreferredInput) { try session.setPreferredInput(mic) }
             }
         } catch {
             // Best effort: the system picks the input when the built-in mic can't be preferred.
         }
         try observed(.setActiveTrue) { try session.setActive(true) }
+    }
+
+    /// Reactivates the session as it is, without setting the category again. For a meeting resuming after an
+    /// interruption: changing options on a session from the background fails ('!int'), so a held session is reused.
+    public func reactivate() throws {
+        try observed(.setActiveTrue) { try AVAudioSession.sharedInstance().setActive(true) }
     }
 
     public func deactivate() {
@@ -60,6 +66,7 @@ public struct AudioSessionController: AudioSessionControlling {
     #else
     public var supportedPolicies: Set<AudioPolicy> { [] }
     public func activate(_ config: SessionConfig) throws {}
+    public func reactivate() throws {}
     public func deactivate() {}
     #endif
 }
@@ -81,6 +88,7 @@ extension SessionDescription {
         if allowBluetoothA2DP { o.insert(.allowBluetoothA2DP) }
         if defaultToSpeaker { o.insert(.defaultToSpeaker) }
         if interruptSpokenAudio { o.insert(.interruptSpokenAudioAndMixWithOthers) }
+        if allowBluetoothHFP { o.insert(.allowBluetoothHFP) }
         return o
     }
 }

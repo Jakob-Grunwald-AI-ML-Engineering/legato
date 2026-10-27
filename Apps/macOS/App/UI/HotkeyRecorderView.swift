@@ -1,13 +1,18 @@
+import LegatoMac
 import SwiftUI
 
 /// Shows the current hotkey and records a new one: a lone modifier (Right ⌘) or a combination.
 struct HotkeyRecorderView: View {
     @Environment(MacAppController.self) private var controller
+    var target: MacAppController.HotkeyTarget = .dictation
+
+    private var spec: HotkeySpec? { target == .dictation ? controller.settings.hotkey : controller.settings.muteHotkey }
+    private var isRecording: Bool { controller.isRecordingHotkey && controller.recordingTarget == target }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             recorder
-            if !controller.isRecordingHotkey, let warning = controller.hotkeyWarning {
+            if !isRecording, let warning = spec?.warning {
                 Label(warning.message, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -24,16 +29,19 @@ struct HotkeyRecorderView: View {
                 .padding(.vertical, 6)
                 .frame(minWidth: 140)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            if controller.isRecordingHotkey {
+            if isRecording {
                 Button("Cancel") { controller.cancelRecording() }
             } else {
-                Button(controller.settings.hotkey == nil ? "Record" : "Change") { controller.beginRecording() }
+                Button(spec == nil ? "Record" : "Change") { controller.beginRecording(target) }
+                if target == .mute, spec != nil {
+                    Button("Clear") { controller.settings.muteHotkey = nil }
+                }
             }
         }
     }
 
     private var label: String {
-        if controller.isRecordingHotkey { return controller.recordingPreview ?? "Press a key…" }
-        return controller.settings.hotkey?.displayName ?? "Not set"
+        if isRecording { return controller.recordingPreview ?? "Press a key…" }
+        return spec?.displayName ?? "Not set"
     }
 }

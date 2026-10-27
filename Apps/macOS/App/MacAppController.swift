@@ -28,7 +28,9 @@ final class MacAppController {
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "mac")
 
     enum Phase: Equatable { case idle, preparing, listening, finishing }
-    enum SettingsTab: Hashable { case general, speech, cleanup }
+    enum SettingsTab: Hashable { case general, speech, cleanup, meetings }
+    /// Which hotkey the recorder is capturing.
+    enum HotkeyTarget: Hashable { case dictation, mute }
 
     private(set) var phase = Phase.idle
     /// The newest history entries (20), newest first.
@@ -36,6 +38,7 @@ final class MacAppController {
     /// Bumped to ask the UI to show the onboarding window.
     private(set) var onboardingRequests = 0
     private(set) var isRecordingHotkey = false
+    private(set) var recordingTarget = HotkeyTarget.dictation
     private(set) var recordingPreview: String?
     /// A hotkey press found something unfinished in setup while the user was in another app:
     /// the menu-bar icon shows a warning until the onboarding window is opened.
@@ -56,6 +59,14 @@ final class MacAppController {
     @ObservationIgnored let loginItem = LoginItem()
     /// The model catalog, the engine and the cleanup registries.
     @ObservationIgnored let models: ModelServices
+    /// Meeting notes: recording, mute, the library and the after-stop chain.
+    @ObservationIgnored let meetings: MeetingController
+    /// Matches the meeting mute hotkey; rebuilt when the hotkey changes.
+    @ObservationIgnored private var muteDetector: HotkeyPressDetector?
+    #if DEBUG
+    /// Kept alive for the `--meeting-selftest` run.
+    @ObservationIgnored private var selfTestController: MeetingController?
+    #endif
     /// What the last cleanup (or refine) did.
     let cleanupReports: CleanupReports
     /// The live engine (resolved from the pick); `session` is rebuilt with it before the next run.
@@ -131,6 +142,7 @@ final class MacAppController {
         gesture = HotkeyGesture(mode: settings.gestureMode)
         let models = ModelServices(root: FluidAudioCatalog.defaultRoot(), defaults: .standard, vocabulary: vocabulary)
         self.models = models
+        meetings = MeetingController(models: models)
         let reports = CleanupReports()
         cleanupReports = reports
         let hud = HUDPanelController()
@@ -239,7 +251,15 @@ final class MacAppController {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        #if DEBUG
+        if let selfTest = Self.meetingSelfTestArguments() {
+            runMeetingSelfTest(selfTest)
+            return
+        }
+        #endif
         Task { [weak self] in
+            // First, before a meeting can start: a recording meeting found later could be a live one.
+            await self?.meetings.recoverAtLaunch()
             await self?.refreshRecent()
             await self?.refreshEngine() // also checks Apple Speech's assets when it is the live engine
             self?.pollSystem()
@@ -388,7 +408,7 @@ final class MacAppController {
 
     // MARK: Hotkey recording
 
-    func beginRecording() {
+    func beginRecording(_ target: HotkeyTarget = .dictation) {
         guard tap.isActive else {
             hud.show(toast: "Grant Accessibility access first.")
             return
@@ -396,6 +416,7 @@ final class MacAppController {
         resetGesture()
         recorder = HotkeyRecorderLogic()
         recordingPreview = nil
+        recordingTarget = target
         isRecordingHotkey = true
     }
 
@@ -416,12 +437,13 @@ final class MacAppController {
             case .none: break
             case .preview(let text): recordingPreview = text
             case .captured(let spec):
-                settings.hotkey = spec
+                capture(spec)
                 cancelRecording()
             case .cancelled: cancelRecording()
             }
             return
         }
+        feedMuteHotkey(event)
         guard let hotkey = settings.hotkey, let trigger = hotkey.triggerEvent(for: event) else { return }
         // A timer that fired late must not reorder things: bring the gesture up to this event's time first.
         dispatch(gesture.tick(at: sample.time))
@@ -443,6 +465,36 @@ final class MacAppController {
             dispatch(gesture.otherKeyDown())
         }
         scheduleArm()
+    }
+
+    /// A recorded hotkey goes to the target being recorded, unless the other target already uses it.
+    private func capture(_ spec: HotkeySpec) {
+        switch recordingTarget {
+        case .dictation:
+            if let mute = settings.muteHotkey, spec.conflicts(with: mute) {
+                hud.show(toast: "\(spec.displayName) is already the mute hotkey.")
+            } else {
+                settings.hotkey = spec
+            }
+        case .mute:
+            if let dictation = settings.hotkey, spec.conflicts(with: dictation) {
+                hud.show(toast: "\(spec.displayName) is already the dictation hotkey.")
+            } else {
+                settings.muteHotkey = spec
+            }
+        }
+    }
+
+    /// The second hotkey: toggles the mic mute of the running meeting. The dictation gesture is untouched.
+    private func feedMuteHotkey(_ event: KeyEvent) {
+        guard let spec = settings.muteHotkey else {
+            muteDetector = nil
+            return
+        }
+        if muteDetector?.spec != spec { muteDetector = HotkeyPressDetector(spec: spec) }
+        guard muteDetector?.feed(event) == true, meetings.phase == .recording else { return }
+        meetings.toggleManualMute()
+        hud.show(toast: meetings.isMuted ? "Muted in the meeting." : "Unmuted.")
     }
 
     private func dispatch(_ action: HotkeyGesture.Action?) {
@@ -473,6 +525,7 @@ final class MacAppController {
         armTask = nil
         triggerPressedAt = nil
         gesture.reset()
+        muteDetector?.reset()
     }
 
     /// Safety net for a lost release of a lone-modifier trigger: if the keyboard says the modifier
@@ -694,4 +747,33 @@ final class MacAppController {
             hud.model.volatile = text
         }
     }
+
+    #if DEBUG
+    // MARK: Meeting self-test
+
+    private struct SelfTestArguments {
+        var seconds: Double
+        var out: URL
+        var includeText: Bool
+    }
+
+    /// `--meeting-selftest <seconds> [--meeting-selftest-out=<json path>] [--meeting-selftest-text]`.
+    private static func meetingSelfTestArguments() -> SelfTestArguments? {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: "--meeting-selftest") else { return nil }
+        let seconds = args.dropFirst(index + 1).first.flatMap(Double.init) ?? 15
+        let out = args.first { $0.hasPrefix("--meeting-selftest-out=") }
+            .map { URL(fileURLWithPath: String($0.dropFirst("--meeting-selftest-out=".count))) }
+            ?? URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "legato-meeting-selftest/selftest.json")
+        return SelfTestArguments(seconds: seconds, out: out, includeText: args.contains("--meeting-selftest-text"))
+    }
+
+    /// A throwaway meeting against its own store next to the JSON, so the user's meetings stay untouched.
+    private func runMeetingSelfTest(_ arguments: SelfTestArguments) {
+        let root = arguments.out.deletingLastPathComponent().appending(path: "store", directoryHint: .isDirectory)
+        let tester = MeetingController(models: models, root: root)
+        selfTestController = tester
+        Task { await tester.runSelfTest(seconds: arguments.seconds, out: arguments.out, includeText: arguments.includeText) }
+    }
+    #endif
 }

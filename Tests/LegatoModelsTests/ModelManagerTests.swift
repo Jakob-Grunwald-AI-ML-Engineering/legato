@@ -359,6 +359,31 @@ import Testing
         #expect(fake.warmCalls == 1)
     }
 
+    @Test func pickingABatchModelDownloadsItButDoesNotWarmIt() async throws {
+        let fake = FakeInstaller(folderName: "batch-a")
+        let h = Harness(installers: ["batch-a": fake])
+        defer { h.cleanUp() }
+
+        try await h.manager.select("batch-a", role: .postPass)
+
+        #expect(fake.installCalls == 1)
+        #expect(fake.warmCalls == 0, "the multi-minute compile waits for the post-pass; it must not hold up a meeting")
+        #expect(await h.manager.selected(role: .postPass) == "batch-a")
+        #expect(await h.manager.state(of: "batch-a") == .installed(bytes: 1_000))
+    }
+
+    @Test func pickingStreamingAndLLMModelsStillWarmsThem() async throws {
+        let speech = FakeInstaller(folderName: "speech-a"), llm = FakeInstaller(folderName: "llm-a")
+        let h = Harness(installers: ["speech-a": speech, "llm-a": llm])
+        defer { h.cleanUp() }
+
+        try await h.manager.select("speech-a", role: .liveDictation)
+        try await h.manager.select("llm-a", role: .cleanup)
+
+        #expect(speech.warmCalls == 1)
+        #expect(llm.warmCalls == 1)
+    }
+
     @Test func selectingAnInstalledModelSwitchesWithoutDownloading() async throws {
         let h = Harness()
         defer { h.cleanUp() }

@@ -14,3 +14,11 @@ public protocol AudioSource: Sendable {
     /// Stops the mic and ends any stream. Ends the lease.
     func stop() async
 }
+
+/// A source that can lose audio for a while and come back (the engine restarts after a device change, the
+/// tap is rebuilt). A meeting listens to ``resumptions`` and fills the missing time with silence, so the
+/// recording stays on the meeting's timeline.
+public protocol ResumableAudioSource: AudioSource {
+    /// Yields each time the source delivers audio again after a gap. Only the newest unread value matters.
+    var resumptions: AsyncStream<Void> { get }
+}

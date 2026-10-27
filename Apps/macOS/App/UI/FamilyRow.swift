@@ -29,6 +29,7 @@ struct FamilyRow: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(family.name)
+                        if let role = family.roleLine { Text(role).font(.caption).foregroundStyle(.tint) }
                         Text(family.detailsLine).font(.caption).foregroundStyle(.secondary)
                         if let chosen { stateLine(chosen).font(.caption) }
                         if let failure { Text(failure).font(.caption).foregroundStyle(.red) }

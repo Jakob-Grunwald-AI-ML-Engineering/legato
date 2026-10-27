@@ -14,7 +14,30 @@ final class Resampler16k: @unchecked Sendable {
     private var converter: AVAudioConverter?
     private var inputFormat: AVAudioFormat?
 
-    func convert(_ buffer: AVAudioPCMBuffer) -> [Float] {
+    /// Mono Float32 view of a multichannel buffer: stereo is averaged; more than two channels
+    /// (voice-processing input can report many) use channel 0, the processed voice channel.
+    private func downmix(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let ch = Int(buffer.format.channelCount)
+        guard ch > 1, buffer.format.commonFormat == .pcmFormatFloat32, let src = buffer.floatChannelData,
+              let monoFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: buffer.format.sampleRate, channels: 1, interleaved: false),
+              let mono = AVAudioPCMBuffer(pcmFormat: monoFmt, frameCapacity: buffer.frameLength),
+              let dst = mono.floatChannelData?[0]
+        else { return nil }
+        let n = Int(buffer.frameLength)
+        let stride = buffer.stride  // interleaved: ch, non-interleaved: 1
+        let interleaved = buffer.format.isInterleaved
+        let used = ch == 2 ? 2 : 1
+        for i in 0..<n {
+            var sum: Float = 0
+            for c in 0..<used { sum += interleaved ? src[0][i * stride + c] : src[c][i] }
+            dst[i] = sum / Float(used)
+        }
+        mono.frameLength = buffer.frameLength
+        return mono
+    }
+
+    func convert(_ input: AVAudioPCMBuffer) -> [Float] {
+        let buffer = downmix(input) ?? input
         if converter == nil || inputFormat != buffer.format {
             converter = AVAudioConverter(from: buffer.format, to: Self.target)
             inputFormat = buffer.format
@@ -105,9 +128,19 @@ final class MicCapture: @unchecked Sendable {
         }
     }
 
-    func start(onSamples: @escaping @Sendable ([Float]) -> Void) throws {
+    /// Format the input node reported after the (optional) voice-processing switch, for the UI.
+    private(set) var inputFormatDescription = ""
+
+    func start(voiceProcessing: Bool = false, onSamples: @escaping @Sendable ([Float]) -> Void) throws {
         let input = engine.inputNode
+        if voiceProcessing {
+            // Must happen before the engine starts; re-reading the format afterwards is essential (it changes).
+            try input.setVoiceProcessingEnabled(true)
+            input.voiceProcessingOtherAudioDuckingConfiguration = AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                enableAdvancedDucking: false, duckingLevel: .min)
+        }
         let format = input.outputFormat(forBus: 0)
+        inputFormatDescription = "\(format.sampleRate) Hz, \(format.channelCount) ch, VP \(voiceProcessing ? "on" : "off")"
         guard format.sampleRate > 0 else { throw CaptureError("mic: input format has 0 Hz (no input device or no permission)") }
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [resampler, stats] buffer, _ in
             let samples = resampler.convert(buffer)
