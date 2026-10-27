@@ -9,9 +9,11 @@ public enum CleanupDelivery: String, Sendable, Equatable, CaseIterable, Codable 
     case clipboard
     /// Nothing streams into the field while listening; the cleaned text is inserted when the run ends.
     case hold
-    /// Each finished phrase (a final segment) is cleaned in the background while the next one is spoken, and
-    /// replaces its raw text in the field while the field still shows it there; at the end only the phrases
-    /// not cleaned yet are. A phrase the user typed around keeps its raw text.
+    /// Rolling cleanup while speaking: after each finished phrase the whole dictated text so far is cleaned
+    /// again from the raw text (so a later "no wait, Thursday" can fix an earlier phrase) and replaces what
+    /// the field shows for the run, while the field still ends with it; a final pass runs at the end. Once
+    /// the user edits the run's text it stays as it is (the cleaned text goes to the clipboard); a cleared
+    /// field (a sent message) closes the text before it.
     case live
 
     /// Whether the text streams into the field while it is spoken.

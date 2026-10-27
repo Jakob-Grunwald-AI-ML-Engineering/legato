@@ -411,6 +411,11 @@ final class FakeSink: TranscriptSink {
     func revised(_ revision: TranscriptRevision) {
         revisions.append(revision)
     }
+    /// Live cleanup's trace, in order (not logged either).
+    private(set) var liveTrace: [LiveTraceEvent] = []
+    func liveTraced(_ event: LiveTraceEvent) {
+        liveTrace.append(event)
+    }
     func leaseChanged(until: Date?) {
         log.add(until == nil ? "sink.lease:nil" : "sink.lease:set")
         leases.append(until)
