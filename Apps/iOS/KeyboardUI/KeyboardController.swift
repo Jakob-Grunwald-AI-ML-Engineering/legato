@@ -57,6 +57,9 @@ final class KeyboardController {
     @ObservationIgnored private let preferences: () -> KeyboardPreferences
 
     @ObservationIgnored private var cursor: AppliedCursor?
+    /// When this keyboard last edited the field itself (typed, deleted or applied the host's text): the
+    /// field's reported context lags such an edit, so a cleared field right after it is not believed.
+    @ObservationIgnored private var lastOwnEditAt = Date.distantPast
     /// Types the host's text into the field a few characters at a time; `ticker` drives it while it has text left.
     @ObservationIgnored private var reveal = TypewriterReveal()
     @ObservationIgnored private var ticker: Task<Void, Never>?
@@ -188,6 +191,26 @@ final class KeyboardController {
         refreshTraits()
         typing.documentChanged()
         if let versions, versions.documentID != document.documentID { self.versions = nil }
+        fieldMayHaveBeenCleared()
+    }
+
+    /// The host emptied the field (a chat app's Send): the dictation's versions are gone with it, and a Live
+    /// run that is still going gets a sent boundary, which the app is told about (`link.applied`): the sent
+    /// text is never cleaned again, typed or copied, and the rest of the run streams into the empty field.
+    private func fieldMayHaveBeenCleared() {
+        guard !document.hasText, document.contextBefore.allSatisfy(\.isWhitespace),
+              Date().timeIntervalSince(lastOwnEditAt) * 1000 >= TypewriterReveal.settleLimitMs
+        else { return }
+        if versions?.documentID == document.documentID { versions = nil }
+        guard let host,
+              let sent = ProxyEditPlanner.fieldCleared(
+                  state: host, cursor: cursor, documentID: document.documentID, contextBefore: document.contextBefore,
+                  hasText: false)
+        else { return }
+        cursor = sent
+        link.writeApplied(sent, notify: true)
+        trace?("sent at=\(sent.sentBase) shown=\(sent.sentShownRevision)")
+        applyHost()
     }
 
     /// Reads the field's traits; only changed values are stored, so the keys redraw only when needed.
@@ -316,6 +339,7 @@ final class KeyboardController {
     }
 
     private func perform(_ ops: [ProxyOp]) {
+        if !ops.isEmpty { lastOwnEditAt = Date() }
         for op in ops {
             switch op {
             case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
@@ -329,6 +353,7 @@ final class KeyboardController {
 
     func type(_ text: String) {
         versions = nil // the user moved on from the dictation
+        lastOwnEditAt = Date()
         beforeUserEdit()
         document.insert(text)
         afterUserEdit()
@@ -336,6 +361,7 @@ final class KeyboardController {
 
     func deleteBackward() {
         versions = nil
+        lastOwnEditAt = Date()
         beforeUserEdit()
         document.deleteBackward()
         afterUserEdit()
