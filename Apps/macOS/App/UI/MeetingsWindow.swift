@@ -1,7 +1,8 @@
 import LegatoMeetings
 import SwiftUI
 
-/// The Meetings window: the list on the left; on the right the live view while recording, else the picked meeting.
+/// The Meetings window: the list; a meeting opens in place of it with a way back. A recording meeting opens
+/// itself, and a meeting that is still starting shows its progress.
 struct MeetingsWindow: View {
     @Environment(MacAppController.self) private var app
     @State private var selection: UUID?
@@ -9,90 +10,36 @@ struct MeetingsWindow: View {
     private var meetings: MeetingController { app.meetings }
 
     var body: some View {
-        NavigationSplitView {
-            list
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240)
-        } detail: {
-            detail
+        Group {
+            if meetings.phase == .starting {
+                startingView
+            } else if let id = selection {
+                MeetingDetailView(meetingID: id, onBack: { selection = nil })
+                    .id(id)
+            } else {
+                MeetingListView(selection: $selection)
+            }
         }
         .frame(minWidth: 760, minHeight: 480)
-        .toolbar {
-            ToolbarItem {
-                Button {
-                    if meetings.phase == .starting { meetings.cancelStart() } else { Task { await meetings.toggle() } }
-                } label: {
-                    switch meetings.phase {
-                    case .recording: Label("Stop meeting", systemImage: "stop.circle.fill")
-                    case .starting: Label("Cancel start", systemImage: "xmark.circle")
-                    default: Label("Start meeting", systemImage: "record.circle")
-                    }
-                }
-                .disabled(meetings.phase == .stopping)
-            }
-        }
         .task { await meetings.refresh() }
-        .onChange(of: meetings.phase) { _, phase in
-            if phase == .recording { selection = nil }
+        .onChange(of: meetings.liveMeetingID) { _, id in
+            if let id { selection = id }
         }
+        .onAppear { if let id = meetings.liveMeetingID { selection = id } }
     }
 
-    private var list: some View {
-        List(selection: $selection) {
-            if meetings.isRecording {
-                Label(meetings.statusText, systemImage: "record.circle")
-                    .foregroundStyle(.red)
-            }
-            ForEach(meetings.meetings.filter { $0.state != .recording || !meetings.isRecording }) { meeting in
-                MeetingRow(meeting: meeting, busy: meetings.busy.contains(meeting.id))
-                    .tag(meeting.id)
-                    .contextMenu {
-                        Button("Delete", role: .destructive) { Task { await meetings.delete(meeting) } }
-                    }
-            }
+    /// While the speech model loads (minutes the first time), with a way out.
+    private var startingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Starting meeting…").font(.headline)
+            Text("Loading the speech model — the first time can take a few minutes.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Cancel") { meetings.cancelStart() }
+                .keyboardShortcut(.cancelAction)
         }
-        .overlay {
-            if meetings.meetings.isEmpty, !meetings.isRecording {
-                Text("No meetings yet.\nStart one from the toolbar or the menu bar.")
-                    .multilineTextAlignment(.center)
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder private var detail: some View {
-        if meetings.isRecording, selection == nil {
-            MeetingLiveView()
-        } else if let id = selection, let meeting = meetings.meetings.first(where: { $0.id == id }) {
-            MeetingDetailView(meeting: meeting)
-                .id(meeting.id)
-        } else {
-            Text("Select a meeting.").foregroundStyle(.secondary)
-        }
-    }
-}
-
-private struct MeetingRow: View {
-    let meeting: Meeting
-    let busy: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(meeting.title).lineLimit(1)
-            HStack(spacing: 6) {
-                Text(meeting.date.formatted(date: .abbreviated, time: .shortened))
-                Text(Self.duration(meeting.duration))
-                if busy || meeting.state == .processing || meeting.state == .interrupted {
-                    ProgressView().controlSize(.mini)
-                }
-            }
-            .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    static func duration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds)
-        return total >= 3600
-            ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
-            : String(format: "%d:%02d", total / 60, total % 60)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
     }
 }

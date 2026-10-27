@@ -10,11 +10,13 @@ import Observation
 import Synchronization
 import os
 
-/// Records meetings: the mic ("me") and the system audio ("them") as two streams of one `MeetingSession`.
+/// Records meetings: the mic and the system audio are mixed into one stream of one `MeetingSession`, with
+/// one live engine and speakers told apart by diarization.
 ///
 /// - `start` opens the mic first (with a fallback to no voice processing when it does not work), then the system-audio tap (the tap excludes our own process, which only
 ///   exists for Core Audio once the mic has touched it).
 /// - `stop` ends the capture and runs the after-stop chain (post-pass, m4a, on-device summary) in a task.
+/// - Pause silences everything and keeps the timeline; End and Discard are the window's own, behind a confirmation.
 /// - The mic is muted when `AutoMutePolicy` says the call app closed its mic, or when the user says so.
 ///   `MeetingMuteState` combines them: the user's choice wins in both directions until the automatic
 ///   decision next changes.
@@ -52,6 +54,16 @@ final class MeetingController {
     private(set) var revision = 0
     /// Set when a start or stop should bring the Meetings window up.
     private(set) var windowRequests = 0
+    /// The meeting a live session owns, while one records.
+    private(set) var liveMeetingID: UUID?
+    /// The card line (summary one-liner, else the first transcript line) of each meeting.
+    private(set) var cards: [UUID: String] = [:]
+    /// The recorder is shrunk to the floating pill.
+    private(set) var pillVisible = false
+    /// The meeting language for the next start (a locale identifier); nil is Auto. Remembered.
+    var language: String? {
+        didSet { settings.language = language }
+    }
 
     @ObservationIgnored let services: MeetingServices
     @ObservationIgnored let settings: MeetingSettings
@@ -72,6 +84,8 @@ final class MeetingController {
     @ObservationIgnored private var policy = AutoMutePolicy(ownPID: ProcessInfo.processInfo.processIdentifier)
     @ObservationIgnored private var lastProcesses: [AutoMuteProcess] = []
     @ObservationIgnored private var recovered = false
+    @ObservationIgnored private var cardSignatures: [UUID: String] = [:]
+    @ObservationIgnored private lazy var pill = MeetingPillPanelController(meetings: self)
 
     init(models: ModelServices, root: URL? = nil, defaults: UserDefaults = .standard) {
         let root = root ?? URL.applicationSupportDirectory
@@ -83,6 +97,7 @@ final class MeetingController {
         self.store = store
         self.settings = settings
         self.defaults = defaults
+        language = settings.language
         keyStore = keys
         hasClaudeKey = Self.keyExists(keys)
         let activity = MacActivitySampler()
@@ -110,13 +125,23 @@ final class MeetingController {
 
     var isRecording: Bool { phase == .recording || phase == .starting || phase == .stopping }
     var isMuted: Bool { mute.effective }
-    /// "Me" is muted because the call app closed its mic, and the user has not said otherwise.
+    var isPaused: Bool { live?.isPaused ?? false }
+    var pillState: MeetingPillState {
+        let pillPhase: MeetingPillState.Phase = switch phase {
+        case .idle: .idle
+        case .starting: .starting
+        case .recording: .recording
+        case .stopping: .stopping
+        }
+        return MeetingPillState(phase: pillPhase, paused: isPaused, muted: isMuted)
+    }
+    /// The microphone is muted because because the call app closed its mic, and the user has not said otherwise.
     var autoMute: Bool { mute.autoWants && mute.manualOverride == nil }
 
     var systemAudioWarning: String? {
         switch tapStatus {
         case .systemAudioSilent:
-            "Them is silent although something is playing. Turn Legato on in System Settings > Privacy & Security > System Audio Recording Only."
+            "System audio is silent although something is playing. Turn Legato on in System Settings > Privacy & Security > System Audio Recording Only."
         case .failed(let message):
             "System audio failed: \(message)"
         default:
@@ -128,7 +153,7 @@ final class MeetingController {
         switch phase {
         case .idle: "No meeting"
         case .starting: "Starting meeting…"
-        case .recording: isMuted ? "Recording · muted" : "Recording"
+        case .recording: isPaused ? "Recording · paused" : isMuted ? "Recording · muted" : "Recording"
         case .stopping: "Saving meeting…"
         }
     }
@@ -208,6 +233,7 @@ final class MeetingController {
             return
         }
         beginObserving(session: session, system: system, mic: mic, cleaningNotices: made.notices)
+        liveMeetingID = meeting.id
         setPhase(.recording)
         windowRequests += 1
     }
@@ -219,14 +245,58 @@ final class MeetingController {
         setPhase(.stopping)
         stopObserving()
         let meeting = await session.stop()
-        self.session = nil
-        live = nil
-        tapStatus = nil
-        mute = MeetingMuteState()
-        setPhase(.idle)
+        endLive()
         await refresh()
         if runPipeline { process(meeting.id) }
         return meeting
+    }
+
+    /// Stops the capture and removes the meeting with everything recorded. The window asked first.
+    func discard() async {
+        guard phase == .recording, let session else { return }
+        setPhase(.stopping)
+        stopObserving()
+        await session.discard()
+        endLive()
+        await refresh()
+    }
+
+    private func endLive() {
+        session = nil
+        live = nil
+        liveMeetingID = nil
+        tapStatus = nil
+        mute = MeetingMuteState()
+        hidePill()
+        setPhase(.idle)
+    }
+
+    // MARK: Pause
+
+    func togglePause() {
+        guard phase == .recording, let session else { return }
+        Task { if isPaused { await session.resume() } else { await session.pause() } }
+    }
+
+    // MARK: Pill
+
+    /// The recorder as a floating pill: the toolbar button, the menu item and ⌃⌘M. Shrinking closes the
+    /// Meetings window; expanding brings it back.
+    func togglePill() {
+        if pillVisible {
+            hidePill()
+            windowRequests += 1
+        } else if phase == .recording {
+            pillVisible = true
+            pill.show()
+            for window in NSApp.windows where window.title == "Meetings" { window.close() }
+        }
+    }
+
+    private func hidePill() {
+        guard pillVisible else { return }
+        pillVisible = false
+        pill.hide()
     }
 
     func toggle() async {
@@ -329,6 +399,42 @@ final class MeetingController {
     func refresh() async {
         meetings = (try? await store.meetings()) ?? []
         revision += 1
+        await updateCards()
+    }
+
+    /// Reads the card line of every meeting that changed since its last read.
+    private func updateCards() async {
+        var next: [UUID: String] = [:]
+        for meeting in meetings where meeting.state != .recording {
+            let signature = "\(meeting.state.rawValue)/\(meeting.completedSteps.count)/\(Int(meeting.duration))/\(meeting.title)"
+            if cardSignatures[meeting.id] == signature, let line = cards[meeting.id] {
+                next[meeting.id] = line
+                continue
+            }
+            let summary = try? await store.summaries(for: meeting.id).first?.text
+            var line = MeetingListLogic.oneLiner(summary: summary, segments: [])
+            if line.isEmpty {
+                line = MeetingListLogic.oneLiner(summary: nil, segments: (try? await store.segments(for: meeting.id)) ?? [])
+            }
+            next[meeting.id] = line
+            cardSignatures[meeting.id] = signature
+        }
+        cards = next
+    }
+
+    /// The meetings that match a search, by title, summaries, notes, speaker names and transcript.
+    func search(_ query: String) async -> Set<UUID> {
+        var found: Set<UUID> = []
+        for meeting in meetings where meeting.id != liveMeetingID {
+            if Task.isCancelled { return found }
+            let summaries = ((try? await store.summaries(for: meeting.id)) ?? []).map(\.text)
+            let notes = (try? await store.notes(for: meeting.id)) ?? nil
+            let segments = (try? await store.segments(for: meeting.id)) ?? []
+            if MeetingListLogic.matches(query, meeting: meeting, summaries: summaries, notes: notes, segments: segments) {
+                found.insert(meeting.id)
+            }
+        }
+        return found
     }
 
     /// At launch: marks meetings the app died in as interrupted and finishes the after-stop chain of every
@@ -356,6 +462,60 @@ final class MeetingController {
     }
 
     func folder(of id: UUID) async -> URL { await store.folder(for: id) }
+
+    func notes(of id: UUID) async -> String { ((try? await store.notes(for: id)) ?? nil) ?? "" }
+
+    /// Saves the private notes (while recording and afterwards). A changed note makes the summary stale.
+    func saveNotes(_ text: String, for id: UUID) async {
+        try? await store.saveNotes(text, for: id)
+        revision += 1
+    }
+
+    /// The meeting's template: the next Regenerate (or Generate) uses it.
+    func setTemplate(_ templateID: String, for id: UUID) async {
+        _ = try? await store.update(id: id) { $0.templateID = templateID }
+        await refresh()
+    }
+
+    /// Gives a person a name. The same name as another person's merges the two everywhere: segments and turns.
+    func renameSpeaker(_ person: PersonID, to name: String, in id: UUID) async {
+        guard id != liveMeetingID, let meeting = try? await store.meeting(id: id) else { return }
+        var directory = SpeakerDirectory(meeting.speakers)
+        let merge = directory.rename(person, to: name)
+        let speakers = directory.speakers
+        _ = try? await store.update(id: id) { $0.speakers = speakers }
+        if let merge {
+            try? await store.replaceSegments(merge.apply(to: await transcript(of: id)), for: id)
+            if let live = try? await store.liveTurns(for: id), !live.isEmpty {
+                try? await store.saveLiveTurns(merge.apply(to: live), for: id)
+            }
+            if let offline = try? await store.offlineTurns(for: id) {
+                try? await store.saveOfflineTurns(merge.apply(to: offline), for: id)
+            }
+        }
+        await refresh()
+    }
+
+    /// Writes the summary again with the on-device backend: the meeting's template, notes and speakers.
+    func regenerate(_ id: UUID) {
+        guard !busy.contains(id) else { return }
+        busy.insert(id)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let backend = await services.summaryBackend() else {
+                    notice = "No on-device model is available for a summary."
+                    busy.remove(id)
+                    return
+                }
+                try await services.pipeline().summarize(meetingID: id, using: backend)
+            } catch {
+                if !(error is CancellationError) { notice = "The summary failed: \(error.localizedDescription)" }
+            }
+            busy.remove(id)
+            await refresh()
+        }
+    }
 
     func delete(_ meeting: Meeting) async {
         guard meeting.state != .recording, !busy.contains(meeting.id) else { return }
@@ -515,8 +675,8 @@ final class MeetingController {
 #if DEBUG
 extension MeetingController {
     /// `--meeting-selftest <seconds> [--meeting-selftest-out=<json>] [--meeting-selftest-text]`: records a
-    /// throwaway meeting, writes how much both streams heard to the JSON and exits (2 when the capture could
-    /// not start, 1 when "them" is empty). The JSON holds counts; the text only with `includeText`. A debug
+    /// throwaway meeting, writes how many words the mixed transcript holds to the JSON and exits (2 when the
+    /// capture could not start, 1 when the transcript is empty). The JSON holds counts; the text only with `includeText`. A debug
     /// build feature: release builds have no such entry point.
     func runSelfTest(seconds: Double, out: URL, includeText: Bool) async -> Never {
         measureTap = true
@@ -562,7 +722,7 @@ final class ZeroCountingSource: AudioSource {
     }
 }
 
-/// The meeting self-test: a real two-stream meeting for N seconds against a temporary store, then a JSON report.
+/// The meeting self-test: a real mixed meeting for N seconds against a temporary store, then a JSON report.
 /// The store (audio and transcript) is deleted afterwards; the output folder is private (`0700`).
 @MainActor
 private struct MeetingSelfTest {
@@ -592,9 +752,9 @@ private struct MeetingSelfTest {
         let counter = controller.selfTestSource
         let report = MeetingSelfTestReport(
             seconds: seconds, engine: engine, engineFallback: fallback, tapStatus: tapStatus, segments: segments,
-            themTapZeroRatio: counter?.zeroRatio, themTapBuffers: counter?.total ?? 0, includeText: includeText)
+            tapZeroRatio: counter?.zeroRatio, tapBuffers: counter?.total ?? 0, includeText: includeText)
         write(report)
-        return report.themHeardSomething ? 0 : 1
+        return report.heardSomething ? 0 : 1
     }
 
     private func write(_ report: MeetingSelfTestReport) {

@@ -1,184 +1,226 @@
+import LegatoAudio
+import LegatoCore
 import LegatoMeetings
 import SwiftUI
 
-/// One finished meeting: Summary and Transcript tabs, and the actions on it.
+/// One meeting, recording or finished: the document on the left, the continuous transcript on the right
+/// (search and Assign speakers above it), the player pill or the recording controls at the bottom.
 struct MeetingDetailView: View {
     @Environment(MacAppController.self) private var app
-    let meeting: Meeting
+    let meetingID: UUID
+    let onBack: () -> Void
 
-    private enum Tab: Hashable { case summary, transcript }
-
-    @State private var tab = Tab.summary
     @State private var current: Meeting?
     @State private var segments: [MeetingSegment] = []
     @State private var summaries: [MeetingStore.Summary] = []
-    @State private var pickedBackend: String?
+    @State private var notes = ""
+    @State private var notesLoaded = false
+    @State private var showTranscript = true
+    @State private var searching = false
+    @State private var query = ""
+    @State private var assigning = false
+    @State private var player: MeetingPlayer?
     @State private var confirmClaude = false
-    @State private var showEchoes = false
+    @State private var confirmEnd = false
+    @State private var confirmDiscard = false
 
     private var meetings: MeetingController { app.meetings }
-    private var shown: Meeting { current ?? meeting }
-    private var working: Bool {
-        meetings.busy.contains(meeting.id) || shown.state == .processing || shown.state == .interrupted
-    }
+    private var isLive: Bool { meetings.liveMeetingID == meetingID }
+    private var meeting: Meeting? { isLive ? meetings.live?.meeting ?? current : current }
+    private var shownSegments: [MeetingSegment] { isLive ? meetings.live?.segments ?? [] : segments }
+    private var working: Bool { meetings.busy.contains(meetingID) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            if let notice = meetings.notice {
-                Label(notice, systemImage: "info.circle")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Picker("", selection: $tab) {
-                Text("Summary").tag(Tab.summary)
-                Text("Transcript").tag(Tab.transcript)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 260)
-            switch tab {
-            case .summary: summaryTab
-            case .transcript: transcriptTab
+        Group {
+            if let meeting {
+                content(meeting)
+            } else {
+                ProgressView()
             }
         }
-        .padding(16)
+        .toolbar { toolbar }
         .task(id: meetings.revision) { await reload() }
-        .confirmationDialog(
-            "Send this transcript to Claude?", isPresented: $confirmClaude, titleVisibility: .visible
-        ) {
+        .onChange(of: notes) { _, text in
+            guard notesLoaded else { return }
+            Task {
+                try? await Task.sleep(for: .milliseconds(600))
+                guard !Task.isCancelled, text == notes else { return }
+                await meetings.saveNotes(text, for: meetingID)
+            }
+        }
+        .onDisappear { player?.pause() }
+        .confirmationDialog("End this meeting?", isPresented: $confirmEnd, titleVisibility: .visible) {
+            Button("End meeting") { Task { await meetings.stop() } }
+            Button("Keep recording", role: .cancel) {}
+        } message: {
+            Text("The recording is saved and the summary is prepared.")
+        }
+        .confirmationDialog("Discard this meeting?", isPresented: $confirmDiscard, titleVisibility: .visible) {
+            Button("Discard meeting", role: .destructive) {
+                Task {
+                    await meetings.discard()
+                    onBack()
+                }
+            }
+            Button("Keep recording", role: .cancel) {}
+        } message: {
+            Text("The recording, the transcript and your notes are deleted. This cannot be undone.")
+        }
+        .confirmationDialog("Send this transcript to Claude?", isPresented: $confirmClaude, titleVisibility: .visible) {
             Button("Send to Claude") {
                 meetings.claudeDisclosureAccepted = true
-                meetings.summarizeWithClaude(meeting.id)
+                meetings.summarizeWithClaude(meetingID)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Summarizing with Claude sends this meeting's transcript to Anthropic over the internet, using your own API key. Nothing else leaves this Mac, and the on-device summary never does. This note is shown once.")
+            Text("Summarizing with Claude sends this meeting's transcript and your notes to Anthropic over the internet, using your own API key. Nothing else leaves this Mac, and the on-device summary never does. This note is shown once.")
         }
     }
 
-    // MARK: Pieces
+    // MARK: Layout
 
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(shown.title).font(.title2.bold())
-                Text("\(shown.date.formatted(date: .abbreviated, time: .shortened)) · \(Self.duration(shown.duration))")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if working { ProgressView().controlSize(.small) }
-            Menu("Actions") {
-                Button("Export Markdown…") { Task { await meetings.exportMarkdown(shown) } }
-                Button("Show audio in Finder") { Task { await meetings.showAudio(shown) } }
+    private func content(_ meeting: Meeting) -> some View {
+        HStack(spacing: 0) {
+            MeetingDocumentView(meeting: meeting, isLive: isLive, summaries: summaries, working: working, notes: $notes)
+                .overlay(alignment: .bottom) { bottomBar }
+            if showTranscript {
                 Divider()
-                Button("Improve transcript") { meetings.improve(meeting.id) }
-                    .disabled(working)
-                Button("Summarize with Claude") {
-                    if meetings.claudeDisclosureAccepted {
-                        meetings.summarizeWithClaude(meeting.id)
-                    } else {
-                        confirmClaude = true
+                transcriptPane(meeting)
+                    .frame(minWidth: 280, idealWidth: 380, maxWidth: 520)
+            }
+        }
+    }
+
+    @ViewBuilder private var bottomBar: some View {
+        if isLive {
+            recordingBar
+        } else if let player {
+            MeetingPlayerBar(player: player).padding(.bottom, 14)
+        }
+    }
+
+    private func transcriptPane(_ meeting: Meeting) -> some View {
+        VStack(spacing: 0) {
+            if assigning, !isLive {
+                AssignSpeakersView(
+                    meetingID: meetingID, speakers: meeting.speakers, segments: shownSegments, player: player,
+                    onClose: { assigning = false })
+            } else {
+                HStack(spacing: 6) {
+                    if searching {
+                        TextField("Search the transcript", text: $query).textFieldStyle(.roundedBorder)
                     }
+                    Spacer(minLength: 0)
+                    Button {
+                        searching.toggle()
+                        if !searching { query = "" }
+                    } label: { Image(systemName: "magnifyingglass") }
+                        .buttonStyle(.borderless).help("Search the transcript")
+                    Button { assigning = true } label: { Image(systemName: "person.2") }
+                        .buttonStyle(.borderless).help("Assign speakers")
+                        .disabled(isLive || meeting.speakers.isEmpty)
                 }
-                .disabled(working || !meetings.hasClaudeKey)
-                if !meetings.hasClaudeKey {
-                    Text("Add a Claude key in Settings > Meetings")
-                }
-            }
-            .fixedSize()
-        }
-    }
-
-    @ViewBuilder private var summaryTab: some View {
-        if summaries.isEmpty {
-            Text(working ? "Working on it…" : "No summary yet.")
-                .foregroundStyle(.secondary)
-            Spacer()
-        } else {
-            let chosen = summaries.first { $0.backendID == pickedBackend } ?? summaries[0]
-            if summaries.count > 1 {
-                Picker("Summary by", selection: Binding(get: { chosen.backendID }, set: { pickedBackend = $0 })) {
-                    ForEach(summaries, id: \.backendID) { Text(Self.backendName($0.backendID)).tag($0.backendID) }
-                }
-                .frame(maxWidth: 320)
-            }
-            ScrollView {
-                Text(Self.markdown(chosen.text))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16).padding(.top, 10)
+                MeetingTranscriptView(
+                    segments: shownSegments, speakers: meeting.speakers, query: query,
+                    partial: isLive ? meetings.live?.volatile[.mixed] ?? "" : "", following: isLive,
+                    onSeek: { time in
+                        player?.seek(to: time)
+                        player?.play()
+                    })
             }
         }
     }
 
-    @ViewBuilder private var transcriptTab: some View {
-        let visible = segments.filter { showEchoes || !$0.echo }
-        if segments.contains(where: \.echo) {
-            Toggle("Show echoes of the speakers picked up by the mic", isOn: $showEchoes)
-                .toggleStyle(.checkbox).font(.callout)
+    /// Mute, pause, end, discard and the clock, over the document while recording.
+    private var recordingBar: some View {
+        let state = meetings.pillState
+        return HStack(spacing: 12) {
+            Circle().fill(state.paused ? Color.orange : Color.red).frame(width: 9, height: 9)
+            Text(MeetingListLogic.clock(meetings.elapsed)).font(.body.monospacedDigit().weight(.medium))
+            Text(state.label).font(.caption).foregroundStyle(.secondary)
+            Divider().frame(height: 16)
+            Button { meetings.toggleManualMute() } label: {
+                Label(meetings.isMuted ? "Unmute" : "Mute", systemImage: meetings.isMuted ? "mic.slash.fill" : "mic.fill")
+            }
+            Button { meetings.togglePause() } label: {
+                Label(state.paused ? "Resume" : "Pause", systemImage: state.paused ? "play.fill" : "pause.fill")
+            }
+            Button { confirmEnd = true } label: { Label("End", systemImage: "stop.fill") }
+                .tint(.red)
+            Button(role: .destructive) { confirmDiscard = true } label: { Label("Discard", systemImage: "trash") }
         }
-        if visible.isEmpty {
-            Text(working ? "Working on it…" : "No transcript.").foregroundStyle(.secondary)
-            Spacer()
-        } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(visible) { segment in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(label(of: segment))
-                                .font(.caption.bold())
-                                .foregroundStyle(segment.stream == .system ? Color.secondary : .accentColor)
-                                .frame(width: 70, alignment: .leading)
-                            Text(Self.stamp(segment.start)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            Text(segment.text)
-                                .foregroundStyle(segment.echo ? .secondary : .primary)
-                                .textSelection(.enabled)
-                        }
+        .labelStyle(.titleAndIcon)
+        .buttonStyle(.plain)
+        .disabled(!state.controlsEnabled)
+        .padding(.horizontal, 18).padding(.vertical, 10)
+        .glassEffect(.regular, in: Capsule())
+        .padding(.bottom, 14)
+    }
+
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button(action: onBack) { Label("Meetings", systemImage: "chevron.left") }
+                .help("Back to the list")
+        }
+        ToolbarItem(placement: .principal) {
+            Text(meeting?.title ?? "Meeting").font(.headline).foregroundStyle(.secondary)
+        }
+        if isLive {
+            ToolbarItem {
+                Button { meetings.togglePill() } label: { Label("Shrink to pill", systemImage: "rectangle.compress.vertical") }
+                    .help("Shrink to a floating pill (⌃⌘M)")
+            }
+        } else if let meeting {
+            ToolbarItem {
+                Menu {
+                    Button("Export Markdown…") { Task { await meetings.exportMarkdown(meeting) } }
+                    Button("Show audio in Finder") { Task { await meetings.showAudio(meeting) } }
+                    Divider()
+                    Button("Improve transcript") { meetings.improve(meetingID) }
+                        .disabled(working)
+                    Button("Summarize with Claude") {
+                        if meetings.claudeDisclosureAccepted { meetings.summarizeWithClaude(meetingID) } else { confirmClaude = true }
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                    .disabled(working || !meetings.hasClaudeKey)
+                    if !meetings.hasClaudeKey { Text("Add a Claude key in Settings > Meetings") }
+                } label: { Label("More", systemImage: "ellipsis") }
             }
         }
-    }
-
-    /// The speaker's name; the old two-stream meetings say Me and Them.
-    private func label(of segment: MeetingSegment) -> String {
-        switch segment.stream {
-        case .mic: "Me"
-        case .system: "Them"
-        case .mixed: segment.speaker.flatMap { current?.speakers[$0]?.name } ?? ""
+        ToolbarItem {
+            Button { showTranscript.toggle() } label: { Label("Transcript", systemImage: "sidebar.right") }
+                .help(showTranscript ? "Hide the transcript" : "Show the transcript")
         }
     }
 
     // MARK: Data
 
     private func reload() async {
-        current = meetings.meetings.first { $0.id == meeting.id }
-        segments = await meetings.transcript(of: meeting.id)
-        summaries = await meetings.summaries(of: meeting.id)
-    }
-
-    private static func markdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(text)
-    }
-
-    private static func backendName(_ id: String) -> String {
-        switch id {
-        case "claude": "Claude"
-        case "foundation-models", "apple-foundation-models": "Apple Foundation Models"
-        default: id
+        current = meetings.meetings.first { $0.id == meetingID }
+        if !isLive {
+            segments = await meetings.transcript(of: meetingID)
+            if assigning, current?.speakers.isEmpty == true { assigning = false }
         }
+        summaries = await meetings.summaries(of: meetingID)
+        if !notesLoaded || !isLive {
+            // Notes are the user's own: reload only when not typing (the first load, and after a finished chain).
+            let stored = await meetings.notes(of: meetingID)
+            if !notesLoaded { notes = stored }
+            notesLoaded = true
+        }
+        if !isLive { await preparePlayer() }
     }
 
-    private static func stamp(_ seconds: TimeInterval) -> String {
-        String(format: "%02d:%02d", Int(seconds) / 60, Int(seconds) % 60)
-    }
-
-    private static func duration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds)
-        return total >= 3600
-            ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
-            : String(format: "%d:%02d", total / 60, total % 60)
+    private func preparePlayer() async {
+        let folder = await meetings.folder(of: meetingID)
+        if let player {
+            try? player.refresh()
+        } else if MeetingPlayer.audioURL(in: folder) != nil {
+            let made = MeetingPlayer(folder: folder)
+            try? made.load()
+            player = made
+        }
     }
 }

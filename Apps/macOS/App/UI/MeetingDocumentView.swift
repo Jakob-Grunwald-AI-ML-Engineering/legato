@@ -1,0 +1,208 @@
+import LegatoAppServices
+import LegatoMeetings
+import SwiftUI
+
+/// The left pane: the title, the template, the summary (with Regenerate and the stale-notes prompt) and the
+/// private notes, which feed the summary.
+struct MeetingDocumentView: View {
+    @Environment(MacAppController.self) private var app
+    let meeting: Meeting
+    let isLive: Bool
+    let summaries: [MeetingStore.Summary]
+    let working: Bool
+    @Binding var notes: String
+
+    @State private var title = ""
+    @State private var processRequested = false
+    @FocusState private var titleFocused: Bool
+
+    private var meetings: MeetingController { app.meetings }
+    private var templates: [SummaryTemplate] { meetings.settings.allTemplates }
+    private var shown: MeetingStore.Summary? { MeetingListLogic.shownSummary(in: summaries, templateID: meeting.templateID) }
+    private var waitingForHeavySteps: Bool { meeting.state == .processing || meeting.state == .interrupted }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                banners
+                if isLive {
+                    Text("The summary is written after the meeting, from the transcript and your notes.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    summarySection
+                }
+                notesSection
+            }
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollIndicators(.automatic)
+        .onAppear { title = meeting.title }
+        .onChange(of: meeting.title) { _, new in if !titleFocused { title = new } }
+    }
+
+    // MARK: Pieces
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Title", text: $title)
+                .textFieldStyle(.plain)
+                .font(.title.bold())
+                .focused($titleFocused)
+                .onSubmit { Task { await meetings.rename(meeting, to: title) } }
+                .onChange(of: titleFocused) { _, focused in
+                    if !focused, title != meeting.title { Task { await meetings.rename(meeting, to: title) } }
+                }
+            HStack(spacing: 8) {
+                Text("\(meeting.date.formatted(date: .abbreviated, time: .shortened)) · \(MeetingListLogic.clock(isLive ? meetings.elapsed : meeting.duration))")
+                if let locale = meeting.locale {
+                    Text("· \(Locale.current.localizedString(forIdentifier: locale) ?? locale)")
+                }
+                Spacer()
+                if !isLive { templateMenu }
+            }
+            .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
+    private var templateMenu: some View {
+        Menu {
+            ForEach(templates) { template in
+                Button {
+                    Task { await meetings.setTemplate(template.id, for: meeting.id) }
+                } label: {
+                    if template.id == meeting.templateID { Label(template.name, systemImage: "checkmark") } else { Text(template.name) }
+                }
+            }
+        } label: {
+            Label(templates.first { $0.id == meeting.templateID }?.name ?? "Summary", systemImage: "doc.text")
+        }
+        .menuStyle(.button).buttonStyle(.bordered).controlSize(.small).fixedSize()
+        .help("The summary template for this meeting")
+    }
+
+    @ViewBuilder private var banners: some View {
+        if waitingForHeavySteps, !isLive {
+            banner(
+                symbol: "hourglass",
+                text: processRequested || working
+                    ? "Improving the transcript, speakers and summary…"
+                    : "The summary and the speaker pass wait until your Mac is idle.",
+                action: processRequested || working ? nil : ("Process now", {
+                    processRequested = true
+                    meetings.processNow(meeting.id)
+                }))
+        }
+        if let notice = meetings.notice {
+            banner(symbol: "info.circle", text: notice, action: nil)
+        }
+        if isLive {
+            if let warning = meetings.systemAudioWarning { banner(symbol: "exclamationmark.triangle", text: warning, action: nil, tint: .orange) }
+            if let reason = meetings.engineFallback { banner(symbol: "info.circle", text: reason, action: nil) }
+            if let error = meetings.live?.audioError ?? meetings.live?.saveError {
+                banner(symbol: "exclamationmark.octagon", text: "Recording problem: \(error)", action: nil, tint: .red)
+            }
+            if let error = meetings.live?.diarizerError {
+                banner(symbol: "person.2.slash", text: "Speaker labels stopped: \(error)", action: nil, tint: .orange)
+            }
+        }
+    }
+
+    private func banner(symbol: String, text: String, action: (String, () -> Void)?, tint: Color = .secondary) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(tint)
+            Text(text).font(.callout).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            if let action { Button(action.0, action: action.1).controlSize(.small) }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder private var summarySection: some View {
+        if let summary = shown {
+            if summary.isStale {
+                banner(
+                    symbol: "pencil.and.list.clipboard", text: "Your notes changed after this summary was written.",
+                    action: working ? nil : ("Regenerate", { meetings.regenerate(meeting.id) }), tint: .orange)
+            }
+            SummaryMarkdownView(text: summary.text)
+            HStack {
+                Button { meetings.regenerate(meeting.id) } label: { Label("Regenerate", systemImage: "arrow.clockwise") }
+                    .controlSize(.small)
+                    .disabled(working)
+                if working { ProgressView().controlSize(.small) }
+                Spacer()
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(working ? "Writing the summary…" : "No summary for this template yet.").foregroundStyle(.secondary)
+                if !working {
+                    Button { meetings.regenerate(meeting.id) } label: { Label("Generate", systemImage: "sparkles") }
+                        .controlSize(.small)
+                        .disabled(waitingForHeavySteps)
+                }
+            }
+        }
+    }
+
+    private var notesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Private notes").font(.title3.bold()).foregroundStyle(.secondary)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $notes)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 160)
+                if notes.isEmpty {
+                    Text(isLive ? "Take notes during the meeting. They are given to the summary." : "Add notes. Changing them offers a new summary.")
+                        .foregroundStyle(.tertiary).padding(.top, 8).padding(.leading, 5).allowsHitTesting(false)
+                }
+            }
+        }
+    }
+}
+
+/// A summary as the document shows it: headings, bullets, checklist items and paragraphs, with inline
+/// Markdown (bold, italics, code, links).
+struct SummaryMarkdownView: View {
+    let text: String
+
+    private enum Block: Hashable {
+        case heading(String), bullet(String), todo(String), paragraph(String)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .heading(let t): Text(Self.inline(t)).font(.title3.bold()).padding(.top, 8)
+                case .bullet(let t):
+                    HStack(alignment: .firstTextBaseline, spacing: 8) { Text("•"); Text(Self.inline(t)) }
+                case .todo(let t):
+                    HStack(alignment: .firstTextBaseline, spacing: 8) { Image(systemName: "circle").font(.caption); Text(Self.inline(t)) }
+                case .paragraph(let t): Text(Self.inline(t))
+                }
+            }
+        }
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var blocks: [Block] {
+        text.split(separator: "\n", omittingEmptySubsequences: true).map { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("#") { return .heading(line.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)) }
+            for prefix in ["- [ ] ", "- [x] ", "* [ ] "] where line.hasPrefix(prefix) { return .todo(String(line.dropFirst(prefix.count))) }
+            for prefix in ["- ", "* ", "• "] where line.hasPrefix(prefix) { return .bullet(String(line.dropFirst(prefix.count))) }
+            return .paragraph(line)
+        }
+    }
+
+    private static func inline(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    }
+}
