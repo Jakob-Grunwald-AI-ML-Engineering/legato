@@ -660,6 +660,20 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         #expect(clipboard.written.isEmpty)
     }
 
+    @Test func aSendReportedWhileTheRunEndsStillKeepsTheClipboardUntouched() async throws {
+        let processor = LivePassProcessor(answers: ["hello world": "Hello world."])
+        let (coordinator, sink, clipboard, engine) = rig(processor, script: [])
+        sink.finalApplied = false
+        #expect(await coordinator.toggle() == .started)
+        engine.emit(final("hello world "), run: 0)
+        #expect(await eventually { sink.revisions.count == 1 })
+        let runID = try #require(sink.started.last?.id.uuidString)
+        // The session is done; the keyboard's report arrives while the sink waits for the final state.
+        sink.onRunEnded = { coordinator.liveTextSent(runID: runID, upTo: 12, shownRevision: 1) }
+        #expect(await coordinator.toggle() == .stopped("Hello world."))
+        #expect(clipboard.written.isEmpty, "the message was sent: nothing to copy")
+    }
+
     @Test func aSentRunRebasesTheSessionAndNeverWritesTheClipboard() async throws {
         let processor = LivePassProcessor(answers: ["hello world": "Hello world.", "how are you": "How are you?"])
         let (coordinator, sink, clipboard, engine) = rig(processor, script: [])

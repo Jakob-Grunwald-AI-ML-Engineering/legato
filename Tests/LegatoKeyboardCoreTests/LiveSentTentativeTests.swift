@@ -162,4 +162,22 @@ private struct SendRig {
         #expect(link.sentTentative(runID: "run-1", boundary: 0) == "hello")
         #expect(link.sentTentative(runID: "run-0", boundary: 0) == "")
     }
+
+    @Test func aSentBoundaryReportedAfterTheRunEndedStillReachesTheApp() {
+        let store = LinkStore(MemoryLinkStore())
+        let link = HostLink(store: store, post: { _ in }, now: { t0 }, sleep: { _ in try await Task.sleep(for: .seconds(3600)) })
+        var heard: [(String, Int, Int)] = []
+        link.onSent = { heard.append(($0, $1, $2)) }
+        link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
+        link.update(committed: "hello world ", volatile: "")
+        link.runEnded(committed: "hello world ", finalText: "Hello world.")
+
+        // The keyboard's report was on its way while the app published the final state.
+        var applied = cursor(runID: "run-1", committedCount: 12)
+        applied.sentBase = 12
+        applied.sentCount = 1
+        store.write(applied, forKey: LinkChannel.Key.applied)
+        link.appliedDidChange()
+        #expect(heard.map(\.0) == ["run-1"], "the app decides whether it is too late")
+    }
 }

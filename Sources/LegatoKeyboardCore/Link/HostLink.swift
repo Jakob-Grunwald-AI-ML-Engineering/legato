@@ -86,9 +86,10 @@ public final class HostLink {
         publish()
     }
 
-    /// The keyboard reported a sent boundary for the running run (`AppliedCursor.sentBase`: its field was
+    /// The keyboard reported a sent boundary for the current run (`AppliedCursor.sentBase`: its field was
     /// cleared, as by sending a message): the run ID, the boundary in `committed`, and the revision the field
-    /// showed for the text before it (0: raw). Called once per boundary, from `appliedDidChange()`.
+    /// showed for the text before it (0: raw). Called once per boundary, from `appliedDidChange()`, also after
+    /// the run's final state went out (a report on its way then still keeps the run off the clipboard).
     public var onSent: (@MainActor (_ runID: String, _ boundary: Int, _ shownRevision: Int) -> Void)?
     private var reportedSentBase = 0
     private var reportedSentCount = 0
@@ -361,7 +362,8 @@ public final class HostLink {
     }
 
     private func reportSentBoundary() {
-        guard isRunning, let runID = state.runID, let cursor = appliedCursor(), cursor.runID == runID,
+        // Also once the run's final state is out: a report on its way then still counts (the app decides).
+        guard let runID = state.runID, let cursor = appliedCursor(), cursor.runID == runID,
               cursor.sentBase > reportedSentBase || cursor.sentCount > reportedSentCount
         else { return }
         reportedSentBase = cursor.sentBase

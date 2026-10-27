@@ -403,9 +403,12 @@ final class FakeSink: TranscriptSink {
     func runFinishing(_ run: DictationRun) {
         log.add("finishing:sink")
     }
+    /// Runs inside `runEnded`, as a keyboard's late report would arrive while the sink waits for its confirmation.
+    var onRunEnded: (@MainActor () -> Void)?
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
         log.add("sink.runEnded")
         ended.append((run, committed, text))
+        onRunEnded?()
         return finalApplied
     }
     func revised(_ revision: TranscriptRevision) {
