@@ -147,3 +147,105 @@ import LegatoCore
     }
     #endif
 }
+
+@Suite struct MeetingAudioWriterMixTests {
+    private let spec = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
+
+    private func tempFolder() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("maw-mix-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func chunk(seconds: Double, level: Float) -> AudioChunk {
+        AudioChunk(samples: [Float](repeating: level, count: Int(seconds * 16_000)), format: spec)
+    }
+
+    private func exists(_ folder: URL, _ name: String) -> Bool {
+        FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path)
+    }
+
+    private func seconds(_ url: URL) throws -> Double {
+        let file = try AVAudioFile(forReading: url)
+        return Double(file.length) / file.processingFormat.sampleRate
+    }
+
+    @Test func theMixIsATrackOfItsOwnAndBecomesMixM4aWithTheMeetingsLength() async throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = MeetingAudioWriter(folder: folder)
+        // A 12 s meeting: each track covers all of it, in pieces and silence, as the session writes them.
+        try await writer.write(chunk(seconds: 7, level: 0.2), stream: .mic)
+        try await writer.writeSilence(seconds: 5, stream: .mic)
+        try await writer.writeSilence(seconds: 3, stream: .system)
+        try await writer.write(chunk(seconds: 9, level: 0.1), stream: .system)
+        for _ in 0..<12 { try await writer.write(chunk(seconds: 1, level: 0.3), stream: .mixed) }
+        try await writer.finish()
+
+        #expect(exists(folder, "mix.caf"))
+        #expect(abs(try await writer.duration(of: .mixed) - 12) < 0.001)
+
+        let report = try await writer.finalize()
+        #expect(Set(report.converted) == [.mic, .system, .mixed])
+        #expect(report.failed.isEmpty)
+        #expect(exists(folder, "mix.m4a") && !exists(folder, "mix.caf"))
+        for name in ["mic.m4a", "system.m4a", "mix.m4a"] {
+            #expect(abs(try seconds(folder.appendingPathComponent(name)) - 12) < 0.2, "\(name)")
+        }
+        #expect(abs(try await writer.duration(of: .mixed) - 12) < 0.2)
+        let window = try await writer.samples(of: .mixed, in: 2..<3)
+        #expect(abs(window.count - 16_000) <= 1)
+    }
+
+    @Test func aLeftoverMixCafIsRecoveredToo() async throws {
+        let folder = try tempFolder()
+        let copy = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: copy) }
+        let writer = MeetingAudioWriter(folder: folder)
+        for _ in 0..<5 { try await writer.write(chunk(seconds: 1, level: 0.3), stream: .mixed) }
+        try FileManager.default.copyItem(
+            at: folder.appendingPathComponent("mix.caf"), to: copy.appendingPathComponent("mix.caf"))
+        try await writer.finish()
+
+        let report = MeetingAudioWriter.recover(folder: copy)
+        #expect(report.converted == [.mixed])
+        #expect(exists(copy, "mix.m4a"))
+    }
+
+    @Test func withOneSourceTheMicRecordingAnswersForTheMix() async throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = MeetingAudioWriter(folder: folder)
+        try await writer.write(chunk(seconds: 3, level: 0.5), stream: .mic)
+        try await writer.finish()
+        #expect(!exists(folder, "mix.caf"))
+        #expect(abs(try await writer.duration(of: .mixed) - 3) < 0.001)
+        let viaMix = try await writer.samples(of: .mixed, in: 0.5..<1.5)
+        let viaMic = try await writer.samples(of: .mic, in: 0.5..<1.5)
+        #expect(viaMix == viaMic && viaMix.count == 16_000)
+
+        try await writer.finalize()
+        #expect(abs(try await writer.duration(of: .mixed) - 3) < 0.2, "after the m4a conversion too")
+    }
+
+    @Test func aMeetingWithTwoSourcesButNoMixHasNoMix() async throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = MeetingAudioWriter(folder: folder)
+        try await writer.write(chunk(seconds: 3, level: 0.5), stream: .mic)
+        try await writer.write(chunk(seconds: 3, level: 0.5), stream: .system)
+        try await writer.finish()
+        // The post-pass then falls back to the two streams, as it did before the mix existed.
+        await #expect(throws: MeetingAudioWriter.WriterError.noRecording(.mixed)) { try await writer.duration(of: .mixed) }
+    }
+
+    @Test func aRealMixWinsOverTheMicAlias() async throws {
+        let folder = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let writer = MeetingAudioWriter(folder: folder)
+        try await writer.write(chunk(seconds: 2, level: 0.5), stream: .mic)
+        try await writer.write(chunk(seconds: 4, level: 0.1), stream: .mixed)
+        try await writer.finish()
+        #expect(abs(try await writer.duration(of: .mixed) - 4) < 0.001)
+    }
+}

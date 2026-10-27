@@ -2,8 +2,11 @@ import AVFAudio
 import Foundation
 import LegatoCore
 
-/// Records a meeting's two streams into one folder: `mic.caf` / `system.caf` (Int16 PCM, 16 kHz mono)
-/// while recording, then `mic.m4a` / `system.m4a` (AAC, ~32 kbps) after ``finalize()``.
+/// Records a meeting's tracks into one folder: `mic.caf` / `system.caf` and, with several sources, `mix.caf`
+/// (what the live engine heard; Int16 PCM, 16 kHz mono) while recording, then the same as `.m4a` (AAC,
+/// ~32 kbps) after ``finalize()``. The tracks come from the session: it writes each source on its own and the
+/// mix on `.mixed`. A meeting with one source (the phone) has no `mix` file; asking the reader for `.mixed` then
+/// answers with the mic recording, which is the mix.
 ///
 /// CAF is written first because it survives a crash; ``finish()`` only closes it so the post-pass can
 /// read full quality. The reader prefers a CAF and falls back to the m4a. Being an actor, writes happen
@@ -24,7 +27,7 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
     }
 
     public static let recordingSpec = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
-    private static let allStreams: [TranscriptEvent.Stream] = [.mic, .system]
+    private static let allStreams: [TranscriptEvent.Stream] = [.mic, .system, .mixed]
 
     private let folder: URL
     private var files: [TranscriptEvent.Stream: AVAudioFile] = [:]
@@ -37,12 +40,17 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
 
     // MARK: Paths
 
+    /// The file name of a track: the stream's name, `mix` for the mixed one.
+    nonisolated private static func fileName(_ s: TranscriptEvent.Stream) -> String {
+        s == .mixed ? "mix" : s.rawValue
+    }
+
     nonisolated private static func cafURL(_ folder: URL, _ s: TranscriptEvent.Stream) -> URL {
-        folder.appendingPathComponent("\(s.rawValue).caf")
+        folder.appendingPathComponent("\(fileName(s)).caf")
     }
 
     nonisolated private static func m4aURL(_ folder: URL, _ s: TranscriptEvent.Stream) -> URL {
-        folder.appendingPathComponent("\(s.rawValue).m4a")
+        folder.appendingPathComponent("\(fileName(s)).m4a")
     }
 
     // MARK: MeetingAudioSink
@@ -162,9 +170,12 @@ public actor MeetingAudioWriter: MeetingAudioSink, AudioSampleReader {
 
     private func openForReading(_ stream: TranscriptEvent.Stream) throws -> AVAudioFile {
         let fm = FileManager.default
-        for url in [Self.cafURL(folder, stream), Self.m4aURL(folder, stream)] where fm.fileExists(atPath: url.path) {
-            return try AVAudioFile(forReading: url)
+        func recording(_ s: TranscriptEvent.Stream) -> URL? {
+            [Self.cafURL(folder, s), Self.m4aURL(folder, s)].first { fm.fileExists(atPath: $0.path) }
         }
+        if let url = recording(stream) { return try AVAudioFile(forReading: url) }
+        // One source: its recording is the mix. Two sources and no mix is a meeting from before the mix existed.
+        if stream == .mixed, recording(.system) == nil, let url = recording(.mic) { return try AVAudioFile(forReading: url) }
         throw WriterError.noRecording(stream)
     }
 

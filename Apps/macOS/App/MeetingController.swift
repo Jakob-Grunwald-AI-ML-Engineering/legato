@@ -30,6 +30,7 @@ final class MeetingController {
     enum Phase: Equatable { case idle, starting, recording, stopping }
 
     private(set) var phase = Phase.idle
+
     /// Newest first.
     private(set) var meetings: [Meeting] = []
     /// The live meeting as the session last published it.
@@ -62,6 +63,7 @@ final class MeetingController {
     @ObservationIgnored private var snapshotTask: Task<Void, Never>?
     @ObservationIgnored private var tapTask: Task<Void, Never>?
     @ObservationIgnored private var micNoticeTask: Task<Void, Never>?
+    @ObservationIgnored private var cleaningNoticeTask: Task<Void, Never>?
     @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var autoMuteTask: Task<Void, Never>?
     @ObservationIgnored private var clockTask: Task<Void, Never>?
@@ -83,7 +85,25 @@ final class MeetingController {
         self.defaults = defaults
         keyStore = keys
         hasClaudeKey = Self.keyExists(keys)
-        services = MeetingServices(models: models, store: store, settings: settings, keyStore: keys)
+        let activity = MacActivitySampler()
+        services = MeetingServices(
+            models: models, store: store, settings: settings, keyStore: keys,
+            sampler: { IdleSample(cpuLoad: activity.cpuLoad(), secondsSinceInput: activity.secondsSinceInput()) })
+        services.onProcessed = { [weak self] id, outcome, error in
+            guard let self else { return }
+            if let outcome, !outcome.notes.isEmpty { notice = outcome.notes.joined(separator: " ") }
+            if let error, !(error is CancellationError) {
+                Self.log.error("Processing failed: \(String(describing: type(of: error)), privacy: .public)")
+                notice = "Processing failed: \(error.localizedDescription)"
+            }
+            busy.remove(id)
+            Task { await self.refresh() }
+        }
+    }
+
+    private func setPhase(_ new: Phase) {
+        phase = new
+        services.setRecording(isRecording)
     }
 
     // MARK: Derived state
@@ -122,7 +142,7 @@ final class MeetingController {
             return
         }
         notice = nil
-        phase = .starting
+        setPhase(.starting)
         let task = Task { await performStart() }
         startTask = task
         await task.value
@@ -135,28 +155,23 @@ final class MeetingController {
     func cancelStart() {
         guard phase == .starting, let startTask else { return }
         startTask.cancel()
-        phase = .idle
+        setPhase(.idle)
         notice = "Meeting start cancelled."
     }
 
     private func performStart() async {
-        let engines = await services.engines()
+        let language = settings.language.map { Locale(identifier: $0) }
+        let engines = await services.engines(for: .macOS, locale: language)
         guard !Task.isCancelled else { return }
-        guard let systemEngine = engines.system else {
-            phase = .idle
-            notice = "Meetings need a second engine for system audio, which this Mac setup does not provide."
-            return
-        }
         engineName = engines.engineID == "apple-speech" ? "Apple Speech" : engines.engineID
         engineFallback = engines.fallbackReason
 
-        let id = UUID()
-        let meeting = Meeting(
-            id: id, title: Self.defaultTitle(Date()), date: Date(), engineID: engines.engineID)
+        let meeting = services.newMeeting(title: Self.defaultTitle(Date()), engines: engines)
+        let id = meeting.id
         let folder: URL
         do { folder = try await store.createFolder(for: id) } catch {
             guard !Task.isCancelled else { return }
-            phase = .idle
+            setPhase(.idle)
             notice = "Could not create the meeting folder: \(error.localizedDescription)"
             return
         }
@@ -164,7 +179,7 @@ final class MeetingController {
             try? FileManager.default.removeItem(at: folder)
             return
         }
-        let mic = VoiceProcessingFallbackMic(voiceProcessing: settings.voiceProcessing)
+        let mic = VoiceProcessingFallbackMic(voiceProcessing: engines.voiceProcessing)
         let system = SystemAudioSource()
         #if DEBUG
         let counter = ZeroCountingSource(system)
@@ -173,15 +188,9 @@ final class MeetingController {
         #else
         let tap: any AudioSource = system
         #endif
-        let session = MeetingSession(
-            meeting: meeting,
-            inputs: [
-                MeetingInput(stream: .mic, source: mic, engine: engines.mic, locale: engines.locale),
-                MeetingInput(stream: .system, source: tap, engine: systemEngine, locale: engines.locale),
-            ],
-            store: store, sink: MeetingAudioWriter(folder: folder),
-            convert: { $0 }, // the writer converts to its own 16 kHz mono
-            clock: { ProcessInfo.processInfo.systemUptime })
+        let made = services.makeSession(
+            meeting: meeting, mic: mic, system: tap, engines: engines, sink: MeetingAudioWriter(folder: folder))
+        let session = made.session
         do {
             try await session.start()
         } catch {
@@ -189,7 +198,7 @@ final class MeetingController {
             // A cancelled start already told the user and freed the window.
             guard !(error is CancellationError), !Task.isCancelled else { return }
             Self.log.error("meeting start failed: \(String(describing: type(of: error)), privacy: .public)")
-            phase = .idle
+            setPhase(.idle)
             notice = "Could not start the meeting: \(error.localizedDescription)"
             return
         }
@@ -198,8 +207,8 @@ final class MeetingController {
             try? FileManager.default.removeItem(at: folder)
             return
         }
-        beginObserving(session: session, system: system, mic: mic)
-        phase = .recording
+        beginObserving(session: session, system: system, mic: mic, cleaningNotices: made.notices)
+        setPhase(.recording)
         windowRequests += 1
     }
 
@@ -207,14 +216,14 @@ final class MeetingController {
     @discardableResult
     func stop(runPipeline: Bool = true) async -> Meeting? {
         guard phase == .recording, let session else { return nil }
-        phase = .stopping
+        setPhase(.stopping)
         stopObserving()
         let meeting = await session.stop()
         self.session = nil
         live = nil
         tapStatus = nil
         mute = MeetingMuteState()
-        phase = .idle
+        setPhase(.idle)
         await refresh()
         if runPipeline { process(meeting.id) }
         return meeting
@@ -248,7 +257,9 @@ final class MeetingController {
 
     // MARK: Observing a running meeting
 
-    private func beginObserving(session: MeetingSession, system: SystemAudioSource, mic: VoiceProcessingFallbackMic) {
+    private func beginObserving(
+        session: MeetingSession, system: SystemAudioSource, mic: VoiceProcessingFallbackMic, cleaningNotices: AsyncStream<String>
+    ) {
         self.session = session
         mute = MeetingMuteState()
         policy = AutoMutePolicy(ownPID: ProcessInfo.processInfo.processIdentifier)
@@ -265,6 +276,9 @@ final class MeetingController {
         }
         micNoticeTask = Task { [weak self, notices = mic.notices] in
             for await text in notices { self?.notice = text }
+        }
+        cleaningNoticeTask = Task { [weak self] in
+            for await text in cleaningNotices { self?.notice = text }
         }
         autoMuteTask = Task { [weak self] in
             for await processes in MicInUseMonitor().processChanges() {
@@ -297,6 +311,8 @@ final class MeetingController {
         tapTask?.cancel()
         micNoticeTask?.cancel()
         micNoticeTask = nil
+        cleaningNoticeTask?.cancel()
+        cleaningNoticeTask = nil
         muteCommands?.finish()
         autoMuteTask = nil
         clockTask = nil
@@ -357,12 +373,26 @@ final class MeetingController {
 
     // MARK: Actions on a meeting
 
-    /// The after-stop chain (or its remainder) for a meeting.
+    /// The after-stop chain (or its remainder) for a meeting: the audio now, the rest when the Mac is idle.
     func process(_ id: UUID) {
-        guard !liveMeetingIDs.contains(id) else { return }
-        run(id, label: "Processing") { services in
-            try await services.pipeline().run(meetingID: id)
+        guard !liveMeetingIDs.contains(id), !busy.contains(id) else { return }
+        busy.insert(id)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let outcome = try await services.processAfterStop(id)
+                if !outcome.notes.isEmpty { notice = outcome.notes.joined(separator: " ") }
+            } catch {
+                if !(error is CancellationError) { notice = "Processing failed: \(error.localizedDescription)" }
+                busy.remove(id)
+            }
+            await refresh()
         }
+    }
+
+    /// "Process now": the heavy steps without waiting for an idle Mac.
+    func processNow(_ id: UUID) {
+        Task { await services.processNow(id) }
     }
 
     /// "Improve transcript": the post-pass again, then the summary again.
@@ -454,7 +484,7 @@ final class MeetingController {
 
     func showAudio(_ meeting: Meeting) async {
         let folder = await store.folder(for: meeting.id)
-        let audio = ["mic.m4a", "system.m4a", "mic.caf", "system.caf"]
+        let audio = ["mix.m4a", "mix.caf", "mic.m4a", "system.m4a", "mic.caf", "system.caf"]
             .map { folder.appendingPathComponent($0) }
             .first { FileManager.default.fileExists(atPath: $0.path) }
         NSWorkspace.shared.activateFileViewerSelecting([audio ?? folder])

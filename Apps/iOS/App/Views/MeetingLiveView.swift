@@ -46,8 +46,8 @@ struct MeetingLiveView: View {
 
     private var transcript: some View {
         let segments = (meetings.live?.segments ?? []).filter { !$0.echo }
-        let partial = meetings.live?.volatile[.mic] ?? ""
-        let failure = meetings.live?.engineErrors[.mic]
+        let partial = meetings.live?.volatile[.mixed] ?? ""
+        let failure = meetings.live?.engineErrors[.mixed]
         return ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {

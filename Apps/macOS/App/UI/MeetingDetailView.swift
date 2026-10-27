@@ -125,10 +125,10 @@ struct MeetingDetailView: View {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(visible) { segment in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(segment.stream == .mic ? "Me" : "Them")
+                            Text(label(of: segment))
                                 .font(.caption.bold())
-                                .foregroundStyle(segment.stream == .mic ? Color.accentColor : .secondary)
-                                .frame(width: 36, alignment: .leading)
+                                .foregroundStyle(segment.stream == .system ? Color.secondary : .accentColor)
+                                .frame(width: 70, alignment: .leading)
                             Text(Self.stamp(segment.start)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                             Text(segment.text)
                                 .foregroundStyle(segment.echo ? .secondary : .primary)
@@ -138,6 +138,15 @@ struct MeetingDetailView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+    }
+
+    /// The speaker's name; the old two-stream meetings say Me and Them.
+    private func label(of segment: MeetingSegment) -> String {
+        switch segment.stream {
+        case .mic: "Me"
+        case .system: "Them"
+        case .mixed: segment.speaker.flatMap { current?.speakers[$0]?.name } ?? ""
         }
     }
 

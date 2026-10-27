@@ -105,6 +105,8 @@ final class MeetingController {
     @ObservationIgnored private var session: MeetingSession?
     @ObservationIgnored private var mic: ResumableMicSource?
     @ObservationIgnored private var snapshotTask: Task<Void, Never>?
+    @ObservationIgnored private var cleaningNoticeTask: Task<Void, Never>?
+    @ObservationIgnored private var tokens: [UUID: BackgroundToken] = [:]
     @ObservationIgnored private var clockTask: Task<Void, Never>?
     @ObservationIgnored private var muteWriter: Task<Void, Never>?
     @ObservationIgnored private var muteCommands: AsyncStream<Bool>.Continuation?
@@ -124,6 +126,20 @@ final class MeetingController {
         keyStore = keys
         hasClaudeKey = Self.keyExists(keys)
         services = MeetingServices(models: models, store: store, settings: settings, keyStore: keys)
+        services.onProcessed = { [weak self] id, outcome, error in
+            guard let self else { return }
+            if let outcome, !outcome.notes.isEmpty { notice = outcome.notes.joined(separator: " ") }
+            if let error, !(error is CancellationError) {
+                Self.log.error("Processing failed: \(String(describing: type(of: error)), privacy: .public)")
+                notice = "Processing failed: \(error.localizedDescription)"
+            }
+            finishProcessing(id)
+        }
+    }
+
+    private func setPhase(_ new: Phase) {
+        phase = new
+        services.setRecording(isActive)
     }
 
     // MARK: Derived state
@@ -157,7 +173,7 @@ final class MeetingController {
             #endif
             return
         }
-        phase = .starting
+        setPhase(.starting)
         onActiveChanged(true)
         await releaseKeptMicrophone() // keep-ready ends when a meeting starts
         // The Live Activity first: it must exist before the audio session activates.
@@ -167,16 +183,15 @@ final class MeetingController {
             notice = "Live Activities are off, so the recording has no Lock Screen indicator."
         }
 
-        let engines = await services.engines(for: .iOS)
-        var engine = engines.mic
-        var engineID = engines.engineID
+        var engines = await services.engines(for: .iOS, locale: settings.language.map { Locale(identifier: $0) })
         #if DEBUG
-        if let override = engineOverride { (engine, engineID) = (override, override.id) }
+        if let override = engineOverride { engines = engines.replacing(engine: override) }
         #endif
+        let engineID = engines.engineID
         engineName = engineID == "apple-speech" ? "Apple Speech" : engineID
         engineFallback = engines.fallbackReason
 
-        let meeting = Meeting(id: UUID(), title: Self.defaultTitle(Date()), date: Date(), engineID: engineID)
+        let meeting = services.newMeeting(title: Self.defaultTitle(Date()), engines: engines)
         let folder: URL
         do { folder = try await store.createFolder(for: meeting.id) } catch {
             await abortStart(notice: "Could not create the meeting folder: \(error.localizedDescription)", folder: nil)
@@ -192,15 +207,15 @@ final class MeetingController {
         for attempt in 0..<2 {
             let writer = MeetingAudioWriter(folder: folder)
             let mic = ResumableMicSource(make: audio.makeMic)
-            let session = MeetingSession(
-                meeting: meeting,
-                inputs: [MeetingInput(stream: .mic, source: mic, engine: engine, locale: engines.locale)],
-                store: store, sink: writer, convert: { $0 },
-                clock: { ProcessInfo.processInfo.systemUptime })
+            let made = services.makeSession(meeting: meeting, mic: mic, engines: engines, sink: writer)
+            let session = made.session
             do {
                 try await session.start()
                 beginObserving(session: session, mic: mic)
-                phase = .recording
+                cleaningNoticeTask = Task { [weak self] in
+                    for await text in made.notices { self?.notice = text }
+                }
+                setPhase(.recording)
                 #if DEBUG
                 E2E.log("meeting.started id=\(meeting.id.uuidString) engine=\(engineID)")
                 #endif
@@ -220,7 +235,7 @@ final class MeetingController {
         audio.deactivate()
         await activity.end(startedAt: startedAt)
         if let folder { try? FileManager.default.removeItem(at: folder) }
-        phase = .idle
+        setPhase(.idle)
         onActiveChanged(false)
         #if DEBUG
         E2E.log("meeting.start.failed notice=\(E2E.quote(notice))")
@@ -231,7 +246,7 @@ final class MeetingController {
     @discardableResult
     func stop(runPipeline: Bool = true) async -> Meeting? {
         guard phase == .recording, let session else { return nil }
-        phase = .stopping
+        setPhase(.stopping)
         stopObserving()
         await activity.update(startedAt: startedAt, phase: .saving)
         let meeting = await session.stop()
@@ -243,7 +258,7 @@ final class MeetingController {
         interruptions = MeetingInterruptions()
         audio.deactivate()
         await activity.end(startedAt: startedAt)
-        phase = .idle
+        setPhase(.idle)
         onActiveChanged(false)
         #if DEBUG
         E2E.log("meeting.stopped id=\(meeting.id.uuidString) mutedRanges=\(meeting.mutedRanges.count)")
@@ -395,6 +410,8 @@ final class MeetingController {
         clockTask?.cancel()
         muteCommands?.finish()
         clockTask = nil
+        cleaningNoticeTask?.cancel()
+        cleaningNoticeTask = nil
         muteCommands = nil
         snapshotTask = nil
         muteWriter = nil
@@ -455,11 +472,42 @@ final class MeetingController {
 
     // MARK: Actions on a meeting
 
-    /// The after-stop chain (or its remainder) for a meeting.
+    /// The after-stop chain (or its remainder) for a meeting: the audio now, the rest when idle (on the phone:
+    /// the app in the foreground with nothing recording), inside an iOS background task. When the system is
+    /// about to suspend the app the running step is cancelled: the meeting stays `processing` and
+    /// `resumeProcessing` continues it in the foreground.
     func process(_ id: UUID) {
-        guard !liveMeetingIDs.contains(id) else { return }
-        run(id, label: "Processing") { services in
-            try await services.pipeline().run(meetingID: id)
+        guard !liveMeetingIDs.contains(id), !busy.contains(id) else { return }
+        busy.insert(id)
+        let token = BackgroundToken()
+        tokens[id] = token
+        token.begin(name: "legato.meeting.pipeline") { [weak self] in
+            guard let self else { return }
+            Task { await self.services.scheduler.cancelRunning() }
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let outcome = try await services.processAfterStop(id)
+                if !outcome.notes.isEmpty { notice = outcome.notes.joined(separator: " ") }
+            } catch {
+                if !(error is CancellationError) { notice = "Processing failed: \(error.localizedDescription)" }
+                finishProcessing(id)
+            }
+        }
+    }
+
+    /// The heavy steps of `id` ended (or were cut short): free its busy mark and background time.
+    private func finishProcessing(_ id: UUID) {
+        busy.remove(id)
+        tokens.removeValue(forKey: id)?.end()
+        Task { [weak self] in
+            guard let self else { return }
+            await refresh()
+            #if DEBUG
+            let state = meetings.first { $0.id == id }?.state.rawValue ?? "missing"
+            E2E.log("meeting.pipeline.done id=\(id.uuidString) state=\(state)")
+            #endif
         }
     }
 
@@ -563,7 +611,7 @@ final class MeetingController {
         }
         var items = [file]
         let folder = await store.folder(for: meeting.id)
-        if let audio = ["mic.m4a", "mic.caf"].map({ folder.appendingPathComponent($0) })
+        if let audio = ["mix.m4a", "mix.caf", "mic.m4a", "mic.caf"].map({ folder.appendingPathComponent($0) })
             .first(where: { FileManager.default.fileExists(atPath: $0.path) })
         {
             items.append(audio)

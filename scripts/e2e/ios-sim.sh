@@ -1137,7 +1137,7 @@ scenario_x() {
   local segs; segs="$(grep -c . "$dir/segments.jsonl" 2> /dev/null)"
   if [ "${segs:-0}" -ge 5 ]; then record PASS "the live transcript was saved ($segs segments)"
   else record FAIL "the live transcript was saved" "segments.jsonl has ${segs:-0} lines"; fi
-  assert_eq "first segment is the first word, tagged mic" "one mic" \
+  assert_eq "first segment is the first word, tagged mixed (one engine on the mix)" "one mixed" \
     "$(python3 -I -c 'import json, sys; s = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]; s.sort(key=lambda x: x["start"]); print(s[0]["text"].strip(), s[0]["stream"])' "$dir/segments.jsonl")"
   assert_eq "the mute left one marked range" "1" "$(meeting_field "$dir" 'len(m["mutedRanges"])')"
   assert_eq "the marked range is the mic's" "mic" "$(meeting_field "$dir" 'm["mutedRanges"][0]["stream"]')"

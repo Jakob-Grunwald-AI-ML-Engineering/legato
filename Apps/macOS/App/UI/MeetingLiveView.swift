@@ -53,10 +53,7 @@ struct MeetingLiveView: View {
                 Label("Recording problem: \(error)", systemImage: "exclamationmark.octagon")
                     .font(.callout).foregroundStyle(.red)
             }
-            HStack(alignment: .top, spacing: 12) {
-                column("Me", stream: .mic)
-                column("Them", stream: .system)
-            }
+            column("Transcript", stream: .mixed)
         }
         .padding(16)
     }
@@ -86,7 +83,7 @@ struct MeetingLiveView: View {
     private func column(_ title: String, stream: TranscriptEvent.Stream) -> some View {
         let segments = (meetings.live?.segments ?? []).filter { $0.stream == stream && !$0.echo }
         let partial = meetings.live?.volatile[stream] ?? ""
-        let muted = stream == .mic && meetings.isMuted
+        let muted = meetings.isMuted
         let failure = meetings.live?.engineErrors[stream]
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
