@@ -8,6 +8,12 @@ public enum ModelKind: String, Sendable, Hashable, CaseIterable {
     case speechBatch
     /// A language model used for text cleanup.
     case llm
+    /// A streaming speaker diarizer that labels who speaks while a meeting records.
+    case speakersLive
+    /// A speaker diarizer for a finished recording (the after-meeting pass).
+    case speakersBatch
+    /// A streaming echo canceller and noise suppressor for the meeting microphone.
+    case echoNoise
 }
 
 /// An OS family a model can run on. Lets the iPhone list only the models flagged for it.
@@ -33,6 +39,12 @@ public enum ModelRole: String, Sendable, Hashable, CaseIterable {
     case postPass
     /// The language model that cleans up dictated text.
     case cleanup
+    /// The diarizer that labels speakers while a meeting records.
+    case liveSpeakers
+    /// The diarizer that labels speakers in a finished meeting.
+    case meetingSpeakers
+    /// The model that removes echo and noise from the meeting microphone.
+    case echoNoiseCancellation
 
     /// The only model kind this role accepts.
     public var kind: ModelKind {
@@ -40,6 +52,9 @@ public enum ModelRole: String, Sendable, Hashable, CaseIterable {
         case .liveDictation: .speechStreaming
         case .postPass: .speechBatch
         case .cleanup: .llm
+        case .liveSpeakers: .speakersLive
+        case .meetingSpeakers: .speakersBatch
+        case .echoNoiseCancellation: .echoNoise
         }
     }
 }
@@ -92,12 +107,16 @@ public struct ModelDescriptor: Sendable, Hashable, Identifiable {
     }
 
     /// What the model is for and how far it reaches, in words for a row: "Live dictation",
-    /// "English only · live dictation" (a streaming model with the single language `en`) or
-    /// "After meetings · not live" (a batch model). `nil` for a model that is not a speech model.
+    /// "English only · live dictation" (a streaming model with the single language `en`),
+    /// "After meetings · not live" (a batch model), "Speakers · live", "Speakers · after meetings" or
+    /// "Echo & noise cancellation · live". `nil` for a language model.
     public var roleLine: String? {
         switch kind {
         case .speechStreaming: languages == ["en"] ? "English only · live dictation" : "Live dictation"
         case .speechBatch: "After meetings · not live"
+        case .speakersLive: "Speakers · live"
+        case .speakersBatch: "Speakers · after meetings"
+        case .echoNoise: "Echo & noise cancellation · live"
         case .llm: nil
         }
     }

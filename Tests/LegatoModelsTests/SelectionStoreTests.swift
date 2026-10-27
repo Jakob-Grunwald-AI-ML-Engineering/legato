@@ -53,5 +53,19 @@ import Testing
         #expect(ModelRole.liveDictation.kind == .speechStreaming)
         #expect(ModelRole.postPass.kind == .speechBatch)
         #expect(ModelRole.cleanup.kind == .llm)
+        #expect(ModelRole.liveSpeakers.kind == .speakersLive)
+        #expect(ModelRole.meetingSpeakers.kind == .speakersBatch)
+        #expect(ModelRole.echoNoiseCancellation.kind == .echoNoise)
+    }
+
+    @Test func aSpeakerRoleRoundTripsItsPick() {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = SelectionStore(defaults: defaults)
+        store.set("sortformer-live", for: .liveSpeakers)
+        store.set("diarizer-offline", for: .meetingSpeakers)
+        #expect(store.selected(for: .liveSpeakers) == "sortformer-live")
+        #expect(store.selected(for: .meetingSpeakers) == "diarizer-offline")
+        #expect(store.selected(for: .echoNoiseCancellation) == nil)
     }
 }

@@ -84,6 +84,31 @@ struct Rig: @unchecked Sendable {
         #expect(live.fallback == nil)
     }
 
+    @Test func aMeetingLanguageOverridesTheGlobalLocalesForThatEngineOnly() async throws {
+        let rig = Rig(); defer { rig.cleanUp() }
+        try rig.installers["nemotron-multilingual-560"]!.stage(root: rig.root)
+        let registry = rig.registry()
+        registry.settings.preferredLocales = [Locale(identifier: "de-DE"), Locale(identifier: "en-US")]
+        try await registry.models.select("nemotron-multilingual-560", role: .liveDictation)
+
+        let meeting = await registry.liveEngine(localeOverride: Locale(identifier: "fr-FR"))
+        #expect(meeting.preferredLocales.map(\.identifier) == ["fr-FR"])
+        #expect(meeting.engine.id == "nemotron-multilingual-560", "the model pick is unchanged")
+        #expect(meeting.silenceMs == 1200)
+
+        let dictation = await registry.liveEngine()
+        #expect(dictation.preferredLocales.map(\.identifier) == ["de-DE", "en-US"], "the setting is not rewritten")
+        #expect(registry.settings.preferredLocales.map(\.identifier) == ["de-DE", "en-US"])
+        #expect(await registry.liveEngine(localeOverride: nil).preferredLocales.map(\.identifier) == ["de-DE", "en-US"])
+    }
+
+    @Test func aMeetingLanguageAlsoReachesTheAppleSpeechFallback() async {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let live = await rig.registry().liveEngine(localeOverride: Locale(identifier: "es-ES"))
+        #expect(live.engine.id == "apple-speech")
+        #expect(live.preferredLocales.map(\.identifier) == ["es-ES"])
+    }
+
     @Test func eouAndLatinChoicesMapToTheirEngines() async throws {
         let rig = Rig(); defer { rig.cleanUp() }
         for id in ["parakeet-eou-320", "nemotron-latin-2240"] {
@@ -156,6 +181,57 @@ struct Rig: @unchecked Sendable {
         #expect(await rig.registry().postPassTranscriber() == nil)
     }
 
+    // MARK: meeting models
+
+    @Test func noMeetingModelInstalledMeansNoDiarizerAndNoEnhancer() async {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let registry = rig.registry()
+        #expect(await registry.liveDiarizer() == nil)
+        #expect(await registry.batchDiarizer() == nil)
+        #expect(await registry.micEnhancer() == nil)
+    }
+
+    @Test func anInstalledMeetingModelIsUsedEvenBeforeItIsPicked() async {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let registry = rig.registry()
+        for id in ["sortformer-live", "diarizer-offline", "localvqe-live"] { for await _ in await registry.models.install(id) {} }
+        #expect(await registry.liveDiarizer() is SortformerSpeakerDiarizer)
+        #expect(await registry.batchDiarizer() is OfflineSpeakerDiarizer)
+        #expect(await registry.micEnhancer() is LocalVqeEnhancer)
+    }
+
+    @Test func aPickedButMissingMeetingModelGivesNothing() async {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let store = SelectionStore(defaults: rig.defaults)
+        store.set("sortformer-live", for: .liveSpeakers)
+        store.set("diarizer-offline", for: .meetingSpeakers)
+        store.set("localvqe-live", for: .echoNoiseCancellation)
+        let registry = rig.registry()
+        #expect(await registry.liveDiarizer() == nil)
+        #expect(await registry.batchDiarizer() == nil)
+        #expect(await registry.micEnhancer() == nil)
+    }
+
+    @Test func aPickOfTheWrongKindForARoleIsIgnored() async throws {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let registry = rig.registry()
+        for await _ in await registry.models.install("parakeet-v3") {}
+        SelectionStore(defaults: rig.defaults).set("parakeet-v3", for: .liveSpeakers)
+        #expect(await registry.liveDiarizer() == nil)
+    }
+
+    @Test func eachCallBuildsAFreshDiarizerAndEnhancer() async throws {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let registry = rig.registry()
+        for id in ["sortformer-live", "localvqe-live"] { for await _ in await registry.models.install(id) {} }
+        let first = try #require(await registry.liveDiarizer() as? SortformerSpeakerDiarizer)
+        let second = try #require(await registry.liveDiarizer() as? SortformerSpeakerDiarizer)
+        #expect(first !== second, "two meetings never share one diarizer's state")
+        let a = try #require(await registry.micEnhancer() as? LocalVqeEnhancer)
+        let b = try #require(await registry.micEnhancer() as? LocalVqeEnhancer)
+        #expect(a !== b)
+    }
+
     @Test func registryNeverStartsAnInstallOrWarmUp() async throws {
         let rig = Rig(); defer { rig.cleanUp() }
         let store = SelectionStore(defaults: rig.defaults)
@@ -166,6 +242,9 @@ struct Rig: @unchecked Sendable {
             let registry = rig.registry()
             _ = await registry.liveEngine()
             _ = await registry.postPassTranscriber()
+            _ = await registry.liveDiarizer()
+            _ = await registry.batchDiarizer()
+            _ = await registry.micEnhancer()
         }
         #expect(rig.totalInstalls == 0)
         #expect(rig.totalWarms == 0)
@@ -184,7 +263,7 @@ struct Rig: @unchecked Sendable {
 @Suite struct FluidAudioCatalogTests {
     @Test func catalogCoversEverySpeechModelAndInstallerIsKeyedByID() {
         let descriptors = FluidAudioCatalog.descriptors(platform: .macOS)
-        #expect(descriptors.count == 6 + 2 + 2)
+        #expect(descriptors.count == 6 + 2 + 2 + 3)
         let installers = FluidAudioCatalog.installers(platform: .macOS)
         #expect(Set(installers.keys) == Set(descriptors.map(\.id)))
     }

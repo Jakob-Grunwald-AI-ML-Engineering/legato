@@ -178,6 +178,59 @@ struct ParakeetBatch {
     }
 }
 
+@Suite("Speaker and enhancement installers")
+struct MeetingModelInstallers {
+    static let sortformerBundle = "sortformer/v3/palettized/Sortformer_v2.1.mlmodelc"
+    static let vqeBundle = "localvqe/localvqe-v1.3-4.8M-16ms.mlmodelc"
+
+    @Test func installFoldersAreTheRepositoryFoldersFluidAudioWrites() {
+        let root = URL(fileURLWithPath: "/models")
+        #expect(SortformerInstaller().installFolder(root: root).path == "/models/sortformer")
+        #expect(OfflineDiarizerInstaller().installFolder(root: root).path == "/models/speaker-diarization")
+        #expect(LocalVqeInstaller().installFolder(root: root).path == "/models/localvqe")
+    }
+
+    @Test func sortformerNeedsOnlyThePalettizedBundle() async throws {
+        let staged = try StagedRoot()
+        defer { staged.remove() }
+        let installer = SortformerInstaller()
+        #expect(await installer.isInstalled(root: staged.url) == false)
+        // The full-precision bundle alone is not enough: the app loads the palettized one.
+        try staged.directory("sortformer/v3/fp16/Sortformer_v2.1.mlmodelc")
+        #expect(await installer.isInstalled(root: staged.url) == false)
+        try staged.directory(Self.sortformerBundle)
+        #expect(await installer.isInstalled(root: staged.url))
+        try staged.file("\(Self.sortformerBundle)/weights/weight.bin.partial")
+        #expect(await installer.isInstalled(root: staged.url) == false, "a download is still staged")
+    }
+
+    @Test func offlineDiarizerNeedsEveryModelAndThePLDAParameters() async throws {
+        let staged = try StagedRoot()
+        defer { staged.remove() }
+        let base = "speaker-diarization"
+        let installer = OfflineDiarizerInstaller()
+        for name in ["Segmentation.mlmodelc", "FBank.mlmodelc", "Embedding.mlmodelc", "PldaRho.mlmodelc"] {
+            try staged.directory("\(base)/\(name)")
+        }
+        #expect(await installer.isInstalled(root: staged.url) == false, "plda-parameters.json still missing")
+        try staged.file("\(base)/plda-parameters.json")
+        #expect(await installer.isInstalled(root: staged.url))
+        try staged.file("\(base)/Embedding.mlmodelc/weights/weight.bin.partial.etag")
+        #expect(await installer.isInstalled(root: staged.url) == false)
+    }
+
+    @Test func localVqeNeedsTheOneRealtimeModelItRuns() async throws {
+        let staged = try StagedRoot()
+        defer { staged.remove() }
+        let installer = LocalVqeInstaller()
+        #expect(await installer.isInstalled(root: staged.url) == false)
+        try staged.directory("localvqe/localvqe-v1.3-4.8M-256ms.mlmodelc")
+        #expect(await installer.isInstalled(root: staged.url) == false, "the 256 ms build is not the one the meeting uses")
+        try staged.directory(Self.vqeBundle)
+        #expect(await installer.isInstalled(root: staged.url))
+    }
+}
+
 @Suite("FluidAudio catalog rows")
 struct CatalogRows {
     static let expectedIDs: Set<String> = [
@@ -185,6 +238,7 @@ struct CatalogRows {
         "nemotron-latin-560", "nemotron-latin-1120", "nemotron-latin-2240",
         "parakeet-eou-160", "parakeet-eou-320",
         "parakeet-v3", "parakeet-ultra",
+        "sortformer-live", "diarizer-offline", "localvqe-live",
     ]
 
     @Test func descriptorIDsMatchThePlan() {
@@ -203,6 +257,29 @@ struct CatalogRows {
         #expect(kinds["parakeet-ultra"] == .speechBatch)
         #expect(kinds["nemotron-latin-1120"] == .speechStreaming)
         #expect(kinds["parakeet-eou-160"] == .speechStreaming)
+        #expect(kinds["sortformer-live"] == .speakersLive)
+        #expect(kinds["diarizer-offline"] == .speakersBatch)
+        #expect(kinds["localvqe-live"] == .echoNoise)
+    }
+
+    @Test func theMeetingModelsStateTheirRoleAndRunOnBothPlatforms() throws {
+        func descriptor(_ id: String) throws -> ModelDescriptor {
+            try #require(FluidAudioModels.descriptors.first { $0.id == id })
+        }
+        #expect(try descriptor("sortformer-live").roleLine == "Speakers · live")
+        #expect(try descriptor("diarizer-offline").roleLine == "Speakers · after meetings")
+        #expect(try descriptor("localvqe-live").roleLine == "Echo & noise cancellation · live")
+        for id in ["sortformer-live", "diarizer-offline", "localvqe-live"] {
+            #expect(try descriptor(id).platforms == [.iOS, .macOS], "\(id)")
+            #expect(try descriptor(id).licence.isEmpty == false, "\(id)")
+        }
+        #expect(try descriptor("localvqe-live").licence == "Apache-2.0")
+    }
+
+    @Test func theMeetingModelsAreNotSpeechFamilies() {
+        #expect(ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechStreaming).count == 3)
+        #expect(ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechBatch).count == 2)
+        #expect(ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speakersLive).map(\.id) == ["sortformer-live"])
     }
 
     @Test func installFoldersAreDistinctAndNeverNested() {

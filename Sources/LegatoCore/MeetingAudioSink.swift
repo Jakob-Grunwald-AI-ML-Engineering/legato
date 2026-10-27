@@ -69,3 +69,58 @@ public protocol BatchDiarizer: Sendable {
     /// Turns of `samples`: 16 kHz mono Float32 (``BatchAudio/sampleRate``), in time order.
     func diarize(samples: [Float]) async throws -> [SpeakerTurn]
 }
+
+/// What a batch diarizer found, and which of its speakers matched the user's enrolled voice.
+public struct BatchDiarization: Sendable, Equatable {
+    public var turns: [SpeakerTurn]
+    /// The cluster id (a ``SpeakerTurn/speaker`` value) whose voice matched the enrolment sample; nil when no
+    /// sample was given or no cluster matched.
+    public var youCluster: String?
+
+    public init(turns: [SpeakerTurn], youCluster: String? = nil) {
+        self.turns = turns
+        self.youCluster = youCluster
+    }
+}
+
+/// A ``BatchDiarizer`` that can also tell which speaker is the user, by comparing voices with the enrolment
+/// sample (the after-meeting pass when live diarization was off).
+public protocol EnrollmentBatchDiarizer: BatchDiarizer {
+    /// Turns of `samples` plus the cluster matching `enrollment` (16 kHz mono Float32, the user's voice sample).
+    func diarize(samples: [Float], enrollment: [Float]?) async throws -> BatchDiarization
+}
+
+/// Whether a ``MicEnhancer`` is cleaning the mic or has handed the raw mic through.
+public enum MicEnhancerState: Sendable, Equatable {
+    /// The model is cleaning the mic.
+    case active
+    /// The model failed or fell behind; the raw mic passes through. The app can tell the user.
+    case fellBack(MicEnhancerFallback)
+}
+
+/// Why a ``MicEnhancer`` stopped cleaning the mic.
+public enum MicEnhancerFallback: Sendable, Equatable {
+    /// More than a second of audio was waiting for the model (or for the reference).
+    case lagging
+    /// The model threw; the message is for display.
+    case failed(String)
+}
+
+/// Cleans the meeting microphone: echo cancellation against a reference (what the speakers played), noise
+/// suppression and dereverberation.
+///
+/// Everything is 16 kHz mono Float32 on the meeting mixer's clock: sample `i` of the mic and sample `i` of the
+/// reference are the same instant, and sample `i` out is the cleaned sample `i` in. Calls are serial.
+public protocol MicEnhancer: Sendable {
+    /// Appends `mic` and its `reference` (nil: no reference, as on iOS, which denoises only) and returns the
+    /// cleaned samples now ready, in order. The model delays its output by a few milliseconds, so this may
+    /// return fewer samples than were fed; ``flush()`` returns the rest. Never throws: on trouble the raw mic
+    /// passes through (see ``state()``), still in order and without gaps.
+    func enhance(mic: [Float], reference: [Float]?) async -> [Float]
+
+    /// Returns every sample fed but not yet returned and ends the stream.
+    func flush() async -> [Float]
+
+    /// Whether the enhancer is still cleaning.
+    func state() async -> MicEnhancerState
+}

@@ -202,6 +202,88 @@ public struct ParakeetBatchInstaller: ModelInstaller {
     }
 }
 
+// MARK: Speakers and enhancement
+
+/// Sortformer (live speakers): `<root>/diar-streaming-sortformer-coreml`, only the palettized streaming bundle.
+public struct SortformerInstaller: ModelInstaller {
+    public init() {}
+
+    /// The bundle path inside the repository folder, which is also the download's variant key.
+    static var bundle: String {
+        ModelNames.Sortformer.bundle(for: FluidSortformerBackend.config) ?? ModelNames.Sortformer.defaultBundle
+    }
+
+    public func installFolder(root: URL) -> URL {
+        root.appendingPathComponent(Repo.sortformer.folderName, isDirectory: true)
+    }
+
+    public func isInstalled(root: URL) async -> Bool {
+        let folder = installFolder(root: root)
+        return exists(folder.appendingPathComponent(Self.bundle)) && !hasPartialFiles(in: folder)
+    }
+
+    public func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        FluidAudioModels.pinRevisions()
+        try await ModelHub.download(.sortformer, to: root, variant: Self.bundle, progressHandler: progressHandler(progress))
+    }
+
+    /// Loads the model once so CoreML compiles it for the Neural Engine; the compiled result is cached by the OS.
+    public func warm(root: URL) async throws {
+        _ = try await FluidSortformerBackend.load(root: root)
+    }
+}
+
+/// The offline diarizer (speakers after meetings): `<root>/speaker-diarization-coreml`, the offline model set.
+public struct OfflineDiarizerInstaller: ModelInstaller {
+    public init() {}
+
+    public func installFolder(root: URL) -> URL {
+        root.appendingPathComponent(Repo.diarizer.folderName, isDirectory: true)
+    }
+
+    public func isInstalled(root: URL) async -> Bool {
+        isComplete(installFolder(root: root), required: ModelNames.OfflineDiarizer.requiredModels)
+    }
+
+    public func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        FluidAudioModels.pinRevisions()
+        try await ModelHub.download(.diarizer, to: root, variant: "offline", progressHandler: progressHandler(progress))
+    }
+
+    /// Nothing to do: like the batch speech models it compiles when the after-meeting pass first loads it.
+    public func warm(root: URL) async throws {}
+}
+
+/// LocalVQE (echo and noise cancellation): `<root>/localvqe-coreml`, only the build the meeting runs.
+public struct LocalVqeInstaller: ModelInstaller {
+    public init() {}
+
+    private static var modelFile: String {
+        let config = FluidAudioModels.localVqeConfig
+        return ModelNames.LocalVQE.modelFile(variant: config.variant, chunk: config.chunk)
+    }
+
+    public func installFolder(root: URL) -> URL {
+        root.appendingPathComponent(Repo.localVqe.folderName, isDirectory: true)
+    }
+
+    public func isInstalled(root: URL) async -> Bool {
+        isComplete(installFolder(root: root), required: [Self.modelFile])
+    }
+
+    public func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        FluidAudioModels.pinRevisions()
+        let config = FluidAudioModels.localVqeConfig
+        try await ModelHub.download(
+            .localVqe, to: root, variant: ModelNames.LocalVQE.variantKey(variant: config.variant, chunk: config.chunk),
+            progressHandler: progressHandler(progress))
+    }
+
+    public func warm(root: URL) async throws {
+        _ = try LocalVqeManager(config: FluidAudioModels.localVqeConfig, modelDirectory: installFolder(root: root))
+    }
+}
+
 // MARK: Catalog rows
 
 /// The FluidAudio rows of the model catalog: descriptors plus the installer for each.
@@ -222,6 +304,16 @@ public enum FluidAudioModels {
 
     public static let parakeetV3ID = "parakeet-v3"
     public static let parakeetUltraID = "parakeet-ultra"
+    /// Streaming Sortformer: who speaks while a meeting records.
+    public static let sortformerID = "sortformer-live"
+    /// The offline diarizer: who spoke, after the meeting.
+    public static let diarizerOfflineID = "diarizer-offline"
+    /// LocalVQE: echo and noise cancellation for the meeting mic.
+    public static let localVqeID = "localvqe-live"
+
+    /// The LocalVQE build the meeting runs: v1.3 in 16 ms hops, so the cleaned mic is at most a hop late. On the
+    /// CPU, which FluidAudio found fastest for it (the fp32 graph is too small to pay for Neural Engine dispatch).
+    static let localVqeConfig = LocalVqeConfig(variant: .v13, chunk: .realtime16ms)
 
     private static let entries: [(descriptor: ModelDescriptor, installer: any ModelInstaller)] = {
         var rows: [(ModelDescriptor, any ModelInstaller)] = []
@@ -280,6 +372,36 @@ public enum FluidAudioModels {
                 platforms: [.iOS, .macOS],
                 family: "parakeet"),
             ParakeetBatchInstaller(model: .ultra)))
+        rows.append((
+            ModelDescriptor(
+                id: sortformerID,
+                kind: .speakersLive,
+                displayName: "Sortformer",
+                approxBytes: 97 * mb,
+                licence: "NVIDIA Open Model License",
+                platforms: [.iOS, .macOS],
+                family: "sortformer"),
+            SortformerInstaller()))
+        rows.append((
+            ModelDescriptor(
+                id: diarizerOfflineID,
+                kind: .speakersBatch,
+                displayName: "Pyannote community-1",
+                approxBytes: 22 * mb,
+                licence: "CC-BY-4.0",
+                platforms: [.iOS, .macOS],
+                family: "pyannote"),
+            OfflineDiarizerInstaller()))
+        rows.append((
+            ModelDescriptor(
+                id: localVqeID,
+                kind: .echoNoise,
+                displayName: "LocalVQE",
+                approxBytes: 20 * mb,
+                licence: "Apache-2.0",
+                platforms: [.iOS, .macOS],
+                family: "localvqe"),
+            LocalVqeInstaller()))
         return rows
     }()
 
