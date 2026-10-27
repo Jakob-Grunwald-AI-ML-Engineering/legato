@@ -68,7 +68,9 @@ private final class BurstTranscriber: BatchTranscriber {
     }
 }
 
-@Suite struct MeetingPostPassTests {
+/// Serialized: each test scans 25 minutes of audio on two streams, and run in parallel they would hold every
+/// thread of the cooperative pool for seconds, starving timer-based tests elsewhere on a small CI runner.
+@Suite(.serialized) struct MeetingPostPassTests {
     func setUp(live: [MeetingSegment] = []) async throws -> (MeetingStore, Meeting, URL) {
         let root = tempRoot()
         let store = MeetingStore(root: root)
