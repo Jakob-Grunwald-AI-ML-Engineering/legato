@@ -81,6 +81,7 @@ struct PipelineTests {
 
     @Test func aStageOverTheTimeoutPassesItsInputThrough() async {
         let log = CallLog()
+        let timers = Mutex(0)
         let pipeline = PostProcessingPipeline(
             stages: [
                 SpyStage("slow", log: log) { _ in
@@ -93,7 +94,9 @@ struct PipelineTests {
             sleeper: { duration in
                 // Only the stage timeout is asked for here, and it is the configured 4 s.
                 #expect(duration == .seconds(4))
-                try await firesAtOnce(duration)
+                // Only the slow stage's timer fires. A timer firing at once for "after" too would race that stage.
+                let first = timers.withLock { n in n += 1; return n == 1 }
+                try await (first ? firesAtOnce : neverFires)(duration)
             })
         // The slow stage times out; the next stage still runs on the unchanged input.
         #expect(await pipeline.process("x", locale: en) == "x!")
