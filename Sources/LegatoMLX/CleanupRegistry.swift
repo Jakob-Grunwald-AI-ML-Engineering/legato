@@ -181,16 +181,18 @@ public struct CleanupRegistry: Sendable {
     /// The pipeline for one run: ITN (when `itn`), then LLM cleanup in `style` when a backend resolved, each
     /// stage limited to `timeout`. Resolves afresh on every call, so GPU access is checked per run.
     /// `context`: the cleaned text that came just before (live cleanup of one segment), shown to the model so
-    /// the segment continues it; empty for a whole transcript.
+    /// the segment continues it; empty for a whole transcript. `vocabulary`: the user's terms for the model's
+    /// `<terms>` line (see ``LLMCleanupStage``).
     public func pipeline(
         style: CleanupStyle, itn: Bool, preference: BackendPreference, background: BackgroundCleanup = .foundationModels,
-        timeout: Duration, context: String = ""
+        timeout: Duration, context: String = "", vocabulary: [String] = []
     ) async -> (pipeline: PostProcessingPipeline, resolution: Resolution) {
         let resolution = await resolve(preference: preference, background: background)
         var stages: [any TranscriptPostProcessor] = itn ? [ITNStage()] : []
         if let backend = resolution.backend {
             let guardrail = style == .verbatim ? cleanupGuard : style.cleanupGuard
-            stages.append(LLMCleanupStage(backend: backend, cleanupGuard: guardrail, prompt: style.prompt, context: context))
+            stages.append(LLMCleanupStage(
+                backend: backend, cleanupGuard: guardrail, vocabulary: vocabulary, prompt: style.prompt, context: context))
         }
         return (PostProcessingPipeline(stages: stages, timeout: timeout), resolution)
     }

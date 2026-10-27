@@ -35,12 +35,19 @@ public final class ModelServices {
     ///   - root: where the models live (`<App Group>/Models` on the phone, `Application Support/Legato/Models`
     ///     on the Mac).
     ///   - defaults: where the picks and the engine settings persist.
-    public convenience init(root: URL, defaults: UserDefaults, platform: ModelPlatform = .current) {
-        self.init(root: root, defaults: defaults, platform: platform, installers: nil)
+    ///   - vocabulary: where the live engines get their vocabulary hints.
+    public convenience init(
+        root: URL, defaults: UserDefaults, platform: ModelPlatform = .current,
+        vocabulary: (any VocabularyHintProvider)? = nil
+    ) {
+        self.init(root: root, defaults: defaults, platform: platform, installers: nil, vocabulary: vocabulary)
     }
 
     /// `installers`: replaces the catalog's real installers (tests); nil for the real ones.
-    init(root: URL, defaults: UserDefaults, platform: ModelPlatform, installers custom: [String: any ModelInstaller]?) {
+    init(
+        root: URL, defaults: UserDefaults, platform: ModelPlatform, installers custom: [String: any ModelInstaller]?,
+        vocabulary: (any VocabularyHintProvider)? = nil
+    ) {
         FluidAudioModels.pinRevisions()
         selection = SelectionStore(defaults: defaults)
         familySelection = FamilySelection(selection: selection, tiers: FamilyTierStore(defaults: defaults))
@@ -63,7 +70,7 @@ public final class ModelServices {
                     await FluidAudioModels.release(folder: folder)
                 }
             })
-        engines = EngineRegistry(models: manager, settings: engineSettings)
+        engines = EngineRegistry(models: manager, settings: engineSettings, vocabulary: vocabulary)
         cleanup = CleanupRegistry(models: manager, foundationModels: FoundationModelsBackend())
     }
 

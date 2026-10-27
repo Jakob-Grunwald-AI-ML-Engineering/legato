@@ -36,7 +36,9 @@ final class AppController {
     private(set) var armFailure: String?
 
     /// Apple Speech, for onboarding's asset download (dictation uses `engineBox`, which is Apple Speech by default).
-    @ObservationIgnored let appleSpeech = AppleSpeechEngine()
+    @ObservationIgnored let appleSpeech: AppleSpeechEngine
+    /// The personal vocabulary: hints the engines and the cleanup step, and learns from dictations.
+    @ObservationIgnored let vocabulary: VocabularyService
     /// The model catalog, the engine and the cleanup registries.
     @ObservationIgnored let models: ModelServices
     /// The live engine every new session gets: resolved from the pick at launch and after every change of
@@ -49,7 +51,7 @@ final class AppController {
     /// Meetings: recording, the after-stop chain and the library. While one records, dictation is blocked.
     let meetings: MeetingController
     /// The one history store; views go through the methods below, never construct their own.
-    @ObservationIgnored private let history: JSONLHistoryStore
+    @ObservationIgnored private let history: any HistoryStore
     @ObservationIgnored let pasteboard = PasteboardClient()
     @ObservationIgnored private let readiness = SystemReadiness()
     @ObservationIgnored private let startEnvironment: SystemStartEnvironment
@@ -79,16 +81,26 @@ final class AppController {
         let directory = AppGroup.containerURL
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
         if AppGroup.containerURL == nil { Self.log.error("App Group container unavailable; history is app-local") }
-        let history = JSONLHistoryStore(fileURL: directory.appending(path: "history.jsonl"))
-        let models = ModelServices(root: ModelServices.phoneModelsRoot, defaults: AppGroup.defaults)
+        // The vocabulary comes before ModelServices: the engines it builds ask it for hints.
+        // The languages are read on every use, so a change of the dictation languages applies at once.
+        let languageSettings = EngineSettings(defaults: AppGroup.defaults)
+        let vocabulary = VocabularyService(
+            fileURL: directory.appending(path: "vocabulary.json"),
+            languages: { VocabularyService.configuredLanguages(languageSettings) })
+        self.vocabulary = vocabulary
+        let history: any HistoryStore = LearningHistoryStore(
+            JSONLHistoryStore(fileURL: directory.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        let models = ModelServices(root: ModelServices.phoneModelsRoot, defaults: AppGroup.defaults, vocabulary: vocabulary)
         self.models = models
-        let engineBox = EngineBox(AppleSpeechEngine())
+        appleSpeech = AppleSpeechEngine(vocabulary: vocabulary)
+        let engineBox = EngineBox(AppleSpeechEngine(vocabulary: vocabulary))
         self.engineBox = engineBox
         let reports = cleanupReports
         let engineSettings = models.engineSettings
         let cleanup = CleanupProcessor(
             registry: models.cleanup, settings: Settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
+            vocabulary: vocabulary,
             report: { report in await reports.record(report) })
         self.history = history
         let meetingRoot = directory.appending(path: "Meetings", directoryHint: .isDirectory)
@@ -224,7 +236,7 @@ final class AppController {
             text, locale: locale, style: .message, refine: true,
             timeout: .seconds(max(Settings.cleanupTimeoutSeconds * 2, 8)), settings: Settings.cleanupStore,
             registry: models.cleanup,
-            report: { report in await reports.record(report) })
+            report: { report in await reports.record(report) }, vocabulary: vocabulary)
         let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
         #if DEBUG
         E2E.log("refine changed=\(refined != text ? 1 : 0)")
