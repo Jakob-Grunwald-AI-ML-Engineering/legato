@@ -93,6 +93,28 @@ struct LLMAlternativeRerankerTests {
         #expect(await rerank(FakeBackend { _ in "2, 1, 3 + claude" }) == ["Claude", "Cloud", "Clout"])
     }
 
+    @Test func aTrailingPeriodIsTolerated() async {
+        #expect(await rerank(FakeBackend { _ in "2, 1, 3." }) == ["Claude", "Cloud", "Clout"])
+        #expect(await rerank(FakeBackend { _ in "2, 1, 3 ." }) == ["Claude", "Cloud", "Clout"])
+    }
+
+    @Test func surroundingBracketsAreTolerated() async {
+        #expect(await rerank(FakeBackend { _ in "[2,1,3]" }) == ["Claude", "Cloud", "Clout"])
+        #expect(await rerank(FakeBackend { _ in "[2, 1, 3]." }) == ["Claude", "Cloud", "Clout"])
+        #expect(await rerank(FakeBackend { _ in "(3, 2, 1)" }) == ["Clout", "Claude", "Cloud"])
+    }
+
+    @Test func aProposalSurvivesBracketsAndAPeriod() async {
+        let out = await rerank(FakeBackend { _ in "[2] + Klaut." }, candidates: ["Cloud", "Claude"])
+        #expect(out == ["Claude", "Klaut", "Cloud"])
+    }
+
+    @Test func bracketsAroundNothingOrNoiseAreStillGarbage() async {
+        for reply in ["[]", "[ ]", "[2, 1, 3", "2, 1, 3]]", "[[2, 1, 3]]", "[2], [1, 3]", "."] {
+            #expect(await rerank(FakeBackend { _ in reply }) == candidates, "reply: \(reply.debugDescription)")
+        }
+    }
+
     @Test func garbageRepliesKeepTheInputOrder() async {
         for reply in ["", "I think Claude.", "2, 1, 3\nbecause it sounds right", "Sure! 2 1 3", "<text>2</text>", "1,2,3,1"] {
             #expect(await rerank(FakeBackend { _ in reply }) == candidates, "reply: \(reply.debugDescription)")

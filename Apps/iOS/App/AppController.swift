@@ -80,9 +80,11 @@ final class AppController {
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
         if AppGroup.containerURL == nil { Self.log.error("App Group container unavailable; history is app-local") }
         // The vocabulary comes before ModelServices: the engines it builds ask it for hints.
+        // The languages are read on every use, so a change of the dictation languages applies at once.
+        let languageSettings = EngineSettings(defaults: AppGroup.defaults)
         let vocabulary = VocabularyService(
             fileURL: directory.appending(path: "vocabulary.json"),
-            languages: VocabularyService.configuredLanguages(EngineSettings(defaults: AppGroup.defaults)))
+            languages: { VocabularyService.configuredLanguages(languageSettings) })
         self.vocabulary = vocabulary
         let history: any HistoryStore = LearningHistoryStore(
             JSONLHistoryStore(fileURL: directory.appending(path: "history.jsonl")), vocabulary: vocabulary)

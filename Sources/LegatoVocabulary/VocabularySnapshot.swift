@@ -46,6 +46,55 @@ public struct VocabularySnapshot: Sendable, Equatable, Codable {
     /// Whether `text` belongs to a blocked entry. Learning sources must check this before adding or reinforcing.
     public func isBlocked(_ text: String) -> Bool { entry(forText: text)?.blocked == true }
 
+    /// Drops what an alias makes redundant: the learned entries (neither manual, pinned nor blocked) and the pending
+    /// terms whose text equals one of `aliases` ignoring case and diacritics. A mishearing kept as an entry of its
+    /// own would be hinted to the engines and the cleanup model as a correct spelling. The entry whose text
+    /// compares equal to `exceptTextKey` (the term that owns the alias) is never dropped.
+    public mutating func removeLearned(equalToAliases aliases: [String], exceptTextKey: String? = nil) {
+        let keys = Set(aliases.map(VocabularyEntry.foldedKey(for:)).filter { !$0.isEmpty })
+        guard !keys.isEmpty else { return }
+        let owner = exceptTextKey.map(VocabularyEntry.foldedKey(for:))
+        entries.removeAll { entry in
+            let key = VocabularyEntry.foldedKey(for: entry.text)
+            return entry.isPlainlyLearned && keys.contains(key) && key != owner
+        }
+        pendingTerms.removeAll { keys.contains(VocabularyEntry.foldedKey(for: $0.text)) }
+    }
+
+    /// Takes dictation (or run) `id` back out of everything it taught, for a dictation the user deleted.
+    ///
+    /// - A pending term or fix loses the id and one point of score; with no ids left it is dropped.
+    /// - An entry loses the id from `recentIDs` and one point of score. A learned entry (neither manual,
+    ///   pinned nor blocked) whose only sighting was `id` is removed.
+    ///
+    /// The limit: an entry remembers only its last ``VocabularyEntry/recentIDsCapacity`` ids, and a choice-learned
+    /// entry remembers none, so a sighting that fell out of the ring cannot be found again. An entry that
+    /// several dictations support stays when one of them goes; the others still evidence it.
+    public mutating func forget(_ id: UUID) {
+        pendingTerms = pendingTerms.compactMap { term in
+            guard term.ids.contains(id) else { return term }
+            var term = term
+            term.ids.removeAll { $0 == id }
+            term.score = max(0, term.score - 1)
+            return term.ids.isEmpty ? nil : term
+        }
+        pendingFixes = pendingFixes.compactMap { fix in
+            guard fix.ids.contains(id) else { return fix }
+            var fix = fix
+            fix.ids.removeAll { $0 == id }
+            fix.score = max(0, fix.score - 1)
+            return fix.ids.isEmpty ? nil : fix
+        }
+        entries = entries.compactMap { entry in
+            guard entry.recentIDs.contains(id) else { return entry }
+            if entry.recentIDs == [id], entry.isPlainlyLearned { return nil }
+            var entry = entry
+            entry.recentIDs.removeAll { $0 == id }
+            entry.score = max(0, entry.score - 1)
+            return entry
+        }
+    }
+
     /// Drops the lowest-effective-score pending terms and fixes beyond ``pendingCap``; ties evict the older `lastSeen` first.
     public mutating func trimPending(now: Date, halfLife: TimeInterval = Decay.defaultHalfLife) {
         if pendingTerms.count > Self.pendingCap {

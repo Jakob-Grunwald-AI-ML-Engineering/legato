@@ -16,4 +16,12 @@ enum AppleSpeechVocabulary {
         }
         return strings
     }
+
+    /// How many hints the engine asks its provider for.
+    static let hintLimit = 50
+
+    /// The contextual strings for the hints `provider` has for ``HintSink/appleSpeech``, at most ``hintLimit``.
+    static func contextualStrings(from provider: any VocabularyHintProvider) async -> [String] {
+        contextualStrings(await provider.hints(for: .appleSpeech, limit: hintLimit))
+    }
 }

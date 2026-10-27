@@ -31,6 +31,20 @@ enum NumberWords {
         return real
     }
 
+    /// Whether any word has a digit or is a spelled-out number ("3 PM", "5km", "zwei"): a number format change,
+    /// a time or a quantity, never a vocabulary term.
+    static func containsNumber(_ words: [String]) -> Bool {
+        words.contains { $0.contains(where: \.isNumber) || classify($0) == .number }
+    }
+
+    private static let units: Set<String> = [
+        "am", "pm", "a.m", "p.m", "uhr", "o'clock", "km", "kg", "cm", "mm", "ml", "mg", "kb", "mb", "gb", "tb", "hz", "khz",
+        "mhz", "ghz",
+    ]
+
+    /// Whether any word is a unit or a time marker ("pm", "km", "Uhr").
+    static func containsUnit(_ words: [String]) -> Bool { words.contains { units.contains($0.lowercased()) } }
+
     private enum Kind { case number, filler, other }
 
     private static func classify(_ word: String) -> Kind {

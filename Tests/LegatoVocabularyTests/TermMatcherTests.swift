@@ -97,11 +97,27 @@ struct TermMatcherTests {
         Row(said: "Claus", term: "Claude Monet", range: 0..<1),
         Row(said: "Kube", term: "Kubernetes", range: 0..<1),
         Row(said: "international", term: "Intel", range: 0..<1),
+        // short joined spans: "in a" is not the name Ina, "is a" is not Isa
+        Row(said: "in a", term: "Ina", range: 0..<2),
+        Row(said: "is a", term: "Isa", range: 0..<2),
+        Row(said: "an dre as", term: "Andreas", range: 0..<3),
     ])
     func doesNotMatch(_ row: Row) {
         let (m, _) = matcher(row.term)
         #expect(m.candidates(for: row.said).isEmpty)
         #expect(m.hits(in: row.said).isEmpty)
+    }
+
+    @Test func aMultiWordTermStillMatchesAShortSpan() {
+        let (m, id) = matcher("IT AG")
+        #expect(m.hits(in: "it ag").map(\.termID) == [id])
+        #expect(m.candidates(for: "it ag").first?.termID == id)
+    }
+
+    @Test func aLongEnoughSpanOfWordsOfThreeLettersMatchesASingleWordTerm() {
+        let (m, id) = matcher("Kubernetes")
+        #expect(m.hits(in: "we use kuber netties").first?.range == 2..<4)
+        #expect(m.hits(in: "we use kuber netties").first?.termID == id)
     }
 
     @Test func aTermListBeyondOneHundredGetsStricter() {

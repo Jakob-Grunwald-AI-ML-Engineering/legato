@@ -43,6 +43,28 @@ public struct PlatformSpellChecker: SpellChecking {
             return UITextChecker().guesses(forWordRange: NSRange(location: 0, length: ns.length), in: word, language: lang) ?? []
         }
     }
+
+    /// One hop to the main actor for the whole batch, with one checker reused for every word.
+    public func knownLanguages(for words: [String], languages: [String]) async -> [String: Set<String>] {
+        await MainActor.run {
+            let checker = UITextChecker()
+            let available = UITextChecker.availableLanguages
+            let resolved = languages.map { (code: $0, language: Self.resolve($0, available: available)) }
+            var out: [String: Set<String>] = [:]
+            for word in words where out[word] == nil {
+                let ns = word as NSString
+                var known = Set<String>()
+                for (code, language) in resolved {
+                    let missing = ns.length > 0 && checker.rangeOfMisspelledWord(
+                        in: word, range: NSRange(location: 0, length: ns.length), startingAt: 0, wrap: false,
+                        language: language).location != NSNotFound
+                    if !missing { known.insert(code) }
+                }
+                out[word] = known
+            }
+            return out
+        }
+    }
     #elseif canImport(AppKit)
     public func isKnown(_ word: String, language: String) async -> Bool {
         await MainActor.run {
@@ -65,6 +87,28 @@ public struct PlatformSpellChecker: SpellChecking {
             return checker.guesses(
                 forWordRange: NSRange(location: 0, length: ns.length), in: word, language: lang,
                 inSpellDocumentWithTag: 0) ?? []
+        }
+    }
+
+    /// One hop to the main actor for the whole batch.
+    public func knownLanguages(for words: [String], languages: [String]) async -> [String: Set<String>] {
+        await MainActor.run {
+            let checker = NSSpellChecker.shared
+            let available = checker.availableLanguages
+            let resolved = languages.map { (code: $0, language: Self.resolve($0, available: available)) }
+            var out: [String: Set<String>] = [:]
+            for word in words where out[word] == nil {
+                let ns = word as NSString
+                var known = Set<String>()
+                for (code, language) in resolved {
+                    let missing = ns.length > 0 && checker.checkSpelling(
+                        of: word, startingAt: 0, language: language, wrap: false, inSpellDocumentWithTag: 0, wordCount: nil
+                    ).location != NSNotFound
+                    if !missing { known.insert(code) }
+                }
+                out[word] = known
+            }
+            return out
         }
     }
     #else

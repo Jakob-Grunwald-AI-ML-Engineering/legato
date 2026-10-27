@@ -129,15 +129,22 @@ public final class AppleSpeechEngine: DictationEngine {
     /// Best-effort: a failure is logged and the dictation runs unbiased.
     private func applyVocabulary(to analyzer: SpeechAnalyzer) async {
         guard let vocabulary else { return }
-        let strings = AppleSpeechVocabulary.contextualStrings(await vocabulary.hints(for: .appleSpeech, limit: 50))
+        let strings = await AppleSpeechVocabulary.contextualStrings(from: vocabulary)
         guard !strings.isEmpty else { return }
         let context = AnalysisContext()
         context.contextualStrings[.general] = strings
         do {
             try await analyzer.setContext(context)
         } catch {
-            Self.log.error("setContext failed, continuing unbiased: \(String(describing: error), privacy: .public)")
+            Self.log.error("setContext failed, continuing unbiased: \(Self.describe(error), privacy: .public)")
         }
+    }
+
+    /// An error as it may be logged: its type, domain and code, never its description, which could echo
+    /// dictated text.
+    static func describe(_ error: any Error) -> String {
+        let ns = error as NSError
+        return "\(type(of: error)) \(ns.domain) \(ns.code)"
     }
 
     private static func resolve(_ locale: Locale?) async throws -> Locale {

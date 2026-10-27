@@ -26,4 +26,12 @@ enum NemotronVocabulary {
         }
         return terms
     }
+
+    /// How many hints the engine asks its provider for.
+    static let hintLimit = 50
+
+    /// The terms for the hints `provider` has for ``HintSink/nemotron``, at most ``hintLimit``.
+    static func terms(from provider: any VocabularyHintProvider) async -> [CustomVocabularyTerm] {
+        terms(await provider.hints(for: .nemotron, limit: hintLimit))
+    }
 }

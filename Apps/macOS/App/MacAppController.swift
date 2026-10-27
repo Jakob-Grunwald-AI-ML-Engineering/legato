@@ -115,9 +115,11 @@ final class MacAppController {
     private init() {
         let support = URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
         // The vocabulary comes before ModelServices: the engines it builds ask it for hints.
+        // The languages are read on every use, so a change of the dictation languages applies at once.
+        let languageSettings = EngineSettings(defaults: .standard)
         let vocabulary = VocabularyService(
             fileURL: support.appending(path: "vocabulary.json"),
-            languages: VocabularyService.configuredLanguages(EngineSettings(defaults: .standard)))
+            languages: { VocabularyService.configuredLanguages(languageSettings) })
         self.vocabulary = vocabulary
         let history: any HistoryStore = LearningHistoryStore(
             JSONLHistoryStore(fileURL: support.appending(path: "history.jsonl")), vocabulary: vocabulary)

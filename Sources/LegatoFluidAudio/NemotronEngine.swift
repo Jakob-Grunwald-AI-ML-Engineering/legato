@@ -72,7 +72,7 @@ public final class NemotronEngine: DictationEngine {
         try await manager.loadFromShared(shared)
         if let vocabulary {
             // Survives `reset()`, so once per session is enough. `[]` leaves biasing off.
-            await manager.setCustomVocabulary(NemotronVocabulary.terms(await vocabulary.hints(for: .nemotron, limit: 50)))
+            await manager.setCustomVocabulary(await NemotronVocabulary.terms(from: vocabulary))
         }
         var clamp = LanguageClamp(preferred: LanguageClamp.preferred(configured: preferredLocales, session: locale))
         clamp.beginSession()

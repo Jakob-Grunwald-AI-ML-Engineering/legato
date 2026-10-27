@@ -1,7 +1,21 @@
 import FluidAudio
 import LegatoCore
+import Synchronization
 import Testing
 @testable import LegatoFluidAudio
+
+/// A provider that records which sink and limit it was asked for.
+private final class RecordingProvider: VocabularyHintProvider {
+    struct Call: Equatable { var sink: HintSink; var limit: Int }
+    private let recorded = Mutex<[Call]>([])
+    let answer: [VocabularyHint]
+    init(_ answer: [VocabularyHint]) { self.answer = answer }
+    var calls: [Call] { recorded.withLock { $0 } }
+    func hints(for sink: HintSink, limit: Int) async -> [VocabularyHint] {
+        recorded.withLock { $0.append(Call(sink: sink, limit: limit)) }
+        return answer
+    }
+}
 
 @Suite("Nemotron vocabulary mapping")
 struct NemotronVocabularyTests {
@@ -35,5 +49,13 @@ struct NemotronVocabularyTests {
 
     @Test func skipsBlankText() {
         #expect(NemotronVocabulary.terms([VocabularyHint(text: "  ")]).isEmpty)
+    }
+
+    @Test func asksTheProviderForTheNemotronSinkWithAFiftyTermLimitAndMapsTheAnswer() async {
+        let provider = RecordingProvider([VocabularyHint(text: "Grünwald", spellings: ["Grunwald"])])
+        let terms = await NemotronVocabulary.terms(from: provider)
+        #expect(provider.calls == [.init(sink: .nemotron, limit: 50)])
+        #expect(terms.map(\.text) == ["Grünwald"])
+        #expect(terms.first?.aliases == ["Grunwald"])
     }
 }

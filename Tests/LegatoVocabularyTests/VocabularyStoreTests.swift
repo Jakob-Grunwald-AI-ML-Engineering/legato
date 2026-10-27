@@ -259,4 +259,39 @@ import Testing
         #expect(Decay.effectiveScore(8, lastSeen: t0, now: t0.addingTimeInterval(3 * h), halfLife: h) == 1)
         #expect(Decay.effectiveScore(8, lastSeen: t0.addingTimeInterval(h), now: t0, halfLife: h) == 8)
     }
+
+    // MARK: an added alias removes a learned sibling
+
+    @Test func addingAnAliasRemovesALearnedEntryWithThatText() async throws {
+        let url = tempURL()
+        defer { cleanup(url) }
+        let store = VocabularyStore(fileURL: url)
+        try await store.learn(text: "kloud", source: .history, id: UUID(), now: t0)
+        try await store.update { $0.pendingTerms.append(PendingTerm(text: "KLOUD", ids: [UUID()], lastSeen: self.t0)) }
+        try await store.add(text: "Claude", aliases: ["Kloud"], now: t0)
+        let snap = try await store.snapshot()
+        #expect(snap.entries.map(\.text) == ["Claude"])
+        #expect(snap.pendingTerms.isEmpty)
+    }
+
+    @Test func addingAnAliasToAnExistingEntryRemovesTheLearnedSiblingToo() async throws {
+        let url = tempURL()
+        defer { cleanup(url) }
+        let store = VocabularyStore(fileURL: url)
+        try await store.add(text: "Claude", now: t0)
+        try await store.learn(text: "kloud", source: .cleanup, now: t0)
+        try await store.add(text: "Claude", aliases: ["kloud"], now: t0)
+        #expect(try await store.snapshot().entries.map(\.text) == ["Claude"])
+    }
+
+    @Test func addingAnAliasKeepsAManualOrPinnedEntryWithThatText() async throws {
+        let url = tempURL()
+        defer { cleanup(url) }
+        let store = VocabularyStore(fileURL: url)
+        try await store.add(text: "kloud", now: t0)
+        let pinned = try await store.learn(text: "klaud", source: .history, now: t0)
+        try await store.pin(id: try #require(pinned).id)
+        try await store.add(text: "Claude", aliases: ["kloud", "klaud"], now: t0)
+        #expect(try await store.snapshot().entries.map(\.text) == ["kloud", "klaud", "Claude"])
+    }
 }

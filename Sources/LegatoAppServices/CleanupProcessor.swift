@@ -122,7 +122,9 @@ public struct CleanupProcessor: TranscriptPostProcessor {
 
     /// One cleanup in `style`, whatever the on/off switch says (refine uses it directly). ITN and the backend
     /// come from `settings`. `context`: the cleaned text before `text` (a live segment). `vocabulary`: its terms go
-    /// to the model, and what the run changed teaches it (as run `runID`), in the background.
+    /// to the model, and what the run changed teaches it (as run `runID`), in the background, except a swap
+    /// to one of the terms the model was given (not independent evidence). A run has no dictation id, so
+    /// deleting a dictation does not unlearn its run's pending fixes (see ``VocabularyService/learnFromCleanup``).
     public static func run(
         _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
         settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
@@ -137,7 +139,8 @@ public struct CleanupProcessor: TranscriptPostProcessor {
             timeout: timeout, context: context, vocabulary: terms)
         let out = await pipeline.process(text, locale: locale)
         if out != text {
-            vocabulary?.learnFromCleanup(raw: text, cleaned: out, style: style, runID: runID, locale: locale)
+            vocabulary?.learnFromCleanup(
+                raw: text, cleaned: out, style: style, runID: runID, locale: locale, suggested: terms)
         }
         let elapsed = start.duration(to: clock.now)
         await report(CleanupRunReport(

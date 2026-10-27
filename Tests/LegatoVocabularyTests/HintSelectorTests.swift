@@ -42,8 +42,9 @@ import Testing
         #expect(texts([term("Banken", knownIn: ["de", "en"], correctionTarget: true)]).isEmpty)
     }
 
-    @Test func aLearnedWordKnownInOnlySomeLanguagesIsRare() {
-        #expect(texts([term("Fenster", knownIn: ["de"])]) == ["Fenster"])
+    @Test func aLearnedWordKnownInAnyConfiguredLanguageIsCommon() {
+        #expect(texts([term("Fenster", knownIn: ["de"])]).isEmpty)
+        #expect(texts([term("Window", knownIn: ["en"])]).isEmpty)
     }
 
     @Test func aLearnedWordUnknownEverywhereIsRare() {
@@ -70,7 +71,8 @@ import Testing
     @Test func rarityFollowsTheSelectorsLanguages() {
         let known = term("Fenster", knownIn: ["de"])
         #expect(texts([known], using: HintSelector(languages: ["de"])).isEmpty)
-        #expect(texts([known], using: HintSelector(languages: ["de", "en"])) == ["Fenster"])
+        #expect(texts([known], using: HintSelector(languages: ["de", "en"])).isEmpty)
+        #expect(texts([known], using: HintSelector(languages: ["en"])) == ["Fenster"])
     }
 
     // MARK: order, caps, floors
@@ -154,61 +156,116 @@ import Testing
 
     // MARK: cleanup terms
 
-    func cleanup(_ text: String, _ entries: [VocabularyEntry], limit: Int = 20) -> [String] {
-        selector.cleanupTerms(for: text, from: VocabularySnapshot(entries: entries), limit: limit, now: Self.now)
+    /// A dictionary in which "cloud", "clause" and the German "Mauer" are ordinary words.
+    static let dictionary = FakeSpellChecker(known: [
+        "en": ["cloud", "clause", "computing", "ask", "about", "it", "a", "demo", "the", "is", "void"],
+        "de": ["mauer", "die", "ist", "hoch"],
+    ])
+
+    func cleanup(
+        _ text: String, _ entries: [VocabularyEntry], limit: Int = 20, spell: FakeSpellChecker = FakeSpellChecker(known: [:])
+    ) async -> [String] {
+        await selector.cleanupTerms(
+            for: text, from: VocabularySnapshot(entries: entries), spellChecker: spell, limit: limit, now: Self.now)
     }
 
-    @Test func cleanupTermsAreThePinnedTermsPlusTheHitsInTheText() {
+    @Test func cleanupTermsAreThePinnedTermsPlusTheHitsInTheText() async {
         let all = [
             term("Claude", score: 2),
             term("Kubernetes", score: 5),
             term("Zorbax", pinned: true),
         ]
-        #expect(cleanup("ask Claude about it", all) == ["Zorbax", "Claude"])
+        #expect(await cleanup("ask Claude about it", all) == ["Zorbax", "Claude"])
     }
 
-    @Test func nonHitNonPinnedTermsAreExcluded() {
-        #expect(cleanup("nothing relevant here", [term("Claude"), term("Kubernetes")]).isEmpty)
+    @Test func nonHitNonPinnedTermsAreExcluded() async {
+        #expect(await cleanup("nothing relevant here", [term("Claude"), term("Kubernetes")]).isEmpty)
     }
 
-    @Test func anAliasHitSelectsTheTermNotTheAlias() {
-        #expect(cleanup("ask kloud about it", [term("Claude", aliases: ["kloud"])]) == ["Claude"])
+    @Test func anAliasHitSelectsTheTermNotTheAlias() async {
+        #expect(await cleanup("ask kloud about it", [term("Claude", aliases: ["kloud"])]) == ["Claude"])
     }
 
-    @Test func aHitOnASpellingSelectsTheTerm() {
-        #expect(cleanup("wir fahren nach Gruenwald", [term("Grünwald", spellings: ["Gruenwald"])]) == ["Grünwald"])
+    @Test func aHitOnASpellingSelectsTheTerm() async {
+        #expect(await cleanup("wir fahren nach Gruenwald", [term("Grünwald", spellings: ["Gruenwald"])]) == ["Grünwald"])
     }
 
-    @Test func pinnedTermsTakeCleanupSlotsFirstUnderTheCap() {
+    @Test func pinnedTermsTakeCleanupSlotsFirstUnderTheCap() async {
         let pinned = (0..<3).map { term("Pin\($0)x", pinned: true) }
         let hit = [term("Claude")]
-        #expect(cleanup("ask Claude", pinned + hit, limit: 3).count == 3)
-        #expect(cleanup("ask Claude", pinned + hit, limit: 3).allSatisfy { $0.hasPrefix("Pin") })
-        #expect(cleanup("ask Claude", pinned + hit, limit: 4).last == "Claude")
-        #expect(cleanup("ask Claude", pinned + hit, limit: 0).isEmpty)
+        #expect(await cleanup("ask Claude", pinned + hit, limit: 3).count == 3)
+        #expect(await cleanup("ask Claude", pinned + hit, limit: 3).allSatisfy { $0.hasPrefix("Pin") })
+        #expect(await cleanup("ask Claude", pinned + hit, limit: 4).last == "Claude")
+        #expect(await cleanup("ask Claude", pinned + hit, limit: 0).isEmpty)
     }
 
-    @Test func cleanupDefaultsToATwentyTermCap() {
+    @Test func cleanupDefaultsToATwentyTermCap() async {
         let pinned = (0..<30).map { term("Pin\($0)x", pinned: true) }
-        let out = selector.cleanupTerms(for: "", from: VocabularySnapshot(entries: pinned), now: Self.now)
+        let out = await selector.cleanupTerms(
+            for: "", from: VocabularySnapshot(entries: pinned), spellChecker: Self.dictionary, now: Self.now)
         #expect(out.count == 20)
     }
 
-    @Test func cleanupHitsFollowTheSameEligibilityAsHints() {
+    @Test func cleanupHitsFollowTheSameEligibilityAsHints() async {
         let all = [
             term("Claude", blocked: true),
             term("Brücke", knownIn: ["de", "en"]),
             term("Rust", source: .manual, knownIn: ["de", "en"]),
         ]
-        #expect(cleanup("Claude baut eine Brücke aus Rust", all) == ["Rust"])
+        #expect(await cleanup("Claude baut eine Brücke aus Rust", all) == ["Rust"])
     }
 
-    @Test func cleanupAcceptsATwoLetterAcronymHit() {
-        #expect(cleanup("die EU beschließt", [term("EU", knownIn: ["de", "en"])]) == ["EU"])
+    @Test func cleanupAcceptsATwoLetterAcronymHit() async {
+        #expect(await cleanup("die EU beschließt", [term("EU", knownIn: ["de", "en"])]) == ["EU"])
     }
 
-    @Test func hintsDefaultToFiftyTerms() {
+    @Test func hintsDefaultToFiftyTerms() async {
         let all = (0..<70).map { term("Term\($0)x") }
         #expect(selector.hints(from: VocabularySnapshot(entries: all), for: .nemotron, now: Self.now).count == 50)
+    }
+
+    // MARK: cleanup terms must not list common words that merely sound like a term
+
+    @Test func aCommonEnglishWordThatSoundsLikeATermIsNotListed() async {
+        let claude = [term("Claude")]
+        #expect(await cleanup("a cloud computing demo", claude, spell: Self.dictionary).isEmpty)
+        #expect(await cleanup("the clause is void", claude, spell: Self.dictionary).isEmpty)
+    }
+
+    @Test func aCommonGermanWordThatSoundsLikeATermIsNotListed() async {
+        #expect(await cleanup("die Mauer ist hoch", [term("Maier")], spell: Self.dictionary).isEmpty)
+    }
+
+    @Test func aMishearingNobodyKnowsIsStillListed() async {
+        #expect(await cleanup("ask kloud about it", [term("Claude")], spell: Self.dictionary) == ["Claude"])
+        #expect(await cleanup("wir sehen die Meier dort", [term("Maier")], spell: Self.dictionary) == ["Maier"])
+    }
+
+    @Test func oneUnknownWordOfAMultiWordSpanIsEnough() async {
+        #expect(await cleanup("we use kuber netties today", [term("Kubernetes")], spell: Self.dictionary) == ["Kubernetes"])
+    }
+
+    @Test func anExactFormIsListedEvenWhenItIsAnOrdinaryWord() async {
+        #expect(await cleanup("a cloud computing demo", [term("Cloud", source: .manual)], spell: Self.dictionary) == ["Cloud"])
+        #expect(await cleanup("a cloud computing demo", [term("Claude", aliases: ["cloud"])], spell: Self.dictionary) == ["Claude"])
+        #expect(await cleanup("the clause is void", [term("Sonne", spellings: ["Clause"])], spell: Self.dictionary) == ["Sonne"])
+    }
+
+    // MARK: an alias is never listed as a term of its own
+
+    @Test func anEntryWhoseTextIsAnotherEntrysAliasIsNeverHinted() {
+        let all = [term("kloud"), term("Claude", aliases: ["Kloud"]), term("Muller"), term("Zorbax", aliases: ["Müller"])]
+        for sink in VocabularyHintSink.allCases { #expect(Set(texts(all, sink: sink)) == ["Claude", "Zorbax"]) }
+    }
+
+    @Test func aManualEntryEqualToAnotherEntrysAliasIsNotHintedEither() {
+        let all = [term("kloud", source: .manual), term("Claude", aliases: ["kloud"])]
+        #expect(texts(all) == ["Claude"])
+    }
+
+    @Test func anEntryEqualToAnAliasIsNotAmongTheCleanupTerms() async {
+        let all = [term("kloud"), term("Claude", aliases: ["kloud"])]
+        #expect(await cleanup("ask kloud about it", all, spell: Self.dictionary) == ["Claude"])
+        #expect(await cleanup("ask about it", [term("kloud", pinned: true), term("Claude", aliases: ["kloud"])]) == [])
     }
 }

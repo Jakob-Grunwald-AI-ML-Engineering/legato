@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import LegatoVocabulary
 
@@ -7,6 +8,24 @@ struct FakeSpellChecker: SpellChecking {
     var known: [String: Set<String>]
     func isKnown(_ word: String, language: String) async -> Bool { known[language]?.contains(word.lowercased()) ?? false }
     func guesses(for word: String, language: String) async -> [String] { [] }
+}
+
+/// Counts how a learner asks: whole texts through the batch lookup, or word by word.
+final class CountingSpellChecker: SpellChecking {
+    private let inner: FakeSpellChecker
+    private let counts = Mutex((batches: 0, singles: 0))
+    init(_ inner: FakeSpellChecker) { self.inner = inner }
+    var batches: Int { counts.withLock { $0.batches } }
+    var singles: Int { counts.withLock { $0.singles } }
+    func isKnown(_ word: String, language: String) async -> Bool {
+        counts.withLock { $0.singles += 1 }
+        return await inner.isKnown(word, language: language)
+    }
+    func guesses(for word: String, language: String) async -> [String] { [] }
+    func knownLanguages(for words: [String], languages: [String]) async -> [String: Set<String>] {
+        counts.withLock { $0.batches += 1 }
+        return await inner.knownLanguages(for: words, languages: languages)
+    }
 }
 
 /// A tagger fake: returns the configured names that occur in the text.
@@ -31,13 +50,17 @@ struct LearnerHarness {
         "there", "berlin", "usb", "nasa", "rust", "bank", "twenty", "one", "ok",
     ]
 
-    init(spans: [EntitySpan] = [], languages: [String] = ["de", "en"]) {
+    init(
+        spans: [EntitySpan] = [], languages: [String] = ["de", "en"], known: Set<String> = [],
+        spellChecker: (any SpellChecking)? = nil
+    ) {
         url = FileManager.default.temporaryDirectory
             .appendingPathComponent("legato-learner-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("vocabulary.json")
         store = VocabularyStore(fileURL: url)
         learner = VocabularyLearner(
-            store: store, spellChecker: FakeSpellChecker(known: ["de": Self.de, "en": Self.en]),
+            store: store,
+            spellChecker: spellChecker ?? FakeSpellChecker(known: ["de": Self.de, "en": Self.en.union(known)]),
             tagger: FakeTagger(spans: spans), languages: languages, now: { Self.t1 })
     }
 
@@ -49,11 +72,14 @@ struct LearnerHarness {
         for _ in 0..<n { await learner.observe(text: text, locale: Locale(identifier: locale), dictationID: UUID()) }
     }
 
-    func fix(_ raw: String, _ cleaned: String, style: CleanupLearningStyle = .verbatim, run: UUID = UUID(), times n: Int = 1) async {
+    func fix(
+        _ raw: String, _ cleaned: String, style: CleanupLearningStyle = .verbatim, run: UUID = UUID(), times n: Int = 1,
+        suggested: [String] = []
+    ) async {
         for i in 0..<n {
             await learner.observeCleanup(
                 raw: raw, cleaned: cleaned, style: style, runID: n == 1 ? run : (i == 0 ? run : UUID()),
-                locale: Locale(identifier: "en"))
+                locale: Locale(identifier: "en"), suggested: suggested)
         }
     }
 }
@@ -341,12 +367,12 @@ struct LearnerHarness {
         #expect(entry.aliases == ["klaud kode"])
     }
 
-    @Test func anAcronymTargetCountsAsRare() async throws {
+    @Test func anAcronymTargetUnknownInLowercaseCountsAsRare() async throws {
         let h = LearnerHarness()
         defer { h.cleanup() }
-        await h.fix("we use nasser today", "we use NASA today", times: 2)
-        let entry = try #require(try await h.snapshot().entry(forText: "NASA"))
-        #expect(entry.aliases == ["nasser"])
+        await h.fix("we use sapp today", "we use SAP today", times: 2)
+        let entry = try #require(try await h.snapshot().entry(forText: "SAP"))
+        #expect(entry.aliases == ["sapp"])
     }
 
     @Test func aTargetThatIsAlreadyATermIsReinforcedOnTheFirstSighting() async throws {
@@ -462,5 +488,224 @@ struct LearnerHarness {
         defer { h.cleanup() }
         await h.learner.recordChoice(original: "klaud code", chosen: "Claude Code", fromVocabulary: false)
         #expect(try await h.snapshot().entry(forText: "Claude Code") != nil)
+    }
+}
+
+// MARK: an alias never survives as a sibling entry
+
+@Suite struct VocabularyLearnerAliasSiblingTests {
+    @Test func aLearnedEntryEqualToANewAliasIsRemovedByAChoice() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        await h.observe("ask kloud about it", times: 3)
+        #expect(try await h.snapshot().entry(forText: "kloud") != nil)
+
+        await h.learner.recordChoice(original: "kloud", chosen: "Claude", fromVocabulary: true)
+        let snap = try await h.snapshot()
+        #expect(snap.entry(forText: "kloud") == nil)
+        #expect(snap.entry(forText: "Claude")?.aliases == ["kloud"])
+    }
+
+    @Test func aLearnedEntryEqualToANewAliasIsRemovedByACleanupFix() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        await h.observe("ask kloud about it", times: 3)
+        await h.fix("ask kloud about it", "ask Claude about it", times: 2)
+        let snap = try await h.snapshot()
+        #expect(snap.entry(forText: "kloud") == nil)
+        #expect(snap.entry(forText: "Claude")?.aliases == ["kloud"])
+    }
+
+    @Test func theComparisonIgnoresCaseAndDiacritics() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        await h.observe("ask Kloüd about it", times: 3)
+        #expect(try await h.snapshot().entry(forText: "Kloüd") != nil)
+        await h.learner.recordChoice(original: "kloud", chosen: "Claude", fromVocabulary: true)
+        #expect(try await h.snapshot().entry(forText: "Kloüd") == nil)
+    }
+
+    @Test func aPendingTermEqualToANewAliasIsDropped() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        await h.observe("ask kloud about it", times: 2)
+        #expect(try await h.snapshot().pendingTerms.contains { $0.text == "kloud" })
+        await h.learner.recordChoice(original: "kloud", chosen: "Claude", fromVocabulary: true)
+        #expect(try await h.snapshot().pendingTerms.contains { $0.text == "kloud" } == false)
+    }
+
+    @Test func aManualOrPinnedEntryEqualToANewAliasStays() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        try await h.store.add(text: "kloud", now: LearnerHarness.t0)
+        let pinned = try await h.store.add(text: "Zorbax", now: LearnerHarness.t0)
+        try await h.store.update { snap in
+            if let i = snap.entries.firstIndex(where: { $0.id == pinned.id }) { snap.entries[i].source = .history }
+        }
+        try await h.store.pin(id: pinned.id)
+        await h.learner.recordChoice(original: "kloud", chosen: "Claude", fromVocabulary: true)
+        await h.learner.recordChoice(original: "zorbax", chosen: "Claude", fromVocabulary: true)
+        let snap = try await h.snapshot()
+        #expect(snap.entry(forText: "kloud") != nil)
+        #expect(snap.entry(forText: "Zorbax") != nil)
+    }
+
+    @Test func theWordsOfAnAliasPhraseAreNotPromotedWhileTheyOccurInsideIt() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        try await h.store.add(text: "Kubernetes", aliases: ["kuber netties"], now: LearnerHarness.t0)
+        await h.observe("we use kuber netties today", times: 4)
+        let snap = try await h.snapshot()
+        #expect(snap.entries.map(\.text) == ["Kubernetes"])
+        #expect(snap.pendingTerms.isEmpty)
+    }
+
+    @Test func aWordOfAnAliasPhraseStillCountsWhenItOccursOutsideIt() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        try await h.store.add(text: "Kubernetes", aliases: ["kuber netties"], now: LearnerHarness.t0)
+        await h.observe("we use kuber today", times: 3)
+        #expect(try await h.snapshot().entry(forText: "kuber") != nil)
+    }
+}
+
+// MARK: cleanup rarity (multi-word, number, acronym targets)
+
+@Suite struct VocabularyLearnerCleanupRarityTests {
+    let common: Set<String> = ["going", "to", "are", "meet", "see", "you", "march", "on", "said", "okay", "pm", "kilo", "book", "for", "weighs", "it", "long"]
+
+    @Test func aContractionExpansionTeachesNothing() async throws {
+        let h = LearnerHarness(known: common)
+        defer { h.cleanup() }
+        await h.fix("we are gonna meet", "we are going to meet", times: 3)
+        let snap = try await h.snapshot()
+        #expect(snap.entries.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test func aMultiWordTargetNeedsARareTokenAndRareOrCapitalisedEdges() async throws {
+        let h = LearnerHarness(known: common)
+        defer { h.cleanup() }
+        // "Claude" is rare, but the block ends on the known lowercase word "today".
+        await h.fix("we ask kloud tuday now", "we ask Claude today now", times: 3)
+        let snap = try await h.snapshot()
+        #expect(snap.entries.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test(arguments: [
+        ("see you at free p m", "see you at 3 PM"),
+        ("on mar tree we meet", "on March 3 we meet"),
+        ("it is five kilometer long", "it is 5 km long"),
+    ])
+    func aTargetWithDigitsUnitsOrTimesTeachesNothing(_ pair: (String, String)) async throws {
+        let h = LearnerHarness(known: common)
+        defer { h.cleanup() }
+        await h.fix(pair.0, pair.1, times: 3)
+        let snap = try await h.snapshot()
+        #expect(snap.entries.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test func aTimeOrUnitWordWithoutDigitsTeachesNothing() async throws {
+        let h = LearnerHarness(known: common.subtracting(["pm"]))
+        defer { h.cleanup() }
+        await h.fix("book it for p m", "book it for PM", times: 3)
+        let snap = try await h.snapshot()
+        #expect(snap.entries.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test func aBlockWithANumberWordOnTheRawSideTeachesNothing() async throws {
+        let h = LearnerHarness(known: common)
+        defer { h.cleanup() }
+        await h.fix("we met two kloud today", "we met Claude today", times: 3)
+        let snap = try await h.snapshot()
+        #expect(snap.entries.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test func anAcronymTargetKnownInLowercaseTeachesNothing() async throws {
+        let h = LearnerHarness(known: common)
+        defer { h.cleanup() }
+        await h.fix("we said okay today", "we said OK today", times: 3)
+        let snap = try await h.snapshot()
+        #expect(snap.entries.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test func anAcronymTargetKnownInLowercaseInAConfiguredLanguageTeachesNothing() async throws {
+        let h = LearnerHarness(known: common)
+        defer { h.cleanup() }
+        await h.fix("we use nasser today", "we use NASA today", times: 3)
+        #expect(try await h.snapshot().entries.isEmpty)
+    }
+}
+
+// MARK: a suggested term is no independent evidence
+
+@Suite struct VocabularyLearnerSuggestedTests {
+    @Test func aSubstitutionToASuggestedTermReinforcesNothingAndTeachesNoAlias() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        try await h.store.add(text: "Claude", now: LearnerHarness.t0)
+        await h.fix("ask kloud about it", "ask Claude about it", times: 3, suggested: ["claude"])
+        let snap = try await h.snapshot()
+        #expect(snap.entries.count == 1)
+        #expect(snap.entries[0].score == 1)
+        #expect(snap.entries[0].aliases == [])
+        #expect(snap.entries[0].recentIDs.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test func aSuggestedTermInsideAMultiWordTargetIsSkippedToo() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        await h.fix("we use klaud kode today", "we use Claude Code today", times: 3, suggested: ["Claude Code"])
+        let snap = try await h.snapshot()
+        #expect(snap.entries.isEmpty)
+        #expect(snap.pendingFixes.isEmpty)
+    }
+
+    @Test func aFixToATermThatWasNotSuggestedStillLearns() async throws {
+        let h = LearnerHarness()
+        defer { h.cleanup() }
+        await h.fix("ask kloud about it", "ask Claude about it", times: 2, suggested: ["Kubernetes"])
+        #expect(try await h.snapshot().entry(forText: "Claude")?.aliases == ["kloud"])
+    }
+}
+
+// MARK: one batch lookup per text
+
+@Suite struct VocabularyLearnerBatchLookupTests {
+    private func counting() -> CountingSpellChecker {
+        CountingSpellChecker(FakeSpellChecker(known: ["de": LearnerHarness.de, "en": LearnerHarness.en]))
+    }
+
+    @Test func observeChecksAWholeTextInOneBatch() async throws {
+        let checker = counting()
+        let h = LearnerHarness(spellChecker: checker)
+        defer { h.cleanup() }
+        await h.observe("we met Zorbax today. ask about it, Quillon", times: 1)
+        #expect(checker.batches == 1)
+        #expect(checker.singles == 0)
+    }
+
+    @Test func observeCleanupChecksAllBlocksInOneBatch() async throws {
+        let checker = counting()
+        let h = LearnerHarness(spellChecker: checker)
+        defer { h.cleanup() }
+        await h.fix("ask kloud about rast today", "ask Claude about Rust today")
+        #expect(checker.batches == 1)
+        #expect(checker.singles == 0)
+    }
+
+    @Test func recordChoiceChecksTheTargetInOneBatch() async throws {
+        let checker = counting()
+        let h = LearnerHarness(spellChecker: checker)
+        defer { h.cleanup() }
+        await h.learner.recordChoice(original: "klaud kode", chosen: "Claude Code", fromVocabulary: false)
+        #expect(checker.batches == 1)
+        #expect(checker.singles == 0)
     }
 }

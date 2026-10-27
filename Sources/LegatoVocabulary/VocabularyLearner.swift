@@ -11,7 +11,8 @@ import Foundation
 /// - ``observe(text:locale:dictationID:)``: final dictation text. A candidate (a name, a word unknown in every
 ///   configured language, an all-caps acronym, or a 2-3 word phrase around a rare word) becomes an entry after
 ///   2 distinct dictations (names, phrases) or 3 (unknown words, acronyms).
-/// - ``observeCleanup(raw:cleaned:style:runID:locale:)``: the same fix in 2 distinct cleanup runs teaches an alias.
+/// - ``observeCleanup(raw:cleaned:style:runID:locale:suggested:)``: the same fix in 2 distinct cleanup runs teaches
+///   an alias.
 /// - ``recordChoice(original:chosen:fromVocabulary:)``: a tapped alternative teaches at once.
 public struct VocabularyLearner: Sendable {
     /// Distinct dictations before a name or phrase is promoted.
@@ -44,29 +45,40 @@ public struct VocabularyLearner: Sendable {
     // MARK: dictation
 
     /// Looks for candidates in the final text of dictation `dictationID` and promotes those with enough evidence.
+    ///
+    /// The words of the text are checked against the dictionaries in one batch. A word that occurs inside a
+    /// multi-word alias of a term ("kuber netties") is a mishearing of that term, not a candidate.
     public func observe(text: String, locale: Locale, dictationID: UUID) async {
         let chunks = Self.chunks(of: text)
         guard !chunks.isEmpty else { return }
         let language = language(of: locale)
-        var cache = KnownCache()
+        let spans = tagger.entities(in: text, language: language)
+        let aliasPhrases = await aliasPhrases()
+        let covered = chunks.map { Self.covered(by: aliasPhrases, in: $0) }
+        let anyCovered = covered.contains { $0.contains(true) }
+        let known = await lookup(chunks.flatMap { $0 } + spans.flatMap { Self.words(of: $0.text) })
         var candidates = Candidates()
 
-        for span in tagger.entities(in: text, language: language) {
+        for span in spans {
             let words = Self.words(of: span.text)
             guard !words.isEmpty else { continue }
-            let known = words.count == 1 ? await knownIn(words[0], cache: &cache) : []
-            candidates.add(text: words.joined(separator: " "), kind: span.kind, threshold: Self.namePromotionCount, knownIn: known)
+            let spanKey = VocabularyEntry.key(for: words.joined(separator: " "))
+            if anyCovered, aliasPhrases.contains(where: { (" " + $0 + " ").contains(" " + spanKey + " ") }) { continue }
+            candidates.add(
+                text: words.joined(separator: " "), kind: span.kind, threshold: Self.namePromotionCount,
+                knownIn: words.count == 1 ? known.languages(of: words[0]) : [])
         }
 
-        for chunk in chunks {
+        for (chunk, covered) in zip(chunks, covered) {
             var rare: [Bool] = []
-            for word in chunk {
+            for (index, word) in chunk.enumerated() {
                 let acronym = Self.isAcronym(word)
-                let known = await knownIn(word, cache: &cache)
-                let unknown = Self.isWordLike(word) && Self.letterCount(word) >= 3 && known.isEmpty
-                rare.append(acronym || unknown)
-                if acronym || unknown {
-                    candidates.add(text: word, kind: .term, threshold: Self.wordPromotionCount, knownIn: known)
+                let languages = known.languages(of: word)
+                let unknown = Self.isWordLike(word) && Self.letterCount(word) >= 3 && languages.isEmpty
+                let isRare = !covered[index] && (acronym || unknown)
+                rare.append(isRare)
+                if isRare {
+                    candidates.add(text: word, kind: .term, threshold: Self.wordPromotionCount, knownIn: languages)
                 }
             }
             for length in 2...3 where chunk.count >= length {
@@ -85,10 +97,10 @@ public struct VocabularyLearner: Sendable {
         let items = candidates.items
         let moment = now()
         _ = try? await store.update(now: moment) { snap in
-            let aliasKeys = Set(snap.entries.flatMap(\.aliases).map(VocabularyEntry.key(for:)))
+            let aliasKeys = Set(snap.entries.flatMap(\.aliases).map(VocabularyEntry.foldedKey(for:)))
             for c in items {
                 let key = VocabularyEntry.key(for: c.text)
-                if aliasKeys.contains(key) || snap.isBlocked(c.text) { continue }
+                if aliasKeys.contains(VocabularyEntry.foldedKey(for: c.text)) || snap.isBlocked(c.text) { continue }
                 if let i = snap.entries.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
                     if snap.entries[i].remember(dictationID) {
                         snap.entries[i].score += 1
@@ -123,35 +135,50 @@ public struct VocabularyLearner: Sendable {
     // MARK: cleanup
 
     /// Learns from what a cleanup run changed. Only ``CleanupLearningStyle/verbatim`` runs count. Each
-    /// word-level substitution is kept when it is not a number-format change and not a case- or diacritic-only
-    /// change, and its target is rare (unknown everywhere, a name, a phrase or an acronym) or already a term.
+    /// word-level substitution is kept when
+    /// - neither side has a digit or a spelled-out number and the target is no unit or time marker ("3 PM", "5 km");
+    /// - it is not a case- or diacritic-only change;
+    /// - its target was not one of the `suggested` terms the model was given (it would not be independent
+    ///   evidence: the model copied the term from its prompt);
+    /// - its target is rare, or already a term. A single word is rare when unknown in every configured language
+    ///   or a name; an acronym when its lowercase form is unknown; several words follow the phrase rule of
+    ///   ``observe(text:locale:dictationID:)`` (a rare token, and rare or capitalised non-initial edges), so a
+    ///   contraction expansion ("gonna" → "going to") teaches nothing.
+    ///
     /// The same raw → target in 2 distinct runs adds raw as an alias of the target (creating the target with
     /// source `.cleanup` if needed) and marks it a correction target. A target that already exists is also
     /// reinforced on its first sighting.
-    public func observeCleanup(raw: String, cleaned: String, style: CleanupLearningStyle, runID: UUID, locale: Locale) async {
+    public func observeCleanup(
+        raw: String, cleaned: String, style: CleanupLearningStyle, runID: UUID, locale: Locale, suggested: [String] = []
+    ) async {
         guard style == .verbatim else { return }
-        var fixes: [Fix] = []
-        var spans: [EntitySpan]?
-        var cache = KnownCache()
+        var blocks: [WordAlignment.Block] = []
         for block in WordAlignment.substitutions(from: raw, to: cleaned) {
-            if NumberWords.isPurelyNumeric(block.raw) || NumberWords.isPurelyNumeric(block.target) { continue }
+            if NumberWords.containsNumber(block.raw) || NumberWords.containsNumber(block.target) { continue }
+            if NumberWords.containsUnit(block.target) { continue }
             if Self.fold(block.rawText) == Self.fold(block.targetText) { continue }
-            if spans == nil { spans = tagger.entities(in: cleaned, language: language(of: locale)) }
-            let info = await rarity(of: block.targetText, spans: spans ?? [], cache: &cache)
-            fixes.append(Fix(raw: block.rawText, target: block.targetText, info: info))
+            if Self.isSuggested(block.targetText, among: suggested) { continue }
+            blocks.append(block)
         }
-        guard !fixes.isEmpty else { return }
+        guard !blocks.isEmpty else { return }
+        let spans = tagger.entities(in: cleaned, language: language(of: locale))
+        let known = await lookup(blocks.flatMap(\.target))
+        let fixes = blocks.map { block in
+            Fix(
+                raw: block.rawText, target: block.targetText,
+                info: rarity(of: block.targetText, spans: spans, known: known, strictPhrases: true))
+        }
 
         let moment = now()
-        let ids = fixes
         _ = try? await store.update(now: moment) { snap in
-            for fix in ids {
+            for fix in fixes {
                 let rawKey = VocabularyEntry.key(for: fix.raw)
                 let targetKey = VocabularyEntry.key(for: fix.target)
                 if snap.isBlocked(fix.target) { continue }
-                var index = snap.entries.firstIndex { VocabularyEntry.key(for: $0.text) == targetKey }
-                if index == nil && !fix.info.rare { continue }
-                if let i = index, snap.entries[i].remember(runID) {
+                func targetIndex() -> Int? { snap.entries.firstIndex { VocabularyEntry.key(for: $0.text) == targetKey } }
+                let exists = targetIndex() != nil
+                if !exists && !fix.info.rare { continue }
+                if let i = targetIndex(), snap.entries[i].remember(runID) {
                     snap.entries[i].score += 1
                     snap.entries[i].lastSeen = moment
                 }
@@ -173,14 +200,15 @@ public struct VocabularyLearner: Sendable {
                 snap.pendingFixes.removeAll {
                     VocabularyEntry.key(for: $0.raw) == rawKey && VocabularyEntry.key(for: $0.target) == targetKey
                 }
-                if index == nil {
+                if !exists {
                     snap.entries.append(
                         VocabularyEntry(
                             text: fix.target, kind: fix.info.kind, source: .cleanup, score: pending.score, lastSeen: moment,
                             recentIDs: Array(pending.ids.suffix(VocabularyEntry.recentIDsCapacity)), knownIn: fix.info.knownIn))
-                    index = snap.entries.count - 1
                 }
-                if let i = index {
+                // The raw side is now a known mishearing: a learned entry of the same text must not stay a term.
+                snap.removeLearned(equalToAliases: [fix.raw], exceptTextKey: fix.target)
+                if let i = targetIndex() {
                     Self.addAlias(fix.raw, to: &snap.entries[i])
                     snap.entries[i].correctionTarget = true
                 }
@@ -196,15 +224,18 @@ public struct VocabularyLearner: Sendable {
     public func recordChoice(original: String, chosen: String, fromVocabulary: Bool) async {
         let target = chosen.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return }
-        var cache = KnownCache()
         let spans = tagger.entities(in: target, language: languages.first ?? "en")
-        let info = await rarity(of: target, spans: spans, cache: &cache)
+        let known = await lookup(Self.words(of: target))
+        let info = rarity(of: target, spans: spans, known: known, strictPhrases: false)
         guard info.rare || fromVocabulary else { return }
 
         let moment = now()
         let key = VocabularyEntry.key(for: target)
         _ = try? await store.update(now: moment) { snap in
             if snap.isBlocked(target) { return }
+            let addsAlias = VocabularyEntry.key(for: original) != key
+            // The original is now a known mishearing: a learned entry of the same text must not stay a term.
+            if addsAlias { snap.removeLearned(equalToAliases: [original], exceptTextKey: target) }
             var entry: VocabularyEntry
             let index = snap.entries.firstIndex { VocabularyEntry.key(for: $0.text) == key }
             if let index {
@@ -214,7 +245,7 @@ public struct VocabularyLearner: Sendable {
             } else {
                 entry = VocabularyEntry(text: target, kind: info.kind, source: .choice, lastSeen: moment, knownIn: info.knownIn)
             }
-            if VocabularyEntry.key(for: original) != key { Self.addAlias(original, to: &entry) }
+            if addsAlias { Self.addAlias(original, to: &entry) }
             if let index { snap.entries[index] = entry } else { snap.entries.append(entry) }
         }
     }
@@ -233,27 +264,26 @@ public struct VocabularyLearner: Sendable {
         var info: Rarity
     }
 
-    /// Known-ness lookups are remembered per call, so a word repeated in a text is checked once.
-    private struct KnownCache {
-        var known: [String: [String]] = [:]
+    /// What the dictionaries said about a batch of words: for each, the configured languages that know it.
+    private struct Known {
+        var table: [String: Set<String>]
+        var configured: [String]
+
+        /// The configured languages whose dictionary knows `word`, in configured order.
+        func languages(of word: String) -> [String] { configured.filter { table[word]?.contains($0) == true } }
     }
 
-    /// The configured languages whose dictionary knows `word`, in configured order.
-    private func knownIn(_ word: String, cache: inout KnownCache) async -> [String] {
-        if let hit = cache.known[word] { return hit }
-        var out: [String] = []
-        let startsUpper = word.first?.isUppercase == true && word != word.uppercased()
-        for language in languages {
-            var known = await spellChecker.isKnown(word, language: language)
-            if !known, startsUpper { known = await spellChecker.isKnown(word.lowercased(), language: language) }
-            if known { out.append(language) }
-        }
-        cache.known[word] = out
-        return out
+    /// One batch lookup of `words`, plus the lowercase form of every acronym ("OK" → "ok").
+    private func lookup(_ words: [String]) async -> Known {
+        let lowercase = words.filter(Self.isAcronym).map { $0.lowercased() }
+        let table = await spellChecker.knownLanguagesFolding(words + lowercase, languages: languages)
+        return Known(table: table, configured: languages)
     }
 
-    /// Whether `text` is rare: several words, an acronym, a name in `spans`, or a single word unknown everywhere.
-    private func rarity(of text: String, spans: [EntitySpan], cache: inout KnownCache) async -> Rarity {
+    /// Whether `text` is rare. A single word is rare when it is a name in `spans`, unknown in every configured
+    /// language, or an acronym (when `strictPhrases`, only if its lowercase form is unknown too). Several words
+    /// are rare when `strictPhrases` is false; otherwise they follow the phrase rule of ``observe``.
+    private func rarity(of text: String, spans: [EntitySpan], known: Known, strictPhrases: Bool) -> Rarity {
         let words = Self.words(of: text)
         let key = VocabularyEntry.key(for: words.joined(separator: " "))
         let span = spans.first {
@@ -261,14 +291,56 @@ public struct VocabularyLearner: Sendable {
             return spanKey.contains(" " + key + " ")
         }
         let kind = span?.kind ?? .term
-        if words.count != 1 { return Rarity(rare: words.count > 1, kind: kind, knownIn: []) }
-        let known = await knownIn(words[0], cache: &cache)
-        let rare = span != nil || Self.isAcronym(words[0]) || known.isEmpty
-        return Rarity(rare: rare, kind: kind, knownIn: known)
+        if words.count != 1 {
+            guard strictPhrases else { return Rarity(rare: words.count > 1, kind: kind, knownIn: []) }
+            let rare = words.map { Self.isAcronym($0) || (Self.isWordLike($0) && Self.letterCount($0) >= 3 && known.languages(of: $0).isEmpty) }
+            let isRare = words.count > 1 && rare.contains(true)
+                && Self.isPhraseEdge(words, rare, 0, first: true) && Self.isPhraseEdge(words, rare, words.count - 1, first: false)
+            return Rarity(rare: isRare, kind: kind, knownIn: [])
+        }
+        let word = words[0]
+        let languages = known.languages(of: word)
+        var rare = span != nil || languages.isEmpty
+        if Self.isAcronym(word) {
+            rare = span != nil || (strictPhrases ? known.languages(of: word.lowercased()).isEmpty : true)
+        }
+        return Rarity(rare: rare, kind: kind, knownIn: languages)
     }
 
     private func language(of locale: Locale) -> String {
         locale.language.languageCode?.identifier ?? languages.first ?? "en"
+    }
+
+    /// The multi-word aliases of the vocabulary, as comparison keys of space-joined words.
+    private func aliasPhrases() async -> [String] {
+        guard let snapshot = try? await store.snapshot() else { return [] }
+        return snapshot.entries.flatMap(\.aliases).compactMap { alias in
+            let words = Self.words(of: alias)
+            return words.count > 1 ? VocabularyEntry.key(for: words.joined(separator: " ")) : nil
+        }
+    }
+
+    /// For each word of `chunk`, whether it sits inside an occurrence of one of the alias `phrases`.
+    private static func covered(by phrases: [String], in chunk: [String]) -> [Bool] {
+        var covered = [Bool](repeating: false, count: chunk.count)
+        let lowered = chunk.map { VocabularyEntry.key(for: $0) }
+        for phrase in phrases {
+            let parts = phrase.split(separator: " ").map(String.init)
+            guard parts.count <= lowered.count else { continue }
+            for start in 0...(lowered.count - parts.count) where Array(lowered[start..<start + parts.count]) == parts {
+                for i in start..<start + parts.count { covered[i] = true }
+            }
+        }
+        return covered
+    }
+
+    /// Whether `target` is, or contains as whole words, one of the `suggested` terms.
+    private static func isSuggested(_ target: String, among suggested: [String]) -> Bool {
+        let padded = " " + words(of: fold(target)).joined(separator: " ") + " "
+        return suggested.contains { term in
+            let words = words(of: fold(term)).joined(separator: " ")
+            return !words.isEmpty && padded.contains(" " + words + " ")
+        }
     }
 
     // MARK: candidates

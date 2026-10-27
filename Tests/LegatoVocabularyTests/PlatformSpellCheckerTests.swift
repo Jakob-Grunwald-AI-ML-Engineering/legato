@@ -16,5 +16,19 @@ import Testing
         #expect(await checker.isKnown("qzxvbrt", language: "en") == false)
         #expect(await checker.isKnown("the", language: "en") == true)
     }
+
+    @Test func aBatchAnswersEveryDistinctWordForEveryLanguageLikeTheSingleCalls() async {
+        let checker = PlatformSpellChecker()
+        let words = ["qzxvbrt", "the", "qzxvbrt", ""]
+        let batch = await checker.knownLanguages(for: words, languages: ["en", "de"])
+        #expect(Set(batch.keys) == ["qzxvbrt", "the", ""])
+        for (word, languages) in batch {
+            for language in ["en", "de"] {
+                #expect(languages.contains(language) == (await checker.isKnown(word, language: language)))
+            }
+        }
+        #expect(batch["qzxvbrt"] == [])
+        #expect(batch["the"]?.contains("en") == true)
+    }
     #endif
 }

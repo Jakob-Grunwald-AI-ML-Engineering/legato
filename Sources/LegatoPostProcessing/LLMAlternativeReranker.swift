@@ -101,14 +101,21 @@ public struct LLMAlternativeReranker: Sendable {
         var proposal: String?
     }
 
-    /// `2, 1, 3` or `3 1 + word` or `+ word`: one line, unique numbers in `1...candidateCount`, at most one proposal.
+    /// `2, 1, 3` or `3 1 + word` or `+ word`: one line, unique numbers in `1...candidateCount`, at most one
+    /// proposal. A trailing period and one pair of brackets around the numbers (`[2, 1, 3].`) are tolerated.
     static func parse(_ reply: String, candidateCount: Int) -> Order? {
-        let line = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        var line = reply.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty, !line.contains(where: \.isNewline) else { return nil }
+        if line.hasSuffix(".") { line = String(line.dropLast()).trimmingCharacters(in: .whitespaces) }
         let parts = line.split(separator: "+", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count <= 2 else { return nil }
+        var numbers = parts[0].trimmingCharacters(in: .whitespaces)
+        for (open, close) in [("[", "]"), ("(", ")")] where numbers.hasPrefix(open) && numbers.hasSuffix(close) {
+            numbers = String(numbers.dropFirst().dropLast())
+            break
+        }
         var indices: [Int] = []
-        for token in parts[0].split(whereSeparator: { $0 == "," || $0 == " " }) {
+        for token in numbers.split(whereSeparator: { $0 == "," || $0 == " " }) {
             guard let n = Int(token), (1...max(1, candidateCount)).contains(n), !indices.contains(n - 1) else { return nil }
             indices.append(n - 1)
         }

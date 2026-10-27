@@ -37,6 +37,8 @@ public actor VocabularyStore {
         now: Date = Date()
     ) throws -> VocabularyEntry {
         try update(now: now) { snap in
+            // An alias is a known mishearing: a learned entry of the same text must not stay behind as a term.
+            snap.removeLearned(equalToAliases: aliases, exceptTextKey: text)
             if let i = snap.entries.firstIndex(where: { VocabularyEntry.key(for: $0.text) == VocabularyEntry.key(for: text) }) {
                 snap.entries[i].source = .manual
                 snap.entries[i].blocked = false
@@ -89,6 +91,9 @@ public actor VocabularyStore {
 
     /// Lifts a block.
     public func unblock(id: UUID) throws { try edit(id) { $0.blocked = false } }
+
+    /// Forgets dictation (or run) `id` everywhere: see ``VocabularySnapshot/forget(_:)``.
+    public func forget(id: UUID) throws { try update { $0.forget(id) } }
 
     /// Deletes the entry. Unlike ``block(id:)`` this lets a learning source add the text again.
     public func remove(id: UUID) throws {

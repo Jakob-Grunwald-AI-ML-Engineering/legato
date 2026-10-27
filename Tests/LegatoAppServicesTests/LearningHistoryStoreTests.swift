@@ -10,14 +10,21 @@ private final class MemoryHistory: HistoryStore {
     struct Failure: Error {}
     private let state = Mutex<[DictationEntry]>([])
     let failAppends: Bool
-    init(failAppends: Bool = false) { self.failAppends = failAppends }
+    let failDeletes: Bool
+    init(failAppends: Bool = false, failDeletes: Bool = false) {
+        self.failAppends = failAppends
+        self.failDeletes = failDeletes
+    }
     var all: [DictationEntry] { state.withLock { $0 } }
     func append(_ entry: DictationEntry) async throws {
         if failAppends { throw Failure() }
         state.withLock { $0.append(entry) }
     }
     func recent(limit: Int) async throws -> [DictationEntry] { Array(all.reversed().prefix(limit)) }
-    func delete(id: UUID) async throws { state.withLock { $0.removeAll { $0.id == id } } }
+    func delete(id: UUID) async throws {
+        if failDeletes { throw Failure() }
+        state.withLock { $0.removeAll { $0.id == id } }
+    }
 }
 
 private func entry(_ text: String, raw: String? = nil, locale: String = "en-US") -> DictationEntry {
@@ -82,5 +89,46 @@ private let grunwald = [EntitySpan(text: "Grunwald", kind: .person)]
         await gate.release()
         await rig.service.waitForLearning()
         #expect(rig.service.pendingLearning == 0)
+    }
+
+    // MARK: deleting a dictation un-teaches it
+
+    @Test func deletingADictationForgetsWhatItTaught() async throws {
+        let rig = VocabularyRig(spans: grunwald); defer { rig.cleanUp() }
+        let store = LearningHistoryStore(MemoryHistory(), vocabulary: rig.service)
+        let first = entry("we met Grunwald")
+        try await store.append(first)
+        await rig.service.waitForLearning()
+        #expect(try await rig.service.store.snapshot().pendingTerms.map(\.text) == ["Grunwald"])
+        try await store.delete(id: first.id)
+        await rig.service.waitForLearning()
+        let snapshot = try await rig.service.store.snapshot()
+        #expect(snapshot.pendingTerms.isEmpty)
+        #expect(snapshot.entries.isEmpty)
+    }
+
+    @Test func aDeleteRightAfterAnAppendLeavesNoTraceEvenWhileTheLearnerIsStillBusy() async throws {
+        let gate = LearnerGate()
+        let rig = VocabularyRig(spellChecker: GatedSpellChecker(gate: gate)); defer { rig.cleanUp() }
+        let store = LearningHistoryStore(MemoryHistory(), vocabulary: rig.service)
+        let doomed = entry("Grunwald")
+        try await store.append(doomed)  // the learner is now held inside the spell checker
+        try await store.delete(id: doomed.id)  // the Mac's cancel chord: append, then delete at once
+        await gate.release()
+        await rig.service.waitForLearning()
+        let snapshot = try await rig.service.store.snapshot()
+        #expect(snapshot.pendingTerms.isEmpty)
+        #expect(snapshot.entries.isEmpty)
+    }
+
+    @Test func aFailedDeleteForgetsNothing() async throws {
+        let rig = VocabularyRig(spans: grunwald); defer { rig.cleanUp() }
+        let store = LearningHistoryStore(MemoryHistory(failDeletes: true), vocabulary: rig.service)
+        let kept = entry("we met Grunwald")
+        try await store.append(kept)
+        await rig.service.waitForLearning()
+        await #expect(throws: MemoryHistory.Failure.self) { try await store.delete(id: kept.id) }
+        await rig.service.waitForLearning()
+        #expect(try await rig.service.store.snapshot().pendingTerms.map(\.text) == ["Grunwald"])
     }
 }

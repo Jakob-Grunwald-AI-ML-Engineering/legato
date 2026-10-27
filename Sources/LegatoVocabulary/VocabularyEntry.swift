@@ -71,6 +71,15 @@ public struct VocabularyEntry: Sendable, Equatable, Codable, Identifiable {
         text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    /// Like ``key(for:)``, and also blind to diacritics: "Müller" and "muller" share one folded key. Used to
+    /// tell whether an alias duplicates another entry.
+    public static func foldedKey(for text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+
+    /// Whether learning created the entry and nothing else vouches for it: not typed in, not pinned, not blocked.
+    var isPlainlyLearned: Bool { source != .manual && !pinned && !blocked }
+
     /// Records `id` in `recentIDs`, dropping the oldest beyond the capacity. Returns `false` (and changes nothing) when it was already there.
     @discardableResult
     public mutating func remember(_ id: UUID) -> Bool {

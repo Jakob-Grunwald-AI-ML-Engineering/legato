@@ -15,7 +15,9 @@ import Foundation
 /// - the edit similarity `1 - distance / length` reaches 0.8, **or** it reaches 0.5 and the two sound alike
 ///   (the Kölner or the Metaphone key agrees).
 ///
-/// Words of four letters or fewer must match exactly. A list of more than 100 terms raises the edit
+/// A span of several words is joined without spaces, which makes short terms match by accident ("in a" →
+/// "Ina"), so it may only match a single-word term when the joined span has six letters or more and none of its
+/// words has fewer than three; a multi-word term matches any span. Words of four letters or fewer must match exactly. A list of more than 100 terms raises the edit
 /// threshold to 0.85 and wants both phonetic keys to agree instead of either. The score is `0.6 × similarity + 0.4` when the keys agree, and 1 for an
 /// exact match.
 public struct TermMatcher: Sendable {
@@ -58,6 +60,7 @@ public struct TermMatcher: Sendable {
         var variants: [String]
         var koelner: String
         var metaphone: String
+        var wordCount: Int
     }
 
     private struct Prepared: Sendable {
@@ -72,6 +75,8 @@ public struct TermMatcher: Sendable {
     private static let lengthRatioFloor = 0.75
     private static let shortWordLetters = 4
     private static let maxSpanWords = 3
+    private static let minJoinedLetters = 6
+    private static let minSpanWordLetters = 3
 
     public init(terms: [Term]) {
         self.terms = terms.map { term in
@@ -115,6 +120,9 @@ public struct TermMatcher: Sendable {
 
     private func matches(of words: [String], range: Range<Int>) -> [(Int, Match)] {
         let joined = words.joined()
+        // Words joined without spaces match a short term by accident ("in a" is not "Ina"). A multi-word span may
+        // only match a single-word term when it is long enough and none of its words is tiny.
+        let spanIsSolid = words.count == 1 || (joined.count >= Self.minJoinedLetters && words.allSatisfy { $0.count >= Self.minSpanWordLetters })
         let variants = Self.variants(of: joined)
         guard !variants.isEmpty else { return [] }
         let koelner = PhoneticKey.koelner(joined)
@@ -122,7 +130,7 @@ public struct TermMatcher: Sendable {
         var out: [(Int, Match)] = []
         for (i, term) in terms.enumerated() {
             var best: Match?
-            for form in term.forms {
+            for form in term.forms where spanIsSolid || form.wordCount > 1 {
                 let k = !koelner.isEmpty && koelner == form.koelner
                 let m = !metaphone.isEmpty && metaphone == form.metaphone
                 let sounds = bothKeys ? (k && m) : (k || m)
@@ -158,11 +166,13 @@ public struct TermMatcher: Sendable {
     private static func form(_ text: String) -> Form? {
         let v = variants(of: text)
         guard !v.isEmpty else { return nil }
-        return Form(text: text, variants: v, koelner: PhoneticKey.koelner(text), metaphone: PhoneticKey.metaphone(text))
+        return Form(
+            text: text, variants: v, koelner: PhoneticKey.koelner(text), metaphone: PhoneticKey.metaphone(text),
+            wordCount: words(in: text).count)
     }
 
     /// The words of `text`: runs of letters and digits.
-    private static func words(in text: String) -> [String] {
+    static func words(in text: String) -> [String] {
         text.split { !($0.isLetter || $0.isNumber) }.map(String.init)
     }
 
