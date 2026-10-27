@@ -30,7 +30,7 @@ import os
 /// Darwin notifications (see `installTriggers`): `toggle`, `interrupt`, `copy-last`, `foreground`,
 /// `background`, `toggle-after-hop` (the press that repeats a `needsForeground` one after the hop).
 /// Meetings (with `-LegatoFakeEngine`, the meeting uses the scripted engine and `E2EFakeMeetingMic`, a tone
-/// that arrives in real time): `meeting-start`, `meeting-stop`, `meeting-mute`, `meeting-unmute`,
+/// that arrives in real time): `meeting-start`, `meeting-stop`, `meeting-mute`, `meeting-unmute`, `meeting-pause`, `meeting-resume`, `meeting-discard`,
 /// `meeting-export` (writes what the share sheet would offer), `meeting-route-change` (AirPods connected),
 /// and `interrupt-end` (the end of an interruption, with `shouldResume`).
 /// - `-LegatoKeepAliveSeconds <n>`: sets the keep-alive setting (any number of seconds).
@@ -304,6 +304,12 @@ extension AppController {
             meetings.setManualMute(true)
         case "meeting-unmute":
             meetings.setManualMute(false)
+        case "meeting-pause":
+            meetings.setPaused(true)
+        case "meeting-resume":
+            meetings.setPaused(false)
+        case "meeting-discard":
+            await meetings.discard()
         case "meeting-route-change":
             NotificationCenter.default.post(
                 name: AVAudioSession.routeChangeNotification,
@@ -330,7 +336,7 @@ extension AppController {
 extension E2E {
     static let commands = [
         "toggle", "interrupt", "interrupt-end", "copy-last", "foreground", "background", "toggle-after-hop",
-        "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-export", "meeting-route-change",
+        "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-pause", "meeting-resume", "meeting-discard", "meeting-export", "meeting-route-change",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-arm", "kbd-hop-start", "kbd-hop-arm-url-first", "kbd-forged-url",
         "harness-mic", "harness-mic-hop", "harness-type", "harness-numbers",

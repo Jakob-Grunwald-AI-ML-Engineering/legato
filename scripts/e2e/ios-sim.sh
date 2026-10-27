@@ -20,7 +20,7 @@
 #   LEGATO_E2E_DERIVED   DerivedData directory to reuse between runs (default: a temp dir, removed on exit)
 #   LEGATO_E2E_KEEP=1    keep the work directory (logs) and print its path
 #   LEGATO_E2E_SHOTS     directory for the keyboard screenshots (scenario s; default: inside the work directory)
-#   LEGATO_E2E_ONLY      space-separated scenario letters to run (for example "x y z"); default: all
+#   LEGATO_E2E_ONLY      space-separated scenario names to run (for example "x x2 y z"); default: all
 # Without LEGATO_E2E_UDID a simulator named "legato-e2e" is created once (iPhone, newest iOS 26+ runtime),
 # reused by later runs, and shut down at the end.
 set -uo pipefail
@@ -126,8 +126,9 @@ if [ "$mode" = release-check ]; then
     KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers LegatoHarnessAppearance
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
     LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
-    E2EFakeMeetingMic meeting-start meeting-stop meeting-mute meeting-unmute meeting-export meeting-route-change interrupt-end
-    "meeting.started" "meeting.refused" "meeting.pipeline.done" "meeting.export" "meeting.session.activate" "meeting.mic.restart")
+    E2EFakeMeetingMic meeting-start meeting-stop meeting-mute meeting-unmute meeting-pause meeting-resume meeting-discard meeting-export meeting-route-change interrupt-end
+    "meeting.started" "meeting.refused" "meeting.pipeline.done" "meeting.export" "meeting.session.activate" "meeting.mic.restart"
+    "meeting.discarded" "meeting.list count" "meeting.bgtask")
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f \( -name 'Legato*' -o -name '*.dylib' \) -print0 | xargs -0 strings -a
   }
@@ -1091,7 +1092,7 @@ meeting_stop_and_wait() {
 }
 
 scenario_x() {
-  begin "x. meeting" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return
+  begin "x. meeting" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO LegatoMeetingProcessImmediately || return
   xcrun simctl pbcopy "$UDID" <<< "sentinel"
   trigger kbd-visible
   wait_log "kbd.visible value=1" 10
@@ -1159,8 +1160,62 @@ scenario_x() {
   else record FAIL "the export notes the muted range" "no '_Microphone muted' line"; fi
 }
 
+# The number of meeting folders in the container's Meetings/.
+meeting_count() {
+  local group; group="$(group_dir)"
+  ls -d "$group"/Meetings/*/ 2> /dev/null | wc -l | tr -d ' '
+}
+
+scenario_x2() {
+  begin "x2. meeting pause and discard" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO LegatoMeetingProcessImmediately || return
+  trigger meeting-start
+  wait_log "e2e meeting.started" 20
+  sleep 2.5
+  trigger meeting-pause
+  wait_log "meeting.pause value=1" 10
+  sleep 2
+  trigger meeting-resume
+  wait_log "meeting.pause value=0" 10
+  sleep 1.5
+  meeting_stop_and_wait
+  local dir; dir="$(meeting_dir)"
+  [ -n "$dir" ] || { record FAIL "a meeting folder exists in the App Group container" "none under Meetings/"; return; }
+  assert_eq "meeting finished" "finished" "$(meeting_field "$dir" 'm["state"]')"
+  assert_eq "the pause left one marked range" "1" "$(meeting_field "$dir" 'len(m["pausedRanges"])')"
+  assert_eq "the paused range is about the 2 s paused" "ok" \
+    "$(meeting_field "$dir" '"ok" if 1.5 <= m["pausedRanges"][0]["end"] - m["pausedRanges"][0]["start"] <= 3.5 else "bad"')"
+  assert_eq "the pause is not a mute" "0" "$(meeting_field "$dir" 'len(m["mutedRanges"])')"
+  if near "$(audio_seconds "$dir/mic.m4a")" "$(meeting_field "$dir" 'm["duration"]')" 1.5; then record PASS "the m4a keeps the timeline over the pause"
+  else record FAIL "the m4a keeps the timeline over the pause" "audio $(audio_seconds "$dir/mic.m4a") s, meeting $(meeting_field "$dir" 'm["duration"]') s"; fi
+  trigger meeting-export
+  wait_log "e2e meeting.export md=" 10
+  local md; md="$(log_field_last "meeting.export" md)"
+  expected_markdown "$dir" "$WORK/expected.md"
+  if [ -f "$md" ] && cmp -s "$md" "$WORK/expected.md"; then record PASS "the exported Markdown matches the saved meeting"
+  else record FAIL "the exported Markdown matches the saved meeting" "$(diff "$md" "$WORK/expected.md" 2>&1 | head -5)"; fi
+  if grep -q '^_Paused ' "$md" 2> /dev/null; then record PASS "the export notes the paused range"
+  else record FAIL "the export notes the paused range" "no '_Paused' line"; fi
+  # Discard: the folder and the list entry go.
+  local before; before="$(meeting_count)"
+  trigger meeting-start
+  wait_log_n "e2e meeting.started" 2 20
+  local id; id="$(grep -F 'e2e meeting.started' "$LOG" | tail -1 | sed -n 's/.*id=\([0-9A-Fa-f-]*\).*/\1/p')"
+  sleep 2
+  local group; group="$(group_dir)"
+  assert_eq "while recording the new meeting has a folder" "yes" "$([ -n "$id" ] && [ -d "$group/Meetings/$id" ] && echo yes || echo no)"
+  trigger meeting-discard
+  wait_log "e2e meeting.discarded" 10
+  sleep 1
+  assert_eq "discard removes the meeting folder" "no" "$([ -n "$id" ] && [ -d "$group/Meetings/$id" ] && echo yes || echo no)"
+  assert_eq "discard leaves the other meeting folders" "$before" "$(meeting_count)"
+  assert_eq "the list has the same entries as before the discarded meeting" "$before" \
+    "$(last_line "meeting.list count=" | sed -n 's/.*meeting.list count=\([0-9]*\).*/\1/p')"
+  assert_log "the meeting's Live Activity ended after the discard" "meeting.activity.end live=0"
+  assert_eq "the link says no meeting now" "yes" "$(last_line "link.host" | grep -q ' meeting=0 ' && echo yes || echo no)"
+}
+
 scenario_y() {
-  begin "y. meeting interruption" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return
+  begin "y. meeting interruption" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO LegatoMeetingProcessImmediately || return
   trigger meeting-start
   wait_log "e2e meeting.started" 20
   sleep 2.5
@@ -1192,13 +1247,13 @@ scenario_y() {
 }
 
 scenario_z() {
-  begin "z. meeting survives a kill" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return
+  begin "z. meeting survives a kill" -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO LegatoMeetingProcessImmediately || return
   trigger meeting-start
   wait_log "e2e meeting.started" 20
   sleep 4
   local dir; dir="$(meeting_dir)"
   assert_eq "while recording the meeting is saved as recording" "recording" "$(meeting_field "$dir" 'm["state"]')"
-  relaunch -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO || return   # kills the app
+  relaunch -LegatoFakeEngine "$MEETING_TEXT" -LegatoFakeWordDelayMs 400 -LegatoForceTapToCopy NO LegatoMeetingProcessImmediately || return   # kills the app
   wait_log "e2e meeting.pipeline.done" 60
   assert_eq "recovery finished the interrupted meeting" "finished" "$(meeting_field "$dir" 'm["state"]')"
   assert_eq "the recording survived as an m4a" "yes" "$([ -f "$dir/mic.m4a" ] && echo yes || echo no)"
@@ -1209,7 +1264,7 @@ scenario_z() {
 
 t_run=$SECONDS
 wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
-for s in a b c d e f g h i p j o k l m n q t r s u x y z; do if wanted "$s"; then "scenario_$s"; fi; done
+for s in a b c d e f g h i p j o k l m n q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
 if wanted v; then
   scenario_v "retry succeeds" duckOthers 1 2 yes
   scenario_v "default fails twice" duckOthers 9 2 no

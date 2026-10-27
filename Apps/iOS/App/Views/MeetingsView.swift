@@ -1,96 +1,59 @@
 import LegatoMeetings
 import SwiftUI
 
-/// The library of recorded meetings, and the way to start one. A meeting that records is the first row.
+/// The Meetings screen: the list, the way to start a meeting and its language, and the meeting document a
+/// card opens. A meeting that starts opens its own document.
 struct MeetingsView: View {
     let controller: AppController
-    @State private var showsLive = false
+    @State private var opened: UUID?
 
     private var meetings: MeetingController { controller.meetings }
 
     var body: some View {
-        List {
-            if meetings.isActive {
-                Section {
-                    NavigationLink {
-                        MeetingLiveView(controller: controller)
+        MeetingListView(controller: controller, opened: $opened)
+            .navigationTitle("Meetings")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Button { meetings.language = nil } label: {
+                            if meetings.language == nil { Label("Auto", systemImage: "checkmark") } else { Text("Auto") }
+                        }
+                        Divider()
+                        ForEach(MeetingListView.languages, id: \.id) { language in
+                            Button { meetings.language = language.id } label: {
+                                if meetings.language == language.id {
+                                    Label(language.name, systemImage: "checkmark")
+                                } else {
+                                    Text(language.name)
+                                }
+                            }
+                        }
                     } label: {
-                        Label(meetings.statusText, systemImage: "record.circle")
-                            .foregroundStyle(.red)
+                        Label(languageName, systemImage: "globe")
                     }
-                    .accessibilityIdentifier("meetings.live")
+                    .disabled(meetings.isActive)
+                    .accessibilityIdentifier("meetings.language")
                 }
-            }
-            if let notice = meetings.notice {
-                Section {
-                    Label(notice, systemImage: "info.circle")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("meetings.notice")
-                }
-            }
-            Section {
-                ForEach(meetings.meetings.filter { $0.state != .recording || !meetings.isActive }) { meeting in
-                    NavigationLink {
-                        MeetingDetailView(controller: controller, meeting: meeting)
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task {
+                            await meetings.start()
+                            if meetings.isRecording { opened = meetings.liveMeetingID }
+                        }
                     } label: {
-                        MeetingRow(meeting: meeting, busy: meetings.busy.contains(meeting.id))
+                        Label("Start meeting", systemImage: "plus")
                     }
-                }
-                .onDelete { offsets in
-                    let doomed = offsets.map { meetings.meetings[$0] }
-                    Task { for meeting in doomed { await meetings.delete(meeting) } }
+                    .disabled(meetings.isActive || controller.isDictating)
+                    .accessibilityIdentifier("meetings.start")
                 }
             }
-        }
-        .overlay {
-            if meetings.meetings.isEmpty, !meetings.isActive {
-                ContentUnavailableView(
-                    "No meetings yet", systemImage: "person.2.wave.2",
-                    description: Text("Record a meeting in the room. Legato transcribes it as it goes and writes a summary afterwards."))
+            .navigationDestination(item: $opened) { id in
+                MeetingDetailView(controller: controller, meetingID: id, onClose: { opened = nil })
             }
-        }
-        .navigationTitle("Meetings")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task {
-                        await meetings.start()
-                        showsLive = meetings.isRecording
-                    }
-                } label: {
-                    Label("Start meeting", systemImage: "record.circle")
-                }
-                .disabled(meetings.isActive || controller.isDictating)
-                .accessibilityIdentifier("meetings.start")
-            }
-        }
-        .navigationDestination(isPresented: $showsLive) { MeetingLiveView(controller: controller) }
-        .task { await meetings.refresh() }
-    }
-}
-
-private struct MeetingRow: View {
-    let meeting: Meeting
-    let busy: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(meeting.title).lineLimit(1)
-            HStack(spacing: 6) {
-                Text(meeting.date.formatted(date: .abbreviated, time: .shortened))
-                Text(Self.duration(meeting.duration))
-                if busy || meeting.state == .processing || meeting.state == .interrupted {
-                    ProgressView().controlSize(.mini)
-                }
-            }
-            .font(.caption).foregroundStyle(.secondary)
-        }
+            .task { await meetings.refresh() }
     }
 
-    static func duration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds)
-        return total >= 3600
-            ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
-            : String(format: "%d:%02d", total / 60, total % 60)
+    private var languageName: String {
+        meetings.language.flatMap { id in MeetingListView.languages.first { $0.id == id }?.name ?? id } ?? "Auto"
     }
 }
