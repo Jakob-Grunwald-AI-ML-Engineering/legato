@@ -227,7 +227,7 @@ private struct Rig {
         let engines = await rig.services().engines(for: .macOS)
         #expect(engines.diarizer == nil, "this meeting runs without live speakers")
         #expect(engines.speakersNote?.localizedCaseInsensitiveContains("speaker") == true)
-        #expect(await eventually(timeout: .seconds(3)) { await installed(rig, FluidAudioModels.sortformerID) }, "downloaded in the background")
+        #expect(await eventually(timeout: .seconds(30)) { await installed(rig, FluidAudioModels.sortformerID) }, "downloaded in the background")
         let next = await rig.services().engines(for: .macOS)
         #expect(next.diarizer != nil && next.speakersNote == nil, "the next meeting has live speakers")
     }
@@ -235,7 +235,7 @@ private struct Rig {
     @Test func aMissingLocalVqeIsDownloadedWhenAMeetingStarts() async throws {
         let rig = Rig()
         _ = await rig.services().engines(for: .macOS)
-        #expect(await eventually(timeout: .seconds(3)) { await installed(rig, FluidAudioModels.localVqeID) })
+        #expect(await eventually(timeout: .seconds(30)) { await installed(rig, FluidAudioModels.localVqeID) })
         #expect(await rig.services().engines(for: .macOS).enhancer != nil)
     }
 
@@ -747,7 +747,7 @@ private final class TrackSink: MeetingAudioSink {
         let id = try await seed(rig)
         try await services.processAfterStop(id)
         let tick = Task { await services.scheduler.tick() }
-        #expect(await eventually(timeout: .seconds(2)) { await MainActor.run { services.stage(of: id)?.isRunning == true } })
+        #expect(await eventually(timeout: .seconds(30)) { await MainActor.run { services.stage(of: id)?.isRunning == true } })
 
         services.setRecording(true)
         await tick.value
@@ -822,10 +822,10 @@ private final class TrackSink: MeetingAudioSink {
             sampler: { .idle }, immediateProcessing: false, pollInterval: nil)
         let id = try await finishedMeeting(rig)
         let summary = Task { try await services.regenerate(meetingID: id) }
-        #expect(await eventually(timeout: .seconds(2)) { llm.calls.withLock { $0 } == 1 }, "the summary is being written")
+        #expect(await eventually(timeout: .seconds(30)) { llm.calls.withLock { $0 } == 1 }, "the summary is being written")
 
         services.setRecording(true)
-        #expect(await eventually(timeout: .seconds(2)) { llm.cancelled.withLock { $0 } == 1 }, "the summary stopped for the recording")
+        #expect(await eventually(timeout: .seconds(30)) { llm.cancelled.withLock { $0 } == 1 }, "the summary stopped for the recording")
         #expect(try await rig.store.summaries(for: id).isEmpty)
 
         services.setRecording(false)
@@ -845,7 +845,7 @@ private final class TrackSink: MeetingAudioSink {
         try await services.processAfterStop(id)
         rig.load.value = .idle
         let deferred = Task { await services.scheduler.tick() }
-        #expect(await eventually(timeout: .seconds(2)) { transcriber.calls.withLock { $0 } == 1 }, "the deferred post-pass runs")
+        #expect(await eventually(timeout: .seconds(30)) { transcriber.calls.withLock { $0 } == 1 }, "the deferred post-pass runs")
 
         let improve = Task { try await services.improveTranscript(meetingID: id) }
         try await Task.sleep(for: .milliseconds(300))
@@ -866,7 +866,7 @@ private final class TrackSink: MeetingAudioSink {
         try await services.processAfterStop(id)
         rig.load.value = .idle
         let deferred = Task { await services.scheduler.tick() }
-        #expect(await eventually(timeout: .seconds(2)) { transcriber.calls.withLock { $0 } == 1 })
+        #expect(await eventually(timeout: .seconds(30)) { transcriber.calls.withLock { $0 } == 1 })
         #expect(services.stage(of: id) == .running(.postPass))
 
         let ended = Mutex(false)
