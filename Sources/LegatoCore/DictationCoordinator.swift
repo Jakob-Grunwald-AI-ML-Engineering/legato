@@ -111,6 +111,8 @@ public final class DictationCoordinator {
         let session: DictationSession
         let feed: EditFeed
         var linger: Linger
+        /// The `sessionEpoch` the session was built in.
+        var epoch: Int
         /// Armed without a run (`arm`): the next start reuses it whatever its keep-alive, and adopts that.
         var armedOnly = false
     }
@@ -128,6 +130,10 @@ public final class DictationCoordinator {
     private var session: DictationSession?
     private var feed: EditFeed?
     private var held: HeldLease?
+    /// Counts `invalidateKeptSession` calls; a session built in an older epoch is never kept or reused.
+    private var sessionEpoch = 0
+    /// The epoch the current run's session was built in.
+    private var runEpoch = 0
     private var run: DictationRun?
     /// A held lease being released right now (`endKeepAlive`); a start waits for it.
     private var pendingRelease: Task<Void, Never>?
@@ -227,6 +233,15 @@ public final class DictationCoordinator {
         await release.value
     }
 
+    /// A setting the sessions are built from changed (the speech model, its languages, the silence wait):
+    /// no session built before now is kept or reused. Idle: a held lease is released now. During a run (or
+    /// a start or an arm) the run goes on and its session is released when it ends instead of being kept;
+    /// an arm in flight arms afresh.
+    public func invalidateKeptSession() async {
+        sessionEpoch += 1
+        await endKeepAlive()
+    }
+
     /// The audio policy setting changed: a lease held between runs was activated under the old policy and
     /// iOS applies lowering or pausing only when a session activates, so it is released now and the next
     /// start activates afresh under the new one. Nothing during a run (its own policy stands).
@@ -297,10 +312,16 @@ public final class DictationCoordinator {
         var policy = context.audioPolicy
         var inputRetries = 0
         while true {
+            let epoch = sessionEpoch
             let s = makeSession(policy, linger)
             do {
                 try await s.armLease()
-                hold(s, feed: startFeed(of: s), linger: linger, armedOnly: true)
+                if epoch != sessionEpoch {
+                    // The settings changed while arming: arm a session built from the new ones.
+                    await s.endLease()
+                    continue
+                }
+                hold(s, feed: startFeed(of: s), linger: linger, epoch: epoch, armedOnly: true)
                 reportLease(leaseEnd(for: linger))
                 return .armed
             } catch {
@@ -466,18 +487,20 @@ public final class DictationCoordinator {
 
     /// The held session when it fits `options` (same keep-alive), else a fresh one for `policy` with its
     /// own edit feed.
-    private func acquireSession(_ options: StartOptions, policy: AudioPolicy) async -> (DictationSession, EditFeed) {
+    private func acquireSession(_ options: StartOptions, policy: AudioPolicy) async -> (DictationSession, EditFeed, Int) {
         if let lease = held {
             held = nil
-            if lease.armedOnly || (options.keepAlive.holdsLease && lease.linger == options.keepAlive) {
+            if lease.epoch == sessionEpoch,
+               lease.armedOnly || (options.keepAlive.holdsLease && lease.linger == options.keepAlive) {
                 lease.session.onLeaseExpired = nil
                 if lease.armedOnly { lease.session.adoptLinger(options.keepAlive) }
-                return (lease.session, lease.feed)
+                return (lease.session, lease.feed, lease.epoch)
             }
             await release(lease)
         }
+        let epoch = sessionEpoch
         let s = makeSession(policy, options.keepAlive)
-        return (s, startFeed(of: s))
+        return (s, startFeed(of: s), epoch)
     }
 
     /// The policy for the next foreground try after the mic had no input: the same one on the first
@@ -493,8 +516,9 @@ public final class DictationCoordinator {
     /// Acquires the session for `policy` (a held lease first, else a fresh one) and wires it to this run
     /// (abort hook, edits feed).
     private func launch(_ policy: AudioPolicy, _ options: StartOptions) async -> DictationSession {
-        let (s, sessionFeed) = await acquireSession(options, policy: policy)
+        let (s, sessionFeed, epoch) = await acquireSession(options, policy: policy)
         session = s
+        runEpoch = epoch
         feed = sessionFeed
         s.onRunAborted = { [weak self, weak s] _ in
             guard let self, let s else { return }
@@ -523,18 +547,21 @@ public final class DictationCoordinator {
         await updateActivity(content(.finishing, tail: live.tail()), staleDate: nil)
         guard session === s else { return .busy }
 
+        sink?.runFinishing(thisRun)
         do {
             // The session saves the entry to history itself; it is not appended again here.
             let entry = try await s.stop()
             s.onRunAborted = nil
             guard let sessionFeed = feed else { return .busy }
-            // The system ended this run: the lease it would keep is dead, so it ends with the run.
-            if releasingLease { await s.endLease() }
+            // The system ended this run: the lease it would keep is dead, so it ends with the run. So does
+            // the lease of a session built before the settings changed (`invalidateKeptSession`).
+            let stale = runEpoch != sessionEpoch
+            if releasingLease || stale { await s.endLease() }
             await flush(sessionFeed, of: s)
             let committed = live.committed
 
-            let keep = !releasingLease && options.keepAlive.holdsLease && s.leaseState == .armed
-            if keep { hold(s, feed: sessionFeed, linger: options.keepAlive) }
+            let keep = !releasingLease && !stale && options.keepAlive.holdsLease && s.leaseState == .armed
+            if keep { hold(s, feed: sessionFeed, linger: options.keepAlive, epoch: runEpoch) }
             let landed = await sink?.runEnded(thisRun, committed: committed, text: entry?.text) ?? false
             if keep, held?.session === s { reportLease(leaseEnd(for: options.keepAlive)) }
             if !keep {
@@ -635,8 +662,8 @@ public final class DictationCoordinator {
     }
 
     /// Keeps `s`'s lease between runs; the sink hears when it runs out (`leaseExpired`).
-    private func hold(_ s: DictationSession, feed: EditFeed, linger: Linger, armedOnly: Bool = false) {
-        held = HeldLease(session: s, feed: feed, linger: linger, armedOnly: armedOnly)
+    private func hold(_ s: DictationSession, feed: EditFeed, linger: Linger, epoch: Int, armedOnly: Bool = false) {
+        held = HeldLease(session: s, feed: feed, linger: linger, epoch: epoch, armedOnly: armedOnly)
         s.onLeaseExpired = { [weak self, weak s] in
             guard let self, let s else { return }
             Task { await self.leaseExpired(s) }
@@ -742,7 +769,11 @@ public final class DictationCoordinator {
             for await edit in edits {
                 guard let self else { return }
                 live.apply(edit)
-                sink?.update(committed: live.committed, volatile: live.volatile)
+                if case .revise(let revision) = edit {
+                    sink?.revised(revision)
+                } else {
+                    sink?.update(committed: live.committed, volatile: live.volatile)
+                }
                 sessionFeed.noteConsumed()
                 await publishListening(force: false)
             }

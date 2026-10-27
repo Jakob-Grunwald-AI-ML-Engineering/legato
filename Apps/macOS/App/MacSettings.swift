@@ -1,5 +1,8 @@
 import Foundation
+import LegatoAppServices
+import LegatoCore
 import LegatoMac
+import LegatoPostProcessing
 import Observation
 
 /// User preferences, persisted in `UserDefaults`. Everything here is read live by the controller.
@@ -13,6 +16,8 @@ final class MacSettings {
     }
 
     @ObservationIgnored private let defaults: UserDefaults
+    /// The cleanup settings' storage (the same keys as on the phone); the session's post-processor reads it.
+    @ObservationIgnored let cleanupStore: CleanupSettingsStore
 
     /// The dictation trigger; nil until the user records one (first launch).
     var hotkey: HotkeySpec? {
@@ -38,8 +43,45 @@ final class MacSettings {
         didSet { defaults.set(restoreClipboard, forKey: Key.restoreClipboard) }
     }
 
+    // MARK: Cleanup (mirrors `cleanupStore`, observable for the UI)
+
+    /// Clean up the text after a dictation. Off by default.
+    var cleanupEnabled: Bool {
+        didSet { cleanupStore.enabled = cleanupEnabled }
+    }
+
+    var cleanupDelivery: CleanupDelivery {
+        didSet { cleanupStore.delivery = cleanupDelivery }
+    }
+
+    var cleanupStyle: CleanupStyle {
+        didSet { cleanupStore.style = cleanupStyle }
+    }
+
+    var cleanupBackend: CleanupBackendChoice {
+        didSet { cleanupStore.backend = cleanupBackend }
+    }
+
+    /// Number normalization before the language model. Off by default (#22).
+    var cleanupITN: Bool {
+        didSet { cleanupStore.itn = cleanupITN }
+    }
+
+    /// Per-stage limit, 1 to 10 seconds.
+    var cleanupTimeoutSeconds: Int {
+        didSet { cleanupStore.timeoutSeconds = cleanupTimeoutSeconds }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        let cleanup = CleanupSettingsStore(defaults: defaults)
+        cleanupStore = cleanup
+        cleanupEnabled = cleanup.enabled
+        cleanupDelivery = cleanup.delivery
+        cleanupStyle = cleanup.style
+        cleanupBackend = cleanup.backend
+        cleanupITN = cleanup.itn
+        cleanupTimeoutSeconds = cleanup.timeoutSeconds
         hotkey = defaults.data(forKey: Key.hotkey).flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) }
         gestureMode = defaults.string(forKey: Key.gestureMode).flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
         insertionMode = defaults.string(forKey: Key.insertionMode).flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
@@ -53,6 +95,30 @@ extension HotkeyGesture.Mode {
         case .hybrid: "Tap to latch, hold to talk"
         case .toggle: "Tap to start, tap to stop"
         case .hold: "Hold to talk"
+        }
+    }
+}
+
+extension CleanupDelivery {
+    var title: String {
+        switch self {
+        case .replace: "Replace"
+        case .clipboard: "Clipboard"
+        case .hold: "Hold"
+        case .live: "Live"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .replace:
+            "The raw text is typed while you speak and swapped for the cleaned text when you stop. If you typed after it or moved the cursor meanwhile, the field is left alone and the cleaned text goes to the clipboard."
+        case .clipboard:
+            "The field keeps the raw text; the cleaned text goes to the clipboard."
+        case .hold:
+            "Nothing is typed while you speak (the floating panel shows the live text); the cleaned text is inserted when you stop."
+        case .live:
+            "Each phrase is cleaned while you speak the next and replaces its raw text in place; at the end only the last phrases are left to clean. A phrase you typed around keeps its raw text."
         }
     }
 }

@@ -38,6 +38,23 @@ final class FakeTextTarget: TextTarget {
         splice(range, Array(text.utf16))
     }
 
+    /// The user types at the caret (after the writer's text, or wherever the caret is).
+    func userTypes(_ text: String) {
+        let new = Array(text.utf16)
+        splice(selection, new)
+        selection = UTF16Range(location: selection.location + new.count, length: 0)
+    }
+
+    /// The user clicks somewhere else in the field.
+    func moveCaret(to location: Int) {
+        selection = UTF16Range(location: location, length: 0)
+    }
+
+    /// The user selects text in the field.
+    func select(_ range: UTF16Range) {
+        selection = range
+    }
+
     /// Like a real field, clamps the range to the text instead of trapping.
     private func splice(_ range: UTF16Range, _ new: [UInt16]) {
         let lower = min(max(range.location, 0), units.count)

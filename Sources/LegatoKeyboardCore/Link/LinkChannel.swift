@@ -18,6 +18,10 @@ public enum LinkChannel {
         public static let presence = "link.presence"
         /// keyboard -> app: `AppliedCursor`.
         public static let applied = "link.applied"
+        /// keyboard -> app: `RefineRequest` (the app acks it on `ack`, and removes it once read).
+        public static let refine = "link.refine"
+        /// app -> keyboard: `RefineReply` (the keyboard removes it once read).
+        public static let refined = "link.refined"
     }
 
     /// Darwin notification names, one per key.
@@ -27,6 +31,8 @@ public enum LinkChannel {
         public static let ack = "de.gruenwald.legato.link.ack"
         public static let presence = "de.gruenwald.legato.link.presence"
         public static let applied = "de.gruenwald.legato.link.applied"
+        public static let refine = "de.gruenwald.legato.link.refine"
+        public static let refined = "de.gruenwald.legato.link.refined"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.
@@ -49,4 +55,7 @@ public enum LinkChannel {
     public static let insertMaxAge: TimeInterval = 10
     /// A request older than this is ignored (a leftover in the inbox).
     public static let requestMaxAge: TimeInterval = 10
+    /// How long the keyboard waits for a refined text once the app acked the request (a language model
+    /// that loads cold takes a while).
+    public static let refineTimeout: TimeInterval = 20
 }

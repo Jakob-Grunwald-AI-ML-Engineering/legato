@@ -148,7 +148,9 @@ enum E2E {
 
     /// A session wired to the scripted engine, or nil when fake mode is off.
     @MainActor
-    static func makeFakeSession(history: any HistoryStore, policy: AudioPolicy, linger: Linger) -> DictationSession? {
+    static func makeFakeSession(
+        history: any HistoryStore, postProcessor: (any TranscriptPostProcessor)? = nil, policy: AudioPolicy, linger: Linger
+    ) -> DictationSession? {
         guard let engine = fakeEngine else { return nil }
         log("session.make engine=\(engine.id) policy=\(policy.rawValue) lingerSeconds=\(seconds(of: linger))")
         return DictationSession(
@@ -156,6 +158,7 @@ enum E2E {
             source: E2EFakeAudioSource(policy: policy),
             sessionControl: E2ENoopSessionControl(policy: policy),
             history: history,
+            postProcessor: postProcessor,
             policy: policy,
             linger: linger)
     }

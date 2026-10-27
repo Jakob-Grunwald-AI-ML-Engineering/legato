@@ -28,6 +28,15 @@ public struct ProxyPlan: Sendable, Equatable {
 ///   With no document (`documentID` nil: no field is bound) nothing is planned and the cursor stays.
 /// - A separating space goes in front of the first text of a run (and after the user typed into the
 ///   run) when the field's text before it doesn't end in whitespace.
+/// - Cleanup (`HostState.delivery`, `finalText`): with `.replace` the streamed text is swapped for the
+///   final text in one edit once it has all landed, only while the field still ends with it (never
+///   retried; without the swap the final state is not confirmed, so the app uses the clipboard). With
+///   `.clipboard` the streamed text stays. With `.hold` nothing is typed while listening; the final text
+///   is inserted once, at the end.
+/// - Live cleanup (`.live`): each new `HostState.revisions` entry replaces its raw span, which must still be
+///   in the field followed by exactly the run's later committed text (`liveRevisions`). One that no
+///   longer is (the user typed in between, the text moved) is skipped for good. The final state is
+///   confirmed only when every revision landed.
 public enum ProxyEditPlanner {
     public static func plan(
         state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?
@@ -48,6 +57,9 @@ public enum ProxyEditPlanner {
             }
             current = AppliedCursor(runID: runID, documentID: documentID)
         }
+
+        if state.delivery == .hold { return planHeld(state: state, cursor: current, ops: ops, context: context) }
+        if state.delivery == .live { return planLive(state: state, cursor: current, ops: ops, context: context) }
 
         // The tentative text in the field is only editable while it is still the end of the context.
         var inField = current.volatile
@@ -71,8 +83,126 @@ public enum ProxyEditPlanner {
         // With nothing newly committed the separator belongs to the tentative text; otherwise it is committed.
         current.volatile = delta.isEmpty ? separator + state.volatile : state.volatile
         current.needsSeparator = current.needsSeparator && delta.isEmpty
-        current.finalApplied = state.isFinal && current.committedCount == state.committed.count && current.volatile.isEmpty
+        let streamedLanded = state.isFinal && current.committedCount == state.committed.count && current.volatile.isEmpty
+        current.finalApplied = streamedLanded
+        if streamedLanded, state.delivery != .clipboard, let finalText = cleanedText(state) {
+            if current.finalReplaced == nil {
+                let span = streamedSpan(of: state.committed)
+                if !span.isEmpty, (context + target).hasSuffix(span) {
+                    ops += replaceOps(from: span, to: finalText + trailingWhitespace(of: span))
+                    current.finalReplaced = true
+                } else {
+                    current.finalReplaced = false
+                }
+            }
+            current.finalApplied = current.finalReplaced == true
+        }
         return ProxyPlan(ops: ops, cursor: current)
+    }
+
+    /// `.live`: streams like `.replace` and applies the new revisions; the edit is one common-prefix diff
+    /// from the field as it is to the field as it should be.
+    private static func planLive(state: HostState, cursor: AppliedCursor, ops: [ProxyOp], context: String) -> ProxyPlan {
+        var ops = ops
+        var current = cursor
+        var stripped = context
+        var inField = current.volatile
+        if !inField.isEmpty {
+            if stripped.hasSuffix(inField) { stripped.removeLast(inField.count) } else { inField = "" }
+        }
+        let delta = state.committed.count > current.committedCount
+            ? String(state.committed.dropFirst(current.committedCount)) : ""
+        let body = delta + state.volatile
+        let separator = (current.committedCount == 0 || current.needsSeparator) && needsSeparator(before: stripped, inserting: body)
+            ? " " : ""
+
+        // The field's committed part once this plan ran, before the tentative text.
+        let committedCount = current.committedCount + delta.count
+        var field = stripped + (delta.isEmpty ? "" : separator + delta)
+        let revised = liveRevisions(
+            state: state, from: current.revisionsHandled, committedCount: committedCount, field: &field)
+        current.revisionsHandled = revised.handled
+        current.revisionSkipped = current.revisionSkipped || revised.skipped
+        let desired = field + (delta.isEmpty ? separator : "") + state.volatile
+        // The field holds `context`; the edit turns it into `desired` (a shared beginning stays).
+        ops += replaceOps(from: context, to: desired)
+
+        current.committedCount = committedCount
+        current.volatile = delta.isEmpty ? separator + state.volatile : state.volatile
+        current.needsSeparator = current.needsSeparator && delta.isEmpty
+        let streamedLanded = state.isFinal && committedCount == state.committed.count && current.volatile.isEmpty
+        current.finalApplied = streamedLanded && current.revisionsHandled == (state.revisions?.count ?? 0)
+            && !current.revisionSkipped
+        return ProxyPlan(ops: ops, cursor: current)
+    }
+
+    /// Applies `state.revisions` from index `from` to `field` (the field's text up to the end of the run's
+    /// committed part, `committedCount` raw characters typed): a revision applies when `field` ends with its
+    /// raw span followed by the raw committed text after it. Returns how many revisions are handled now and
+    /// whether one was skipped. A revision past the typed text waits. Kept apart from the planning so a
+    /// typewriter reveal can drive the same replacement.
+    static func liveRevisions(
+        state: HostState, from start: Int, committedCount: Int, field: inout String
+    ) -> (handled: Int, skipped: Bool) {
+        let revisions = state.revisions ?? []
+        var handled = start
+        var skipped = false
+        let committed = Array(state.committed)
+        while handled < revisions.count {
+            let revision = revisions[handled]
+            guard revision.start >= 0, revision.end <= committedCount, committedCount <= committed.count else { break }
+            let tail = String(committed[revision.start..<committedCount])
+            if !revision.raw.isEmpty, tail.hasPrefix(revision.raw), field.hasSuffix(tail) {
+                field = String(field.dropLast(tail.count)) + revision.text + String(tail.dropFirst(revision.raw.count))
+            } else {
+                skipped = true
+            }
+            handled += 1
+        }
+        return (handled, skipped)
+    }
+
+    /// `.hold`: nothing goes into the field while listening; the final text goes in once, at the end.
+    private static func planHeld(state: HostState, cursor: AppliedCursor, ops: [ProxyOp], context: String) -> ProxyPlan {
+        var ops = ops
+        var current = cursor
+        guard state.isFinal, !current.finalApplied else { return ProxyPlan(ops: ops, cursor: current) }
+        let text = cleanedText(state) ?? state.committed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+            ops.append(.insert((needsSeparator(before: context, inserting: text) ? " " : "") + text))
+        }
+        current.committedCount = state.committed.count
+        current.volatile = ""
+        current.finalApplied = true
+        return ProxyPlan(ops: ops, cursor: current)
+    }
+
+    /// The final state's post-processed text, trimmed, when there is one that differs from the streamed text.
+    static func cleanedText(_ state: HostState) -> String? {
+        guard let text = state.finalText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty,
+              text != state.committed.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return nil }
+        return text
+    }
+
+    /// What a run's streamed text left in the field: the committed text without its leading whitespace
+    /// (that stays as the separator), trailing whitespace included.
+    static func streamedSpan(of committed: String) -> String {
+        String(committed.drop(while: \.isWhitespace))
+    }
+
+    static func trailingWhitespace(of text: String) -> String {
+        String(text.reversed().prefix(while: \.isWhitespace).reversed())
+    }
+
+    /// The edit that turns `old`, the end of the field, into `new`: a shared beginning stays.
+    static func replaceOps(from old: String, to new: String) -> [ProxyOp] {
+        let shared = commonPrefixCount(old, new)
+        var ops: [ProxyOp] = []
+        if old.count > shared { ops.append(.deleteBackward(old.count - shared)) }
+        let missing = String(new.dropFirst(shared))
+        if !missing.isEmpty { ops.append(.insert(missing)) }
+        return ops
     }
 
     /// The user is about to type into the field mid-run: remove the tentative text (if it is still the end

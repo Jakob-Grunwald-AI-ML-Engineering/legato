@@ -59,6 +59,8 @@ public struct MLXInstaller: ModelInstaller {
     private let spec: MLXModelSpec
     private let fetcher: any MLXFileFetcher
     private let loader: (@Sendable (MLXModelSpec, URL) async throws -> Void)?
+    private let generator: any MLXGenerating
+    private let canUseGPU: @Sendable () async -> Bool
 
     /// - Parameters:
     ///   - loader: loads the installed folder once so the first cleanup call is fast ("warm"). `nil` uses
@@ -68,9 +70,19 @@ public struct MLXInstaller: ModelInstaller {
         fetcher: any MLXFileFetcher = HubFileFetcher(),
         loader: (@Sendable (MLXModelSpec, URL) async throws -> Void)? = nil
     ) {
+        self.init(spec: spec, fetcher: fetcher, loader: loader, generator: MLXChatGenerator(),
+                  canUseGPU: CleanupRegistry.defaultCanUseGPU)
+    }
+
+    /// The default warm-up loads on the GPU only while `canUseGPU` allows it: a download can finish while
+    /// the phone app is in the background, where iOS refuses GPU work.
+    init(spec: MLXModelSpec, fetcher: any MLXFileFetcher, loader: (@Sendable (MLXModelSpec, URL) async throws -> Void)? = nil,
+         generator: any MLXGenerating, canUseGPU: @escaping @Sendable () async -> Bool) {
         self.spec = spec
         self.fetcher = fetcher
         self.loader = loader
+        self.generator = generator
+        self.canUseGPU = canUseGPU
     }
 
     public func installFolder(root: URL) -> URL { spec.folder(root: root) }
@@ -107,7 +119,7 @@ public struct MLXInstaller: ModelInstaller {
         if let loader {
             try await loader(spec, folder)
         } else {
-            _ = try await MLXModelCache.shared.container(for: spec, folder: folder)
+            try await generator.load(spec: spec, folder: folder, device: await canUseGPU() ? .gpu : .cpu)
         }
     }
 }

@@ -52,19 +52,40 @@ public final class HostLink {
         // Whatever an earlier process left behind is stale by definition: say "idle, no text" now.
         store.write(state, forKey: LinkChannel.Key.host)
         store.remove(forKey: LinkChannel.Key.applied)
+        store.remove(forKey: LinkChannel.Key.refine)
+        store.remove(forKey: LinkChannel.Key.refined)
         post(LinkChannel.Note.host)
     }
 
     // MARK: Publishing
 
-    public func runStarted(id: String, target: HostTarget) {
+    /// `delivery`: how the run's cleaned text reaches the field (nil without cleanup); the keyboard needs
+    /// it from the start, because `.hold` keeps the field free while listening.
+    public func runStarted(id: String, target: HostTarget, delivery: HostDelivery? = nil) {
         cancelScrub()
         state.runID = id
         state.target = target
         state.phase = .starting
         state.committed = ""
         state.volatile = ""
+        state.delivery = delivery
+        state.finalText = nil
         state.insertAt = nil
+        state.revisions = nil
+        publish()
+    }
+
+    /// Live cleanup replaced a committed span (`HostDelivery.live`): published at once.
+    public func revise(_ revision: HostRevision) {
+        guard state.runID != nil else { return }
+        state.revisions = (state.revisions ?? []) + [revision]
+        publish()
+    }
+
+    /// A stop began: published at once. Updates that still arrive while the engine finalizes keep the phase.
+    public func runFinishing() {
+        guard state.runID != nil, state.phase == .starting || state.phase == .listening else { return }
+        state.phase = .finishing
         publish()
     }
 
@@ -81,6 +102,9 @@ public final class HostLink {
         state.phase = .idle
         state.committed = text
         state.volatile = ""
+        state.delivery = nil // an insert is typed as it is: no cleanup swap, no hold
+        state.finalText = nil
+        state.revisions = nil
         state.insertAt = now()
         publish()
         scheduleScrub()
@@ -90,7 +114,7 @@ public final class HostLink {
     public func update(committed: String, volatile: String) {
         state.committed = committed
         state.volatile = volatile
-        if state.phase != .listening {
+        if state.phase != .listening, state.phase != .finishing {
             state.phase = .listening
             publish()
         } else if let last = lastPublishAt, now().timeIntervalSince(last) < LinkChannel.minPublishInterval {
@@ -100,11 +124,13 @@ public final class HostLink {
         }
     }
 
-    /// The run is over: the final state goes out at once, whatever was held back is dropped.
-    public func runEnded(committed: String) {
+    /// The run is over: the final state goes out at once, whatever was held back is dropped. `finalText`:
+    /// the post-processed text when it differs from the trimmed `committed` text.
+    public func runEnded(committed: String, finalText: String? = nil) {
         state.phase = .idle
         state.committed = committed
         state.volatile = ""
+        state.finalText = finalText
         publish()
         scheduleScrub()
     }
@@ -116,12 +142,18 @@ public final class HostLink {
         guard !isRunning else { return }
         cancelScrub()
         store.remove(forKey: LinkChannel.Key.applied)
-        guard state.runID != nil || !state.committed.isEmpty || !state.volatile.isEmpty else { return }
+        store.remove(forKey: LinkChannel.Key.refine)
+        store.remove(forKey: LinkChannel.Key.refined)
+        guard state.runID != nil || !state.committed.isEmpty || !state.volatile.isEmpty || state.finalText != nil
+        else { return }
         state.runID = nil
         state.phase = .idle
         state.committed = ""
         state.volatile = ""
+        state.finalText = nil
+        state.delivery = nil
         state.insertAt = nil
+        state.revisions = nil
         publish()
     }
 
@@ -222,6 +254,24 @@ public final class HostLink {
         }
     }
 
+    /// Answers a refine request (`processRefine`) with the refined text, or nil when there is none.
+    public var onRefine: (@MainActor (String) async -> String?)?
+
+    /// Handles the keyboard's refine request (`link.refine`), on its Darwin note: a fresh request is acked
+    /// at once (the keyboard then waits up to `LinkChannel.refineTimeout`), removed from the store (it
+    /// carries dictated text), answered once (`onRefine`) and the reply written to `link.refined`.
+    public func processRefine() async {
+        guard let request = store.read(RefineRequest.self, forKey: LinkChannel.Key.refine),
+              now().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge
+        else { return }
+        store.remove(forKey: LinkChannel.Key.refine)
+        acknowledge(request.id, .accepted)
+        guard ledger.admit(id: request.id) else { return } // a copy: already being answered
+        let text = await onRefine?(request.text) ?? nil
+        store.write(RefineReply(id: request.id, text: text), forKey: LinkChannel.Key.refined)
+        post(LinkChannel.Note.refined)
+    }
+
     /// What to do with a `legato://keyboard` URL.
     public enum URLAdmission: Sendable, Equatable {
         /// Our keyboard asked for this and nothing acted on it yet: act.
@@ -248,7 +298,8 @@ public final class HostLink {
         return .act
     }
 
-    private var isRunning: Bool { state.runID != nil && (state.phase == .starting || state.phase == .listening) }
+    /// A run is starting, listening or finishing (being stopped and post-processed).
+    private var isRunning: Bool { state.runID != nil && state.phase != .idle }
 
     private func canAct(on command: RequestCommand) -> Bool {
         switch command {
@@ -293,6 +344,11 @@ public final class HostLink {
     public func appliedDidChange() {
         guard let waiter = appliedWaiter, finalApplied(runID: waiter.runID) else { return }
         resolveAppliedWaiter(true)
+    }
+
+    /// What the keyboard last reported it applied (`link.applied`), whichever run it was for.
+    public func appliedCursor() -> AppliedCursor? {
+        store.read(AppliedCursor.self, forKey: LinkChannel.Key.applied)
     }
 
     private func finalApplied(runID: String) -> Bool {

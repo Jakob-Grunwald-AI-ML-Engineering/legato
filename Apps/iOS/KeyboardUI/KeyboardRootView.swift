@@ -29,6 +29,15 @@ struct KeyboardRootView: View {
                             Color.clear.contentShape(Rectangle()).gesture(swipe)
                         }
                     }
+                    if showsVersionBar {
+                        // Above the swipe layer, which would take the taps; right of the collapse chevron, which
+                        // sits in the first slot.
+                        let bar = g.suggestionFrame
+                        let inset = controller.expansion.control == .collapse ? g.marginX + 44 : 0
+                        place(CGRect(x: bar.minX + inset, y: bar.minY, width: bar.width - inset, height: bar.height)) {
+                            VersionBar(controller: controller).simultaneousGesture(swipe)
+                        }
+                    }
                     place(g.pillFrame) { MicKey(controller: controller).simultaneousGesture(swipe) }
                     KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance)
                     if controller.showsGlobe, let frame = frames["globe"] {
@@ -77,8 +86,14 @@ struct KeyboardRootView: View {
                             .padding(.trailing, cell.trailingInset)
                             .simultaneousGesture(swipe)
                     case .status:
-                        stripStatus(visible: row.statusTextVisible, leading: cell.leadingInset)
-                            .simultaneousGesture(swipe)
+                        if showsVersionBar {
+                            VersionBar(controller: controller)
+                                .padding(.leading, cell.leadingInset)
+                                .simultaneousGesture(swipe)
+                        } else {
+                            stripStatus(visible: row.statusTextVisible, leading: cell.leadingInset)
+                                .simultaneousGesture(swipe)
+                        }
                     case .delete:
                         StripDeleteKey(typing: typing, insets: insets)
                             .simultaneousGesture(swipe)
@@ -118,6 +133,7 @@ struct KeyboardRootView: View {
             .font(.system(size: 15))
             .foregroundStyle(Color(uiColor: KeyColors.suggestion))
             .lineLimit(1)
+            .truncationMode(controller.hint == nil ? .head : .tail) // live dictated text: its end matters
             .minimumScaleFactor(0.7)
             .padding(.leading, leading)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -143,16 +159,25 @@ struct KeyboardRootView: View {
             .position(x: frame.midX, y: frame.midY)
     }
 
+    /// After a dictation landed (and nothing else claims the bar): the version keys take the slots' place
+    /// (the full keyboard's top bar) or the status text's (the strip).
+    private var showsVersionBar: Bool {
+        controller.versions != nil && controller.statusText == nil && controller.suggestions.isEmpty
+    }
+
     /// Three slots with thin dividers. A hint or the dictation status takes the bar's place.
     private func suggestionBar(_ g: KeyGeometry) -> some View {
         let frame = g.suggestionFrame
         let slots = controller.suggestions
         return Group {
-            if let status = controller.statusText {
+            if showsVersionBar {
+                Color.clear
+            } else if let status = controller.statusText {
                 Text(status)
                     .font(.system(size: 15))
                     .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                     .lineLimit(2)
+                    .truncationMode(.head)
                     .minimumScaleFactor(0.8)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 8)
@@ -178,5 +203,63 @@ struct KeyboardRootView: View {
         .frame(width: frame.width, height: frame.height)
         .position(x: frame.midX, y: frame.midY)
         .allowsHitTesting(false)
+    }
+}
+
+/// The version keys of the last dictation, in the suggestion slots: the previous version, Refine (a
+/// stronger rewrite by the app), the next version. Styled like the suggestion slots.
+struct VersionBar: View {
+    let controller: KeyboardController
+
+    var body: some View {
+        let versions = controller.versions
+        HStack(spacing: 0) {
+            key(enabled: versions?.hasPrevious == true, id: "keyboard.version.previous", label: "Previous version") {
+                controller.showPreviousVersion()
+            } content: {
+                Image(systemName: "chevron.left")
+            }
+            divider
+            key(enabled: !controller.isRefining, id: "keyboard.version.refine", label: "Refine") {
+                controller.refine()
+            } content: {
+                if controller.isRefining {
+                    ProgressView()
+                } else {
+                    HStack(spacing: 4) {
+                        Text("Refine")
+                        if let versions, versions.texts.count > 1 {
+                            Text("\(versions.current + 1)/\(versions.texts.count)").font(.system(size: 12)).monospacedDigit()
+                        }
+                    }
+                }
+            }
+            divider
+            key(enabled: versions?.hasNext == true, id: "keyboard.version.next", label: "Next version") {
+                controller.showNextVersion()
+            } content: {
+                Image(systemName: "chevron.right")
+            }
+        }
+    }
+
+    private var divider: some View {
+        Rectangle().fill(Color(uiColor: KeyColors.divider)).frame(width: 0.67, height: 24)
+    }
+
+    private func key<Content: View>(
+        enabled: Bool, id: String, label: String, action: @escaping () -> Void, @ViewBuilder content: () -> Content
+    ) -> some View {
+        Button(action: action) {
+            content()
+                .font(.system(size: 17))
+                .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(enabled ? 1 : 0.35))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
     }
 }

@@ -36,6 +36,19 @@ targets:
         product: LegatoAppleSpeech
       - package: LegatoKit
         product: LegatoMac
+      # Downloadable models, engines and cleanup.
+      - package: LegatoKit
+        product: LegatoModels
+      - package: LegatoKit
+        product: LegatoFluidAudio
+      - package: LegatoKit
+        product: LegatoEngines
+      - package: LegatoKit
+        product: LegatoPostProcessing
+      - package: LegatoKit
+        product: LegatoMLX
+      - package: LegatoKit
+        product: LegatoAppServices
     settings:
       base:
         PRODUCT_NAME: Legato

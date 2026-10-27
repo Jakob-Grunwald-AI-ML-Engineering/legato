@@ -16,24 +16,46 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
     private let maxChunkCharacters: Int
     private let vocabulary: [String]
     private let prompt: CleanupPrompt
+    private let context: String
+
+    /// How many characters of `context` the model sees at most (its end).
+    public static let maxContextCharacters = 400
 
     /// - Parameters:
     ///   - maxChunkCharacters: upper bound for one chunk of input; the backend's own limit can lower it.
     ///   - vocabulary: the user's names and terms, offered as likely meanings of misheard words.
     ///   - prompt: how a chunk is put to the model.
+    ///   - context: the already cleaned text that came just before this one (live cleanup cleans a dictation
+    ///     segment by segment). Its end (``maxContextCharacters``) is shown to the model, marked as context
+    ///     only, so the text continues it; it is never part of the reply. Empty: the prompt is unchanged.
     public init(
         backend: any LLMBackend,
         cleanupGuard: CleanupGuard = CleanupGuard(),
         maxChunkCharacters: Int = 1200,
         vocabulary: [String] = [],
-        prompt: CleanupPrompt = .standard
+        prompt: CleanupPrompt = .standard,
+        context: String = ""
     ) {
         self.backend = backend
         self.cleanupGuard = cleanupGuard
         self.maxChunkCharacters = maxChunkCharacters
         self.vocabulary = vocabulary
         self.prompt = prompt
+        self.context = Self.boundedContext(context)
     }
+
+    /// The end of `context`, trimmed, at most ``maxContextCharacters`` long and starting at a word.
+    static func boundedContext(_ context: String) -> String {
+        let trimmed = context.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > maxContextCharacters else { return trimmed }
+        let tail = trimmed.suffix(maxContextCharacters)
+        guard let gap = tail.firstIndex(where: \.isWhitespace) else { return String(tail) }
+        return String(tail[gap...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static let contextInstruction = """
+        The text in <before> tags came just before and is already clean: use it only to continue its sentence and style. Never repeat or change it; reply with the <text> only.
+        """
 
     // MARK: chunking
 
@@ -165,10 +187,11 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         if case .unavailable(let reason) = await backend.availability {
             throw LLMError.unavailable(reason: reason)
         }
-        let instructions = prompt.instructions(locale, vocabulary)
+        let instructions = prompt.instructions(locale, vocabulary) + (context.isEmpty ? "" : "\n" + Self.contextInstruction)
         let examples = prompt.examples(locale)
         let joiner = Self.isUnspaced(locale) ? "" : " "
-        let overhead = instructions.count + examples.reduce(0) { $0 + $1.user.count + $1.assistant.count }
+        let overhead = instructions.count + contextPrefix.count
+            + examples.reduce(0) { $0 + $1.user.count + $1.assistant.count }
         let chunks = Self.chunks(of: text, maxCharacters: chunkLimit(overhead: overhead), joiner: joiner)
 
         var results: [ChunkResult] = []
@@ -186,7 +209,7 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         do {
             reply = try await backend.respond(
                 instructions: instructions, examples: examples,
-                prompt: prompt.userMessage(chunk, locale, vocabulary))
+                prompt: contextPrefix + prompt.userMessage(chunk, locale, vocabulary))
         } catch LLMError.guardrail {
             return ChunkResult(input: chunk, reply: nil, output: chunk, accepted: false)
         } catch LLMError.contextTooLong {
@@ -198,6 +221,9 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         let accepted = cleanupGuard.accepts(candidate, reference: chunk)
         return ChunkResult(input: chunk, reply: reply, output: accepted ? candidate : chunk, accepted: accepted)
     }
+
+    /// What goes before the user message when there is context.
+    private var contextPrefix: String { context.isEmpty ? "" : "<before>\n\(context)\n</before>\n" }
 
     /// The input budget for one chunk: the backend limit covers instructions, examples, prompt and a reply
     /// about as long as the prompt.

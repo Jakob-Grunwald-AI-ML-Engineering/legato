@@ -200,6 +200,20 @@ struct Rig: @unchecked Sendable {
         #expect(FluidAudioCatalog.descriptors().contains { $0.id == FluidAudioCatalog.suggestedLiveModelID })
     }
 
+    @Test func streamingFamiliesAreTheCatalogGroupedPerPlatform() {
+        let families = FluidAudioCatalog.streamingFamilies(platform: .macOS)
+        #expect(families.map(\.id) == ["nemotron-multilingual", "nemotron-latin", "parakeet-eou"])
+        let ids = families.flatMap(\.members).map(\.id)
+        #expect(Set(ids) == Set(FluidAudioCatalog.descriptors(platform: .macOS).filter { $0.kind == .speechStreaming }.map(\.id)))
+    }
+
+    @Test func theSuggestedLiveModelIsTheDefaultTierOfItsFamily() throws {
+        let families = FluidAudioCatalog.streamingFamilies()
+        let family = try #require(families.first { $0.contains(FluidAudioCatalog.suggestedLiveModelID) })
+        #expect(family.id == "nemotron-multilingual")
+        #expect(family.descriptor(tierMs: family.defaultTierMs)?.id == FluidAudioCatalog.suggestedLiveModelID)
+    }
+
     @Test func defaultRootIsUnderApplicationSupportLegato() {
         let path = FluidAudioCatalog.defaultRoot().path
         #expect(path.hasSuffix("Legato/Models"))

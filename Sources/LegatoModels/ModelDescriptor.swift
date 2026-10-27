@@ -58,8 +58,14 @@ public struct ModelDescriptor: Sendable, Hashable, Identifiable {
     public let languages: [String]
     public let licence: String
     public let platforms: Set<ModelPlatform>
-    /// The model family (for example "nemotron"), for grouping in a picker.
+    /// The model family (for example "nemotron-latin"), for grouping in a picker. Descriptors that share a
+    /// family and carry a ``tierMs`` are latency tiers of one model (see ``ModelFamily``).
     public let family: String
+    /// The family's display name ("Nemotron Latin"); `displayName` when `nil`.
+    public let familyName: String?
+    /// The audio chunk this tier works on, in milliseconds: smaller answers sooner and is less accurate.
+    /// `nil` for a model that is not a tier of a family.
+    public let tierMs: Int?
 
     public init(
         id: String,
@@ -69,7 +75,9 @@ public struct ModelDescriptor: Sendable, Hashable, Identifiable {
         languages: [String] = [],
         licence: String,
         platforms: Set<ModelPlatform> = [.iOS, .macOS],
-        family: String
+        family: String,
+        familyName: String? = nil,
+        tierMs: Int? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -79,6 +87,8 @@ public struct ModelDescriptor: Sendable, Hashable, Identifiable {
         self.licence = licence
         self.platforms = platforms
         self.family = family
+        self.familyName = familyName
+        self.tierMs = tierMs
     }
 
     /// Whether the model is flagged to run on `platform`.

@@ -38,7 +38,11 @@ struct OnboardingView: View {
             }
 
             step(3, "Speech model", done: permissions.modelInstalled) {
-                modelRow(permissions.model)
+                if permissions.appleSpeechLive {
+                    modelRow(permissions.model)
+                } else {
+                    Label("Using \(controller.engineStatus.name)", systemImage: "checkmark").foregroundStyle(.green)
+                }
             }
 
             HStack {

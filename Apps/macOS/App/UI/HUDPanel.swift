@@ -5,7 +5,8 @@ import SwiftUI
 /// What the floating HUD shows.
 @MainActor @Observable
 final class HUDModel {
-    enum Phase { case starting, listening, finishing }
+    /// `cleaningUp`: the finishing step's cleanup (a language model) is running.
+    enum Phase { case starting, listening, finishing, cleaningUp }
 
     var phase = Phase.starting
     /// Finished text (what is typed into the field, or will be).
@@ -124,26 +125,49 @@ struct HUDView: View {
 
     private var runCard: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: model.phase == .finishing ? "ellipsis" : "mic.fill")
+            Image(systemName: symbol)
                 .foregroundStyle(model.phase == .listening ? Color.red : Color.secondary)
-                .symbolEffect(.pulse, isActive: model.phase == .listening)
+                .symbolEffect(.pulse, isActive: model.phase == .listening || model.phase == .cleaningUp)
                 .frame(width: 18)
-            Group {
-                if model.committed.isEmpty, model.volatile.isEmpty {
-                    Text(model.phase == .starting ? "Starting…" : model.phase == .finishing ? "Finishing…" : "Listening…")
+            VStack(alignment: .leading, spacing: 4) {
+                Group {
+                    if model.committed.isEmpty, model.volatile.isEmpty {
+                        Text(phaseText).foregroundStyle(.secondary)
+                    } else {
+                        Text(transcript)
+                    }
+                }
+                .font(.system(size: 15))
+                .lineLimit(5)
+                .truncationMode(.head)
+                if model.phase == .cleaningUp, !(model.committed.isEmpty && model.volatile.isEmpty) {
+                    Text("Cleaning up…")
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
-                } else {
-                    Text(transcript)
                 }
             }
-            .font(.system(size: 15))
-            .lineLimit(5)
-            .truncationMode(.head)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var symbol: String {
+        switch model.phase {
+        case .finishing: "ellipsis"
+        case .cleaningUp: "sparkles"
+        case .starting, .listening: "mic.fill"
+        }
+    }
+
+    private var phaseText: String {
+        switch model.phase {
+        case .starting: "Starting…"
+        case .listening: "Listening…"
+        case .finishing: "Finishing…"
+        case .cleaningUp: "Cleaning up…"
+        }
     }
 
     private func toastCard(_ text: String) -> some View {

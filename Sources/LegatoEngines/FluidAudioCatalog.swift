@@ -25,6 +25,12 @@ public enum FluidAudioCatalog {
         FluidAudioModels.descriptors.filter { $0.supports(platform) }
     }
 
+    /// The live (streaming) models grouped as the user sees them: Nemotron multilingual, Nemotron Latin and
+    /// Parakeet EOU, each with its latency tiers. Every tier keeps its own descriptor and download.
+    public static func streamingFamilies(platform: ModelPlatform = .current) -> [ModelFamily] {
+        ModelFamily.groups(of: descriptors(platform: platform), kind: .speechStreaming)
+    }
+
     /// The installers for ``descriptors(platform:)``, keyed by descriptor id.
     public static func installers(platform: ModelPlatform = .current) -> [String: any ModelInstaller] {
         let all = FluidAudioModels.installers

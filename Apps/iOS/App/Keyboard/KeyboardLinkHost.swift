@@ -22,8 +22,16 @@ final class KeyboardLinkHost: TranscriptSink {
     var onRunActivity: (@MainActor (Bool) -> Void)?
     /// The mic lease between runs: when it ends, or nil when it is not held.
     var onLease: (@MainActor (Date?) -> Void)?
+    /// How a run that starts now delivers its cleaned text (nil with cleanup off); asked once per run.
+    var deliveryForRun: @MainActor () -> HostDelivery? = { nil }
+
+    /// The current run's delivery, fixed when it started (a settings change mid-run applies to the next).
+    private var runDelivery: HostDelivery?
 
     private var observers: [DarwinObserver] = []
+    #if LEGATO_INTERNAL
+    private let trace = LiveTrace()
+    #endif
 
     /// nil when the App Group is unavailable (misconfigured signing): the keyboard link is then off.
     init?() {
@@ -53,6 +61,9 @@ final class KeyboardLinkHost: TranscriptSink {
             },
             DarwinObserver(name: LinkChannel.Note.applied) {
                 Task { @MainActor in link.appliedDidChange() }
+            },
+            DarwinObserver(name: LinkChannel.Note.refine) {
+                Task { @MainActor in await link.processRefine() }
             },
         ]
     }
@@ -94,22 +105,57 @@ final class KeyboardLinkHost: TranscriptSink {
     // MARK: TranscriptSink
 
     func runStarted(_ run: DictationRun) {
-        link.runStarted(id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app)
+        // Cleanup delivery is about the keyboard's field: a run for the app's own screen or the activity's
+        // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
+        runDelivery = run.target == .keyboard ? deliveryForRun() : nil
+        link.runStarted(id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery)
         onRunActivity?(true)
+        #if LEGATO_INTERNAL
+        trace.runStarted(run, delivery: runDelivery)
+        #endif
+    }
+
+    func runFinishing(_ run: DictationRun) {
+        link.runFinishing()
     }
 
     func update(committed: String, volatile: String) {
         link.update(committed: committed, volatile: volatile)
         onTranscript?(committed, volatile)
+        #if LEGATO_INTERNAL
+        trace.update(committed: committed)
+        #endif
     }
 
+    /// Live cleanup replaced a committed span: the keyboard swaps it in while its field still shows the raw text.
+    func revised(_ revision: TranscriptRevision) {
+        link.revise(HostRevision(start: revision.start, raw: revision.raw, text: revision.text))
+        #if LEGATO_INTERNAL
+        trace.revised(revision)
+        #endif
+    }
+
+    /// With cleanup, `text` is the cleaned text: the keyboard swaps it in (`.replace`), keeps the streamed
+    /// text (`.clipboard`: never confirmed, so the cleaned text goes to the clipboard) or inserts it (`.hold`).
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
-        link.runEnded(committed: committed)
-        onTranscript?(committed, "")
+        let raw = committed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalText = text.flatMap { $0 != raw ? $0 : nil }
+        link.runEnded(committed: committed, finalText: finalText)
+        onTranscript?(text ?? committed, "")
         onRunActivity?(false)
         // Only a run streamed into a visible keyboard has anything to confirm.
-        guard run.target == .keyboard, text != nil, link.keyboardIsVisible() else { return false }
-        return await link.awaitFinalApplied(runID: run.id.uuidString, timeout: Self.appliedTimeout)
+        guard run.target == .keyboard, text != nil, link.keyboardIsVisible() else {
+            #if LEGATO_INTERNAL
+            trace.runEnded(applied: nil, confirmed: false)
+            #endif
+            return false
+        }
+        let applied = await link.awaitFinalApplied(runID: run.id.uuidString, timeout: Self.appliedTimeout)
+        #if LEGATO_INTERNAL
+        trace.runEnded(applied: link.appliedCursor(), confirmed: applied)
+        #endif
+        if runDelivery == .clipboard, finalText != nil { return false }
+        return applied
     }
 
     func leaseChanged(until: Date?) {

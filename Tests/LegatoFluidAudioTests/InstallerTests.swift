@@ -236,5 +236,34 @@ struct CatalogRows {
     @Test func tiersHaveNamedChunks() {
         #expect(NemotronInstaller.supportedChunks == [560, 1120, 2240])
     }
+
+    @Test func speechTiersGroupIntoThreeFamiliesAndTheBatchModelsStaySeparate() {
+        let streaming = ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechStreaming)
+        #expect(streaming.map(\.id) == ["nemotron-multilingual", "nemotron-latin", "parakeet-eou"])
+        #expect(streaming.map(\.name) == ["Nemotron multilingual", "Nemotron Latin", "Parakeet EOU"])
+        #expect(streaming.map(\.tiers) == [[560, 1120, 2240], [560, 1120, 2240], [160, 320]])
+        let batch = ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechBatch)
+        #expect(batch.map(\.id) == ["parakeet-v3", "parakeet-ultra"])
+    }
+
+    @Test func tierDescriptorsKeepTheirPersistedIDs() throws {
+        let nemotron = try #require(ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechStreaming).first)
+        #expect(nemotron.descriptor(tierMs: 560)?.id == "nemotron-multilingual-560")
+        #expect(nemotron.descriptor(tierMs: 1120)?.id == FluidAudioModels.nemotronID(.multilingual, chunkMs: 1120))
+        #expect(nemotron.descriptor(tierMs: 2240)?.id == "nemotron-multilingual-2240")
+        let eou = try #require(ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechStreaming).last)
+        #expect(eou.descriptor(tierMs: 160)?.id == "parakeet-eou-160")
+        #expect(eou.descriptor(tierMs: 320)?.id == "parakeet-eou-320")
+    }
+
+    @Test func everyTierOfAFamilyHasTheSameInstallerKindAndOwnFolder() {
+        let root = URL(fileURLWithPath: "/models")
+        for family in ModelFamily.groups(of: FluidAudioModels.descriptors, kind: .speechStreaming) {
+            #expect(Set(family.members.map(\.languages)).count == 1, "\(family.id): one language set")
+            #expect(Set(family.members.map(\.licence)).count == 1, "\(family.id): one licence")
+            let folders = family.members.compactMap { FluidAudioModels.installers[$0.id]?.installFolder(root: root).path }
+            #expect(Set(folders).count == family.members.count, "\(family.id): one folder per tier")
+        }
+    }
 }
 }

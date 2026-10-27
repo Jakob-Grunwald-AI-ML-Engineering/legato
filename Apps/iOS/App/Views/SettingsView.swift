@@ -1,3 +1,4 @@
+import LegatoAppServices
 import LegatoAudio
 import LegatoCore
 import LegatoKeyboardCore
@@ -15,6 +16,8 @@ struct SettingsView: View {
     @State private var stripHeight = Settings.keyboardStripHeight
     #endif
     @State private var showPauseOthers = Settings.debugShowPauseOthers
+    @State private var lastEntry: DictationEntry?
+    @State private var cleanupOn = Settings.cleanupEnabled
     #if LEGATO_INTERNAL
     @State private var keepSessionActive = Settings.keepSessionActiveBetweenRuns
     @State private var forceTapToCopy = Settings.debugForceTapToCopy
@@ -28,6 +31,29 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                NavigationLink {
+                    SpeechEngineView(controller: controller)
+                } label: {
+                    LabeledContent("Speech engine", value: controller.engineStatus.name)
+                }
+                .accessibilityIdentifier("settings.engine")
+                NavigationLink {
+                    CleanupSettingsView(controller: controller)
+                } label: {
+                    LabeledContent("Cleanup", value: cleanupOn ? "On" : "Off")
+                }
+                .accessibilityIdentifier("settings.cleanup")
+            } header: {
+                Text("Dictation")
+            } footer: {
+                if let fallback = controller.engineStatus.fallback {
+                    Text("Using Apple Speech: \(fallback).")
+                }
+            }
+
+            lastDictation
+
             Section {
                 Picker("Other audio", selection: $policy) {
                     ForEach(policies, id: \.self) { Text(Self.title(for: $0)).tag($0) }
@@ -79,6 +105,10 @@ struct SettingsView: View {
             #endif
         }
         .navigationTitle("Settings")
+        .task {
+            cleanupOn = Settings.cleanupEnabled
+            lastEntry = await controller.recentEntries(limit: 1).first
+        }
         .onChange(of: policy) { _, new in
             guard new != Settings.audioPolicy else { return }
             Settings.audioPolicy = new
@@ -105,6 +135,37 @@ struct SettingsView: View {
             if !new { controller.releaseHeldSession() }
         }
         #endif
+    }
+
+    /// What actually ran last: the engine from the newest history entry, the cleanup backend from the last
+    /// cleanup run (with why a preferred backend was passed over).
+    @ViewBuilder private var lastDictation: some View {
+        let report = controller.cleanupReports.last
+        if lastEntry != nil || report != nil {
+            Section {
+                if let entry = lastEntry {
+                    LabeledContent("Engine", value: Self.engineName(entry.engineID, models: controller.models))
+                    LabeledContent("Duration", value: Duration.seconds(entry.duration)
+                        .formatted(.units(allowed: [.minutes, .seconds], width: .abbreviated, fractionalPart: .show(length: 1))))
+                    LabeledContent("Cleaned", value: entry.rawText == nil ? "No change" : "Changed")
+                }
+                if let report {
+                    LabeledContent(report.refine ? "Refine backend" : "Cleanup backend", value: report.backend)
+                    if let device = report.device { LabeledContent("Device", value: device) }
+                    LabeledContent("Took", value: "\(report.milliseconds) ms · \(report.style.rawValue)")
+                    ForEach(report.skipped, id: \.self) { reason in
+                        Text("Skipped: \(reason)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Last dictation")
+            }
+        }
+    }
+
+    static func engineName(_ id: String, models: ModelServices) -> String {
+        if id == "apple-speech" { return "Apple Speech" }
+        return models.streamingModels.first { $0.id == id }?.displayName ?? id
     }
 
     private static func title(for policy: AudioPolicy) -> String {

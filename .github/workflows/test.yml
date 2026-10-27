@@ -22,7 +22,8 @@ jobs:
   build-test:
     # Xcode is selected from .xcode-version by scripts/ci/lib.sh.
     runs-on: macos-26
-    timeout-minutes: 30
+    # The apps link MLX and FluidAudio: a PR build takes ~28 min, the full queue run longer.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # The mode is picked in shell, not by `if:`, so no step can silently skip.

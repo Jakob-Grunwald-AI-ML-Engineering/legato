@@ -1,9 +1,12 @@
 import AVFAudio
 import Foundation
+import LegatoAppServices
 import LegatoAppleSpeech
 import LegatoAudio
 import LegatoCore
+import LegatoEngines
 import LegatoKeyboardCore
+import LegatoPostProcessing
 import Observation
 import os
 
@@ -32,7 +35,17 @@ final class AppController {
     /// The keyboard's arm failed (readiness, a refused activation): what the hop screen tells the user.
     private(set) var armFailure: String?
 
-    @ObservationIgnored let engine = AppleSpeechEngine()
+    /// Apple Speech, for onboarding's asset download (dictation uses `engineBox`, which is Apple Speech by default).
+    @ObservationIgnored let appleSpeech = AppleSpeechEngine()
+    /// The model catalog, the engine and the cleanup registries.
+    @ObservationIgnored let models: ModelServices
+    /// The live engine every new session gets: resolved from the pick at launch and after every change of
+    /// the pick or the engine settings (`refreshEngine`).
+    @ObservationIgnored private let engineBox: EngineBox
+    /// Which engine new dictations use, and why Apple Speech when a pick could not be used.
+    private(set) var engineStatus = EngineStatus()
+    /// What the last cleanup (or refine) did.
+    let cleanupReports = CleanupReports()
     /// The one history store; views go through the methods below, never construct their own.
     @ObservationIgnored private let history: JSONLHistoryStore
     @ObservationIgnored let pasteboard = PasteboardClient()
@@ -65,7 +78,16 @@ final class AppController {
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
         if AppGroup.containerURL == nil { Self.log.error("App Group container unavailable; history is app-local") }
         let history = JSONLHistoryStore(fileURL: directory.appending(path: "history.jsonl"))
-        let engine = self.engine
+        let models = ModelServices(root: ModelServices.phoneModelsRoot, defaults: AppGroup.defaults)
+        self.models = models
+        let engineBox = EngineBox(AppleSpeechEngine())
+        self.engineBox = engineBox
+        let reports = cleanupReports
+        let engineSettings = models.engineSettings
+        let cleanup = CleanupProcessor(
+            registry: models.cleanup, settings: Settings.cleanupStore,
+            preferredLocale: { ModelServices.singleLocale(engineSettings) },
+            report: { report in await reports.record(report) })
         self.history = history
         #if LEGATO_INTERNAL
         let sessionControl = KeepActiveSessionControl.app()
@@ -87,7 +109,9 @@ final class AppController {
             history: history,
             makeSession: { policy, linger in
                 #if DEBUG
-                if let fake = E2E.makeFakeSession(history: history, policy: policy, linger: linger) { return fake }
+                if let fake = E2E.makeFakeSession(history: history, postProcessor: cleanup, policy: policy, linger: linger) {
+                    return fake
+                }
                 #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
                 #if LEGATO_INTERNAL
@@ -97,10 +121,11 @@ final class AppController {
                 let sessionControl = AudioSessionController()
                 #endif
                 return DictationSession(
-                    engine: engine,
+                    engine: engineBox.engine,
                     source: source,
                     sessionControl: sessionControl,
                     history: history,
+                    postProcessor: cleanup,
                     policy: policy,
                     linger: linger)
             })
@@ -125,6 +150,8 @@ final class AppController {
             }
             keyboardLink.onLease = { [weak self] until in self?.micReadyUntil = until }
             keyboardLink.link.onRequest = { [weak self] request in await self?.perform(request.command) ?? false }
+            keyboardLink.link.onRefine = { [weak self] text in await self?.refine(text) }
+            keyboardLink.deliveryForRun = { Settings.hostDelivery }
             keyboardLink.startListening()
         }
         installInterruptionObservers()
@@ -134,6 +161,52 @@ final class AppController {
         #if DEBUG
         E2E.applyLaunchSettings()
         #endif
+        Task { await refreshEngine(releasingKeptMicrophone: false) }
+    }
+
+    // MARK: Models
+
+    /// Resolves the live engine from the pick and the engine settings, for the sessions built from now on.
+    /// `releasingKeptMicrophone`: a session kept between runs (keep-ready) holds the old engine, so it is
+    /// released and the next start builds one with the new engine. During a run, the run's session is
+    /// released when the run ends instead of being kept.
+    func refreshEngine(releasingKeptMicrophone: Bool = true) async {
+        let resolution = await models.engines.liveEngine()
+        engineBox.engine = resolution.engine
+        readiness.modelEngineReady = resolution.modelID != nil
+        engineStatus = EngineStatus(
+            modelID: resolution.modelID,
+            name: resolution.modelID.flatMap { id in models.streamingModels.first { $0.id == id }?.displayName } ?? "Apple Speech",
+            fallback: resolution.fallback.map(Self.describe))
+        #if DEBUG
+        E2E.log("engine.resolved id=\(resolution.engine.id) fallback=\(resolution.fallback.map(Self.describe) ?? "none")")
+        #endif
+        if releasingKeptMicrophone { await coordinator.invalidateKeptSession() }
+        await refreshReadiness()
+    }
+
+    private static func describe(_ fallback: EngineFallback) -> String {
+        switch fallback {
+        case .assetsNotInstalled: "the picked model is not installed"
+        case .unknownModel(let id): "the picked model \(id) is not in this build's catalog"
+        }
+    }
+
+    /// The keyboard's Refine key: a stronger rewrite (message style) of `text`, or nil when there is none.
+    /// Runs in the background too, as the background cleanup setting says (the MLX model on the CPU by default).
+    func refine(_ text: String) async -> String? {
+        let reports = cleanupReports
+        let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
+        let out = await CleanupProcessor.run(
+            text, locale: locale, style: .message, refine: true,
+            timeout: .seconds(max(Settings.cleanupTimeoutSeconds * 2, 8)), settings: Settings.cleanupStore,
+            registry: models.cleanup,
+            report: { report in await reports.record(report) })
+        let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        #if DEBUG
+        E2E.log("refine changed=\(refined != text ? 1 : 0)")
+        #endif
+        return refined.isEmpty || refined == text ? nil : refined
     }
 
     // MARK: Dictation

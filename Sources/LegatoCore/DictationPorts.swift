@@ -165,7 +165,9 @@ public struct StartOptions: Sendable, Equatable {
 }
 
 /// Receives a run's text as it happens (the app publishes it to the keyboard). Per run, in order:
-/// `runStarted`, `update` (first with empty text once listening, then after every edit), `runEnded`;
+/// `runStarted`, `update` (first with empty text once listening, then after every edit; `revised` instead
+/// for a live cleanup's revision), `runFinishing`
+/// (a stop began; more `update`s can follow while the engine finalizes), `runEnded`;
 /// then `leaseChanged` when a keep-alive lease is held. A run that began always ends, however it ends.
 @MainActor
 public protocol TranscriptSink: AnyObject {
@@ -173,6 +175,12 @@ public protocol TranscriptSink: AnyObject {
     func runStarted(_ run: DictationRun)
     /// The run's text so far: everything committed, and the tentative tail.
     func update(committed: String, volatile: String)
+    /// Live cleanup replaced a committed span (`CleanupDelivery.live`); `committed` in later updates stays
+    /// the raw text. Optional (the default does nothing).
+    func revised(_ revision: TranscriptRevision)
+    /// A stop began: no more speech is taken; the text is being finalized (and post-processed). Not
+    /// called for a run that aborted or never started. Optional (the default does nothing).
+    func runFinishing(_ run: DictationRun)
     /// The run is over. `committed` is everything committed (as it was streamed), `text` the final
     /// trimmed transcript, nil when nothing final was recognized. Returns whether the final text is
     /// now in the target's field, so the clipboard isn't needed; may wait briefly for the target to
@@ -180,4 +188,9 @@ public protocol TranscriptSink: AnyObject {
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool
     /// The mic lease between runs: when it ends, or nil when it is not held (ended or expired).
     func leaseChanged(until: Date?)
+}
+
+extension TranscriptSink {
+    public func runFinishing(_ run: DictationRun) {}
+    public func revised(_ revision: TranscriptRevision) {}
 }

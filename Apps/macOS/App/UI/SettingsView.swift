@@ -1,7 +1,29 @@
 import LegatoMac
 import SwiftUI
 
+/// The Settings window: General (hotkey, text, login), Speech engine and Cleanup.
 struct SettingsView: View {
+    @Environment(MacAppController.self) private var controller
+
+    var body: some View {
+        @Bindable var controller = controller
+        TabView(selection: $controller.settingsTab) {
+            GeneralSettingsView()
+                .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(MacAppController.SettingsTab.general)
+            SpeechEngineSettingsView()
+                .frame(width: 520, height: 560)
+                .tabItem { Label("Speech engine", systemImage: "waveform") }
+                .tag(MacAppController.SettingsTab.speech)
+            CleanupSettingsView()
+                .frame(width: 520, height: 620)
+                .tabItem { Label("Cleanup", systemImage: "sparkles") }
+                .tag(MacAppController.SettingsTab.cleanup)
+        }
+    }
+}
+
+private struct GeneralSettingsView: View {
     @Environment(MacAppController.self) private var controller
 
     var body: some View {
@@ -35,7 +57,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
+        .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear { controller.loginItem.refresh() }
     }

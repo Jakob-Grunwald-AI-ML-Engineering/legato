@@ -15,6 +15,15 @@ import Foundation
 ///   doesn't end with the cursor's tentative text, ticks wait (`settleLimitMs` at most, then it is
 ///   planned against as before: the user did move on). Host updates don't use up that wait.
 /// - Nothing is drained without a field to type into (no field, another field, not the keyboard's run).
+/// - Cleanup delivery (`HostState.delivery`): `.hold` is not revealed (nothing is typed while listening and
+///   the final text goes in as one edit, which the reveal would otherwise insert again on every tick).
+///   With `.replace` the streamed text is revealed like any other; the swap for the final text waits until
+///   all of it is in the field and the field's context shows it (`settleLimitMs` at most), and is then one
+///   edit. With `.clipboard` the streamed text is the result.
+///   With `.live` a revision (`HostState.revisions`) is applied by the planner only to text the reveal has
+///   typed (the planner sees the state cut to the revealed part, so a revision waits until its raw span is
+///   covered), and, like the swap, only once the field's context shows the raw text typed on earlier ticks
+///   (`settleLimitMs` at most): a revision that finds nothing to replace is skipped for good.
 public struct TypewriterReveal: Sendable, Equatable {
     /// How long a tick waits for the field's context to show the tentative text before giving up.
     public static let settleLimitMs = 250.0
@@ -37,7 +46,7 @@ public struct TypewriterReveal: Sendable, Equatable {
         elapsedMs: Double = 0
     ) -> ProxyPlan {
         needsTicks = false
-        guard let documentID, state.target == .keyboard, let runID = state.runID,
+        guard let documentID, state.target == .keyboard, let runID = state.runID, state.delivery != .hold,
               cursor == nil || cursor?.runID != runID || cursor?.documentID == documentID
         else {
             return ProxyEditPlanner.plan(state: state, cursor: cursor, contextBefore: contextBefore, documentID: documentID)
@@ -58,8 +67,18 @@ public struct TypewriterReveal: Sendable, Equatable {
         }
         text = target
 
-        if let cursor, cursor.runID == runID, !cursor.volatile.isEmpty, !contextBefore.hasSuffix(cursor.volatile),
-           waitedMs < Self.settleLimitMs {
+        // A swap for the cleaned text is due: it needs all of the streamed text in the field first.
+        let swapDue = state.isFinal && state.delivery == .replace && ProxyEditPlanner.cleanedText(state) != nil
+            && cursor?.finalReplaced == nil
+        let streamedLanded = cursor?.runID == runID && cursor?.committedCount == state.committed.count
+            && cursor?.volatile.isEmpty == true
+        let span = ProxyEditPlanner.streamedSpan(of: state.committed)
+        let swapWaits = swapDue && streamedLanded && !span.isEmpty && !contextBefore.hasSuffix(span)
+
+        let revisionWaits = Self.revisionAwaitsContext(state: state, cursor: cursor, contextBefore: contextBefore)
+
+        if let cursor, cursor.runID == runID, waitedMs < Self.settleLimitMs,
+           (!cursor.volatile.isEmpty && !contextBefore.hasSuffix(cursor.volatile)) || swapWaits || revisionWaits {
             waitedMs += elapsedMs
             needsTicks = true
             return ProxyPlan(ops: [], cursor: cursor)
@@ -72,13 +91,31 @@ public struct TypewriterReveal: Sendable, Equatable {
             revealed = TypewriterDrain.step(revealed: revealed, target: total, dtMs: elapsedMs)
         }
 
+        // The swap is a step of its own, after the streamed text has settled in the field.
+        let streamOnly = swapDue && !streamedLanded
+        var shown = Self.shown(state, count: revealed)
+        if streamOnly { shown.finalText = nil }
         var plan = ProxyEditPlanner.plan(
-            state: Self.shown(state, count: revealed), cursor: cursor, contextBefore: contextBefore, documentID: documentID)
-        if revealed < total {
+            state: shown, cursor: cursor, contextBefore: contextBefore, documentID: documentID)
+        if revealed < total || streamOnly {
             plan.cursor?.finalApplied = false
             needsTicks = true
         }
         return plan
+    }
+
+    /// `.live`: a revision not yet handled reaches back into raw text typed on earlier ticks, which the
+    /// planner looks for at the end of the field's context (before the tentative text). True while the
+    /// context does not show that text yet.
+    private static func revisionAwaitsContext(state: HostState, cursor: AppliedCursor?, contextBefore: String) -> Bool {
+        guard state.delivery == .live, let cursor, cursor.runID == state.runID,
+              let revisions = state.revisions, cursor.revisionsHandled < revisions.count
+        else { return false }
+        let start = revisions[cursor.revisionsHandled].start
+        let typed = min(cursor.committedCount, state.committed.count)
+        guard start >= 0, start < typed else { return false }
+        let raw = String(state.committed.dropFirst(start).prefix(typed - start))
+        return !contextBefore.hasSuffix(raw + cursor.volatile)
     }
 
     /// `state` cut to its first `count` characters of `committed + volatile`.

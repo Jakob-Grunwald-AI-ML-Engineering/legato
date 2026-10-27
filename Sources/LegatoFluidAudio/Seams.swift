@@ -5,16 +5,30 @@ import LegatoModels
 /// Decides when a silence is long enough to commit the current segment.
 ///
 /// Judges whole chunks by RMS (as the spike does), so a lone click inside a silent chunk counts the whole
-/// chunk as speech. Pure: it never touches a model.
+/// chunk as speech. A chunk is silent below ``rmsThreshold`` or below ``noiseRatio`` times the run's noise
+/// floor, whichever is higher: a phone's mic in a room hears more than the fixed threshold (0.003 to 0.013
+/// RMS before speech), and a pause there must still end a segment. The floor is the quietest chunk so far,
+/// rising by at most ``floorRisePerSecond`` while the chunks are louder; a commit keeps it. A floor above
+/// ``maxNoiseFloor`` is taken for speech (a run that starts talking) and not used. Pure: it never touches a model.
 struct SilenceEndpointer: Sendable {
     /// Consecutive silent samples that end a segment (1200 ms at 16 kHz is 19,200).
     let silenceSamples: Int
     let rmsThreshold: Float
+    /// A chunk under this multiple of the noise floor is silent (6 dB).
+    static let noiseRatio = 2.0
+    /// The loudest floor that is still room noise; above it the fixed threshold alone decides.
+    static let maxNoiseFloor = 0.015
+    /// How fast the floor follows louder chunks: 2 % a second, so speech never lifts it to its own level.
+    static let floorRisePerSecond = 0.02
+    private let sampleRate: Int
     private var silent = 0
+    /// The run's noise floor (chunk RMS); nil before the first chunk.
+    private(set) var noiseFloor: Double?
     /// Whether any non-silent chunk arrived since the last commit or reset.
     private(set) var heardSpeech = false
 
     init(sampleRate: Int = 16_000, silenceMs: Int = 1200, rmsThreshold: Float = 0.004) {
+        self.sampleRate = sampleRate
         self.silenceSamples = sampleRate * silenceMs / 1000
         self.rmsThreshold = rmsThreshold
     }
@@ -26,15 +40,27 @@ struct SilenceEndpointer: Sendable {
         var sum = 0.0
         for sample in samples { sum += Double(sample * sample) }
         let rms = (sum / Double(samples.count)).squareRoot()
-        if rms < Double(rmsThreshold) {
+        let floor = noiseFloor.flatMap { $0 <= Self.maxNoiseFloor ? $0 : nil } ?? 0
+        let threshold = max(Double(rmsThreshold), floor * Self.noiseRatio)
+        if rms < threshold {
             silent += samples.count
         } else {
             silent = 0
             heardSpeech = true
         }
+        trackFloor(rms, samples: samples.count)
         guard hasText, silent >= silenceSamples else { return false }
         reset()
         return true
+    }
+
+    private mutating func trackFloor(_ rms: Double, samples: Int) {
+        guard let floor = noiseFloor, rms > floor else {
+            noiseFloor = rms
+            return
+        }
+        let seconds = Double(samples) / Double(sampleRate)
+        noiseFloor = min(rms, floor * (1 + Self.floorRisePerSecond * seconds))
     }
 
     mutating func reset() {

@@ -24,6 +24,42 @@ import Testing
         #expect(field.string == "abcHelloghi")
     }
 
+    @Test func aSelectionMadeWhileListeningIsNotOverwritten() {
+        let field = FakeTextTarget("abcdefghi")
+        let writer = FieldWriter(target: field, mode: .insertOnStop)
+        writer.apply(.commit(delta: "Hello"))
+        field.select(UTF16Range(location: 3, length: 3)) // the user selects while Hold listens
+        #expect(writer.finish(finalText: "Hello") == .copy("Hello"))
+        #expect(field.writes.isEmpty)
+        #expect(field.string == "abcdefghi")
+    }
+
+    @Test func aCaretMovedWhileListeningCopiesInstead() {
+        let field = FakeTextTarget("abcdefghi")
+        let writer = FieldWriter(target: field, mode: .insertOnStop)
+        writer.apply(.commit(delta: "Hello"))
+        field.moveCaret(to: 2)
+        #expect(writer.finish(finalText: "Hello") == .copy("Hello"))
+        #expect(field.writes.isEmpty)
+    }
+
+    @Test func holdWithACleanupCopiesTheCleanedTextWhenTheSelectionMoved() {
+        let field = FakeTextTarget("abcdefghi", selection: UTF16Range(location: 3, length: 3))
+        let writer = FieldWriter(target: field, mode: .insertOnStop)
+        writer.apply(.commit(delta: "um hello"))
+        field.moveCaret(to: 9)
+        #expect(writer.finish(rawText: "um hello", cleanedText: "Hello.", delivery: .hold) == .copy("Hello."))
+        #expect(field.string == "abcdefghi")
+    }
+
+    @Test func anUnchangedSelectionIsStillReplaced() {
+        let field = FakeTextTarget("abcdefghi", selection: UTF16Range(location: 3, length: 3))
+        let writer = FieldWriter(target: field, mode: .insertOnStop)
+        writer.apply(.commit(delta: "um hello"))
+        #expect(writer.finish(rawText: "um hello", cleanedText: "Hello.", delivery: .hold) == .done)
+        #expect(field.string == "abcHello.ghi")
+    }
+
     @Test func withoutFinalTextItInsertsItsOwnTrimmedText() {
         let field = FakeTextTarget()
         let writer = FieldWriter(target: field, mode: .insertOnStop)

@@ -386,6 +386,8 @@ final class FakeSink: TranscriptSink {
     private(set) var leases: [Date?] = []
     /// What `runEnded` reports: the final text landed in the field.
     var finalApplied = false
+    /// Live cleanup's revisions, in order (not logged, so the sink trails other tests compare stay as they were).
+    private(set) var revisions: [TranscriptRevision] = []
 
     init(log: EventLog) { self.log = log }
 
@@ -397,10 +399,17 @@ final class FakeSink: TranscriptSink {
         log.add("sink.update")
         updates.append((committed, volatile))
     }
+    /// Logged outside the `sink.` prefix, so the sink trails other tests compare stay as they were.
+    func runFinishing(_ run: DictationRun) {
+        log.add("finishing:sink")
+    }
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
         log.add("sink.runEnded")
         ended.append((run, committed, text))
         return finalApplied
+    }
+    func revised(_ revision: TranscriptRevision) {
+        revisions.append(revision)
     }
     func leaseChanged(until: Date?) {
         log.add(until == nil ? "sink.lease:nil" : "sink.lease:set")
