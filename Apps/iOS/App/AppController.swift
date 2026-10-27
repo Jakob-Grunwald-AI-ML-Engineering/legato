@@ -46,6 +46,8 @@ final class AppController {
     private(set) var engineStatus = EngineStatus()
     /// What the last cleanup (or refine) did.
     let cleanupReports = CleanupReports()
+    /// Meetings: recording, the after-stop chain and the library. While one records, dictation is blocked.
+    let meetings: MeetingController
     /// The one history store; views go through the methods below, never construct their own.
     @ObservationIgnored private let history: JSONLHistoryStore
     @ObservationIgnored let pasteboard = PasteboardClient()
@@ -89,6 +91,15 @@ final class AppController {
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             report: { report in await reports.record(report) })
         self.history = history
+        let meetingRoot = directory.appending(path: "Meetings", directoryHint: .isDirectory)
+        #if DEBUG
+        meetings = MeetingController(
+            models: models, root: meetingRoot, defaults: AppGroup.defaults,
+            audio: E2E.fakeEngine != nil ? E2E.meetingAudio : .live)
+        meetings.engineOverride = E2E.fakeEngine
+        #else
+        meetings = MeetingController(models: models, root: meetingRoot, defaults: AppGroup.defaults)
+        #endif
         #if LEGATO_INTERNAL
         let sessionControl = KeepActiveSessionControl.app()
         self.sessionControl = sessionControl
@@ -154,6 +165,13 @@ final class AppController {
             keyboardLink.deliveryForRun = { Settings.hostDelivery }
             keyboardLink.startListening()
         }
+        meetings.isInBackground = { [weak self] in self?.startEnvironment.current().inBackground ?? false }
+        meetings.dictationActive = { [weak self] in
+            guard let self else { return false }
+            return isDictating || keyboardRunActive
+        }
+        meetings.releaseKeptMicrophone = { [weak self] in await self?.endKeepAlive() }
+        meetings.onActiveChanged = { [weak self] active in self?.keyboardLink?.link.meetingChanged(active: active) }
         installInterruptionObservers()
         #if LEGATO_INTERNAL
         AudioDiagnostics.install()
@@ -162,6 +180,7 @@ final class AppController {
         E2E.applyLaunchSettings()
         #endif
         Task { await refreshEngine(releasingKeptMicrophone: false) }
+        Task { await meetings.recoverAtLaunch() }
     }
 
     // MARK: Models
@@ -227,7 +246,7 @@ final class AppController {
             options = Self.pressOptions()
         }
         hopOptions = nil
-        return await run(options, hopReason: reason) ?? .busy
+        return await run(options, hopReason: reason, source: "toggle") ?? .busy
     }
 
     /// What a press starts with. The text is neither copied nor typed when the run ends: it waits in the
@@ -298,7 +317,7 @@ final class AppController {
         case .start:
             // A start never toggles: a second one while running must not stop the run.
             let options = StartOptions(activity: .bestEffort, keepAlive: Settings.keepAliveLinger, target: .keyboard)
-            guard let outcome = await run(options, startOnly: true) else { return true }
+            guard let outcome = await run(options, startOnly: true, source: "keyboard") else { return true }
             if case .started = outcome { return true }
             return false
         case .arm:
@@ -306,6 +325,13 @@ final class AppController {
             // history entry, no Live Activity, no clipboard; the next tap, back in the host app, starts
             // the dictation on this lease.
             armFailure = nil
+            if let notice = MeetingArbitration.dictationRefusal(meetingActive: meetings.isActive) {
+                armFailure = notice
+                #if DEBUG
+                E2E.log("meeting.refused source=keyboard-arm notice=\(E2E.quote(notice))")
+                #endif
+                return false
+            }
             let outcome = await coordinator.arm(keepAlive: Settings.keepAliveLinger)
             #if DEBUG
             E2E.log("arm outcome=\(Self.describe(outcome))")
@@ -351,8 +377,16 @@ final class AppController {
 
     /// `startOnly`: never stops a run in progress; nil when one was in progress (nothing started).
     private func run(
-        _ options: StartOptions, hopReason reason: ForegroundReason? = nil, startOnly: Bool = false
+        _ options: StartOptions, hopReason reason: ForegroundReason? = nil, startOnly: Bool = false, source: String
     ) async -> DictationCoordinator.Outcome? {
+        // A meeting owns the microphone: no dictation from the keyboard, the Action Button or the app.
+        if let notice = MeetingArbitration.dictationRefusal(meetingActive: meetings.isActive) {
+            armFailure = notice
+            #if DEBUG
+            E2E.log("meeting.refused source=\(source) notice=\(E2E.quote(notice))")
+            #endif
+            return .failed(notice)
+        }
         let finishedBefore = idleCount
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("toggle.begin", ["isDictating": isDictating])
@@ -546,8 +580,19 @@ final class AppController {
 
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-            Task { @MainActor in self?.stopForSystemEvent("interruption began", releasesHeldSession: true) }
+            let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let shouldResume = AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
+            Task { @MainActor in
+                guard let self else { return }
+                // A meeting mutes and resumes by itself; dictation cannot be running next to it.
+                if self.meetings.isActive {
+                    if raw == AVAudioSession.InterruptionType.began.rawValue { self.meetings.interruptionBegan() }
+                    if raw == AVAudioSession.InterruptionType.ended.rawValue { self.meetings.interruptionEnded(shouldResume: shouldResume) }
+                    return
+                }
+                guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
+                self.stopForSystemEvent("interruption began", releasesHeldSession: true)
+            }
         }
 
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
@@ -556,20 +601,39 @@ final class AppController {
             let previous = (note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)
                 .map { Set($0.inputs.map(\.uid)) } ?? []
             let current = Set(AVAudioSession.sharedInstance().currentRoute.inputs.map(\.uid))
+            let changedInput = reason == .newDeviceAvailable || reason == .oldDeviceUnavailable
+            Task { @MainActor in
+                guard let self, self.meetings.isActive else { return }
+                if changedInput { self.meetings.routeChanged() }
+            }
             guard InputRoute.shouldStop(
                 reasonIsOldDeviceUnavailable: reason == .oldDeviceUnavailable,
                 previousInputs: previous,
                 currentInputs: current)
             else { return }
-            Task { @MainActor in self?.stopForSystemEvent("input lost") }
+            Task { @MainActor in
+                guard let self, !self.meetings.isActive else { return } // a meeting restarts its own engine
+                self.stopForSystemEvent("input lost")
+            }
         }
 
         center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.stopForSystemEvent("engine configuration change") }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.meetings.isActive { self.meetings.routeChanged() } else { self.stopForSystemEvent("engine configuration change") }
+            }
         }
 
         center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.stopForSystemEvent("media services reset", releasesHeldSession: true) }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.meetings.isActive {
+                    self.meetings.interruptionBegan()
+                    self.meetings.interruptionEnded(shouldResume: true)
+                } else {
+                    self.stopForSystemEvent("media services reset", releasesHeldSession: true)
+                }
+            }
         }
     }
 
@@ -594,6 +658,12 @@ final class AppController {
 
     func copy(_ text: String) {
         pasteboard.forceWrite(text)
+    }
+
+    /// The app came to the foreground: a meeting that could not resume, or whose after-stop chain was cut
+    /// short, continues.
+    func appBecameActive() {
+        self.meetings.appBecameActive()
     }
 
     func refreshReadiness() async {

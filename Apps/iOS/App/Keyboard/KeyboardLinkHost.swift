@@ -45,7 +45,7 @@ final class KeyboardLinkHost: TranscriptSink {
             E2E.log("""
                 link.host phase=\(state.phase.rawValue) final=\(state.isFinal ? 1 : 0) target=\(state.target.rawValue) \
                 committed=\(E2E.quote(state.committed)) volatile=\(E2E.quote(state.volatile)) \
-                lease=\(state.leaseUntil == nil ? 0 : 1) accepts=\(state.acceptsRemoteStart ? 1 : 0) seq=\(state.seq)
+                lease=\(state.leaseUntil == nil ? 0 : 1) accepts=\(state.acceptsRemoteStart ? 1 : 0) meeting=\(state.meetingRecording == true ? 1 : 0) seq=\(state.seq)
                 """)
         }
         #endif

@@ -82,6 +82,8 @@ public struct HostState: Codable, Sendable, Equatable {
     public var insertAt: Date?
     /// `.live`: the revisions of this run so far, in order; nil before the first.
     public var revisions: [HostRevision]?
+    /// A meeting is recording: dictation is blocked. Absent (nil) otherwise, so older readers see the same state.
+    public var meetingRecording: Bool?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,

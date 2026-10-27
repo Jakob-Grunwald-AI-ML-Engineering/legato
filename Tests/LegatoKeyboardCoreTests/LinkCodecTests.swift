@@ -33,6 +33,21 @@ import Testing
         #expect(json["leaseUntil"] == nil) // absent, not null
     }
 
+    @Test func theMeetingFlagIsAbsentUnlessSetAndOldStatesStillDecode() throws {
+        let backing = MemoryLinkStore()
+        let store = LinkStore(backing)
+        store.write(hostState(), forKey: LinkChannel.Key.host)
+        let data = try #require(backing.data(forKey: LinkChannel.Key.host))
+        let plain = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(plain["meetingRecording"] == nil) // absent, not null: an older keyboard reads the same state
+        var meeting = hostState()
+        meeting.meetingRecording = true
+        store.write(meeting, forKey: LinkChannel.Key.host)
+        #expect(store.read(HostState.self, forKey: LinkChannel.Key.host)?.meetingRecording == true)
+        store.write(hostState(), forKey: LinkChannel.Key.host)
+        #expect(store.read(HostState.self, forKey: LinkChannel.Key.host)?.meetingRecording == nil)
+    }
+
     @Test func requestAckPresenceAndAppliedRoundTrip() {
         let store = LinkStore(MemoryLinkStore())
         let request = KeyboardRequest(id: "req-1", command: .endKeepAlive, at: t0)

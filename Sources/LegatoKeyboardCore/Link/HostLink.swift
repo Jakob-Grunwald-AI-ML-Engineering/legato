@@ -179,6 +179,13 @@ public final class HostLink {
         publish()
     }
 
+    /// A meeting started (true) or ended (false). While it records the state says so and keeps beating, so
+    /// the keyboard trusts it and can say "Meeting recording" instead of offering to dictate.
+    public func meetingChanged(active: Bool) {
+        state.meetingRecording = active ? true : nil
+        publish()
+    }
+
     private func publish() {
         trailing?.cancel()
         trailing = nil
@@ -204,7 +211,7 @@ public final class HostLink {
     }
 
     private var isActive: Bool {
-        (state.runID != nil && state.phase != .idle) || state.leaseUntil != nil
+        (state.runID != nil && state.phase != .idle) || state.leaseUntil != nil || state.meetingRecording == true
     }
 
     private func updateBeat() {

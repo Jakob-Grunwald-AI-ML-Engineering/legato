@@ -121,10 +121,19 @@ final class KeyboardController {
     #endif
 
     /// What the keyboard says in place of its suggestions (the strip's text, the full keyboard's top bar):
-    /// a hint, else the dictation status (`dictationStatus`) while the slots are empty; nil when there is
-    /// nothing to say.
+    /// a hint, else the meeting notice or the dictation status (`dictationStatus`) while the slots are empty;
+    /// nil when there is nothing to say.
     var statusText: String? {
-        hint ?? (suggestions.isEmpty ? dictationStatus : nil)
+        hint ?? (suggestions.isEmpty ? (meetingNotice ?? dictationStatus) : nil)
+    }
+
+    /// While the app records a meeting dictation is blocked, and the keyboard says why instead of offering to
+    /// dictate. Believed only while the app keeps beating: an app that died mid-meeting leaves the flag behind.
+    var meetingNotice: String? {
+        guard let host, host.meetingRecording == true,
+              Date().timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness
+        else { return nil }
+        return "Meeting recording"
     }
 
     // MARK: Visibility

@@ -29,6 +29,10 @@ import os
 ///
 /// Darwin notifications (see `installTriggers`): `toggle`, `interrupt`, `copy-last`, `foreground`,
 /// `background`, `toggle-after-hop` (the press that repeats a `needsForeground` one after the hop).
+/// Meetings (with `-LegatoFakeEngine`, the meeting uses the scripted engine and `E2EFakeMeetingMic`, a tone
+/// that arrives in real time): `meeting-start`, `meeting-stop`, `meeting-mute`, `meeting-unmute`,
+/// `meeting-export` (writes what the share sheet would offer), `meeting-route-change` (AirPods connected),
+/// and `interrupt-end` (the end of an interruption, with `shouldResume`).
 /// - `-LegatoKeepAliveSeconds <n>`: sets the keep-alive setting (any number of seconds).
 /// - `-LegatoFakeKeyboardApply YES|NO`: whether the fake keyboard types the streamed text into its
 ///   document and confirms it (default YES). NO leaves the final text unconfirmed.
@@ -201,6 +205,59 @@ enum E2E {
     }
 }
 
+extension E2E {
+    /// The meeting's audio in the simulator run: no AVAudioSession, a scripted tone for a microphone.
+    @MainActor
+    static var meetingAudio: MeetingAudioEnvironment {
+        MeetingAudioEnvironment(
+            activate: { _ in log("meeting.session.activate") },
+            reactivate: { log("meeting.session.reactivate") },
+            deactivate: { log("meeting.session.deactivate") },
+            makeMic: { E2EFakeMeetingMic() })
+    }
+}
+
+/// A microphone for a meeting: a 440 Hz tone in 100 ms chunks, delivered in real time, so the recording
+/// has the length of the meeting. A new instance is a restarted engine.
+final class E2EFakeMeetingMic: AudioSource, Sendable {
+    /// The system took the microphone (the `interrupt` command): the tone stops until a fresh mic starts.
+    static let taken = Mutex(false)
+
+    private let task = Mutex<Task<Void, Never>?>(nil)
+
+    func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
+        Self.taken.withLock { $0 = false }
+        E2E.log("meeting.mic.start")
+        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
+        let spec = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
+        let producer = Task {
+            var phase = 0.0
+            while !Task.isCancelled {
+                let samples = (0..<1_600).map { _ -> Float in
+                    phase += 2 * Double.pi * 440 / 16_000
+                    return Float(0.2 * sin(phase))
+                }
+                if !Self.taken.withLock({ $0 }) { continuation.yield(AudioChunk(samples: samples, format: spec)) }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            continuation.finish()
+        }
+        task.withLock { $0 = producer }
+        continuation.onTermination = { _ in producer.cancel() }
+        return stream
+    }
+
+    func route() async throws -> AsyncStream<AudioChunk> { throw MicSourceError.notArmed }
+    func detach() async {}
+
+    func stop() async {
+        E2E.log("meeting.mic.stop")
+        let producer = task.withLock { t in defer { t = nil }; return t }
+        producer?.cancel()
+        await producer?.value
+    }
+}
+
 extension AppController {
     /// Handles the debug-only URLs. Returns whether `url` was one of them.
     func handleE2E(_ url: URL) async -> Bool {
@@ -226,10 +283,35 @@ extension AppController {
         case "toggle":
             _ = await toggle()
         case "interrupt":
+            E2EFakeMeetingMic.taken.withLock { $0 = true }
             NotificationCenter.default.post(
                 name: AVAudioSession.interruptionNotification,
                 object: AVAudioSession.sharedInstance(),
                 userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
+        case "interrupt-end":
+            NotificationCenter.default.post(
+                name: AVAudioSession.interruptionNotification,
+                object: AVAudioSession.sharedInstance(),
+                userInfo: [
+                    AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
+                    AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue,
+                ])
+        case "meeting-start":
+            await meetings.start()
+        case "meeting-stop":
+            _ = await meetings.stop()
+        case "meeting-mute":
+            meetings.setManualMute(true)
+        case "meeting-unmute":
+            meetings.setManualMute(false)
+        case "meeting-route-change":
+            NotificationCenter.default.post(
+                name: AVAudioSession.routeChangeNotification,
+                object: AVAudioSession.sharedInstance(),
+                userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue])
+        case "meeting-export":
+            await meetings.refresh()
+            if let meeting = meetings.meetings.first { _ = await meetings.exportItems(for: meeting) }
         case "copy-last":
             await handle(DictationAttributes.copyLastURL)
         case "foreground":
@@ -247,7 +329,8 @@ extension AppController {
 
 extension E2E {
     static let commands = [
-        "toggle", "interrupt", "copy-last", "foreground", "background", "toggle-after-hop",
+        "toggle", "interrupt", "interrupt-end", "copy-last", "foreground", "background", "toggle-after-hop",
+        "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-export", "meeting-route-change",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-arm", "kbd-hop-arm-url-first", "kbd-forged-url",
         "harness-mic", "harness-mic-hop", "harness-type", "harness-numbers",
