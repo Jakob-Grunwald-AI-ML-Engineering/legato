@@ -1,0 +1,250 @@
+{
+  "schema": 1,
+  "evidenceKind": "phone-foreground-mlx-cpu-compilation-failures",
+  "source": "private-results/mlx-qwen06-initial/Results/{measurements,events}.jsonl",
+  "fixture": {
+    "name": "de-short-01-time",
+    "language": "de",
+    "length": "short",
+    "locale": "de-DE",
+    "input": "wir treffen uns morgen um neun uhr dreißig im café am marktplatz",
+    "vocabulary": [],
+    "mustContain": [
+      "Wir treffen",
+      "9",
+      "30",
+      "Café",
+      "Marktplatz"
+    ],
+    "mustNotContain": [
+      "neun",
+      "dreißig"
+    ],
+    "reference": "Wir treffen uns morgen um 9:30 Uhr im Café am Marktplatz."
+  },
+  "runs": [
+    {
+      "measurement": {
+        "anePlacement": "unverified; requires Instruments",
+        "appStateAtInference": "active",
+        "appStateAtTrigger": "active",
+        "batteryLevel": 0.4,
+        "batteryState": "UIDeviceBatteryState(rawValue: 2)",
+        "buildConfiguration": "Release (detached timing eligible)",
+        "buildID": "44c31faf14c5ff967f7bc458a6338da39463365eb737b257c281a5a7de5f0814",
+        "cacheState": "modelCold",
+        "computePermission": "cpu",
+        "deviceModel": "iPhone18,3",
+        "endToEndMs": 35696.615375,
+        "error": "failed(\"MLX: [Compiled::eval_cpu] CPU compilation not supported on the platform. at /Users/work/Library/Caches/legato/SourcePackages/checkouts/mlx-swift/Source/Cmlx/mlx-c/mlx/c/transforms.cpp:15\")",
+        "fixture": "de-short-01-time",
+        "fixtureDeadlineSeconds": 300,
+        "lowPowerMode": false,
+        "modelRevision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+        "osVersion": "Version 26.6.1 (Build 23G83)",
+        "outputCap": 1024,
+        "pid": 29649,
+        "prompt": "Legato CleanupPrompt.standard; all eleven examples",
+        "promptFamily": "qwen3",
+        "requestedBackend": "mlx-cpu",
+        "runID": "68C1AA42-C447-4F68-B832-3990F5BB1E83",
+        "sampledPeakBytes": 628852328,
+        "schema": 1,
+        "semanticPromptSHA256": "36d2f78be255254a53032a000c42706339a32359ba2dac4c09f5432b08b0baa6",
+        "settledAt": "2026-10-27T20:46:11Z",
+        "startClassification": "foregroundFixture",
+        "status": "failed",
+        "thermalState": "fair",
+        "timestamp": "2026-10-27T20:45:35Z",
+        "tokenizerRevision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+        "trigger": "foregroundURLFixture",
+        "workload": "cleanupFixture"
+      },
+      "eventsThroughSettlement": [
+        {
+          "inferenceState": "notStarted",
+          "runID": "68C1AA42-C447-4F68-B832-3990F5BB1E83",
+          "pid": "29649",
+          "event": "fixture.idleTimerDisabled",
+          "time": "2026-10-27T20:45:35Z",
+          "appState": "active",
+          "trigger": "foregroundURLFixture",
+          "build": "Release (detached timing eligible)"
+        },
+        {
+          "inferenceState": "notStarted",
+          "fixture": "de-short-01-time",
+          "pid": "29649",
+          "event": "fixture.begin",
+          "runID": "68C1AA42-C447-4F68-B832-3990F5BB1E83",
+          "time": "2026-10-27T20:45:35Z",
+          "appState": "active",
+          "trigger": "foregroundURLFixture",
+          "build": "Release (detached timing eligible)"
+        },
+        {
+          "inferenceState": "notStarted",
+          "runID": "68C1AA42-C447-4F68-B832-3990F5BB1E83",
+          "remainingSeconds": "1.7976931348623157e+308",
+          "event": "runtime.begin",
+          "pid": "29649",
+          "time": "2026-10-27T20:45:35Z",
+          "appState": "active",
+          "trigger": "foregroundURLFixture",
+          "build": "Release (detached timing eligible)"
+        },
+        {
+          "inferenceState": "notStarted",
+          "runID": "68C1AA42-C447-4F68-B832-3990F5BB1E83",
+          "pid": "29649",
+          "event": "fixture.deadline",
+          "time": "2026-10-27T20:45:35Z",
+          "appState": "active",
+          "trigger": "foregroundURLFixture",
+          "seconds": "300",
+          "build": "Release (detached timing eligible)",
+          "cacheState": "modelCold"
+        },
+        {
+          "inferenceState": "active",
+          "trigger": "foregroundURLFixture",
+          "build": "Release (detached timing eligible)",
+          "event": "inference.apiBegin",
+          "runID": "68C1AA42-C447-4F68-B832-3990F5BB1E83",
+          "time": "2026-10-27T20:45:35Z",
+          "pid": "29649",
+          "appState": "active"
+        },
+        {
+          "status": "failed",
+          "pid": "29649",
+          "event": "fixture.settled",
+          "inferenceState": "active",
+          "runID": "68C1AA42-C447-4F68-B832-3990F5BB1E83",
+          "trigger": "foregroundURLFixture",
+          "time": "2026-10-27T20:46:11Z",
+          "build": "Release (detached timing eligible)",
+          "appState": "active"
+        }
+      ]
+    },
+    {
+      "measurement": {
+        "anePlacement": "unverified; requires Instruments",
+        "appStateAtInference": "active",
+        "appStateAtTrigger": "active",
+        "batteryLevel": 0.45,
+        "batteryState": "UIDeviceBatteryState(rawValue: 2)",
+        "buildConfiguration": "Release (detached timing eligible)",
+        "buildID": "44c31faf14c5ff967f7bc458a6338da39463365eb737b257c281a5a7de5f0814",
+        "cacheState": "modelCold",
+        "computePermission": "cpu",
+        "deviceModel": "iPhone18,3",
+        "endToEndMs": 36389.608334000004,
+        "error": "failed(\"MLX: [Compiled::eval_cpu] CPU compilation not supported on the platform. at /Users/work/Library/Caches/legato/SourcePackages/checkouts/mlx-swift/Source/Cmlx/mlx-c/mlx/c/transforms.cpp:15\")",
+        "fixture": "de-short-01-time",
+        "fixtureDeadlineSeconds": 300,
+        "lowPowerMode": false,
+        "modelRevision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+        "osVersion": "Version 26.6.1 (Build 23G83)",
+        "outputCap": 1024,
+        "pid": 29649,
+        "prompt": "Legato CleanupPrompt.standard; all eleven examples",
+        "promptFamily": "qwen3",
+        "requestedBackend": "mlx-cpu",
+        "runID": "1A16B5CC-1436-4C79-8E6E-A7D54469DEBC",
+        "sampledPeakBytes": 471598696,
+        "schema": 1,
+        "semanticPromptSHA256": "36d2f78be255254a53032a000c42706339a32359ba2dac4c09f5432b08b0baa6",
+        "settledAt": "2026-10-27T20:46:47Z",
+        "startClassification": "foregroundFixture",
+        "status": "failed",
+        "thermalState": "fair",
+        "timestamp": "2026-10-27T20:46:11Z",
+        "tokenizerRevision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+        "trigger": "foregroundURLFixture",
+        "workload": "cleanupFixture"
+      },
+      "eventsThroughSettlement": [
+        {
+          "event": "fixture.idleTimerDisabled",
+          "runID": "1A16B5CC-1436-4C79-8E6E-A7D54469DEBC",
+          "time": "2026-10-27T20:46:11Z",
+          "inferenceState": "notStarted",
+          "trigger": "foregroundURLFixture",
+          "build": "Release (detached timing eligible)",
+          "appState": "active",
+          "pid": "29649"
+        },
+        {
+          "event": "fixture.begin",
+          "runID": "1A16B5CC-1436-4C79-8E6E-A7D54469DEBC",
+          "time": "2026-10-27T20:46:11Z",
+          "inferenceState": "notStarted",
+          "trigger": "foregroundURLFixture",
+          "build": "Release (detached timing eligible)",
+          "appState": "active",
+          "fixture": "de-short-01-time",
+          "pid": "29649"
+        },
+        {
+          "event": "runtime.begin",
+          "remainingSeconds": "1.7976931348623157e+308",
+          "runID": "1A16B5CC-1436-4C79-8E6E-A7D54469DEBC",
+          "time": "2026-10-27T20:46:11Z",
+          "inferenceState": "notStarted",
+          "trigger": "foregroundURLFixture",
+          "build": "Release (detached timing eligible)",
+          "appState": "active",
+          "pid": "29649"
+        },
+        {
+          "event": "fixture.deadline",
+          "runID": "1A16B5CC-1436-4C79-8E6E-A7D54469DEBC",
+          "time": "2026-10-27T20:46:11Z",
+          "inferenceState": "notStarted",
+          "trigger": "foregroundURLFixture",
+          "seconds": "300",
+          "build": "Release (detached timing eligible)",
+          "cacheState": "modelCold",
+          "appState": "active",
+          "pid": "29649"
+        },
+        {
+          "event": "inference.apiBegin",
+          "runID": "1A16B5CC-1436-4C79-8E6E-A7D54469DEBC",
+          "trigger": "foregroundURLFixture",
+          "time": "2026-10-27T20:46:11Z",
+          "inferenceState": "active",
+          "build": "Release (detached timing eligible)",
+          "appState": "active",
+          "pid": "29649"
+        },
+        {
+          "status": "failed",
+          "pid": "29649",
+          "event": "fixture.settled",
+          "runID": "1A16B5CC-1436-4C79-8E6E-A7D54469DEBC",
+          "inferenceState": "active",
+          "trigger": "foregroundURLFixture",
+          "time": "2026-10-27T20:46:47Z",
+          "build": "Release (detached timing eligible)",
+          "appState": "active"
+        }
+      ]
+    }
+  ],
+  "interpretation": {
+    "sampleSize": 2,
+    "completedInference": false,
+    "outputTextAvailable": false,
+    "allRecordedRunEventsThroughSettlementActive": true,
+    "failure": "MLX [Compiled::eval_cpu] CPU compilation not supported on the platform",
+    "elapsedMeaning": "Time until failed wrapper completion; neither CPU generation latency nor a throughput figure.",
+    "inferenceStateMeaning": "inference.apiBegin marks entry into the adapter API, not proof of a successful token prediction.",
+    "scope": "This pinned MLX CPU execution path failed; no claim that every MLX CPU configuration or an uncompiled path is impossible.",
+    "comparisonConclusion": "No successful matched MLX output, quality or performance baseline obtained.",
+    "anePlacementField": "Generic harness field is inapplicable to this CPU-only attempt.",
+    "sampledPeakScope": "Sampled process peak during failed attempt; not successful full-model inference memory."
+  }
+}

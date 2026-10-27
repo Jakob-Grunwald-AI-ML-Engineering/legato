@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "evidenceKind": "read-only-microphone-warmup-policy-inspection",
+  "acceptedDesign": "Prepare model during existing microphone warmup; preserve configured readiness/retention policy; evaluate background only after ready.",
+  "coldBackgroundStartupRequired": false,
+  "productionIntegrationImplemented": false,
+  "spikeWarmupMode": "Manual foreground model warmup; readiness/retention integration remains future work.",
+  "policy": {
+    "callPath": "AppController.perform(.arm) -> DictationCoordinator.arm(keepAlive:) -> DictationSession.armLease()",
+    "configuredRetention": "Settings.keepAliveLinger:0off,negativeindefinite,positiveconfiguredseconds",
+    "armWhenKeepReadyOffSeconds": 60,
+    "armFloorMeaning": "Lease retention after arming, not an initialization timeout.",
+    "overallPreparationDeadline": "No separate deadline found in inspected arming path; do not invent a numeric model-load deadline.",
+    "micStartAttempts": 8,
+    "micRetryDelayMs": 150,
+    "coordinatorRetrySettleDelayMs": 300,
+    "futureIntegration": "Prepare model before mic-ready acknowledgment; share existing lease expiry/teardown for microphone and model; no behavior change made."
+  },
+  "sources": {
+    "Apps/iOS/App/AppController.swift": {
+      "sha256": "daab64b170b124834c822823a088fc34ccba37d812f4175899903aa01e92d670",
+      "lineReferences": [
+        339,
+        351
+      ]
+    },
+    "Apps/iOS/App/Settings.swift": {
+      "sha256": "c4381c9bcf7585dd40dc322443ffb4b7ba6b209b8f3e0b71c3c73b1ac8d576f6",
+      "lineReferences": [
+        42,
+        59
+      ]
+    },
+    "Sources/LegatoCore/DictationCoordinator.swift": {
+      "sha256": "111603751331829d5505ca205850009c8efb14f74281e72a023495b81bc55ba6",
+      "lineReferences": [
+        285,
+        320
+      ]
+    },
+    "Sources/LegatoCore/DictationSession.swift": {
+      "sha256": "dfbe74f6008f890781e8d6edf601b6db4cdc786cc00bf8eb25a9969d9b13a8c7",
+      "lineReferences": [
+        625,
+        671
+      ]
+    },
+    "Sources/LegatoCore/Linger.swift": {
+      "sha256": "79ce0ac56ce45e831a782d0ee37b9ddd988cdb1f4844ea9e39d95c274b098301",
+      "lineReferences": [
+        32,
+        46
+      ]
+    },
+    "Sources/LegatoAudio/MicSource.swift": {
+      "sha256": "2dcdd3ac4d471887888e150ae881775bd4b3b0954e51aab03eafaceeea61f6d6",
+      "lineReferences": [
+        128,
+        130
+      ]
+    }
+  }
+}

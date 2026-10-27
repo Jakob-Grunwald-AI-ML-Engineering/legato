@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "sourceRevision": "a1b00f628f348c8ff55c9fe088e5db97535fd567",
+  "inspectionScope": "Local staged files, read-only static inspection; phone bytes/runtime type not reverified by this inventory.",
+  "metaYamlSHA256": "377114b49a7213f6212707347ea05ebdb07fc61b5ea6f812d085c2433430f535",
+  "expectedFFNPath": "gemma3_FFN_PF_lut6_chunk_01of01.mlmodelc",
+  "loaderLocalSHA256": "ab7f1c4015323909b9eb01e8186bed97f208940553163a5d1efd6d64d433733b",
+  "loaderContract": "YAML explicit ffn basename resolved beside meta.yaml;1chunk preserves chunk01of01;functionName infer then prefill then optional infer_rotate/prefill_rotate.",
+  "models": [
+    {
+      "directory": "gemma3_FFN_PF_lut6_chunk_01of01.mlmodelc",
+      "modelType": {
+        "name": "MLModelType_mlProgram"
+      },
+      "specificationVersion": 9,
+      "functions": [
+        "infer",
+        "infer_rotate",
+        "prefill",
+        "prefill_rotate"
+      ],
+      "milHeader": "program(1.3)",
+      "milFunctions": [
+        "infer",
+        "infer_rotate",
+        "prefill",
+        "prefill_rotate"
+      ],
+      "files": {
+        "metadata.json": {
+          "bytes": 18245,
+          "sha256": "8fa3fc9eae0c6c6c53559fa04efceb4a1d1492aeac45245c2938f64acd9fccb8"
+        },
+        "model.mil": {
+          "bytes": 4509841,
+          "sha256": "822060a955a3d25733e80d748cd9bacf19e0e17d088d16151d466eec601ae90c"
+        },
+        "coremldata.bin": {
+          "bytes": 1655,
+          "sha256": "ebf9f991115223c6521704e80eb9b03690d0dae486f8727f199bc4eabe097482"
+        }
+      }
+    },
+    {
+      "directory": "gemma3_embeddings_lut8.mlmodelc",
+      "modelType": {
+        "name": "MLModelType_mlProgram"
+      },
+      "specificationVersion": 9,
+      "functions": [],
+      "milHeader": "program(1.3)",
+      "milFunctions": [
+        "main"
+      ],
+      "files": {
+        "metadata.json": {
+          "bytes": 2054,
+          "sha256": "4478777a70eb5050bf17d27d74854b8d1fb3eac225a656d88a55244d345afc41"
+        },
+        "model.mil": {
+          "bytes": 2315,
+          "sha256": "910d986c8ab72c4bebf15d6df770e7958c395b0ea3c1a578e14598c46631bc5b"
+        },
+        "coremldata.bin": {
+          "bytes": 587,
+          "sha256": "1c69b647bec6f40ae75d785fc4f34cd72c24005fbadf40a89c835f71984dbe54"
+        }
+      }
+    },
+    {
+      "directory": "gemma3_lm_head_lut6.mlmodelc",
+      "modelType": {
+        "name": "MLModelType_mlProgram"
+      },
+      "specificationVersion": 9,
+      "functions": [],
+      "milHeader": "program(1.3)",
+      "milFunctions": [
+        "main"
+      ],
+      "files": {
+        "metadata.json": {
+          "bytes": 2457,
+          "sha256": "5f8788a6cd7da7d4f30a23f82917384f6a26caa80b0ee42e25e19796baf90956"
+        },
+        "model.mil": {
+          "bytes": 56788,
+          "sha256": "774fd3191f0b79c5f9a25410602f5b53a0b0ed46438cae39c5ee2005a3607c3d"
+        },
+        "coremldata.bin": {
+          "bytes": 600,
+          "sha256": "1227384eea5776e75f3f454bea85dd2877aae7e3c3865435478729e6da3759da"
+        }
+      }
+    }
+  ],
+  "conclusion": "No static local type/function/path contradiction found. Actual failing NSError and on-phone resolved model classification remain unresolved.",
+  "nextDiagnostics": [
+    "At ModelLoader load catch, preserve original NSError domain,code,userInfo and recursively underlying errors before conversion to ModelError(String).",
+    "Record on-device resolved URL, selected functionName, computeUnits and relevant file byte sizes/SHA256; compare exact FFN coremldata/metadata/MIL/weights with pinned manifest.",
+    "With serialized settled work, probe exact same compiled URL and infer config; inspect runtime modelDescription available function names/default, separating load from prediction.",
+    "A nil-function load may be a diagnostic control only; do not silently remove function selection or treat that as validated stateful infer/prefill behavior.",
+    "Reproduce under controlled lifecycle/thermal state and collect Core ML unified errors; do not attribute failure to thermal state, package corruption, caches or capture without evidence."
+  ]
+}

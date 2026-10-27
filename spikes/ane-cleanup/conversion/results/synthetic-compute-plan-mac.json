@@ -1,0 +1,9 @@
+{
+  "status": "estimated",
+  "preferred_operation_counts": {
+    "unknown": 331,
+    "MLCPUComputeDevice": 57,
+    "MLNeuralEngineComputeDevice": 151
+  },
+  "observed_dispatch": false
+}
