@@ -2,14 +2,18 @@ import LegatoCore
 import LegatoMeetings
 import SwiftUI
 
-/// The colour of a speaker: the palette index the meeting stores.
+/// The colour of a speaker: the palette index the meeting stores. Each colour is mixed toward the text colour so it
+/// reads on a light window as well as a dark one (system yellow and green alone do not).
 enum SpeakerPalette {
-    static let colors: [Color] = [.green, .blue, .purple, .orange, .pink, .teal, .yellow, .red]
-    static func color(_ index: Int) -> Color { colors[((index % colors.count) + colors.count) % colors.count] }
+    static let colors: [Color] = [.green, .blue, .purple, .orange, .pink, .teal, .brown, .red]
+    static func color(_ index: Int) -> Color {
+        colors[((index % colors.count) + colors.count) % colors.count].mix(with: .primary, by: 0.35)
+    }
 }
 
-/// The continuous transcript: a coloured speaker name over each run of one voice, a right-aligned timestamp
-/// that seeks the player, the tentative text of the phrase in progress while recording.
+/// The continuous transcript: a coloured speaker name over each run of one voice (click it to rename), a
+/// right-aligned timestamp that seeks the player, the tentative text of the phrase in progress while recording.
+/// A live transcript follows its newest line until the user scrolls up.
 struct MeetingTranscriptView: View {
     let segments: [MeetingSegment]
     let speakers: [PersonID: SpeakerInfo]
@@ -18,7 +22,16 @@ struct MeetingTranscriptView: View {
     /// The phrase being spoken now (recording only).
     var partial = ""
     var following = false
+    /// There is audio to play: without it the timestamps are plain text.
+    var canSeek = false
     let onSeek: (TimeInterval) -> Void
+    /// Gives a person a new name (the same name as another person's merges them).
+    let onRename: (PersonID, String) -> Void
+
+    @State private var follow = TranscriptFollow()
+    @State private var distanceFromBottom = 0.0
+    @State private var renaming: PersonID?
+    @State private var draft = ""
 
     var body: some View {
         let shown = visible
@@ -37,14 +50,33 @@ struct MeetingTranscriptView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             }
+            .onScrollGeometryChange(for: Double.self) { geometry in
+                max(0, geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize.height)
+            } action: { _, distance in
+                distanceFromBottom = distance
+            }
+            .onScrollPhaseChange { _, phase in
+                if phase == .idle { follow.scrollSettled(distanceFromBottom: distanceFromBottom) }
+            }
             .overlay {
                 if shown.isEmpty {
                     Text(query.isEmpty ? (following ? "Listening…" : "No transcript.") : "No match.")
                         .foregroundStyle(.secondary)
                 }
             }
-            .onChange(of: segments.count) { if following { proxy.scrollTo("end") } }
-            .onChange(of: partial) { if following { proxy.scrollTo("end") } }
+            .overlay(alignment: .bottom) {
+                if following, !follow.follows {
+                    Button {
+                        follow = TranscriptFollow()
+                        proxy.scrollTo("end")
+                    } label: { Label("Latest", systemImage: "arrow.down") }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        .padding(.bottom, 10)
+                        .accessibilityIdentifier("meeting.transcript.latest")
+                }
+            }
+            .onChange(of: segments.count) { if following, follow.follows { proxy.scrollTo("end") } }
+            .onChange(of: partial) { if following, follow.follows { proxy.scrollTo("end") } }
         }
     }
 
@@ -58,18 +90,55 @@ struct MeetingTranscriptView: View {
     private func row(_ segment: MeetingSegment, showsName: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
-                if showsName, let name = name(of: segment) {
-                    Text(name).font(.callout.weight(.semibold)).foregroundStyle(color(of: segment))
+                if showsName, let person = segment.speaker, let name = name(of: segment) {
+                    nameButton(person, name: name, color: color(of: segment))
                 }
                 Spacer()
                 Button { onSeek(segment.start) } label: {
                     Text(MeetingListLogic.clock(segment.start)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Play from here")
+                .disabled(!canSeek)
+                .help(canSeek ? "Play from here" : "There is no recording to play yet")
+                .accessibilityLabel("Play from \(MeetingListLogic.clock(segment.start))")
             }
             Text(segment.text).textSelection(.enabled)
         }
+    }
+
+    /// The name is a button: it opens a small field to rename the speaker, while recording too.
+    private func nameButton(_ person: PersonID, name: String, color: Color) -> some View {
+        Button {
+            draft = name
+            renaming = person
+        } label: {
+            Text(name).font(.callout.weight(.semibold)).foregroundStyle(color)
+        }
+        .buttonStyle(.plain)
+        .help("Rename this speaker")
+        .accessibilityLabel("Rename \(name)")
+        .accessibilityIdentifier("meeting.speaker.name")
+        .popover(isPresented: Binding(get: { renaming == person }, set: { if !$0 { renaming = nil } })) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Rename speaker").font(.headline)
+                TextField("Name", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .onSubmit { commitRename(person) }
+                Text("The same name as another speaker merges the two.").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { renaming = nil }.keyboardShortcut(.cancelAction)
+                    Button("Rename") { commitRename(person) }.keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(14)
+        }
+    }
+
+    private func commitRename(_ person: PersonID) {
+        renaming = nil
+        onRename(person, draft)
     }
 
     /// The speaker's name; none when unknown (meetings from before speakers included).

@@ -21,12 +21,12 @@ private struct Rig {
     let priorities = Box<[TaskPriority]>([])
     let result = Box(true)
 
-    func scheduler(immediate: Bool = false) -> ProcessingScheduler {
+    func scheduler(immediate: Bool = false, pollInterval: Duration? = nil) -> ProcessingScheduler {
         let now = self.now, sample = self.sample, recording = self.recording, ran = self.ran
         let running = self.running, maxRunning = self.maxRunning, priorities = self.priorities, result = self.result
         return ProcessingScheduler(
             clock: { now.current }, sample: { sample.current }, isRecording: { recording.current }, immediate: immediate,
-            pollInterval: nil,
+            pollInterval: pollInterval,
             work: { id in
                 running.update { $0 += 1 }
                 let now = running.current
@@ -206,5 +206,23 @@ private func idle(_ p: inout IdlePredicate, _ sample: IdleSample, isRecording: B
         await scheduler.tick()
         #expect(rig.ran.current == [first, first, second])
         #expect(await scheduler.queued.isEmpty)
+    }
+
+    @Test func processNowStartsAtOnceEvenWhileThePollerSleeps() async throws {
+        let rig = Rig()
+        // A poller that looks only every hour: Process now must not wait for its next look.
+        let scheduler = rig.scheduler(pollInterval: .seconds(3600))
+        let id = UUID()
+        await scheduler.enqueue(id)  // starts the poller; the machine is busy, so nothing runs
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(rig.ran.current.isEmpty)
+
+        await scheduler.processNow(id)
+        var waited = 0
+        while rig.ran.current.isEmpty, waited < 200 {
+            try await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        #expect(rig.ran.current == [id], "it ran without waiting for the poll")
     }
 }

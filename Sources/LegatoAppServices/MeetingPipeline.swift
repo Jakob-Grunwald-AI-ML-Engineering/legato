@@ -23,6 +23,14 @@ extension MeetingAudioWriter: MeetingAudioFinalizing {
     public func discardLosslessAudio() async { discardLossless() }
 }
 
+/// What a running pipeline says about its steps, for the banner: a step began, and how far it is.
+public enum PipelineStepEvent: Sendable, Equatable {
+    case started(Meeting.Step)
+    /// 0 to 1. Only steps that can tell report it: the post-pass (windows), the speaker pass (the model's chunks)
+    /// and the summary (chunks of the transcript, then the merge).
+    case progress(Meeting.Step, Double)
+}
+
 /// The after-stop chain of a meeting, in two parts.
 ///
 /// - ``runAudio(meetingID:)`` is cheap and runs at once when the meeting stops: the CAF tracks become m4a
@@ -71,6 +79,7 @@ public struct MeetingPipeline: Sendable {
     private let releaseModels: @Sendable () async -> Void
     private let releasePostPassModels: @Sendable () async -> Void
     private var onStep: @Sendable (Meeting.Step) -> Void
+    private var onEvent: @Sendable (PipelineStepEvent) async -> Void = { _ in }
 
     /// - Parameters:
     ///   - audio: the recordings of the meeting whose folder is given.
@@ -116,6 +125,15 @@ public struct MeetingPipeline: Sendable {
         return copy
     }
 
+    /// This pipeline, also telling `onEvent` when each step starts and how far it is. Events come in the order
+    /// they happen: `onEvent` has returned for one before the next is sent.
+    public func reportingEvents(_ onEvent: @escaping @Sendable (PipelineStepEvent) async -> Void) -> MeetingPipeline {
+        var copy = self
+        let previous = self.onEvent
+        copy.onEvent = { await previous($0); await onEvent($0) }
+        return copy
+    }
+
     // MARK: Chain
 
     /// The audio step, then the deferred steps. A meeting that is not `processing` or `interrupted` is left alone.
@@ -135,6 +153,7 @@ public struct MeetingPipeline: Sendable {
     public func runAudio(meetingID: UUID) async throws -> Outcome {
         var outcome = Outcome()
         guard let meeting = try await processable(meetingID), !meeting.completedSteps.contains(.audio) else { return outcome }
+        await onEvent(.started(.audio))
         let failed = try await audio(await store.folder(for: meetingID)).finalizeAudio()
         if failed.isEmpty {
             try await complete(.audio, meetingID)
@@ -158,9 +177,12 @@ public struct MeetingPipeline: Sendable {
         var improved = false
 
         if !meeting.completedSteps.contains(.postPass), let batch = await transcriber() {
+            await onEvent(.started(.postPass))
             await releaseModels()
             do {
-                try await MeetingPostPass(store: store, reader: recordings, transcriber: batch).run(meetingID: meetingID)
+                let report = onEvent
+                try await MeetingPostPass(store: store, reader: recordings, transcriber: batch)
+                    .run(meetingID: meetingID, progress: { await report(.progress(.postPass, $0)) })
                 try await complete(.postPass, meetingID)
                 improved = true
             } catch is CancellationError {
@@ -185,6 +207,7 @@ public struct MeetingPipeline: Sendable {
         if !stepFailed { await recordings.discardLosslessAudio() }
 
         if !meeting.completedSteps.contains(.summary) || improved {
+            await onEvent(.started(.summary))
             try await automaticSummary(meetingID, outcome: &outcome)
         }
 
@@ -218,13 +241,14 @@ public struct MeetingPipeline: Sendable {
     /// file and changes nothing else about the meeting. Returns the file.
     @discardableResult
     public func summarize(meetingID: UUID, using backend: any LLMBackend) async throws -> URL {
+        let report = onEvent
         let meeting = try await store.meeting(id: meetingID)
         let segments = try await store.segments(for: meetingID)
         let notes = (try? await store.notes(for: meetingID)) ?? ""
         let template = SummaryTemplate.find(meeting?.templateID ?? SummaryTemplate.summaryID, custom: templates()) ?? .summary
         let text = try await MeetingSummarizer(
             backend: backend, template: template, notes: notes, language: meeting?.locale, speakers: meeting?.speakers ?? [:]
-        ).summarize(segments: segments)
+        ).summarize(segments: segments, progress: { await report(.progress(.summary, $0)) })
         try await store.saveSummary(text, backendID: backend.id, templateID: template.id, for: meetingID)
         return await store.summaryURL(for: meetingID, templateID: template.id, backendID: backend.id)
     }
@@ -266,14 +290,23 @@ public struct MeetingPipeline: Sendable {
         let duration = (try? await recordings.duration(of: .mixed)) ?? 0
         guard duration > 0, let mix = recordings.recordingURL(of: .mixed) else { return nil }
         let turns: [SpeakerTurn]
+        // The model reports from its own thread; one task passes the reports on in order.
+        let (reports, reporter) = AsyncStream<Double>.makeStream()
+        let report = onEvent
+        let forwarding = Task { for await fraction in reports { await report(.progress(.diarize, fraction)) } }
         do {
             try Task.checkCancellation()
-            turns = try await diarizer.diarize(file: mix)
+            await onEvent(.started(.diarize))
+            turns = try await diarizer.diarize(file: mix, progress: { reporter.yield($0) })
+            reporter.finish()
+            await forwarding.value
             try Task.checkCancellation()
         } catch is CancellationError {
+            reporter.finish()
             await releaseDiarizer()
             throw CancellationError()
         } catch {
+            reporter.finish()
             await releaseDiarizer()
             outcome.notes.append("The speaker pass failed, so the speakers stay as they were: \(error)")
             return false

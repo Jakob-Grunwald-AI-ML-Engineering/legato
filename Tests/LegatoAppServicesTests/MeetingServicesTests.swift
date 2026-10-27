@@ -594,6 +594,72 @@ private final class TrackSink: MeetingAudioSink {
         #expect(try await rig.store.summaries(for: id).map(\.backendID) == ["blocking"])
     }
 
+    // MARK: What the heavy steps are doing (the banner's source)
+
+    @Test func theStageFollowsAMeetingFromQueuedThroughItsStepsToGone() async throws {
+        let rig = Rig()
+        let services = rig.services()
+        let id = try await seed(rig)
+        let seen = Mutex<[ProcessingStage?]>([])
+        services.onProgress = { changed, stage in if changed == id { seen.withLock { $0.append(stage) } } }
+
+        #expect(services.stage(of: id) == nil)
+        try await services.processAfterStop(id)
+        #expect(services.stage(of: id) == .queued, "waiting for an idle machine is not working")
+
+        await services.scheduler.tick()  // the machine is busy: still only waiting
+        #expect(services.stage(of: id) == .queued)
+        #expect(!seen.withLock { $0 }.contains { $0?.isRunning == true }, "nothing claimed to run while waiting")
+
+        rig.load.value = IdleSample(cpuLoad: 0.9, secondsSinceInput: 61)
+        await services.scheduler.tick()
+        let stages = seen.withLock { $0 }
+        #expect(stages.first == .queued)
+        #expect(stages.contains(.running(.summary)), "the summary step says it started")
+        #expect(stages.contains(.running(.summary, progress: 0.5)), "and how far it is: one chunk, then the merge")
+        #expect(stages.last == .some(nil), "gone once the steps are done")
+        #expect(services.stage(of: id) == nil)
+    }
+
+    @Test func aJobCutShortByARecordingGoesBackToWaiting() async throws {
+        let rig = Rig()
+        let blocking = BlockingLLM()
+        let services = MeetingServices(
+            models: rig.models, store: rig.store, settings: rig.settings, keyStore: rig.keys,
+            cleanup: CleanupRegistry(models: rig.models.manager, foundationModels: blocking),
+            sampler: { .idle }, immediateProcessing: false, pollInterval: nil)
+        let id = try await seed(rig)
+        try await services.processAfterStop(id)
+        let tick = Task { await services.scheduler.tick() }
+        #expect(await eventually(timeout: .seconds(2)) { await MainActor.run { services.stage(of: id)?.isRunning == true } })
+
+        services.setRecording(true)
+        await tick.value
+        #expect(services.stage(of: id) == .queued, "the banner says waiting again, not still working")
+    }
+
+    @Test func processNowQueuesAMeetingTheServiceDidNotKnowYet() async throws {
+        let rig = Rig()
+        let services = rig.services()
+        let id = try await seed(rig)
+        await services.processNow(id)
+        #expect(services.stage(of: id) == .queued)
+    }
+
+    @Test func regenerateReportsTheSummaryStepWhileItRunsAndThenNothing() async throws {
+        let rig = Rig()
+        let services = rig.services()
+        let id = UUID()
+        try await rig.store.create(Meeting(id: id, title: "Done", date: Date(), duration: 10, engineID: "live", state: .finished, completedSteps: [.audio, .summary]))
+        try await rig.store.appendSegment(MeetingSegment(stream: .mixed, text: "we ship friday", start: 0, end: 3), to: id)
+        let seen = Mutex<[ProcessingStage?]>([])
+        services.onProgress = { changed, stage in if changed == id { seen.withLock { $0.append(stage) } } }
+        try await services.regenerate(meetingID: id)
+        #expect(seen.withLock { $0 }.first == .running(.summary))
+        #expect(seen.withLock { $0 }.last == .some(nil))
+        #expect(services.stage(of: id) == nil)
+    }
+
     @Test func manualProcessingIsRefusedWhileAMeetingRecords() async throws {
         let rig = Rig()
         let services = rig.services(claudeBackend: rig.claude)

@@ -41,7 +41,11 @@ struct MeetingsView: View {
                             if meetings.isRecording { opened = meetings.liveMeetingID }
                         }
                     } label: {
-                        Label("Start meeting", systemImage: "plus")
+                        if meetings.phase == .starting {
+                            ProgressView()  // the model loads and the audio session opens: the tap did something
+                        } else {
+                            Label("Start meeting", systemImage: "plus")
+                        }
                     }
                     .disabled(meetings.isActive || controller.isDictating)
                     .accessibilityIdentifier("meetings.start")

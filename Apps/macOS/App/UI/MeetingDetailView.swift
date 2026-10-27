@@ -15,6 +15,11 @@ struct MeetingDetailView: View {
     @State private var summaries: [MeetingStore.Summary] = []
     @State private var notes = ""
     @State private var notesLoaded = false
+    /// The notes as last handed to the store, so a leave or a debounce saves only what changed.
+    @State private var notesSaved = ""
+    /// The meeting is being discarded: nothing of it is saved any more.
+    @State private var discarded = false
+    @FocusState private var searchFocused: Bool
     @State private var showTranscript = true
     @State private var searching = false
     @State private var query = ""
@@ -28,7 +33,7 @@ struct MeetingDetailView: View {
     private var isLive: Bool { meetings.liveMeetingID == meetingID }
     private var meeting: Meeting? { isLive ? meetings.live?.meeting ?? current : current }
     private var shownSegments: [MeetingSegment] { isLive ? meetings.live?.segments ?? [] : segments }
-    private var working: Bool { meetings.busy.contains(meetingID) }
+    private var working: Bool { meetings.isWorking(meetingID) }
 
     var body: some View {
         Group {
@@ -40,15 +45,17 @@ struct MeetingDetailView: View {
         }
         .toolbar { toolbar }
         .task(id: meetings.revision) { await reload() }
-        .onChange(of: notes) { _, text in
-            guard notesLoaded else { return }
-            Task {
-                try? await Task.sleep(for: .milliseconds(600))
-                guard !Task.isCancelled, text == notes else { return }
-                await meetings.saveNotes(text, for: meetingID)
-            }
+        // A new task per edit: the last edit saves after 600 ms, and leaving the view cancels it (and flushes below).
+        .task(id: notes) {
+            guard notesLoaded, !discarded, notes != notesSaved else { return }
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled, !discarded else { return }
+            flushNotes()
         }
-        .onDisappear { player?.pause() }
+        .onDisappear {
+            player?.pause()
+            flushNotes()
+        }
         .confirmationDialog("End this meeting?", isPresented: $confirmEnd, titleVisibility: .visible) {
             Button("End meeting") { Task { await meetings.stop() } }
             Button("Keep recording", role: .cancel) {}
@@ -57,6 +64,7 @@ struct MeetingDetailView: View {
         }
         .confirmationDialog("Discard this meeting?", isPresented: $confirmDiscard, titleVisibility: .visible) {
             Button("Discard meeting", role: .destructive) {
+                discarded = true  // a note typed a moment ago must not bring the folder back
                 Task {
                     await meetings.discard()
                     onBack()
@@ -81,8 +89,8 @@ struct MeetingDetailView: View {
 
     private func content(_ meeting: Meeting) -> some View {
         HStack(spacing: 0) {
-            MeetingDocumentView(meeting: meeting, isLive: isLive, summaries: summaries, working: working, notes: $notes)
-                .overlay(alignment: .bottom) { bottomBar }
+            MeetingDocumentView(meeting: meeting, isLive: isLive, summaries: summaries, notes: $notes)
+                .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             if showTranscript {
                 Divider()
                 transcriptPane(meeting)
@@ -108,54 +116,88 @@ struct MeetingDetailView: View {
             } else {
                 HStack(spacing: 6) {
                     if searching {
-                        TextField("Search the transcript", text: $query).textFieldStyle(.roundedBorder)
+                        TextField("Search the transcript", text: $query)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($searchFocused)
+                            .accessibilityIdentifier("meeting.transcript.search")
                     }
                     Spacer(minLength: 0)
                     Button {
                         searching.toggle()
-                        if !searching { query = "" }
+                        if searching { searchFocused = true } else { query = "" }
                     } label: { Image(systemName: "magnifyingglass") }
-                        .buttonStyle(.borderless).help("Search the transcript")
+                        .buttonStyle(.borderless).help("Search the transcript (⌘F)")
+                        .keyboardShortcut("f", modifiers: .command)
+                        .accessibilityLabel("Search the transcript")
                     Button { assigning = true } label: { Image(systemName: "person.2") }
-                        .buttonStyle(.borderless).help("Assign speakers")
+                        .buttonStyle(.borderless)
+                        .help(assignHelp(meeting))
                         .disabled(isLive || meeting.speakers.isEmpty)
+                        .accessibilityLabel("Assign speakers")
+                        .accessibilityIdentifier("meeting.speakers")
                 }
                 .padding(.horizontal, 16).padding(.top, 10)
                 MeetingTranscriptView(
                     segments: shownSegments, speakers: meeting.speakers, query: query,
                     partial: isLive ? meetings.live?.volatile[.mixed] ?? "" : "", following: isLive,
+                    canSeek: player != nil && !isLive,
                     onSeek: { time in
                         player?.seek(to: time)
                         player?.play()
-                    })
+                    },
+                    onRename: { person, name in Task { await meetings.renameSpeaker(person, to: name, in: meetingID) } })
             }
         }
     }
 
-    /// Mute, pause, end, discard and the clock, over the document while recording.
+    /// Why Assign speakers is off, or what it does.
+    private func assignHelp(_ meeting: Meeting) -> String {
+        if isLive { return "Available after the meeting ends. Click a speaker's name in the transcript to rename it now." }
+        if meeting.speakers.isEmpty { return "No speakers were told apart in this meeting" }
+        return "Assign speakers"
+    }
+
+    /// Mute, pause, end, discard and the clock, below the document while recording. At a narrow width the buttons
+    /// shrink to their icons (the names stay in the tooltips and for VoiceOver).
     private var recordingBar: some View {
         let state = meetings.pillState
-        return HStack(spacing: 12) {
+        return ViewThatFits(in: .horizontal) {
+            recordingControls(state, compact: false)
+            recordingControls(state, compact: true)
+        }
+        .padding(.bottom, 14)
+    }
+
+    private func recordingControls(_ state: MeetingPillState, compact: Bool) -> some View {
+        HStack(spacing: 12) {
             Circle().fill(state.paused ? Color.orange : Color.red).frame(width: 9, height: 9)
             Text(MeetingListLogic.clock(meetings.elapsed)).font(.body.monospacedDigit().weight(.medium))
-            Text(state.label).font(.caption).foregroundStyle(.secondary)
+            if !compact { Text(state.label).font(.caption).foregroundStyle(.secondary) }
             Divider().frame(height: 16)
             Button { meetings.toggleManualMute() } label: {
                 Label(meetings.isMuted ? "Unmute" : "Mute", systemImage: meetings.isMuted ? "mic.slash.fill" : "mic.fill")
             }
+            .help(meetings.isMuted ? "Unmute the microphone" : "Mute the microphone")
+            .accessibilityIdentifier("meeting.mute")
             Button { meetings.togglePause() } label: {
                 Label(state.paused ? "Resume" : "Pause", systemImage: state.paused ? "play.fill" : "pause.fill")
             }
+            .help(state.paused ? "Resume the meeting" : "Pause the meeting")
+            .accessibilityIdentifier("meeting.pause")
             Button { confirmEnd = true } label: { Label("End", systemImage: "stop.fill") }
                 .tint(.red)
+                .help("End the meeting")
+                .accessibilityIdentifier("meeting.stop")
             Button(role: .destructive) { confirmDiscard = true } label: { Label("Discard", systemImage: "trash") }
+                .help("Discard the meeting")
+                .accessibilityIdentifier("meeting.discard")
         }
-        .labelStyle(.titleAndIcon)
+        .labelStyle(CompactLabelStyle(compact: compact))
         .buttonStyle(.plain)
         .disabled(!state.controlsEnabled)
         .padding(.horizontal, 18).padding(.vertical, 10)
         .glassEffect(.regular, in: Capsule())
-        .padding(.bottom, 14)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     // MARK: Toolbar
@@ -164,6 +206,7 @@ struct MeetingDetailView: View {
         ToolbarItem(placement: .navigation) {
             Button(action: onBack) { Label("Meetings", systemImage: "chevron.left") }
                 .help("Back to the list")
+                .accessibilityIdentifier("meeting.back")
         }
         ToolbarItem(placement: .principal) {
             Text(meeting?.title ?? "Meeting").font(.headline).foregroundStyle(.secondary)
@@ -172,6 +215,7 @@ struct MeetingDetailView: View {
             ToolbarItem {
                 Button { meetings.togglePill() } label: { Label("Shrink to pill", systemImage: "rectangle.compress.vertical") }
                     .help("Shrink to a floating pill (⌃⌘M)")
+                    .accessibilityIdentifier("meeting.pill")
             }
         } else if let meeting {
             ToolbarItem {
@@ -187,11 +231,14 @@ struct MeetingDetailView: View {
                     .disabled(working || !meetings.hasClaudeKey)
                     if !meetings.hasClaudeKey { Text("Add a Claude key in Settings > Meetings") }
                 } label: { Label("More", systemImage: "ellipsis") }
+                    .help("More actions")
+                    .accessibilityIdentifier("meeting.more")
             }
         }
         ToolbarItem {
             Button { showTranscript.toggle() } label: { Label("Transcript", systemImage: "sidebar.right") }
                 .help(showTranscript ? "Hide the transcript" : "Show the transcript")
+                .accessibilityIdentifier("meeting.transcript.toggle")
         }
     }
 
@@ -207,10 +254,21 @@ struct MeetingDetailView: View {
         if !notesLoaded || !isLive {
             // Notes are the user's own: reload only when not typing (the first load, and after a finished chain).
             let stored = await meetings.notes(of: meetingID)
-            if !notesLoaded { notes = stored }
+            if !notesLoaded {
+                notesSaved = stored
+                notes = stored
+            }
             notesLoaded = true
         }
         if !isLive { await preparePlayer() }
+    }
+
+    /// Hands changed notes to the store now (the debounce fired, or the view is going away). Never after a discard.
+    private func flushNotes() {
+        guard notesLoaded, !discarded, notes != notesSaved else { return }
+        let text = notes
+        notesSaved = text
+        Task { await meetings.saveNotes(text, for: meetingID) }
     }
 
     private func preparePlayer() async {
@@ -221,6 +279,19 @@ struct MeetingDetailView: View {
             let made = MeetingPlayer(folder: folder)
             try? made.load()
             player = made
+        }
+    }
+}
+
+/// Title and icon, or the icon alone at a narrow width.
+private struct CompactLabelStyle: LabelStyle {
+    let compact: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        if compact {
+            configuration.icon
+        } else {
+            HStack(spacing: 4) { configuration.icon; configuration.title }
         }
     }
 }

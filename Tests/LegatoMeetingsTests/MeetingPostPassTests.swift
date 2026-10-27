@@ -99,6 +99,31 @@ private final class BurstTranscriber: BatchTranscriber {
         #expect(cuts[2] == 1_500)
     }
 
+    @Test func theMixPassReportsTheShareOfTheRecordingTranscribedAfterEachWindow() async throws {
+        let (store, meeting, root) = try await setUp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let seen = Mutex<[Double]>([])
+        try await MeetingPostPass(store: store, reader: FakeRecording(hasMix: true), transcriber: BurstTranscriber())
+            .run(meetingID: meeting.id, progress: { f in seen.withLock { $0.append(f) } })
+        let values = seen.withLock { $0 }
+        #expect(values.count == 3, "three windows of the 25-minute mix")
+        #expect(values == values.sorted() && values.allSatisfy { $0 > 0 && $0 <= 1 })
+        #expect((585.0 / 1500 - 0.01...587.0 / 1500 + 0.01).contains(values[0]))
+        #expect(values.last == 1)
+    }
+
+    @Test func anOldMeetingWithTwoRecordingsReportsOneRunningShareAcrossBoth() async throws {
+        let (store, meeting, root) = try await setUp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let seen = Mutex<[Double]>([])
+        try await MeetingPostPass(store: store, reader: FakeRecording(), transcriber: BurstTranscriber())
+            .run(meetingID: meeting.id, progress: { f in seen.withLock { $0.append(f) } })
+        let values = seen.withLock { $0 }
+        #expect(values.count == 6)
+        #expect(values == values.sorted() && values.last == 1)
+        #expect(values[2] < 0.51 && values[2] > 0.49, "the mic recording is half the work")
+    }
+
     @Test func offsetsRangesIncludingAfterAMutedRange() async throws {
         let (store, meeting, root) = try await setUp()
         defer { try? FileManager.default.removeItem(at: root) }

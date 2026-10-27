@@ -40,9 +40,11 @@ struct SpeakersSheet: View {
                 }
             }
         }
+        // Swiping the sheet down is leaving too: a name typed without Return is kept.
         .onDisappear {
             stopSample?.cancel()
             player?.pause()
+            commitAll()
         }
     }
 
@@ -66,7 +68,9 @@ struct SpeakersSheet: View {
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(color)
                     .submitLabel(.done)
+                    .textFieldStyle(.roundedBorder)
                     .onSubmit { commit(id, current: info.name) }
+                    .accessibilityLabel("Name of \(info.name)")
                 Spacer()
                 Button { if let sample { play(sample) } } label: {
                     Image(systemName: "play.fill").foregroundStyle(color).frame(width: 32, height: 32)
@@ -89,13 +93,11 @@ struct SpeakersSheet: View {
 
     /// Renames in order, one after the other: a merge changes the people the next rename sees.
     private func commitAll() {
-        let changes = speakers.compactMap { id, info -> (PersonID, String)? in
-            guard let draft = drafts[id], draft != info.name else { return nil }
-            return (id, draft)
-        }
+        let changes = SpeakerDirectory.pendingRenames(drafts: drafts, speakers: speakers)
         drafts = [:]
+        guard !changes.isEmpty else { return }
         let controller = controller, meetingID = meetingID
-        Task { for (id, name) in changes { await controller.renameSpeaker(id, to: name, in: meetingID) } }
+        Task { for change in changes { await controller.renameSpeaker(change.id, to: change.name, in: meetingID) } }
     }
 
     /// Plays the segment, then stops at its end.

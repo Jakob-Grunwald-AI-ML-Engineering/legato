@@ -148,6 +148,14 @@ private final class FakeOfflineRunner: OfflineDiarizationRunner {
     private let fileCalls = Mutex<[URL]>([])
     var files: [URL] { fileCalls.withLock { $0 } }
 
+    /// The (chunksProcessed, totalChunks) pairs the pipeline reports during a file run.
+    let chunkProgress = Mutex<[(Int, Int)]>([])
+
+    func run(file: URL, hints: DiarizationHints, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult {
+        for (done, total) in chunkProgress.withLock({ $0 }) { progress?(done, total) }
+        return try await run(file: file, hints: hints)
+    }
+
     func run(file: URL, hints: DiarizationHints) async throws -> DiarizationResult {
         fileCalls.withLock { $0.append(file) }
         let next = state.withLock { s -> Result<DiarizationResult, any Error> in
@@ -203,6 +211,21 @@ struct OfflineSpeakerDiarizerTests {
         let turns = try await OfflineSpeakerDiarizer(runner: runner).diarize(file: url)
         #expect(turns == [SpeakerTurn(speaker: "S1", start: 0, end: 2)])
         #expect(runner.files == [url])
+    }
+
+    @Test func theModelsChunkProgressBecomesAFractionOfTheRecording() async throws {
+        let runner = FakeOfflineRunner([.success(result([segment("S1", 0, 2, [1, 0])], database: ["S1": [1, 0]]))])
+        runner.chunkProgress.withLock { $0 = [(1, 4), (2, 4), (4, 4)] }
+        let seen = Mutex<[Double]>([])
+        _ = try await OfflineSpeakerDiarizer(runner: runner).diarize(
+            file: URL(fileURLWithPath: "/meeting/mix.caf"), progress: { f in seen.withLock { $0.append(f) } })
+        #expect(seen.withLock { $0 } == [0.25, 0.5, 1])
+    }
+
+    @Test func aDiarizerWithoutProgressStillDiarizesAFile() async throws {
+        let runner = FakeOfflineRunner([.success(result([segment("S1", 0, 2, [1, 0])], database: ["S1": [1, 0]]))])
+        let turns = try await OfflineSpeakerDiarizer(runner: runner).diarize(file: URL(fileURLWithPath: "/m.caf"), progress: nil)
+        #expect(turns == [SpeakerTurn(speaker: "S1", start: 0, end: 2)])
     }
 
     @Test func aRecordingFileWithoutSpeechHasNoTurns() async throws {

@@ -342,6 +342,33 @@ public actor MeetingSession {
         return meeting
     }
 
+    /// Gives a person a name while the meeting runs. Another person with that name merges with this one. The
+    /// session owns the people while it records, so the rename goes through it: it shows in the next snapshot, is
+    /// saved, and the diarizer's later turn updates keep it (they only add people for clusters never seen).
+    public func renameSpeaker(_ person: PersonID, to name: String) {
+        guard !stopped, !discarded, directory.speakers[person] != nil else { return }
+        let merge = directory.rename(person, to: name)
+        directory.save(into: &meeting)
+        if let merge {
+            // The diarizer's cluster for the merged person is the other person's from now on.
+            for (cluster, owner) in clusterPerson where owner == merge.from { clusterPerson[cluster] = merge.into }
+            segments = merge.apply(to: segments)
+            settledTurns = merge.apply(to: settledTurns)
+            recentTurns = merge.apply(to: recentTurns)
+            markSegmentsDirty()
+            let turns = settledTurns
+            save { [store, id = meeting.id] in try await store.saveLiveTurns(turns, for: id) }
+        }
+        let (people, merged) = (directory.speakers, directory.merged)
+        save { [store, id = meeting.id] in
+            try await store.update(id: id) { m in
+                m.speakers = people
+                m.mergedSpeakers = merged
+            }
+        }
+        publish()
+    }
+
     /// Stops the capture and removes the meeting: its folder and everything recorded or saved in it. Nothing
     /// of the meeting is kept, and a later ``stop()`` does nothing.
     public func discard() async {

@@ -439,6 +439,78 @@ import LegatoCore
         _ = await rig.session.stop()
     }
 
+    // MARK: Renaming while recording
+
+    @Test func aRenameDuringRecordingSurvivesTheNextLiveTurnUpdate() async throws {
+        let diarizer = FakeDiarizer()
+        let rig = Rig(diarizer: diarizer)
+        defer { rig.cleanup() }
+        let latest = Mutex<MeetingSnapshot?>(nil)
+        let snapshots = rig.session.snapshots
+        let collector = Task { for await s in snapshots { latest.withLock { $0 = s } } }
+        defer { collector.cancel() }
+        try await rig.session.start()
+        diarizer.script([SpeakerTurn(speaker: "c0", start: 0, end: 9), SpeakerTurn(speaker: "c1", start: 9, end: 12)])
+        rig.clock.now = 10
+        rig.micSource.push(tone(1_600))
+        rig.engine.emit(finalEvent("First voice.", 7.5..<8.5))
+        #expect(await eventually { (try? await rig.store.meeting(id: rig.meeting.id))?.speakers.count == 2 })
+
+        await rig.session.renameSpeaker("P1", to: "Anna")
+        #expect(await eventually { latest.withLock { $0 }?.meeting.speakers["P1"]?.name == "Anna" }, "the live window sees it at once")
+        #expect(await eventually { (try? await rig.store.meeting(id: rig.meeting.id))?.speakers["P1"]?.name == "Anna" }, "and it is saved")
+
+        // The diarizer moves on: a third voice joins, and the same clusters are answered again.
+        diarizer.script([
+            SpeakerTurn(speaker: "c0", start: 0, end: 9), SpeakerTurn(speaker: "c1", start: 9, end: 12),
+            SpeakerTurn(speaker: "c2", start: 12, end: 14),
+        ])
+        rig.clock.now = 15
+        rig.micSource.push(tone(1_600))
+        #expect(await eventually { (try? await rig.store.meeting(id: rig.meeting.id))?.speakers.count == 3 })
+        let saved = try #require(try await rig.store.meeting(id: rig.meeting.id))
+        #expect(saved.speakers["P1"]?.name == "Anna", "the next turn update did not bring 'Speaker 1' back")
+        #expect(saved.speakers["P3"]?.name == "Speaker 3")
+        #expect(await eventually { latest.withLock { $0 }?.meeting.speakers["P1"]?.name == "Anna" })
+        let finished = await rig.session.stop()
+        #expect(finished.speakers["P1"]?.name == "Anna")
+        #expect(try await rig.store.meeting(id: rig.meeting.id)?.speakers["P1"]?.name == "Anna")
+    }
+
+    @Test func renamingToAnExistingNameDuringRecordingMergesAndTheMergedVoiceStaysMerged() async throws {
+        let diarizer = FakeDiarizer()
+        let rig = Rig(diarizer: diarizer)
+        defer { rig.cleanup() }
+        try await rig.session.start()
+        diarizer.script([SpeakerTurn(speaker: "c0", start: 6, end: 8), SpeakerTurn(speaker: "c1", start: 8, end: 9.5)])
+        rig.clock.now = 10
+        rig.micSource.push(tone(1_600))
+        rig.engine.emit(finalEvent("One.", 7..<7.9))
+        rig.engine.emit(finalEvent("Two.", 8.5..<9.5))
+        #expect(await eventually { await rig.stored().map(\.speaker) == ["P1", "P2"] })
+
+        await rig.session.renameSpeaker("P2", to: "speaker 1")  // P1's name, in other case: the same person
+        #expect(await eventually { await rig.stored().map(\.speaker) == ["P1", "P1"] }, "the segments follow the merge")
+
+        // The diarizer still says c1: it must stay with P1, not become a new person.
+        diarizer.script([
+            SpeakerTurn(speaker: "c0", start: 6, end: 8), SpeakerTurn(speaker: "c1", start: 8, end: 9.5),
+            SpeakerTurn(speaker: "c1", start: 11, end: 13),
+        ])
+        rig.clock.now = 14
+        rig.micSource.push(tone(1_600))
+        rig.engine.emit(finalEvent("Three.", 11.5..<12.5))
+        #expect(await eventually { await rig.stored().count == 3 })
+        #expect(await eventually { await rig.stored().last?.speaker == "P1" })
+        let finished = await rig.session.stop()
+        #expect(finished.speakers.keys.sorted() == ["P1"])
+        #expect(finished.mergedSpeakers == ["P2": "P1"])
+        let onDisk = try #require(try await rig.store.meeting(id: rig.meeting.id))
+        #expect(onDisk.speakers.keys.sorted() == ["P1"], "the merged-away person was not written back")
+        #expect(try await rig.store.liveTurns(for: rig.meeting.id).allSatisfy { $0.speaker == "P1" })
+        #expect(await rig.stored().allSatisfy { $0.speaker == "P1" })
+    }
+
     @Test func aDiarizerThatFailsIsReportedAndTheRecordingGoesOn() async throws {
         let diarizer = FakeDiarizer()
         diarizer.failFeeds()

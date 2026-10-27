@@ -405,6 +405,22 @@ import LegatoCore
         #expect(try await store.summaries(for: m.id).first?.isStale == true)
     }
 
+    @Test func savingNotesAfterTheMeetingWasDiscardedDoesNotBringItsFolderBack() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let m = meeting("Gone", at: 1)
+        try await store.create(m)
+        try await store.saveNotes("first", for: m.id)
+        try await store.deleteMeeting(id: m.id)
+
+        // The window's 600 ms notes debounce can fire after Discard.
+        try await store.saveNotes("typed just before Discard", for: m.id)
+        #expect(!FileManager.default.fileExists(atPath: await store.folder(for: m.id).path), "no ghost folder")
+        #expect(try await store.meetings().isEmpty)
+        #expect(try await store.notes(for: m.id) == nil)
+    }
+
     @Test func clearingNotesThatWereNeverThereLeavesTheSummaryFresh() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }

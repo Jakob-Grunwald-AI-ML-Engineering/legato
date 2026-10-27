@@ -10,6 +10,38 @@ struct MeetingsWindow: View {
     private var meetings: MeetingController { app.meetings }
 
     var body: some View {
+        VStack(spacing: 0) {
+            globalNotices
+            content
+        }
+        .frame(minWidth: 760, minHeight: 480)
+        .task { await meetings.refresh() }
+        .onChange(of: meetings.liveMeetingID) { _, id in
+            if let id { selection = id }
+        }
+        .onAppear { if let id = meetings.liveMeetingID { selection = id } }
+    }
+
+    /// What went wrong with the app itself (a meeting that did not start), above the list or the open meeting, until dismissed.
+    @ViewBuilder private var globalNotices: some View {
+        ForEach(meetings.notices.global) { notice in
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                Text(notice.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button { meetings.dismissNotice(notice.id) } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless).controlSize(.small)
+                    .help("Dismiss")
+                    .accessibilityLabel("Dismiss")
+            }
+            .padding(10)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 20).padding(.top, 10)
+            .accessibilityIdentifier("meetings.notice")
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         Group {
             if meetings.phase == .starting {
                 startingView
@@ -20,12 +52,6 @@ struct MeetingsWindow: View {
                 MeetingListView(selection: $selection)
             }
         }
-        .frame(minWidth: 760, minHeight: 480)
-        .task { await meetings.refresh() }
-        .onChange(of: meetings.liveMeetingID) { _, id in
-            if let id { selection = id }
-        }
-        .onAppear { if let id = meetings.liveMeetingID { selection = id } }
     }
 
     /// While the speech model loads (minutes the first time), with a way out.

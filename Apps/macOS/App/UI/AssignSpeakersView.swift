@@ -14,12 +14,18 @@ struct AssignSpeakersView: View {
 
     @State private var drafts: [PersonID: String] = [:]
     @State private var stopSample: Task<Void, Never>?
+    @FocusState private var focused: PersonID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Button(action: onClose) { Image(systemName: "chevron.left") }
+                Button {
+                    commitAll()
+                    onClose()
+                } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(.borderless)
+                    .help("Back to the transcript")
+                    .accessibilityLabel("Back to the transcript")
                 Text("Assign speakers").font(.headline)
             }
             .padding(.horizontal, 20).padding(.top, 12)
@@ -35,7 +41,15 @@ struct AssignSpeakersView: View {
                 .padding(.horizontal, 20)
             }
         }
-        .onDisappear { stopSample?.cancel() }
+        // A name typed without Return is kept when the field loses focus or the view goes away; the sample stops.
+        .onChange(of: focused) { old, _ in
+            if let old { commit(old, current: speakers[old]?.name ?? "") }
+        }
+        .onDisappear {
+            stopSample?.cancel()
+            player?.pause()
+            commitAll()
+        }
     }
 
     private var people: [(id: PersonID, info: SpeakerInfo)] {
@@ -54,15 +68,18 @@ struct AssignSpeakersView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 TextField("Name", text: Binding(get: { drafts[id] ?? info.name }, set: { drafts[id] = $0 }))
-                    .textFieldStyle(.plain)
+                    .textFieldStyle(.roundedBorder)
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(color)
+                    .focused($focused, equals: id)
                     .onSubmit { commit(id, current: info.name) }
+                    .accessibilityLabel("Name of \(info.name)")
                 Spacer()
                 Button { if let sample { play(sample) } } label: { Image(systemName: "play.fill").foregroundStyle(color) }
                     .buttonStyle(.plain)
                     .disabled(sample == nil || player == nil)
-                    .help("Play this speaker's first turn")
+                    .help(sample == nil ? "This speaker has no turn to play" : player == nil ? "There is no recording to play yet" : "Play this speaker's first turn")
+                    .accessibilityLabel("Play \(info.name)'s first turn")
             }
             if let sample { Text(sample.text).lineLimit(2).font(.callout) }
         }
@@ -74,6 +91,15 @@ struct AssignSpeakersView: View {
         guard let draft = drafts[id], draft != current else { return }
         drafts[id] = nil
         Task { await app.meetings.renameSpeaker(id, to: draft, in: meetingID) }
+    }
+
+    /// Renames in order, one after the other: a merge changes the people the next rename sees.
+    private func commitAll() {
+        let changes = SpeakerDirectory.pendingRenames(drafts: drafts, speakers: speakers)
+        drafts = [:]
+        guard !changes.isEmpty else { return }
+        let meetings = app.meetings, meetingID = meetingID
+        Task { for change in changes { await meetings.renameSpeaker(change.id, to: change.name, in: meetingID) } }
     }
 
     /// Plays the segment, then stops at its end.

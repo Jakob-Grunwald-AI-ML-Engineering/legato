@@ -47,8 +47,10 @@ final class MeetingController {
     private(set) var mute = MeetingMuteState()
     /// Meetings whose after-stop chain or an explicit action is running.
     private(set) var busy: Set<UUID> = []
-    /// The latest thing that went wrong or was skipped, for the window.
-    private(set) var notice: String?
+    /// What to tell the user, per meeting; each notice is dismissible and goes when it stops being true.
+    private(set) var notices = MeetingNotices()
+    /// What the heavy steps of each meeting are doing (waiting in the queue, or running a step), as the services report it.
+    private(set) var processing: [UUID: ProcessingStage] = [:]
     /// A Claude key is stored. Read from the Keychain at launch and when the key changes, not per view update.
     private(set) var hasClaudeKey = false
     /// Bumped when a meeting finished or changed on disk, so open detail views reload.
@@ -105,14 +107,17 @@ final class MeetingController {
         services = MeetingServices(
             models: models, store: store, settings: settings, keyStore: keys,
             sampler: { IdleSample(cpuLoad: activity.cpuLoad(), secondsSinceInput: activity.secondsSinceInput()) })
+        services.onProgress = { [weak self] id, stage in
+            self?.processing[id] = stage
+        }
         services.onProcessed = { [weak self] id, outcome, error in
             guard let self else { return }
-            if let outcome, !outcome.notes.isEmpty { notice = outcome.notes.joined(separator: " ") }
+            // What the last run found replaces what the run before it found.
+            if let outcome { notices.set(outcome.notes, kind: .processing, meeting: id) }
             if let error, !(error is CancellationError) {
                 Self.log.error("Processing failed: \(String(describing: type(of: error)), privacy: .public)")
-                notice = "Processing failed: \(error.localizedDescription)"
+                notices.set(["Processing failed: \(error.localizedDescription)"], kind: .processing, meeting: id)
             }
-            busy.remove(id)
             Task { await self.refresh() }
         }
     }
@@ -123,6 +128,21 @@ final class MeetingController {
     }
 
     // MARK: Derived state
+
+    /// The latest notice about the app itself (a start that failed): the menu shows it.
+    var notice: String? { notices.latestGlobal?.text }
+
+    func dismissNotice(_ id: Int) { notices.dismiss(id) }
+
+    /// The meeting's heavy steps are running, or the app is doing something to it.
+    func isWorking(_ id: UUID) -> Bool { busy.contains(id) || processing[id]?.isRunning == true }
+
+    /// What the banner of the meeting's document says: waiting, a recording in the way, or the step that runs.
+    func banner(for meeting: Meeting) -> MeetingBanner {
+        MeetingBanner.make(
+            meeting: meeting, stage: processing[meeting.id], recordingActive: isRecording, actionRunning: busy.contains(meeting.id),
+            device: "Mac")
+    }
 
     var isRecording: Bool { phase == .recording || phase == .starting || phase == .stopping }
     var isMuted: Bool { mute.effective }
@@ -164,10 +184,10 @@ final class MeetingController {
     func start() async {
         guard phase == .idle else { return }
         guard startTask == nil else {
-            notice = "Still cancelling the last start. Try again in a moment."
+            notices.post("Still cancelling the last start. Try again in a moment.", kind: .start, meeting: nil)
             return
         }
-        notice = nil
+        notices.clear(kind: .start, meeting: nil)
         setPhase(.starting)
         let task = Task { await performStart() }
         startTask = task
@@ -182,7 +202,7 @@ final class MeetingController {
         guard phase == .starting, let startTask else { return }
         startTask.cancel()
         setPhase(.idle)
-        notice = "Meeting start cancelled."
+        notices.post("Meeting start cancelled.", kind: .start, meeting: nil)
     }
 
     private func performStart() async {
@@ -198,7 +218,7 @@ final class MeetingController {
         do { folder = try await store.createFolder(for: id) } catch {
             guard !Task.isCancelled else { return }
             setPhase(.idle)
-            notice = "Could not create the meeting folder: \(error.localizedDescription)"
+            notices.post("Could not create the meeting folder: \(error.localizedDescription)", kind: .start, meeting: nil)
             return
         }
         guard !Task.isCancelled else {
@@ -232,7 +252,7 @@ final class MeetingController {
             guard !(error is CancellationError), !Task.isCancelled else { return }
             Self.log.error("meeting start failed: \(String(describing: type(of: error)), privacy: .public)")
             setPhase(.idle)
-            notice = "Could not start the meeting: \(error.localizedDescription)"
+            notices.post("Could not start the meeting: \(error.localizedDescription)", kind: .start, meeting: nil)
             return
         }
         guard !Task.isCancelled else {
@@ -240,7 +260,7 @@ final class MeetingController {
             try? FileManager.default.removeItem(at: folder)
             return
         }
-        beginObserving(session: session, system: system, mic: mic, cleaningNotices: made.notices)
+        beginObserving(session: session, system: system, mic: mic, cleaningNotices: made.notices, meetingID: meeting.id)
         liveMeetingID = meeting.id
         setPhase(.recording)
         windowRequests += 1
@@ -253,7 +273,7 @@ final class MeetingController {
         setPhase(.stopping)
         stopObserving()
         let meeting = await session.stop()
-        endLive()
+        endLive(meeting.id)
         await refresh()
         if runPipeline { process(meeting.id) }
         return meeting
@@ -262,14 +282,18 @@ final class MeetingController {
     /// Stops the capture and removes the meeting with everything recorded. The window asked first.
     func discard() async {
         guard phase == .recording, let session else { return }
+        let id = session.meetingID
         setPhase(.stopping)
         stopObserving()
         await session.discard()
-        endLive()
+        endLive(id)
+        notices.removeMeeting(id)
         await refresh()
     }
 
-    private func endLive() {
+    private func endLive(_ id: UUID) {
+        // What was said about the recording is no longer true once it ended.
+        notices.clear(kind: .live, meeting: id)
         session = nil
         live = nil
         liveMeetingID = nil
@@ -336,7 +360,8 @@ final class MeetingController {
     // MARK: Observing a running meeting
 
     private func beginObserving(
-        session: MeetingSession, system: SystemAudioSource, mic: VoiceProcessingFallbackMic, cleaningNotices: AsyncStream<String>
+        session: MeetingSession, system: SystemAudioSource, mic: VoiceProcessingFallbackMic, cleaningNotices: AsyncStream<String>,
+        meetingID: UUID
     ) {
         self.session = session
         mute = MeetingMuteState()
@@ -353,10 +378,10 @@ final class MeetingController {
             }
         }
         micNoticeTask = Task { [weak self, notices = mic.notices] in
-            for await text in notices { self?.notice = text }
+            for await text in notices { self?.notices.post(text, kind: .live, meeting: meetingID) }
         }
         cleaningNoticeTask = Task { [weak self] in
-            for await text in cleaningNotices { self?.notice = text }
+            for await text in cleaningNotices { self?.notices.post(text, kind: .live, meeting: meetingID) }
         }
         let ownPID = ProcessInfo.processInfo.processIdentifier
         autoMuteTask = Task { [weak self] in
@@ -416,19 +441,21 @@ final class MeetingController {
         await updateCards()
     }
 
-    /// Reads the card line of every meeting that changed since its last read.
+    /// Reads the card line of every meeting that changed since its last read: its state, its template, or the
+    /// summary its card shows (written again by Regenerate or Claude).
     private func updateCards() async {
         var next: [UUID: String] = [:]
         for meeting in meetings where meeting.state != .recording {
-            let signature = "\(meeting.state.rawValue)/\(meeting.completedSteps.count)/\(Int(meeting.duration))/\(meeting.title)"
+            let summaries = (try? await store.summaries(for: meeting.id)) ?? []
+            let signature = MeetingListLogic.cardSignature(meeting: meeting, summaries: summaries)
             if cardSignatures[meeting.id] == signature, let line = cards[meeting.id] {
                 next[meeting.id] = line
                 continue
             }
-            let summary = try? await store.summaries(for: meeting.id).first?.text
-            var line = MeetingListLogic.oneLiner(summary: summary, segments: [])
+            var line = MeetingListLogic.cardLine(meeting: meeting, summaries: summaries, segments: [])
             if line.isEmpty {
-                line = MeetingListLogic.oneLiner(summary: nil, segments: (try? await store.segments(for: meeting.id)) ?? [])
+                let segments = (try? await store.segments(for: meeting.id)) ?? []
+                line = MeetingListLogic.cardLine(meeting: meeting, summaries: [], segments: segments)
             }
             next[meeting.id] = line
             cardSignatures[meeting.id] = signature
@@ -493,7 +520,12 @@ final class MeetingController {
 
     /// Gives a person a name. The same name as another person's merges the two everywhere: segments and turns.
     func renameSpeaker(_ person: PersonID, to name: String, in id: UUID) async {
-        guard id != liveMeetingID, let meeting = try? await store.meeting(id: id) else { return }
+        // While recording the session owns the people: it takes the rename and keeps it through later turn updates.
+        if id == liveMeetingID {
+            await session?.renameSpeaker(person, to: name)
+            return
+        }
+        guard let meeting = try? await store.meeting(id: id) else { return }
         var directory = SpeakerDirectory(meeting: meeting)
         let merge = directory.rename(person, to: name)
         let renamed = directory
@@ -514,33 +546,41 @@ final class MeetingController {
     func regenerate(_ id: UUID) {
         guard !busy.contains(id) else { return }
         busy.insert(id)
+        notices.clear(kind: .action, meeting: id)
         Task { [weak self] in
             guard let self else { return }
             do {
                 guard await services.summaryBackend() != nil else {
-                    notice = "No on-device model is available for a summary."
+                    notices.post("No on-device model is available for a summary.", kind: .action, meeting: id)
                     busy.remove(id)
                     return
                 }
                 try await services.regenerate(meetingID: id)
             } catch {
-                if !(error is CancellationError) { notice = "The summary failed: \(error.localizedDescription)" }
+                if !(error is CancellationError) {
+                    notices.post("The summary failed: \(error.localizedDescription)", kind: .action, meeting: id)
+                }
             }
             busy.remove(id)
             await refresh()
         }
     }
 
+    /// Waiting to be processed does not stop a delete; a step that is running does.
     func delete(_ meeting: Meeting) async {
-        guard meeting.state != .recording, !busy.contains(meeting.id) else { return }
+        guard meeting.state != .recording, !isWorking(meeting.id) else { return }
         let folder = await store.folder(for: meeting.id)
         try? FileManager.default.trashItem(at: folder, resultingItemURL: nil)
+        notices.removeMeeting(meeting.id)
+        processing[meeting.id] = nil
         await refresh()
     }
 
+    /// Renames the meeting. The list and the document show the new title at once, not after the file is written.
     func rename(_ meeting: Meeting, to title: String) async {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if let index = meetings.firstIndex(where: { $0.id == meeting.id }) { meetings[index].title = trimmed }
         _ = try? await store.update(id: meeting.id) { $0.title = trimmed }
         await refresh()
     }
@@ -549,17 +589,19 @@ final class MeetingController {
 
     /// The after-stop chain (or its remainder) for a meeting: the audio now, the rest when the Mac is idle.
     func process(_ id: UUID) {
-        guard !liveMeetingIDs.contains(id), !busy.contains(id) else { return }
-        busy.insert(id)
+        guard !liveMeetingIDs.contains(id), !busy.contains(id), processing[id] == nil else { return }
+        busy.insert(id)  // only for the audio step: waiting for an idle Mac is not being busy
         Task { [weak self] in
             guard let self else { return }
             do {
                 let outcome = try await services.processAfterStop(id)
-                if !outcome.notes.isEmpty { notice = outcome.notes.joined(separator: " ") }
+                for note in outcome.notes { notices.post(note, kind: .action, meeting: id) }
             } catch {
-                if !(error is CancellationError) { notice = "Processing failed: \(error.localizedDescription)" }
-                busy.remove(id)
+                if !(error is CancellationError) {
+                    notices.post("Processing failed: \(error.localizedDescription)", kind: .action, meeting: id)
+                }
             }
+            busy.remove(id)
             await refresh()
         }
     }
@@ -582,16 +624,17 @@ final class MeetingController {
     ) {
         guard !busy.contains(id) else { return }
         busy.insert(id)
+        notices.clear(kind: .action, meeting: id)
         Task { [weak self] in
             guard let self else { return }
             do {
                 let outcome = try await work(services)
-                if !outcome.notes.isEmpty { notice = outcome.notes.joined(separator: " ") }
+                notices.set(outcome.notes, kind: .processing, meeting: id)
             } catch is CancellationError {
                 // The meeting stays `processing` and resumes at the next launch.
             } catch {
                 Self.log.error("\(label, privacy: .public) failed: \(String(describing: type(of: error)), privacy: .public)")
-                notice = "\(label) failed: \(error.localizedDescription)"
+                notices.post("\(label) failed: \(error.localizedDescription)", kind: .action, meeting: id)
             }
             busy.remove(id)
             await refresh()
@@ -623,12 +666,13 @@ final class MeetingController {
     func summarizeWithClaude(_ id: UUID) {
         guard !busy.contains(id) else { return }
         busy.insert(id)
+        notices.clear(kind: .action, meeting: id)
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await services.summarizeWithClaude(meetingID: id)
             } catch {
-                notice = "Claude summary failed: \(error.localizedDescription)"
+                notices.post("Claude summary failed: \(error.localizedDescription)", kind: .action, meeting: id)
             }
             busy.remove(id)
             await refresh()
@@ -652,7 +696,7 @@ final class MeetingController {
         NSApp.activate()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try Data(text.utf8).write(to: url, options: .atomic) } catch {
-            notice = "Could not save the export: \(error.localizedDescription)"
+            notices.post("Could not save the export: \(error.localizedDescription)", kind: .action, meeting: meeting.id)
         }
     }
 

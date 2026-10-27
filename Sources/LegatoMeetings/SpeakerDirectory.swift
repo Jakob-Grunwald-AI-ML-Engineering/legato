@@ -56,6 +56,27 @@ public struct SpeakerDirectory: Sendable, Equatable {
         meeting.mergedSpeakers = merged
     }
 
+    /// One name to give: what the rename field of a person says now.
+    public struct Rename: Sendable, Equatable {
+        public var id: PersonID
+        public var name: String
+        public init(id: PersonID, name: String) {
+            self.id = id
+            self.name = name
+        }
+    }
+
+    /// The renames the fields hold that change something, one per person in the order of the ids (`P2` before `P10`).
+    /// Apply them one after the other: a merge changes the people the next one sees.
+    public static func pendingRenames(drafts: [PersonID: String], speakers: [PersonID: SpeakerInfo]) -> [Rename] {
+        drafts.compactMap { id, draft -> Rename? in
+            guard let info = speakers[id] else { return nil }
+            let name = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name == info.name ? nil : Rename(id: id, name: name)
+        }
+        .sorted { (number($0.id) ?? 0, $0.id) < (number($1.id) ?? 0, $1.id) }
+    }
+
     /// Adds a person and returns its id.
     @discardableResult
     public mutating func add() -> PersonID {

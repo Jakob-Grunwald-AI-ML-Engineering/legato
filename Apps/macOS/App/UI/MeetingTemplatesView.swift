@@ -28,7 +28,7 @@ struct MeetingTemplatesView: View {
         } header: {
             Text("Summary templates")
         } footer: {
-            Text("A template is the instruction the summary follows. New meetings use the default; each meeting can pick another in its toolbar. The built-in ones can be read, not changed.")
+            Text("A template is the instruction the summary follows. New meetings use the default; each meeting can pick another from the template menu above its summary. The built-in ones can be read, not changed.")
                 .font(.callout).foregroundStyle(.secondary)
         }
         .onAppear(perform: reload)

@@ -104,4 +104,16 @@ import LegatoCore
         #expect(info == SpeakerInfo(name: "You", colorIndex: 2))
         #expect(!String(decoding: try JSONEncoder().encode(info), as: UTF8.self).contains("isYou"))
     }
+
+    @Test func pendingRenamesAreTheDraftsThatChangeANameInTheOrderOfTheIds() {
+        let people = [
+            "P1": SpeakerInfo(name: "Speaker 1", colorIndex: 0), "P2": SpeakerInfo(name: "Anna", colorIndex: 1),
+            "P10": SpeakerInfo(name: "Speaker 10", colorIndex: 2),
+        ]
+        let drafts = ["P10": "Ben", "P1": "Carl", "P2": " Anna ", "P9": "Nobody"]
+        let pending = SpeakerDirectory.pendingRenames(drafts: drafts, speakers: people)
+        #expect(pending == [
+            SpeakerDirectory.Rename(id: "P1", name: "Carl"), SpeakerDirectory.Rename(id: "P10", name: "Ben"),
+        ], "P2 only gained space, P9 is not a person, and P10 comes after P1 and P2")
+    }
 }

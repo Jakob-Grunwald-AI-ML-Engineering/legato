@@ -86,7 +86,9 @@ private final class FakeDiarizer: BatchDiarizer {
     let log: Log
     let sampleCounts = Mutex<[Int]>([])
     let files = Mutex<[URL]>([])
-    init(_ result: [SpeakerTurn], log: Log) { self.result = result; self.log = log }
+    /// What its progress callback reports during a file run.
+    let progress: [Double]
+    init(_ result: [SpeakerTurn], log: Log, progress: [Double] = []) { self.result = result; self.log = log; self.progress = progress }
     func diarize(samples: [Float]) async throws -> [SpeakerTurn] {
         log.add("diarize")
         sampleCounts.withLock { $0.append(samples.count) }
@@ -96,6 +98,10 @@ private final class FakeDiarizer: BatchDiarizer {
         log.add("diarize")
         files.withLock { $0.append(file) }
         return result
+    }
+    func diarize(file: URL, progress report: (@Sendable (Double) -> Void)?) async throws -> [SpeakerTurn] {
+        for value in progress { report?(value) }
+        return try await diarize(file: file)
     }
 }
 
@@ -608,6 +614,28 @@ private struct Rig {
         let pipeline = base.reporting { step in seen.withLock { $0.append(step) } }
         _ = try await pipeline.run(meetingID: rig.id)
         #expect(seen.withLock { $0 } == [.audio, .postPass, .summary])
+    }
+
+    @Test func eachStepSaysWhenItStartsAndHowFarItIs() async throws {
+        let rig = Rig(mixDuration: 20)
+        try await rig.seedMixed()
+        let diarizer = FakeDiarizer([SpeakerTurn(speaker: "c0", start: 0, end: 10)], log: rig.log, progress: [0.25, 0.75])
+        let events = Mutex<[PipelineStepEvent]>([])
+        let pipeline = rig.pipeline(diarizer: diarizer).reportingEvents { event in events.withLock { $0.append(event) } }
+        _ = try await pipeline.runAudio(meetingID: rig.id)
+        _ = try await pipeline.runDeferred(meetingID: rig.id)
+        let seen = events.withLock { $0 }
+
+        let starts = seen.compactMap { event -> Meeting.Step? in if case .started(let step) = event { step } else { nil } }
+        #expect(starts == [.audio, .postPass, .diarize, .summary])
+        func progress(_ step: Meeting.Step) -> [Double] {
+            seen.compactMap { event in if case .progress(step, let f) = event { f } else { nil } }
+        }
+        #expect(progress(.postPass) == [1], "one window of the 20 s mix")
+        #expect(progress(.diarize) == [0.25, 0.75], "the diarizer's own callback")
+        #expect(progress(.summary) == [0.5], "one chunk and the merge")
+        // A step's start comes before its progress.
+        #expect(seen.firstIndex(of: .started(.postPass))! < seen.firstIndex(of: .progress(.postPass, 1))!)
     }
 
     @Test func anExplicitSummaryWritesItsOwnFileAndLeavesTheState() async throws {

@@ -109,7 +109,7 @@ public actor ProcessingScheduler {
     public func processNow(_ id: UUID) {
         if !queue.contains(id) { queue.append(id) }
         forced.insert(id)
-        poll()
+        poll(lookNow: true)
     }
 
     /// Cancels the running job (the app is about to be suspended, or a meeting starts recording). It stays queued.
@@ -139,8 +139,14 @@ public actor ProcessingScheduler {
         }
     }
 
-    private func poll() {
-        guard let pollInterval, polling == nil else { return }
+    /// Starts the poller if it is not looking yet; `lookNow` also makes it look once now when it is asleep,
+    /// so "Process now" does not wait for the next poll. (`tick` is safe to run twice: it returns while a job runs.)
+    private func poll(lookNow: Bool = false) {
+        guard let pollInterval else { return }
+        guard polling == nil else {
+            if lookNow { Task { await tick() } }
+            return
+        }
         polling = Task { [self] in
             while !Task.isCancelled {
                 await tick()

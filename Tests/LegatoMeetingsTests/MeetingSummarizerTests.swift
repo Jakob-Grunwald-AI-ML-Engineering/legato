@@ -110,6 +110,26 @@ private func transcript(count: Int, length: Int = 80) -> [MeetingSegment] {
         }
     }
 
+    @Test func theSummaryReportsHowManyChunksAreDoneOutOfTheWholeJob() async throws {
+        let segments = transcript(count: 40)
+        let backend = LimitedBackend(limit: 3_000) { call, i in isChunk(call) ? "c\(i)" : "m\(i)" }
+        let seen = Mutex<[Double]>([])
+        _ = try await MeetingSummarizer(backend: backend).summarize(segments: segments, progress: { f in seen.withLock { $0.append(f) } })
+        let chunks = backend.all.filter(isChunk).count
+        #expect(chunks > 1)
+        // After each chunk: i of the chunks plus the merge, which is the last part of the job.
+        let expected = (1...chunks).map { Double($0) / Double(chunks + 1) }
+        #expect(seen.withLock { $0 } == expected)
+        #expect(expected.last! < 1)
+    }
+
+    @Test func oneChunkReportsHalf() async throws {
+        let backend = LimitedBackend(limit: 100_000) { _, _ in "S" }
+        let seen = Mutex<[Double]>([])
+        _ = try await MeetingSummarizer(backend: backend).summarize(segments: transcript(count: 3), progress: { f in seen.withLock { $0.append(f) } })
+        #expect(seen.withLock { $0 } == [0.5])
+    }
+
     @Test func theMergeStepRecursesUntilItFits() async throws {
         let backend = LimitedBackend(limit: 3_000) { call, i in
             isChunk(call) ? "chunk-summary-\(i) " + String(repeating: "a", count: 120) : "merged-\(i) " + String(repeating: "b", count: 120)

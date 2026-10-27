@@ -122,4 +122,70 @@ import LegatoCore
         #expect(!MeetingPillState(phase: .starting, paused: false, muted: false).controlsEnabled)
         #expect(MeetingPillState(phase: .recording, paused: false, muted: false).controlsEnabled)
     }
+
+    // MARK: Card line and signature
+
+    private func summary(_ template: String, _ text: String, _ day: Double = 1) -> MeetingStore.Summary {
+        MeetingStore.Summary(templateID: template, backendID: "fm", text: text, date: Date(timeIntervalSince1970: day), isStale: false)
+    }
+
+    @Test func theCardLineIsTheSelectedTemplatesSummaryEvenWhenAnotherTemplatesIsNewer() {
+        var m = meeting("Sync", at: "2026-10-27T09:00:00Z")
+        m.templateID = "action-items"
+        let list = [
+            summary("brainstorm", "## Summary\nA newer brainstorm.", 9),
+            summary("action-items", "## Summary\nThe action items one.", 2),
+        ]
+        #expect(MeetingListLogic.cardLine(meeting: m, summaries: list, segments: []) == "The action items one.")
+    }
+
+    @Test func withoutASummaryForTheSelectedTemplateTheCardFallsBackToTheTranscript() {
+        var m = meeting("Sync", at: "2026-10-27T09:00:00Z")
+        m.templateID = "one-on-one"
+        let segments = [MeetingSegment(stream: .mixed, text: "Hello there.", start: 0, end: 1)]
+        let list = [summary("summary", "## Summary\nWrong template.")]
+        #expect(MeetingListLogic.cardLine(meeting: m, summaries: list, segments: segments) == "Hello there.")
+    }
+
+    @Test func theCardSignatureChangesWhenASummaryIsRewrittenOrTheTemplateChanges() {
+        let m = meeting("Sync", at: "2026-10-27T09:00:00Z")
+        let before = MeetingListLogic.cardSignature(meeting: m, summaries: [summary("summary", "old", 1)])
+        #expect(before == MeetingListLogic.cardSignature(meeting: m, summaries: [summary("summary", "old", 1)]))
+        #expect(before != MeetingListLogic.cardSignature(meeting: m, summaries: [summary("summary", "new text", 5)]), "Regenerate / Claude")
+        var other = m
+        other.templateID = "brainstorm"
+        #expect(before != MeetingListLogic.cardSignature(meeting: other, summaries: [summary("summary", "old", 1)]), "template change")
+        var renamed = m
+        renamed.title = "Renamed"
+        #expect(before != MeetingListLogic.cardSignature(meeting: renamed, summaries: [summary("summary", "old", 1)]))
+    }
+
+    // MARK: Empty state
+
+    @Test func theEmptyStateNamesWhatIsHappening() {
+        func state(_ shown: Int, live: Bool = false, _ query: String = "", ready: Bool = true) -> MeetingListEmptyState {
+            MeetingListLogic.emptyState(shownCount: shown, hasLive: live, query: query, searchReady: ready)
+        }
+        #expect(state(0) == .noMeetings)
+        #expect(state(3) == .none)
+        #expect(state(0, live: true) == .none)
+        #expect(state(0, "budget", ready: false) == .searching, "no 'No meeting matches' flash while the search still scans")
+        #expect(state(0, "budget", ready: true) == .noMatch)
+        #expect(state(2, "budget", ready: true) == .none)
+        #expect(state(0, live: true, "budget", ready: true) == .noMatch, "the live card hides while searching")
+        #expect(state(0, "   ", ready: false) == .noMeetings, "a blank query is no search")
+    }
+
+    // MARK: Following the live transcript
+
+    @Test func theLiveTranscriptStopsFollowingWhenTheUserScrollsUpAndResumesAtTheBottom() {
+        var follow = TranscriptFollow()
+        #expect(follow.follows)
+        follow.scrollSettled(distanceFromBottom: 600)
+        #expect(!follow.follows)
+        follow.scrollSettled(distanceFromBottom: 300)
+        #expect(!follow.follows)
+        follow.scrollSettled(distanceFromBottom: 12)
+        #expect(follow.follows)
+    }
 }

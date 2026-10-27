@@ -54,7 +54,10 @@ public struct MeetingSummarizer: Sendable {
     ///
     /// - Throws: ``LLMError/emptyResponse`` when nothing was spoken; ``LLMError/guardrail`` or
     ///   ``LLMError/contextTooLong`` when no part could be summarised; the backend's other errors as they are.
-    public func summarize(segments: [MeetingSegment]) async throws -> String {
+    ///
+    /// - Parameter progress: told, after each transcript chunk, how much of the job is done: `i / (chunks + 1)`,
+    ///   the merge being the last part. It never reaches 1; the caller knows when the whole summary is written.
+    public func summarize(segments: [MeetingSegment], progress: (@Sendable (Double) async -> Void)? = nil) async throws -> String {
         let lines = Self.lines(of: segments, speakers: speakers)
         guard !lines.isEmpty else { throw LLMError.emptyResponse }
 
@@ -69,9 +72,11 @@ public struct MeetingSummarizer: Sendable {
 
         var skips = Skips()
         var partials: [String] = []
-        for chunk in Self.chunks(of: lines, budget: budget) {
+        let chunks = Self.chunks(of: lines, budget: budget)
+        for (index, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
             partials += try await summarizeChunk(chunk, skips: &skips)
+            await progress?(Double(index + 1) / Double(chunks.count + 1))
         }
         guard !partials.isEmpty else { throw skips.guardrail > 0 ? LLMError.guardrail : LLMError.contextTooLong }
 

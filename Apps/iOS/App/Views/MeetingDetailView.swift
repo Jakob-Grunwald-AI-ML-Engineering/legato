@@ -15,6 +15,10 @@ struct MeetingDetailView: View {
     @State private var summaries: [MeetingStore.Summary] = []
     @State private var notes = ""
     @State private var notesLoaded = false
+    /// The notes as last handed to the store, so a leave or a debounce saves only what changed.
+    @State private var notesSaved = ""
+    /// The meeting is being discarded: nothing of it is saved any more.
+    @State private var discarded = false
     @State private var player: MeetingPlayer?
     @State private var exportItems: [URL] = []
     @State private var showSpeakers = false
@@ -26,14 +30,14 @@ struct MeetingDetailView: View {
     private var isLive: Bool { meetings.liveMeetingID == meetingID }
     private var meeting: Meeting? { isLive ? meetings.live?.meeting ?? current : current }
     private var shownSegments: [MeetingSegment] { isLive ? meetings.live?.segments ?? [] : segments }
-    private var working: Bool { meetings.busy.contains(meetingID) }
+    private var working: Bool { meetings.isWorking(meetingID) }
 
     var body: some View {
         Group {
             if let meeting {
                 MeetingDocumentView(
                     controller: controller, meeting: meeting, isLive: isLive, segments: shownSegments, summaries: summaries,
-                    working: working, notes: $notes, canSeek: player != nil,
+                    notes: $notes, canSeek: player != nil,
                     onSeek: { time in
                         guard let player else { return }
                         Task {
@@ -42,7 +46,8 @@ struct MeetingDetailView: View {
                             player.play()
                         }
                     },
-                    onSpeakers: { showSpeakers = true })
+                    onSpeakers: { showSpeakers = true },
+                    onRename: { person, name in Task { await meetings.renameSpeaker(person, to: name, in: meetingID) } })
                     .safeAreaInset(edge: .bottom) { bottomBar }
             } else {
                 ProgressView()
@@ -51,17 +56,17 @@ struct MeetingDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { if !isLive, meeting != nil { ToolbarItem(placement: .primaryAction) { actions } } }
         .task(id: meetings.revision) { await reload() }
-        .onChange(of: notes) { _, text in
-            guard notesLoaded else { return }
-            Task {
-                try? await Task.sleep(for: .milliseconds(600))
-                guard !Task.isCancelled, text == notes else { return }
-                await meetings.saveNotes(text, for: meetingID)
-            }
+        // A new task per edit: the last edit saves after 600 ms, and leaving the view cancels it (and flushes below).
+        .task(id: notes) {
+            guard notesLoaded, !discarded, notes != notesSaved else { return }
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled, !discarded else { return }
+            flushNotes()
         }
         .onDisappear {
             player?.pause()
             meetings.endPlayback()
+            flushNotes()
         }
         .sheet(isPresented: $showSpeakers) {
             if let meeting {
@@ -79,6 +84,7 @@ struct MeetingDetailView: View {
         }
         .confirmationDialog("Discard this meeting?", isPresented: $confirmDiscard, titleVisibility: .visible) {
             Button("Discard meeting", role: .destructive) {
+                discarded = true  // a note typed a moment ago must not bring the folder back
                 Task {
                     await meetings.discard()
                     onClose()
@@ -191,13 +197,24 @@ struct MeetingDetailView: View {
         if !notesLoaded || !isLive {
             // Notes are the user's own: reload only when not typing (the first load, and after a finished chain).
             let stored = await meetings.notes(of: meetingID)
-            if !notesLoaded { notes = stored }
+            if !notesLoaded {
+                notesSaved = stored
+                notes = stored
+            }
             notesLoaded = true
         }
         if !isLive {
             await preparePlayer()
             if let current { exportItems = await meetings.exportItems(for: current) }
         }
+    }
+
+    /// Hands changed notes to the store now (the debounce fired, or the view is going away). Never after a discard.
+    private func flushNotes() {
+        guard notesLoaded, !discarded, notes != notesSaved else { return }
+        let text = notes
+        notesSaved = text
+        Task { await meetings.saveNotes(text, for: meetingID) }
     }
 
     private func preparePlayer() async {

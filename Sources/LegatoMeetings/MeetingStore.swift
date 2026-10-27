@@ -99,7 +99,11 @@ public actor MeetingStore {
     /// Saves the notes. Saving what is already there changes nothing, so it cannot make a summary stale. Blank
     /// notes empty the file rather than remove it: its modification time still says the notes changed, so a
     /// summary written with the old notes is stale.
+    ///
+    /// A meeting whose folder is gone (discarded, deleted) is not brought back: a late save, such as the window's
+    /// notes debounce firing after Discard, does nothing.
     public func saveNotes(_ text: String, for id: UUID) throws {
+        guard FileManager.default.fileExists(atPath: folder(for: id).path) else { return }
         let url = notesURL(for: id)
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard try notes(for: id) != nil else { return }  // nothing to clear
@@ -107,7 +111,6 @@ public actor MeetingStore {
             return
         }
         if let existing = try notes(for: id), existing == text { return }
-        try createFolder(for: id)
         try PrivateFiles.write(Data(text.utf8), to: url)
     }
 

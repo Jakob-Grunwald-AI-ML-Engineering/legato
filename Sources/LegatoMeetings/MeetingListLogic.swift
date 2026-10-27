@@ -8,6 +8,24 @@ public struct MeetingDayGroup: Sendable, Equatable {
     public var meetings: [Meeting]
 }
 
+/// What the meetings list shows when it has no cards.
+public enum MeetingListEmptyState: Sendable, Equatable { case none, noMeetings, searching, noMatch }
+
+/// Whether the live transcript follows its newest line. It stops when the user scrolls up and starts again when
+/// they come back to the bottom; the view tells it where a scroll came to rest.
+public struct TranscriptFollow: Sendable, Equatable {
+    /// How near the bottom counts as "at the bottom", in points.
+    public static let tolerance: Double = 40
+
+    public private(set) var follows = true
+
+    public init() {}
+
+    public mutating func scrollSettled(distanceFromBottom: Double) {
+        follows = distanceFromBottom <= Self.tolerance
+    }
+}
+
 /// What the pill (the small floating recorder) shows, from the recorder's state.
 public struct MeetingPillState: Sendable, Equatable {
     public enum Phase: Sendable, Equatable { case idle, starting, recording, stopping }
@@ -81,6 +99,30 @@ public enum MeetingListLogic {
         if let notes { parts.append(notes) }
         let haystack = parts.joined(separator: "\n")
         return words.allSatisfy { haystack.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
+    /// The card's line for a meeting: the first sentence of the summary of the meeting's own template (not another
+    /// template's, newer or not), else the first line of the transcript. Empty when there is neither.
+    public static func cardLine(meeting: Meeting, summaries: [MeetingStore.Summary], segments: [MeetingSegment]) -> String {
+        let shown = shownSummary(in: summaries, templateID: meeting.templateID)
+        return oneLiner(summary: shown?.text, segments: segments)
+    }
+
+    /// What decides whether a card's line has to be read again: the meeting's state, steps, length, title and
+    /// template, and which summary is shown (its template, backend and when it was written).
+    public static func cardSignature(meeting: Meeting, summaries: [MeetingStore.Summary]) -> String {
+        let shown = shownSummary(in: summaries, templateID: meeting.templateID)
+        let summary = shown.map { "\($0.templateID)/\($0.backendID)/\($0.date.timeIntervalSince1970)/\($0.text.count)" } ?? "none"
+        return "\(meeting.state.rawValue)/\(meeting.completedSteps.count)/\(Int(meeting.duration))/\(meeting.title)/\(meeting.templateID)/\(summary)"
+    }
+
+    /// What the list shows when it has no cards: nothing, "no meetings", "searching…" or "no match". A search that
+    /// has not finished scanning says so rather than claiming that nothing matches.
+    public static func emptyState(shownCount: Int, hasLive: Bool, query: String, searchReady: Bool) -> MeetingListEmptyState {
+        let searching = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if shownCount > 0 { return .none }
+        if searching { return searchReady ? .noMatch : .searching }
+        return hasLive ? .none : .noMeetings
     }
 
     /// "1:05", or "1:02:05" from an hour on.

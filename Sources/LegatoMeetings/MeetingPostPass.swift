@@ -22,7 +22,9 @@ public struct MeetingPostPass: Sendable {
         self.transcriber = transcriber
     }
 
-    public func run(meetingID: UUID) async throws {
+    /// - Parameter progress: told after each window, how much of the recording is transcribed (0 to 1, over all the
+    ///   recordings the pass reads).
+    public func run(meetingID: UUID, progress: (@Sendable (Double) async -> Void)? = nil) async throws {
         guard try await store.meeting(id: meetingID) != nil else { return }
         var segments = try await store.segments(for: meetingID)
         _ = try await store.saveLiveSegmentsOnce(segments, for: meetingID)
@@ -31,17 +33,22 @@ public struct MeetingPostPass: Sendable {
         let mixDuration = (try? await reader.duration(of: .mixed)) ?? 0
         var ordered: [MeetingSegment]
         if mixDuration > 0 {
-            let fresh = try await transcribe(.mixed, duration: mixDuration)
+            var done = Done(total: mixDuration, report: progress)
+            let fresh = try await transcribe(.mixed, duration: mixDuration, done: &done)
             let turns = SpeakerAssigner.bestTurns(
                 live: try await store.liveTurns(for: meetingID), offline: try await store.offlineTurns(for: meetingID))
             ordered = MeetingStore.ordered(SpeakerAssigner.assign(fresh, turns: turns))
         } else {
+            var durations: [TranscriptEvent.Stream: TimeInterval] = [:]
+            for stream in [TranscriptEvent.Stream.mic, .system] { durations[stream] = try await reader.duration(of: stream) }
+            var done = Done(total: durations.values.reduce(0, +), report: progress)
             for stream in [TranscriptEvent.Stream.mic, .system] {
-                let duration = try await reader.duration(of: stream)
+                let duration = durations[stream] ?? 0
                 guard duration > 0 else { continue }
-                let fresh = try await transcribe(stream, duration: duration)
+                let fresh = try await transcribe(stream, duration: duration, done: &done)
                 segments.removeAll { $0.stream == stream }
                 segments += fresh
+                done.base += duration
             }
             ordered = MeetingStore.ordered(EchoDeduper.mark(segments))
         }
@@ -51,7 +58,21 @@ public struct MeetingPostPass: Sendable {
         try await store.update(id: meetingID) { $0.postPassID = postPassID }
     }
 
-    private func transcribe(_ stream: TranscriptEvent.Stream, duration: TimeInterval) async throws -> [MeetingSegment] {
+    /// How much audio is transcribed out of all there is, and who to tell. `base` is the length of the recordings
+    /// already done; a window ends at a position in the current one.
+    private struct Done {
+        var total: TimeInterval
+        var base: TimeInterval = 0
+        var report: (@Sendable (Double) async -> Void)?
+
+        func reach(_ position: TimeInterval) async {
+            if total > 0 { await report?(min(1, (base + position) / total)) }
+        }
+    }
+
+    private func transcribe(
+        _ stream: TranscriptEvent.Stream, duration: TimeInterval, done: inout Done
+    ) async throws -> [MeetingSegment] {
         var result: [MeetingSegment] = []
         var start: TimeInterval = 0
         while start < duration {
@@ -66,6 +87,7 @@ public struct MeetingPostPass: Sendable {
                 result.append(MeetingSegment(
                     stream: stream, text: text, start: start + range.lowerBound, end: start + range.upperBound, origin: .postPass))
             }
+            await done.reach(end)
             start = end
         }
         return result

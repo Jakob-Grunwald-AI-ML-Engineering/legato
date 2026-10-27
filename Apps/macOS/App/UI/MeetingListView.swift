@@ -10,6 +10,10 @@ struct MeetingListView: View {
     @State private var searching = false
     @State private var query = ""
     @State private var matches: Set<UUID>?
+    /// The query `matches` answers; a different one means the scan is still running.
+    @State private var matchedQuery = ""
+    @State private var pendingDelete: Meeting?
+    @FocusState private var searchFocused: Bool
 
     private var meetings: MeetingController { app.meetings }
 
@@ -24,7 +28,9 @@ struct MeetingListView: View {
             if searching {
                 TextField("Search titles, summaries, notes, speakers and transcripts", text: $query)
                     .textFieldStyle(.roundedBorder)
+                    .focused($searchFocused)
                     .padding(.horizontal, 20).padding(.top, 12)
+                    .accessibilityIdentifier("meetings.search")
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
@@ -37,12 +43,7 @@ struct MeetingListView: View {
                             .padding(.top, 10).padding(.leading, 4)
                         ForEach(group.meetings) { meeting in card(meeting) }
                     }
-                    if groups.isEmpty, meetings.liveMeetingID == nil {
-                        Text(query.isEmpty ? "No meetings yet.\nStart one with the + button or from the menu bar." : "No meeting matches.")
-                            .multilineTextAlignment(.center)
-                            .font(.callout).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity).padding(.top, 60)
-                    }
+                    emptyState
                 }
                 .padding(.horizontal, 20).padding(.bottom, 20)
             }
@@ -51,12 +52,25 @@ struct MeetingListView: View {
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 matches = nil
+                matchedQuery = ""
                 return
             }
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             let found = await meetings.search(trimmed)
-            if !Task.isCancelled { matches = found }
+            if !Task.isCancelled {
+                matches = found
+                matchedQuery = trimmed
+            }
+        }
+        .confirmationDialog(
+            "Delete this meeting?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible, presenting: pendingDelete
+        ) { meeting in
+            Button("Delete \"\(meeting.title)\"", role: .destructive) { Task { await meetings.delete(meeting) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("The recording, the transcript, the summary and your notes move to the Trash.")
         }
         .toolbar {
             ToolbarItem(placement: .navigation) { Text("Meetings").font(.headline) }
@@ -80,8 +94,11 @@ struct MeetingListView: View {
             ToolbarItem {
                 Button {
                     searching.toggle()
-                    if !searching { query = "" }
+                    if searching { searchFocused = true } else { query = "" }
                 } label: { Label("Search", systemImage: "magnifyingglass") }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .help("Search the meetings (⌘F)")
+                    .accessibilityIdentifier("meetings.search.toggle")
             }
             ToolbarItem {
                 Button {
@@ -91,12 +108,32 @@ struct MeetingListView: View {
                 }
                 .disabled(meetings.isRecording && meetings.phase != .starting)
                 .help("Start a meeting")
+                .accessibilityIdentifier("meetings.start")
             }
         }
     }
 
     private var languageName: String {
         meetings.language.flatMap { id in Self.languages.first { $0.id == id }?.name ?? id } ?? "Auto"
+    }
+
+    @ViewBuilder private var emptyState: some View {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = MeetingListLogic.emptyState(
+            shownCount: groups.reduce(0) { $0 + $1.meetings.count }, hasLive: meetings.liveMeetingID != nil, query: query,
+            searchReady: matches != nil && matchedQuery == trimmed)
+        switch state {
+        case .none:
+            EmptyView()
+        case .noMeetings:
+            Text("No meetings yet.\nStart one with the + button or from the menu bar.")
+                .multilineTextAlignment(.center).font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity).padding(.top, 60)
+        case .searching:
+            ProgressView("Searching…").controlSize(.small).frame(maxWidth: .infinity).padding(.top, 60)
+        case .noMatch:
+            Text("No meeting matches.").font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 60)
+        }
     }
 
     private var groups: [MeetingDayGroup] {
@@ -127,8 +164,10 @@ struct MeetingListView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(meeting.title).font(.headline).lineLimit(1)
                     Spacer()
-                    if meetings.busy.contains(meeting.id) || meeting.state == .processing || meeting.state == .interrupted {
+                    if meetings.isWorking(meeting.id) {
                         ProgressView().controlSize(.mini)
+                    } else if meeting.state == .processing || meeting.state == .interrupted {
+                        Image(systemName: "hourglass").font(.caption).foregroundStyle(.secondary).help("Waiting to be processed")
                     }
                     Text(meeting.date.formatted(date: .omitted, time: .shortened)).font(.callout).foregroundStyle(.secondary)
                 }
@@ -139,7 +178,7 @@ struct MeetingListView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Delete", role: .destructive) { Task { await meetings.delete(meeting) } }
+            Button("Delete…", role: .destructive) { pendingDelete = meeting }
         }
     }
 }

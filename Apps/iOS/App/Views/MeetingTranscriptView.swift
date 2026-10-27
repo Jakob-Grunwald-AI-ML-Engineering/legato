@@ -2,14 +2,17 @@ import LegatoCore
 import LegatoMeetings
 import SwiftUI
 
-/// The colour of a speaker: the palette index the meeting stores.
+/// The colour of a speaker: the palette index the meeting stores. Each colour is mixed toward the text colour so it
+/// reads on a light screen as well as a dark one (system yellow and green alone do not).
 enum SpeakerPalette {
-    static let colors: [Color] = [.green, .blue, .purple, .orange, .pink, .teal, .yellow, .red]
-    static func color(_ index: Int) -> Color { colors[((index % colors.count) + colors.count) % colors.count] }
+    static let colors: [Color] = [.green, .blue, .purple, .orange, .pink, .teal, .brown, .red]
+    static func color(_ index: Int) -> Color {
+        colors[((index % colors.count) + colors.count) % colors.count].mix(with: .primary, by: 0.35)
+    }
 }
 
-/// The continuous transcript: a coloured speaker name over each run of one voice, a right-aligned timestamp
-/// that seeks the player, and the tentative text of the phrase in progress while recording. It does not
+/// The continuous transcript: a coloured speaker name over each run of one voice (tap it to rename), a right-aligned
+/// timestamp that seeks the player, and the tentative text of the phrase in progress while recording. It does not
 /// scroll by itself: the document's scroll view carries it.
 struct MeetingTranscriptView: View {
     let segments: [MeetingSegment]
@@ -21,6 +24,11 @@ struct MeetingTranscriptView: View {
     var following = false
     var canSeek = false
     let onSeek: (TimeInterval) -> Void
+    /// Gives a person a new name (the same name as another person's merges them).
+    let onRename: (PersonID, String) -> Void
+
+    @State private var renaming: PersonID?
+    @State private var draft = ""
 
     var body: some View {
         let shown = visible
@@ -40,6 +48,16 @@ struct MeetingTranscriptView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("meeting.transcript")
+        .alert("Rename speaker", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+            TextField("Name", text: $draft)
+            Button("Rename") {
+                if let person = renaming { onRename(person, draft) }
+                renaming = nil
+            }
+            Button("Cancel", role: .cancel) { renaming = nil }
+        } message: {
+            Text("The same name as another speaker merges the two.")
+        }
     }
 
     private var visible: [MeetingSegment] {
@@ -52,8 +70,16 @@ struct MeetingTranscriptView: View {
     private func row(_ segment: MeetingSegment, showsName: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
-                if showsName, let name = name(of: segment) {
-                    Text(name).font(.callout.weight(.semibold)).foregroundStyle(color(of: segment))
+                if showsName, let person = segment.speaker, let name = name(of: segment) {
+                    Button {
+                        draft = name
+                        renaming = person
+                    } label: {
+                        Text(name).font(.callout.weight(.semibold)).foregroundStyle(color(of: segment))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Rename \(name)")
+                    .accessibilityIdentifier("meeting.speaker.name")
                 }
                 Spacer()
                 Button { onSeek(segment.start) } label: {

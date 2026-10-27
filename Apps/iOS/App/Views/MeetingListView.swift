@@ -10,6 +10,9 @@ struct MeetingListView: View {
 
     @State private var query = ""
     @State private var matches: Set<UUID>?
+    /// The query `matches` answers; a different one means the scan is still running.
+    @State private var matchedQuery = ""
+    @State private var pendingDelete: Meeting?
 
     private var meetings: MeetingController { controller.meetings }
 
@@ -20,46 +23,101 @@ struct MeetingListView: View {
     ].map { ($0, Locale.current.localizedString(forIdentifier: $0) ?? $0) }.sorted { $0.1 < $1.1 }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
-                if let notice = meetings.notice, !meetings.isActive {
-                    Label(notice, systemImage: "info.circle")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .accessibilityIdentifier("meetings.notice")
+        List {
+            ForEach(meetings.notices.global) { notice in
+                HStack(spacing: 10) {
+                    Image(systemName: "info.circle").foregroundStyle(.secondary)
+                    Text(notice.text).font(.callout).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button { meetings.dismissNotice(notice.id) } label: { Image(systemName: "xmark").frame(width: 28, height: 28) }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Dismiss")
                 }
-                if let id = meetings.liveMeetingID, query.isEmpty {
-                    liveCard(id)
-                }
-                ForEach(groups, id: \.day) { group in
+                .accessibilityIdentifier("meetings.notice")
+                .rowStyle()
+            }
+            if meetings.phase == .starting {
+                startingCard.rowStyle()
+            }
+            if let id = meetings.liveMeetingID, query.isEmpty {
+                liveCard(id).rowStyle()
+            }
+            ForEach(groups, id: \.day) { group in
+                Section {
+                    ForEach(group.meetings) { meeting in
+                        card(meeting)
+                            .rowStyle()
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) { pendingDelete = meeting } label: { Label("Delete", systemImage: "trash") }
+                                    .disabled(meetings.isWorking(meeting.id))
+                            }
+                    }
+                } header: {
                     Text(MeetingListLogic.dayLabel(group.day))
                         .font(.callout.weight(.semibold)).foregroundStyle(.secondary)
-                        .padding(.top, 10).padding(.leading, 4)
-                    ForEach(group.meetings) { meeting in card(meeting) }
-                }
-                if groups.isEmpty, meetings.liveMeetingID == nil {
-                    ContentUnavailableView(
-                        query.isEmpty ? "No meetings yet" : "No meeting matches",
-                        systemImage: query.isEmpty ? "person.2.wave.2" : "magnifyingglass",
-                        description: Text(query.isEmpty
-                            ? "Record a meeting in the room. Legato transcribes it as it goes and writes a summary afterwards." : ""))
-                        .padding(.top, 40)
+                        .textCase(nil)
                 }
             }
-            .padding(.horizontal, 16).padding(.bottom, 20)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .overlay { emptyState }
         .searchable(text: $query, prompt: "Search meetings")
+        .confirmationDialog(
+            "Delete this meeting?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible, presenting: pendingDelete
+        ) { meeting in
+            Button("Delete \"\(meeting.title)\"", role: .destructive) { Task { await meetings.delete(meeting) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("The recording, the transcript, the summary and your notes are deleted. This cannot be undone.")
+        }
         .task(id: "\(query)/\(meetings.revision)") {
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 matches = nil
+                matchedQuery = ""
                 return
             }
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             let found = await meetings.search(trimmed)
-            if !Task.isCancelled { matches = found }
+            if !Task.isCancelled {
+                matches = found
+                matchedQuery = trimmed
+            }
         }
+    }
+
+    @ViewBuilder private var emptyState: some View {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = MeetingListLogic.emptyState(
+            shownCount: groups.reduce(0) { $0 + $1.meetings.count }, hasLive: meetings.liveMeetingID != nil || meetings.phase == .starting,
+            query: query, searchReady: matches != nil && matchedQuery == trimmed)
+        switch state {
+        case .none:
+            EmptyView()
+        case .noMeetings:
+            ContentUnavailableView(
+                "No meetings yet", systemImage: "person.2.wave.2",
+                description: Text("Record a meeting in the room. Legato transcribes it as it goes and writes a summary afterwards."))
+        case .searching:
+            ProgressView("Searching…")
+        case .noMatch:
+            ContentUnavailableView("No meeting matches", systemImage: "magnifyingglass")
+        }
+    }
+
+    /// Between the tap on Start and the first words: the speech model loads, the audio session opens.
+    private var startingCard: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+            Text("Starting meeting…").font(.headline)
+            Spacer()
+        }
+        .cardStyle()
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("meetings.starting")
     }
 
     private var groups: [MeetingDayGroup] {
@@ -91,8 +149,11 @@ struct MeetingListView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(meeting.title).font(.headline).lineLimit(1)
                     Spacer()
-                    if meetings.busy.contains(meeting.id) || meeting.state == .processing || meeting.state == .interrupted {
+                    if meetings.isWorking(meeting.id) {
                         ProgressView().controlSize(.mini)
+                    } else if meeting.state == .processing || meeting.state == .interrupted {
+                        Image(systemName: "hourglass").font(.caption).foregroundStyle(.secondary)
+                            .accessibilityLabel("Waiting to be processed")
                     }
                     Text(meeting.date.formatted(date: .omitted, time: .shortened)).font(.callout).foregroundStyle(.secondary)
                 }
@@ -103,13 +164,21 @@ struct MeetingListView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Delete", role: .destructive) { Task { await meetings.delete(meeting) } }
+            Button("Delete…", role: .destructive) { pendingDelete = meeting }
+                .disabled(meetings.isWorking(meeting.id))
         }
         .accessibilityIdentifier("meetings.card")
     }
 }
 
 private extension View {
+    /// A card in a list: no separator, no row background, a little air.
+    func rowStyle() -> some View {
+        listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+    }
+
     func cardStyle() -> some View {
         padding(.horizontal, 16).padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)

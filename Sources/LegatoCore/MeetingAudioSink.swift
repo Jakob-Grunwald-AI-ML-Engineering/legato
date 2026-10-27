@@ -68,6 +68,16 @@ public protocol BatchDiarizer: Sendable {
     /// Turns of the recording at `file` (a CAF or m4a), in time order. The file is read from disk as needed,
     /// never held in memory whole, so a long meeting costs no more memory than a short one.
     func diarize(file: URL) async throws -> [SpeakerTurn]
+
+    /// The same, telling `progress` how far the model is (0 to 1) as it goes. A diarizer that cannot tell reports
+    /// nothing.
+    func diarize(file: URL, progress: (@Sendable (Double) -> Void)?) async throws -> [SpeakerTurn]
+}
+
+extension BatchDiarizer {
+    public func diarize(file: URL, progress: (@Sendable (Double) -> Void)?) async throws -> [SpeakerTurn] {
+        try await diarize(file: file)
+    }
 }
 
 /// Whether a ``MicEnhancer`` is cleaning the mic or has handed the raw mic through.

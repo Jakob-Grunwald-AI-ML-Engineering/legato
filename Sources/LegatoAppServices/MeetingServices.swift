@@ -84,6 +84,10 @@ public final class MeetingServices {
     /// (`CancellationError` when cut short: the meeting stays queued).
     public var onProcessed: (@MainActor (UUID, MeetingPipeline.Outcome?, (any Error)?) -> Void)?
 
+    /// Called when what the heavy steps of a meeting are doing changed; nil stage: they are not running or waiting.
+    public var onProgress: (@MainActor (UUID, ProcessingStage?) -> Void)?
+    private var stages: [UUID: ProcessingStage] = [:]
+
     private let registry: EngineRegistry
     private let cleanup: CleanupRegistry
     private let background: CleanupRegistry.BackgroundCleanup
@@ -232,6 +236,39 @@ public final class MeetingServices {
 
     // MARK: Processing
 
+    /// What the heavy steps of a meeting are doing: waiting in the queue, or running (which step, how far). Nil when
+    /// they are neither.
+    public func stage(of id: UUID) -> ProcessingStage? { stages[id] }
+
+    private func setStage(_ id: UUID, _ stage: ProcessingStage?) {
+        guard stages[id] != stage else { return }
+        stages[id] = stage
+        onProgress?(id, stage)
+    }
+
+    /// A step began or moved on: what the pipeline says goes to the stage, in order.
+    private func apply(_ event: PipelineStepEvent, to id: UUID) {
+        switch event {
+        case .started(let step): setStage(id, .running(step))
+        case .progress(let step, let fraction):
+            if let current = stages[id] { setStage(id, current.reporting(fraction, for: step)) }
+        }
+    }
+
+    /// The pipeline whose steps report to the meeting's stage.
+    private func pipeline(reportingFor id: UUID) -> MeetingPipeline {
+        pipeline().reportingEvents { [weak self] event in await self?.apply(event, to: id) }
+    }
+
+    /// Runs `work` with the meeting's stage at `stage`; afterwards the meeting is waiting again if it was queued
+    /// before, else it has no stage.
+    private func running<T>(_ id: UUID, _ stage: ProcessingStage, _ work: () async throws -> T) async rethrows -> T {
+        let before = stages[id]
+        setStage(id, stage)
+        defer { setStage(id, before == .queued ? .queued : nil) }
+        return try await work()
+    }
+
     /// A meeting records (true) or not. Nothing heavy runs while one does: a heavy step already running when a
     /// recording starts is cut short (its meeting stays queued and runs again, from the step it was in, once
     /// the machine is idle after the meeting), and the manual actions refuse to start.
@@ -270,12 +307,14 @@ public final class MeetingServices {
     @discardableResult
     public func processAfterStop(_ id: UUID) async throws -> MeetingPipeline.Outcome {
         let outcome = try await pipeline().runAudio(meetingID: id)
+        setStage(id, stages[id] ?? .queued)
         if settings.idleProcessing { await scheduler.enqueue(id) } else { await scheduler.processNow(id) }
         return outcome
     }
 
     /// "Process now": the heavy steps of this meeting without waiting for an idle machine (never during a recording).
     public func processNow(_ id: UUID) async {
+        setStage(id, stages[id] ?? .queued)
         await scheduler.processNow(id)
     }
 
@@ -284,7 +323,9 @@ public final class MeetingServices {
     @discardableResult
     public func improveTranscript(meetingID: UUID) async throws -> MeetingPipeline.Outcome {
         guard !isRecording else { throw MeetingServicesError.recording }
-        return try await pipeline().improveTranscript(meetingID: meetingID)
+        return try await running(meetingID, .running(nil)) {
+            try await pipeline(reportingFor: meetingID).improveTranscript(meetingID: meetingID)
+        }
     }
 
     /// Regenerate: the summary again with the on-device backend (the meeting's template, notes and speakers).
@@ -296,20 +337,26 @@ public final class MeetingServices {
         guard let backend = await summaryBackend() else {
             throw LLMError.unavailable(reason: "No on-device model is available for a summary.")
         }
-        return try await pipeline().summarize(meetingID: meetingID, using: backend)
+        return try await running(meetingID, .running(.summary)) {
+            try await pipeline(reportingFor: meetingID).summarize(meetingID: meetingID, using: backend)
+        }
     }
 
     /// The scheduler's job: the deferred steps. False (stay queued) when cut short or to be retried.
     private func runDeferred(_ id: UUID) async -> Bool {
+        setStage(id, .running(nil))
         do {
-            let outcome = try await pipeline().runDeferred(meetingID: id)
-            onProcessed?(id, outcome, nil)
+            let outcome = try await pipeline(reportingFor: id).runDeferred(meetingID: id)
             // A step failed: the meeting stays queued and is tried again (a few times; see MeetingPipeline).
+            setStage(id, outcome.willRetry ? .queued : nil)
+            onProcessed?(id, outcome, nil)
             if outcome.willRetry { return false }
         } catch is CancellationError {
+            setStage(id, .queued)  // cut short (a recording started): waiting again
             onProcessed?(id, nil, CancellationError())
             return false
         } catch {
+            setStage(id, nil)
             onProcessed?(id, nil, error)
         }
         return true
@@ -324,6 +371,8 @@ public final class MeetingServices {
         guard !isRecording else { throw MeetingServicesError.recording }
         let claude = claudeBackend()
         if case .unavailable(let reason) = await claude.availability { throw LLMError.unavailable(reason: reason) }
-        return try await pipeline().summarize(meetingID: meetingID, using: claude)
+        return try await running(meetingID, .running(.summary)) {
+            try await pipeline(reportingFor: meetingID).summarize(meetingID: meetingID, using: claude)
+        }
     }
 }

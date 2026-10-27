@@ -21,6 +21,14 @@ protocol OfflineDiarizationRunner: Sendable {
     func run(audio: [Float], hints: DiarizationHints) async throws -> DiarizationResult
     /// The pipeline over a recording on disk, read as it goes (memory-mapped, converted to 16 kHz).
     func run(file: URL, hints: DiarizationHints) async throws -> DiarizationResult
+    /// The same, reporting `(chunksProcessed, totalChunks)` as it goes.
+    func run(file: URL, hints: DiarizationHints, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult
+}
+
+extension OfflineDiarizationRunner {
+    func run(file: URL, hints: DiarizationHints, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult {
+        try await run(file: file, hints: hints)
+    }
 }
 
 /// Speaker labels for a finished recording, from FluidAudio's offline pipeline (segmentation, embeddings and
@@ -50,8 +58,18 @@ public final class OfflineSpeakerDiarizer: BatchDiarizer {
     }
 
     public func diarize(file: URL) async throws -> [SpeakerTurn] {
+        try await diarize(file: file, progress: nil)
+    }
+
+    public func diarize(file: URL, progress: (@Sendable (Double) -> Void)?) async throws -> [SpeakerTurn] {
         do {
-            return Self.turns(from: try await runner.run(file: file, hints: hints))
+            var report: (@Sendable (Int, Int) -> Void)?
+            if let progress {
+                report = { @Sendable (done: Int, total: Int) -> Void in
+                    if total > 0 { progress(min(1, Double(done) / Double(total))) }
+                }
+            }
+            return Self.turns(from: try await runner.run(file: file, hints: hints, progress: report))
         } catch OfflineDiarizationError.noSpeechDetected {
             return []
         }
@@ -82,7 +100,11 @@ private final class FluidOfflineRunner: OfflineDiarizationRunner {
     }
 
     func run(file: URL, hints: DiarizationHints) async throws -> DiarizationResult {
-        try await manager(hints).process(file)
+        try await run(file: file, hints: hints, progress: nil)
+    }
+
+    func run(file: URL, hints: DiarizationHints, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult {
+        try await manager(hints).process(file, progressCallback: progress)
     }
 
     private func manager(_ hints: DiarizationHints) async throws -> OfflineDiarizerManager {
