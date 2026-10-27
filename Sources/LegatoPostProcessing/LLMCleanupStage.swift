@@ -8,7 +8,7 @@ import LegatoCore
 /// the ``CleanupGuard``, comes back empty or trips the backend's guardrail keeps its own text, so one bad
 /// chunk never costs the rest. An unavailable backend or any other error throws, which the pipeline turns
 /// into "no change".
-public struct LLMCleanupStage: TranscriptPostProcessor {
+public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
     public let id = "llm-cleanup"
 
     private let backend: any LLMBackend
@@ -180,6 +180,14 @@ public struct LLMCleanupStage: TranscriptPostProcessor {
         let joiner = Self.isUnspaced(locale) ? "" : " "
         let results = try await processChunks(text, locale: locale)
         return results.isEmpty ? text : results.map(\.output).joined(separator: joiner)
+    }
+
+    /// ``process(_:locale:)``, and whether the guard rejected a chunk's reply (that chunk kept its text).
+    func processGuarded(_ text: String, locale: Locale) async throws -> (text: String, rejected: Bool) {
+        let joiner = Self.isUnspaced(locale) ? "" : " "
+        let results = try await processChunks(text, locale: locale)
+        let out = results.isEmpty ? text : results.map(\.output).joined(separator: joiner)
+        return (out, results.contains { $0.reply != nil && !$0.accepted })
     }
 
     /// ``process(_:locale:)`` with each chunk's outcome kept, for evaluation.

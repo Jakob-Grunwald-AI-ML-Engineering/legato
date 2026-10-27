@@ -80,6 +80,7 @@ select_xcode() {
 # MLX compiles Metal shaders; since Xcode 26 the Metal toolchain is a separate download. Idempotent: an
 # installed toolchain is left alone. Only CI downloads it (about a gigabyte); locally it prints how.
 ensure_metal_toolchain() {
+  [ "${LEGATO_STUB_DEPS:-}" != 1 ] || return 0   # the stubs compile no Metal
   if xcodebuild -showComponent MetalToolchain 2>/dev/null | grep -q "Status: installed"; then
     return 0
   fi

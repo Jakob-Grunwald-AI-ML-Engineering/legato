@@ -23,38 +23,49 @@ public enum TranscriptEdit: Sendable, Equatable {
     case commit(delta: String)
     /// Replace the currently shown volatile (tentative) text; empty string clears it.
     case replaceVolatile(String)
-    /// Replace an earlier committed span with its cleaned text (live cleanup). Positions are in the raw
-    /// committed text, which itself never changes.
+    /// Live cleanup's newest cleaned version of the run's text (`CleanupDelivery.live`): replaces what a
+    /// client shows for the run from `start` on. The committed text itself never changes.
     case revise(TranscriptRevision)
 }
 
-/// A committed span replaced after the fact: live cleanup swaps a segment's raw text for its cleaned text.
+/// Live cleanup's cleaned version of a run's dictated text: a whole-span replacement.
 ///
-/// Revisions of a run never overlap and arrive in order of `start`. Positions count characters of the
-/// run's raw committed text (everything the `.commit` edits appended), so they stay valid however many
-/// revisions came before.
+/// A rolling pass cleans the run's raw committed text from `start` (the segment base: 0, or where the last
+/// sent boundary was) up to what was committed when the pass began (`raw`). A client that shows the run
+/// replaces its current text for the run from `start` with `text` followed by the raw text committed after
+/// `raw` (`end` on), and only while the field still ends with exactly what it shows for the run. A newer
+/// revision (higher `n`) supersedes every earlier one; positions count characters of the raw committed text.
 public struct TranscriptRevision: Sendable, Equatable, Codable {
-    /// Where the span starts in the raw committed text, in characters.
+    /// Counts the run's revisions from 1; a client applies only a revision newer than the one it showed.
+    public var n: Int
+    /// Where the cleaned span starts in the raw committed text, in characters (the segment base).
     public var start: Int
-    /// The span's raw text, as it was committed (one segment, or at the stop the segments still raw).
+    /// The raw committed text the pass cleaned: from `start` up to what was committed when it began.
     public var raw: String
     /// What replaces it: the cleaned text, with the raw span's leading and trailing whitespace kept.
     public var text: String
 
-    public init(start: Int, raw: String, text: String) {
+    public init(n: Int, start: Int, raw: String, text: String) {
+        self.n = n
         self.start = start
         self.raw = raw
         self.text = text
     }
 
-    /// Where the span ends in the raw committed text.
+    /// Where the span ends in the raw committed text: raw text from here on follows `text` as it is.
     public var end: Int { start + raw.count }
 
     /// The revision of `raw` at `start` to `cleaned` (trimmed), keeping `raw`'s surrounding whitespace.
-    public static func cleaning(_ raw: String, at start: Int, to cleaned: String) -> TranscriptRevision {
+    public static func cleaning(_ raw: String, n: Int, at start: Int, to cleaned: String) -> TranscriptRevision {
+        TranscriptRevision(n: n, start: start, raw: raw, text: keepingWhitespace(of: raw, around: cleaned))
+    }
+
+    /// `cleaned` with `raw`'s leading and trailing whitespace.
+    public static func keepingWhitespace(of raw: String, around cleaned: String) -> String {
+        guard !raw.allSatisfy(\.isWhitespace) else { return raw }
         let lead = String(raw.prefix(while: \.isWhitespace))
         let trail = String(raw.reversed().prefix(while: \.isWhitespace).reversed())
-        return TranscriptRevision(start: start, raw: raw, text: lead + cleaned + trail)
+        return lead + cleaned + trail
     }
 }
 

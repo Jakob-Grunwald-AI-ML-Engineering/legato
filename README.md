@@ -10,3 +10,7 @@ Open-source, on-device dictation and meeting notes for iOS and macOS.
 - Summaries: Apple Foundation Models, local MLX, or Claude (opt-in)
 
 Licensed under Apache-2.0.
+
+## Build caches
+
+`scripts/e2e/ios-sim.sh` keeps its builds under `~/Library/Caches/legato` (`LEGATO_CACHE_DIR`): SwiftPM clones shared by every worktree, DerivedData reused per worktree, and sweeps stale `legato-e2e.*` temp dirs of killed runs. `scripts/dev/prune-build-caches.sh` lists (dry run) or, with `--delete`, removes DerivedData and caches of deleted worktrees.

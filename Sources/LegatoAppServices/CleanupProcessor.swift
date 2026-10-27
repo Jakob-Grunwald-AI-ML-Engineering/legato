@@ -51,7 +51,7 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     /// Called when a run's cleanup begins (cleanup on), before any stage: the UI shows "Cleaning up…".
     let willRun: @Sendable () async -> Void
     let report: @Sendable (CleanupRunReport) async -> Void
-    /// What the segments of the current live run did so far.
+    /// What the passes of the current live run did so far.
     private let liveRun = LiveRunTally()
     /// The id of the current live run, for the vocabulary: every segment of one run counts as one run. A box,
     /// because the processor is a struct.
@@ -85,7 +85,7 @@ public struct CleanupProcessor: TranscriptPostProcessor {
             vocabulary: vocabulary, runID: UUID())
     }
 
-    /// Cleanup on with delivery Live: the session cleans each committed segment while the run goes on.
+    /// Cleanup on with delivery Live: the session cleans the run's text in rolling passes while it goes on.
     public var cleansSegmentsLive: Bool {
         let options = settings.options
         return options.enabled && options.delivery == .live
@@ -97,39 +97,56 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         liveRunID.renew()
     }
 
-    /// The stop of a live run spends at most the setting's time limit on cleanup, the segment in flight
-    /// and the stop pass together.
+    /// The stop of a live run spends at most the setting's time limit on cleanup, the pass in flight and
+    /// the final pass together.
     public var liveStopTimeLimit: Duration? {
         let options = settings.options
         return options.enabled ? .seconds(options.timeoutSeconds) : nil
     }
 
-    /// One live segment, with the cleaned text before it as `context`. Only the stop pass (`atStop`) shows
-    /// "Cleaning up…": a segment cleaned while listening must not change what the UI says. The report covers
-    /// the run so far (``liveRunStarts()``): the time of all its segments, changed when any changed.
-    public func processSegment(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> String {
+    /// One live pass, with the frozen cleaned text before it as `context` (empty for a whole-text pass). Only
+    /// the final pass (`atStop`) shows "Cleaning up…": a pass while listening must not change what the UI says.
+    /// The report covers the run so far (``liveRunStarts()``): the time of all its passes, changed when any
+    /// changed. The result says which backend ran and whether the guard rejected a reply or time ran out.
+    public func cleanLivePass(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> LivePassResult {
         let options = settings.options
-        guard options.enabled else { return text }
+        guard options.enabled else { return LivePassResult(text: text) }
         if atStop { await willRun() }
         let liveRun = liveRun
         let report = report
-        return await Self.run(
+        let ran = await Self.runReporting(
             text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
             timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry,
             report: { await report(liveRun.adding($0)) }, context: context,
             vocabulary: vocabulary, runID: liveRunID.current)
+        return LivePassResult(
+            text: ran.pipeline.text, guardRejected: ran.pipeline.guardRejected, timedOut: ran.pipeline.timedOut,
+            backend: ran.report.backend, device: ran.report.device)
     }
 
     /// One cleanup in `style`, whatever the on/off switch says (refine uses it directly). ITN and the backend
-    /// come from `settings`. `context`: the cleaned text before `text` (a live segment). `vocabulary`: its terms go
-    /// to the model, and what the run changed teaches it (as run `runID`), in the background, except a swap
-    /// to one of the terms the model was given (not independent evidence). A run has no dictation id, so
-    /// deleting a dictation does not unlearn its run's pending fixes (see ``VocabularyService/learnFromCleanup``).
+    /// come from `settings`. `context`: the frozen cleaned text before `text` (a live pass past the length cap).
+    /// `vocabulary`: its terms go to the model, and what the run changed teaches it (as run `runID`), in the
+    /// background, except a swap to one of the terms the model was given (not independent evidence). A run has
+    /// no dictation id, so deleting a dictation does not unlearn its run's pending fixes (see
+    /// ``VocabularyService/learnFromCleanup``).
     public static func run(
         _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
         settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
         context: String = "", vocabulary: VocabularyService? = nil, runID: UUID = UUID()
     ) async -> String {
+        await runReporting(
+            text, locale: locale, style: style, refine: refine, timeout: timeout, settings: settings, registry: registry,
+            report: report, context: context, vocabulary: vocabulary, runID: runID).pipeline.text
+    }
+
+    /// ``run(_:locale:style:refine:timeout:settings:registry:report:context:)`` with the pipeline's report and
+    /// the run's.
+    static func runReporting(
+        _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
+        settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
+        context: String = "", vocabulary: VocabularyService? = nil, runID: UUID = UUID()
+    ) async -> (pipeline: PostProcessingPipeline.Report, report: CleanupRunReport) {
         let clock = ContinuousClock()
         let start = clock.now
         let itn = settings.itn
@@ -137,17 +154,18 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         let (pipeline, resolution) = await registry.pipeline(
             style: style, itn: itn, preference: settings.backend.preference, background: settings.backgroundCleanup,
             timeout: timeout, context: context, vocabulary: terms)
-        let out = await pipeline.process(text, locale: locale)
-        if out != text {
+        let out = await pipeline.processReporting(text, locale: locale)
+        if out.text != text {
             vocabulary?.learnFromCleanup(
-                raw: text, cleaned: out, style: style, runID: runID, locale: locale, suggested: terms)
+                raw: text, cleaned: out.text, style: style, runID: runID, locale: locale, suggested: terms)
         }
         let elapsed = start.duration(to: clock.now)
-        await report(CleanupRunReport(
+        let run = CleanupRunReport(
             backend: name(resolution.choice, itn: itn), skipped: resolution.skipped.map(\.description), style: style,
-            changed: out != text, milliseconds: Int(elapsed / .milliseconds(1)), refine: refine,
-            device: resolution.device?.label))
-        return out
+            changed: out.text != text, milliseconds: Int(elapsed / .milliseconds(1)), refine: refine,
+            device: resolution.device?.label)
+        await report(run)
+        return (out, run)
     }
 
     public static func name(_ choice: CleanupRegistry.Choice, itn: Bool) -> String {
@@ -166,14 +184,14 @@ final class LiveRunID: Sendable {
     func renew() { id.withLock { $0 = UUID() } }
 }
 
-/// The sum of a live run's segment reports: total time, changed when any segment changed, every backend
+/// The sum of a live run's pass reports: total time, changed when any pass changed, every backend
 /// and device that ran (in order, each once) and every skip reason.
 final class LiveRunTally: Sendable {
     private let total = Mutex<CleanupRunReport?>(nil)
 
     func reset() { total.withLock { $0 = nil } }
 
-    /// Adds one segment's report and returns the run's so far.
+    /// Adds one pass's report and returns the run's so far.
     func adding(_ segment: CleanupRunReport) -> CleanupRunReport {
         total.withLock { total in
             guard var run = total else {

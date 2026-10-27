@@ -127,11 +127,23 @@ final class KeyboardLinkHost: TranscriptSink {
         #endif
     }
 
-    /// Live cleanup replaced a committed span: the keyboard swaps it in while its field still shows the raw text.
+    /// Live cleanup's newest version of the run's text: the keyboard replaces what its field shows for the run
+    /// while the field still ends with it.
     func revised(_ revision: TranscriptRevision) {
-        link.revise(HostRevision(start: revision.start, raw: revision.raw, text: revision.text))
+        link.revise(HostRevision(n: revision.n, start: revision.start, raw: revision.raw, text: revision.text))
         #if LEGATO_INTERNAL
         trace.revised(revision)
+        #endif
+    }
+
+    /// The tentative text the keyboard's field showed when it was cleared at `boundary`: it went with the message.
+    func sentTentative(runID: String, boundary: Int) -> String {
+        link.sentTentative(runID: runID, boundary: boundary)
+    }
+
+    func liveTraced(_ event: LiveTraceEvent) {
+        #if LEGATO_INTERNAL
+        trace.traced(event)
         #endif
     }
 

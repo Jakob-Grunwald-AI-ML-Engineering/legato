@@ -164,6 +164,10 @@ final class AppController {
             keyboardLink.link.onRequest = { [weak self] request in await self?.perform(request.command) ?? false }
             keyboardLink.link.onRefine = { [weak self] text in await self?.refine(text) }
             keyboardLink.deliveryForRun = { Settings.hostDelivery }
+            // The keyboard's field was cleared mid-run (a chat app sent it): later cleanup covers only what follows.
+            keyboardLink.link.onSent = { [weak self] runID, boundary, shownRevision in
+                self?.coordinator.liveTextSent(runID: runID, upTo: boundary, shownRevision: shownRevision)
+            }
             keyboardLink.startListening()
         }
         installInterruptionObservers()

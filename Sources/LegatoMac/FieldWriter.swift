@@ -50,10 +50,12 @@ public enum DegradeReason: Sendable, Equatable {
 /// - Leading whitespace of the first phrase is not written, so the field matches the trimmed text.
 /// - Tentative text left in the field by a mid-run degrade in `.streamLive` is not cleaned up
 ///   by `finish`.
-/// - `.revise` (live cleanup) replaces a committed segment in the field with one verified write of the span
-///   from the segment to the end of our text, so the caret stays after it. Only while the focused field
-///   reads exactly as the writer left it there and the caret sits right after our text; otherwise the
-///   revision is skipped (no degrade) and the field keeps the raw segment. The collected text follows every
+/// - `.revise` (live cleanup, a whole-span revision) replaces what the field shows for the run with the
+///   revision's text followed by the raw text committed after its input, in one verified write of only the
+///   part that changed (from the first differing character to the end of our text, so the caret stays after
+///   it). Only while the focused field reads exactly as the writer left it and the caret sits right after our
+///   text; otherwise the revision is skipped (no degrade), and so is every later one: the field keeps what it
+///   shows. An older revision than the newest seen is ignored. The collected text follows the newest
 ///   revision, so `finish` compares the field with the cleaned text.
 /// - `revert()` is for a cancelled run: it removes what this writer typed (and puts back the
 ///   selection the first write replaced) if the field still reads exactly as the writer left
@@ -74,13 +76,21 @@ public final class FieldWriter {
     public private(set) var degradeReason: DegradeReason?
 
     private let target: (any TextTarget)?
-    /// Everything the engine committed, as received, with live cleanup's revisions applied.
-    private var committed = ""
-    /// How far revisions moved positions in `committed` (and in `written`) from the raw committed text.
-    private var committedShift = 0
-    private var writtenShift = 0
+    /// Everything the engine committed, as received.
+    private var rawCommitted = ""
+    /// Live cleanup's newest revision (the collected text shows it).
+    private var revision: TranscriptRevision?
+    /// Everything the engine committed, with live cleanup's newest revision applied.
+    private var committed: String {
+        guard let revision else { return rawCommitted }
+        return String(rawCommitted.prefix(revision.start)) + revision.text + String(rawCommitted.dropFirst(revision.end))
+    }
     /// Leading whitespace of the raw committed text that was never written (the field starts at its text).
     private var droppedLead = 0
+    /// Raw committed characters whose text is in `written` (after `droppedLead`).
+    private var writtenRaw = 0
+    /// A revision was skipped (the user worked in the field): later ones are too.
+    private var revisionsSkipped = false
     /// The committed text verified to be in the field, starting at `spanStart` (UTF-16).
     private var written = ""
     private var spanStart: Int?
@@ -109,7 +119,7 @@ public final class FieldWriter {
         switch edit {
         case .commit(let delta):
             guard !delta.isEmpty else { return }
-            committed += delta
+            rawCommitted += delta
             guard degradeReason == nil, mode != .insertOnStop else { return }
             update(appending: delta, tentative: "")
         case .replaceVolatile(let text):
@@ -194,40 +204,32 @@ public final class FieldWriter {
     }
 
     /// Applies a live cleanup revision: to the collected text always, to the field when it is safe.
-    private func revise(_ revision: TranscriptRevision) {
-        let raw = Array(revision.raw)
-        // The collected text.
-        var chars = Array(committed)
-        let at = revision.start + committedShift
-        guard at >= 0, at + raw.count <= chars.count, Array(chars[at..<at + raw.count]) == raw else { return }
-        chars.replaceSubrange(at..<at + raw.count, with: Array(revision.text))
-        committed = String(chars)
-        committedShift += revision.text.count - raw.count
+    private func revise(_ new: TranscriptRevision) {
+        guard new.n > (revision?.n ?? 0), new.start >= 0, new.end <= rawCommitted.count,
+              String(rawCommitted.dropFirst(new.start).prefix(new.raw.count)) == new.raw
+        else { return }
+        revision = new
 
-        guard degradeReason == nil, mode != .insertOnStop, let target, let start = spanStart else { return }
-        // Where the segment sits in `written`; leading whitespace that was never written is left out.
-        var from = revision.start + writtenShift - droppedLead
-        var oldPart = revision.raw
-        var newPart = revision.text
-        if from < 0 {
-            let missing = -from
-            guard revision.raw.prefix(missing).allSatisfy(\.isWhitespace) else { return }
-            oldPart = String(revision.raw.dropFirst(missing))
-            newPart = String(revision.text.drop(while: \.isWhitespace))
-            from = 0
-        }
-        let have = Array(written)
-        let old = Array(oldPart)
-        guard from + old.count <= have.count, Array(have[from..<from + old.count]) == old else { return }
-        let before = String(have[..<from])
-        let after = String(have[(from + old.count)...])
+        guard degradeReason == nil, mode != .insertOnStop, !revisionsSkipped, let target, let start = spanStart else { return }
+        // The field's text for the run once revised: the revision, then the raw text written after its input.
+        // Leading whitespace that was never written stays out.
+        let typed = droppedLead + writtenRaw
+        guard new.start <= droppedLead, new.end <= typed else { return } // covers text not in the field: nothing to do yet
+        let raw = Array(rawCommitted)
+        let desired = String((new.text + String(raw[new.end..<typed])).drop(while: \.isWhitespace))
         let shown = written + tentative
-        let span = UTF16Range(location: start + before.utf16.count, length: (String(have[from...]) + tentative).utf16.count)
         guard target.isFocused(),
               let current = try? target.text(in: UTF16Range(location: start, length: shown.utf16.count)), current == shown,
               let selection = try? target.selectedRange(), selection == UTF16Range(location: start + shown.utf16.count, length: 0)
-        else { return } // the user is working in the field: leave the raw segment
-        let replacement = newPart + after + tentative
+        else {
+            revisionsSkipped = true // the user is working in the field: it keeps what it shows
+            return
+        }
+        guard desired != written else { return }
+        let shared = String(zip(written, desired).prefix { $0 == $1 }.map(\.0))
+        let span = UTF16Range(
+            location: start + shared.utf16.count, length: shown.utf16.count - shared.utf16.count)
+        let replacement = String(desired.dropFirst(shared.count)) + tentative
         do {
             try target.replace(span, with: replacement)
         } catch {
@@ -236,8 +238,7 @@ public final class FieldWriter {
         guard let readback = try? target.text(in: UTF16Range(location: span.location, length: replacement.utf16.count)),
               readback == replacement
         else { return degrade(.notApplied) }
-        written = before + newPart + after
-        writtenShift += newPart.count - old.count
+        written = desired
     }
 
     /// `finish(finalText:)` for a run whose text was cleaned up: `rawText` is what the engine heard (what
@@ -385,6 +386,7 @@ public final class FieldWriter {
         }
         spanStart = start
         written += delta
+        writtenRaw += delta.count
         tentative = newTentative
     }
 
