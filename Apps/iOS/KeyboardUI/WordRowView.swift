@@ -33,6 +33,9 @@ struct WordRowView<Swipe: Gesture>: View {
                 row
             }
         }
+        // As the system's bar: new words cross-fade in place, nothing slides.
+        .animation(.easeOut(duration: 0.18), value: controller.suggestions)
+        .animation(.easeOut(duration: 0.18), value: controller.statusText)
     }
 
     private var row: some View {
@@ -61,16 +64,33 @@ struct WordRowView<Swipe: Gesture>: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .padding(.horizontal, 6)
+                    .contentTransition(.opacity)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.black.opacity(0.001))
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(WordSlotStyle())
+            .transition(.opacity)
             .simultaneousGesture(swipe)
             .accessibilityLabel(word)
             .accessibilityIdentifier("keyboard.word.\(rank)")
         } else {
             Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+/// A word slot's press: a rounded key-colored highlight behind the word, as on the system's bar.
+private struct WordSlotStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(uiColor: KeyColors.key))
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 2)
+                    .opacity(configuration.isPressed ? 1 : 0)
+            }
+            .animation(.easeOut(duration: configuration.isPressed ? 0.05 : 0.2), value: configuration.isPressed)
     }
 }

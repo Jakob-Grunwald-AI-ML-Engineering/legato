@@ -77,7 +77,7 @@ struct KeyboardRootView: View {
     private func stripWordRow(width: CGFloat) -> some View {
         let inset: CGFloat = StripRow.margin
         let slots = WordRowLayout.visibleSlots(width: Double(width - 2 * inset))
-        return WordRowView(controller: controller, slots: slots, fontSize: 16, swipe: swipe)
+        return WordRowView(controller: controller, slots: slots, swipe: swipe)
             .padding(.horizontal, inset)
             // Not clear: the keyboard gets no touches on fully clear pixels.
             .background(Color.black.opacity(0.001).gesture(swipe))

@@ -28,10 +28,10 @@ import Testing
     }
 
     @Test func theStripGrowsByTheWordRow() {
-        #expect(WordRowHeight.strip == 30)
-        #expect(StripHeight.requested(row: 44) == 74)
-        #expect(StripHeight.requested(row: 56) == 86)
-        #expect(StripHeight.requested(row: 30) == 60)
+        #expect(WordRowHeight.strip == 40)
+        #expect(StripHeight.requested(row: 44) == 84)
+        #expect(StripHeight.requested(row: 56) == 96)
+        #expect(StripHeight.requested(row: 30) == 70)
     }
 
     @Test func theDebugHeightsThatLeaveNothingToTouchStayAsRequested() {

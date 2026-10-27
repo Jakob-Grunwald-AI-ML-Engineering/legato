@@ -3,7 +3,7 @@ import Foundation
 /// How tall the word row is, in points.
 public enum WordRowHeight {
     /// Above the compact strip.
-    public static let strip = 30.0
+    public static let strip = 40.0
     /// Above the hotkey bar and the pill on the portrait keyboard.
     public static let portrait = 32.0
 }
