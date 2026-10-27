@@ -74,7 +74,8 @@ final class KeyboardLinkHost: TranscriptSink {
         drainChoices() // choices made while the app was away
     }
 
-    private func drainChoices() {
+    /// Reads the queued choices now (the app came to the foreground; the Darwin note can be missed in the background).
+    func drainChoices() {
         let records = link.drainChoices()
         if !records.isEmpty { onChoices?(records) }
     }

@@ -116,13 +116,20 @@ import Testing
         guard case .alternatives = c else { Issue.record("expected alternatives, got \(c)"); return }
     }
 
-    @Test func aDifferentContextInsideTheWindowIsExternalAndEndsTheSuppression() {
+    @Test func aDifferentContextInsideTheWindowIsAnIntermediateStateOfTheOwnEditAndIsIgnored() {
+        // A swap reaches the host in steps (move, deletes, insert); the reports between them are not the user.
         var s = SuggestionState()
         s.willApplyOwnEdit(expectedContextBefore: "ab cd", at: at(0))
-        let c = move(&s, "ab", " cd", 0.2)
-        guard case .alternatives(let w, _, _) = c else { Issue.record("expected alternatives, got \(c)"); return }
+        #expect(move(&s, "ab", " cd", 0.2) == .empty)
+        #expect(move(&s, "ab cd", "", 0.3) == .empty, "the final echo must still count as the keyboard's own")
+    }
+
+    @Test func theSuppressionLapsesWithTheWindow() {
+        var s = SuggestionState()
+        s.willApplyOwnEdit(expectedContextBefore: "ab cd", at: at(0))
+        _ = move(&s, "ab", " cd", 0.2)
+        guard case .alternatives(let w, _, _) = move(&s, "ab", " cd", 1) else { Issue.record("expected alternatives"); return }
         #expect(w == "ab")
-        guard case .alternatives = move(&s, "ab cd", "", 0.3) else { Issue.record("suppression should have ended"); return }
     }
 
     // MARK: status and runs

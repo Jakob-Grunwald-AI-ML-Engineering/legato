@@ -239,4 +239,33 @@ private struct TickRig {
         #expect(rig.field == String("hello world how are you ".dropFirst(typed)), "only what was not sent goes in")
         #expect(rig.cursor?.finalApplied == true)
     }
+
+    // MARK: who emptied the field
+
+    @Test func aFieldTheKeyboardEmptiedItselfIsNotAHostClear() {
+        var watch = ClearWatch()
+        watch.ownEdit(at: at(0), leavesFieldEmpty: true) // undo of the only word, or holding delete
+        _ = checkEmpty(&watch, at: 40)
+        let again = checkEmpty(&watch, at: ClearWatch.ownEditWindowMs)
+        guard case .cleared = again else { Issue.record("expected cleared, got \(again)"); return }
+        #expect(!watch.hostEmptiedField, "the history survives the keyboard's own clearing")
+    }
+
+    @Test func aNewOwnEditThatLeavesTextMakesTheNextClearTheHosts() {
+        var watch = ClearWatch()
+        watch.ownEdit(at: at(0), leavesFieldEmpty: true)
+        watch.ownEdit(at: at(100), leavesFieldEmpty: false)
+        #expect(watch.hostEmptiedField)
+    }
+
+    @Test func aReturnTheKeyboardTypedMakesTheClearTheHosts() {
+        var watch = ClearWatch()
+        watch.ownEdit(at: at(0), leavesFieldEmpty: true)
+        watch.returnTyped(at: at(10))
+        #expect(watch.hostEmptiedField)
+    }
+
+    @Test func withoutAnyOwnEditAClearIsTheHosts() {
+        #expect(ClearWatch().hostEmptiedField)
+    }
 }

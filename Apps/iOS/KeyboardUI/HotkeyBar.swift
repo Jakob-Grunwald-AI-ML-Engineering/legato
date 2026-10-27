@@ -9,6 +9,8 @@ struct HotkeyButtons<Swipe: Gesture>: View {
     /// Refine as a wand icon instead of the word (the strip).
     var iconOnlyRefine = false
     var dividers = true
+    /// Whether there is room for redo (the narrowest strip rows leave it out, `StripRow.showsRedo`).
+    var showsRedo = true
     let swipe: Swipe
 
     var body: some View {
@@ -17,10 +19,12 @@ struct HotkeyButtons<Swipe: Gesture>: View {
                 Image(systemName: "arrow.uturn.backward")
             }
             divider
-            key(enabled: controller.canRedo, id: "keyboard.hotkey.redo", label: "Redo", action: controller.redo) {
-                Image(systemName: "arrow.uturn.forward")
+            if showsRedo {
+                key(enabled: controller.canRedo, id: "keyboard.hotkey.redo", label: "Redo", action: controller.redo) {
+                    Image(systemName: "arrow.uturn.forward")
+                }
+                divider
             }
-            divider
             // Tappable while dimmed: a tap says why it can't run.
             key(enabled: controller.canRefine, id: "keyboard.hotkey.refine", label: "Refine", action: controller.refine, tappableWhenDimmed: true) {
                 if controller.isRefining {

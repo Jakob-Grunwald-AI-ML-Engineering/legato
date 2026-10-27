@@ -5,7 +5,7 @@ import Foundation
 /// Share exactly one instance per file (the actor serializes access only within an instance; there is no file
 /// locking). The keyboard extension never uses this type for the app's file; it reads with
 /// ``WordPairModel/read(from:)``. A file that cannot be read starts an empty model, since the data is derived
-/// and ``rebuild(from:now:)`` restores it.
+/// and ``rebuild(entries:now:)`` restores it.
 public actor WordPairStore {
     public let fileURL: URL
     private let languages: [String]
@@ -30,6 +30,13 @@ public actor WordPairStore {
     public func rebuild(from texts: [String], now: Date = Date()) throws {
         var model = WordPairModel(languages: languages)
         for text in texts { model.observe(text: text, at: now) }
+        try commit(model, now: now)
+    }
+
+    /// Replaces everything learned with the pairs of `entries` (oldest first), each learned as of its own date.
+    public func rebuild(entries: [(text: String, date: Date)], now: Date = Date()) throws {
+        var model = WordPairModel(languages: languages)
+        for entry in entries { model.observe(text: entry.text, at: entry.date) }
         try commit(model, now: now)
     }
 

@@ -678,6 +678,7 @@ final class AppController {
     func deleteEntry(id: UUID) async {
         try? await history.delete(id: id)
         keyboardLink?.link.scrubText() // a deleted dictation must not linger in the App Group
+        keyboardLink?.link.removePendingChoices() // nor the words the keyboard queued from it
         await refreshLastTranscript()
     }
 
@@ -688,6 +689,7 @@ final class AppController {
     /// The app came to the foreground: a meeting that could not resume, or whose after-stop chain was cut
     /// short, continues.
     func appBecameActive() {
+        keyboardLink?.drainChoices() // choices whose Darwin note arrived while the app was suspended
         self.meetings.appBecameActive()
     }
 

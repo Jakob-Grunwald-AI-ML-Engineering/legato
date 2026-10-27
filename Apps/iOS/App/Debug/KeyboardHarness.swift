@@ -69,6 +69,7 @@ final class HarnessDocument: TextDocument {
     }
 
     var isSecureTextEntry: Bool { false }
+    var textContentType: UITextContentType? { nil }
 
     var returnKeyType: UIReturnKeyType {
         switch Self.argument("LegatoHarnessReturn") {
@@ -110,12 +111,11 @@ final class HarnessDocument: TextDocument {
     func deleteBackward() { textView.deleteBackward() }
 
     func adjustTextPosition(byCharacterOffset offset: Int) {
-        // UITextView counts UTF-16 units; the proxy moves by characters, so walk the text by Characters.
+        // The proxy counts UTF-16 units, as UITextView's NSRange does.
         let current = textView.selectedRange
-        let string = text
-        let start = String.Index(utf16Offset: current.location + current.length, in: string)
-        guard let moved = string.index(start, offsetBy: offset, limitedBy: offset < 0 ? string.startIndex : string.endIndex) else { return }
-        textView.selectedRange = NSRange(location: moved.utf16Offset(in: string), length: 0)
+        let length = (text as NSString).length
+        let location = min(max(current.location + current.length + offset, 0), length)
+        textView.selectedRange = NSRange(location: location, length: 0)
     }
 }
 

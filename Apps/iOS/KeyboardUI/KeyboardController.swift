@@ -247,6 +247,7 @@ final class KeyboardController {
             lastDocumentID = id
             history.clear()
             keptVersions = nil
+            lastDictationTexts = [] // the dictation belongs to the field it landed in
             syncHistory()
             wordRow.fieldChanged()
         }
@@ -281,11 +282,15 @@ final class KeyboardController {
     }
 
     /// The field was emptied: the dictation's versions are gone with it; a sent boundary is recorded and told.
+    /// The history goes with them only when the host emptied the field: after the keyboard's own edit (undo of the
+    /// first word, a held delete, undoing a dictation) it is still good, and redo is exactly what is wanted.
     private func takeClear(_ sent: AppliedCursor?) -> ClearCheck {
         cancelClearRecheck()
         if versions?.documentID == document.documentID { versions = nil }
-        history.clear()
-        keptVersions = nil
+        if clearWatch.hostEmptiedField {
+            history.clear()
+            keptVersions = nil
+        }
         syncHistory()
         guard let sent else { return .none }
         cursor = sent
@@ -496,10 +501,10 @@ final class KeyboardController {
         document.insert(text)
         if text == "\n" { clearWatch.returnTyped(at: Date()) } else { clearWatch.ownEdit(at: Date()) }
         if let selected, !selected.isEmpty {
-            history.record(removed: selected, inserted: text, at: Date()) // the key replaced the selection
+            history.record(removed: selected, inserted: text, at: Date(), contextBefore: before + text) // the key replaced the selection
             wordRow.interruptTyping()
         } else {
-            history.typed(text, at: Date())
+            history.typed(text, at: Date(), contextBefore: before + text)
             wordRow.typed(text)
         }
         syncHistory()
@@ -510,20 +515,22 @@ final class KeyboardController {
     func deleteBackward(contextBefore: String? = nil) {
         versions = nil
         resolveHeldClear()
-        clearWatch.ownEdit(at: Date())
         beforeUserEdit()
         let before = contextBefore ?? document.contextBefore
         let selected = document.selectedText
+        let deletesSelection = selected?.isEmpty == false
+        let remaining = deletesSelection ? before : String(before.dropLast())
+        clearWatch.ownEdit(at: Date(), leavesFieldEmpty: remaining.isEmpty && document.contextAfter.isEmpty)
         document.deleteBackward()
-        if let selected, !selected.isEmpty {
-            history.record(removed: selected, inserted: "", at: Date())
+        if let selected, deletesSelection {
+            history.record(removed: selected, inserted: "", at: Date(), contextBefore: before)
             wordRow.interruptTyping()
         } else if let last = before.last {
-            history.deleted(String(last), at: Date())
+            history.deleted(String(last), at: Date(), contextBefore: remaining)
             wordRow.deletedTyped()
         }
         syncHistory()
-        wordRow.keystroke(contextBefore: String(before.dropLast()))
+        wordRow.keystroke(contextBefore: remaining)
         afterUserEdit()
     }
 
@@ -535,21 +542,24 @@ final class KeyboardController {
         resolveHeldClear()
         beforeUserEdit()
         let before = typing.contextBefore
-        let moved = before + String(document.contextAfter.prefix(edit.forward))
+        let after = document.contextAfter
+        let moved = before + String(after.prefix(edit.forward))
         let expected = String(moved.dropLast(edit.deleteCount)) + edit.insert
         versions = nil
-        wordRow.interruptTyping()
         if asTyping {
-            for _ in 0..<edit.deleteCount { wordRow.deletedTyped() }
-            wordRow.typed(edit.insert)
+            // A completion goes on in the live typing buffer (the word typed so far becomes the completed word), so
+            // the pair learned is previous -> completed word, not previous -> prefix.
+            wordRow.completed(deleting: edit.deleteCount, with: edit.insert)
         } else {
+            wordRow.interruptTyping()
             wordRow.willApplyOwnEdit(expectedContextBefore: expected)
         }
-        clearWatch.ownEdit(at: Date())
-        if edit.forward != 0 { document.adjustTextPosition(byCharacterOffset: edit.forward) }
+        clearWatch.ownEdit(at: Date(), leavesFieldEmpty: expected.isEmpty && String(after.dropFirst(edit.forward)).isEmpty)
+        // The proxy moves by UTF-16 units; the edit counts characters.
+        if edit.forward != 0 { document.adjustTextPosition(byCharacterOffset: edit.utf16Forward(contextAfter: after)) }
         for _ in 0..<edit.deleteCount { document.deleteBackward() }
         if !edit.insert.isEmpty { document.insert(edit.insert) }
-        if record { history.record(removed: removed, inserted: edit.insert, at: Date()) }
+        if record { history.record(removed: removed, inserted: edit.insert, at: Date(), contextBefore: expected) }
         syncHistory()
         typing.ownEdit(contextBefore: expected)
         // A completion, undo or redo goes on with what fits the new cursor position; a swap empties the row.
@@ -576,24 +586,25 @@ final class KeyboardController {
 
     func undo() {
         guard canUndo else { return }
-        prepareHistoryStep()
+        prepareHistoryStep(discardingTyped: true)
         guard let step = history.undo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
-        run(step)
+        run(step, undoing: true)
     }
 
     func redo() {
         guard canRedo else { return }
-        prepareHistoryStep()
+        prepareHistoryStep(discardingTyped: false)
         guard let step = history.redo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
-        run(step)
+        run(step, undoing: false)
     }
 
-    private func prepareHistoryStep() {
+    /// Undoing typing drops the typing buffer (what is taken back is not learned); a redo has nothing typed to lose.
+    private func prepareHistoryStep(discardingTyped: Bool) {
         resolveHeldClear()
         if reveal.needsTicks { applyHost(flush: true) }
-        wordRow.interruptTyping()
+        if discardingTyped { wordRow.discardTyping() } else { wordRow.interruptTyping() }
     }
 
     /// The field changed behind the keyboard's back: the guard cleared the history.
@@ -602,13 +613,14 @@ final class KeyboardController {
         show("The text changed, so there is nothing to undo.")
     }
 
-    private func run(_ step: EditHistory.Step) {
+    private func run(_ step: EditHistory.Step, undoing: Bool) {
         switch step {
         case .edit(let edit):
             applyEdit(edit, removed: "", asTyping: false, record: false)
         case .version(let index):
+            // A swap the field no longer allows leaves the entry where it was; the rest of the history is intact.
             if !showVersion(at: index, record: false) {
-                history.clear()
+                if undoing { history.revertUndo() } else { history.revertRedo() }
                 syncHistory()
             }
         }
@@ -746,9 +758,12 @@ final class KeyboardController {
             return false
         }
         let before = typing.contextBefore
-        wordRow.willApplyOwnEdit(
-            expectedContextBefore: String(before.dropLast(current.shown.count)) + current.texts[index] + current.trailing)
+        let expected = String(before.dropLast(current.shown.count)) + current.texts[index] + current.trailing
+        wordRow.willApplyOwnEdit(expectedContextBefore: expected)
         perform(ops)
+        // `perform` forgot the tracked context (it is for the host's text); this swap is the keyboard's own, so a
+        // quick second undo reads the context the swap left rather than the field's lagging report.
+        typing.ownEdit(contextBefore: expected)
         current.show(index)
         versions = current // undoing the typing that followed the dictation makes Refine possible again
         keptVersions = current

@@ -158,7 +158,6 @@ public final class HostLink {
         store.remove(forKey: LinkChannel.Key.applied)
         store.remove(forKey: LinkChannel.Key.refine)
         store.remove(forKey: LinkChannel.Key.refined)
-        removeChoices()
         guard state.runID != nil || !state.committed.isEmpty || !state.volatile.isEmpty || state.finalText != nil
         else { return }
         state.runID = nil
@@ -185,7 +184,9 @@ public final class HostLink {
         return fresh.sorted { $0.at < $1.at }
     }
 
-    private func removeChoices() {
+    /// Removes the queued word choices unread. For when the user deletes history; the retention timer's
+    /// ``scrubText()`` leaves them, since the app has not read them yet.
+    public func removePendingChoices() {
         for key in store.keys(withPrefix: LinkChannel.Key.choicePrefix) { store.remove(forKey: key) }
     }
 

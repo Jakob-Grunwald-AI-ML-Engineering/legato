@@ -16,6 +16,8 @@ protocol TextDocument: AnyObject {
     var selectedText: String? { get }
     /// Whether the field hides what is typed (a password): nothing of it is suggested or learned.
     var isSecureTextEntry: Bool { get }
+    /// The field's content type hint (`textContentType`): a password, one-time code, address and so on.
+    var textContentType: UITextContentType? { get }
     var returnKeyType: UIReturnKeyType { get }
     var keyboardType: UIKeyboardType { get }
     var autocapitalizationType: UITextAutocapitalizationType { get }
@@ -25,6 +27,7 @@ protocol TextDocument: AnyObject {
     var hasText: Bool { get }
     func insert(_ text: String)
     func deleteBackward()
-    /// Moves the insertion point by `offset` characters (negative: back), as `adjustTextPosition(byCharacterOffset:)`.
+    /// Moves the insertion point by `offset` UTF-16 units (negative: back), as `adjustTextPosition(byCharacterOffset:)`
+    /// counts them despite its name (`WordEdit.utf16Forward(contextAfter:)` converts from characters).
     func adjustTextPosition(byCharacterOffset offset: Int)
 }

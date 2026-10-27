@@ -72,6 +72,20 @@ private func predictions(_ url: URL, after word: String) -> [String] {
         #expect(predictions(rig.pairsURL, after: "see") == ["you"])
     }
 
+    @Test func rebuildingKeepsTheAgeOfEachDictation() async throws {
+        let rig = VocabularyRig(withPairs: true); defer { rig.cleanUp() }
+        let history = PairsHistory()
+        let old = Date(timeIntervalSince1970: 1_700_000_000 - 3 * 365 * 86_400)
+        for _ in 0..<3 {
+            try await history.append(DictationEntry(date: old, text: "see old news", rawText: nil, localeIdentifier: "en-US", engineID: "test", duration: 1))
+        }
+        try await history.append(dictation("see new things"))
+        rig.service.backfillPairsIfNeeded(history: history)
+        await rig.service.waitForLearning()
+        // Observed "now", three old sightings would outweigh one new one.
+        #expect(predictions(rig.pairsURL, after: "see") == ["new"])
+    }
+
     @Test func wipingRemovesBothPairFiles() async throws {
         let rig = VocabularyRig(withPairs: true); defer { rig.cleanUp() }
         rig.service.learnFromDictation(text: "see you tomorrow", locale: Locale(identifier: "en-US"), id: UUID())

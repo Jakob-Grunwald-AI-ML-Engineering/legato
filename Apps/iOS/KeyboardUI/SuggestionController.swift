@@ -47,6 +47,9 @@ final class SuggestionController {
     private unowned let controller: KeyboardController
     private var state = SuggestionState()
     private var actions: [Action] = []
+    /// The row generation `actions` were built for: a keystroke starts a new one, and until the new words are
+    /// published a tap on the old ones would apply them to a field that has moved on.
+    private var actionsGeneration = 0
     private var lastContent: WordRowContent = .empty
     private var generation = 0
     private var task: Task<Void, Never>?
@@ -158,22 +161,29 @@ final class SuggestionController {
 
     // MARK: Fields
 
-    /// Whether the field takes suggestions: prose-like fields only (a password, address, number or URL doesn't).
-    private var suggestsHere: Bool {
-        guard !document.isSecureTextEntry else { return false }
+    /// The field's keyboard type as the core policy knows it.
+    private var fieldKeyboard: SuggestionField.Keyboard {
         switch document.keyboardType {
-        case .default, .asciiCapable, .twitter, .webSearch, .numbersAndPunctuation: return true
-        default: return false
+        case .default: .default
+        case .asciiCapable: .asciiCapable
+        case .twitter: .twitter
+        case .webSearch: .webSearch
+        case .numbersAndPunctuation: .numbersAndPunctuation
+        default: .other
         }
     }
 
-    /// Whether what is typed here may be learned.
+    /// Whether the field takes suggestions: prose-like fields only (a password, address, number or URL doesn't).
+    private var suggestsHere: Bool {
+        SuggestionField.suggests(
+            secure: document.isSecureTextEntry, keyboard: fieldKeyboard, contentType: document.textContentType?.rawValue)
+    }
+
+    /// Whether what is typed here may be learned (`SuggestionField.learns`).
     private var learnsHere: Bool {
-        guard controller.fullAccess, !document.isSecureTextEntry else { return false }
-        switch document.keyboardType {
-        case .default, .asciiCapable, .twitter: return true
-        default: return false
-        }
+        SuggestionField.learns(
+            fullAccess: controller.fullAccess, secure: document.isSecureTextEntry, keyboard: fieldKeyboard,
+            contentType: document.textContentType?.rawValue)
     }
 
     private var document: any TextDocument { controller.document }
@@ -220,9 +230,7 @@ final class SuggestionController {
         var foreign = true
         if let own, Date().timeIntervalSince(own.at) <= SuggestionState.settleWindow {
             // The host may trim its context differently from what the keyboard tracked: a suffix match is the same text.
-            let same = own.before == reported
-                || (!reported.isEmpty && (own.before.hasSuffix(reported) || reported.hasSuffix(own.before)))
-            if same {
+            if OwnEditEcho.isSame(expected: own.before, reported: reported) {
                 reported = own.before
                 foreign = false
             }
@@ -231,7 +239,7 @@ final class SuggestionController {
         }
         before = reported
         after = document.contextAfter
-        _ = state.cursorMoved(contextBefore: reported, contextAfter: after, hasSelection: document.selectedText != nil, at: Date())
+        _ = state.cursorMoved(contextBefore: reported, contextAfter: after, hasSelection: document.selectedText?.isEmpty == false, at: Date())
         refreshRow()
         return foreign
     }
@@ -260,6 +268,7 @@ final class SuggestionController {
         pinned = words
         controller.suggestions = words
         actions = []
+        actionsGeneration = generation
     }
 
     /// Takes the words off the row (after a swap, or when nothing applies).
@@ -284,7 +293,8 @@ final class SuggestionController {
         case .empty, .status:
             publish([], [])
         case .predictions(let previous):
-            let words = WordSuggester.predictions(previous: previous.map { [$0] } ?? [], pairs: resources.pairs)
+            let words = WordSuggester.predictions(
+                previous: previous.map { [$0] } ?? [], pairs: resources.pairs, snapshot: resources.snapshot)
             publish(words, words.map { _ in .complete(prefix: "") })
         case .completions(let prefix):
             task = Task { [weak self] in
@@ -299,6 +309,7 @@ final class SuggestionController {
 
     private func publish(_ words: [String], _ actions: [Action]) {
         self.actions = actions
+        actionsGeneration = generation
         if controller.suggestions != words { controller.suggestions = words }
     }
 
@@ -315,7 +326,10 @@ final class SuggestionController {
     /// checker: the dictation's versions and the vocabulary first, then those plus the checker.
     private func alternatives(word: String, id: Int) async {
         let before = self.before, after = self.after
-        guard let tapped = WordAtCursor.find(contextBefore: before, contextAfter: after) else { return }
+        guard let tapped = WordAtCursor.find(contextBefore: before, contextAfter: after) else {
+            if id == generation { publish([], []) }
+            return
+        }
         let texts = controller.lastDictationTexts
         let location = texts.count > 1
             ? DictationLocator.locate(
@@ -421,11 +435,19 @@ final class SuggestionController {
         let words = controller.suggestions
         guard words.indices.contains(rank) else { return }
         let word = words[rank]
-        let action = actions.count == words.count ? actions[rank] : .complete(prefix: TextContext(documentContextBeforeInput: document.contextBefore).wordPrefix)
-        switch action {
+        if pinned != nil {
+            // The harness's fixed words complete whatever is being typed.
+            let prefix = TextContext(documentContextBeforeInput: controller.typing.contextBefore).wordPrefix
+            controller.applyEdit(WordEdit.complete(prefix: prefix, with: word), removed: prefix, asTyping: true)
+            return
+        }
+        // Words shown for an earlier state of the field (a key landed since) are not applied: their actions
+        // describe a word that is no longer there.
+        guard actionsGeneration == generation, actions.count == words.count else { return }
+        switch actions[rank] {
         case .complete(let prefix):
-            let removed = String(document.contextBefore.suffix(prefix.count))
-            controller.applyEdit(WordEdit.complete(prefix: prefix, with: word), removed: removed, asTyping: true)
+            guard let edit = WordEdit.complete(prefix: prefix, with: word, contextBefore: controller.typing.contextBefore) else { return }
+            controller.applyEdit(edit, removed: prefix, asTyping: true)
         case .replace(let original, let span, let fromVocabulary):
             controller.applyEdit(
                 WordEdit.replace(span: span, with: word, matchingCaseOf: original), removed: original, asTyping: false)
@@ -444,6 +466,17 @@ final class SuggestionController {
     func deletedTyped() {
         guard learnsHere else { return }
         typedBuffer.deleted()
+    }
+
+    /// A completion or prediction replaced the last `count` typed characters with `text`: it counts as typed.
+    func completed(deleting count: Int, with text: String) {
+        guard learnsHere else { return }
+        if let sentence = typedBuffer.completed(deleting: count, with: text) { learn(sentence) }
+    }
+
+    /// The typing is being undone: what was typed so far is dropped, not learned.
+    func discardTyping() {
+        typedBuffer.discard()
     }
 
     /// The cursor moved, the field changed or the host edited the text: what was typed so far is learned.

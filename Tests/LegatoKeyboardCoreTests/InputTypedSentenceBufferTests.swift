@@ -54,4 +54,35 @@ import Testing
         b.deleted()
         #expect(b.interrupted() == nil)
     }
+
+    // MARK: completions follow the live buffer
+
+    @Test func acceptingACompletionLearnsTheCompletedWordNotThePrefix() {
+        var b = TypedSentenceBuffer()
+        _ = type(&b, "say Hel")
+        #expect(b.completed(deleting: 3, with: "Hello ") == nil, "nothing is handed over mid-sentence")
+        #expect(b.typed(".") == "say Hello .")
+    }
+
+    @Test func aPredictionAcceptedAfterASpaceJoinsTheSentence() {
+        var b = TypedSentenceBuffer()
+        _ = type(&b, "see ")
+        #expect(b.completed(deleting: 0, with: "you ") == nil)
+        #expect(b.typed("!") == "see you !", "the completion brought its trailing space")
+    }
+
+    @Test func aCompletionThatEndsTheSentenceHandsItOver() {
+        var b = TypedSentenceBuffer()
+        _ = type(&b, "wait for th")
+        #expect(b.completed(deleting: 2, with: "them.") == "wait for them.")
+    }
+
+    // MARK: undoing typing
+
+    @Test func discardingDropsTheTypedTextWithoutLearningIt() {
+        var b = TypedSentenceBuffer()
+        _ = type(&b, "we meet at noon")
+        b.discard()
+        #expect(b.interrupted() == nil)
+    }
 }

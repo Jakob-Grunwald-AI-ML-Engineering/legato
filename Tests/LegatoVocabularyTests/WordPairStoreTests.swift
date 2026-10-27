@@ -39,6 +39,20 @@ struct WordPairStoreTests {
         #expect(try #require(WordPairModel.read(from: url)) == model)
     }
 
+    @Test func rebuildKeepsEachEntrysOwnDateSoOldDictationsStayOld() async throws {
+        let url = tempURL()
+        defer { cleanup(url) }
+        let store = WordPairStore(fileURL: url)
+        let longAgo = t0.addingTimeInterval(-5 * 365 * 86_400)
+        try await store.rebuild(
+            entries: [(text: "ich liebe Berlin", date: longAgo), (text: "ich liebe Berlin", date: longAgo),
+                      (text: "ich liebe Berlin", date: longAgo), (text: "ich laufe schnell", date: t0)],
+            now: t0)
+        let model = await store.model()
+        // Three old sightings have decayed to nothing; the one recent sighting wins.
+        #expect(model.predict(after: ["ich"], now: t0) == ["laufe"])
+    }
+
     @Test func rebuildFromNothingEmptiesTheModel() async throws {
         let url = tempURL()
         defer { cleanup(url) }

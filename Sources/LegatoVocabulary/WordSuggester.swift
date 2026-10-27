@@ -12,7 +12,8 @@ public enum WordSuggester {
     /// blocked entries and entries that are another entry's alias are skipped, as in ``HintSelector``), then the
     /// word-pair hits for that prefix after `previous`, then the dictionary's completions. The dictionary is
     /// asked only when the first two leave a slot free. A text offered twice counts once (case-insensitively),
-    /// and the prefix itself (in any case) is never returned.
+    /// and the prefix itself (in any case) is never returned. Whatever the source, a blocked word or another
+    /// entry's alias (a mishearing) is never offered.
     public static func completions(
         prefix: String, previous: [String], snapshot: VocabularySnapshot?, pairs: WordPairModel?,
         completer: (any WordCompleting)?, languages: [String], limit: Int = WordSuggester.limit, now: Date = Date()
@@ -21,9 +22,12 @@ public enum WordSuggester {
         guard !typed.isEmpty, limit > 0 else { return [] }
         var out: [String] = []
         var seen: Set<String> = []
+        let hidden = hiddenKeys(in: snapshot)
         func add(_ text: String) {
             let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard out.count < limit, !text.isEmpty, text.lowercased() != typed.lowercased(), seen.insert(text.lowercased()).inserted else { return }
+            guard out.count < limit, !text.isEmpty, text.lowercased() != typed.lowercased(),
+                  !hidden.contains(VocabularyEntry.foldedKey(for: text)), seen.insert(text.lowercased()).inserted
+            else { return }
             out.append(text)
         }
         if let snapshot { vocabularyMatches(prefix: typed, in: snapshot, now: now).forEach(add) }
@@ -34,11 +38,29 @@ public enum WordSuggester {
         return out
     }
 
-    /// The most likely next words after `previous`, best first.
+    /// The most likely next words after `previous`, best first. With the vocabulary `snapshot`, blocked words and
+    /// aliases are left out (the model is asked for more, so that the slots still fill).
     public static func predictions(
-        previous: [String], pairs: WordPairModel?, limit: Int = WordSuggester.limit, now: Date = Date()
+        previous: [String], pairs: WordPairModel?, snapshot: VocabularySnapshot? = nil, limit: Int = WordSuggester.limit,
+        now: Date = Date()
     ) -> [String] {
-        pairs?.predict(after: previous, limit: limit, now: now) ?? []
+        guard let pairs else { return [] }
+        let hidden = hiddenKeys(in: snapshot)
+        guard !hidden.isEmpty else { return pairs.predict(after: previous, limit: limit, now: now) }
+        return Array(
+            pairs.predict(after: previous, limit: WordPairModel.maxNext, now: now)
+                .filter { !hidden.contains(VocabularyEntry.foldedKey(for: $0)) }.prefix(max(0, limit)))
+    }
+
+    /// The folded keys of every blocked entry and of every alias: texts no output may contain.
+    private static func hiddenKeys(in snapshot: VocabularySnapshot?) -> Set<String> {
+        guard let snapshot else { return [] }
+        var keys: Set<String> = []
+        for entry in snapshot.entries {
+            if entry.blocked { keys.insert(VocabularyEntry.foldedKey(for: entry.text)) }
+            for alias in entry.aliases { keys.insert(VocabularyEntry.foldedKey(for: alias)) }
+        }
+        return keys
     }
 
     private static func vocabularyMatches(prefix: String, in snapshot: VocabularySnapshot, now: Date) -> [String] {

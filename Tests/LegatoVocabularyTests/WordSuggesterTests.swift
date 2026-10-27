@@ -71,6 +71,42 @@ struct WordSuggesterTests {
         #expect(out == ["Hello"])
     }
 
+    // MARK: aliases and blocked words appear in no output (PR #31)
+
+    @Test func aliasesAndBlockedWordsFromThePairModelAndTheCheckerAreDropped() async {
+        let snapshot = VocabularySnapshot(entries: [
+            entry("Hello", aliases: ["Helo"]),
+            entry("Helmut", blocked: true),
+            entry("Helena", aliases: ["Elena"]),
+        ])
+        let model = pairs(["ich helo", "ich helmut", "ich helfe"])
+        let completer = FakeCompleter(["Helo", "HELMUT", "Help"])
+        let out = await WordSuggester.completions(
+            prefix: "hel", previous: ["ich"], snapshot: snapshot, pairs: model, completer: completer, languages: ["en"], now: t0)
+        #expect(out == ["Helena", "Hello", "helfe"])
+        #expect(!out.map { $0.lowercased() }.contains("helo"))
+        #expect(!out.map { $0.lowercased() }.contains("helmut"))
+    }
+
+    @Test func theCheckerCannotBringBackABlockedWordEither() async {
+        let snapshot = VocabularySnapshot(entries: [entry("Helmut", blocked: true), entry("Helo", aliases: [])])
+        let completer = FakeCompleter(["helmut", "Help"])
+        let out = await WordSuggester.completions(
+            prefix: "Hel", previous: [], snapshot: snapshot, pairs: nil, completer: completer, languages: ["en"], now: t0)
+        #expect(out == ["Helo", "Help"])
+    }
+
+    @Test func predictionsLeaveOutAliasesAndBlockedWords() {
+        let snapshot = VocabularySnapshot(entries: [entry("Claude", aliases: ["kloud"]), entry("Spam", blocked: true)])
+        let model = pairs(["use kloud", "use kloud", "use spam", "use spam", "use claude", "use tools"])
+        #expect(WordSuggester.predictions(previous: ["use"], pairs: model, snapshot: snapshot, now: t0) == ["claude", "tools"])
+    }
+
+    @Test func predictionsWithoutASnapshotAreUnfiltered() {
+        let model = pairs(["use kloud"])
+        #expect(WordSuggester.predictions(previous: ["use"], pairs: model, snapshot: nil, now: t0) == ["kloud"])
+    }
+
     @Test func dedupesCaseInsensitivelyAcrossSources() async {
         let snapshot = VocabularySnapshot(entries: [entry("Hello")])
         let model = pairs(["ich hello"])

@@ -16,7 +16,8 @@ public enum WordRowContent: Sendable, Equatable {
 /// Decides what the word row shows. The newest intent wins: a keystroke shows completions (or
 /// predictions after a space), a cursor move the keyboard didn't make shows alternatives for the word
 /// it landed on (predictions in a space). A status or an active run takes the row over and pauses both
-/// until it ends; the row is then empty until the next intent.
+/// until it ends; the row is then empty until the next intent. Reports inside ``settleWindow`` of the
+/// keyboard's own edit are that edit settling, not a cursor move.
 public struct SuggestionState: Sendable {
     /// How long after the keyboard's own edit a matching cursor report still counts as that edit.
     public static let settleWindow: TimeInterval = 0.6
@@ -51,7 +52,10 @@ public struct SuggestionState: Sendable {
     @discardableResult
     public mutating func cursorMoved(contextBefore: String, contextAfter: String, hasSelection: Bool, at now: Date) -> WordRowContent {
         if let expected {
-            if contextBefore == expected.contextBefore, now.timeIntervalSince(expected.at) <= Self.settleWindow { return content }
+            // Inside the window every report belongs to the keyboard's own edit: its echo, or one of the steps
+            // on the way (a swap moves, deletes and inserts, and the host reports between them). Dropping the
+            // expectation at the first step would make the final echo look like the user moving the cursor.
+            if now.timeIntervalSince(expected.at) <= Self.settleWindow { return content }
             self.expected = nil
         }
         guard !paused else { return content }

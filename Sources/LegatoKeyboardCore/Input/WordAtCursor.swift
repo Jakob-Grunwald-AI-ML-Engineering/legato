@@ -1,7 +1,8 @@
 import Foundation
 
 /// A stretch of text around the cursor, as characters before and after it. Units are Characters
-/// (grapheme clusters); `ProxyDocument` converts if the host counts differently.
+/// (grapheme clusters), the way `deleteBackward` counts; moving the cursor over it takes UTF-16 units
+/// (``WordEdit/utf16Forward(contextAfter:)``).
 public struct WordSpan: Sendable, Equatable {
     public var before: Int
     public var after: Int

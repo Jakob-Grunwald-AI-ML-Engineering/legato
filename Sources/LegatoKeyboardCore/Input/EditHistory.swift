@@ -6,12 +6,18 @@ import Foundation
 /// Typing is grouped by word: a space or punctuation (included in the group), a cursor move or
 /// `idleGap` of silence closes the group. Dictation, cleanup and Refine results are `.version` entries
 /// that undo through the dictation's versions, guarded by the caller. Every other entry is guarded: the
-/// text before the cursor must still end with what the entry inserted (redo: removed), else the field
-/// changed behind the keyboard's back and the history is cleared.
+/// text before the cursor must still end with what the entry inserted (redo: removed) and, when the
+/// recording knew it, with the tail of the context the edit left (its anchor: where the cursor was), else
+/// the field changed behind the keyboard's back and the history is cleared.
+///
+/// A run of backspaces (a held delete) is one entry, like a typing group: it ends with `idleGap` of silence,
+/// or with anything that is not a backspace.
 public struct EditHistory: Sendable, Equatable {
     public static let capacity = 50
     /// Typing pauses longer than this start a new entry.
     public static let idleGap: TimeInterval = 1.5
+    /// How much of the context before the cursor an entry's anchor compares (the host may trim the rest).
+    static let anchorLength = 24
 
     public enum Kind: Sendable, Equatable {
         case text
@@ -23,11 +29,14 @@ public struct EditHistory: Sendable, Equatable {
         public var removed: String
         public var inserted: String
         public var kind: Kind
+        /// The text before the cursor right after the edit, when it was known.
+        public var anchor: String?
 
-        public init(removed: String, inserted: String, kind: Kind) {
+        public init(removed: String, inserted: String, kind: Kind, anchor: String? = nil) {
             self.removed = removed
             self.inserted = inserted
             self.kind = kind
+            self.anchor = anchor
         }
     }
 
@@ -42,6 +51,8 @@ public struct EditHistory: Sendable, Equatable {
     public private(set) var entries: [Entry] = []
     private var redoEntries: [Entry] = []
     private var groupOpen = false
+    /// The newest entry is a run of backspaces that further backspaces extend.
+    private var deleteGroupOpen = false
     private var lastTypedAt: Date?
 
     public init() {}
@@ -60,26 +71,30 @@ public struct EditHistory: Sendable, Equatable {
 
     // MARK: Recording
 
-    /// Typed text (a keystroke or a pasted run).
-    public mutating func typed(_ text: String, at now: Date) {
+    /// Typed text (a keystroke or a pasted run). `contextBefore`: the text before the cursor now, when known.
+    public mutating func typed(_ text: String, at now: Date, contextBefore: String? = nil) {
         guard !text.isEmpty else { return }
+        if deleteGroupOpen { closeGroup() }
         if groupOpen, let last = lastTypedAt, now.timeIntervalSince(last) > Self.idleGap { closeGroup() }
         redoEntries = []
         if groupOpen, let index = entries.indices.last {
             entries[index].inserted += text
+            entries[index].anchor = contextBefore
         } else {
-            append(Entry(removed: "", inserted: text, kind: .text))
+            append(Entry(removed: "", inserted: text, kind: .text, anchor: contextBefore))
             groupOpen = true
         }
         lastTypedAt = now
         if text.contains(where: { $0.isWhitespace || $0.isPunctuation || $0.isSymbol }) { closeGroup() }
     }
 
-    /// Text removed by a backspace. It shortens the open typing group; otherwise it is an entry of its own.
-    public mutating func deleted(_ text: String, at now: Date) {
+    /// Text removed by a backspace. It shortens the open typing group; otherwise it joins the run of backspaces
+    /// before it, or is an entry of its own. `contextBefore`: the text before the cursor now, when known.
+    public mutating func deleted(_ text: String, at now: Date, contextBefore: String? = nil) {
         guard !text.isEmpty else { return }
         if groupOpen, let index = entries.indices.last, entries[index].inserted.hasSuffix(text) {
             entries[index].inserted.removeLast(text.count)
+            entries[index].anchor = contextBefore
             if entries[index].inserted.isEmpty && entries[index].removed.isEmpty {
                 entries.removeLast()
                 closeGroup()
@@ -87,14 +102,23 @@ public struct EditHistory: Sendable, Equatable {
             lastTypedAt = now
             return
         }
-        record(removed: text, inserted: "", at: now)
+        if deleteGroupOpen, let last = lastTypedAt, now.timeIntervalSince(last) <= Self.idleGap, let index = entries.indices.last,
+           entries[index].inserted.isEmpty, case .text = entries[index].kind {
+            entries[index].removed = text + entries[index].removed
+            entries[index].anchor = contextBefore
+            lastTypedAt = now
+            return
+        }
+        record(removed: text, inserted: "", at: now, contextBefore: contextBefore)
+        deleteGroupOpen = true
+        lastTypedAt = now
     }
 
     /// A discrete edit (a completion, a word swap, a cleanup replacement).
-    public mutating func record(removed: String, inserted: String, at now: Date) {
+    public mutating func record(removed: String, inserted: String, at now: Date, contextBefore: String? = nil) {
         closeGroup()
         redoEntries = []
-        append(Entry(removed: removed, inserted: inserted, kind: .text))
+        append(Entry(removed: removed, inserted: inserted, kind: .text, anchor: contextBefore))
     }
 
     /// A dictation, cleanup or Refine result: the field went from version `from` to version `to`.
@@ -116,7 +140,7 @@ public struct EditHistory: Sendable, Equatable {
             redoEntries.append(entry)
             return .version(from)
         case .text:
-            guard contextBefore.hasSuffix(entry.inserted) else { clear(); return nil }
+            guard contextBefore.hasSuffix(entry.inserted), Self.anchored(contextBefore, at: entry.anchor) else { clear(); return nil }
             entries.removeLast()
             redoEntries.append(entry)
             return .edit(WordEdit(forward: 0, deleteCount: entry.inserted.count, insert: entry.removed))
@@ -133,17 +157,41 @@ public struct EditHistory: Sendable, Equatable {
             entries.append(entry)
             return .version(to)
         case .text:
-            guard contextBefore.hasSuffix(entry.removed) else { clear(); return nil }
+            guard contextBefore.hasSuffix(entry.removed),
+                  Self.anchored(contextBefore, at: entry.anchor.map { String($0.dropLast(entry.inserted.count)) + entry.removed })
+            else { clear(); return nil }
             redoEntries.removeLast()
             entries.append(entry)
             return .edit(WordEdit(forward: 0, deleteCount: entry.removed.count, insert: entry.inserted))
         }
     }
 
+    /// An undo step that could not be carried out (the dictation version could not be shown): the entry is back.
+    public mutating func revertUndo() {
+        guard let entry = redoEntries.popLast() else { return }
+        entries.append(entry)
+    }
+
+    /// A redo step that could not be carried out: the entry is back on the redo stack.
+    public mutating func revertRedo() {
+        guard let entry = entries.popLast() else { return }
+        redoEntries.append(entry)
+    }
+
     // MARK: Internals
+
+    /// Whether the cursor still sits where the edit left it: the text before it ends with the tail of the
+    /// edit's anchor. No anchor, no check.
+    private static func anchored(_ contextBefore: String, at anchor: String?) -> Bool {
+        guard let anchor else { return true }
+        if contextBefore.hasSuffix(String(anchor.suffix(anchorLength))) { return true }
+        // A host that trims its context shorter than the tail: what it reports must be the anchor's end.
+        return !contextBefore.isEmpty && anchor.hasSuffix(contextBefore)
+    }
 
     private mutating func closeGroup() {
         groupOpen = false
+        deleteGroupOpen = false
         lastTypedAt = nil
     }
 

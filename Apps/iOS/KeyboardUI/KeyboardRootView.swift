@@ -106,7 +106,7 @@ struct KeyboardRootView: View {
                             .padding(.trailing, cell.trailingInset)
                             .simultaneousGesture(swipe)
                     case .hotkeys:
-                        HotkeyButtons(controller: controller, iconOnlyRefine: true, dividers: false, swipe: swipe)
+                        HotkeyButtons(controller: controller, iconOnlyRefine: true, dividers: false, showsRedo: row.showsRedo, swipe: swipe)
                             .padding(.leading, cell.leadingInset)
                             .padding(.trailing, cell.trailingInset)
                     case .delete:

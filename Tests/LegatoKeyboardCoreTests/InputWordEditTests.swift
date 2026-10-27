@@ -56,4 +56,43 @@ import Testing
         let edit = WordEdit.replace(span: WordSpan(before: 3, after: 0), with: "wand", matchingCaseOf: "Win")
         #expect(edit.insert == "Wand")
     }
+
+    // MARK: a completion tapped after the field moved on
+
+    @Test func aCompletionIsRefusedWhenTheWordHasGrownSinceTheRowWasBuilt() {
+        // The row offered "hello" for "hel"; a key made it "hell" before the tap landed.
+        #expect(WordEdit.complete(prefix: "hel", with: "hello", contextBefore: "say hell") == nil)
+    }
+
+    @Test func aCompletionIsRefusedWhenTheWordHasShrunkSinceTheRowWasBuilt() {
+        #expect(WordEdit.complete(prefix: "hel", with: "hello", contextBefore: "say he") == nil)
+    }
+
+    @Test func aCompletionOfTheCurrentPrefixIsTheUsualEdit() {
+        #expect(
+            WordEdit.complete(prefix: "hel", with: "hello", contextBefore: "say hel")
+                == WordEdit(forward: 0, deleteCount: 3, insert: "hello "))
+    }
+
+    @Test func aPredictionNeedsAnEmptyPrefix() {
+        #expect(WordEdit.complete(prefix: "", with: "world", contextBefore: "hello ") == WordEdit(forward: 0, deleteCount: 0, insert: "world "))
+        #expect(WordEdit.complete(prefix: "", with: "world", contextBefore: "hello w") == nil)
+    }
+
+    // MARK: the proxy counts UTF-16 units
+
+    @Test func theForwardMoveIsCountedInUTF16UnitsOfTheCharactersItCrosses() {
+        let edit = WordEdit(forward: 2, deleteCount: 5, insert: "x")
+        #expect(edit.utf16Forward(contextAfter: "😀é rest") == 3, "😀 is two units, é (precomposed) one")
+        #expect(WordEdit(forward: 0, deleteCount: 1, insert: "").utf16Forward(contextAfter: "😀") == 0)
+    }
+
+    @Test func aCombinedEmojiCountsAsOneCharacterButManyUnits() {
+        let family = "👨‍👩‍👧"
+        #expect(WordEdit(forward: 1, deleteCount: 0, insert: "").utf16Forward(contextAfter: family + "a") == family.utf16.count)
+    }
+
+    @Test func aForwardMoveBeyondTheKnownTextCountsWhatIsThere() {
+        #expect(WordEdit(forward: 5, deleteCount: 0, insert: "").utf16Forward(contextAfter: "😀") == 2)
+    }
 }

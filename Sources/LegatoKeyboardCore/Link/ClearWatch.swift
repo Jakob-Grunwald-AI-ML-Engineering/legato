@@ -23,19 +23,27 @@ public struct ClearWatch: Sendable, Equatable {
     }
 
     private var lastOwnEditAt: Date?
+    private var lastOwnEditLeftEmpty = false
     /// A recheck is due for a field that showed the run's text: type nothing of the run until then.
     public private(set) var holds = false
 
     public init() {}
 
-    /// The keyboard edited the field itself (typed, deleted, applied the host's text).
-    public mutating func ownEdit(at now: Date) {
+    /// Whether a cleared field is the host's doing. False when the keyboard's own last edit left the field empty
+    /// (undo of the first word, holding delete, undoing a dictation): the keyboard's history is then still good.
+    public var hostEmptiedField: Bool { !lastOwnEditLeftEmpty }
+
+    /// The keyboard edited the field itself (typed, deleted, applied the host's text). `leavesFieldEmpty`: the
+    /// edit leaves no text in the field.
+    public mutating func ownEdit(at now: Date, leavesFieldEmpty: Bool = false) {
         lastOwnEditAt = now
+        lastOwnEditLeftEmpty = leavesFieldEmpty
     }
 
     /// The keyboard typed a Return (after its own edits for it): an empty field after it is believed at once.
     public mutating func returnTyped(at now: Date) {
         lastOwnEditAt = nil
+        lastOwnEditLeftEmpty = false
     }
 
     /// The user is about to press a key (typed, delete, Return, a suggestion): a clear held back for its recheck

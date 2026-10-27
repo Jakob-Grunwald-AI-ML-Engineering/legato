@@ -1,8 +1,8 @@
 import Foundation
 
 /// One edit at the cursor: move `forward` characters, delete `deleteCount` characters backwards, then
-/// insert `insert`. Units are Characters (grapheme clusters); `ProxyDocument` converts if the host
-/// counts differently.
+/// insert `insert`. Units are Characters (grapheme clusters), the way `deleteBackward` counts; the text
+/// proxy moves the cursor in UTF-16 units, so the move goes through ``utf16Forward(contextAfter:)``.
 public struct WordEdit: Sendable, Equatable {
     public var forward: Int
     public var deleteCount: Int
@@ -25,6 +25,20 @@ public struct WordEdit: Sendable, Equatable {
     /// Completes the typed `prefix` with `candidate` and a trailing space, in the typed word's case.
     public static func complete(prefix: String, with candidate: String) -> WordEdit {
         WordEdit(forward: 0, deleteCount: prefix.count, insert: matchCase(candidate, to: prefix) + " ")
+    }
+
+    /// The completion of `prefix` with `candidate`, only while `contextBefore` still ends in that very prefix (the
+    /// word row can lag a keystroke behind the field); nil otherwise.
+    public static func complete(prefix: String, with candidate: String, contextBefore: String) -> WordEdit? {
+        guard TextContext(documentContextBeforeInput: contextBefore).wordPrefix == prefix else { return nil }
+        return complete(prefix: prefix, with: candidate)
+    }
+
+    /// `forward` as the UTF-16 units `adjustTextPosition(byCharacterOffset:)` actually moves by, read off the
+    /// characters it crosses in the text after the cursor.
+    public func utf16Forward(contextAfter: String) -> Int {
+        guard forward > 0 else { return forward }
+        return String(contextAfter.prefix(forward)).utf16.count
     }
 
     /// A lowercase candidate takes the typed word's capitalisation: all caps (two or more letters) or a

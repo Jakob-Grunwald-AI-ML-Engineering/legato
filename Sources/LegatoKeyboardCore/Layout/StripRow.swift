@@ -25,23 +25,28 @@ public struct StripCell: Sendable, Equatable {
 
 /// The compact strip's single row for a keyboard width: chevron · globe? · hotkeys · delete · return · mic.
 /// The hotkeys cell holds undo, redo and an icon-only Refine. The mic pill keeps its full size and the
-/// right margin at every width, and the hotkeys keep their minimum; the keys give way. The touch areas tile the whole width (each gap is split in the middle; the chevron and the
+/// right margin at every width. When space is short the keys shrink first, down to `minKeyWidth`; then redo
+/// goes (``showsRedo``) and the keys get what that frees; only below the phone sizes do the keys shrink
+/// further. The touch areas tile the whole width (each gap is split in the middle; the chevron and the
 /// mic reach the screen edges), so the mic pill stays easy to hit.
 public struct StripRow: Sendable, Equatable {
     public static let margin = 8.0
     public static let gap = 8.0
     public static let keyWidth = 44.0
-    /// A key's usual smallest width; below this the keys shrink only to keep the hotkeys' minimum
-    /// (narrow phones with a globe and a text return key).
-    public static let minKeyWidth = 40.0
+    /// The smallest a key gets on a phone-sized width (375 pt and up), globe and text return included.
+    public static let minKeyWidth = 36.0
     public static let textReturnWidth = 60.0
     public static let pillWidth = 81.0
     /// One hotkey button (undo, redo, Refine).
-    public static let hotkeyButtonWidth = 36.0
-    /// The narrowest the hotkeys cell gets: three buttons.
+    public static let hotkeyButtonWidth = 30.0
+    /// The narrowest the hotkeys cell gets with undo, redo and Refine: three buttons.
     public static let minHotkeysWidth = 3 * hotkeyButtonWidth
+    /// The narrowest it gets without redo: undo and Refine.
+    public static let minCompactHotkeysWidth = 2 * hotkeyButtonWidth
 
     public let cells: [StripCell]
+    /// Whether the hotkeys cell has room for redo (it is left out on the narrowest rows).
+    public let showsRedo: Bool
 
     public static func make(width: Double, showsGlobe: Bool, returnStyle: StripReturnStyle) -> StripRow {
         var slots: [StripSlot] = [.expand]
@@ -56,9 +61,14 @@ public struct StripRow: Sendable, Equatable {
         let count = Double(flexible)
 
         var key = keyWidth
+        var showsRedo = true
         if available - count * key < minHotkeysWidth {
-            // The hotkeys always get their minimum; the keys take what is left.
-            key = max((available - minHotkeysWidth) / count, 0)
+            key = (available - minHotkeysWidth) / count
+            if key < minKeyWidth {
+                // Three buttons would squeeze the keys below their floor: redo goes, the keys get its room.
+                showsRedo = false
+                key = min(max((available - minCompactHotkeysWidth) / count, 0), keyWidth)
+            }
         }
         let hotkeys = max(available - count * key, 0)
 
@@ -83,6 +93,6 @@ public struct StripRow: Sendable, Equatable {
             let hitMaxX = index == frames.count - 1 ? width : f.x + f.width + gap / 2
             return StripCell(slot: f.slot, x: f.x, width: f.width, hitX: hitX, hitWidth: hitMaxX - hitX)
         }
-        return StripRow(cells: cells)
+        return StripRow(cells: cells, showsRedo: showsRedo)
     }
 }

@@ -22,6 +22,7 @@ final class ProxyDocument: TextDocument {
     var contextAfter: String { proxy()?.documentContextAfterInput ?? "" }
     var selectedText: String? { proxy()?.selectedText }
     var isSecureTextEntry: Bool { proxy()?.isSecureTextEntry ?? false }
+    var textContentType: UITextContentType? { proxy()?.textContentType }
     var returnKeyType: UIReturnKeyType { proxy()?.returnKeyType ?? .default }
     var keyboardType: UIKeyboardType { proxy()?.keyboardType ?? .default }
     var autocapitalizationType: UITextAutocapitalizationType { proxy()?.autocapitalizationType ?? .sentences }

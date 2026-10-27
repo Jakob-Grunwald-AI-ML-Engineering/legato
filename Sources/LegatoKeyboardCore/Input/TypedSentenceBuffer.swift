@@ -24,6 +24,16 @@ public struct TypedSentenceBuffer: Sendable, Equatable {
         if !text.isEmpty { text.removeLast() }
     }
 
+    /// A completion replaced the last `count` characters with `text`: the buffer follows, nothing is handed over.
+    /// (Returns the finished sentence when `text` ended one.)
+    public mutating func completed(deleting count: Int, with text: String) -> String? {
+        for _ in 0..<max(0, count) { deleted() }
+        return typed(text)
+    }
+
+    /// The typed text is being undone: it is dropped, not learned.
+    public mutating func discard() { text = "" }
+
     /// The cursor moved, the field changed or something else edited the text: what was typed so far.
     public mutating func interrupted() -> String? { take() }
 
