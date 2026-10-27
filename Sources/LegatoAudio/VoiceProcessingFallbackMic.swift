@@ -28,7 +28,9 @@ public struct MicDevices: Sendable {
 /// through ``notices``, and every replaced microphone makes ``resumptions`` yield so the meeting fills the gap.
 ///
 /// - **Device.** It records from `device` (nil: the system default input) and moves to the device given to
-///   ``follow(device:)`` (the call app's, which the Mac app polls).
+///   ``follow(device:)`` (the call app's, which the Mac app polls). A device the microphone cannot be bound to
+///   is reported by name and the default input records instead; that device is not tried again with the same
+///   voice-processing setting, however often it is followed.
 /// - **Dead input.** After every start and restart a ``MicSilenceGuard`` judges the first seconds.
 ///   A `silent` plain microphone is reported by name, and moved to the call app's device when that differs.
 /// - **Voice processing** can fail to configure on some Bluetooth headsets: starting it throws, or it starts
@@ -46,6 +48,11 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         let yours = mic.map { "Your mic (\($0))" } ?? "Your mic"
         if let call { return "\(yours) hears nothing — the call uses \(call)" }
         return "\(yours) hears nothing — check the input in System Settings → Sound"
+    }
+
+    /// The notice for a device the microphone could not be bound to.
+    public static func deviceNotSelectedNotice(_ name: String?) -> String {
+        "Couldn't record from \(name ?? "the call's mic") — recording from the default input instead"
     }
 
     /// What to tell the user, one string per event. One consumer.
@@ -68,6 +75,14 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         var device: UInt32?
         /// The device to record from; a switch in progress moves on to it afterwards.
         var wanted: UInt32?
+        /// The last device that could not be bound, and with which voice-processing setting.
+        var refused: (device: UInt32, voiceProcessing: Bool)?
+
+        /// The device to start a microphone on: the wanted one, unless it was refused with this setting.
+        func target(voiceProcessing: Bool) -> UInt32? {
+            if let refused, refused.device == wanted, refused.voiceProcessing == voiceProcessing { return nil }
+            return wanted
+        }
     }
 
     private let state: Mutex<State>
@@ -119,13 +134,14 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
             s.lifecycle += 1
             s.continuation = continuation
             s.format = format
-            return (s.lifecycle, s.wanted)
+            return (s.lifecycle, s.target(voiceProcessing: voiceProcessing))
         }
         do {
             do {
                 try await launch(voiceProcessing: voiceProcessing, device: device, format: format, lifecycle: lifecycle)
             } catch where voiceProcessing && !(error is CancellationError) {
                 noticeSink.yield(Self.notice)
+                let device = state.withLock { $0.target(voiceProcessing: false) }
                 try await launch(voiceProcessing: false, device: device, format: format, lifecycle: lifecycle)
             }
         } catch {
@@ -136,11 +152,11 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     }
 
     /// Records from `device` from now on (the call app's input). The running microphone is replaced on the
-    /// same stream unless it already uses it; before a start, the start uses it.
+    /// same stream unless it already uses it (or could not be bound to it); before a start, the start uses it.
     public func follow(device: UInt32) async {
         let move = state.withLock { s -> Bool in
             s.wanted = device
-            return s.inner != nil && !s.switching && s.device != device
+            return s.inner != nil && !s.switching && s.device != s.target(voiceProcessing: s.voiceProcessingOn)
         }
         if move { await switchMic(voiceProcessing: nil, notice: nil) }
     }
@@ -170,11 +186,20 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         continuation?.finish()
     }
 
-    /// Starts one microphone, wires it to the stream and arms the guard. Throws `MicSourceError.notArmed`,
+    /// Starts one microphone, wires it to the stream and arms the guard. A device it cannot be bound to is
+    /// reported and remembered, and the default input is started instead. Throws `MicSourceError.notArmed`,
     /// after stopping the new microphone, when a stop or restart got there first.
     private func launch(voiceProcessing: Bool, device: UInt32?, format: AudioFormatSpec, lifecycle: Int) async throws {
         let source = make(voiceProcessing, device)
-        let chunks = try await source.start(format: format)
+        let chunks: AsyncStream<AudioChunk>
+        do {
+            chunks = try await source.start(format: format)
+        } catch MicSourceError.deviceNotSelected(let refused, _) where device != nil {
+            state.withLock { $0.refused = (refused, voiceProcessing) }
+            noticeSink.yield(Self.deviceNotSelectedNotice(devices.name(refused)))
+            try await launch(voiceProcessing: voiceProcessing, device: nil, format: format, lifecycle: lifecycle)
+            return
+        }
         let pump = Task { [weak self] in
             for await chunk in chunks { self?.deliver(chunk) }
         }
@@ -249,7 +274,8 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
             guard !s.switching, let inner = s.inner, let format = s.format else { return nil }
             s.switching = true
             defer { s.inner = nil; s.pump = nil; s.relay = nil; s.watching = nil }
-            return (inner, s.pump, s.relay, format, s.lifecycle, voiceProcessing ?? s.voiceProcessingOn, s.wanted)
+            let vp = voiceProcessing ?? s.voiceProcessingOn
+            return (inner, s.pump, s.relay, format, s.lifecycle, vp, s.target(voiceProcessing: vp))
         }
         guard let (old, oldPump, oldRelay, format, lifecycle, vp, device) = taken else { return }
         if let notice { noticeSink.yield(notice) }
@@ -259,7 +285,7 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         do {
             try await launch(voiceProcessing: vp, device: device, format: format, lifecycle: lifecycle)
             resumeSink.yield()
-        } catch is MicSourceError {
+        } catch MicSourceError.notArmed {
             // stopped meanwhile: nothing to report
         } catch {
             noticeSink.yield(Self.restartFailedNotice)
@@ -267,7 +293,7 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         // A device followed while this switch ran.
         let again = state.withLock { s -> Bool in
             s.switching = false
-            return s.inner != nil && s.wanted != s.device
+            return s.inner != nil && s.device != s.target(voiceProcessing: s.voiceProcessingOn)
         }
         if again { await switchMic(voiceProcessing: nil, notice: nil) }
     }

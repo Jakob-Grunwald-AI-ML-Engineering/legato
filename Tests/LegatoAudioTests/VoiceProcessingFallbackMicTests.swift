@@ -11,16 +11,18 @@ private final class FakeMic: ResumableAudioSource {
     let voiceProcessing: Bool
     let device: UInt32?
     private let failStart: Bool
+    private let refuseDevice: Bool
     private let continuation = Mutex<AsyncStream<AudioChunk>.Continuation?>(nil)
     private let stops = Mutex(0)
     private let resumeSink: AsyncStream<Void>.Continuation
     let resumptions: AsyncStream<Void>
     var stopCount: Int { stops.withLock { $0 } }
 
-    init(voiceProcessing: Bool, device: UInt32? = nil, failStart: Bool = false) {
+    init(voiceProcessing: Bool, device: UInt32? = nil, failStart: Bool = false, refuseDevice: Bool = false) {
         self.voiceProcessing = voiceProcessing
         self.device = device
         self.failStart = failStart
+        self.refuseDevice = refuseDevice
         (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self)
     }
 
@@ -34,6 +36,7 @@ private final class FakeMic: ResumableAudioSource {
 
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         if failStart { throw StartFailed() }
+        if refuseDevice, let device { throw MicSourceError.deviceNotSelected(device: device, status: -10851) }
         let (stream, cont) = AsyncStream<AudioChunk>.makeStream()
         continuation.withLock { $0 = cont }
         return stream
@@ -47,13 +50,19 @@ private final class FakeMic: ResumableAudioSource {
 }
 
 /// Makes the mics in order of `plan` (voice processing flag, whether its start fails) and keeps them.
+/// A mic on a device in `refused` cannot select it (as `MicSource` throws).
 private final class Factory: Sendable {
     private let plan: Mutex<[(vp: Bool, fail: Bool)]>
+    private let refused: Set<UInt32>
     let made = Mutex<[FakeMic]>([])
-    init(_ plan: [(vp: Bool, fail: Bool)]) { self.plan = Mutex(plan) }
+    init(_ plan: [(vp: Bool, fail: Bool)], refused: Set<UInt32> = []) {
+        self.plan = Mutex(plan)
+        self.refused = refused
+    }
     func make(_ vp: Bool, _ device: UInt32? = nil) -> any AudioSource {
         let next = plan.withLock { $0.isEmpty ? (vp: vp, fail: false) : $0.removeFirst() }
-        let mic = FakeMic(voiceProcessing: vp, device: device, failStart: next.fail)
+        let refuse = device.map { refused.contains($0) } ?? false
+        let mic = FakeMic(voiceProcessing: vp, device: device, failStart: next.fail, refuseDevice: refuse)
         made.withLock { $0.append(mic) }
         return mic
     }
@@ -273,6 +282,44 @@ private func eventually(_ condition: @Sendable () -> Bool) async -> Bool {
         _ = try await source.start(format: format)
         factory.mics[0].resume() // MicSource rebuilt its engine after a device change
         #expect(await eventually { resumptions.values.count == 1 })
+        await source.stop()
+    }
+
+    /// The field bug: the meeting mic could not select the call's device and stayed on the dead default input,
+    /// and nobody was told.
+    @Test func aDeviceThatCannotBeSelectedIsReportedAndTheDefaultInputRecords() async throws {
+        let factory = Factory([], refused: [builtIn])
+        let source = VoiceProcessingFallbackMic(
+            voiceProcessing: false, device: builtIn, devices: devices(call: builtIn), makeMic: { factory.make($0, $1) })
+        let notices = Tally(source.notices)
+        let stream = try await source.start(format: format)
+        let (got, reader) = collect(stream)
+
+        #expect(factory.mics.map(\.device) == [builtIn, nil])
+        #expect(await eventually {
+            notices.values == ["Couldn't record from MacBook Pro Microphone — recording from the default input instead"]
+        })
+        factory.mics[1].push(0.4)
+        #expect(await eventually { got.values == [0.4] })
+        await source.stop()
+        await reader.value
+    }
+
+    @Test func aRefusedDeviceIsNotRetriedOnEveryFollow() async throws {
+        let factory = Factory([], refused: [builtIn])
+        let source = VoiceProcessingFallbackMic(
+            voiceProcessing: false, devices: devices(call: nil), makeMic: { factory.make($0, $1) })
+        let notices = Tally(source.notices)
+        _ = try await source.start(format: format)
+
+        await source.follow(device: builtIn) // refused: back on the default
+        #expect(factory.mics.map(\.device) == [nil, builtIn, nil])
+        await source.follow(device: builtIn) // the call app is polled again: same device, no new attempt
+        await source.follow(device: builtIn)
+        #expect(factory.mics.count == 3)
+        #expect(await eventually { notices.values.count >= 1 })
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(notices.values.count == 1, "one notice, not one per poll")
         await source.stop()
     }
 
