@@ -1,7 +1,13 @@
-# The gate. Each tree is tested in full once: in the merge queue, on the commit
-# that will land (main + the queued PRs ahead + this one). PRs get a quick build
-# for early feedback. No push trigger: the queue's commit IS what main becomes,
-# so main and live never re-test. `gate` is the check the merge queue requires.
+# The gate. Budget: a run takes at most 10 minutes, cold, with no cache machinery.
+# Runs only in the merge queue (and by hand), on the commit that will land (main + the queued PRs ahead + this
+# one), so main and live never re-test. `gate` is the one check the main ruleset requires.
+#
+# It covers the cleanup e2e test, `swift test` and both app builds, all against CI-only stubs of MLX,
+# FluidAudio and the Hugging Face libraries (Stubs/, LEGATO_STUB_DEPS=1), so only our own code compiles.
+# The real libraries, the Release builds and the binary scan run on the release path (release-checks.yml,
+# on every push to `live`). Simulator scenarios are local only (scripts/e2e/ios-sim.sh).
+#
+# Pull requests build nothing; `gate` only reports there, so the queue accepts them.
 name: test
 
 on:
@@ -20,38 +26,30 @@ permissions:
 
 jobs:
   build-test:
-    # Xcode is selected from .xcode-version by scripts/ci/lib.sh.
+    # Not on pull requests: the build is the queue's job.
+    if: ${{ github.event_name != 'pull_request' }}
+    # Xcode (and the Metal toolchain MLX needs) is selected from .xcode-version by scripts/ci/lib.sh.
     runs-on: macos-26
-    # The apps link MLX and FluidAudio: a PR build takes ~28 min, the full queue run longer.
-    timeout-minutes: 75
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      # The mode is picked in shell, not by `if:`, so no step can silently skip.
-      - name: Build (PR) or full test (merge queue, dispatch)
-        env:
-          EVENT: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT" = "pull_request" ]; then
-            scripts/ci/test.sh quick
-          else
-            scripts/ci/test.sh full
-          fi
+      - run: scripts/ci/test.sh
 
-  # The ONE required check. always() so a failed or cancelled needed job fails
-  # this one instead of skipping it (a skipped required check reads as passing).
+  # The ONE required check. always() so a failed or cancelled build-test fails this job instead of skipping it
+  # (a skipped required check reads as passing). Only on pull_request may build-test be skipped.
   gate:
     needs: [build-test]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Every needed job succeeded
+      - name: build-test succeeded (or was skipped on a pull request)
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          EVENT: ${{ github.event_name }}
+          RESULT: ${{ needs.build-test.result }}
         run: |
-          for r in $RESULTS; do
-            if [ "$r" != "success" ]; then
-              echo "::error::A required job finished as '$r'."
-              exit 1
-            fi
-          done
+          if [ "$RESULT" = success ] || { [ "$EVENT" = pull_request ] && [ "$RESULT" = skipped ]; }; then
+            exit 0
+          fi
+          echo "::error::build-test finished as '$RESULT' on a '$EVENT' event."
+          exit 1

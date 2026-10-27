@@ -195,9 +195,13 @@ struct PipelineTests {
     }
 }
 
+/// CI stub mode (`LEGATO_STUB_DEPS=1`, see Package.swift): the heavy dependencies are no-behaviour stubs, so tests
+/// that exercise their real behaviour are gated on this.
+private let stubDeps = ProcessInfo.processInfo.environment["LEGATO_STUB_DEPS"] == "1"
+
 @Suite("ITNStage")
 struct ITNStageTests {
-    @Test func englishNumbersBecomeDigits() async throws {
+    @Test(.disabled(if: stubDeps, "needs the real FluidAudio TextNormalizer")) func englishNumbersBecomeDigits() async throws {
         let out = try await ITNStage().process("that costs twenty five euros", locale: en)
         #expect(out.contains("25"))
     }
@@ -207,7 +211,7 @@ struct ITNStageTests {
         #expect(try await ITNStage().process(input, locale: de) == input)
     }
 
-    @Test func englishFlavoursOfEnglishAreNormalizedToo() async throws {
+    @Test(.disabled(if: stubDeps, "needs the real FluidAudio TextNormalizer")) func englishFlavoursOfEnglishAreNormalizedToo() async throws {
         let out = try await ITNStage().process("twenty five euros", locale: Locale(identifier: "en-GB"))
         #expect(out.contains("25"))
     }

@@ -3,7 +3,8 @@
 #
 # Usage: ios-sim.sh [run|release-check]
 #   run             (default) build the Debug app, run the scenarios, print a PASS/FAIL table.
-#   release-check   build the Release app and verify none of the fake/e2e code is in the binary.
+#   release-check   build the Release app (arm64 simulator) and verify none of the fake/e2e code is in the binary;
+#                   every needle must still occur in the sources (stale-needle control).
 #
 # SpeechTranscriber and the microphone don't work on the Simulator and there is no Action Button, so the
 # app runs with a scripted engine and a fake mic (-LegatoFakeEngine) and is driven by Darwin notifications
@@ -15,11 +16,27 @@
 #
 # Environment:
 #   LEGATO_E2E_UDID      use this (already created) simulator; it is shut down afterwards only if the script booted it
-#   LEGATO_E2E_DERIVED   DerivedData directory to reuse between runs (default: a temp dir, removed on exit)
-#   LEGATO_E2E_KEEP=1    keep the work directory (logs) and print its path
+#   LEGATO_E2E_DERIVED   DerivedData directory to reuse between runs (default: <cache>/e2e-derived/<hash of this
+#                        checkout's path>, kept between runs; see "Build caches" below)
+#   LEGATO_E2E_KEEP=1    keep the work directory (logs) and print its path; kept dirs are swept after
+#                        LEGATO_E2E_KEEP_DAYS (default 7)
+#   LEGATO_CACHE_DIR     root of the shared build caches (default: ~/Library/Caches/legato)
 #   LEGATO_E2E_SHOTS     directory for the keyboard screenshots (scenario s; default: inside the work directory)
 # Without LEGATO_E2E_UDID a simulator named "legato-e2e" is created once (iPhone, newest iOS 26+ runtime),
 # reused by later runs, and shut down at the end.
+#
+# Work directory: $TMPDIR/legato-e2e.* holds logs only (a few MB), tagged with the owner PID. It is removed on
+# exit and on SIGINT/SIGTERM (the running build is killed first). A SIGKILL leaves it behind; every new run first
+# sweeps such dirs, never one whose owner is still alive. See scripts/e2e/work-dir.sh.
+#
+# Build caches (all under LEGATO_CACHE_DIR, so deleting worktrees does not strand gigabytes):
+#   SourcePackages/      cloned SwiftPM packages, shared by every checkout and run (-clonedSourcePackagesDirPath;
+#                        SwiftPM locks it itself).
+#   e2e-derived/<hash>/  DerivedData, one per checkout, reused between runs. Not shared across checkouts: DerivedData
+#                        is keyed by source paths, so another checkout would rebuild everything anyway, and concurrent
+#                        xcodebuilds on one DerivedData are unsafe. Runs on the same checkout are serialized by a
+#                        mkdir lock (stale locks of dead PIDs are taken over).
+# scripts/dev/prune-build-caches.sh removes the caches of deleted checkouts (dry run by default).
 set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=../ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../ci/lib.sh"   # also cd's to the repo root
@@ -28,18 +45,66 @@ mode="${1:-run}"
 BID=de.gruenwald.legato
 SIM_NAME=legato-e2e
 NOTIFY=de.gruenwald.legato.e2e
+# shellcheck source-path=SCRIPTDIR source=work-dir.sh
+source "$(dirname "${BASH_SOURCE[0]}")/work-dir.sh"
+
+sweep_stale_work_dirs "${TMPDIR:-/tmp}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/legato-e2e.XXXXXX")"
-DERIVED="${LEGATO_E2E_DERIVED:-$WORK/derived}"
+tag_work_dir "$WORK"
+CACHE="$(legato_cache_dir)"
+PKGS="$CACHE/SourcePackages"
+DERIVED_LOCKED=""
+if [ -n "${LEGATO_E2E_DERIVED:-}" ]; then
+  DERIVED="$LEGATO_E2E_DERIVED"
+else
+  DERIVED="$CACHE/e2e-derived/$(pwd -P | shasum | cut -c1-12)"
+fi
+mkdir -p "$PKGS" "$DERIVED"
+[ -n "${LEGATO_E2E_DERIVED:-}" ] || pwd -P > "$DERIVED/legato-checkout"   # lets prune-build-caches.sh tell when the checkout is gone
 UDID=""
 BOOTED_BY_US=0
 LOGPID=""
+CHILD=""
 
 cleanup() {
   if declare -F stop_log > /dev/null; then stop_log; fi
   if [ "$BOOTED_BY_US" = 1 ] && [ -n "$UDID" ]; then xcrun simctl shutdown "$UDID" > /dev/null 2>&1; fi
-  if [ "${LEGATO_E2E_KEEP:-0}" = 1 ]; then echo "Work directory kept: $WORK"; else rm -rf "$WORK"; fi
+  [ -z "$DERIVED_LOCKED" ] || unlock_dir "$DERIVED"
+  if [ "${LEGATO_E2E_KEEP:-0}" = 1 ]; then touch "$WORK/keep"; echo "Work directory kept: $WORK"; else rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
+
+# Run a long foreground command so a signal is handled at once (bash defers traps until a foreground child exits):
+# it runs in its own process group and `wait` returns as soon as a trap fires; the trap kills the group.
+run_fg() {
+  set -m
+  "$@" &
+  CHILD=$!
+  set +m
+  wait "$CHILD"
+  local rc=$?
+  CHILD=""
+  return "$rc"
+}
+on_signal() { # on_signal <exit status>
+  local status="$1" i
+  trap '' INT TERM
+  if [ -n "$CHILD" ]; then
+    kill -TERM -- "-$CHILD" 2> /dev/null
+    for ((i = 0; i < 100; i++)); do kill -0 "$CHILD" 2> /dev/null || break; sleep 0.1; done
+    kill -KILL -- "-$CHILD" 2> /dev/null
+    wait "$CHILD" 2> /dev/null
+  fi
+  exit "$status"
+}
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+lock_dir "$DERIVED" || exit 2
+DERIVED_LOCKED=1
+
+# Test seam (scripts/e2e/tests/cleanup-test.sh): run a stub instead of the real work, so the trap and sweep are testable.
+if [ -n "${LEGATO_E2E_TEST_STUB:-}" ]; then run_fg "$LEGATO_E2E_TEST_STUB" "$WORK"; exit $?; fi
 
 select_xcode
 ensure_xcodegen || exit 2
@@ -98,21 +163,38 @@ for devs in json.load(sys.stdin)["devices"].values():
 
 # ---------------------------------------------------------------------------------------------- build
 
+# Resolve packages into the shared clone dir under a lock: two xcodebuilds cloning into it for the first time
+# race ("already exists unexpectedly"). Builds then run with automatic resolution off and only read it.
+PKGS_RESOLVED=""
+resolve_packages() {
+  [ -z "$PKGS_RESOLVED" ] || return 0
+  lock_dir "$PKGS" || exit 2
+  run_fg xcodebuild -resolvePackageDependencies -project Apps/iOS/Legato.xcodeproj -scheme Legato \
+    -clonedSourcePackagesDirPath "$PKGS" > "$WORK/resolve.log" 2>&1
+  local rc=$?
+  unlock_dir "$PKGS"
+  [ "$rc" = 0 ] || { tail -30 "$WORK/resolve.log"; echo "Package resolution failed ($WORK/resolve.log)"; LEGATO_E2E_KEEP=1; exit 2; }
+  PKGS_RESOLVED=1
+}
+
 build_app() { # build_app <configuration> <extra xcodebuild args...>
   local config="$1"; shift
-  xcodebuild build -project Apps/iOS/Legato.xcodeproj -scheme Legato -configuration "$config" \
-    -destination "${DEST:-generic/platform=iOS Simulator}" -derivedDataPath "$DERIVED" "$@" \
+  resolve_packages
+  run_fg xcodebuild build -project Apps/iOS/Legato.xcodeproj -scheme Legato -configuration "$config" \
+    -destination "${DEST:-generic/platform=iOS Simulator}" -derivedDataPath "$DERIVED" \
+    -clonedSourcePackagesDirPath "$PKGS" -disableAutomaticPackageResolution "$@" \
     > "$WORK/build-$config.log" 2>&1 || { tail -30 "$WORK/build-$config.log"; echo "Build failed ($WORK/build-$config.log)"; LEGATO_E2E_KEEP=1; exit 2; }
 }
 
 # ---------------------------------------------------------------------------------------------- release check
 
 if [ "$mode" = release-check ]; then
-  build_app Release CODE_SIGNING_ALLOWED=NO
-  build_app Debug CODE_SIGNING_ALLOWED=NO   # positive control for the scan below
+  # Release only, arm64 simulator slice only (half the compile of the default fat build). The scan covers every
+  # Mach-O in the bundle, whatever the slice count.
+  build_app Release CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES
   app="$DERIVED/Build/Products/Release-iphonesimulator/Legato.app"
-  debug_app="$DERIVED/Build/Products/Debug-iphonesimulator/Legato.app"
-  # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.
+  # Identifiers that exist only in the e2e hooks. Positive control (no Debug build): each must still occur in
+  # the iOS sources, or the needle is stale (renamed/removed) and the scan would pass vacuously.
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
     AudioDiagnostics session.deactivate.skipped audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
@@ -124,21 +206,20 @@ if [ "$mode" = release-check ]; then
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
     LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document)
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
-    find "$1" -type f \( -name 'Legato*' -o -name '*.dylib' \) -print0 | xargs -0 strings -a
+    find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
   }
   scan "$app" > "$WORK/release.strings"
   fail=0
+  if [ ! -s "$WORK/release.strings" ]; then echo "FAIL  scan found no Mach-O strings in $app"; fail=1; fi
   for n in "${needles[@]}"; do
     if grep -q -F -- "$n" "$WORK/release.strings"; then echo "FAIL  Release contains: $n"; fail=1; fi
   done
   if [ "$fail" = 0 ]; then echo "PASS  Release build contains none of: ${needles[*]}"; fi
-  if [ -d "$debug_app" ]; then
-    scan "$debug_app" > "$WORK/debug.strings"
-    missing=0
-    for n in LegatoFakeEngine e2e-scripted; do grep -q -F -- "$n" "$WORK/debug.strings" || missing=1; done
-    if [ "$missing" = 1 ]; then echo "WARN  control failed: Debug build lacks the identifiers, so the scan proves nothing"; fail=1
-    else echo "PASS  control: the Debug build contains them"; fi
-  fi
+  stale=0
+  for n in "${needles[@]}"; do
+    if ! git grep -q -F -- "$n" -- Apps/iOS; then echo "FAIL  stale needle (not in the sources): $n"; stale=1; fi
+  done
+  if [ "$stale" = 1 ]; then fail=1; else echo "PASS  control: every needle occurs in the iOS sources"; fi
   exit "$fail"
 fi
 
