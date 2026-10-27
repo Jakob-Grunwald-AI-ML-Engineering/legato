@@ -2,13 +2,15 @@
 # from main. Deliberately no tests here: every commit on main was tested in the
 # merge queue as exactly that commit. Bypassing the queue (direct push, admin
 # merge) turns this workflow into "ship untested".
+# The apps are not built by the gate, so both release checks (release-checks.yml: iOS Release build + binary
+# scan, Mac Release build) must pass before `ship`. To run only the checks, dispatch release-checks.
 # Target pipeline (TestFlight iOS; notarized DMG + Sparkle macOS): issue #4.
 name: release
 
 on:
   push:
     branches: [live]
-  workflow_dispatch:
+  workflow_dispatch:   # runs checks AND ship; to run only the checks dispatch release-checks
 
 concurrency:
   group: release
@@ -18,9 +20,13 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/release-checks.yml
+
   ship:
+    needs: [checks]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - run: scripts/ci/release.sh
+      - run: scripts/ci/release.sh ship

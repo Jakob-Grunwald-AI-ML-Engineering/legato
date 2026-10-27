@@ -3,7 +3,8 @@
 #
 # Usage: ios-sim.sh [run|release-check]
 #   run             (default) build the Debug app, run the scenarios, print a PASS/FAIL table.
-#   release-check   build the Release app and verify none of the fake/e2e code is in the binary.
+#   release-check   build the Release app (arm64 simulator) and verify none of the fake/e2e code is in the binary;
+#                   every needle must still occur in the sources (stale-needle control).
 #
 # SpeechTranscriber and the microphone don't work on the Simulator and there is no Action Button, so the
 # app runs with a scripted engine and a fake mic (-LegatoFakeEngine) and is driven by Darwin notifications
@@ -188,11 +189,12 @@ build_app() { # build_app <configuration> <extra xcodebuild args...>
 # ---------------------------------------------------------------------------------------------- release check
 
 if [ "$mode" = release-check ]; then
-  build_app Release CODE_SIGNING_ALLOWED=NO
-  build_app Debug CODE_SIGNING_ALLOWED=NO   # positive control for the scan below
+  # Release only, arm64 simulator slice only (half the compile of the default fat build). The scan covers every
+  # Mach-O in the bundle, whatever the slice count.
+  build_app Release CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES
   app="$DERIVED/Build/Products/Release-iphonesimulator/Legato.app"
-  debug_app="$DERIVED/Build/Products/Debug-iphonesimulator/Legato.app"
-  # Identifiers that exist only in the e2e hooks. The Debug build is the positive control.
+  # Identifiers that exist only in the e2e hooks. Positive control (no Debug build): each must still occur in
+  # the iOS sources, or the needle is stale (renamed/removed) and the scan would pass vacuously.
   needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
     LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
     AudioDiagnostics session.deactivate.skipped audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
@@ -204,21 +206,20 @@ if [ "$mode" = release-check ]; then
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
     LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document)
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
-    find "$1" -type f \( -name 'Legato*' -o -name '*.dylib' \) -print0 | xargs -0 strings -a
+    find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
   }
   scan "$app" > "$WORK/release.strings"
   fail=0
+  if [ ! -s "$WORK/release.strings" ]; then echo "FAIL  scan found no Mach-O strings in $app"; fail=1; fi
   for n in "${needles[@]}"; do
     if grep -q -F -- "$n" "$WORK/release.strings"; then echo "FAIL  Release contains: $n"; fail=1; fi
   done
   if [ "$fail" = 0 ]; then echo "PASS  Release build contains none of: ${needles[*]}"; fi
-  if [ -d "$debug_app" ]; then
-    scan "$debug_app" > "$WORK/debug.strings"
-    missing=0
-    for n in LegatoFakeEngine e2e-scripted; do grep -q -F -- "$n" "$WORK/debug.strings" || missing=1; done
-    if [ "$missing" = 1 ]; then echo "WARN  control failed: Debug build lacks the identifiers, so the scan proves nothing"; fail=1
-    else echo "PASS  control: the Debug build contains them"; fi
-  fi
+  stale=0
+  for n in "${needles[@]}"; do
+    if ! git grep -q -F -- "$n" -- Apps/iOS; then echo "FAIL  stale needle (not in the sources): $n"; stale=1; fi
+  done
+  if [ "$stale" = 1 ]; then fail=1; else echo "PASS  control: every needle occurs in the iOS sources"; fi
   exit "$fail"
 fi
 
