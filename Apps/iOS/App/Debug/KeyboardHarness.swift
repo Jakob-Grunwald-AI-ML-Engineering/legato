@@ -14,8 +14,9 @@ import UIKit
 /// - `-LegatoHarnessKeyboardType email|url|number|phone|decimal|numbers`: the field's keyboard type.
 /// - `-LegatoHarnessReturn send|go|search|next|done|join`: the field's return key.
 /// - `-LegatoHarnessAutocap NO`: no auto-capitalization (lowercase letters, to compare with the system keyboard).
-/// - `-LegatoHarnessSuggestions a,b,c`: fill the suggestion slots.
+/// - `-LegatoHarnessSuggestions a,b,c`: fill the word row's slots, whatever is typed.
 /// - `-LegatoHarnessGlobe YES`: show the globe key.
+/// - `-LegatoHarnessStrip YES`: the compact strip (word row above the strip's row) at its requested height.
 /// - `-LegatoHarnessLandscape YES`: lay the keyboard out 874 pt wide (landscape height), turned a quarter
 ///   turn so it fits the portrait screen (the screenshot is turned back).
 ///
@@ -31,6 +32,12 @@ import UIKit
 final class HarnessDocument: TextDocument {
     let textView = UITextView()
     let documentID: String? = "harness-document"
+    /// Tells the keyboard the cursor or the text changed, as the extension's `textDidChange` and `selectionDidChange` do.
+    private let observer = HarnessSelectionObserver()
+    var onChange: (() -> Void)? {
+        get { observer.onChange }
+        set { observer.onChange = newValue }
+    }
 
     private static func argument(_ key: String) -> String? { UserDefaults.standard.string(forKey: key) }
 
@@ -39,6 +46,7 @@ final class HarnessDocument: TextDocument {
         textView.font = .preferredFont(forTextStyle: .title3)
         // The system keyboard never shows over the harness: the Legato keys are the only input.
         textView.inputView = UIView()
+        textView.delegate = observer
     }
 
     var text: String { textView.text ?? "" }
@@ -47,6 +55,20 @@ final class HarnessDocument: TextDocument {
         let ns = text as NSString
         return ns.substring(to: min(textView.selectedRange.location, ns.length))
     }
+
+    var contextAfter: String {
+        let ns = text as NSString
+        let end = min(textView.selectedRange.location + textView.selectedRange.length, ns.length)
+        return ns.substring(from: end)
+    }
+
+    var selectedText: String? {
+        let range = textView.selectedRange
+        guard range.length > 0 else { return nil }
+        return (text as NSString).substring(with: range)
+    }
+
+    var isSecureTextEntry: Bool { false }
 
     var returnKeyType: UIReturnKeyType {
         switch Self.argument("LegatoHarnessReturn") {
@@ -86,6 +108,22 @@ final class HarnessDocument: TextDocument {
 
     func insert(_ text: String) { textView.insertText(text) }
     func deleteBackward() { textView.deleteBackward() }
+
+    func adjustTextPosition(byCharacterOffset offset: Int) {
+        // UITextView counts UTF-16 units; the proxy moves by characters, so walk the text by Characters.
+        let current = textView.selectedRange
+        let string = text
+        let start = String.Index(utf16Offset: current.location + current.length, in: string)
+        guard let moved = string.index(start, offsetBy: offset, limitedBy: offset < 0 ? string.startIndex : string.endIndex) else { return }
+        textView.selectedRange = NSRange(location: moved.utf16Offset(in: string), length: 0)
+    }
+}
+
+@MainActor
+private final class HarnessSelectionObserver: NSObject, UITextViewDelegate {
+    var onChange: (() -> Void)?
+    func textViewDidChangeSelection(_ textView: UITextView) { onChange?() }
+    func textViewDidChange(_ textView: UITextView) { onChange?() }
 }
 
 @MainActor
@@ -112,14 +150,23 @@ final class KeyboardHarnessModel {
 
     private init() {
         let document = self.document
-        controller = KeyboardController(document: document, link: LinkClient(), hasFullAccess: { true })
+        controller = KeyboardController(
+            document: document, link: LinkClient(), hasFullAccess: { true },
+            preferences: {
+                var preferences = KeyboardPreferences.load()
+                if ["YES", "TRUE", "1"].contains(UserDefaults.standard.string(forKey: "LegatoHarnessStrip")?.uppercased() ?? "") {
+                    preferences.strip = true
+                }
+                return preferences
+            })
         controller.trace = { message in E2E.log("harness \(message) doc=\(E2E.quote(document.text))") }
+        document.onChange = { [weak controller] in controller?.documentDidChange() }
     }
 
     func appeared() {
         controller.showsGlobe = ["YES", "TRUE", "1"].contains(UserDefaults.standard.string(forKey: "LegatoHarnessGlobe")?.uppercased() ?? "")
         if let list = UserDefaults.standard.string(forKey: "LegatoHarnessSuggestions") {
-            controller.suggestions = list.split(separator: ",").map(String.init)
+            controller.pinSuggestions(list.split(separator: ",").map(String.init))
         }
         controller.appeared()
         let typing = controller.typing!
@@ -202,7 +249,7 @@ struct KeyboardHarness: View {
                 VStack(spacing: 0) {
                     HarnessTextView(textView: model.document.textView).padding(8)
                     VStack(spacing: 0) {
-                        keyboard.frame(height: KeyGeometry.height(landscape: false))
+                        keyboard.frame(height: portraitHeight)
                         Color.clear.frame(height: Self.systemArea)
                     }
                     .background(Self.backdrop)
@@ -213,6 +260,12 @@ struct KeyboardHarness: View {
         .preferredColorScheme(scheme)
         .onAppear { model.appeared() }
         .onDisappear { model.controller.disappeared() }
+    }
+
+    /// The strip asks for its own height (`StripHeight.requested`), the full keyboard for the portrait one.
+    private var portraitHeight: CGFloat {
+        model.controller.mode == .strip
+            ? CGFloat(StripHeight.requested(row: model.controller.stripHeight)) : KeyGeometry.height(landscape: false)
     }
 
     private var keyboard: some View {

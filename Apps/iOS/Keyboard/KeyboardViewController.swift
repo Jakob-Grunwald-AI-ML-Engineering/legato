@@ -4,8 +4,8 @@ import UIKit
 
 /// The Legato keyboard. A `.keyboard`-style input view hosting the SwiftUI key grid. It compiles only
 /// `Keyboard/` and `KeyboardUI/` (never `Shared/`: the AppIntents there would run in this process,
-/// which cannot record) and links only `LegatoKeyboardCore`. Dictation runs in the app; this process
-/// asks for it over the App Group and types the text the app publishes.
+/// which cannot record) and links only `LegatoKeyboardCore` and `LegatoVocabulary` (the word row). Dictation
+/// runs in the app; this process asks for it over the App Group and types the text the app publishes.
 final class KeyboardViewController: UIInputViewController {
     private var controller: KeyboardController?
     private var heightConstraint: NSLayoutConstraint?
@@ -53,11 +53,11 @@ final class KeyboardViewController: UIInputViewController {
         controller.onLayoutChange = { [weak self] reason in self?.layoutChanged(reason: reason) }
     }
 
-    /// The height the current mode asks for: the strip's own (the same in portrait and landscape), or the
-    /// full keyboard's for the orientation. By width, as `KeyGeometry` does: a portrait keyboard
-    /// (402 x 301) is wider than tall too.
+    /// The height the current mode asks for: the strip's own plus the word row above it (the same in portrait
+    /// and landscape), or the full keyboard's for the orientation. By width, as `KeyGeometry` does: a portrait
+    /// keyboard (402 x 306) is wider than tall too.
     private var requestedHeight: CGFloat {
-        if let controller, controller.mode == .strip { return CGFloat(controller.stripHeight) }
+        if let controller, controller.mode == .strip { return CGFloat(StripHeight.requested(row: controller.stripHeight)) }
         return KeyGeometry.isLandscape(width: view.bounds.width) ? Self.landscapeHeight : Self.portraitHeight
     }
 
@@ -111,6 +111,13 @@ final class KeyboardViewController: UIInputViewController {
 
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
+        controller?.documentDidChange()
+    }
+
+    /// The cursor or the selection moved (a tap in the text): the word row looks at the word there. Some hosts
+    /// report only `textDidChange`, which comes to the same handler.
+    override func selectionDidChange(_ textInput: (any UITextInput)?) {
+        super.selectionDidChange(textInput)
         controller?.documentDidChange()
     }
 }

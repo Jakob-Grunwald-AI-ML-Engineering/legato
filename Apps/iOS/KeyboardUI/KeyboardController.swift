@@ -36,8 +36,8 @@ final class KeyboardController {
     private(set) var appearance: UIUserInterfaceStyle = .unspecified
     /// A line above the keys: the Full Access explainer, or the "tap again to open" fallback.
     private(set) var hint: String?
-    /// Up to three suggestions, best first; the bar shows them as "2 | 1 | 3" (``SuggestionSlots``). The
-    /// prediction engine fills them; empty for now.
+    /// Up to three suggestions, best first; the word row shows them as "2 | 1 | 3" (``SuggestionSlots``).
+    /// `SuggestionController` fills them.
     var suggestions: [String] = []
     /// Whether to show the globe key (`needsInputModeSwitchKey`); set by the extension.
     var showsGlobe = false
@@ -48,6 +48,21 @@ final class KeyboardController {
     private(set) var versions: DictationVersions?
     /// A refine request is waiting for the app.
     private(set) var isRefining = false
+    /// The texts of the last dictation (raw, cleaned, refinements). Unlike `versions` they survive typing: the
+    /// word row's alternatives come from them as long as the dictated words are in the field.
+    @ObservationIgnored private(set) var lastDictationTexts: [String] = []
+    /// The last dictation's versions, kept while the user types (`versions` is dropped then): undoing the
+    /// typing makes a version swap possible again, and the swap is guarded by what the field holds.
+    @ObservationIgnored private var keptVersions: DictationVersions?
+    /// The version of the last dictation the field holds, when known.
+    var shownVersionIndex: Int? { (versions ?? keptVersions)?.current }
+    /// The keyboard's own edits, for ↶ ↷ (`EditHistory`); `undoAvailable` and `redoAvailable` mirror it for the views.
+    @ObservationIgnored private var history = EditHistory()
+    private(set) var undoAvailable = false
+    private(set) var redoAvailable = false
+    @ObservationIgnored private var lastDocumentID: String?
+    /// Fills the word row (completions, predictions, alternatives) and learns from typing.
+    @ObservationIgnored private(set) var wordRow: SuggestionController!
 
     /// Strip or full keyboard, and the chevron that switches (`KeyboardExpansion`, per keyboard session).
     private(set) var expansion = KeyboardExpansion(stripEnabled: false)
@@ -84,6 +99,7 @@ final class KeyboardController {
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
         typing = TypingModel(controller: self)
+        wordRow = SuggestionController(controller: self)
     }
 
     var fullAccess: Bool { hasFullAccess() }
@@ -118,19 +134,36 @@ final class KeyboardController {
     }
 
     #if DEBUG
-    /// Debug: a long press on the strip's status text steps the strip height through the candidates.
+    /// Debug: a long press on the strip's word row steps the strip height through the candidates.
     func cycleStripHeight() {
         stripHeight = StripHeight.next(after: stripHeight)
         onLayoutChange?("cycle")
     }
     #endif
 
-    /// What the keyboard says in place of its suggestions (the strip's text, the full keyboard's top bar):
-    /// a hint, else the meeting notice or the dictation status (`dictationStatus`) while the slots are empty;
-    /// nil when there is nothing to say.
+    /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
+    /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        hint ?? (suggestions.isEmpty ? (meetingNotice ?? dictationStatus) : nil)
+        hint ?? meetingNotice ?? dictationStatus
     }
+
+    /// A dictation or a Refine is running: the word row is taken over and ↶ ↷ are dimmed.
+    var runActive: Bool {
+        if isRefining { return true }
+        guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
+        return host.phase != .idle
+    }
+
+    /// Tells the word row what has taken it over (status or run), so it pauses and takes up again.
+    private func syncRowTakeover() {
+        wordRow.setTakeover(status: statusText, running: runActive)
+    }
+
+    /// The harness's fixed words (`LegatoHarnessSuggestions`): shown whatever is typed.
+    func pinSuggestions(_ words: [String]) { wordRow.pin(words) }
+
+    /// A slot of the word row was tapped (`rank` 0 is the best suggestion).
+    func suggestionTapped(rank: Int) { wordRow.tapped(rank: rank) }
 
     /// While the app records a meeting dictation is blocked, and the keyboard says why instead of offering to
     /// dictate. Believed only while the app keeps beating: an app that died mid-meeting leaves the flag behind.
@@ -145,6 +178,7 @@ final class KeyboardController {
         refreshPreferences()
         refreshTraits()
         typing.appeared()
+        wordRow.appeared()
         link.writePresence(visible: true, notify: true)
         trace?("visible value=1")
         heartbeat?.cancel()
@@ -164,6 +198,7 @@ final class KeyboardController {
         if reveal.needsTicks { applyHost(flush: true) }
         stopTicker()
         isVisible = false
+        wordRow.interruptTyping()
         typing.disappeared()
         heartbeat?.cancel()
         heartbeat = nil
@@ -194,12 +229,31 @@ final class KeyboardController {
         reloadHost()
     }
 
-    /// The field or its traits changed (a new field, another return key).
+    /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
+    /// extension's `textDidChange` and `selectionDidChange` both come here.
     func documentDidChange() {
         refreshTraits()
         typing.documentChanged()
         if let versions, versions.documentID != document.documentID { self.versions = nil }
         if checkForClear() == .sent { applyHost() }
+        trackContext()
+    }
+
+    /// A new field starts over (no history, no row); a cursor move or text change the keyboard didn't make
+    /// closes the typing group and what was typed so far is learned, and the word row looks at the word there.
+    private func trackContext() {
+        let id = document.documentID
+        if id != lastDocumentID {
+            lastDocumentID = id
+            history.clear()
+            keptVersions = nil
+            syncHistory()
+            wordRow.fieldChanged()
+        }
+        if wordRow.contextChanged() {
+            history.cursorMoved()
+            wordRow.interruptTyping()
+        }
     }
 
     private enum ClearCheck { case none, held, sent }
@@ -230,6 +284,9 @@ final class KeyboardController {
     private func takeClear(_ sent: AppliedCursor?) -> ClearCheck {
         cancelClearRecheck()
         if versions?.documentID == document.documentID { versions = nil }
+        history.clear()
+        keptVersions = nil
+        syncHistory()
         guard let sent else { return .none }
         cursor = sent
         link.writeApplied(sent, notify: true)
@@ -295,6 +352,7 @@ final class KeyboardController {
         now = Date()
         let latest = link.readHost()
         if latest != host { host = latest }
+        syncRowTakeover()
     }
 
     private func hostDidChange() {
@@ -358,13 +416,26 @@ final class KeyboardController {
     private func updateVersions(_ host: HostState) {
         if host.phase != .idle {
             if versions != nil, host.runID != versions?.runID { versions = nil }
+            if keptVersions != nil, host.runID != keptVersions?.runID { keptVersions = nil }
             return
         }
-        guard host.isFinal, versions?.runID != host.runID,
+        guard host.isFinal, versions?.runID != host.runID, keptVersions?.runID != host.runID,
               let landed = DictationVersions.landed(state: host, cursor: cursor)
         else { return }
         versions = landed
+        keptVersions = landed
+        lastDictationTexts = landed.texts
+        recordDictation(landed)
         trace?("versions count=\(landed.texts.count) current=\(landed.current)")
+    }
+
+    /// A dictation is one entry of the history, and its cleanup (the field showing a later version than the
+    /// raw text) another: undo steps from the cleaned text to the raw text, then removes the dictation.
+    private func recordDictation(_ landed: DictationVersions) {
+        let raw = landed.texts[0] + landed.trailing
+        if !raw.isEmpty { history.record(removed: "", inserted: raw, at: Date()) }
+        if landed.texts.count > 1, landed.current != 0 { history.recordVersion(from: 0, to: landed.current, at: Date()) }
+        syncHistory()
     }
 
     // MARK: Typewriter
@@ -395,8 +466,14 @@ final class KeyboardController {
         ticker = nil
     }
 
+    /// The host's text going into the field (typewriter ticks, live re-cleans, version swaps). Never recorded in
+    /// the history; whoever swaps a version records that itself.
     private func perform(_ ops: [ProxyOp]) {
-        if !ops.isEmpty { clearWatch.ownEdit(at: Date()) }
+        if !ops.isEmpty {
+            clearWatch.ownEdit(at: Date())
+            history.cursorMoved()
+            wordRow.interruptTyping() // what was typed so far is learned; the host's text is not typing
+        }
         for op in ops {
             switch op {
             case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
@@ -409,22 +486,132 @@ final class KeyboardController {
     // MARK: Typing
 
     /// A Return holds no clear back (`ClearWatch.returnTyped`): in a chat app it sends and empties the field.
-    func type(_ text: String) {
+    /// `contextBefore`: the text before the cursor as the typing model tracks it (the field's own report lags).
+    func type(_ text: String, contextBefore: String? = nil) {
         versions = nil // the user moved on from the dictation
         resolveHeldClear()
         beforeUserEdit()
+        let before = contextBefore ?? document.contextBefore
+        let selected = document.selectedText
         document.insert(text)
         if text == "\n" { clearWatch.returnTyped(at: Date()) } else { clearWatch.ownEdit(at: Date()) }
+        if let selected, !selected.isEmpty {
+            history.record(removed: selected, inserted: text, at: Date()) // the key replaced the selection
+            wordRow.interruptTyping()
+        } else {
+            history.typed(text, at: Date())
+            wordRow.typed(text)
+        }
+        syncHistory()
+        wordRow.keystroke(contextBefore: before + text)
         afterUserEdit()
     }
 
-    func deleteBackward() {
+    func deleteBackward(contextBefore: String? = nil) {
         versions = nil
         resolveHeldClear()
         clearWatch.ownEdit(at: Date())
         beforeUserEdit()
+        let before = contextBefore ?? document.contextBefore
+        let selected = document.selectedText
         document.deleteBackward()
+        if let selected, !selected.isEmpty {
+            history.record(removed: selected, inserted: "", at: Date())
+            wordRow.interruptTyping()
+        } else if let last = before.last {
+            history.deleted(String(last), at: Date())
+            wordRow.deletedTyped()
+        }
+        syncHistory()
+        wordRow.keystroke(contextBefore: String(before.dropLast()))
         afterUserEdit()
+    }
+
+    /// One edit of the word row (a completion or a swap), or of undo and redo: move to the end of the span,
+    /// delete backwards, insert. `removed` is the text the edit takes out, for the history; `asTyping` marks a
+    /// completion, which the row follows up with predictions and which counts as typed text. `record: false`
+    /// is for undo and redo, which move the history themselves.
+    func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) {
+        resolveHeldClear()
+        beforeUserEdit()
+        let before = typing.contextBefore
+        let moved = before + String(document.contextAfter.prefix(edit.forward))
+        let expected = String(moved.dropLast(edit.deleteCount)) + edit.insert
+        versions = nil
+        wordRow.interruptTyping()
+        if asTyping {
+            for _ in 0..<edit.deleteCount { wordRow.deletedTyped() }
+            wordRow.typed(edit.insert)
+        } else {
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+        }
+        clearWatch.ownEdit(at: Date())
+        if edit.forward != 0 { document.adjustTextPosition(byCharacterOffset: edit.forward) }
+        for _ in 0..<edit.deleteCount { document.deleteBackward() }
+        if !edit.insert.isEmpty { document.insert(edit.insert) }
+        if record { history.record(removed: removed, inserted: edit.insert, at: Date()) }
+        syncHistory()
+        typing.ownEdit(contextBefore: expected)
+        // A completion, undo or redo goes on with what fits the new cursor position; a swap empties the row.
+        if asTyping || !record { wordRow.keystroke(contextBefore: expected) }
+        afterUserEdit()
+    }
+
+    /// The user's choice from the word row, for the app to learn from (Full Access only).
+    func recordChoice(_ record: ChoiceRecord) {
+        guard hasFullAccess() else { return }
+        link.writeChoice(record)
+    }
+
+    // MARK: Undo and redo
+
+    /// ↶ ↷ undo and redo the keyboard's own edits; dimmed while a run is active.
+    var canUndo: Bool { undoAvailable && !runActive }
+    var canRedo: Bool { redoAvailable && !runActive }
+
+    private func syncHistory() {
+        if undoAvailable != history.canUndo { undoAvailable = history.canUndo }
+        if redoAvailable != history.canRedo { redoAvailable = history.canRedo }
+    }
+
+    func undo() {
+        guard canUndo else { return }
+        prepareHistoryStep()
+        guard let step = history.undo(contextBefore: typing.contextBefore) else { return historyRefused() }
+        syncHistory()
+        run(step)
+    }
+
+    func redo() {
+        guard canRedo else { return }
+        prepareHistoryStep()
+        guard let step = history.redo(contextBefore: typing.contextBefore) else { return historyRefused() }
+        syncHistory()
+        run(step)
+    }
+
+    private func prepareHistoryStep() {
+        resolveHeldClear()
+        if reveal.needsTicks { applyHost(flush: true) }
+        wordRow.interruptTyping()
+    }
+
+    /// The field changed behind the keyboard's back: the guard cleared the history.
+    private func historyRefused() {
+        syncHistory()
+        show("The text changed, so there is nothing to undo.")
+    }
+
+    private func run(_ step: EditHistory.Step) {
+        switch step {
+        case .edit(let edit):
+            applyEdit(edit, removed: "", asTyping: false, record: false)
+        case .version(let index):
+            if !showVersion(at: index, record: false) {
+                history.clear()
+                syncHistory()
+            }
+        }
     }
 
     /// The user types into a run's text: the tentative text comes out first so the key lands after the
@@ -545,39 +732,44 @@ final class KeyboardController {
 
     // MARK: Versions
 
-    func showPreviousVersion() {
-        guard let versions else { return }
-        showVersion(at: versions.current - 1)
-    }
-
-    func showNextVersion() {
-        guard let versions else { return }
-        showVersion(at: versions.current + 1)
-    }
-
     /// Swaps the dictation in the field for version `index`, only while the field still ends with the
-    /// version shown now.
-    private func showVersion(at index: Int) {
-        guard var current = versions, current.texts.indices.contains(index) else { return }
+    /// version shown now. `record`: whether this is a new step of the history (Refine) rather than undo or redo.
+    @discardableResult
+    private func showVersion(at index: Int, record: Bool) -> Bool {
+        guard var current = keptVersions ?? versions, current.texts.indices.contains(index) else { return false }
+        let from = current.current
         guard current.documentID == document.documentID,
-              let ops = current.swapOps(to: index, contextBefore: document.contextBefore)
+              let ops = current.swapOps(to: index, contextBefore: typing.contextBefore)
         else {
             trace?("version swap=refused")
             show("The text changed, so there is nothing to swap.")
-            return
+            return false
         }
+        let before = typing.contextBefore
+        wordRow.willApplyOwnEdit(
+            expectedContextBefore: String(before.dropLast(current.shown.count)) + current.texts[index] + current.trailing)
         perform(ops)
         current.show(index)
-        versions = current
+        versions = current // undoing the typing that followed the dictation makes Refine possible again
+        keptVersions = current
+        if record, from != index {
+            history.recordVersion(from: from, to: index, at: Date())
+            syncHistory()
+        }
         trace?("version index=\(index) of=\(current.texts.count)")
+        return true
     }
 
     /// Asks the app for a stronger rewrite (its message style) of the raw dictation and shows it as a new
     /// version. The keyboard never runs a model itself; the app must be running (it acks at once).
     func refine() {
-        guard let versions, !isRefining else { return }
+        guard !isRefining else { return }
         guard hasFullAccess() else {
             show("Turn on Allow Full Access for Legato in Settings > General > Keyboard to refine.")
+            return
+        }
+        guard let versions else {
+            show("Refine works on the dictation you just made.")
             return
         }
         isRefining = true
@@ -611,9 +803,14 @@ final class KeyboardController {
         guard var current = versions, current.runID == runID else { return }
         let index = current.add(refined)
         versions = current
+        keptVersions = current
+        lastDictationTexts = current.texts
         trace?("refine reply=text")
-        showVersion(at: index)
+        showVersion(at: index, record: true)
     }
+
+    /// Refine can run: there is a dictation to refine and Full Access lets the keyboard ask the app.
+    var canRefine: Bool { versions != nil && fullAccess && !isRefining }
 
     // MARK: Status
 
@@ -640,11 +837,13 @@ final class KeyboardController {
 
     private func show(_ text: String) {
         hint = text
+        syncRowTakeover()
         hintTimeout?.cancel()
         hintTimeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
             self?.hint = nil
+            self?.syncRowTakeover()
         }
     }
 }

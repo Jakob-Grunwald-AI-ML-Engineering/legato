@@ -10,6 +10,12 @@ protocol TextDocument: AnyObject {
     var documentID: String? { get }
     /// The text before the insertion point (`documentContextBeforeInput`); empty when there is none.
     var contextBefore: String { get }
+    /// The text after the insertion point (`documentContextAfterInput`); empty when there is none.
+    var contextAfter: String { get }
+    /// The selected text (`selectedText`), nil when nothing is selected.
+    var selectedText: String? { get }
+    /// Whether the field hides what is typed (a password): nothing of it is suggested or learned.
+    var isSecureTextEntry: Bool { get }
     var returnKeyType: UIReturnKeyType { get }
     var keyboardType: UIKeyboardType { get }
     var autocapitalizationType: UITextAutocapitalizationType { get }
@@ -19,4 +25,6 @@ protocol TextDocument: AnyObject {
     var hasText: Bool { get }
     func insert(_ text: String)
     func deleteBackward()
+    /// Moves the insertion point by `offset` characters (negative: back), as `adjustTextPosition(byCharacterOffset:)`.
+    func adjustTextPosition(byCharacterOffset offset: Int)
 }
