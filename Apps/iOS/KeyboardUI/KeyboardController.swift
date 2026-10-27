@@ -36,7 +36,8 @@ final class KeyboardController {
     private(set) var appearance: UIUserInterfaceStyle = .unspecified
     /// A line above the keys: the Full Access explainer, or the "tap again to open" fallback.
     private(set) var hint: String?
-    /// The three suggestion slots above the keys (the prediction engine fills them; empty for now).
+    /// Up to three suggestions, best first; the bar shows them as "2 | 1 | 3" (``SuggestionSlots``). The
+    /// prediction engine fills them; empty for now.
     var suggestions: [String] = []
     /// Whether to show the globe key (`needsInputModeSwitchKey`); set by the extension.
     var showsGlobe = false

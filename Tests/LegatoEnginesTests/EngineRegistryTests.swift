@@ -1,4 +1,5 @@
 import Foundation
+import LegatoAppleSpeech
 import LegatoCore
 import LegatoFluidAudio
 import LegatoModels
@@ -51,11 +52,11 @@ struct Rig: @unchecked Sendable {
     }
 
     /// A fresh manager and registry over the same root and defaults, like a relaunch.
-    func registry() -> EngineRegistry {
+    func registry(vocabulary: (any VocabularyHintProvider)? = nil) -> EngineRegistry {
         let manager = ModelManager(
             root: root, catalog: FluidAudioCatalog.descriptors(), installers: installers,
             selection: SelectionStore(defaults: defaults))
-        return EngineRegistry(models: manager, settings: EngineSettings(defaults: defaults))
+        return EngineRegistry(models: manager, settings: EngineSettings(defaults: defaults), vocabulary: vocabulary)
     }
 
     var totalInstalls: Int { installers.values.reduce(0) { $0 + $1.installs } }
@@ -67,7 +68,36 @@ struct Rig: @unchecked Sendable {
     }
 }
 
+final class FakeHintProvider: VocabularyHintProvider {
+    func hints(for sink: HintSink, limit: Int) async -> [VocabularyHint] { [] }
+}
+
 @Suite struct EngineRegistryTests {
+    @Test func liveEngineForwardsTheVocabularyProviderToAppleSpeech() async throws {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let provider = FakeHintProvider()
+        let live = await rig.registry(vocabulary: provider).liveEngine()
+        let apple = try #require(live.engine as? AppleSpeechEngine)
+        #expect((apple.vocabularyProvider as AnyObject?) === provider)
+    }
+
+    @Test func liveEngineForwardsTheVocabularyProviderToNemotron() async throws {
+        let rig = Rig(); defer { rig.cleanUp() }
+        try rig.installers["nemotron-multilingual-560"]!.stage(root: rig.root)
+        let provider = FakeHintProvider()
+        let registry = rig.registry(vocabulary: provider)
+        try await registry.models.select("nemotron-multilingual-560", role: .liveDictation)
+        let nemotron = try #require(await registry.liveEngine().engine as? NemotronEngine)
+        #expect((nemotron.vocabularyProvider as AnyObject?) === provider)
+    }
+
+    @Test func noProviderLeavesTheEnginesUnbiased() async {
+        let rig = Rig(); defer { rig.cleanUp() }
+        let apple = await rig.registry().liveEngine().engine as? AppleSpeechEngine
+        #expect(apple != nil)
+        #expect(apple?.vocabularyProvider == nil)
+    }
+
     @Test func installedChoiceIsReturnedWithTierAndLocaleSet() async throws {
         let rig = Rig(); defer { rig.cleanUp() }
         try rig.installers["nemotron-multilingual-560"]!.stage(root: rig.root)

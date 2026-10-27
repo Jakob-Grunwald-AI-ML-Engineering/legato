@@ -73,7 +73,9 @@ final class MacAppController {
     @ObservationIgnored private var engine: any DictationEngine
     @ObservationIgnored private var sessionIsStale = false
     @ObservationIgnored private let cleanup: CleanupProcessor
-    @ObservationIgnored private let history: JSONLHistoryStore
+    @ObservationIgnored private let history: any HistoryStore
+    /// The personal vocabulary: hints the engines and the cleanup step, and learns from dictations.
+    @ObservationIgnored let vocabulary: VocabularyService
     @ObservationIgnored private var session: DictationSession
     @ObservationIgnored private var editPump: Task<Void, Never>?
     /// The writer of the last delivered dictation: version swaps go through it.
@@ -123,14 +125,22 @@ final class MacAppController {
 
     private init() {
         let support = URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
-        let history = JSONLHistoryStore(fileURL: support.appending(path: "history.jsonl"))
+        // The vocabulary comes before ModelServices: the engines it builds ask it for hints.
+        // The languages are read on every use, so a change of the dictation languages applies at once.
+        let languageSettings = EngineSettings(defaults: .standard)
+        let vocabulary = VocabularyService(
+            fileURL: support.appending(path: "vocabulary.json"),
+            languages: { VocabularyService.configuredLanguages(languageSettings) })
+        self.vocabulary = vocabulary
+        let history: any HistoryStore = LearningHistoryStore(
+            JSONLHistoryStore(fileURL: support.appending(path: "history.jsonl")), vocabulary: vocabulary)
         self.history = history
         let settings = MacSettings()
         self.settings = settings
         // Apple Speech's asset download lives in Permissions; dictation uses `engine`.
-        permissions = Permissions(engine: AppleSpeechEngine())
+        permissions = Permissions(engine: AppleSpeechEngine(vocabulary: vocabulary))
         gesture = HotkeyGesture(mode: settings.gestureMode)
-        let models = ModelServices(root: FluidAudioCatalog.defaultRoot(), defaults: .standard)
+        let models = ModelServices(root: FluidAudioCatalog.defaultRoot(), defaults: .standard, vocabulary: vocabulary)
         self.models = models
         meetings = MeetingController(models: models)
         let reports = CleanupReports()
@@ -142,15 +152,16 @@ final class MacAppController {
             registry: models.cleanup, settings: settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             willRun: { await hud.setPhase(.cleaningUp) },
+            vocabulary: vocabulary,
             report: { report in await reports.record(report) })
         self.cleanup = cleanup
-        let engine = AppleSpeechEngine()
+        let engine = AppleSpeechEngine(vocabulary: vocabulary)
         self.engine = engine
         session = Self.makeSession(engine: engine, history: history, postProcessor: cleanup)
     }
 
     private static func makeSession(
-        engine: any DictationEngine, history: JSONLHistoryStore, postProcessor: CleanupProcessor
+        engine: any DictationEngine, history: any HistoryStore, postProcessor: CleanupProcessor
     ) -> DictationSession {
         DictationSession(
             engine: engine,
@@ -357,7 +368,7 @@ final class MacAppController {
         let out = await CleanupProcessor.run(
             entry.text, locale: locale, style: .message, refine: true,
             timeout: .seconds(max(store.timeoutSeconds * 2, 8)), settings: store, registry: models.cleanup,
-            report: { report in await reports.record(report) })
+            report: { report in await reports.record(report) }, vocabulary: vocabulary)
         let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !refined.isEmpty, refined != entry.text else {
             hud.show(toast: "Refine changed nothing.")

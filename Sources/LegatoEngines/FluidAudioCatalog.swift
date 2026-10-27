@@ -62,13 +62,14 @@ public enum FluidAudioCatalog {
         id: String,
         preferredLocales: [Locale],
         silenceMs: Int,
-        models: ModelManager
+        models: ModelManager,
+        vocabulary: (any VocabularyHintProvider)? = nil
     ) -> (any DictationEngine)? {
         for variant in NemotronVariant.allCases {
             for chunkMs in NemotronInstaller.supportedChunks where FluidAudioModels.nemotronID(variant, chunkMs: chunkMs) == id {
                 return NemotronEngine(
                     variant: variant, chunkMs: chunkMs, preferredLocales: preferredLocales,
-                    silenceMs: silenceMs, models: models, modelID: id)
+                    silenceMs: silenceMs, models: models, modelID: id, vocabulary: vocabulary)
             }
         }
         for chunk in EouChunk.allCases where FluidAudioModels.eouID(chunk) == id {

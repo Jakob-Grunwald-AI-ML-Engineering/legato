@@ -65,10 +65,16 @@ public struct EngineResolution: Sendable {
 public struct EngineRegistry: Sendable {
     public let models: ModelManager
     public let settings: EngineSettings
+    /// Where the live engines get their vocabulary hints; nil leaves them unbiased.
+    private let vocabulary: (any VocabularyHintProvider)?
 
-    public init(models: ModelManager, settings: EngineSettings = EngineSettings()) {
+    public init(
+        models: ModelManager, settings: EngineSettings = EngineSettings(),
+        vocabulary: (any VocabularyHintProvider)? = nil
+    ) {
         self.models = models
         self.settings = settings
+        self.vocabulary = vocabulary
     }
 
     /// The live dictation engine for the persisted `.liveDictation` pick, or Apple Speech when nothing is
@@ -81,14 +87,14 @@ public struct EngineRegistry: Sendable {
         let silenceMs = settings.silenceMs
         func apple(_ fallback: EngineFallback?) -> EngineResolution {
             EngineResolution(
-                engine: AppleSpeechEngine(), modelID: nil, preferredLocales: locales, silenceMs: silenceMs,
+                engine: AppleSpeechEngine(vocabulary: vocabulary), modelID: nil, preferredLocales: locales, silenceMs: silenceMs,
                 fallback: fallback)
         }
         guard let id = await models.selected(role: .liveDictation) else { return apple(nil) }
         let catalog = await models.catalog
         guard catalog.contains(where: { $0.id == id && $0.kind == .speechStreaming }),
             let engine = FluidAudioCatalog.liveEngine(
-                id: id, preferredLocales: locales, silenceMs: silenceMs, models: models)
+                id: id, preferredLocales: locales, silenceMs: silenceMs, models: models, vocabulary: vocabulary)
         else { return apple(.unknownModel(id)) }
         guard case .installed = await models.state(of: id) else { return apple(.assetsNotInstalled) }
         return EngineResolution(
