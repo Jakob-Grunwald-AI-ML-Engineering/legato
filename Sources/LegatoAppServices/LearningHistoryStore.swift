@@ -2,7 +2,7 @@ import Foundation
 import LegatoCore
 
 /// A ``HistoryStore`` that lets the vocabulary learn from what is appended. Every call goes to the wrapped
-/// store; after an append that succeeded, the entry's final text is handed to the service, which learns in
+/// store; after an append that succeeded, the entry's raw text (or final text when no raw text exists) is handed to the service, which learns in
 /// the background. A failed append observes nothing, and the observing never delays or fails an append.
 ///
 /// A delete that succeeded also tells the service to forget that dictation, so a cancelled or deleted dictation
@@ -18,7 +18,7 @@ public struct LearningHistoryStore: HistoryStore {
 
     public func append(_ entry: DictationEntry) async throws {
         try await base.append(entry)
-        vocabulary.learnFromDictation(text: entry.text, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
+        vocabulary.learnFromDictation(text: entry.rawText ?? entry.text, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
     }
 
     public func recent(limit: Int) async throws -> [DictationEntry] { try await base.recent(limit: limit) }

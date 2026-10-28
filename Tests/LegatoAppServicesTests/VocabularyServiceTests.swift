@@ -299,6 +299,7 @@ struct VocabularyRig {
     @Test func theStylesMapOntoTheLearningStyles() {
         #expect(VocabularyService.learningStyle(.verbatim) == .verbatim)
         #expect(VocabularyService.learningStyle(.message) == .message)
+        #expect(VocabularyService.learningStyle(.markdown) == .message)
     }
 
     @Test func learningReturnsAtOnceWhileTheLearnerIsStillBusy() async throws {
@@ -397,10 +398,11 @@ private final class ReplyingBackend: LLMBackend {
         #expect(snapshot.pendingFixes.isEmpty)
     }
 
-    @Test func aMessageStyleRunTeachesNothing() async throws {
+    @Test(arguments: [CleanupStyle.message, .markdown])
+    func aRewriteStyleRunTeachesNothing(style: CleanupStyle) async throws {
         let rig = VocabularyRig(); defer { rig.cleanUp() }
         let backend = ReplyingBackend(reply: "ask Claude about it")
-        let processor = processor(backend: backend, vocabulary: rig.service, style: .message)
+        let processor = processor(backend: backend, vocabulary: rig.service, style: style)
         for _ in 0..<2 {
             _ = try await processor.process("ask kloud about it", locale: Locale(identifier: "en-US"))
         }

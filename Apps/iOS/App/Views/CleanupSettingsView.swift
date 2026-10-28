@@ -13,6 +13,7 @@ struct CleanupSettingsView: View {
     @State private var enabled = Settings.cleanupEnabled
     @State private var delivery = Settings.cleanupDelivery
     @State private var style = Settings.cleanupStyle
+    @State private var emoji = Settings.cleanupEmoji
     @State private var backend = Settings.cleanupBackend
     @State private var itn = Settings.cleanupITN
     @State private var timeout = Double(Settings.cleanupTimeoutSeconds)
@@ -37,7 +38,7 @@ struct CleanupSettingsView: View {
                 Toggle("Clean up dictation", isOn: $enabled)
                     .accessibilityIdentifier("cleanup.enabled")
             } footer: {
-                Text("A language model on this iPhone adds punctuation and fixes misheard words (after you stop, or continuously while you speak with Live). History keeps the raw text next to the cleaned one.")
+                Text("A language model on this iPhone preserves your voice, writes natural messages or structures Markdown (after you stop, or continuously while you speak with Live). History keeps the raw text next to the cleaned one.")
             }
 
             Section {
@@ -56,13 +57,15 @@ struct CleanupSettingsView: View {
 
             Section {
                 Picker("Style", selection: $style) {
-                    Text("Verbatim").tag(CleanupStyle.verbatim)
-                    Text("Message").tag(CleanupStyle.message)
+                    ForEach(CleanupStyle.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                if style == .message {
+                    Picker("Emoji", selection: $emoji) {
+                        ForEach(MessageEmojiStyle.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
                 }
             } footer: {
-                Text(style == .verbatim
-                    ? "Verbatim: punctuation, casing, numbers and misheard words. Every word stays."
-                    : "Message: also drops fillers and false starts and applies corrections like \"Friday, no wait, Thursday\". The keyboard's Refine key always uses Message.")
+                Text(style.explanation + " Changes apply to the next run. Earlier text in long dictations may no longer be revised.")
             }
 
             #if ANE_CLEANUP_SPIKE
@@ -119,7 +122,7 @@ struct CleanupSettingsView: View {
             } header: {
                 Text("Advanced")
             } footer: {
-                Text("ITN turns spoken numbers into digits before the model (English only). Off by default: it merges \"ten thirty\" into \"40\". The time limit applies to each step; past it the raw text is kept.")
+                Text("ITN applies only to Voice, turning spoken numbers into digits before the model (English only). Message and Markdown bypass it. Off by default: it merges \"ten thirty\" into \"40\". The time limit applies to each step; past it the raw text is kept.")
             }
         }
         .navigationTitle("Cleanup")
@@ -136,6 +139,7 @@ struct CleanupSettingsView: View {
         }
         .onChange(of: delivery) { _, new in Settings.cleanupDelivery = new }
         .onChange(of: style) { _, new in Settings.cleanupStyle = new }
+        .onChange(of: emoji) { _, new in Settings.cleanupEmoji = new }
         .onChange(of: backend) { _, new in
             Settings.cleanupBackend = new
             timeout = Double(Settings.cleanupTimeoutSeconds)

@@ -27,7 +27,7 @@ struct CleanupSettingsView: View {
             Section {
                 Toggle("Clean up dictation", isOn: $settings.cleanupEnabled)
             } footer: {
-                Text("A language model on this Mac adds punctuation and fixes misheard words (after you stop, or phrase by phrase with Live). History keeps the raw text next to the cleaned one.")
+                Text("A language model on this Mac preserves your voice, writes natural messages or structures Markdown (after you stop, or continuously while you speak with Live). History keeps the raw text next to the cleaned one.")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
@@ -36,15 +36,17 @@ struct CleanupSettingsView: View {
                     ForEach(CleanupDelivery.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 Picker("Style", selection: $settings.cleanupStyle) {
-                    Text("Verbatim").tag(CleanupStyle.verbatim)
-                    Text("Message").tag(CleanupStyle.message)
+                    ForEach(CleanupStyle.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                if settings.cleanupStyle == .message {
+                    Picker("Emoji", selection: $settings.cleanupEmoji) {
+                        ForEach(MessageEmojiStyle.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
                 }
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(settings.cleanupDelivery.explanation)
-                    Text(settings.cleanupStyle == .verbatim
-                        ? "Verbatim: punctuation, casing, numbers and misheard words. Every word stays."
-                        : "Message: also drops fillers and false starts and applies corrections like \"Friday, no wait, Thursday\". Refine always uses Message.")
+                    Text(settings.cleanupStyle.explanation + " Changes apply to the next run. Earlier text in long dictations may no longer be revised.")
                 }
                 .font(.callout).foregroundStyle(.secondary)
             }
@@ -96,7 +98,7 @@ struct CleanupSettingsView: View {
             } header: {
                 Text("Advanced")
             } footer: {
-                Text("ITN turns spoken numbers into digits before the model (English only). Off by default: it merges \"ten thirty\" into \"40\". The time limit applies to each step; past it the raw text is kept.")
+                Text("ITN applies only to Voice, turning spoken numbers into digits before the model (English only). Message and Markdown bypass it. Off by default: it merges \"ten thirty\" into \"40\". The time limit applies to each step; past it the raw text is kept.")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
@@ -188,7 +190,7 @@ struct LastDictationSection: View {
                     LabeledContent(report.refine ? "Refine backend" : "Cleanup backend", value: report.backend)
                     LabeledContent("Outcome", value: report.outcome)
                     if let device = report.device { LabeledContent("Device", value: device) }
-                    LabeledContent("Took", value: "\(report.milliseconds) ms · \(report.style.rawValue)")
+                    LabeledContent("Took", value: "\(report.milliseconds) ms · \(report.style.title)")
                     ForEach(report.skipped, id: \.self) { reason in
                         Text("Skipped: \(reason)").font(.caption).foregroundStyle(.secondary)
                     }

@@ -168,7 +168,7 @@ struct SettingsView: View {
                     LabeledContent(report.refine ? "Refine backend" : "Cleanup backend", value: report.backend)
                     LabeledContent("Outcome", value: report.outcome)
                     if let device = report.device { LabeledContent("Device", value: device) }
-                    LabeledContent("Took", value: "\(report.milliseconds) ms · \(report.style.rawValue)")
+                    LabeledContent("Took", value: "\(report.milliseconds) ms · \(report.style.title)")
                     ForEach(report.skipped, id: \.self) { reason in
                         Text("Skipped: \(reason)").font(.caption).foregroundStyle(.secondary)
                     }

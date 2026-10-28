@@ -158,7 +158,7 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     /// stay old); false when history can't be read.
     private func rebuildPairs(_ pairs: WordPairStore, from history: any HistoryStore) async -> Bool {
         guard let recent = try? await history.recent(limit: Self.pairHistoryLimit) else { return false }
-        return (try? await pairs.rebuild(entries: recent.reversed().map { ($0.text, $0.date) }, now: now())) != nil
+        return (try? await pairs.rebuild(entries: recent.reversed().map { ($0.rawText ?? $0.text, $0.date) }, now: now())) != nil
     }
 
     /// Learns from what cleanup run `runID` changed. Returns at once. `suggested`: the terms the model was
@@ -192,7 +192,7 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     static func learningStyle(_ style: CleanupStyle) -> CleanupLearningStyle {
         switch style {
         case .verbatim: .verbatim
-        case .message: .message
+        case .message, .markdown: .message
         }
     }
 
