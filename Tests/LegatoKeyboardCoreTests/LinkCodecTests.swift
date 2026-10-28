@@ -98,8 +98,9 @@ import Testing
         let counter = Counter()
         let observer = DarwinObserver(name: name) { counter.bump() }
         DarwinObserver.post(name)
-        var waited = 0
-        while counter.value == 0, waited < 200 { try await Task.sleep(for: .milliseconds(10)); waited += 1 }
+        // A hang guard, not a speed bound: the note arrives whenever the notification centre delivers it.
+        let deadline = ContinuousClock.now + .seconds(30)
+        while counter.value == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         #expect(counter.value == 1)
         withExtendedLifetime(observer) {}
     }

@@ -28,8 +28,10 @@ private struct CacheTestError: Error {}
 
 private func url(_ name: String) -> URL { URL(fileURLWithPath: "/models/\(name)") }
 
+/// Polls until `condition` holds or a generous 30 s deadline passes (a hang guard, not a speed bound).
 private func eventually(_ condition: () -> Bool) async -> Bool {
-    for _ in 0..<400 {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while ContinuousClock.now < deadline {
         if condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))
     }

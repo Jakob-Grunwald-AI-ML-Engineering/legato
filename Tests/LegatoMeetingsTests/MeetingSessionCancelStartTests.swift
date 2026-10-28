@@ -89,14 +89,18 @@ final class UncancellableEngine: DictationEngine {
         #expect(try await store.meeting(id: id) == nil)
     }
 
-    @Test func aStartCancelledInsideAnEngineThatHonoursCancellationTearsDownToo() async throws {
+    @Test(.timeLimit(.minutes(1)))
+    func aStartCancelledInsideAnEngineThatHonoursCancellationTearsDownToo() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let mic = ScriptedSource(), system = ScriptedSource()
-        let (s, _) = makeSession(engine: CancellableSlowEngine(), mic: mic, system: system, store: MeetingStore(root: root))
+        let engine = CancellableSlowEngine()
+        let (s, _) = makeSession(engine: engine, mic: mic, system: system, store: MeetingStore(root: root))
 
         let start = Task { try await s.start() }
-        try await Task.sleep(for: .milliseconds(20))
+        // Cancel once `prepare` is running, however long the runner takes to get there.
+        var entered = engine.entered.makeAsyncIterator()
+        await entered.next()
         start.cancel()
 
         await #expect(throws: CancellationError.self) { try await start.value }
@@ -107,9 +111,14 @@ final class UncancellableEngine: DictationEngine {
 /// `prepare` sleeps, so it throws when cancelled.
 final class CancellableSlowEngine: DictationEngine {
     let id = "slow"
+    /// Yields once when `prepare` has begun waiting.
+    let entered: AsyncStream<Void>
+    private let enteredSignal: AsyncStream<Void>.Continuation
+    init() { (entered, enteredSignal) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1)) }
     func installAssets(locale: Locale?) -> AsyncStream<Double> { AsyncStream { $0.finish() } }
     func prepare(locale: Locale?) async throws -> AudioFormatSpec {
-        try await Task.sleep(for: .seconds(30))
+        enteredSignal.yield()
+        try await Task.sleep(for: .seconds(3600))
         return recFormat
     }
     func transcribe(_ input: AsyncStream<AudioChunk>) -> AsyncThrowingStream<TranscriptEvent, Error> {
