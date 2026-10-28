@@ -28,6 +28,7 @@ final class KeyboardController {
     private(set) var now = Date()
     private(set) var isVisible = false
     private(set) var returnKeyType: UIReturnKeyType = .default
+    private(set) var offersAutoFillSwitch = false
     private(set) var keyboardType: UIKeyboardType = .default
     private(set) var autocapitalization: AutoCapitalizationType = .none
     private(set) var enablesReturnKeyAutomatically = false
@@ -341,6 +342,7 @@ final class KeyboardController {
 
     /// Reads the field's traits; only changed values are stored, so the keys redraw only when needed.
     func refreshTraits() {
+        offersAutoFillSwitch = AutoFillHandoff.offersAction(contentType: AutoFillContentType.semanticName(for: document.textContentType))
         if returnKeyType != document.returnKeyType { returnKeyType = document.returnKeyType }
         if keyboardType != document.keyboardType { keyboardType = document.keyboardType }
         let capitalization = AutoCapitalizationType(rawValue: document.autocapitalizationType.rawValue) ?? .none

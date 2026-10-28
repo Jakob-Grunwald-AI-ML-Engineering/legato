@@ -13,7 +13,7 @@ public enum SuggestionField {
     /// Content types (`UITextContentType.rawValue`) that are credentials, identities, payment or contact
     /// details: nothing is suggested or learned there, whatever the keyboard type says.
     private static let sensitiveContentTypes: Set<String> = [
-        "password", "newpassword", "onetimecode", "username", "emailaddress", "url", "telephonenumber",
+        "password", "newpassword", "new-password", "onetimecode", "one-time-code", "username", "emailaddress", "url", "telephonenumber",
         "fullstreetaddress", "streetaddressline1", "streetaddressline2", "addresscity", "addressstate",
         "addresscityandstate", "sublocality", "countryname", "postalcode", "location",
     ]

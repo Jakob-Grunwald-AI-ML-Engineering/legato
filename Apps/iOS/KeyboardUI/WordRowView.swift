@@ -19,7 +19,9 @@ struct WordRowView<Swipe: Gesture>: View {
 
     var body: some View {
         Group {
-            if let status = controller.statusText {
+            if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
+                AutoFillSwitchKey(target: target)
+            } else if let status = controller.statusText {
                 Text(status)
                     .font(.system(size: fontSize - 4))
                     .foregroundStyle(Color(uiColor: KeyColors.suggestion))
@@ -206,4 +208,33 @@ private struct GlyphFade: Transition {
             .opacity(phase.isIdentity ? 1 : 0)
             .animation(phase == .didDisappear ? staggers.removalAnimation(id) : staggers.insertionAnimation(id), value: phase.isIdentity)
     }
+}
+
+/// UIKit receives all touches so the system supplies both tap-to-advance and the long-press picker.
+/// iOS chooses the next enabled keyboard; a keyboard extension cannot select Apple Passwords directly.
+private struct AutoFillSwitchKey: UIViewRepresentable {
+    weak var target: UIInputViewController?
+
+    func makeUIView(context: Context) -> UIButton {
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: "key.fill")
+        configuration.title = "Switch keyboard for AutoFill"
+        configuration.imagePadding = 5
+        configuration.baseForegroundColor = KeyColors.suggestion
+        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var attributes = incoming
+            attributes.font = UIFont.systemFont(ofSize: 13)
+            return attributes
+        }
+        let button = UIButton(configuration: configuration)
+        button.accessibilityIdentifier = "keyboard.autofill"
+        button.accessibilityLabel = "Switch keyboard for AutoFill"
+        button.accessibilityHint = "Switches to the next keyboard. Touch and hold to choose a keyboard."
+        if let target {
+            button.addTarget(target, action: #selector(UIInputViewController.handleInputModeList(from:with:)), for: .allTouchEvents)
+        }
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {}
 }

@@ -47,6 +47,13 @@ import Testing
         #expect(!suggests(contentType: "creditCardNumber"))
     }
 
+    // UIKit constants verified on the simulator: newPassword and oneTimeCode use hyphenated raw values.
+    @Test(arguments: ["new-password", "one-time-code"])
+    func actualCredentialRawValuesNeverLearnOrSuggest(_ type: String) {
+        #expect(!learns(contentType: type))
+        #expect(!suggests(contentType: type))
+    }
+
     @Test func proseFieldsGetSuggestions() {
         #expect(suggests())
         #expect(suggests(keyboard: .numbersAndPunctuation))

@@ -7,6 +7,9 @@ import UIKit
 /// which cannot record) and links only `LegatoKeyboardCore` and `LegatoVocabulary` (the word row). Dictation
 /// runs in the app; this process asks for it over the App Group and types the text the app publishes.
 final class KeyboardViewController: UIInputViewController {
+    // Shared across controller recreation when the user returns to Legato on the same field.
+    private static var autoFillHandoff = AutoFillHandoff()
+    private var handoffVisible = false
     private var controller: KeyboardController?
     private var heightConstraint: NSLayoutConstraint?
 
@@ -85,6 +88,35 @@ final class KeyboardViewController: UIInputViewController {
         controller?.appeared()
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        handoffVisible = true
+        controller?.refreshTraits()
+        switchForAutoFillIfNeeded()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        handoffVisible = false
+        super.viewWillDisappear(animated)
+    }
+
+    /// Only field metadata is inspected; handing off does not type, read a password or start dictation.
+    private func switchForAutoFillIfNeeded() {
+        guard let controller else { return }
+        if Self.autoFillHandoff.shouldSwitch(
+            documentID: controller.document.documentID,
+            contentType: AutoFillContentType.semanticName(for: controller.document.textContentType),
+            enabled: KeyboardPreferences.load().automaticAutoFill,
+            visible: handoffVisible && viewIfLoaded?.window != nil,
+            targetAvailable: controller.inputModeTarget === self
+        ) {
+            #if DEBUG
+            NSLog("kbd.autofill automatic-handoff")
+            #endif
+            advanceToNextInputMode()
+        }
+    }
+
     /// The controller observes the app's Darwin notes and runs tasks of its own; a hosting view can keep it
     /// alive a moment past this view controller, so it is shut down here, not left to its own release.
     isolated deinit {
@@ -112,6 +144,7 @@ final class KeyboardViewController: UIInputViewController {
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
         controller?.documentDidChange()
+        switchForAutoFillIfNeeded()
     }
 
     /// The cursor or the selection moved (a tap in the text): the word row looks at the word there. Some hosts
@@ -119,6 +152,7 @@ final class KeyboardViewController: UIInputViewController {
     override func selectionDidChange(_ textInput: (any UITextInput)?) {
         super.selectionDidChange(textInput)
         controller?.documentDidChange()
+        switchForAutoFillIfNeeded()
     }
 }
 
