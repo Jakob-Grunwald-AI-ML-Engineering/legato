@@ -181,6 +181,8 @@ final class KeyboardController {
     func appeared() {
         guard !isTornDown else { return }
         isVisible = true
+        // A return from the app is a new attempt, even before the previous tap's URL-settle timer.
+        openAppRequestID = UUID().uuidString
         refreshPreferences()
         refreshTraits()
         typing.appeared()
@@ -702,7 +704,8 @@ final class KeyboardController {
             // The Link reads its URL as the tap lands; a fresh id is for the next tap.
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(1))
-                self?.openAppRequestID = UUID().uuidString
+                guard let self, self.openAppRequestID == id else { return }
+                self.openAppRequestID = UUID().uuidString
             }
         case .remote(let action):
             trace?("mic mode=remote-\(action == .start ? "start" : "stop")")

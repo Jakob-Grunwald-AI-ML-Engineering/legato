@@ -208,7 +208,7 @@ if [ "$mode" = release-check ]; then
     KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers LegatoHarnessAppearance
     LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
     LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
-    E2EFakeMeetingMic meeting-start meeting-stop meeting-mute meeting-unmute meeting-pause meeting-resume meeting-discard meeting-export meeting-route-change interrupt-end
+    harness-mic-hop-retry foreign-engine-change E2EFakeMeetingMic meeting-start meeting-stop meeting-mute meeting-unmute meeting-pause meeting-resume meeting-discard meeting-export meeting-route-change interrupt-end
     "meeting.started" "meeting.refused" "meeting.pipeline.done" "meeting.export" "meeting.session.activate" "meeting.mic.restart"
     "meeting.discarded" "meeting.list count" "meeting.bgtask")
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
@@ -829,6 +829,44 @@ scenario_m() {
   assert_log "no lease: the keyboard is told to hop" "kbd.ack result=hop"
   assert_no_log "nothing started" "e2e outcome kind=started"
   assert_no_log "no session built" "session.make"
+}
+
+scenario_n5() {
+  begin "n5. immediate hop retry after refused activation" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoKeyboardHarness YES -LegatoFakeBackgroundRefusal pla -LegatoFakeRefusalInForeground YES \
+    -LegatoFakeRefusalCount 1 || return
+  wait_log "harness ready" 10
+  trigger harness-mic-hop-retry
+  wait_log "harness hop-retry.done" 10
+  assert_count "first activation failed once" "arm outcome=failed" 1
+  assert_count "fresh retry actually arms microphone" "arm outcome=armed" 1
+  assert_count "two distinct arm operations admitted" "arm outcome=" 2
+}
+
+scenario_n4() {
+  begin "n4. unrelated engine preserves indefinite lease" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoKeepAliveSeconds -1 -LegatoFakeBackgroundRefusal pla || return
+  trigger kbd-hop-arm
+  wait_log "arm outcome=armed" 10
+  trigger foreign-engine-change
+  wait_log "command foreign-engine-change" 5
+  sleep 0.5
+  assert_no_log "foreign engine cannot release armed microphone" "session.deactivate"
+  assert_no_log "foreign engine cannot invalidate lease" "system-event reason=\"engine configuration change\""
+  xcrun simctl io "$UDID" screenshot "$WORK/n4-hop-ready.png" > /dev/null 2>&1
+  trigger background
+  trigger kbd-visible
+  wait_log "kbd.visible value=1" 10
+  trigger kbd-request-start
+  wait_log "outcome kind=started" 10
+  assert_log "background dictation still uses armed microphone" "outcome kind=started"
+  assert_count "no replacement microphone" "audio.start" 1
+  trigger kbd-request-stop
+  wait_log "outcome kind=stopped" 10
+  assert_log "dictation remains stoppable" "outcome kind=stopped"
+  trigger interrupt
+  wait_log "system-event reason=\"interruption began\"" 5
+  assert_count "genuine interruption releases retained microphone" "session.deactivate" 1
 }
 
 scenario_n3() {
@@ -1546,7 +1584,7 @@ scenario_z() {
 
 t_run=$SECONDS
 wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
-for s in a b c d e f g h i p j o k l m n n2 n3 q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
+for s in a b c d e f g h i p j o k l m n n2 n3 n4 n5 q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
 if wanted v; then
   scenario_v "retry succeeds" duckOthers 1 2 yes
   scenario_v "default fails twice" duckOthers 9 2 no
