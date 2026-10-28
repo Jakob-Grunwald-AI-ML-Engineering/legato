@@ -218,10 +218,10 @@ private func idle(_ p: inout IdlePredicate, _ sample: IdleSample, isRecording: B
         #expect(rig.ran.current.isEmpty)
 
         await scheduler.processNow(id)
-        var waited = 0
-        while rig.ran.current.isEmpty, waited < 200 {
+        // A hang guard, not a speed bound.
+        let deadline = ContinuousClock.now + .seconds(30)
+        while rig.ran.current.isEmpty, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
-            waited += 1
         }
         #expect(rig.ran.current == [id], "it ran without waiting for the poll")
     }

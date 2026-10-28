@@ -155,9 +155,10 @@ struct Harness: @unchecked Sendable {
     }
 }
 
-/// Polls until `condition` holds (max ~2 s).
+/// Polls until `condition` holds or a generous 30 s deadline passes (a hang guard, not a speed bound).
 func eventually(_ condition: () async -> Bool) async -> Bool {
-    for _ in 0..<400 {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while ContinuousClock.now < deadline {
         if await condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))
     }

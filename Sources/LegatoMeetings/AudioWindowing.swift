@@ -32,10 +32,12 @@ public enum AudioWindowing {
 
     /// The next window's end, starting at `start`: the recording's end when it fits, else the quietest
     /// point in the last ``searchSpan`` seconds before the limit.
+    /// - Parameter window: the longest window; ``maxWindow`` in the app, shorter in tests so they scan less audio.
     public static func nextCut(
-        from start: TimeInterval, duration: TimeInterval, stream: TranscriptEvent.Stream, reader: any AudioSampleReader
+        from start: TimeInterval, duration: TimeInterval, stream: TranscriptEvent.Stream, reader: any AudioSampleReader,
+        window: TimeInterval = maxWindow
     ) async throws -> TimeInterval {
-        let limit = start + maxWindow
+        let limit = start + window
         guard limit < duration else { return duration }
         let from = limit - searchSpan
         let tail = try await reader.samples(of: stream, in: from..<limit)
