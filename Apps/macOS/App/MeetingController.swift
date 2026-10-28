@@ -238,12 +238,28 @@ final class MeetingController {
         let choice = MeetingMicRoute.choose(
             processes: (try? monitor.activeProcesses()) ?? [], ownPID: ownPID,
             defaultInput: AudioDevices.defaultInput(), selectedInput: selectedInput)
+        #if DEBUG
+        let diagnostics = MacMeetingDiagnostics.shared
+        diagnostics?.event("capture.settings", fields: [
+            "voiceProcessing": String(engines.voiceProcessing), "enhancement": String(engines.enhancer != nil),
+            "requestedInput": choice.pinned.map(String.init) ?? "default",
+            "defaultInput": AudioDevices.defaultInput().map(String.init) ?? "unknown",
+        ])
+        #endif
         let mic = VoiceProcessingFallbackMic(
             voiceProcessing: engines.voiceProcessing, device: choice.pinned,
             devices: MicDevices(
                 defaultInput: { AudioDevices.defaultInput() }, name: { AudioDevices.name(of: $0) },
                 callInput: { manualUID == nil ? monitor.meetingMic(ownPID: ownPID).pinned : nil }),
-            strictDevice: manualUID != nil)
+            strictDevice: manualUID != nil,
+            makeMic: { vp, device in
+                #if DEBUG
+                MicSource(onDiagnostic: { event in diagnostics?.event(event.event, fields: event.fields) },
+                          voiceProcessing: vp, device: device, strictDevice: manualUID != nil)
+                #else
+                MicSource(voiceProcessing: vp, device: device, strictDevice: manualUID != nil)
+                #endif
+            })
         let system = SystemAudioSource()
         #if DEBUG
         let counter = ZeroCountingSource(system)
@@ -252,8 +268,16 @@ final class MeetingController {
         #else
         let tap: any AudioSource = system
         #endif
+        var micInput: any AudioSource = mic
+        var audioSink: any MeetingAudioSink = MeetingAudioWriter(folder: folder)
+        #if DEBUG
+        if let diagnostics {
+            micInput = DiagnosticMicSource(source: mic, diagnostics: diagnostics)
+            audioSink = DiagnosticMeetingSink(sink: audioSink, diagnostics: diagnostics)
+        }
+        #endif
         let made = services.makeSession(
-            meeting: meeting, mic: mic, system: tap, engines: engines, sink: MeetingAudioWriter(folder: folder))
+            meeting: meeting, mic: micInput, system: tap, engines: engines, sink: audioSink)
         let session = made.session
         do {
             try await session.start()

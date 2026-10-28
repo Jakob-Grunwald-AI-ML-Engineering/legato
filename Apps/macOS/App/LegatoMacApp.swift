@@ -7,6 +7,9 @@ struct LegatoMacApp: App {
 
     init() {
         MacAppController.shared.bootstrap()
+        #if DEBUG
+        MacMeetingDiagnostics.shared?.install(meetings: MacAppController.shared.meetings)
+        #endif
     }
 
     var body: some Scene {

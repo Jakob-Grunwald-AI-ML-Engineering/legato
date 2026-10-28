@@ -101,7 +101,30 @@ public final class MicSource: ResumableAudioSource {
     /// engine is only touched by `route()` (reads `isRunning`) and by `stop()` after taking it out.
     private final class EngineBox: @unchecked Sendable {
         let engine: AVAudioEngine
+        #if os(macOS)
+        let boundInput: BoundInputDevice?
+        var boundDevice: UInt32? { boundInput?.device }
+        init(_ engine: AVAudioEngine, boundInput: BoundInputDevice? = nil) {
+            self.engine = engine
+            self.boundInput = boundInput
+        }
+        #else
         init(_ engine: AVAudioEngine) { self.engine = engine }
+        #endif
+
+        func stop() {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            #if os(macOS)
+            boundInput?.destroy()
+            #endif
+        }
+    }
+
+    /// Opt-in metadata only: lifecycle and audio measurements, never samples or transcript text.
+    public struct Diagnostic: Sendable {
+        public let event: String
+        public let fields: [String: String]
     }
 
     /// The outcome of one engine start attempt, for diagnostics.
@@ -133,6 +156,7 @@ public final class MicSource: ResumableAudioSource {
     private let router = TapRouter()
     private let onAttempt: (@Sendable (Attempt) -> Void)?
     private let onFirstBuffer: (@Sendable (FirstBuffer) -> Void)?
+    private let onDiagnostic: (@Sendable (Diagnostic) -> Void)?
     /// A source-scoped engine event. Recheck after scheduling: stop/start can supersede it meanwhile.
     public struct ConfigurationChange: Sendable {
         private let validate: @Sendable () -> Bool
@@ -166,14 +190,33 @@ public final class MicSource: ResumableAudioSource {
     public init(
         onAttempt: (@Sendable (Attempt) -> Void)? = nil,
         onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil,
+        onDiagnostic: (@Sendable (Diagnostic) -> Void)? = nil,
         voiceProcessing: Bool = false,
         device: UInt32? = nil,
         strictDevice: Bool = false,
         onConfigurationChange: (@Sendable (ConfigurationChange) -> Void)? = nil
     ) {
         self.onConfigurationChange = onConfigurationChange
-        self.onAttempt = onAttempt
-        self.onFirstBuffer = onFirstBuffer
+        self.onDiagnostic = onDiagnostic
+        self.onAttempt = { attempt in
+            onAttempt?(attempt)
+            onDiagnostic?(Diagnostic(event: "engine.attempt", fields: [
+                "attempt": String(attempt.index), "rate": String(attempt.inputSampleRate),
+                "channels": String(attempt.inputChannelCount), "requested": device.map(String.init) ?? "default",
+                "error": attempt.error.map { String(describing: $0) } ?? "none",
+            ]))
+        }
+        if onFirstBuffer != nil || onDiagnostic != nil {
+            self.onFirstBuffer = { buffer in
+                onFirstBuffer?(buffer)
+                onDiagnostic?(Diagnostic(event: "engine.firstBuffer", fields: [
+                    "msSinceStart": String(buffer.msSinceStart), "rms": String(buffer.rms),
+                    "frames": String(buffer.frames), "rate": String(buffer.sampleRate),
+                ]))
+            }
+        } else {
+            self.onFirstBuffer = nil
+        }
         self.voiceProcessing = voiceProcessing
         self.strictDevice = strictDevice
         self.device = device
@@ -194,7 +237,11 @@ public final class MicSource: ResumableAudioSource {
 
     /// Builds, taps and starts a fresh engine on `device` (nil: the default input), retrying while the route settles.
     private func launchEngine(format: AudioFormatSpec, device: UInt32?) async throws -> EngineBox {
-        #if !os(macOS)
+        #if os(macOS)
+        // One owned full-duplex device for this retry sequence. Creating one per attempt never lets it settle.
+        let boundInput = try device.map { try BoundInputDevice(input: $0) }
+        let boundDevice = boundInput?.device
+        #else
         let device: UInt32? = nil // devices are macOS only
         #endif
         // The route can still be settling right after session activation (kAUStartIO 'what', or a
@@ -221,9 +268,14 @@ public final class MicSource: ResumableAudioSource {
             }
             // On this fresh engine, after voice processing (which puts the unit back on the default devices),
             // before the format is read.
-            if let device, let error = Self.bind(input, to: device) {
-                lastError = error
-                onAttempt?(Attempt(index: attempt, inputSampleRate: 0, inputChannelCount: 0, error: error))
+            if let boundDevice, let error = Self.bind(input, to: boundDevice) {
+                let failure: MicSourceError
+                if case .deviceNotSelected(_, let status) = error {
+                    failure = .deviceNotSelected(device: device ?? boundDevice, status: status)
+                } else { failure = error }
+                lastError = failure
+                onAttempt?(Attempt(index: attempt, inputSampleRate: 0, inputChannelCount: 0, error: failure))
+                engine.stop()
                 continue
             }
             #endif
@@ -257,7 +309,13 @@ public final class MicSource: ResumableAudioSource {
                 continue
             }
             report(nil)
+            #if os(macOS)
+            diagnose("engine.started", engine: engine, boundDevice: boundDevice)
+            return EngineBox(engine, boundInput: boundInput)
+            #else
+            diagnose("engine.started", engine: engine)
             return EngineBox(engine)
+            #endif
         }
         throw lastError ?? MicSourceError.invalidInputFormat
     }
@@ -281,9 +339,7 @@ public final class MicSource: ResumableAudioSource {
             return taken
         }
         if let observer { NotificationCenter.default.removeObserver(observer.token) }
-        guard let engine = engine?.engine else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        engine?.stop()
     }
 
     /// macOS: a device or format change stops the engine; with the lease armed it is rebuilt and the
@@ -324,8 +380,9 @@ public final class MicSource: ResumableAudioSource {
     private func restartAfterConfigurationChange(_ old: EngineBox) async {
         #if os(macOS)
         // Binding a device posts a change of its own while the engine runs on, on that device.
-        let current = old.engine.inputNode.audioUnit.flatMap(Self.inputDevice(of:))
-        guard Self.needsRebuild(running: old.engine.isRunning, current: current, bound: device) else { return }
+        let current = old.engine.inputNode.audioUnit.flatMap { Self.inputDevice(of: $0) }
+        diagnose("engine.configuration", engine: old.engine, boundDevice: old.boundDevice)
+        guard Self.needsRebuild(running: old.engine.isRunning, current: current, bound: old.boundDevice) else { return }
         #endif
         let armed = state.withLock { s -> (Int, AudioFormatSpec)? in
             guard s.engine === old, let format = s.format else { return nil }
@@ -336,11 +393,18 @@ public final class MicSource: ResumableAudioSource {
         if let observer = state.withLock({ s -> ObserverBox? in defer { s.observer = nil }; return s.observer }) {
             NotificationCenter.default.removeObserver(observer.token)
         }
-        old.engine.inputNode.removeTap(onBus: 0)
-        old.engine.stop()
+        old.stop()
         // Automatic routing can fall back; an explicitly selected device never opens another microphone.
-        var rebuilt = try? await launchEngine(format: format, device: device)
-        if rebuilt == nil, Self.mayFallbackToDefault(bound: device, strictDevice: strictDevice) { rebuilt = try? await launchEngine(format: format, device: nil) }
+        var rebuilt: EngineBox?
+        do {
+            rebuilt = try await launchEngine(format: format, device: device)
+        } catch {
+            diagnose("engine.restart.failed", engine: old.engine, error: error)
+            if Self.mayFallbackToDefault(bound: device, strictDevice: strictDevice) {
+                do { rebuilt = try await launchEngine(format: format, device: nil) }
+                catch { diagnose("engine.restart.fallback.failed", engine: old.engine, error: error) }
+            }
+        }
         guard let fresh = rebuilt else {
             router.setSink(nil)
             return
@@ -351,12 +415,31 @@ public final class MicSource: ResumableAudioSource {
             return true
         }
         if kept {
+            #if os(macOS)
+            diagnose("engine.restart.succeeded", engine: fresh.engine, boundDevice: fresh.boundDevice)
+            #else
+            diagnose("engine.restart.succeeded", engine: fresh.engine)
+            #endif
             installConfigurationObserver(for: fresh)
             resumeSink.yield()
         } else {
-            fresh.engine.inputNode.removeTap(onBus: 0)
-            fresh.engine.stop()
+            fresh.stop()
         }
+    }
+
+    private func diagnose(_ event: String, engine: AVAudioEngine, boundDevice: UInt32? = nil, error: (any Error)? = nil) {
+        guard let onDiagnostic else { return }
+        var fields = [
+            "requested": device.map(String.init) ?? "default", "boundDevice": boundDevice.map(String.init) ?? "default", "running": String(engine.isRunning),
+            "strictDevice": String(strictDevice), "error": error.map { String(describing: $0) } ?? "none",
+        ]
+        #if os(macOS)
+        if let unit = engine.inputNode.audioUnit {
+            fields["currentDeviceElement0"] = Self.inputDevice(of: unit, element: 0).map(String.init) ?? "unknown"
+            fields["currentDeviceElement1"] = Self.inputDevice(of: unit, element: 1).map(String.init) ?? "unknown"
+        }
+        #endif
+        onDiagnostic(Diagnostic(event: event, fields: fields))
     }
 
     /// Whether an unavailable pinned input may be replaced by the default input.
@@ -372,22 +455,26 @@ public final class MicSource: ResumableAudioSource {
     /// Points the input node's unit at `device` and checks that it took. nil on success.
     private static func bind(_ input: AVAudioInputNode, to device: UInt32) -> MicSourceError? {
         guard let unit = input.audioUnit else { return .deviceNotSelected(device: device, status: 0) }
-        var id = AudioDeviceID(device)
-        let status = AudioUnitSetProperty(
-            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, inputElement,
-            &id, UInt32(MemoryLayout<AudioDeviceID>.size))
-        guard status == noErr, inputDevice(of: unit) == device else {
-            return .deviceNotSelected(device: device, status: status)
+        // AUHAL is one duplex device: both sides must refer to our aggregate, otherwise AVAudioEngine
+        // replaces the input with its own aggregate containing the system-default microphone.
+        for element: AudioUnitElement in [0, inputElement] {
+            var id = AudioDeviceID(device)
+            let status = AudioUnitSetProperty(
+                unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, element,
+                &id, UInt32(MemoryLayout<AudioDeviceID>.size))
+            guard status == noErr, inputDevice(of: unit, element: element) == device else {
+                return .deviceNotSelected(device: device, status: status)
+            }
         }
         return nil
     }
 
     /// The device the unit's input runs on.
-    private static func inputDevice(of unit: AudioUnit) -> UInt32? {
+    private static func inputDevice(of unit: AudioUnit, element: AudioUnitElement = inputElement) -> UInt32? {
         var id = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         let status = AudioUnitGetProperty(
-            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, inputElement, &id, &size)
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, element, &id, &size)
         return status == noErr ? id : nil
     }
     #endif

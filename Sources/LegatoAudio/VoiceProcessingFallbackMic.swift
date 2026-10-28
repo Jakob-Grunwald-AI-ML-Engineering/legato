@@ -63,6 +63,12 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         var inner: (any AudioSource)?
         var pump: Task<Void, Never>?
         var relay: Task<Void, Never>?
+        var watchdog: Task<Void, Never>?
+        var generation = 0
+        var endedGeneration: Int?
+        var handledEndGeneration: Int?
+        var recoveries = 0
+        var lastBuffer = 0.0
         var continuation: AsyncStream<AudioChunk>.Continuation?
         var format: AudioFormatSpec?
         /// Bumped by every start and stop, so a switch that lost the race to either backs out.
@@ -93,6 +99,8 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     private let guardian: MicSilenceGuard
     private let devices: MicDevices
     private let strictDevice: Bool
+    private let stallTimeout: TimeInterval
+    private let clock: @Sendable () -> TimeInterval
 
     /// - Parameters:
     ///   - voiceProcessing: whether to try voice processing first.
@@ -102,12 +110,15 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     ///   - makeMic: builds a microphone with voice processing on or off on a device, one per start and per switch.
     public init(
         voiceProcessing: Bool, guardian: MicSilenceGuard = MicSilenceGuard(), device: UInt32? = nil,
-        devices: MicDevices = .unknown, strictDevice: Bool = false, makeMic: @escaping @Sendable (Bool, UInt32?) -> any AudioSource
+        devices: MicDevices = .unknown, strictDevice: Bool = false, stallTimeout: TimeInterval = 3,
+        clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, makeMic: @escaping @Sendable (Bool, UInt32?) -> any AudioSource
     ) {
         self.voiceProcessing = voiceProcessing
         self.guardian = guardian
         self.devices = devices
         self.strictDevice = strictDevice
+        self.stallTimeout = stallTimeout
+        self.clock = clock
         self.make = makeMic
         state = Mutex(State(wanted: device))
         (notices, noticeSink) = AsyncStream.makeStream(of: String.self)
@@ -123,10 +134,13 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     }
 
     /// The microphone a meeting uses: Apple's `MicSource`, with voice processing as asked, on `device`.
-    public convenience init(voiceProcessing: Bool, device: UInt32? = nil, devices: MicDevices = .unknown, strictDevice: Bool = false) {
+    public convenience init(
+        voiceProcessing: Bool, device: UInt32? = nil, devices: MicDevices = .unknown, strictDevice: Bool = false,
+        onDiagnostic: (@Sendable (MicSource.Diagnostic) -> Void)? = nil
+    ) {
         self.init(
             voiceProcessing: voiceProcessing, device: device, devices: devices, strictDevice: strictDevice,
-            makeMic: { MicSource(voiceProcessing: $0, device: $1, strictDevice: strictDevice) })
+            makeMic: { MicSource(onDiagnostic: onDiagnostic, voiceProcessing: $0, device: $1, strictDevice: strictDevice) })
     }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
@@ -134,6 +148,7 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         let (stream, continuation) = AsyncStream.makeStream(of: AudioChunk.self)
         let (lifecycle, device) = state.withLock { s -> (Int, UInt32?) in
             s.lifecycle += 1
+            s.recoveries = 0
             s.continuation = continuation
             s.format = format
             return (s.lifecycle, s.target(voiceProcessing: voiceProcessing))
@@ -147,7 +162,7 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
                 try await launch(voiceProcessing: false, device: device, format: format, lifecycle: lifecycle)
             }
         } catch {
-            await stop()
+            await stopCurrent(ifLifecycle: lifecycle)
             throw error
         }
         return stream
@@ -174,14 +189,17 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
 
     // MARK: Internals
 
-    private func stopCurrent() async {
-        let (inner, pump, relay, continuation) = state.withLock { s in
+    private func stopCurrent(ifLifecycle: Int? = nil) async {
+        let taken = state.withLock { s -> ((any AudioSource)?, Task<Void, Never>?, Task<Void, Never>?, Task<Void, Never>?, AsyncStream<AudioChunk>.Continuation?)? in
+            guard ifLifecycle == nil || s.lifecycle == ifLifecycle else { return nil }
             defer {
                 s.inner = nil; s.pump = nil; s.relay = nil; s.continuation = nil; s.format = nil
-                s.watching = nil; s.lifecycle += 1
+                s.watching = nil; s.lifecycle += 1; s.generation += 1; s.watchdog = nil; s.switching = false
             }
-            return (s.inner, s.pump, s.relay, s.continuation)
+            return (s.inner, s.pump, s.relay, s.watchdog, s.continuation)
         }
+        guard let (inner, pump, relay, watchdog, continuation) = taken else { return }
+        watchdog?.cancel()
         await inner?.stop()
         relay?.cancel()
         await pump?.value
@@ -202,8 +220,14 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
             try await launch(voiceProcessing: voiceProcessing, device: nil, format: format, lifecycle: lifecycle)
             return
         }
-        let pump = Task { [weak self] in
-            for await chunk in chunks { self?.deliver(chunk) }
+        let generation = state.withLock { s -> Int? in
+            guard s.lifecycle == lifecycle else { return nil }
+            s.generation += 1
+            return s.generation
+        }
+        guard let generation else {
+            await source.stop()
+            throw MicSourceError.notArmed
         }
         let relay = (source as? any ResumableAudioSource).map { resumable in
             let resumptions = resumable.resumptions
@@ -215,10 +239,11 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
             }
         }
         let kept = state.withLock { s -> Bool in
-            guard s.lifecycle == lifecycle else { return false }
+            guard s.lifecycle == lifecycle, s.generation == generation else { return false }
             s.inner = source
-            s.pump = pump
+            s.endedGeneration = nil
             s.relay = relay
+            s.lastBuffer = clock()
             s.voiceProcessingOn = voiceProcessing
             s.device = device
             s.watching = guardian
@@ -227,8 +252,56 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         if !kept {
             await source.stop()
             relay?.cancel()
-            await pump.value
             throw MicSourceError.notArmed
+        }
+        // Install state before pumping: even a stream that ends immediately must be observed.
+        let pump = Task { [weak self] in
+            for await chunk in chunks { self?.deliver(chunk, generation: generation) }
+            Task { await self?.sourceStopped(generation: generation, lifecycle: lifecycle) }
+        }
+        let watchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, let self else { return }
+                let stalled = self.state.withLock { s in
+                    s.generation == generation && !s.switching && s.inner != nil
+                        && self.clock() - s.lastBuffer > self.stallTimeout
+                }
+                if stalled {
+                    Task { await self.sourceStopped(generation: generation, lifecycle: lifecycle) }
+                    return
+                }
+            }
+        }
+        let current = state.withLock { s -> Bool in
+            guard s.generation == generation, s.lifecycle == lifecycle else { return false }
+            s.pump = pump
+            s.watchdog = watchdog
+            return true
+        }
+        if !current { pump.cancel(); watchdog.cancel() }
+    }
+
+    /// A failed native restart can end its stream or stop callbacks while leaving the stream open.
+    /// Recover twice on the requested device; silence with live callbacks is never a stall.
+    private func sourceStopped(generation: Int, lifecycle: Int) async {
+        let action = state.withLock { s -> (Bool, Bool)? in
+            guard s.generation == generation, s.lifecycle == lifecycle, s.inner != nil else { return nil }
+            s.endedGeneration = generation
+            guard !s.switching, s.handledEndGeneration != generation else { return nil }
+            s.handledEndGeneration = generation
+            guard s.recoveries < 2 else { return (false, s.voiceProcessingOn) }
+            s.recoveries += 1
+            return (true, s.voiceProcessingOn)
+        }
+        guard let (retry, vp) = action else { return }
+        if retry {
+            await switchMic(voiceProcessing: false, notice: vp ? Self.notice : "The microphone stopped delivering audio; restarting the selected microphone.")
+        } else {
+            if state.withLock({ $0.lifecycle == lifecycle }) {
+                noticeSink.yield(Self.restartFailedNotice)
+                await stopCurrent(ifLifecycle: lifecycle)
+            }
         }
     }
 
@@ -241,9 +314,11 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     }
 
     /// Forwards a chunk; while the first seconds are being judged, a `silent` verdict acts on it.
-    private func deliver(_ chunk: AudioChunk) {
+    private func deliver(_ chunk: AudioChunk, generation: Int) {
         typealias Judged = (AsyncStream<AudioChunk>.Continuation?, MicSilenceGuard.Verdict, Bool)
         let (continuation, verdict, voiceProcessingOn) = state.withLock { s -> Judged in
+            guard s.generation == generation || (s.switching && s.generation == generation + 1) else { return (nil, .working, s.voiceProcessingOn) }
+            s.lastBuffer = clock()
             guard var watching = s.watching else { return (s.continuation, .working, s.voiceProcessingOn) }
             let verdict = watching.observe(chunk)
             s.watching = verdict == .undecided ? watching : nil
@@ -275,6 +350,9 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         let taken = state.withLock { s -> Taken? in
             guard !s.switching, let inner = s.inner, let format = s.format else { return nil }
             s.switching = true
+            s.generation += 1
+            s.watchdog?.cancel()
+            s.watchdog = nil
             defer { s.inner = nil; s.pump = nil; s.relay = nil; s.watching = nil }
             let vp = voiceProcessing ?? s.voiceProcessingOn
             return (inner, s.pump, s.relay, format, s.lifecycle, vp, s.target(voiceProcessing: vp))
@@ -290,13 +368,19 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         } catch MicSourceError.notArmed {
             // stopped meanwhile: nothing to report
         } catch {
-            noticeSink.yield(Self.restartFailedNotice)
+            if state.withLock({ $0.lifecycle == lifecycle }) {
+                noticeSink.yield(Self.restartFailedNotice)
+                await stopCurrent(ifLifecycle: lifecycle)
+            }
         }
         // A device followed while this switch ran.
         let again = state.withLock { s -> Bool in
+            guard s.lifecycle == lifecycle else { return false }
             s.switching = false
             return s.inner != nil && s.device != s.target(voiceProcessing: s.voiceProcessingOn)
         }
         if again { await switchMic(voiceProcessing: nil, notice: nil) }
+        let ended = state.withLock { s -> Int? in s.lifecycle == lifecycle && s.endedGeneration == s.generation ? s.endedGeneration : nil }
+        if let ended { await sourceStopped(generation: ended, lifecycle: lifecycle) }
     }
 }
