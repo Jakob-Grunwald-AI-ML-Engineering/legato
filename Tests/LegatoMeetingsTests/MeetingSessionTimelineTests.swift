@@ -105,8 +105,7 @@ import LegatoCore
 
         // Jitter is not a gap.
         rig.clock.now = 5.1
-        rig.micSource.resume()
-        try await Task.sleep(for: .milliseconds(50))
+        await rig.session.fillGap(stream: .mic)
         #expect(rig.calls(.mic).count == 2)
         _ = await rig.session.stop()
     }

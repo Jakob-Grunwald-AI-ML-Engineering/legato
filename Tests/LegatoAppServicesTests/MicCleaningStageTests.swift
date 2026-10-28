@@ -350,8 +350,8 @@ private func collect(_ stream: AsyncStream<AudioChunk>) -> Task<[Float], Never> 
             let before = systemOut.samples.count
             now.withLock { $0 = 100.1 + 0.1 * Double(k) }
             system.push([Float](repeating: Float(k) / 10, count: 1_600))
-            _ = await eventually { systemOut.samples.count > before }
-            try? await Task.sleep(for: .milliseconds(10))
+            #expect(await eventually { systemOut.samples.count > before })
+            // ReferenceTap enqueues the copy before its output collector can acknowledge it.
         }
         await micChunk(at: 100.1)  // 0-0.1 s
         for k in 1...5 { await referenceChunk(k) }  // the mic is away from 0.1 s to 0.6 s

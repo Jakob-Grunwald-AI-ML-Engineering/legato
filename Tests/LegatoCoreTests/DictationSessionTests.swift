@@ -161,7 +161,7 @@ final class EditRecorder {
         }
         try await r.session.start()
         #expect(await eventually { !calls.isEmpty })
-        try? await Task.sleep(for: .milliseconds(30))
+        await r.session.settled()
         #expect(calls.count == 1)
         #expect(calls.first?.run == .idle && calls.first?.lease == .idle) // torn down before the hook runs
         #expect(calls.first?.error == TestError(tag: "stream"))
@@ -173,7 +173,7 @@ final class EditRecorder {
         r.session.onRunAborted = { _ in fired += 1 }
         try await r.session.start()
         _ = try await r.session.stop()
-        try? await Task.sleep(for: .milliseconds(30))
+        await r.session.settled()
         #expect(fired == 0)
     }
 
@@ -230,7 +230,7 @@ final class EditRecorder {
         // Late traffic from run 1's stream: an event, then a failure.
         r.engine.emit(.init(text: " LATE", isFinal: true), run: 0)
         r.engine.failStream(with: TestError(tag: "late"), run: 0)
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { r.session.partialEntry()?.text == "run2" })
 
         #expect(r.session.runState == .listening)
         #expect(r.session.lastError == nil)
@@ -390,12 +390,14 @@ final class EditRecorder {
             }
         })
         try await r.session.start(); _ = try await r.session.stop() // linger sleeper pending
+        #expect(await eventually { clock.pendingCount == 1 })
         try await r.session.start()
         // The pending expiry itself was cancelled (a bare tick can't tell: the cancelled sleeper eats it).
         #expect(cancelledSleeps.withLock { $0 } == 1)
+        #expect(await eventually { clock.cancelledCount == 1 })
         clock.tick() // would expire the first linger if it were still pending
         clock.tick()
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.log.count("deactivate") == 0)
         #expect(r.session.leaseState == .armed)
         _ = try await r.session.stop()
@@ -440,11 +442,13 @@ extension DictationSessionTests {
         try await r.session.start()
         _ = try await r.session.stop()
         #expect(r.session.leaseState == .armed)
+        #expect(await eventually { r.clock.pendingCount == 1 })
         await r.session.endLease()
+        #expect(await eventually { r.clock.cancelledCount == 1 })
         #expect(r.session.leaseState == .idle)
         #expect(r.log.count("deactivate") == 1)
         r.clock.tick() // the cancelled linger must not tear down a second time
-        try? await Task.sleep(for: .milliseconds(30))
+        await Task.yield()
         #expect(r.log.count("deactivate") == 1)
     }
 
@@ -482,7 +486,9 @@ extension DictationSessionTests {
         ended.session.onLeaseExpired = { fired.count += 1 }
         try await ended.session.start()
         _ = try await ended.session.stop()
+        #expect(await eventually { ended.clock.pendingCount == 1 })
         await ended.session.endLease()
+        #expect(await eventually { ended.clock.cancelledCount == 1 })
         let plain = Rig()
         plain.session.onLeaseExpired = { fired.count += 1 }
         try await plain.session.start()
@@ -490,7 +496,7 @@ extension DictationSessionTests {
         // Time passes: the window the ended lease would have run out in, and a (never armed) one for the plain run.
         ended.clock.tick()
         plain.clock.tick()
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(fired.count == 0)
         #expect(ended.log.count("deactivate") == 1 && plain.log.count("deactivate") == 1) // no second teardown either
     }

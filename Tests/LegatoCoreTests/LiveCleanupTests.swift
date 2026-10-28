@@ -187,7 +187,7 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         engine.emit(final("two "), run: 0)
         engine.emit(final("three "), run: 0)
         #expect(await eventually { recorder.commits.count == 3 })
-        try await Task.sleep(for: .milliseconds(40))
+        await Task.yield()
         #expect(processor.calls.count == 1, "one pass in flight at most")
 
         processor.release("one")
@@ -248,12 +248,14 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         s.onRunAborted = { _ in aborted = true }
         try await s.start()
         #expect(await eventually { processor.calls.count == 1 })
+        let pass = try #require(s.currentLivePassTask)
 
         engine.failStream(with: TestError(tag: "stream"), run: 0)
         #expect(await eventually { aborted })
         #expect(await eventually { processor.cancelled == ["hello world"] })
         processor.release("hello world")
-        try await Task.sleep(for: .milliseconds(30))
+        await pass.value
+        #expect(await eventually { recorder.edits.count == s.editCount })
         #expect(recorder.revisions.isEmpty)
         #expect(s.partialEntry()?.text == "hello world", "the salvage stays the raw text")
     }
@@ -310,18 +312,20 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         #expect(await eventually { recorder.revisions.count == 1 })
         engine.emit(final("two "), run: 0)
         #expect(await eventually { processor.calls.count == 2 })
+        let pass = try #require(s.currentLivePassTask)
 
         let stop = Task { try await s.stop() }
         #expect(await eventually { deadline.asked == [.seconds(3)] }, "one deadline, the setting's time limit")
         deadline.fire()
         #expect(await eventually { s.runState == .idle }, "the stop ends at the deadline")
         processor.release("one two")
+        await pass.value
         let entry = try #require(try await stop.value)
 
         #expect(entry.text == "One. two")
         #expect(entry.rawText == "one two")
         #expect(processor.cancelled == ["one two"])
-        try await Task.sleep(for: .milliseconds(30))
+        #expect(await eventually { recorder.edits.count == s.editCount })
         #expect(recorder.revisions.count == 1, "nothing is published after the deadline")
         #expect(recorder.passes.last?.outcome == .timeout)
         #expect(recorder.passes.last?.final == true)

@@ -84,6 +84,8 @@ public actor ProcessingScheduler {
     private var forced: Set<UUID> = []
     /// Manual jobs, in the order they were asked for; the first one runs when the lane is free.
     private var manual: [ManualJob] = []
+    /// Manual jobs admitted to the lane but still waiting behind its running job.
+    var waitingManualCount: Int { manual.filter { $0.id != runningManual }.count }
     private var predicate = IdlePredicate()
     /// The job in the lane, and the id of the manual job when it is one.
     private var running: Task<Void, Never>?

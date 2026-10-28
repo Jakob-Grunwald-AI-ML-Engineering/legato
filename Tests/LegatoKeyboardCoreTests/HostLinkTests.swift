@@ -27,9 +27,12 @@ private struct TickClock: Sendable {
         private struct State {
             var pending = 0
             var nextID = 0
+            var cancelled = 0
             var waiters: [Int: CheckedContinuation<Void, any Error>] = [:]
         }
         private let state = Mutex(State())
+        var pendingCount: Int { state.withLock { $0.waiters.count } }
+        var cancelledCount: Int { state.withLock { $0.cancelled } }
 
         func tick() {
             let waiter = state.withLock { s -> CheckedContinuation<Void, any Error>? in
@@ -58,7 +61,11 @@ private struct TickClock: Sendable {
                     }
                 }
             } onCancel: {
-                let waiter = state.withLock { $0.waiters.removeValue(forKey: id) }
+                let waiter = state.withLock { s in
+                    let waiter = s.waiters.removeValue(forKey: id)
+                    if waiter != nil { s.cancelled += 1 }
+                    return waiter
+                }
                 waiter?.resume(throwing: CancellationError())
             }
         }
@@ -66,6 +73,8 @@ private struct TickClock: Sendable {
 
     private let source = Source()
     func tick() { source.tick() }
+    var pendingCount: Int { source.pendingCount }
+    var cancelledCount: Int { source.cancelledCount }
     var sleep: @Sendable (Duration) async throws -> Void {
         let source = self.source
         return { _ in try await source.wait() }
@@ -208,14 +217,16 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         r.link.update(committed: "", volatile: "a")
         r.env.advance(0.01)
         r.link.update(committed: "hello ", volatile: "wor") // held
+        #expect(await eventually { r.env.other.pendingCount == 1 })
         r.link.runEnded(committed: "hello world ")
         let host = try #require(r.host)
         #expect(host.phase == .idle && host.runID == "run-1" && host.isFinal)
         #expect(host.committed == "hello world " && host.volatile == "")
         let seq = host.seq
+        #expect(await eventually { r.env.other.cancelledCount == 1 })
         r.env.advance(0.2)
         r.env.other.tick()
-        try await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.host?.seq == seq) // the held update never lands after the end
     }
 
@@ -249,11 +260,13 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     @Test func theBeatStopsWhenNothingIsRunningAndNoLeaseIsHeld() async throws {
         let r = Rig()
         r.link.runStarted(id: "run-1", target: .keyboard)
+        #expect(await eventually { r.env.beat.pendingCount == 1 })
         r.link.runEnded(committed: "hi ")
+        #expect(await eventually { r.env.beat.cancelledCount == 1 })
         let seq = r.host?.seq
         r.env.advance(1)
         r.env.beat.tick()
-        try await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.host?.seq == seq && r.host?.beatAt == t0)
     }
 
@@ -274,12 +287,14 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         let r = Rig()
         r.link.leaseChanged(until: t0.addingTimeInterval(30))
         #expect(r.host?.acceptsRemoteStart == true && r.host?.runID == nil)
+        #expect(await eventually { r.env.beat.pendingCount == 1 })
         r.link.leaseChanged(until: nil)
+        #expect(await eventually { r.env.beat.cancelledCount == 1 })
         #expect(r.host?.acceptsRemoteStart == false && r.host?.leaseUntil == nil)
         let seq = r.host?.seq
         r.env.advance(1)
         r.env.beat.tick()
-        try await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.host?.seq == seq)
     }
 
@@ -298,12 +313,14 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         r.env.advance(1)
         r.env.beat.tick()
         #expect(await eventually { r.host?.beatAt == t0.addingTimeInterval(1) })
+        #expect(await eventually { r.env.beat.pendingCount == 1 })
         r.link.meetingChanged(active: false)
+        #expect(await eventually { r.env.beat.cancelledCount == 1 })
         #expect(r.host?.meetingRecording == nil)
         let seq = r.host?.seq
         r.env.advance(1)
         r.env.beat.tick()
-        try await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.host?.seq == seq)
     }
 
@@ -361,11 +378,13 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     @Test func aNewRunCancelsThePendingScrub() async throws {
         let r = Rig()
         finishedRun(r)
+        #expect(await eventually { r.env.retention.pendingCount == 1 })
         r.link.runStarted(id: "run-2", target: .keyboard)
+        #expect(await eventually { r.env.retention.cancelledCount == 1 })
         r.link.update(committed: "second ", volatile: "")
         r.report(cursor(runID: "run-2", committedCount: 7))
         r.env.retention.tick() // the old window ends: it must not wipe the new run
-        try await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.host?.runID == "run-2" && r.host?.committed == "second ")
         #expect(r.applied?.runID == "run-2")
     }
@@ -789,7 +808,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         let r = Rig()
         r.report(cursor(runID: "run-1", committedCount: 1, finalApplied: false))
         let waiting = Task { await r.link.awaitFinalApplied(runID: "run-1", timeout: 0.5) }
-        try? await Task.sleep(for: .milliseconds(20))
+        #expect(await eventually { r.env.other.pendingCount == 1 })
         r.report(cursor(runID: "run-1", committedCount: 3, finalApplied: true))
         r.link.appliedDidChange()
         #expect(await waiting.value)
@@ -798,12 +817,12 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     @Test func aReportForAnotherRunOrWithoutTheFinalFlagDoesNotConfirm() async {
         let r = Rig()
         let waiting = Task { await r.link.awaitFinalApplied(runID: "run-2", timeout: 0.5) }
-        try? await Task.sleep(for: .milliseconds(20))
+        #expect(await eventually { r.env.other.pendingCount == 1 })
         r.report(cursor(runID: "run-1", finalApplied: true))
         r.link.appliedDidChange()
         r.report(cursor(runID: "run-2", finalApplied: false))
         r.link.appliedDidChange()
-        try? await Task.sleep(for: .milliseconds(20))
+        #expect(await eventually { r.env.other.pendingCount == 1 })
         r.env.other.tick() // the timeout
         #expect(await waiting.value == false)
     }
@@ -811,7 +830,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     @Test func noReportWithinTheTimeoutMeansNotApplied() async {
         let r = Rig()
         let waiting = Task { await r.link.awaitFinalApplied(runID: "run-1", timeout: 0.5) }
-        try? await Task.sleep(for: .milliseconds(20))
+        #expect(await eventually { r.env.other.pendingCount == 1 })
         r.env.other.tick()
         #expect(await waiting.value == false)
     }
@@ -820,7 +839,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         let r = Rig()
         r.report(cursor(runID: "run-1", finalApplied: true))
         let waiting = Task { await r.link.awaitFinalApplied(runID: "run-2", timeout: 0.5) }
-        try? await Task.sleep(for: .milliseconds(20))
+        #expect(await eventually { r.env.other.pendingCount == 1 })
         r.env.other.tick()
         #expect(await waiting.value == false)
     }

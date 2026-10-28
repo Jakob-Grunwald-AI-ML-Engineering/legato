@@ -110,6 +110,7 @@ private final class Tally<T: Sendable>: Sendable {
         task.withLock { $0 = t }
     }
     var values: [T] { list.withLock { $0 } }
+    func settled() async { await task.withLock { $0 }?.value }
     deinit { task.withLock { $0 }?.cancel() }
 }
 
@@ -353,9 +354,9 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
         await source.follow(device: builtIn)
         #expect(factory.mics.count == 3)
         #expect(await eventually { notices.values.count >= 1 })
-        try await Task.sleep(for: .milliseconds(50))
+        await source.stop() // closes notices after the source's work has joined
+        await notices.settled()
         #expect(notices.values.count == 1, "one notice, not one per poll")
-        await source.stop()
     }
 
     @Test func anUnexpectedEndRecoversTheSameExplicitInputWithoutVoiceProcessing() async throws {
@@ -489,11 +490,11 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
         let source = VoiceProcessingFallbackMic(
             voiceProcessing: false, device: airPods, clock: { 0 }, makeMic: { factory.make($0, $1) })
         _ = try await source.start(format: format)
-        await source.follow(device: builtIn)
-        try await Task.sleep(for: .milliseconds(50))
+        await source.follow(device: builtIn) // joins the old microphone's pump before replacing it
+        #expect(factory.mics[0].stopCount == 1 && factory.mics[1].hasStarted)
         #expect(factory.mics.map(\.device) == [airPods, builtIn])
-        await source.stop()
-        try await Task.sleep(for: .milliseconds(50))
+        await source.stop() // joins the replacement pump as well
+        #expect(factory.mics[1].stopCount == 1)
         #expect(factory.mics.count == 2)
     }
 

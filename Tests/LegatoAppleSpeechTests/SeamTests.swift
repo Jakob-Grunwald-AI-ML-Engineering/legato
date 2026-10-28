@@ -226,7 +226,6 @@ struct AssetInstallProgressTests {
     @Test func successfulInstallEndsAtOne() async {
         let values = await collect(AssetInstallProgress.stream(pollInterval: .milliseconds(5)) {
             self.install(completed: 3) { p in
-                try await Task.sleep(for: .milliseconds(20))
                 p.completedUnitCount = 10
             }
         })

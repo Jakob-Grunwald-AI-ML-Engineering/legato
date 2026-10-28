@@ -11,12 +11,14 @@ import Testing
 /// Installs at once and is installed ever after.
 private final class InstantInstaller: ModelInstaller {
     let folderName: String
+    let requests = Mutex(0)
     init(folderName: String) { self.folderName = folderName }
     func installFolder(root: URL) -> URL { root.appending(path: folderName, directoryHint: .isDirectory) }
     func isInstalled(root: URL) async -> Bool {
         FileManager.default.fileExists(atPath: installFolder(root: root).appending(path: "complete").path)
     }
     func install(root: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        requests.withLock { $0 += 1 }
         let folder = installFolder(root: root)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try Data("x".utf8).write(to: folder.appending(path: "complete"))
@@ -64,6 +66,7 @@ private final class SamplerBox: Sendable {
 private struct Rig {
     let root = FileManager.default.temporaryDirectory.appending(path: "legato-meeting-services-\(UUID().uuidString)")
     let models: ModelServices
+    let installers: [String: InstantInstaller]
     let modelDefaults: UserDefaults
     let store: MeetingStore
     let settings: MeetingSettings
@@ -75,6 +78,7 @@ private struct Rig {
         let suite = "legato.meeting-services.\(UUID().uuidString)"
         let catalog = ModelServices(root: root, defaults: UserDefaults(suiteName: suite + ".a")!, platform: .macOS).catalog
         let installers = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, InstantInstaller(folderName: $0.id)) })
+        self.installers = installers
         modelDefaults = UserDefaults(suiteName: suite + ".b")!
         models = ModelServices(root: root, defaults: modelDefaults, platform: .macOS, installers: installers)
         store = MeetingStore(root: root.appending(path: "Meetings"))
@@ -223,7 +227,11 @@ private struct Rig {
 
     @Test func aMeetingWithLiveSpeakersOnStartsDownloadingTheMissingModelAndGoesOnWithout() async throws {
         let rig = Rig()
-        let engines = await rig.services().engines(for: .macOS)
+        let services = rig.services()
+        var requests: [ModelRole] = []
+        services.onBackgroundDownloadRequested = { requests.append($0) }
+        let engines = await services.engines(for: .macOS)
+        #expect(requests.contains(.liveSpeakers))
         #expect(engines.diarizer == nil, "this meeting runs without live speakers")
         #expect(engines.speakersNote?.localizedCaseInsensitiveContains("speaker") == true)
         #expect(await eventually(timeout: .seconds(30)) { await installed(rig, FluidAudioModels.sortformerID) }, "downloaded in the background")
@@ -233,7 +241,11 @@ private struct Rig {
 
     @Test func aMissingLocalVqeIsDownloadedWhenAMeetingStarts() async throws {
         let rig = Rig()
-        _ = await rig.services().engines(for: .macOS)
+        let services = rig.services()
+        var requests: [ModelRole] = []
+        services.onBackgroundDownloadRequested = { requests.append($0) }
+        _ = await services.engines(for: .macOS)
+        #expect(requests.contains(.echoNoiseCancellation))
         #expect(await eventually(timeout: .seconds(30)) { await installed(rig, FluidAudioModels.localVqeID) })
         #expect(await rig.services().engines(for: .macOS).enhancer != nil)
     }
@@ -242,9 +254,15 @@ private struct Rig {
         let rig = Rig()
         rig.settings.liveDiarization = false
         rig.settings.echoNoise = .appleVoiceProcessing
-        let engines = await rig.services().engines(for: .macOS)
+        let services = rig.services()
+        var requests: [ModelRole] = []
+        services.onBackgroundDownloadRequested = { requests.append($0) }
+        let engines = await services.engines(for: .macOS)
         #expect(engines.speakersNote == nil)
-        try await Task.sleep(for: .milliseconds(150))
+        #expect(requests.isEmpty)
+        // engines(for:) has completed both enabled-model decisions.
+        #expect(rig.installers[FluidAudioModels.sortformerID]!.requests.withLock { $0 } == 0)
+        #expect(rig.installers[FluidAudioModels.localVqeID]!.requests.withLock { $0 } == 0)
         #expect(await !installed(rig, FluidAudioModels.sortformerID))
         #expect(await !installed(rig, FluidAudioModels.localVqeID))
     }
@@ -416,7 +434,7 @@ private final class MeteredTranscriber: BatchTranscriber {
         meter.enter()
         defer { meter.leave() }
         let first = calls.withLock { $0 += 1; return $0 == 1 }
-        try await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         while first, held.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(5)) }
         if fails { throw LLMError.failed("boom") }
         return [TranscriptEvent(stream: stream, text: "accurate", isFinal: true, range: 0..<2)]
@@ -433,7 +451,7 @@ private final class MeteredLLM: LLMBackend {
     func respond(instructions: String, prompt: String) async throws -> String {
         meter.enter()
         defer { meter.leave() }
-        try await Task.sleep(for: .milliseconds(20))
+        await Task.yield()
         return "## Summary\nmetered"
     }
 }
@@ -549,8 +567,8 @@ private final class TrackSink: MeetingAudioSink {
         now.withLock { $0 = 1 }
         if withSystem {
             system.push([Float](repeating: 0.2, count: 16_000))
-            _ = await eventually { (sink.samples(.system)?.count ?? 0) >= 16_000 }
-            try await Task.sleep(for: .milliseconds(50))  // the copy for the enhancer is on its way
+            #expect(await eventually { (sink.samples(.system)?.count ?? 0) >= 16_000 })
+            // ReferenceTap enqueues the enhancer copy before forwarding this chunk to the sink.
         }
         mic.push([Float](repeating: 0.4, count: 8_000))
         let wrote = await eventually { (sink.samples(.mic)?.count ?? 0) >= 16_000 && (!withSystem || (sink.samples(.system)?.count ?? 0) >= 16_000) }
@@ -608,7 +626,9 @@ private final class TrackSink: MeetingAudioSink {
 
 // MARK: - When the heavy steps run
 
-@MainActor @Suite struct MeetingServicesSchedulingTests {
+// These file-backed scenarios each launch background work. Running them together can saturate
+// background I/O on a busy Mac; each scenario still drives its own explicit concurrency.
+@MainActor @Suite(.serialized, .timeLimit(.minutes(1))) struct MeetingServicesSchedulingTests {
     private func seed(_ rig: Rig) async throws -> UUID {
         let id = UUID()
         try await rig.store.create(Meeting(id: id, title: "Sync", date: Date(), duration: 10, engineID: "live", state: .processing))
@@ -851,7 +871,7 @@ private final class TrackSink: MeetingAudioSink {
         #expect(await eventually(timeout: .seconds(30)) { transcriber.calls.withLock { $0 } == 1 }, "the deferred post-pass runs")
 
         let improve = Task { try await services.improveTranscript(meetingID: id) }
-        try await Task.sleep(for: .milliseconds(300))
+        #expect(await eventually(timeout: .seconds(30)) { await services.scheduler.waitingManualCount == 1 })
         transcriber.release()
         await deferred.value
         _ = try await improve.value

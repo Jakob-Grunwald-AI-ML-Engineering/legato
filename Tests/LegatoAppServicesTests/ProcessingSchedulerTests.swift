@@ -20,12 +20,14 @@ private struct Rig {
     let maxRunning = Box(0)
     let priorities = Box<[TaskPriority]>([])
     let result = Box(true)
+    let sampleCount = Box(0)
 
     func scheduler(immediate: Bool = false, pollInterval: Duration? = nil) -> ProcessingScheduler {
+        let sampleCount = self.sampleCount
         let now = self.now, sample = self.sample, recording = self.recording, ran = self.ran
         let running = self.running, maxRunning = self.maxRunning, priorities = self.priorities, result = self.result
         return ProcessingScheduler(
-            clock: { now.current }, sample: { sample.current }, isRecording: { recording.current }, immediate: immediate,
+            clock: { now.current }, sample: { sampleCount.update { $0 += 1 }; return sample.current }, isRecording: { recording.current }, immediate: immediate,
             pollInterval: pollInterval,
             work: { id in
                 running.update { $0 += 1 }
@@ -214,7 +216,10 @@ private func idle(_ p: inout IdlePredicate, _ sample: IdleSample, isRecording: B
         let scheduler = rig.scheduler(pollInterval: .seconds(3600))
         let id = UUID()
         await scheduler.enqueue(id)  // starts the poller; the machine is busy, so nothing runs
-        try await Task.sleep(for: .milliseconds(50))
+        let sampled = ContinuousClock.now + .seconds(30)
+        while rig.sampleCount.current == 0, ContinuousClock.now < sampled { await Task.yield() }
+        #expect(rig.sampleCount.current > 0)
+        _ = await scheduler.queued // the poller's first look returned and entered its sleep
         #expect(rig.ran.current.isEmpty)
 
         await scheduler.processNow(id)

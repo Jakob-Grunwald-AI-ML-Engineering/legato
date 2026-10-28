@@ -45,7 +45,7 @@ import Testing
         try await r.session.armLease()
         #expect(await eventually { clock.requested == [.seconds(60)] })
         clock.advance(by: .seconds(59))
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.session.leaseState == .armed)
         clock.advance(by: .seconds(1))
         #expect(await eventually { r.session.leaseState == .idle })
@@ -94,8 +94,11 @@ import Testing
         #expect(await eventually { clock.requested.count == 2 })
         #expect(r.log.count("activate") == 1)
         clock.advance(by: .seconds(59)) // 99 s in, 59 s after the second arm
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.session.leaseState == .armed)
+        clock.advance(by: .seconds(1))
+        #expect(await eventually { r.session.leaseState == .idle })
+        #expect(r.log.count("deactivate") == 1)
     }
 
     // MARK: adopting the linger of the run that reuses the lease

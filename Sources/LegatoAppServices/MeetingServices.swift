@@ -86,6 +86,8 @@ public final class MeetingServices {
 
     /// Called when what the heavy steps of a meeting are doing changed; nil stage: they are not running or waiting.
     public var onProgress: (@MainActor (UUID, ProcessingStage?) -> Void)?
+    /// Observes the request before its install task is detached, for package synchronization.
+    var onBackgroundDownloadRequested: (@MainActor (ModelRole) -> Void)?
     private var stages: [UUID: ProcessingStage] = [:]
 
     private let registry: EngineRegistry
@@ -176,6 +178,7 @@ public final class MeetingServices {
     private func download(_ role: ModelRole, fallback: String) async {
         let id = await registry.meetingModelID(role: role, fallback: fallback)
         let manager = registry.models
+        onBackgroundDownloadRequested?(role)
         Task.detached(priority: .utility) {
             for await _ in await manager.install(id) {}
         }

@@ -403,8 +403,9 @@ import Testing
         try await runOnce(r, options)
         #expect(r.built.lingers == [.indefinite])
         #expect(leaseDates(r) == [.distantFuture]) // a lease that never ends
+        #expect(r.lingerClock.registeredCount == 0)
         r.lingerClock.tick() // no timer exists; nothing can expire it
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.coordinator.holdsLease)
         #expect(r.log.count("deactivate") == 0)
         try await runOnce(r, options)
@@ -442,10 +443,13 @@ import Testing
         let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
         r.attachSink()
         try await runOnce(r, Self.keepAlive)
+        #expect(await eventually { r.lingerClock.pendingCount == 1 })
         await r.coordinator.updateKeepAlive(.indefinite)
+        #expect(await eventually { r.lingerClock.cancelledCount == 1 })
         #expect(leaseDates(r).last == .some(.distantFuture))
+        #expect(r.lingerClock.pendingCount == 0)
         r.lingerClock.tick()
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.coordinator.holdsLease && r.log.count("deactivate") == 0)
     }
 

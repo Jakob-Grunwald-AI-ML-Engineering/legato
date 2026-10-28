@@ -70,6 +70,7 @@ final class VirtualClock: Sendable {
 
     /// The durations every sleep asked for, in order.
     var requested: [Duration] { state.withLock { $0.requested } }
+    var pendingCount: Int { state.withLock { $0.waiters.count } }
     var now: Duration { state.withLock { $0.now } }
 
     func advance(by d: Duration) {
@@ -85,7 +86,6 @@ final class VirtualClock: Sendable {
         { [self] d in
             let id = state.withLock { s -> Int in
                 s.nextID += 1
-                s.requested.append(d)
                 return s.nextID
             }
             try await withTaskCancellationHandler {
@@ -93,6 +93,7 @@ final class VirtualClock: Sendable {
                     let cancelled = state.withLock { s -> Bool in
                         if Task.isCancelled { return true }
                         s.waiters[id] = (s.now + d, c)
+                        s.requested.append(d)
                         return false
                     }
                     if cancelled { c.resume(throwing: CancellationError()) }
