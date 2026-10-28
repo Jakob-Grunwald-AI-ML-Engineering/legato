@@ -128,10 +128,9 @@ public struct NemotronInstaller: ModelInstaller {
             progressHandler: progressHandler(progress))
     }
 
-    /// Loads the tier once so CoreML compiles it for the Neural Engine; the compiled result is cached by the OS.
+    /// Loads through the same cache the live engine uses, so install-time preparation is retained.
     public func warm(root: URL) async throws {
-        _ = try await StreamingNemotronMultilingualAsrManager.preloadShared(
-            from: installFolder(root: root), configuration: FluidAudioCompute.configuration())
+        _ = try await NemotronModelCache.shared.models(at: installFolder(root: root))
     }
 }
 
@@ -163,9 +162,7 @@ public struct ParakeetEouInstaller: ModelInstaller {
     }
 
     public func warm(root: URL) async throws {
-        let manager = StreamingEouAsrManager(configuration: FluidAudioCompute.configuration(), chunkSize: chunk.chunkSize)
-        try await manager.loadModels(from: installFolder(root: root))
-        await manager.cleanup()
+        _ = try await EouModelCache.shared.manager(at: installFolder(root: root), chunk: chunk)
     }
 }
 

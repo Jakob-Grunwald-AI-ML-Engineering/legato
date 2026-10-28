@@ -1,0 +1,77 @@
+--- a/anemll-swift-cli/Sources/AnemllCore/InferenceManager.swift
++++ b/anemll-swift-cli/Sources/AnemllCore/InferenceManager.swift
+@@ -262,6 +262,10 @@
+         return resolved
+     }
+     
++    /// Spike cancellation boundary: configured before the worker starts; never mutated while running.
++    /// The closure synchronizes its own flag, including inside predictionQueue.
++    public var cancellationCheck: (@Sendable () throws -> Void)?
++
+     public func AbortGeneration( Code : Int)
+     {
+         abort_generation = Code
+@@ -342,6 +346,7 @@
+         var predictionError: Error?
+         predictionQueue.sync { [self] in
+             do {
++                try cancellationCheck?()
+                 _ = try model.prediction(from: input, using: state, options: options)
+             } catch {
+                 predictionError = error
+@@ -1684,6 +1689,7 @@
+             if debugLevel >= 1 {
+                 print("About to run embedding model prediction...")
+             }
++            try cancellationCheck?()
+             let _ = try await embedModel.prediction(from: embedInput, options: embedOptions)
+             await maybeDelayBeforeReadingPredictionOutputs()
+             if debugLevel >= 1 {
+@@ -1973,6 +1979,7 @@
+             var predictionError: Error?
+             predictionQueue.sync { [self] in
+                 do {
++                    try cancellationCheck?()
+                     _ = try prefillModel.prediction(
+                         from: prefillInput,
+                         using: state,
+@@ -2039,6 +2046,7 @@
+             var predictionError: Error?
+             predictionQueue.sync { [self] in
+                 do {
++                    try cancellationCheck?()
+                     _ = try inferModel.prediction(
+                         from: inferInput,
+                         using: state,
+@@ -2273,6 +2281,7 @@
+         if let backings = hiddenStatesBackings_emb {
+             embedOptions.outputBackings = backings
+         }
++        try cancellationCheck?()
+         let _ = try await embedModel.prediction(from: embedInput, options: embedOptions)
+         await maybeDelayBeforeReadingPredictionOutputs()
+ 
+@@ -2363,6 +2372,7 @@
+         }
+ 
+         let lmInput = try MLDictionaryFeatureProvider(dictionary: ["hidden_states": currentHiddenStates])
++        try cancellationCheck?()
+         let _ = try await lmheadModel.prediction(from: lmInput, options: lmOptions)
+         await maybeDelayBeforeReadingPredictionOutputs()
+         
+@@ -2753,6 +2763,7 @@
+             var predictionError: Error?
+             predictionQueue.sync { [self] in
+                 do {
++                    try cancellationCheck?()
+                     _ = try monolithicModel.prediction(from: inferInput, using: state, options: inferOptions)
+                 } catch {
+                     predictionError = error
+@@ -2858,6 +2869,7 @@
+         var predictionError: Error?
+         predictionQueue.sync { [self] in
+             do {
++                try cancellationCheck?()
+                 _ = try monolithicModel.prediction(from: inferInput, using: state, options: inferOptions)
+             } catch {
+                 predictionError = error

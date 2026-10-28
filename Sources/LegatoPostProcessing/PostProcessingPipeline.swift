@@ -42,6 +42,8 @@ public struct PostProcessingPipeline: Sendable {
         public var timedOut: Bool
         /// A language model's reply was rejected by the cleanup guard (its input was kept, all or in part).
         public var guardRejected: Bool
+        /// A stage failed or was canceled and its input was kept.
+        public var failed: Bool = false
     }
 
     /// ``process(_:locale:)`` with what happened on the way.
@@ -56,7 +58,7 @@ public struct PostProcessingPipeline: Sendable {
             case .timedOut:
                 report.timedOut = true
             case .failed:
-                break
+                report.failed = true
             }
         }
         return report

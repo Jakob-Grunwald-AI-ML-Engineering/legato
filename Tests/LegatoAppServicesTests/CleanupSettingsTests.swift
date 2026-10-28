@@ -68,6 +68,64 @@ private final class Recorder: Sendable {
         #expect(store.timeoutSeconds == 1)
     }
 
+    @Test func coreMLUsesEightSecondsWhenNoTimeLimitWasChosen() {
+        let defaults = freshDefaults()
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.backend = .coreML
+        #expect(store.timeoutSeconds == 8)
+        #expect(store.options.timeoutSeconds == 8)
+        #expect(CleanupSettingsStore(defaults: defaults).timeoutSeconds == 8)
+        #expect(defaults.object(forKey: "cleanup.timeoutSeconds") == nil)
+    }
+
+    @Test(arguments: [CleanupBackendChoice.auto, .foundationModels, .mlx])
+    func otherBackendsKeepFourSecondsWhenNoTimeLimitWasChosen(backend: CleanupBackendChoice) {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.backend = .coreML
+        store.backend = backend
+        #expect(store.timeoutSeconds == 4)
+    }
+
+    @Test(arguments: [CleanupBackendChoice.auto, .mlx])
+    func aSelectedCoreMLModelGetsEightSecondsThroughAutomaticResolution(backend: CleanupBackendChoice) {
+        let defaults = freshDefaults()
+        SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.backend = backend
+        #expect(store.timeoutSeconds == 8)
+        #expect(store.options.timeoutSeconds == 8)
+        #expect(defaults.object(forKey: "cleanup.timeoutSeconds") == nil)
+    }
+
+    @Test func automaticCoreMLPreservesAnExplicitFourSecondLimit() {
+        let defaults = freshDefaults()
+        SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.timeoutSeconds = 4
+        store.backend = .auto
+        #expect(store.timeoutSeconds == 4)
+    }
+
+    @Test func explicitFoundationModelsIgnoresTheSelectedCoreMLDefault() {
+        let defaults = freshDefaults()
+        SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.backend = .foundationModels
+        #expect(store.timeoutSeconds == 4)
+    }
+
+    @Test(arguments: [4, 7])
+    func anExplicitTimeLimitSurvivesEveryBackendSelection(seconds: Int) {
+        let defaults = freshDefaults()
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.timeoutSeconds = seconds
+        for backend in CleanupBackendChoice.allCases {
+            store.backend = backend
+            #expect(store.timeoutSeconds == seconds)
+            #expect(CleanupSettingsStore(defaults: defaults).timeoutSeconds == seconds)
+        }
+    }
+
     @Test func onlyFoundationModelsPrefersFoundationModels() {
         #expect(CleanupBackendChoice.foundationModels.preference == .foundationModels)
         #expect(CleanupBackendChoice.auto.preference == .auto)
@@ -354,4 +412,36 @@ private struct AnsweringFoundationModels: LLMBackend {
     let maxPromptCharacters: Int? = nil
     var availability: LLMAvailability { get async { .available } }
     func respond(instructions: String, prompt: String) async throws -> String { "<text>\(reply)</text>" }
+}
+
+
+@Suite struct CleanupOutcomeReportTests {
+    private struct Backend: LLMBackend {
+        let id = "test"
+        let maxPromptCharacters: Int? = nil
+        let fails: Bool
+        var availability: LLMAvailability { .available }
+        func respond(instructions: String, prompt: String) async throws -> String {
+            if fails { throw LLMError.failed("No result") }
+            return "hello world"
+        }
+    }
+    @Test func backendFailureIsNotReportedAsCompleted() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        let recorder = Recorder()
+        let processor = CleanupProcessor(registry: CleanupRegistry(models: emptyManager(), foundationModels: Backend(fails: true)), settings: store, report: { recorder.record($0) })
+        let result = try await processor.process("hello world", locale: Locale(identifier: "en"))
+        #expect(result == "hello world")
+        #expect(recorder.reports.last?.outcome == "rawOrUnavailable")
+    }
+    @Test func unchangedSuccessfulOutputIsCompleted() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        let recorder = Recorder()
+        let processor = CleanupProcessor(registry: CleanupRegistry(models: emptyManager(), foundationModels: Backend(fails: false)), settings: store, report: { recorder.record($0) })
+        let result = try await processor.process("hello world", locale: Locale(identifier: "en"))
+        #expect(result == "hello world")
+        #expect(recorder.reports.last?.outcome == "completed")
+    }
 }

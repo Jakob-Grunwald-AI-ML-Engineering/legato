@@ -257,7 +257,10 @@ private struct Rig {
         for choice in CleanupBackendChoice.allCases {
             rig.settings.backend = choice
             let backend = await rig.services(claudeBackend: rig.claude).summaryBackend()
-            #expect(backend?.id == "fake-fm", "\(choice)")
+            // An explicit Core ML choice requires a selected prepared Core ML model; it never
+            // silently substitutes Foundation Models. The existing choices keep their resolution.
+            let expected: String? = choice == .coreML ? nil : "fake-fm"
+            #expect(backend?.id == expected, "\(choice)")
         }
     }
 

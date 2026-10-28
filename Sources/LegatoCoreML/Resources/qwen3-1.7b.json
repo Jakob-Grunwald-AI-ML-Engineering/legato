@@ -1,0 +1,131 @@
+{
+  "repository": "anemll/anemll-Qwen-Qwen3-1.7B-ctx2048_0.3.5",
+  "revision": "0977a61d00e39118aab5ed1e510f1d228df5eefd",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 4324,
+      "sha256": "16cc899592e9d604c89536b7ad47176c8ea9d57cf2c70f80f3f497c9d504aa4b"
+    },
+    {
+      "path": "config.json",
+      "bytes": 66,
+      "sha256": "fe1a6983f7eaca1e87c0df840fea81b63e1c82331f0c34d08b01d0959bb78e2f"
+    },
+    {
+      "path": "meta.yaml",
+      "bytes": 1554,
+      "sha256": "42aafed122b95fef156fea692afa52c3c7b097a5b8e73be0180ec13d48e19b62"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "sha256": "62962552d3504795ae49877d64cb2becd53b3f4bea5fcc06ee7a3d5fb441f908"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/coremldata.bin",
+      "bytes": 981,
+      "sha256": "3c9c963defecffbc19f052c1dbded9b4c8cbfb893b340a12c0721470e85f3be7"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/metadata.json",
+      "bytes": 10194,
+      "sha256": "78e6c1f1a5bdaa5695e34756b6b3162119c4011d7d0112cee8ac02331827a6bb"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/model.mil",
+      "bytes": 1090707,
+      "sha256": "cfee60d7e864a9d0902688ef1c653889e0dca92b8041c54ea5a7f577e030710f"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/weights/weight.bin",
+      "bytes": 539892672,
+      "sha256": "748e49e0e7c213647880c6aa68a14e086f9181c12f03ad731b8e8129dcd22e82"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "sha256": "3907a4ea0e95a988c85a6ff012d1b4ee07f90a4eed373fe270c2128f85dc3bfc"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/coremldata.bin",
+      "bytes": 981,
+      "sha256": "fc4805bba9e1e75b6e6370fab189ddf3e22a9c790bef9005a8f262bb12f95a5a"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/metadata.json",
+      "bytes": 10192,
+      "sha256": "4bbefe63d92d17a6a536b64a9a5f241076052351e7b753f24b6d18be1155f410"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/model.mil",
+      "bytes": 1093914,
+      "sha256": "96db06dacd7b3c704742c56328af0b5a9c4f1fe11a11dca99387264cf4c71e5c"
+    },
+    {
+      "path": "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/weights/weight.bin",
+      "bytes": 539896832,
+      "sha256": "579bcd695adec21d98a8c74f6bf5a1e1484884771be69b64691164fcabd4cb4e"
+    },
+    {
+      "path": "qwen_embeddings.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "sha256": "2d9497e6cc728c81fc2c94ecd9b91224340d2a5676cb6451256cc4cb960dfdbb"
+    },
+    {
+      "path": "qwen_embeddings.mlmodelc/coremldata.bin",
+      "bytes": 560,
+      "sha256": "bbfa04acca7ab182c784460426c7f03eaea7c393d30635ff4e17369c992941d7"
+    },
+    {
+      "path": "qwen_embeddings.mlmodelc/metadata.json",
+      "bytes": 1989,
+      "sha256": "dd73b548992ff4db7919fd38c8e6637dda43732137ed85ca9d42cc801a4b9eb2"
+    },
+    {
+      "path": "qwen_embeddings.mlmodelc/model.mil",
+      "bytes": 2118,
+      "sha256": "565e9f6d87c203266543bb0a6a9c3ebec23ac2b753770e43c6c8e1c4ca0dd83b"
+    },
+    {
+      "path": "qwen_embeddings.mlmodelc/weights/weight.bin",
+      "bytes": 622329984,
+      "sha256": "80d4a53fa6ef9baa7f3411fbab47dfcc6434c4045af34d06fba90fbff676d8c8"
+    },
+    {
+      "path": "qwen_lm_head_lut6.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "sha256": "eef9d9f082e484b3e2a8f9b182cba9be44907d48c269feb7765c8b4ea78a3fa8"
+    },
+    {
+      "path": "qwen_lm_head_lut6.mlmodelc/coremldata.bin",
+      "bytes": 957,
+      "sha256": "6a1ad7b1d258f78ae38a5bc656708e77e7bd904985a69f7c650b595db5db45f6"
+    },
+    {
+      "path": "qwen_lm_head_lut6.mlmodelc/metadata.json",
+      "bytes": 6621,
+      "sha256": "9770a666d7534b63442e3739aa72687b7ddf6ec7efff81860656f8111657954b"
+    },
+    {
+      "path": "qwen_lm_head_lut6.mlmodelc/model.mil",
+      "bytes": 30457,
+      "sha256": "4de9d3f7408a7a8ecb9ece602183fc4bd74b6e303cb1e5ee613b203e68e8fcef"
+    },
+    {
+      "path": "qwen_lm_head_lut6.mlmodelc/weights/weight.bin",
+      "bytes": 238237760,
+      "sha256": "fd461430cdafa077d5e64249f056f7fcaa962f7531378f065b572bd24debc42f"
+    },
+    {
+      "path": "tokenizer.json",
+      "bytes": 11422654,
+      "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "bytes": 9732,
+      "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+    }
+  ]
+}

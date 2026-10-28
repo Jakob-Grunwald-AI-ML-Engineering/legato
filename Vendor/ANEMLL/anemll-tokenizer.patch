@@ -1,0 +1,18 @@
+--- a/anemll-swift-cli/Sources/AnemllCore/Tokenizer.swift
++++ b/anemll-swift-cli/Sources/AnemllCore/Tokenizer.swift
+@@ -329,6 +329,15 @@
+     /// - Parameter text: The input text to tokenize
+     /// - Returns: Array of token IDs
+     /// - Throws: TokenizerError if tokenization fails
++    /// Spike API: canonical template rendering must be checked against raw rendering with no extra BOS.
++    public func rawTokens(_ text: String) -> [Int] {
++        tokenizer.encode(text: text, addSpecialTokens: false)
++    }
++
++    public func canonicalChatTokens(messages: [[String: any Sendable]], thinking: Bool) throws -> [Int] {
++        try tokenizer.applyChatTemplate(messages: messages, tools: nil, additionalContext: ["enable_thinking": thinking])
++    }
++
+     public func tokenize(_ text: String) -> [Int] {
+         return tokenizer.encode(text: text)
+     }

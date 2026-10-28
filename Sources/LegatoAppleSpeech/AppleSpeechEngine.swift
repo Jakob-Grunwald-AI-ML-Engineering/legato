@@ -7,7 +7,7 @@ import Synchronization
 
 /// On-device transcription with `SpeechAnalyzer` / `SpeechTranscriber` (iOS 26 / macOS 26).
 /// Lifted from the keyboard spike. One locale per session; `nil` means the device locale.
-public final class AppleSpeechEngine: DictationEngine {
+public final class AppleSpeechEngine: DictationEngine, ModelResourceLifecycle {
     public let id = "apple-speech"
 
     private struct Run {
@@ -20,6 +20,32 @@ public final class AppleSpeechEngine: DictationEngine {
     }
 
     private let run = Mutex<Run?>(nil)
+    private let warmResources = WarmResources()
+
+    /// A separate analyzer requests system-owned resource residency. It never receives audio and is
+    /// never installed as the active Run, whose result stream and callbacks belong to one dictation.
+    private actor WarmResources {
+        private var prepared: (locale: String, analyzer: SpeechAnalyzer)?
+        func prepare(locale: Locale?) async throws {
+            let resolved = try await AppleSpeechEngine.resolve(locale)
+            if prepared?.locale == resolved.identifier { return }
+            try Task.checkCancellation()
+            try await AppleSpeechEngine.reserve(resolved)
+            let transcriber = AppleSpeechEngine.makeTranscriber(resolved)
+            guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
+                throw DictationError.assetsNotInstalled
+            }
+            let analyzer = SpeechAnalyzer(
+                modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .processLifetime))
+            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                throw AppleSpeechError.noAnalyzerFormat
+            }
+            try await analyzer.prepareToAnalyze(in: format)
+            try Task.checkCancellation()
+            prepared = (resolved.identifier, analyzer)
+        }
+        func release() { prepared = nil }
+    }
 
     private let vocabulary: (any VocabularyHintProvider)?
 
@@ -33,6 +59,14 @@ public final class AppleSpeechEngine: DictationEngine {
 
     /// The hint provider this engine was built with.
     public var vocabularyProvider: (any VocabularyHintProvider)? { vocabulary }
+
+    public func prewarmResources() async throws { try await prewarmResources(locale: nil) }
+
+    /// Prepares installed speech resources without opening the microphone or changing an active Run.
+    public func prewarmResources(locale: Locale?) async throws { try await warmResources.prepare(locale: locale) }
+
+    /// Relinquishes our preparation object; Speech owns process-lifetime model residency.
+    public func releaseWarmResources() async { await warmResources.release() }
 
     // MARK: Assets
 
@@ -56,7 +90,7 @@ public final class AppleSpeechEngine: DictationEngine {
             throw DictationError.assetsNotInstalled
         }
         // Explicit priority: the default can inherit a low priority from an intent/background task.
-        let analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .lingering))
+        let analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .processLifetime))
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw AppleSpeechError.noAnalyzerFormat
         }

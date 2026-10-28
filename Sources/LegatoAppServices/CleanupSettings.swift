@@ -1,18 +1,28 @@
 import Foundation
 import LegatoCore
+import LegatoCoreML
 import LegatoMLX
+import LegatoModels
 import LegatoPostProcessing
 
 /// Which backend cleanup uses. Stored as its raw value.
 public enum CleanupBackendChoice: String, CaseIterable, Sendable {
-    /// The picked MLX model (on the CPU in the phone's background, as the background setting says), else Apple Foundation Models.
+    /// The selected Core ML or MLX model; Foundation Models when no local model is selected.
     case auto
     /// Apple Foundation Models only.
     case foundationModels
     /// The picked MLX model (in the phone's background as the background setting says: on the CPU by default).
     case mlx
+    /// The selected Core ML model; prewarmed CPU/Neural Engine resources work in the background.
+    case coreML
 
-    public var preference: CleanupRegistry.BackendPreference { self == .foundationModels ? .foundationModels : .auto }
+    public var preference: CleanupRegistry.BackendPreference {
+        switch self {
+        case .foundationModels: .foundationModels
+        case .coreML: .coreML
+        case .auto, .mlx: .auto
+        }
+    }
 }
 
 /// The cleanup settings at one moment.
@@ -44,7 +54,7 @@ public struct CleanupOptions: Sendable, Equatable {
 
 /// The cleanup settings in an injected `UserDefaults` (the App Group's on the phone, the app's on the Mac).
 /// Off by default; delivery Replace, style Verbatim, backend Auto, ITN off (#22), 4 s per stage, background
-/// cleanup on the CPU.
+/// cleanup on the CPU. Core ML defaults to 8 seconds unless the user has chosen a time limit.
 public struct CleanupSettingsStore: Sendable {
     // UserDefaults is documented thread-safe but not annotated Sendable.
     nonisolated(unsafe) private let defaults: UserDefaults
@@ -93,7 +103,16 @@ public struct CleanupSettingsStore: Sendable {
     public var timeoutSeconds: Int {
         get {
             let stored = defaults.integer(forKey: Key.timeoutSeconds)
-            return stored == 0 ? 4 : min(max(stored, 1), 10)
+            if stored == 0 {
+                switch backend {
+                case .coreML: return 8
+                case .foundationModels: return 4
+                case .auto, .mlx:
+                    let selected = SelectionStore(defaults: defaults).selected(for: .cleanup)
+                    return selected.flatMap { CoreMLModels.spec(id: $0) } == nil ? 4 : 8
+                }
+            }
+            return min(max(stored, 1), 10)
         }
         nonmutating set { defaults.set(min(max(newValue, 1), 10), forKey: Key.timeoutSeconds) }
     }

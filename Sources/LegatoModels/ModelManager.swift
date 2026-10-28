@@ -14,11 +14,14 @@ public actor ModelManager {
     private let descriptors: [String: ModelDescriptor]
     private let installers: [String: any ModelInstaller]
     private let selection: SelectionStore
+    private let onWillDelete: (@Sendable (_ id: String, _ folder: URL) async -> Void)?
     private let onDelete: (@Sendable (_ id: String, _ folder: URL) async -> Void)?
 
     /// In-flight (downloading, warming) and failed states. Installed and not installed are read from disk.
     private var transient: [String: ModelState] = [:]
     private var running: [String: Task<Void, Never>] = [:]
+    /// Reserved before resource-release hooks suspend. Installs join the deletion before touching disk.
+    private var deletions: [String: Task<Void, Never>] = [:]
     private var subscribers: [String: [UUID: Subscriber]] = [:]
     /// The model each role is currently being switched to, so a later pick supersedes an earlier one.
     private var pending: [ModelRole: String] = [:]
@@ -43,21 +46,25 @@ public actor ModelManager {
     ///   - installers: one installer per catalog model, keyed by ``ModelDescriptor/id``. A model without
     ///     an installer cannot be installed.
     ///   - selection: where the picked model per role persists.
-    ///   - onDelete: called after ``delete(_:)`` removed a model's folder, with the model id and that
-    ///     folder, so the owner of loaded copies of the model (in-memory caches) can release them. The
-    ///     manager itself keeps no loaded models.
+    ///   - onWillDelete: settles resource users before files are removed by a delete or cancelled
+    ///     install. The model stays reserved until both hooks finish. Hooks may inspect state, but
+    ///     must not wait for an install/delete of the same model from inside its own deletion.
+    ///   - onDelete: called after a delete or cancelled install removed the folder, so in-memory cache
+    ///     owners can relinquish retained copies. The manager itself keeps no loaded models.
     public init(
         root: URL,
         catalog: [ModelDescriptor],
         installers: [String: any ModelInstaller],
         selection: SelectionStore,
-        onDelete: (@Sendable (_ id: String, _ folder: URL) async -> Void)? = nil
+        onDelete: (@Sendable (_ id: String, _ folder: URL) async -> Void)? = nil,
+        onWillDelete: (@Sendable (_ id: String, _ folder: URL) async -> Void)? = nil
     ) {
         self.root = root
         self.catalog = catalog
         self.descriptors = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         self.installers = installers
         self.selection = selection
+        self.onWillDelete = onWillDelete
         self.onDelete = onDelete
     }
 
@@ -65,9 +72,11 @@ public actor ModelManager {
 
     /// The model's state now. Never starts an install.
     public func state(of id: String) async -> ModelState {
+        if deletions[id] != nil { return .notInstalled }
         if let current = transient[id] { return current }
         guard let installer = installers[id] else { return .notInstalled }
         let installed = await isInstalledOnDisk(id, installer)
+        if deletions[id] != nil { return .notInstalled }
         // An install may have started while the disk was being probed.
         if let current = transient[id] { return current }
         return installed ? .installed(bytes: folderSize(installer.installFolder(root: root))) : .notInstalled
@@ -104,11 +113,16 @@ public actor ModelManager {
     }
 
     private func install(_ id: String, owner: Owner) async -> AsyncStream<ModelState> {
+        while let deletion = deletions[id] { await deletion.value }
         guard let installer = installers[id], descriptors[id] != nil else {
             return Self.single(.failed("Unknown model \(id)"))
         }
         if running[id] == nil {
             let installed = await isInstalledOnDisk(id, installer)
+            if let deletion = deletions[id] {
+                await deletion.value
+                return await install(id, owner: owner)
+            }
             // Another caller may have started the install while the disk was being probed.
             if running[id] == nil {
                 if installed {
@@ -138,21 +152,30 @@ public actor ModelManager {
 
     /// Cancels any install, removes the model's folder, resets its state and clears any selection of it.
     ///
-    /// An install that queues up while the cancelled one winds down is cancelled too: the folder is only
-    /// removed once nothing runs, and nothing suspends between that check and the removal.
+    /// Concurrent deletes share one operation. New installs wait until resource settlement, file
+    /// removal and cache release finish, then may install afresh without losing their new files.
     public func delete(_ id: String) async {
+        if let deletion = deletions[id] { await deletion.value; return }
+        let deletion = Task { await self.performDelete(id) }
+        deletions[id] = deletion
+        await deletion.value
+    }
+
+    private func performDelete(_ id: String) async {
+        defer { deletions[id] = nil }
         while let task = running[id] {
             task.cancel()
             await task.value
         }
         let folder = installers[id]?.installFolder(root: root)
+        if let folder { await onWillDelete?(id, folder) }
         if let folder { try? FileManager.default.removeItem(at: folder) }
         transient[id] = nil
         for role in ModelRole.allCases where selection.selected(for: role) == id {
             selection.set(nil, for: role)
         }
         publish(id, .notInstalled)
-        // Last, and after the removal: nothing above may wait, so a racing install is never undone.
+        // Installs remain behind this deletion's reservation until retained copies are released too.
         if let folder { await onDelete?(id, folder) }
     }
 
@@ -245,7 +268,11 @@ public actor ModelManager {
             outcome = .installed(bytes: folderSize(installer.installFolder(root: root)))
         } catch {
             if Task.isCancelled || error is CancellationError {
+                // Warmup has returned (including a late successful native load after cancellation).
+                // Release that candidate too; it never became a selected, installed model.
+                await onWillDelete?(id, folder)
                 try? FileManager.default.removeItem(at: installer.installFolder(root: root))
+                await onDelete?(id, folder)
                 outcome = .notInstalled
             } else {
                 outcome = .failed(Self.message(for: error))

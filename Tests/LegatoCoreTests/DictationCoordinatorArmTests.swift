@@ -2,6 +2,25 @@ import Foundation
 import Testing
 @testable import LegatoCore
 
+/// Models a native resource load that finishes after its Swift caller has been cancelled.
+private actor NonCancellingArmEngine: DictationEngine {
+    nonisolated let id = "native-prepare"
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    private(set) var prepares = 0
+    nonisolated func installAssets(locale: Locale?) -> AsyncStream<Double> { AsyncStream { $0.finish() } }
+    func prepare(locale: Locale?) async throws -> AudioFormatSpec {
+        prepares += 1
+        if !released { await withCheckedContinuation { continuation = $0 } }
+        return testFormat
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
+    nonisolated func transcribe(_ input: AsyncStream<AudioChunk>) -> AsyncThrowingStream<TranscriptEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func finish() async throws {}
+}
+
 /// Arming the microphone without a run: the keyboard's first tap hops to the app, which only readies the
 /// mic lease; the next tap (back in the host app) starts dictation on that lease.
 @MainActor
@@ -174,6 +193,34 @@ import Testing
         r.engine.set(hangInPrepare: false)
         #expect(await arming.value == .armed)
         #expect(r.activity.calls.isEmpty)
+    }
+
+    @Test func cancelledNativePreparationCannotActivateRetryOrPublishAMicrophoneLease() async {
+        let log = EventLog(); let engine = NonCancellingArmEngine(); let source = FakeSource(log: log)
+        let control = FakeSessionControl(log: log); let history = MemoryHistory(); let sink = FakeSink(log: log)
+        let coordinator = DictationCoordinator(
+            activity: FakeActivity(log: log), clipboard: FakeClipboard(log: log), readiness: FakeReadiness(),
+            startEnvironment: FakeStartEnvironment(), history: history,
+            makeSession: { policy, linger in
+                DictationSession(engine: engine, source: source, sessionControl: control, history: history,
+                                 policy: policy, linger: linger)
+            })
+        coordinator.sink = sink
+        let arming = Task { await coordinator.arm(keepAlive: .off) }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            if await engine.prepares == 1 { break }
+            await Task.yield()
+        }
+        #expect(await engine.prepares == 1)
+        arming.cancel()
+        await coordinator.invalidateKeptSession()
+        await engine.release()
+        guard case .failed = await arming.value else { Issue.record("Cancelled arm succeeded"); return }
+        #expect(await engine.prepares == 1)
+        #expect(log.count("activate") == 0)
+        #expect(!coordinator.holdsLease)
+        #expect(sink.leases.isEmpty)
     }
 
     @Test(arguments: [false, true])

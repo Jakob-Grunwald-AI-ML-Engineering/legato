@@ -85,6 +85,46 @@ private func backend(
 
 @Suite("MLXBackend picks the device per call")
 struct MLXBackendDeviceTests {
+    @Test func prewarmingLoadsResourcesWithoutStartingAResponse() async throws {
+        let generator = RecordingGenerator()
+        let mlx = try backend(gpu: { true }, generator: generator)
+        try await mlx.prewarmResources()
+        #expect(generator.loads == [.gpu])
+        #expect(generator.streams == [])
+        #expect(generator.pulled == 0)
+    }
+
+    @Test func cancelledPrewarmingDoesNotBeginLoading() async throws {
+        let generator = RecordingGenerator()
+        let mlx = try backend(gpu: { true }, generator: generator)
+        let prepare = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await mlx.prewarmResources()
+        }
+        await #expect(throws: CancellationError.self) { try await prepare.value }
+        #expect(generator.loads == [])
+        #expect(generator.streams == [])
+    }
+
+    @Test func releasingWarmOwnershipDoesNotAbortAnActiveResponse() async throws {
+        let started = AsyncStream<Void>.makeStream()
+        let resume = AsyncStream<Void>.makeStream()
+        let generator = RecordingGenerator { index in
+            if index == 1 {
+                started.continuation.yield()
+                for await _ in resume.stream { break }
+            }
+        }
+        let mlx = try backend(gpu: { true }, generator: generator)
+        let response = Task { try await mlx.respond(instructions: "i", prompt: "p") }
+        for await _ in started.stream { break }
+        await mlx.releaseWarmResources()
+        #expect(!generator.terminated)
+        resume.continuation.yield()
+        #expect(try await response.value == "Hello world.")
+        #expect(generator.streams == [.gpu])
+    }
+
     @Test func aGpuBackendLoadsAndGeneratesOnTheCpuWhileTheGpuIsNotUsable() async throws {
         let generator = RecordingGenerator()
         let reply = try await backend(gpu: { false }, generator: generator).respond(instructions: "i", prompt: "p")

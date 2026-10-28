@@ -16,6 +16,7 @@ func heavy(_ name: String, _ package: String) -> Target.Dependency {
 
 /// Local stand-ins for the heavy modules (stub mode only). Version 5 mode: they are throwaway shims.
 let stubTargets: [Target] = [
+    .target(name: "LegatoANEMLL", path: "Stubs/LegatoANEMLL"),
     .target(name: "MLX", path: "Stubs/MLX", swiftSettings: [.swiftLanguageMode(.v5)]),
     .target(name: "MLXLMCommon", dependencies: ["MLX"], path: "Stubs/MLXLMCommon", swiftSettings: [.swiftLanguageMode(.v5)]),
     .target(name: "MLXLLM", dependencies: ["MLXLMCommon"], path: "Stubs/MLXLLM", swiftSettings: [.swiftLanguageMode(.v5)]),
@@ -36,6 +37,7 @@ let package = Package(
         .library(name: "LegatoEngines", targets: ["LegatoEngines"]),
         .library(name: "LegatoPostProcessing", targets: ["LegatoPostProcessing"]),
         .library(name: "LegatoMLX", targets: ["LegatoMLX"]),
+        .library(name: "LegatoCoreML", targets: ["LegatoCoreML"]),
         .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
@@ -45,12 +47,15 @@ let package = Package(
     ],
     dependencies: stubDeps ? [] : [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
+        .package(url: "https://github.com/jpsim/Yams.git", exact: "5.4.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", exact: "3.32.3", traits: []),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", exact: "1.0.0"),
         .package(url: "https://github.com/huggingface/swift-transformers.git", exact: "1.3.5"),
     ],
     targets: [
         .target(name: "LegatoCore"),
+        .target(name: "LegatoCoreML", dependencies: ["LegatoCore", "LegatoModels", "LegatoANEMLL"], resources: [.process("Resources")]),
+        .testTarget(name: "LegatoCoreMLTests", dependencies: ["LegatoCoreML", "LegatoCore", "LegatoModels"]),
         .testTarget(name: "LegatoCoreTests", dependencies: ["LegatoCore"]),
         // The keyboard extension links only this (Foundation only; it must not depend on LegatoCore).
         .target(name: "LegatoKeyboardCore"),
@@ -128,7 +133,7 @@ let package = Package(
         .target(
             name: "LegatoAppServices",
             dependencies: [
-                "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoPostProcessing",
+                "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoCoreML", "LegatoPostProcessing",
                 "LegatoAppleSpeech", "LegatoAudio", "LegatoMeetings", "LegatoClaude", "LegatoVocabulary",
             ]
         ),
@@ -151,6 +156,12 @@ let package = Package(
         // The Claude API as an opt-in summary backend, and where its key lives. Core only.
         .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoClaudeTests", dependencies: ["LegatoClaude", "LegatoCore"]),
-    ] + (stubDeps ? stubTargets : []),
+    ] + (stubDeps ? stubTargets : [
+        .target(name: "LegatoANEMLL", dependencies: [
+            .product(name: "Yams", package: "Yams"),
+            .product(name: "Tokenizers", package: "swift-transformers"),
+            .product(name: "Hub", package: "swift-transformers"),
+        ], path: "Vendor/ANEMLL/Sources/AnemllCore"),
+    ]),
     swiftLanguageModes: [.v6]
 )

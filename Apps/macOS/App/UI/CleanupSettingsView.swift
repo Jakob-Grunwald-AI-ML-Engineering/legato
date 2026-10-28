@@ -48,12 +48,12 @@ struct CleanupSettingsView: View {
             }
 
             Section {
-                backendRow("Auto", detail: "Your MLX model when one is picked, else Apple Foundation Models", choice: .auto)
+                backendRow("Auto", detail: "Your selected model; Apple Foundation Models when none is selected", choice: .auto)
                 backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence)", choice: .foundationModels)
                 ForEach(models.cleanupModels) { descriptor in
                     ModelRow(
                         descriptor: descriptor, manager: models.manager,
-                        isSelected: settings.cleanupBackend == .mlx && selectedMLX == descriptor.id,
+                        isSelected: settings.cleanupBackend == models.cleanupChoice(for: descriptor.id) && selectedMLX == descriptor.id,
                         isPending: pending == descriptor.id, failure: failures[descriptor.id],
                         onPick: { pickMLX(descriptor.id) }, onDelete: { delete(descriptor.id) },
                         onCancel: { cancelDownload(descriptor.id) })
@@ -61,7 +61,7 @@ struct CleanupSettingsView: View {
             } header: {
                 Text("Backend")
             } footer: {
-                Text("Picking an MLX model downloads it first. Auto uses the MLX model picked last: \(selectedMLXName ?? "none yet").")
+                Text("Picking a model downloads it first. Auto uses the model picked last: \(selectedMLXName ?? "none yet").")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
@@ -86,6 +86,8 @@ struct CleanupSettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear { selectedMLX = models.selected(.cleanup) }
+        .onChange(of: settings.cleanupEnabled) { _, _ in controller.cleanupSettingsChanged() }
+        .onChange(of: settings.cleanupBackend) { _, _ in controller.cleanupSettingsChanged() }
     }
 
     private func backendRow(_ title: String, detail: String, choice: CleanupBackendChoice) -> some View {
@@ -114,7 +116,8 @@ struct CleanupSettingsView: View {
                 failures[id] = String(describing: error)
             } else {
                 selectedMLX = models.selected(.cleanup)
-                controller.settings.cleanupBackend = .mlx
+                controller.settings.cleanupBackend = models.cleanupChoice(for: id)
+                controller.cleanupSettingsChanged()
             }
         }
     }
@@ -129,7 +132,11 @@ struct CleanupSettingsView: View {
         Task {
             await models.manager.delete(id)
             selectedMLX = models.selected(.cleanup)
-            if selectedMLX == nil, controller.settings.cleanupBackend == .mlx { controller.settings.cleanupBackend = .auto }
+            if selectedMLX == nil,
+               controller.settings.cleanupBackend == .mlx || controller.settings.cleanupBackend == .coreML {
+                controller.settings.cleanupBackend = .auto
+            }
+            controller.cleanupSettingsChanged()
         }
     }
 }
@@ -152,6 +159,7 @@ struct LastDictationSection: View {
                 }
                 if let report {
                     LabeledContent(report.refine ? "Refine backend" : "Cleanup backend", value: report.backend)
+                    LabeledContent("Outcome", value: report.outcome)
                     if let device = report.device { LabeledContent("Device", value: device) }
                     LabeledContent("Took", value: "\(report.milliseconds) ms · \(report.style.rawValue)")
                     ForEach(report.skipped, id: \.self) { reason in

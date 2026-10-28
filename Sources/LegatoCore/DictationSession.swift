@@ -658,14 +658,18 @@ public final class DictationSession {
     /// - Throws: `DictationError.alreadyRunning`, `.assetsNotInstalled`, or whatever the engine, session
     ///   or source threw (the lease is torn down).
     public func armLease(locale: Locale? = nil) async throws {
+        try Task.checkCancellation()
         guard runState == .idle else { throw DictationError.alreadyRunning }
         await cancelLinger()
         do {
             try Task.checkCancellation()
             if leaseState != .armed {
                 let format = try await engine.prepare(locale: locale)
+                // Native model preparation may complete even after Swift cancellation. Never let that
+                // late completion activate capture for an admission the user or a reset revoked.
                 try Task.checkCancellation()
                 _ = try await arm(format)
+                try Task.checkCancellation()
                 await source.detach() // armed and idle, like a lease between two runs
                 try Task.checkCancellation()
             }

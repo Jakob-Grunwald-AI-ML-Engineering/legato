@@ -298,10 +298,10 @@ public final class DictationCoordinator {
     /// own `keepAlive` says. A lease already held is replaced by a fresh one (its mic may have died).
     /// The sink hears the lease (`leaseChanged`) and nothing else.
     public func arm(keepAlive: Linger) async -> ArmOutcome {
+        guard !Task.isCancelled else { return .failed("Preparation cancelled") }
         guard phase == .idle else { return .busy }
         phase = .arming
         defer { phase = .idle }
-        if Task.isCancelled { return .failed("Preparation cancelled") }
         if let release = pendingRelease { await release.value }
         if let lease = held {
             held = nil
