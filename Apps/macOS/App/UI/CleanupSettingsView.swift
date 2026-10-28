@@ -1,5 +1,6 @@
 import LegatoAppServices
 import LegatoCore
+import LegatoCoreML
 import LegatoModels
 import LegatoPostProcessing
 import SwiftUI
@@ -57,6 +58,13 @@ struct CleanupSettingsView: View {
                         isPending: pending == descriptor.id, failure: failures[descriptor.id],
                         onPick: { pickModel(descriptor.id) }, onDelete: { delete(descriptor.id) },
                         onCancel: { cancelDownload(descriptor.id) })
+                    if descriptor.id == CoreMLModels.qwen3_0_6bID {
+                        Text("Experimental: review numbers and times carefully; this model can change them incorrectly.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else if descriptor.id == CoreMLModels.gemma3_1bID {
+                        Text("Experimental: preparation can fail on some devices. If it fails, choose another model.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             } header: {
                 Text("Cleanup model")

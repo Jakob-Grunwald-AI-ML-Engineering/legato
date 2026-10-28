@@ -15,12 +15,12 @@ import Testing
         #expect(!models.cleanupModels.contains { $0.id.hasPrefix("mlx-") })
         #expect(await models.manager.state(of: "coreml-qwen3-1.7b-lut6") == .notInstalled)
     }
-    @Test func legacyMLXRawValueKeepsExplicitLocalIntent() {
+    @Test func unsupportedOldBackendUsesTheNewBuiltInDefault() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         defaults.set("mlx", forKey: "cleanup.backend")
         let settings = CleanupSettingsStore(defaults: defaults)
-        #expect(settings.backend == .coreML)
-        #expect(settings.backend.preference == .coreML)
-        #expect(CleanupSettingsStore(defaults: defaults).backend.preference == .coreML)
+        #expect(settings.backend == .foundationModels)
+        #expect(settings.backend.preference == .foundationModels)
+        #expect(CleanupSettingsStore(defaults: defaults).backend.preference == .foundationModels)
     }
 }

@@ -87,14 +87,14 @@ private final class Recorder: Sendable {
     }
 
     @Test(arguments: ["auto", "mlx"])
-    func aSelectedCoreMLModelGetsEightSecondsThroughLegacyMigration(backend: String) {
+    func unsupportedOldBackendsUseTheBuiltInDefault(backend: String) {
         let defaults = freshDefaults()
         SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
         defaults.set(backend, forKey: "cleanup.backend")
         let store = CleanupSettingsStore(defaults: defaults)
-        #expect(store.backend == .coreML)
-        #expect(store.timeoutSeconds == 8)
-        #expect(store.options.timeoutSeconds == 8)
+        #expect(store.backend == .foundationModels)
+        #expect(store.timeoutSeconds == 4)
+        #expect(store.options.timeoutSeconds == 4)
         #expect(defaults.object(forKey: "cleanup.timeoutSeconds") == nil)
     }
 
