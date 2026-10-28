@@ -14,7 +14,6 @@ struct CleanupSettingsView: View {
     @State private var delivery = Settings.cleanupDelivery
     @State private var style = Settings.cleanupStyle
     @State private var backend = Settings.cleanupBackend
-    @State private var background = Settings.cleanupBackground
     @State private var itn = Settings.cleanupITN
     @State private var timeout = Double(Settings.cleanupTimeoutSeconds)
     @State private var selectedMLX: String?
@@ -93,19 +92,6 @@ struct CleanupSettingsView: View {
                 if usesCoreML { Text("Core ML uses the same selected model in Legato and from the keyboard.") }
             }
 
-            if !usesCoreML {
-                Section {
-                    Picker("Background cleanup", selection: $background) {
-                        Text("CPU (slower)").tag(CleanupRegistry.BackgroundCleanup.cpu)
-                        Text("Apple Foundation Models").tag(CleanupRegistry.BackgroundCleanup.foundationModels)
-                        Text("Off").tag(CleanupRegistry.BackgroundCleanup.off)
-                    }
-                    .accessibilityIdentifier("cleanup.background")
-                } footer: {
-                    Text(Self.explain(background))
-                }
-            }
-
             #endif
 
             Section {
@@ -131,10 +117,6 @@ struct CleanupSettingsView: View {
         .onChange(of: backend) { _, new in
             Settings.cleanupBackend = new
             timeout = Double(Settings.cleanupTimeoutSeconds)
-            controller.cleanupSettingsChanged()
-        }
-        .onChange(of: background) { _, new in
-            Settings.cleanupBackground = new
             controller.cleanupSettingsChanged()
         }
         .onChange(of: itn) { _, new in Settings.cleanupITN = new }
@@ -189,17 +171,6 @@ struct CleanupSettingsView: View {
             if selectedMLX == nil, backend == .mlx || backend == .coreML { backend = .auto }
             Settings.cleanupBackend = backend
             controller.cleanupSettingsChanged()
-        }
-    }
-
-    static func explain(_ background: CleanupRegistry.BackgroundCleanup) -> String {
-        switch background {
-        case .cpu:
-            "With Legato in the background iOS allows no GPU work, so your MLX model runs on the CPU: same text, a few times slower. Apple Foundation Models work in the background as they are."
-        case .foundationModels:
-            "With Legato in the background your MLX model is passed over and Apple Foundation Models clean up instead."
-        case .off:
-            "With Legato in the background no language model runs; the raw text is kept."
         }
     }
 
