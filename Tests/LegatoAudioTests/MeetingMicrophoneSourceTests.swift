@@ -180,13 +180,20 @@ private actor MicrophoneChunks {
         let stream = try await source.start(format: AudioFormatSpec(sampleRate: 16_000, channelCount: 1))
         let chunks = MicrophoneChunks()
         let reader = Task { for await chunk in stream { await chunks.add(chunk) }; await chunks.finish() }
-        first.push(0.2, samples: 4096)
-        let deadline = ContinuousClock.now + .seconds(30)
-        while await !chunks.values.contains(where: { $0.samples.contains(0.2) }), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        // Native microphones keep delivering callbacks after a scheduling stall; a one-shot fake
+        // batch can legitimately be discarded by the source's long-suspension recovery.
+        let firstDeadline = ContinuousClock.now + .seconds(30)
+        while await !chunks.values.contains(where: { $0.samples.contains(0.2) }), ContinuousClock.now < firstDeadline {
+            first.push(0.2)
+            try await Task.sleep(for: .milliseconds(20))
+        }
         #expect(await chunks.values.contains(where: { $0.samples.contains(0.2) }))
         await source.update(selection: .device("b"), devices: Self.devices)
-        first.push(0.9); second.push(0.4, samples: 4096)
-        while await !chunks.values.contains(where: { $0.samples.contains(0.4) }), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        let secondDeadline = ContinuousClock.now + .seconds(30)
+        while await !chunks.values.contains(where: { $0.samples.contains(0.4) }), ContinuousClock.now < secondDeadline {
+            first.push(0.9); second.push(0.4)
+            try await Task.sleep(for: .milliseconds(20))
+        }
         #expect(await chunks.values.contains(where: { $0.samples.contains(0.4) }))
         #expect(await chunks.values.contains(where: { $0.samples.contains(0.9) }) == false)
         #expect(await chunks.finished == false)
