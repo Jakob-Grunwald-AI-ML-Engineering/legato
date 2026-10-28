@@ -152,20 +152,43 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
 /// Install warm-up and cleanup resolution share the same owner. Entries are released only after native settlement.
 public actor CoreMLModelStore {
     public static let shared = CoreMLModelStore()
+    private struct PendingRelease {
+        let token: UUID
+        let task: Task<Void, Never>
+    }
     private var backends: [String: CoreMLBackend] = [:]
-    public init() {}
-    public func backend(for spec: CoreMLModelSpec, root: URL) -> CoreMLBackend {
+    private var releases: [String: PendingRelease] = [:]
+    private let makeBackend: @Sendable (CoreMLModelSpec, URL) -> CoreMLBackend
+    public init() { self.makeBackend = { CoreMLBackend(spec: $0, folder: $1) } }
+    init(makeBackend: @escaping @Sendable (CoreMLModelSpec, URL) -> CoreMLBackend) { self.makeBackend = makeBackend }
+
+    public func backend(for spec: CoreMLModelSpec, root: URL) async -> CoreMLBackend {
         let folder = spec.folder(root: root).standardizedFileURL
+        // Every release task includes its actor-cache cleanup before completing. Rechecking also joins
+        // a later release that began while this acquisition was waiting for an earlier one.
+        while let release = releases[folder.path] { await release.task.value }
         if let backend = backends[folder.path] { return backend }
-        let backend = CoreMLBackend(spec: spec, folder: folder)
+        let backend = makeBackend(spec, folder)
         backends[folder.path] = backend
         return backend
     }
     public func release(folder: URL) async {
         let key = folder.standardizedFileURL.path
+        if let release = releases[key] { await release.task.value; return }
         guard let backend = backends[key] else { return }
-        await backend.unload()
+        let token = UUID()
+        let task = Task { [self] in
+            await backend.unload()
+            finishRelease(key: key, backend: backend, token: token)
+        }
+        // Reserve this folder before yielding, so acquisition cannot borrow the retiring owner.
+        releases[key] = PendingRelease(token: token, task: task)
+        await task.value
+    }
+    private func finishRelease(key: String, backend: CoreMLBackend, token: UUID) {
+        guard releases[key]?.token == token else { return }
         if backends[key] === backend { backends[key] = nil }
+        releases[key] = nil
     }
     public func releaseAll() async {
         for key in Array(backends.keys) { await release(folder: URL(filePath: key)) }

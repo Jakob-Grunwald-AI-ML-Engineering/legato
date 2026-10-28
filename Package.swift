@@ -16,7 +16,7 @@ func heavy(_ name: String, _ package: String) -> Target.Dependency {
 
 /// Local stand-ins for the heavy modules (stub mode only). Version 5 mode: they are throwaway shims.
 let stubTargets: [Target] = [
-    .target(name: "AnemllCore", path: "Stubs/AnemllCore"),
+    .target(name: "LegatoANEMLL", path: "Stubs/LegatoANEMLL"),
     .target(name: "MLX", path: "Stubs/MLX", swiftSettings: [.swiftLanguageMode(.v5)]),
     .target(name: "MLXLMCommon", dependencies: ["MLX"], path: "Stubs/MLXLMCommon", swiftSettings: [.swiftLanguageMode(.v5)]),
     .target(name: "MLXLLM", dependencies: ["MLXLMCommon"], path: "Stubs/MLXLLM", swiftSettings: [.swiftLanguageMode(.v5)]),
@@ -54,7 +54,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "LegatoCore"),
-        .target(name: "LegatoCoreML", dependencies: ["LegatoCore", "LegatoModels", "AnemllCore"], resources: [.process("Resources")]),
+        .target(name: "LegatoCoreML", dependencies: ["LegatoCore", "LegatoModels", "LegatoANEMLL"], resources: [.process("Resources")]),
         .testTarget(name: "LegatoCoreMLTests", dependencies: ["LegatoCoreML", "LegatoCore", "LegatoModels"]),
         .testTarget(name: "LegatoCoreTests", dependencies: ["LegatoCore"]),
         // The keyboard extension links only this (Foundation only; it must not depend on LegatoCore).
@@ -157,7 +157,7 @@ let package = Package(
         .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoClaudeTests", dependencies: ["LegatoClaude", "LegatoCore"]),
     ] + (stubDeps ? stubTargets : [
-        .target(name: "AnemllCore", dependencies: [
+        .target(name: "LegatoANEMLL", dependencies: [
             .product(name: "Yams", package: "Yams"),
             .product(name: "Tokenizers", package: "swift-transformers"),
             .product(name: "Hub", package: "swift-transformers"),

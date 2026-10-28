@@ -106,3 +106,46 @@ struct CoreMLSettlementTests {
         #expect(loads.withLock { $0 } == 1)
     }
 }
+
+
+extension CoreMLSettlementTests {
+    @Test func acquiringDuringFolderReleaseWaitsForSettlementAndGetsOneFreshOwner() async throws {
+        let entered = NativeGate(), returns = NativeGate(), acquisitionStarted = NativeGate()
+        let store = CoreMLModelStore { spec, folder in
+            CoreMLBackend(spec: spec, folder: folder) { cancellation in
+                BlockingDriver(cancellation: cancellation, entered: entered, returns: returns)
+            }
+        }
+        let root = URL(filePath: "/fixture-shared-owner")
+        let old = await store.backend(for: spec, root: root)
+        try await old.prepare()
+        let response = Task { try await old.respond(instructions: "Clean", prompt: "A") }
+        await entered.wait()
+        let release = Task { await store.release(folder: spec.folder(root: root)) }
+        for _ in 0..<1_000 {
+            if await !old.isPrepared() { break }
+            await Task.yield()
+        }
+        #expect(await old.isPrepared() == false)
+        let secondRelease = Task { await store.release(folder: spec.folder(root: root)) }
+        let acquired = Mutex<CoreMLBackend?>(nil)
+        let acquisition = Task {
+            await acquisitionStarted.open()
+            let backend = await store.backend(for: spec, root: root)
+            acquired.withLock { $0 = backend }
+            return backend
+        }
+        await acquisitionStarted.wait()
+        for _ in 0..<100 { await Task.yield() }
+        #expect(acquired.withLock { $0 } == nil, "No owner escapes while this folder's native operation is settling")
+        await returns.open()
+        await #expect(throws: CancellationError.self) { try await response.value }
+        await release.value
+        await secondRelease.value
+        let fresh = await acquisition.value
+        #expect(fresh !== old)
+        let again = await store.backend(for: spec, root: root)
+        #expect(again === fresh, "Release cleanup must not evict the replacement owner")
+        #expect(await fresh.isPrepared() == false)
+    }
+}

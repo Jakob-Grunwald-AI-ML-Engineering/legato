@@ -1,4 +1,4 @@
-import AnemllCore
+import LegatoANEMLL
 import CoreML
 import Foundation
 import LegatoCore
@@ -6,10 +6,10 @@ import LegatoCore
 /// Native objects are confined to CoreMLBackend's lease, including cancellation and preparation.
 final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
     let contextLength: Int
-    private let tokenizer: AnemllCore.Tokenizer
+    private let tokenizer: LegatoANEMLL.Tokenizer
     private let manager: InferenceManager
     private let cancellation: CoreMLCancellation
-    private init(config: YAMLConfig, tokenizer: AnemllCore.Tokenizer, manager: InferenceManager, cancellation: CoreMLCancellation) {
+    private init(config: YAMLConfig, tokenizer: LegatoANEMLL.Tokenizer, manager: InferenceManager, cancellation: CoreMLCancellation) {
         self.contextLength = config.contextLength; self.tokenizer = tokenizer; self.manager = manager; self.cancellation = cancellation
     }
     static func load(folder: URL, cancellation: CoreMLCancellation) async throws -> NativeCoreMLDriver {
@@ -17,7 +17,7 @@ final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
         guard config.contextLength == 2_048, config.batchSize == 64, config.numChunks == 2,
               config.modelPrefix == "qwen", config.splitLMHead == 16 else { throw CoreMLInstallError.invalidManifest }
         try cancellation.check()
-        let tokenizer = try await AnemllCore.Tokenizer(modelPath: folder.path, template: "qwen3", debugLevel: 0)
+        let tokenizer = try await LegatoANEMLL.Tokenizer(modelPath: folder.path, template: "qwen3", debugLevel: 0)
         try cancellation.check()
         let loader = ModelLoader()
         let models = try await withTaskCancellationHandler {
