@@ -1,5 +1,4 @@
 import LegatoMeetings
-import LegatoMac
 import SwiftUI
 
 /// The Meetings window: the list; a meeting opens in place of it with a way back. A recording meeting opens
@@ -7,45 +6,16 @@ import SwiftUI
 struct MeetingsWindow: View {
     @Environment(MacAppController.self) private var app
     @State private var selection: UUID?
-    @State private var inputUID = ""
-    @State private var inputs: [(id: UInt32, uid: String, name: String)] = []
 
     private var meetings: MeetingController { app.meetings }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Picker("Microphone", selection: $inputUID) {
-                    Text("Auto — follow call microphone").tag("")
-                    ForEach(inputs, id: \.uid) { device in Text(device.name).tag(device.uid) }
-                    if !inputUID.isEmpty && !inputs.contains(where: { $0.uid == inputUID }) {
-                        Text("Selected microphone disconnected").tag(inputUID)
-                    }
-                }
-                .frame(maxWidth: 420)
-                .disabled(meetings.phase != .idle)
-                Spacer()
-                if meetings.isRecording {
-                    Label(meetings.isMuted ? "Microphone muted" : "Microphone on",
-                          systemImage: meetings.isMuted ? "mic.slash.fill" : "mic.fill")
-                }
-            }
-            .padding(.horizontal, 20).padding(.top, 10)
-            Text("Records the selected microphone together with meeting audio. Mute silences your microphone until you unmute.")
-                .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 8)
             globalNotices
             content
         }
         .frame(minWidth: 760, minHeight: 480)
         .task { await meetings.refresh() }
-        .task {
-            inputUID = meetings.settings.inputDeviceUID ?? ""
-            while !Task.isCancelled {
-                inputs = AudioDevices.inputs()
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
-        .onChange(of: inputUID) { _, uid in meetings.settings.inputDeviceUID = uid.isEmpty ? nil : uid }
         .onChange(of: meetings.liveMeetingID) { _, id in
             if let id { selection = id }
         }

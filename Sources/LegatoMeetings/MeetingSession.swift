@@ -105,6 +105,7 @@ public actor MeetingSession {
     private let sources: [MeetingSource]
     private let engine: any DictationEngine
     private let locale: Locale?
+    private var languageChangeRevision = 0
     private let diarizer: (any SpeakerDiarizer)?
     private let store: MeetingStore
     private let sink: any MeetingAudioSink
@@ -203,6 +204,29 @@ public actor MeetingSession {
 
     /// The meeting this session records.
     public nonisolated let meetingID: UUID
+
+    /// Languages that can be selected without restarting this session's engine; nil means unsupported.
+    public nonisolated var liveLanguageCodes: [String]? {
+        (engine as? any LiveLanguageConfigurableEngine)?.liveLanguageCodes
+    }
+
+    /// Accepts a language change without restarting capture or preparing the speech engine again.
+    public func setLanguage(_ locale: Locale?) async -> Bool {
+        guard started, !stopped, !tearingDown, mixFormat != nil, engineError == nil,
+            let configurable = engine as? any LiveLanguageConfigurableEngine else { return false }
+        if let locale, !configurable.liveLanguageCodes.contains(locale.language.languageCode?.identifier ?? "") { return false }
+        languageChangeRevision += 1
+        let revision = languageChangeRevision
+        guard await configurable.setLanguage(locale),
+            started, !stopped, !tearingDown, engineError == nil, revision == languageChangeRevision else { return false }
+        meeting.locale = locale?.identifier
+        let identifier = meeting.locale
+        save { [store, id = meeting.id] in
+            try await store.update(id: id) { $0.locale = identifier }
+        }
+        publish()
+        return true
+    }
 
     /// Seconds since the meeting began; 0 before it has. The same timeline as the segments and mute ranges.
     public nonisolated var elapsed: TimeInterval {

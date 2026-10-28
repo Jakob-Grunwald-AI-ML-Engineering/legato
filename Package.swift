@@ -64,8 +64,9 @@ let package = Package(
         // depend on LegatoCore, so the keyboard extension can link it).
         .target(name: "LegatoVocabulary"),
         .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),
-        .target(name: "LegatoAudio", dependencies: ["LegatoCore"]),
-        .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore"]),
+        .target(name: "LegatoAudioBridge", publicHeadersPath: "include"),
+        .target(name: "LegatoAudio", dependencies: ["LegatoCore", "LegatoAudioBridge"]),
+        .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore", "LegatoAudioBridge"]),
         .target(name: "LegatoAppleSpeech", dependencies: ["LegatoCore"]),
         .testTarget(
             name: "LegatoAppleSpeechTests",

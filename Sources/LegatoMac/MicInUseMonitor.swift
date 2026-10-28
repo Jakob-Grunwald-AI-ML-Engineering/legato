@@ -115,7 +115,7 @@ public enum AudioDevices {
         return err == noErr && id != kAudioObjectUnknown ? id : nil
     }
 
-    /// The public devices (private aggregates are not among them).
+    /// Device IDs visible to this process, including its own private aggregates.
     public static func all() -> [UInt32] {
         ids(of: AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, scope: kAudioObjectPropertyScopeGlobal)
     }
@@ -123,6 +123,7 @@ public enum AudioDevices {
     /// Public devices that actually have input channels. UIDs remain stable across reconnects.
     public static func inputs() -> [(id: UInt32, uid: String, name: String)] {
         all().compactMap { id in
+            guard classification(of: id).isSelectable else { return nil }
             var address = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyStreamConfiguration, mScope: kAudioObjectPropertyScopeInput,
                 mElement: kAudioObjectPropertyElementMain)
@@ -135,6 +136,36 @@ public enum AudioDevices {
                 let uid = uid(of: id) else { return nil }
             return (id, uid, name(of: id) ?? uid)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// Aggregates can duplicate physical microphones already captured in Auto and All modes.
+    public static func isAggregate(_ device: UInt32) -> Bool { classification(of: device).isAggregate }
+
+    private static func classification(of device: UInt32) -> MeetingInputClassification {
+        let classID = scalar(device, kAudioObjectPropertyClass)
+        let transport = scalar(device, kAudioDevicePropertyTransportType)
+        let aggregate = classID == kAudioAggregateDeviceClassID || transport == kAudioDeviceTransportTypeAggregate
+        var isPrivate = false
+        if aggregate {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioAggregateDevicePropertyComposition, mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var composition: Unmanaged<CFDictionary>?
+            var size = UInt32(MemoryLayout<Unmanaged<CFDictionary>?>.size)
+            if AudioObjectGetPropertyData(device, &address, 0, nil, &size, &composition) == noErr,
+                let dictionary = composition?.takeRetainedValue() as? [String: Any] {
+                isPrivate = (dictionary[kAudioAggregateDeviceIsPrivateKey] as? NSNumber)?.boolValue ?? false
+            }
+        }
+        return MeetingInputClassification(classID: classID, transport: transport, isPrivate: isPrivate)
+    }
+
+    private static func scalar(_ device: UInt32, _ selector: AudioObjectPropertySelector) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr ? value : nil
     }
 
     public static func uid(of device: UInt32) -> String? {
@@ -170,6 +201,15 @@ public enum AudioDevices {
         guard AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &ids) == noErr else { return [] }
         return Array(ids.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
     }
+}
+
+/// Pure Core Audio classification policy; device reads are kept at the boundary.
+struct MeetingInputClassification {
+    let classID: UInt32?
+    let transport: UInt32?
+    let isPrivate: Bool
+    var isAggregate: Bool { classID == kAudioAggregateDeviceClassID || transport == kAudioDeviceTransportTypeAggregate }
+    var isSelectable: Bool { !isPrivate }
 }
 
 public enum MicInUseError: Error, Sendable, Equatable {

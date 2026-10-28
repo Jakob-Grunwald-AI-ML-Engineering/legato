@@ -164,11 +164,88 @@ struct MeetingDetailView: View {
     /// shrink to their icons (the names stay in the tooltips and for VoiceOver).
     private var recordingBar: some View {
         let state = meetings.pillState
-        return ViewThatFits(in: .horizontal) {
-            recordingControls(state, compact: false)
-            recordingControls(state, compact: true)
+        return VStack(spacing: 8) {
+            liveCaptureControls
+            ViewThatFits(in: .horizontal) {
+                recordingControls(state, compact: false)
+                recordingControls(state, compact: true)
+            }
         }
         .padding(.bottom, 14)
+    }
+
+    private var liveCaptureControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    liveMicrophonePicker
+                    liveLanguageMenu
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    liveMicrophonePicker
+                    liveLanguageMenu
+                }
+            }
+            Text(meetings.isMuted ? "All microphones muted · meeting audio continues" : "Microphone and meeting audio are always combined")
+                .font(.caption).foregroundStyle(.secondary)
+            if meetings.inputSelection == .auto, let uid = meetings.activeInputUID,
+                let input = meetings.availableInputs.first(where: { $0.uid == uid }) {
+                Text("Auto is using \(input.name)").font(.caption).foregroundStyle(.secondary)
+            }
+            if meetings.liveLanguageCodes != nil {
+                Text("Language changes apply to the next sentence.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 18)
+        .disabled(meetings.phase != .recording)
+    }
+
+    private var liveMicrophonePicker: some View {
+        Picker("Microphone", selection: Binding(
+            get: { meetings.inputSelection },
+            set: { selection in Task { await meetings.setMicrophoneSelection(selection) } }
+        )) {
+            Text("Auto — strongest microphone").tag(MeetingMicrophoneSelection.auto)
+            Text("All microphones").tag(MeetingMicrophoneSelection.all)
+            ForEach(meetings.availableInputs, id: \.uid) { input in
+                Text(input.name).tag(MeetingMicrophoneSelection.device(input.uid))
+            }
+            if case .device(let uid) = meetings.inputSelection,
+                !meetings.availableInputs.contains(where: { $0.uid == uid }) {
+                Text("Selected microphone disconnected").tag(MeetingMicrophoneSelection.device(uid))
+            }
+        }
+        .accessibilityIdentifier("meeting.microphone")
+        .help("Change microphones while recording. Auto uses the strongest input; All combines every available microphone.")
+        .frame(maxWidth: 360)
+    }
+
+    private var liveLanguageMenu: some View {
+        Menu {
+            Button { Task { await meetings.setLiveLanguage(nil) } } label: {
+                if meetings.liveLanguage == nil { Label("Auto", systemImage: "checkmark") }
+                else { Text("Auto") }
+            }
+            ForEach(meetings.liveLanguageCodes ?? [], id: \.self) { code in
+                Button { Task { await meetings.setLiveLanguage(code) } } label: {
+                    let name = Locale.current.localizedString(forLanguageCode: code) ?? code
+                    if meetings.liveLanguage.flatMap({ Locale(identifier: $0).language.languageCode?.identifier }) == code {
+                        Label(name, systemImage: "checkmark")
+                    } else { Text(name) }
+                }
+            }
+        } label: {
+            Label(meetings.changingLanguage ? "Updating…" : liveLanguageName, systemImage: "globe")
+        }
+        .disabled(meetings.liveLanguageCodes == nil || meetings.changingLanguage)
+        .help(meetings.liveLanguageCodes == nil
+            ? "This model cannot change language without restarting. Set the default in Settings for your next meeting."
+            : "Language changes apply to the next sentence without reloading the model.")
+        .accessibilityIdentifier("meeting.language")
+    }
+
+    private var liveLanguageName: String {
+        meetings.liveLanguage.map { Locale.current.localizedString(forIdentifier: $0) ?? $0 } ?? "Auto language"
     }
 
     private func recordingControls(_ state: MeetingPillState, compact: Bool) -> some View {

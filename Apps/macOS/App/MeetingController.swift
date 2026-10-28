@@ -13,8 +13,8 @@ import os
 /// Records meetings: the mic and the system audio are mixed into one stream of one `MeetingSession`, with
 /// one live engine and speakers told apart by diarization.
 ///
-/// - `start` opens the mic first, on the call app's input device (with a fallback to no voice processing when it does
-///   not work, and a notice when it hears nothing), then the system-audio tap (the tap excludes our own process, which only
+/// - `start` opens the selected microphones first (Auto chooses the strongest; All combines them),
+///   then the system-audio tap (the tap excludes our own process, which only
 ///   exists for Core Audio once the mic has touched it).
 /// - `stop` ends the capture and runs the after-stop chain (m4a, post-pass, speakers; the summary only when automatic) in a task.
 /// - Pause silences everything and keeps the timeline; End and Discard are the window's own, behind a confirmation.
@@ -67,6 +67,13 @@ final class MeetingController {
         didSet { settings.language = language }
     }
 
+    private(set) var inputSelection: MeetingMicrophoneSelection
+    private(set) var availableInputs: [MeetingMicrophoneDevice] = []
+    private(set) var activeInputUID: String?
+    private(set) var liveLanguage: String?
+    private(set) var liveLanguageCodes: [String]?
+    private(set) var changingLanguage = false
+
     @ObservationIgnored let services: MeetingServices
     @ObservationIgnored let settings: MeetingSettings
     @ObservationIgnored private let store: MeetingStore
@@ -74,6 +81,8 @@ final class MeetingController {
     @ObservationIgnored private let defaults: UserDefaults
 
     @ObservationIgnored private var session: MeetingSession?
+    @ObservationIgnored private var microphoneSource: MeetingMicrophoneSource?
+    @ObservationIgnored private var deviceTask: Task<Void, Never>?
     @ObservationIgnored private var snapshotTask: Task<Void, Never>?
     @ObservationIgnored private var tapTask: Task<Void, Never>?
     @ObservationIgnored private var micNoticeTask: Task<Void, Never>?
@@ -100,6 +109,7 @@ final class MeetingController {
         self.settings = settings
         self.defaults = defaults
         language = settings.language
+        inputSelection = settings.inputSelection
         keyStore = keys
         hasClaudeKey = Self.keyExists(keys)
         let activity = MacActivitySampler()
@@ -224,42 +234,34 @@ final class MeetingController {
             try? FileManager.default.removeItem(at: folder)
             return
         }
-        // The mic the call app records from, not just the default input (which may be a headset mic nobody uses).
-        let monitor = MicInUseMonitor()
-        let manualUID = settings.inputDeviceUID
-        let selectedInput = manualUID.flatMap { uid in AudioDevices.inputs().first { $0.uid == uid }?.id }
-        if manualUID != nil && selectedInput == nil {
-            try? FileManager.default.removeItem(at: folder)
-            setPhase(.idle)
-            notices.post("The selected microphone is disconnected. Choose another microphone or Auto.", kind: .start, meeting: nil)
-            return
-        }
-        let ownPID = ProcessInfo.processInfo.processIdentifier
-        let choice = MeetingMicRoute.choose(
-            processes: (try? monitor.activeProcesses()) ?? [], ownPID: ownPID,
-            defaultInput: AudioDevices.defaultInput(), selectedInput: selectedInput)
+        refreshInputs()
+        let selection = inputSelection
         #if DEBUG
         let diagnostics = MacMeetingDiagnostics.shared
         diagnostics?.event("capture.settings", fields: [
-            "voiceProcessing": String(engines.voiceProcessing), "enhancement": String(engines.enhancer != nil),
-            "requestedInput": choice.pinned.map(String.init) ?? "default",
+            "voiceProcessing": "false", "requestedVoiceProcessing": String(engines.voiceProcessing),
+            "enhancement": String(engines.enhancer != nil), "capture": "input-only-hal",
+            "selection": String(describing: selection),
             "defaultInput": AudioDevices.defaultInput().map(String.init) ?? "unknown",
         ])
         #endif
-        let mic = VoiceProcessingFallbackMic(
-            voiceProcessing: engines.voiceProcessing, device: choice.pinned,
-            devices: MicDevices(
-                defaultInput: { AudioDevices.defaultInput() }, name: { AudioDevices.name(of: $0) },
-                callInput: { manualUID == nil ? monitor.meetingMic(ownPID: ownPID).pinned : nil }),
-            strictDevice: manualUID != nil,
-            makeMic: { vp, device in
-                #if DEBUG
-                MicSource(onDiagnostic: { event in diagnostics?.event(event.event, fields: event.fields) },
-                          voiceProcessing: vp, device: device, strictDevice: manualUID != nil)
-                #else
-                MicSource(voiceProcessing: vp, device: device, strictDevice: manualUID != nil)
-                #endif
-            })
+        let mic = MeetingMicrophoneSource(selection: selection, devices: captureInputs(for: selection)) { device in
+            VoiceProcessingFallbackMic(
+                voiceProcessing: false, device: device.id,
+                devices: MicDevices(defaultInput: { AudioDevices.defaultInput() }, name: { AudioDevices.name(of: $0) }, callInput: { nil }),
+                strictDevice: true,
+                makeMic: { _, _ in
+                    #if DEBUG
+                    MeetingHALMicSource(device: device.id, onDiagnostic: { event in
+                        var fields = event.fields
+                        fields["microphoneUID"] = device.uid
+                        diagnostics?.event(event.event, fields: fields)
+                    })
+                    #else
+                    MeetingHALMicSource(device: device.id)
+                    #endif
+                })
+        }
         let system = SystemAudioSource()
         #if DEBUG
         let counter = ZeroCountingSource(system)
@@ -295,9 +297,16 @@ final class MeetingController {
             try? FileManager.default.removeItem(at: folder)
             return
         }
+        microphoneSource = mic
+        liveLanguage = meeting.locale
+        liveLanguageCodes = session.liveLanguageCodes
         beginObserving(session: session, system: system, mic: mic, cleaningNotices: made.notices, meetingID: meeting.id)
         liveMeetingID = meeting.id
         setPhase(.recording)
+        if engines.voiceProcessing {
+            notices.post("Apple microphone processing is unavailable with live microphone selection. Recording uses raw microphone audio.",
+                kind: .live, meeting: meeting.id)
+        }
         windowRequests += 1
     }
 
@@ -330,12 +339,49 @@ final class MeetingController {
         // What was said about the recording is no longer true once it ended.
         notices.clear(kind: .live, meeting: id)
         session = nil
+        microphoneSource = nil
+        activeInputUID = nil
+        liveLanguage = nil
+        liveLanguageCodes = nil
+        changingLanguage = false
         live = nil
         liveMeetingID = nil
         tapStatus = nil
         mute = MeetingMuteState()
         hidePill()
         setPhase(.idle)
+    }
+
+    // MARK: Live capture settings
+
+    private func refreshInputs() {
+        availableInputs = AudioDevices.inputs().map { MeetingMicrophoneDevice(id: $0.id, uid: $0.uid, name: $0.name) }
+    }
+
+    private func captureInputs(for selection: MeetingMicrophoneSelection) -> [MeetingMicrophoneDevice] {
+        if case .device = selection { return availableInputs }
+        // A public aggregate may already include one of the physical inputs; avoid recording it twice.
+        return availableInputs.filter { !AudioDevices.isAggregate($0.id) }
+    }
+
+    func setMicrophoneSelection(_ selection: MeetingMicrophoneSelection) async {
+        guard phase == .recording, let microphoneSource else { return }
+        inputSelection = selection
+        settings.inputSelection = selection
+        refreshInputs()
+        await microphoneSource.update(selection: selection, devices: captureInputs(for: selection))
+        activeInputUID = await microphoneSource.activeDeviceUID
+    }
+
+    /// Updates only this meeting. Its engine applies the hint at the next utterance boundary.
+    func setLiveLanguage(_ language: String?) async {
+        guard phase == .recording, !changingLanguage, let session, liveLanguageCodes != nil else { return }
+        changingLanguage = true
+        let accepted = await session.setLanguage(language.map { Locale(identifier: $0) })
+        guard self.session === session else { return }
+        changingLanguage = false
+        if accepted { liveLanguage = language }
+        else { notices.post("This speech model cannot change to that language during recording.", kind: .live, meeting: liveMeetingID) }
     }
 
     // MARK: Pause
@@ -395,7 +441,7 @@ final class MeetingController {
     // MARK: Observing a running meeting
 
     private func beginObserving(
-        session: MeetingSession, system: SystemAudioSource, mic: VoiceProcessingFallbackMic, cleaningNotices: AsyncStream<String>,
+        session: MeetingSession, system: SystemAudioSource, mic: MeetingMicrophoneSource, cleaningNotices: AsyncStream<String>,
         meetingID: UUID
     ) {
         self.session = session
@@ -418,18 +464,20 @@ final class MeetingController {
         cleaningNoticeTask = Task { [weak self] in
             for await text in cleaningNotices { self?.notices.post(text, kind: .live, meeting: meetingID) }
         }
-        let ownPID = ProcessInfo.processInfo.processIdentifier
         autoMuteTask = Task { [weak self] in
             for await processes in MicInUseMonitor().processChanges() {
                 guard let self else { return }
                 lastProcesses = processes
                 reevaluateMute()
-                // A call that starts later, or moves to another mic, takes the meeting mic along. A call app that
-                // closes its mic (muted) leaves it where it is.
-                if settings.inputDeviceUID == nil,
-                    let device = MeetingMicRoute.choose(processes: processes, ownPID: ownPID, defaultInput: nil).pinned {
-                    await mic.follow(device: device)
-                }
+            }
+        }
+        deviceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                refreshInputs()
+                await mic.update(selection: inputSelection, devices: captureInputs(for: inputSelection))
+                activeInputUID = await mic.activeDeviceUID
+                try? await Task.sleep(for: .seconds(2))
             }
         }
         clockTask = Task { [weak self] in
@@ -452,6 +500,8 @@ final class MeetingController {
 
     private func stopObserving() {
         autoMuteTask?.cancel()
+        deviceTask?.cancel()
+        deviceTask = nil
         clockTask?.cancel()
         tapTask?.cancel()
         micNoticeTask?.cancel()

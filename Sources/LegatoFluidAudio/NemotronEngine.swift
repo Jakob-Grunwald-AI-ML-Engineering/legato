@@ -11,7 +11,7 @@ import Synchronization
 ///   locale is that language hint; several run on `auto` and narrow to the first preferred one when the
 ///   detected language falls outside the set.
 /// - `prepare` throws ``DictationError/assetsNotInstalled`` unless the model is installed in `models`.
-public final class NemotronEngine: DictationEngine {
+public final class NemotronEngine: LiveLanguageConfigurableEngine {
     public let id: String
 
     private let variant: NemotronVariant
@@ -55,6 +55,17 @@ public final class NemotronEngine: DictationEngine {
         self.id = FluidAudioModels.nemotronID(variant, chunkMs: chunkMs)
     }
 
+    public var liveLanguageCodes: [String] {
+        variant == .latin ? FluidAudioModels.latinLanguages : FluidAudioModels.nemotronLanguages
+    }
+
+    public func setLanguage(_ locale: Locale?) async -> Bool {
+        if let locale, !liveLanguageCodes.contains(locale.language.languageCode?.identifier ?? "") { return false }
+        guard let updates = run.withLock({ $0?.languageUpdates }) else { return false }
+        updates.request(locale)
+        return true
+    }
+
     /// The hint provider this engine was built with.
     public var vocabularyProvider: (any VocabularyHintProvider)? { vocabulary }
 
@@ -85,7 +96,7 @@ public final class NemotronEngine: DictationEngine {
         let box = PartialBox()
         await manager.setPartialCallback { box.set($0) }
 
-        run.withLock { $0 = EngineRun(backend: NemotronBackend(manager: manager, box: box), clamp: clamp) }
+        run.withLock { $0 = EngineRun(backend: NemotronBackend(manager: manager, box: box), clamp: clamp, languageUpdates: LiveLanguageUpdates()) }
         return EngineSupport.audioFormat
     }
 
@@ -102,7 +113,7 @@ public final class NemotronEngine: DictationEngine {
                     var driver = SegmentDriver(
                         endpointer: SilenceEndpointer(silenceMs: silenceMs, rmsThreshold: rmsThreshold),
                         mapper: PartialEventMapper(),
-                        clamp: prepared.clamp)
+                        clamp: prepared.clamp, languageUpdates: prepared.languageUpdates)
                     try await driver.run(input, backend: prepared.backend) { continuation.yield($0) }
                     continuation.finish()
                 } catch {

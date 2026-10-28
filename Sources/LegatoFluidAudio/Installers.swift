@@ -285,8 +285,8 @@ public struct LocalVqeInstaller: ModelInstaller {
 
 /// The FluidAudio rows of the model catalog: descriptors plus the installer for each.
 public enum FluidAudioModels {
-    private static let nemotronLanguages = ["en", "es", "fr", "it", "pt", "de", "zh", "ja"]
-    private static let latinLanguages = ["en", "es", "fr", "it", "pt", "de"]
+    static let nemotronLanguages = ["en", "es", "fr", "it", "pt", "de", "zh", "ja"]
+    static let latinLanguages = ["en", "es", "fr", "it", "pt", "de"]
     private static let parakeetV3Languages = [
         "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it",
         "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
