@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var keepAlive = Settings.keepAlive
     @State private var haptics = Settings.keyboardHaptics
     @State private var clicks = Settings.keyboardClicks
+    @State private var automaticAutoFill = Settings.keyboardAutomaticAutoFill
     @State private var strip = Settings.keyboardStrip
     #if DEBUG
     @State private var stripHeight = Settings.keyboardStripHeight
@@ -89,6 +90,8 @@ struct SettingsView: View {
                 Toggle("Haptic feedback", isOn: $haptics)
                 Toggle("Key clicks", isOn: $clicks)
                 Toggle("Compact keyboard (strip)", isOn: $strip)
+                Toggle("Automatically switch for AutoFill", isOn: $automaticAutoFill)
+                    .accessibilityIdentifier("settings.automaticAutoFill")
                 #if DEBUG
                 Picker("Strip height", selection: $stripHeight) {
                     ForEach(StripHeight.candidates, id: \.self) { Text("\(Int($0)) pt").tag($0) }
@@ -100,7 +103,7 @@ struct SettingsView: View {
             } header: {
                 Text("Typing")
             } footer: {
-                Text("Haptics and clicks need Allow Full Access for the Legato keyboard (Settings > Legato > Keyboards). Clicks also follow the system's Keyboard Clicks switch in Settings > Sounds & Haptics. The compact keyboard is one row with the dictation status and the mic key; its chevron opens the full keyboard.")
+                Text("Haptics and clicks need Allow Full Access for the Legato keyboard (Settings > Legato > Keyboards). Clicks also follow the system's Keyboard Clicks switch in Settings > Sounds & Haptics. The compact keyboard is one row with the dictation status and the mic key; its chevron opens the full keyboard. AutoFill switching moves to the next enabled keyboard on username, password and verification-code fields. iOS controls keyboard order; long-press the key in Legato to choose a keyboard. You can switch back to Legato to keep typing.")
             }
 
             #if LEGATO_INTERNAL
@@ -131,6 +134,7 @@ struct SettingsView: View {
         }
         .onChange(of: haptics) { _, new in Settings.keyboardHaptics = new }
         .onChange(of: clicks) { _, new in Settings.keyboardClicks = new }
+        .onChange(of: automaticAutoFill) { _, new in Settings.keyboardAutomaticAutoFill = new }
         .onChange(of: strip) { _, new in Settings.keyboardStrip = new }
         #if DEBUG
         .onChange(of: stripHeight) { _, new in Settings.keyboardStripHeight = new }

@@ -13,6 +13,7 @@ struct KeyboardPreferences: Equatable {
 
     var haptics = true
     var clicks = true
+    var automaticAutoFill = AutoFillHandoff.defaultEnabled
     var strip = false
     var stripHeight = StripHeight.standard
 
@@ -25,6 +26,7 @@ struct KeyboardPreferences: Equatable {
         return KeyboardPreferences(
             haptics: defaults.object(forKey: hapticsKey) as? Bool ?? true,
             clicks: defaults.object(forKey: clicksKey) as? Bool ?? true,
+            automaticAutoFill: defaults.object(forKey: AutoFillHandoff.preferenceKey) as? Bool ?? AutoFillHandoff.defaultEnabled,
             strip: defaults.object(forKey: stripKey) as? Bool ?? false,
             stripHeight: StripHeight.resolve(stored: stored))
     }

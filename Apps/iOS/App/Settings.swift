@@ -83,6 +83,12 @@ enum Settings {
         set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.clicksKey) }
     }
 
+    /// Hand credential fields to the next enabled keyboard once per field. Default off.
+    static var keyboardAutomaticAutoFill: Bool {
+        get { AppGroup.defaults.object(forKey: AutoFillHandoff.preferenceKey) as? Bool ?? AutoFillHandoff.defaultEnabled }
+        set { AppGroup.defaults.set(newValue, forKey: AutoFillHandoff.preferenceKey) }
+    }
+
     /// The compact keyboard: one row with the dictation status, the mic key and a chevron that expands to the
     /// full keyboard. The keyboard reads the same key (`KeyboardPreferences`). Default off.
     static var keyboardStrip: Bool {

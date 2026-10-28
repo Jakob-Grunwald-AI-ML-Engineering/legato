@@ -24,6 +24,12 @@ import UIKit
 ///   Legato keyboard extension to (pins the field to the extension's input mode, see `SystemFieldHost`),
 ///   to look at the extension itself. Logs `systemfield modes=...` and the keyboard's own
 ///   `kbd.geometry` lines (see `KeyboardViewController`).
+/// - `-LegatoHarnessContentType username|password|newPassword|oneTimeCode|emailAddress|URL|none`:
+///   initial system field's semantic type. Other real fields below it cover credentials and ordinary prose.
+/// - `-LegatoHarnessSecure YES`: initial system field is secure (iOS supplies its native keyboard).
+/// - `-LegatoHarnessSingleField YES`: omit sibling fields to isolate host credential-form heuristics.
+/// - `-LegatoHarnessUnpinKeyboard YES`: release the Legato input-mode pin after initial focus, so native
+///   keyboard switching and the picker work normally; recommended for AutoFill tests.
 ///
 /// Commands (Darwin notifications): `harness-mic`, `harness-mic-hop` (a tap on the mic key in open-app
 /// mode, plus the URL its Link would open), `harness-type` (the scripted typing cases below),
@@ -288,38 +294,85 @@ private struct SystemFieldHost: UIViewControllerRepresentable {
 }
 
 private final class LegatoModeTextField: UITextField {
+    var pinsLegato = true
     override var textInputMode: UITextInputMode? {
-        UITextInputMode.activeInputModes.first { ($0.value(forKey: "identifier") as? String)?.contains("de.gruenwald.legato") == true }
+        guard pinsLegato else { return super.textInputMode }
+        return UITextInputMode.activeInputModes.first { ($0.value(forKey: "identifier") as? String)?.contains("de.gruenwald.legato") == true }
             ?? super.textInputMode
     }
 }
 
 private final class SystemFieldController: UIViewController {
     private let field = LegatoModeTextField()
+    private var didFocus = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
+        let defaults = UserDefaults.standard
+        let contentTypes: [String: UITextContentType] = [
+            "username": .username, "password": .password, "newPassword": .newPassword,
+            "oneTimeCode": .oneTimeCode, "emailAddress": .emailAddress, "URL": .URL,
+        ]
         field.accessibilityIdentifier = "systemfield.document"
-        field.borderStyle = .roundedRect
-        field.placeholder = "Legato keyboard"
-        field.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(field)
-        NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            field.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            field.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 60),
-        ])
-        if let mode = UserDefaults.standard.string(forKey: "LegatoHarnessAppearance") {
-            field.keyboardAppearance = mode == "dark" ? .dark : .light
+        field.placeholder = "Initial field"
+        field.textContentType = defaults.string(forKey: "LegatoHarnessContentType").flatMap { contentTypes[$0] }
+        field.isSecureTextEntry = defaults.bool(forKey: "LegatoHarnessSecure")
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(field)
+        let siblingFields: [(String, UITextContentType, Bool)] = [
+            ("username", UITextContentType.username, false),
+            ("password", .password, true),
+            ("newPassword", .newPassword, false),
+            ("oneTimeCode", .oneTimeCode, false),
+            ("emailAddress", .emailAddress, false),
+            ("prose", UITextContentType(rawValue: ""), false),
+        ]
+        for (name, type, secure) in defaults.bool(forKey: "LegatoHarnessSingleField") ? [] : siblingFields {
+            let extra = UITextField()
+            extra.placeholder = name
+            extra.accessibilityIdentifier = "systemfield.\(name)"
+            extra.textContentType = type
+            extra.isSecureTextEntry = secure
+            if name == "emailAddress" { extra.keyboardType = .emailAddress }
+            stack.addArrangedSubview(extra)
         }
+        for case let input as UITextField in stack.arrangedSubviews {
+            input.borderStyle = .roundedRect
+            input.autocorrectionType = .no
+            input.autocapitalizationType = .none
+            if let appearance = defaults.string(forKey: "LegatoHarnessAppearance") {
+                input.keyboardAppearance = appearance == "dark" ? .dark : .light
+            }
+        }
+        let releasePin = UIButton(type: .system)
+        releasePin.setTitle("Release keyboard pin", for: .normal)
+        releasePin.accessibilityIdentifier = "systemfield.releasePin"
+        releasePin.addAction(UIAction { [weak self] _ in
+            self?.field.pinsLegato = false
+            E2E.log("systemfield pin=released")
+        }, for: .touchUpInside)
+        stack.addArrangedSubview(releasePin)
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+        ])
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        guard !didFocus else { return }
+        didFocus = true
         let modes = UITextInputMode.activeInputModes.map { ($0.value(forKey: "identifier") as? String) ?? "?" }
         E2E.log("systemfield modes=\(E2E.quote(modes.joined(separator: ",")))")
         field.becomeFirstResponder()
+        if UserDefaults.standard.bool(forKey: "LegatoHarnessUnpinKeyboard") { field.pinsLegato = false }
     }
 }
 
