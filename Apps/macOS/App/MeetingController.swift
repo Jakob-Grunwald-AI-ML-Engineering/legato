@@ -19,8 +19,7 @@ import os
 /// - `stop` ends the capture and runs the after-stop chain (m4a, post-pass, speakers; the summary only when automatic) in a task.
 /// - Pause silences everything and keeps the timeline; End and Discard are the window's own, behind a confirmation.
 /// - The mic is muted when `AutoMutePolicy` says the call app closed its mic, or when the user says so.
-///   `MeetingMuteState` combines them: the user's choice wins in both directions until the automatic
-///   decision next changes.
+///   `MeetingMuteState` combines them: the user's choice wins in both directions until they toggle it again.
 /// - The meeting's mic is a second `AVAudioEngine` input beside push-to-talk dictation's own `MicSource`.
 ///   Two engines on the same input device are allowed by Core Audio; not driven on a device by the author.
 /// - A meeting never touches the dictation session.
@@ -227,12 +226,24 @@ final class MeetingController {
         }
         // The mic the call app records from, not just the default input (which may be a headset mic nobody uses).
         let monitor = MicInUseMonitor()
+        let manualUID = settings.inputDeviceUID
+        let selectedInput = manualUID.flatMap { uid in AudioDevices.inputs().first { $0.uid == uid }?.id }
+        if manualUID != nil && selectedInput == nil {
+            try? FileManager.default.removeItem(at: folder)
+            setPhase(.idle)
+            notices.post("The selected microphone is disconnected. Choose another microphone or Auto.", kind: .start, meeting: nil)
+            return
+        }
         let ownPID = ProcessInfo.processInfo.processIdentifier
+        let choice = MeetingMicRoute.choose(
+            processes: (try? monitor.activeProcesses()) ?? [], ownPID: ownPID,
+            defaultInput: AudioDevices.defaultInput(), selectedInput: selectedInput)
         let mic = VoiceProcessingFallbackMic(
-            voiceProcessing: engines.voiceProcessing, device: monitor.meetingMic(ownPID: ownPID).pinned,
+            voiceProcessing: engines.voiceProcessing, device: choice.pinned,
             devices: MicDevices(
                 defaultInput: { AudioDevices.defaultInput() }, name: { AudioDevices.name(of: $0) },
-                callInput: { monitor.meetingMic(ownPID: ownPID).pinned }))
+                callInput: { manualUID == nil ? monitor.meetingMic(ownPID: ownPID).pinned : nil }),
+            strictDevice: manualUID != nil)
         let system = SystemAudioSource()
         #if DEBUG
         let counter = ZeroCountingSource(system)
@@ -391,7 +402,8 @@ final class MeetingController {
                 reevaluateMute()
                 // A call that starts later, or moves to another mic, takes the meeting mic along. A call app that
                 // closes its mic (muted) leaves it where it is.
-                if let device = MeetingMicRoute.choose(processes: processes, ownPID: ownPID, defaultInput: nil).pinned {
+                if settings.inputDeviceUID == nil,
+                    let device = MeetingMicRoute.choose(processes: processes, ownPID: ownPID, defaultInput: nil).pinned {
                     await mic.follow(device: device)
                 }
             }

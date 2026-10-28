@@ -50,6 +50,12 @@ import Testing
     }
 
     /// Dictation (no device) rebuilds on every configuration change, as before.
+    @Test func anExplicitDeviceNeverFallsBackAfterADisconnect() {
+        #expect(!MicSource.mayFallbackToDefault(bound: 92, strictDevice: true))
+        #expect(MicSource.mayFallbackToDefault(bound: 92, strictDevice: false))
+        #expect(!MicSource.mayFallbackToDefault(bound: nil, strictDevice: false))
+    }
+
     @Test func anUnboundEngineIsAlwaysRebuilt() {
         #expect(MicSource.needsRebuild(running: true, current: 92, bound: nil))
         #expect(MicSource.needsRebuild(running: false, current: nil, bound: nil))

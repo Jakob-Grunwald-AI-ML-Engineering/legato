@@ -305,6 +305,15 @@ private func eventually(_ condition: @Sendable () -> Bool) async -> Bool {
         await reader.value
     }
 
+    @Test func anExplicitMicrophoneNeverFallsBackToTheDefault() async {
+        let factory = Factory([], refused: [builtIn])
+        let source = VoiceProcessingFallbackMic(
+            voiceProcessing: false, device: builtIn, devices: devices(call: nil), strictDevice: true,
+            makeMic: { factory.make($0, $1) })
+        await #expect(throws: MicSourceError.self) { _ = try await source.start(format: format) }
+        #expect(factory.mics.map(\.device) == [builtIn])
+    }
+
     @Test func aRefusedDeviceIsNotRetriedOnEveryFollow() async throws {
         let factory = Factory([], refused: [builtIn])
         let source = VoiceProcessingFallbackMic(

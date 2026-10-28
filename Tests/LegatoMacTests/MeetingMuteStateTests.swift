@@ -29,15 +29,25 @@ import Testing
         #expect(s.effective == true)
     }
 
-    @Test func theOverrideClearsWhenTheAutoDecisionNextChanges() {
+    @Test func manualUnmuteStaysUntilTheUserChangesIt() {
         var s = MeetingMuteState()
         s.setAuto(true)
         s.toggle()                 // unmuted by hand during the auto-mute
-        s.setAuto(false)           // the call app is back: auto follows again
-        #expect(s.manualOverride == nil)
+        s.setAuto(false)           // the call app is back: keep the explicit choice
+        #expect(s.manualOverride == false)
         #expect(s.effective == false)
         s.setAuto(true)
+        #expect(s.effective == false)
+    }
+
+    @Test func manualMuteSurvivesCallMuteChanges() {
+        var s = MeetingMuteState()
+        s.toggle()
+        s.setAuto(true)
+        s.setAuto(false)
         #expect(s.effective == true)
+        s.toggle()
+        #expect(s.effective == false)
     }
 
     @Test func toggleAlwaysFlipsTheEffectiveState() {

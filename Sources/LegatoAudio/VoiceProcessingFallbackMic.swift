@@ -92,6 +92,7 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     private let voiceProcessing: Bool
     private let guardian: MicSilenceGuard
     private let devices: MicDevices
+    private let strictDevice: Bool
 
     /// - Parameters:
     ///   - voiceProcessing: whether to try voice processing first.
@@ -101,11 +102,12 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     ///   - makeMic: builds a microphone with voice processing on or off on a device, one per start and per switch.
     public init(
         voiceProcessing: Bool, guardian: MicSilenceGuard = MicSilenceGuard(), device: UInt32? = nil,
-        devices: MicDevices = .unknown, makeMic: @escaping @Sendable (Bool, UInt32?) -> any AudioSource
+        devices: MicDevices = .unknown, strictDevice: Bool = false, makeMic: @escaping @Sendable (Bool, UInt32?) -> any AudioSource
     ) {
         self.voiceProcessing = voiceProcessing
         self.guardian = guardian
         self.devices = devices
+        self.strictDevice = strictDevice
         self.make = makeMic
         state = Mutex(State(wanted: device))
         (notices, noticeSink) = AsyncStream.makeStream(of: String.self)
@@ -121,10 +123,10 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
     }
 
     /// The microphone a meeting uses: Apple's `MicSource`, with voice processing as asked, on `device`.
-    public convenience init(voiceProcessing: Bool, device: UInt32? = nil, devices: MicDevices = .unknown) {
+    public convenience init(voiceProcessing: Bool, device: UInt32? = nil, devices: MicDevices = .unknown, strictDevice: Bool = false) {
         self.init(
-            voiceProcessing: voiceProcessing, device: device, devices: devices,
-            makeMic: { MicSource(voiceProcessing: $0, device: $1) })
+            voiceProcessing: voiceProcessing, device: device, devices: devices, strictDevice: strictDevice,
+            makeMic: { MicSource(voiceProcessing: $0, device: $1, strictDevice: strictDevice) })
     }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
@@ -194,7 +196,7 @@ public final class VoiceProcessingFallbackMic: ResumableAudioSource {
         let chunks: AsyncStream<AudioChunk>
         do {
             chunks = try await source.start(format: format)
-        } catch MicSourceError.deviceNotSelected(let refused, _) where device != nil {
+        } catch MicSourceError.deviceNotSelected(let refused, _) where device != nil && !strictDevice {
             state.withLock { $0.refused = (refused, voiceProcessing) }
             noticeSink.yield(Self.deviceNotSelectedNotice(devices.name(refused)))
             try await launch(voiceProcessing: voiceProcessing, device: nil, format: format, lifecycle: lifecycle)

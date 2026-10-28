@@ -49,8 +49,7 @@ public struct AutoMutePolicy: Sendable {
 
 /// The effective mute of "me" in a Mac meeting: the automatic decision, unless the user overrode it.
 ///
-/// Manual mute wins in both directions. The override lasts until the automatic decision next changes
-/// (the call app mutes or unmutes), and then the automatic decision is followed again.
+/// Manual mute wins in both directions for the rest of the meeting, until the user toggles it again.
 public struct MeetingMuteState: Sendable, Equatable {
     /// The user's choice; `nil` follows the automatic decision.
     public private(set) var manualOverride: Bool?
@@ -60,11 +59,9 @@ public struct MeetingMuteState: Sendable, Equatable {
 
     public var effective: Bool { manualOverride ?? autoWants }
 
-    /// Records the automatic decision; a change of it clears the user's override.
+    /// Records the automatic decision while preserving the user's explicit choice.
     public mutating func setAuto(_ wants: Bool) {
-        guard wants != autoWants else { return }
         autoWants = wants
-        manualOverride = nil
     }
 
     /// The button or hotkey: flips what is in effect now.

@@ -46,6 +46,13 @@ import Testing
         #expect(choice == MeetingMicChoice(device: airPods, followsCall: false))
     }
 
+    @Test func explicitInputWinsOverTheCallAndDefault() {
+        let choice = MeetingMicRoute.choose(
+            processes: [call(teams, on: [airPods])], ownPID: me, defaultInput: airPods, selectedInput: builtIn)
+        #expect(choice.device == builtIn)
+        #expect(choice.pinned == builtIn)
+    }
+
     @Test func noDefaultAndNoCallAppIsNoDevice() {
         #expect(MeetingMicRoute.choose(processes: [], ownPID: me, defaultInput: nil) == MeetingMicChoice(device: nil, followsCall: false))
     }

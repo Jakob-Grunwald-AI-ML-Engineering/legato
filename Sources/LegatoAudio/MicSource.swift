@@ -143,6 +143,7 @@ public final class MicSource: ResumableAudioSource {
     private let onConfigurationChange: (@Sendable (ConfigurationChange) -> Void)?
     private let voiceProcessing: Bool
     private let device: UInt32?
+    private let strictDevice: Bool
     private let resumeSink: AsyncStream<Void>.Continuation
 
     /// Yields each time the engine was rebuilt after a device or format change (macOS), so a meeting can
@@ -159,7 +160,7 @@ public final class MicSource: ResumableAudioSource {
     ///   - device: macOS only; ignored on iOS. The Core Audio input device to record from, bound on every fresh
     ///     engine before its format is read. nil (the default) records from the system default input and follows
     ///     it. A device that cannot be bound makes `start(format:)` throw `MicSourceError.deviceNotSelected`;
-    ///     when it goes away later, the rebuilt engine records from the default input.
+    ///     when it goes away later, the rebuilt engine records from the default input unless strictDevice is true.
     ///   - onConfigurationChange: iOS only; schedules invalidation after this source's engine stops for a
     ///     configuration change. Check `requiresStop` again when handling it, as stop/start can supersede it.
     public init(
@@ -167,12 +168,14 @@ public final class MicSource: ResumableAudioSource {
         onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil,
         voiceProcessing: Bool = false,
         device: UInt32? = nil,
+        strictDevice: Bool = false,
         onConfigurationChange: (@Sendable (ConfigurationChange) -> Void)? = nil
     ) {
         self.onConfigurationChange = onConfigurationChange
         self.onAttempt = onAttempt
         self.onFirstBuffer = onFirstBuffer
         self.voiceProcessing = voiceProcessing
+        self.strictDevice = strictDevice
         self.device = device
         (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
     }
@@ -335,9 +338,9 @@ public final class MicSource: ResumableAudioSource {
         }
         old.engine.inputNode.removeTap(onBus: 0)
         old.engine.stop()
-        // A bound device that is gone leaves the default input, which the meeting's dead-mic check then judges.
+        // Automatic routing can fall back; an explicitly selected device never opens another microphone.
         var rebuilt = try? await launchEngine(format: format, device: device)
-        if rebuilt == nil, device != nil { rebuilt = try? await launchEngine(format: format, device: nil) }
+        if rebuilt == nil, Self.mayFallbackToDefault(bound: device, strictDevice: strictDevice) { rebuilt = try? await launchEngine(format: format, device: nil) }
         guard let fresh = rebuilt else {
             router.setSink(nil)
             return
@@ -354,6 +357,11 @@ public final class MicSource: ResumableAudioSource {
             fresh.engine.inputNode.removeTap(onBus: 0)
             fresh.engine.stop()
         }
+    }
+
+    /// Whether an unavailable pinned input may be replaced by the default input.
+    static func mayFallbackToDefault(bound: UInt32?, strictDevice: Bool) -> Bool {
+        bound != nil && !strictDevice
     }
 
     #if os(macOS)
