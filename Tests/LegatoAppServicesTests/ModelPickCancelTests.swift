@@ -1,5 +1,5 @@
 import Foundation
-import LegatoMLX
+import LegatoCoreML
 import LegatoModels
 import Synchronization
 import Testing
@@ -149,7 +149,7 @@ private let parakeet = "parakeet-eou-320"
     @Test func cancellingACleanupModelDownloadWorksTheSame() async throws {
         let rig = Rig()
         let done = Done()
-        let qwen = MLXModels.qwen3_1_7bID
+        let qwen = CoreMLModels.qwen3_1_7bID
         rig.services.pick(qwen, role: .cleanup, done: done.callback("pick"))
         #expect(await until { await rig.downloading(qwen) })
         await rig.services.cancelDownload(qwen)

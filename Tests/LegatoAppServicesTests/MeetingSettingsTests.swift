@@ -12,7 +12,7 @@ import Testing
     @Test func defaults() {
         let s = settings()
         #expect(s.customPrompt == "")
-        #expect(s.backend == .auto)
+        #expect(s.backend == .foundationModels)
         #expect(s.voiceProcessing)
         #expect(s.autoMute)
     }

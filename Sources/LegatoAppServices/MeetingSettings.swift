@@ -11,7 +11,7 @@ public enum EchoNoiseMode: String, Sendable, Equatable, CaseIterable {
 
 /// The meeting settings in an injected `UserDefaults` (the App Group's on the phone, the app's on the Mac).
 /// Defaults: summary on click (not automatic) with the sections Summary, Decisions and Action items ticked, backend
-/// Auto, echo and noise cancellation LocalVQE, live and after-meeting diarization on, idle processing on, language
+/// explicit Foundation Models, echo and noise cancellation LocalVQE, live and after-meeting diarization on, idle processing on, language
 /// Auto, auto-mute on.
 public struct MeetingSettings: Sendable {
     // UserDefaults is documented thread-safe but not annotated Sendable.
@@ -40,6 +40,7 @@ public struct MeetingSettings: Sendable {
     }
 
     public init(defaults: UserDefaults) {
+        CleanupSelectionMigration.migrate(defaults)
         self.defaults = defaults
     }
 
@@ -53,7 +54,7 @@ public struct MeetingSettings: Sendable {
     /// Which on-device backend writes the automatic summary. Claude is never a choice here: it is explicit,
     /// per meeting.
     public var backend: CleanupBackendChoice {
-        get { defaults.string(forKey: Key.backend).flatMap(CleanupBackendChoice.init(rawValue:)) ?? .auto }
+        get { defaults.string(forKey: Key.backend).flatMap(CleanupBackendChoice.init(rawValue:)) ?? .coreML }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.backend) }
     }
 

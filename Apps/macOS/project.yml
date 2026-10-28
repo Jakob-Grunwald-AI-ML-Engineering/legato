@@ -46,8 +46,6 @@ targets:
       - package: LegatoKit
         product: LegatoPostProcessing
       - package: LegatoKit
-        product: LegatoMLX
-      - package: LegatoKit
         product: LegatoAppServices
       # Meeting notes: the session and store, and the opt-in Claude summary backend with its Keychain key.
       - package: LegatoKit

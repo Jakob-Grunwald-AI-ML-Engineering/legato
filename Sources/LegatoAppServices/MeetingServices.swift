@@ -5,7 +5,6 @@ import LegatoClaude
 import LegatoCore
 import LegatoEngines
 import LegatoFluidAudio
-import LegatoMLX
 import LegatoMeetings
 import LegatoModels
 import Synchronization
@@ -91,7 +90,6 @@ public final class MeetingServices {
 
     private let registry: EngineRegistry
     private let cleanup: CleanupRegistry
-    private let background: CleanupRegistry.BackgroundCleanup
     private let makeClaude: @Sendable () -> any LLMBackend
     private let sampler: @Sendable () -> IdleSample
     private let immediateProcessing: Bool
@@ -100,7 +98,6 @@ public final class MeetingServices {
 
     /// - Parameters:
     ///   - cleanup: the registry the summary backend resolves through; the models' own by default.
-    ///   - background: what the summary does while the GPU is not usable (the phone in the background).
     ///   - claudeBackend: replaces the Claude backend (tests); nil builds a ``ClaudeBackend`` over `keyStore`.
     ///   - sampler: the machine's load and input idleness (the Mac's real one; the phone's always idle).
     ///   - immediateProcessing: run the heavy steps without waiting for idleness (the debug launch argument).
@@ -108,7 +105,7 @@ public final class MeetingServices {
     public init(
         models: ModelServices, store: MeetingStore, settings: MeetingSettings, keyStore: any APIKeyStore,
         claudeSession: URLSession? = nil, cleanup: CleanupRegistry? = nil,
-        claudeBackend: (any LLMBackend)? = nil, background: CleanupRegistry.BackgroundCleanup = .cpu,
+        claudeBackend: (any LLMBackend)? = nil,
         sampler: @escaping @Sendable () -> IdleSample = { .idle },
         immediateProcessing: Bool = ProcessingScheduler.launchImmediate, pollInterval: Duration? = .seconds(5)
     ) {
@@ -116,7 +113,6 @@ public final class MeetingServices {
         self.settings = settings
         self.registry = models.engines
         self.cleanup = cleanup ?? models.cleanup
-        self.background = background
         self.sampler = sampler
         self.immediateProcessing = immediateProcessing
         self.pollInterval = pollInterval
@@ -229,7 +225,7 @@ public final class MeetingServices {
 
     /// The on-device backend for Summarize (and the automatic summary), as the stored choice resolves. Never Claude.
     public func summaryBackend() async -> (any LLMBackend)? {
-        await cleanup.resolve(preference: settings.backend.preference, background: background).backend
+        await cleanup.resolve(preference: settings.backend.preference).backend
     }
 
     /// The Claude backend. Used only by ``summarizeWithClaude(meetingID:)``.
@@ -318,13 +314,12 @@ public final class MeetingServices {
     public func pipeline(onStep: @escaping @Sendable (Meeting.Step) -> Void = { _ in }) -> MeetingPipeline {
         if let pipelineOverride { return pipelineOverride().reporting(onStep) }
         let registry = self.registry, cleanup = self.cleanup, settings = self.settings
-        let background = self.background
         let recording = self.recording
         return MeetingPipeline(
             store: store,
             audio: { MeetingAudioWriter(folder: $0) },
             transcriber: { await registry.postPassTranscriber() },
-            backend: { await cleanup.resolve(preference: settings.backend.preference, background: background).backend },
+            backend: { await cleanup.resolve(preference: settings.backend.preference).backend },
             sections: { settings.sections(for: $0) },
             summarizeAutomatically: { settings.summarizeAutomatically },
             batchDiarizer: { await registry.batchDiarizer() },

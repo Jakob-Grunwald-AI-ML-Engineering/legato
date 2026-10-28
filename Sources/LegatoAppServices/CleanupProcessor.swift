@@ -1,7 +1,6 @@
 import Foundation
 import LegatoCore
 import LegatoCoreML
-import LegatoMLX
 import LegatoPostProcessing
 import Observation
 import Synchronization
@@ -14,7 +13,7 @@ public struct CleanupRunReport: Sendable, Equatable {
     public var changed: Bool
     public var milliseconds: Int
     public var refine: Bool
-    /// "GPU" or "CPU" for an MLX model; nil for any other backend.
+    /// Configured execution policy when supplied by the backend; physical placement remains unverified.
     public var device: String?
     /// Every outcome is retained when live passes are aggregated.
     public var outcome: String = "completed"
@@ -155,7 +154,7 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         let itn = settings.itn
         let terms = await vocabulary?.cleanupTerms(for: text) ?? []
         let (pipeline, resolution) = await registry.pipeline(
-            style: style, itn: itn, preference: settings.backend.preference, background: settings.backgroundCleanup,
+            style: style, itn: itn, preference: settings.backend.preference,
             timeout: timeout, context: context, vocabulary: terms)
         let out = await pipeline.processReporting(text, locale: locale)
         if out.text != text {
@@ -166,7 +165,7 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         var run = CleanupRunReport(
             backend: name(resolution.choice, itn: itn), skipped: resolution.skipped.map(\.description), style: style,
             changed: out.text != text, milliseconds: Int(elapsed / .milliseconds(1)), refine: refine,
-            device: resolution.execution ?? resolution.device?.label)
+            device: resolution.execution)
         run.outcome = Task.isCancelled ? "cancelled"
             : out.timedOut ? "timedOut"
             : out.guardRejected ? "guardRejected"
@@ -178,7 +177,6 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     public static func name(_ choice: CleanupRegistry.Choice, itn: Bool) -> String {
         switch choice {
         case .coreML(let id): CoreMLModels.spec(id: id)?.displayName ?? id
-        case .mlx(let id): MLXModels.spec(id: id)?.displayName ?? id
         case .foundationModels: "Apple Foundation Models"
         case .itnOnly: itn ? "ITN only (no language model)" : "None (no language model)"
         }

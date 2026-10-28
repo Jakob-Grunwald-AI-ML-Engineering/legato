@@ -1,6 +1,5 @@
 import LegatoAppServices
 import LegatoCore
-import LegatoMLX
 import LegatoModels
 import LegatoPostProcessing
 import SwiftUI
@@ -16,18 +15,19 @@ struct CleanupSettingsView: View {
     @State private var backend = Settings.cleanupBackend
     @State private var itn = Settings.cleanupITN
     @State private var timeout = Double(Settings.cleanupTimeoutSeconds)
-    @State private var selectedMLX: String?
+    @State private var selectedModel: String?
+    @State private var modelTerms: CleanupModelTerms?
     @State private var pending: String?
     @State private var failures: [String: String] = [:]
 
     private var models: ModelServices { controller.models }
 
-    private var selectedMLXName: String? {
-        selectedMLX.flatMap { id in models.cleanupModels.first { $0.id == id }?.displayName }
+    private var selectedModelName: String? {
+        selectedModel.flatMap { id in models.cleanupModels.first { $0.id == id }?.displayName }
     }
 
     private var usesCoreML: Bool {
-        backend == .coreML || (backend == .auto && selectedMLX.map { models.cleanupChoice(for: $0) == .coreML } == true)
+        backend == .coreML
     }
 
     var body: some View {
@@ -72,23 +72,23 @@ struct CleanupSettingsView: View {
             }
             #else
             Section {
-                backendRow("Auto", detail: "Your selected model; Apple Foundation Models when none is selected", choice: .auto)
                 backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence)", choice: .foundationModels)
                 ForEach(models.cleanupModels) { descriptor in
                     ModelRow(
                         descriptor: descriptor, manager: models.manager,
-                        isSelected: backend == models.cleanupChoice(for: descriptor.id) && selectedMLX == descriptor.id,
+                        isSelected: backend == models.cleanupChoice(for: descriptor.id) && selectedModel == descriptor.id,
                         isPending: pending == descriptor.id, failure: failures[descriptor.id],
                         onCancel: { cancelDownload(descriptor.id) }
-                    ) { pickMLX(descriptor.id) }
+                    ) { pickModel(descriptor.id) }
                     .swipeActions {
                         Button("Delete", role: .destructive) { delete(descriptor.id) }
                     }
                 }
             } header: {
-                Text("Backend")
+                Text("Cleanup model")
             } footer: {
-                Text("Picking a model downloads it first. Auto uses the model picked last: \(selectedMLXName ?? "none yet").")
+                Text("Picking a downloaded model installs and prepares it first. The selected model is used in every app state; unavailable models keep the raw text.")
+                if backend == .coreML, selectedModelName == nil { Text("Choose a Core ML model to install and prepare it.") }
                 if usesCoreML { Text("Core ML uses the same selected model in Legato and from the keyboard.") }
             }
 
@@ -107,7 +107,13 @@ struct CleanupSettingsView: View {
             }
         }
         .navigationTitle("Cleanup")
-        .onAppear { selectedMLX = models.selected(.cleanup) }
+        .sheet(item: $modelTerms) { terms in
+            CleanupTermsSheet(terms: terms) {
+                modelTerms = nil
+                downloadModel(terms.id)
+            }
+        }
+        .onAppear { selectedModel = models.selected(.cleanup) }
         .onChange(of: enabled) { _, new in
             Settings.cleanupEnabled = new
             controller.cleanupSettingsChanged()
@@ -142,7 +148,14 @@ struct CleanupSettingsView: View {
         .accessibilityIdentifier("cleanup.backend.\(choice.rawValue)")
     }
 
-    private func pickMLX(_ id: String) {
+    private func pickModel(_ id: String) {
+        do {
+            if let terms = try CleanupModelTerms.forModel(id) { modelTerms = terms }
+            else { downloadModel(id) }
+        } catch { failures[id] = "Model terms could not be opened: \(error.localizedDescription)" }
+    }
+
+    private func downloadModel(_ id: String) {
         failures[id] = nil
         pending = id
         models.pick(id, role: .cleanup) { error in
@@ -150,7 +163,7 @@ struct CleanupSettingsView: View {
             if let error {
                 failures[id] = String(describing: error)
             } else {
-                selectedMLX = models.selected(.cleanup)
+                selectedModel = models.selected(.cleanup)
                 backend = models.cleanupChoice(for: id)
                 Settings.cleanupBackend = backend
                 controller.cleanupSettingsChanged()
@@ -167,8 +180,7 @@ struct CleanupSettingsView: View {
         if pending == id { pending = nil }
         Task {
             await models.manager.delete(id)
-            selectedMLX = models.selected(.cleanup)
-            if selectedMLX == nil, backend == .mlx || backend == .coreML { backend = .auto }
+            selectedModel = models.selected(.cleanup)
             Settings.cleanupBackend = backend
             controller.cleanupSettingsChanged()
         }
@@ -185,5 +197,34 @@ struct CleanupSettingsView: View {
         case .live:
             "Live: after each phrase the whole text so far is cleaned again and replaces what you see, so a later \"no wait, Thursday\" can fix an earlier phrase; a last pass runs when you stop. Once you edit the text it stays as you left it. Sending the message (the field clears) keeps going with a fresh text."
         }
+    }
+}
+
+/// Terms stay available offline in the same flow that authorizes the download.
+private struct CleanupTermsSheet: View {
+    let terms: CleanupModelTerms
+    let agree: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Gemma model terms").font(.title2)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(terms.notice)
+                    Text("Your use of Gemma is governed by the Gemma Terms of Use and its Prohibited Use Policy below. Agreeing to download means you agree to comply with both, including the use restrictions in Section 3.2.")
+                    Text("Terms of Use").font(.headline)
+                    Text(terms.terms)
+                    Text("Prohibited Use Policy").font(.headline)
+                    Text(terms.restrictions)
+                }
+                .textSelection(.enabled)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) { dismiss() }
+                Spacer()
+                Button("Agree and download", action: agree).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
     }
 }

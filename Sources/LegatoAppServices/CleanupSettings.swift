@@ -1,26 +1,15 @@
 import Foundation
 import LegatoCore
-import LegatoCoreML
-import LegatoMLX
-import LegatoModels
 import LegatoPostProcessing
 
-/// Which backend cleanup uses. Stored as its raw value.
+/// Explicit system model or selected downloaded Core ML model. Legacy raw values migrate on opening settings.
 public enum CleanupBackendChoice: String, CaseIterable, Sendable {
-    /// The selected Core ML or MLX model; Foundation Models when no local model is selected.
-    case auto
-    /// Apple Foundation Models only.
     case foundationModels
-    /// The picked MLX model (in the phone's background as the background setting says: on the CPU by default).
-    case mlx
-    /// The selected Core ML model; prewarmed CPU/Neural Engine resources work in the background.
     case coreML
-
     public var preference: CleanupRegistry.BackendPreference {
         switch self {
         case .foundationModels: .foundationModels
         case .coreML: .coreML
-        case .auto, .mlx: .auto
         }
     }
 }
@@ -35,12 +24,10 @@ public struct CleanupOptions: Sendable, Equatable {
     public var itn: Bool
     /// Per-stage limit, 1 to 10 seconds.
     public var timeoutSeconds: Int
-    /// What runs while the GPU is not usable (the phone app in the background).
-    public var background: CleanupRegistry.BackgroundCleanup
 
     public init(
         enabled: Bool, delivery: CleanupDelivery, style: CleanupStyle, backend: CleanupBackendChoice, itn: Bool,
-        timeoutSeconds: Int, background: CleanupRegistry.BackgroundCleanup = .cpu
+        timeoutSeconds: Int
     ) {
         self.enabled = enabled
         self.delivery = delivery
@@ -48,13 +35,12 @@ public struct CleanupOptions: Sendable, Equatable {
         self.backend = backend
         self.itn = itn
         self.timeoutSeconds = timeoutSeconds
-        self.background = background
     }
 }
 
 /// The cleanup settings in an injected `UserDefaults` (the App Group's on the phone, the app's on the Mac).
-/// Off by default; delivery Replace, style Verbatim, backend Auto, ITN off (#22), 4 s per stage, background
-/// cleanup on the CPU. Core ML defaults to 8 seconds unless the user has chosen a time limit.
+/// Off by default; delivery Replace, style Verbatim, explicit Foundation Models, ITN off (#22).
+/// Core ML defaults to 8 seconds and Foundation Models to 4 unless the user chose a time limit.
 public struct CleanupSettingsStore: Sendable {
     // UserDefaults is documented thread-safe but not annotated Sendable.
     nonisolated(unsafe) private let defaults: UserDefaults
@@ -66,10 +52,10 @@ public struct CleanupSettingsStore: Sendable {
         static let backend = "cleanup.backend"
         static let itn = "cleanup.itn"
         static let timeoutSeconds = "cleanup.timeoutSeconds"
-        static let background = "cleanup.background"
     }
 
     public init(defaults: UserDefaults) {
+        CleanupSelectionMigration.migrate(defaults)
         self.defaults = defaults
     }
 
@@ -90,7 +76,7 @@ public struct CleanupSettingsStore: Sendable {
     }
 
     public var backend: CleanupBackendChoice {
-        get { defaults.string(forKey: Key.backend).flatMap(CleanupBackendChoice.init(rawValue:)) ?? .auto }
+        get { defaults.string(forKey: Key.backend).flatMap(CleanupBackendChoice.init(rawValue:)) ?? .coreML }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.backend) }
     }
 
@@ -107,9 +93,6 @@ public struct CleanupSettingsStore: Sendable {
                 switch backend {
                 case .coreML: return 8
                 case .foundationModels: return 4
-                case .auto, .mlx:
-                    let selected = SelectionStore(defaults: defaults).selected(for: .cleanup)
-                    return selected.flatMap { CoreMLModels.spec(id: $0) } == nil ? 4 : 8
                 }
             }
             return min(max(stored, 1), 10)
@@ -117,15 +100,8 @@ public struct CleanupSettingsStore: Sendable {
         nonmutating set { defaults.set(min(max(newValue, 1), 10), forKey: Key.timeoutSeconds) }
     }
 
-    /// What cleanup does while the GPU is not usable (the phone app in the background). Default the CPU.
-    public var backgroundCleanup: CleanupRegistry.BackgroundCleanup {
-        get { defaults.string(forKey: Key.background).flatMap(CleanupRegistry.BackgroundCleanup.init(rawValue:)) ?? .cpu }
-        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.background) }
-    }
-
     public var options: CleanupOptions {
         CleanupOptions(
-            enabled: enabled, delivery: delivery, style: style, backend: backend, itn: itn, timeoutSeconds: timeoutSeconds,
-            background: backgroundCleanup)
+            enabled: enabled, delivery: delivery, style: style, backend: backend, itn: itn, timeoutSeconds: timeoutSeconds)
     }
 }

@@ -4,13 +4,12 @@ import LegatoAppleSpeech
 import LegatoCoreML
 import LegatoEngines
 import LegatoFluidAudio
-import LegatoMLX
 import LegatoModels
 import LegatoPostProcessing
 import os
 
 /// An app's one owner of the downloadable models: the catalog for this platform (FluidAudio speech models
-/// and MLX cleanup models) with their install states and picks, the engine registry and the cleanup registry.
+/// and Core ML cleanup models) with their install states and picks, the engine registry and the cleanup registry.
 ///
 /// Nothing downloads implicitly: only a pick (`pick`, which installs and warms first: "load on pick") or
 /// nothing at all. The previous pick stays live until the new one is installed.
@@ -56,6 +55,7 @@ public final class ModelServices {
         root: URL, defaults: UserDefaults, platform: ModelPlatform, installers custom: [String: any ModelInstaller]?,
         vocabulary: (any VocabularyHintProvider)? = nil
     ) {
+        CleanupSelectionMigration.migrate(defaults)
         self.modelRoot = root
         speechResources = AppleSpeechEngine(vocabulary: vocabulary)
         FluidAudioModels.pinRevisions()
@@ -63,9 +63,8 @@ public final class ModelServices {
         familySelection = FamilySelection(selection: selection, tiers: FamilyTierStore(defaults: defaults))
         engineSettings = EngineSettings(defaults: defaults)
         let speech = FluidAudioCatalog.descriptors(platform: platform)
-        let llms = MLXModels.descriptors(platform: platform) + CoreMLModels.descriptors(platform: platform)
+        let llms = CoreMLModels.descriptors(platform: platform)
         let installers = custom ?? FluidAudioCatalog.installers(platform: platform)
-            .merging(MLXModels.installers(platform: platform)) { first, _ in first }
             .merging(CoreMLModels.installers(platform: platform)) { first, _ in first }
         catalog = speech + llms
         streamingFamilies = ModelFamily.groups(of: speech, kind: .speechStreaming)
@@ -77,8 +76,6 @@ public final class ModelServices {
             onWillDelete: { id, folder in
                 if CoreMLModels.spec(id: id) != nil {
                     await CoreMLModels.release(folder: folder)
-                } else if MLXModels.spec(id: id) != nil {
-                    await MLXModels.release(folder: folder)
                 } else {
                     await FluidAudioModels.release(folder: folder)
                 }
@@ -109,7 +106,7 @@ public final class ModelServices {
     }
 
     public func cleanupChoice(for modelID: String) -> CleanupBackendChoice {
-        CoreMLModels.spec(id: modelID) == nil ? .mlx : .coreML
+        .coreML
     }
 
     private func selectedResources(options: CleanupOptions) async -> [SelectedModelWarmup.Resource] {
@@ -135,19 +132,22 @@ public final class ModelServices {
         let manager = self.manager
         // A selected local model has the same resource identity in foreground and background.
         // Disabled cleanup still retains its pick for the independent Refine key.
-        if selectedCleanup == nil {
+        if preference == .foundationModels {
             resources.append(.init(key: "cleanup:foundation-models", prewarm: {
                 if await fallback.availability.isAvailable { try await fallback.prewarmResources() }
             }, release: { await fallback.releaseWarmResources() }))
         }
-        if let id = selectedCleanup {
+        if preference == .coreML {
+            let id = selectedCleanup ?? "unselected"
             resources.append(.init(key: "cleanup:" + id, prewarm: { [weak self] in
                 do {
-                    guard case .installed = await manager.state(of: id) else { return }
+                    guard case .installed = await manager.state(of: id) else {
+                        throw LLMError.unavailable(reason: "Choose and prepare the selected Core ML cleanup model in Legato.")
+                    }
                     if let spec = CoreMLModels.spec(id: id) {
                         try await CoreMLModelStore.shared.backend(for: spec, root: root).prepare()
-                    } else if preference == .auto, let spec = MLXModels.spec(id: id) {
-                        try await MLXBackend(spec: spec, folder: spec.folder(root: root)).prewarmResources()
+                    } else {
+                        throw LLMError.unavailable(reason: "Choose a model from the Core ML cleanup catalog in Legato.")
                     }
                     await self?.setCleanupPreparationNotice(nil)
                 } catch is CancellationError {
@@ -160,8 +160,6 @@ public final class ModelServices {
             }, release: {
                 if let spec = CoreMLModels.spec(id: id) {
                     await CoreMLModels.release(folder: spec.folder(root: root))
-                } else if let spec = MLXModels.spec(id: id) {
-                    await MLXModels.release(folder: spec.folder(root: root))
                 }
             }))
         }
@@ -288,7 +286,7 @@ public final class ModelServices {
         await manager.cancel(id)
     }
 
-    /// Back to the zero-download default for `role` (Apple Speech, or no MLX model): cancels a pick in
+    /// Back to the zero-download default for `role` (Apple Speech, or no local cleanup model): cancels a pick in
     /// flight and its download, unless something else still waits for it.
     public func clearPick(_ role: ModelRole) {
         picks[role]?.cancel()

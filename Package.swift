@@ -133,14 +133,14 @@ let package = Package(
         .target(
             name: "LegatoAppServices",
             dependencies: [
-                "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoMLX", "LegatoCoreML", "LegatoPostProcessing",
+                "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoCoreML", "LegatoPostProcessing",
                 "LegatoAppleSpeech", "LegatoAudio", "LegatoMeetings", "LegatoClaude", "LegatoVocabulary",
             ]
         ),
         .testTarget(
             name: "LegatoAppServicesTests",
             dependencies: [
-                "LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoPostProcessing", "LegatoVocabulary",
+                "LegatoAppServices", "LegatoCore", "LegatoModels", "LegatoCoreML", "LegatoPostProcessing", "LegatoVocabulary",
                 "LegatoEngines", "LegatoMeetings", "LegatoClaude", "LegatoFluidAudio",
             ]
         ),

@@ -9,14 +9,15 @@ import SwiftUI
 struct CleanupSettingsView: View {
     @Environment(MacAppController.self) private var controller
 
-    @State private var selectedMLX: String?
+    @State private var selectedModel: String?
+    @State private var modelTerms: CleanupModelTerms?
     @State private var pending: String?
     @State private var failures: [String: String] = [:]
 
     private var models: ModelServices { controller.models }
 
-    private var selectedMLXName: String? {
-        selectedMLX.flatMap { id in models.cleanupModels.first { $0.id == id }?.displayName }
+    private var selectedModelName: String? {
+        selectedModel.flatMap { id in models.cleanupModels.first { $0.id == id }?.displayName }
     }
 
     var body: some View {
@@ -48,21 +49,21 @@ struct CleanupSettingsView: View {
             }
 
             Section {
-                backendRow("Auto", detail: "Your selected model; Apple Foundation Models when none is selected", choice: .auto)
                 backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence)", choice: .foundationModels)
                 ForEach(models.cleanupModels) { descriptor in
                     ModelRow(
                         descriptor: descriptor, manager: models.manager,
-                        isSelected: settings.cleanupBackend == models.cleanupChoice(for: descriptor.id) && selectedMLX == descriptor.id,
+                        isSelected: settings.cleanupBackend == models.cleanupChoice(for: descriptor.id) && selectedModel == descriptor.id,
                         isPending: pending == descriptor.id, failure: failures[descriptor.id],
-                        onPick: { pickMLX(descriptor.id) }, onDelete: { delete(descriptor.id) },
+                        onPick: { pickModel(descriptor.id) }, onDelete: { delete(descriptor.id) },
                         onCancel: { cancelDownload(descriptor.id) })
                 }
             } header: {
-                Text("Backend")
+                Text("Cleanup model")
             } footer: {
-                Text("Picking a model downloads it first. Auto uses the model picked last: \(selectedMLXName ?? "none yet").")
+                Text("Picking a downloaded model installs and prepares it first. The selected model is used in every app state; unavailable models keep the raw text.")
                     .font(.callout).foregroundStyle(.secondary)
+                if settings.cleanupBackend == .coreML, selectedModelName == nil { Text("Choose a Core ML model to install and prepare it.") }
             }
 
             Section {
@@ -85,7 +86,13 @@ struct CleanupSettingsView: View {
             LastDictationSection()
         }
         .formStyle(.grouped)
-        .onAppear { selectedMLX = models.selected(.cleanup) }
+        .sheet(item: $modelTerms) { terms in
+            CleanupTermsSheet(terms: terms) {
+                modelTerms = nil
+                downloadModel(terms.id)
+            }
+        }
+        .onAppear { selectedModel = models.selected(.cleanup) }
         .onChange(of: settings.cleanupEnabled) { _, _ in controller.cleanupSettingsChanged() }
         .onChange(of: settings.cleanupBackend) { _, _ in controller.cleanupSettingsChanged() }
     }
@@ -107,7 +114,14 @@ struct CleanupSettingsView: View {
         .buttonStyle(.plain)
     }
 
-    private func pickMLX(_ id: String) {
+    private func pickModel(_ id: String) {
+        do {
+            if let terms = try CleanupModelTerms.forModel(id) { modelTerms = terms }
+            else { downloadModel(id) }
+        } catch { failures[id] = "Model terms could not be opened: \(error.localizedDescription)" }
+    }
+
+    private func downloadModel(_ id: String) {
         failures[id] = nil
         pending = id
         models.pick(id, role: .cleanup) { error in
@@ -115,7 +129,7 @@ struct CleanupSettingsView: View {
             if let error {
                 failures[id] = String(describing: error)
             } else {
-                selectedMLX = models.selected(.cleanup)
+                selectedModel = models.selected(.cleanup)
                 controller.settings.cleanupBackend = models.cleanupChoice(for: id)
                 controller.cleanupSettingsChanged()
             }
@@ -131,11 +145,7 @@ struct CleanupSettingsView: View {
         if pending == id { pending = nil }
         Task {
             await models.manager.delete(id)
-            selectedMLX = models.selected(.cleanup)
-            if selectedMLX == nil,
-               controller.settings.cleanupBackend == .mlx || controller.settings.cleanupBackend == .coreML {
-                controller.settings.cleanupBackend = .auto
-            }
+            selectedModel = models.selected(.cleanup)
             controller.cleanupSettingsChanged()
         }
     }
@@ -168,5 +178,35 @@ struct LastDictationSection: View {
                 }
             }
         }
+    }
+}
+
+/// Terms stay available offline in the same flow that authorizes the download.
+private struct CleanupTermsSheet: View {
+    let terms: CleanupModelTerms
+    let agree: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Gemma model terms").font(.title2)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(terms.notice)
+                    Text("Your use of Gemma is governed by the Gemma Terms of Use and its Prohibited Use Policy below. Agreeing to download means you agree to comply with both, including the use restrictions in Section 3.2.")
+                    Text("Terms of Use").font(.headline)
+                    Text(terms.terms)
+                    Text("Prohibited Use Policy").font(.headline)
+                    Text(terms.restrictions)
+                }
+                .textSelection(.enabled)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) { dismiss() }
+                Spacer()
+                Button("Agree and download", action: agree).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .frame(minWidth: 520, idealWidth: 620, minHeight: 420, idealHeight: 600)
     }
 }

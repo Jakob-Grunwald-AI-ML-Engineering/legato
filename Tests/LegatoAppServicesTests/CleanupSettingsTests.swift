@@ -5,7 +5,7 @@ import LegatoPostProcessing
 import Synchronization
 import Testing
 @testable import LegatoAppServices
-import LegatoMLX
+import LegatoCoreML
 
 private func freshDefaults() -> UserDefaults {
     UserDefaults(suiteName: "legato-appservices-tests-\(UUID().uuidString)")!
@@ -36,12 +36,12 @@ private final class Recorder: Sendable {
 }
 
 @Suite struct CleanupSettingsStoreTests {
-    @Test func defaultsAreOffReplaceVerbatimAutoNoITNFourSeconds() {
+    @Test func defaultsAreOffReplaceVerbatimFoundationModelsNoITNFourSeconds() {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         #expect(store.enabled == false)
         #expect(store.delivery == .replace)
         #expect(store.style == .verbatim)
-        #expect(store.backend == .auto)
+        #expect(store.backend == .foundationModels)
         #expect(store.itn == false)
         #expect(store.timeoutSeconds == 4)
     }
@@ -78,7 +78,7 @@ private final class Recorder: Sendable {
         #expect(defaults.object(forKey: "cleanup.timeoutSeconds") == nil)
     }
 
-    @Test(arguments: [CleanupBackendChoice.auto, .foundationModels, .mlx])
+    @Test(arguments: [CleanupBackendChoice.foundationModels])
     func otherBackendsKeepFourSecondsWhenNoTimeLimitWasChosen(backend: CleanupBackendChoice) {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         store.backend = .coreML
@@ -86,12 +86,13 @@ private final class Recorder: Sendable {
         #expect(store.timeoutSeconds == 4)
     }
 
-    @Test(arguments: [CleanupBackendChoice.auto, .mlx])
-    func aSelectedCoreMLModelGetsEightSecondsThroughAutomaticResolution(backend: CleanupBackendChoice) {
+    @Test(arguments: ["auto", "mlx"])
+    func aSelectedCoreMLModelGetsEightSecondsThroughLegacyMigration(backend: String) {
         let defaults = freshDefaults()
         SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
+        defaults.set(backend, forKey: "cleanup.backend")
         let store = CleanupSettingsStore(defaults: defaults)
-        store.backend = backend
+        #expect(store.backend == .coreML)
         #expect(store.timeoutSeconds == 8)
         #expect(store.options.timeoutSeconds == 8)
         #expect(defaults.object(forKey: "cleanup.timeoutSeconds") == nil)
@@ -102,7 +103,7 @@ private final class Recorder: Sendable {
         SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
         let store = CleanupSettingsStore(defaults: defaults)
         store.timeoutSeconds = 4
-        store.backend = .auto
+        store.backend = .coreML
         #expect(store.timeoutSeconds == 4)
     }
 
@@ -128,8 +129,7 @@ private final class Recorder: Sendable {
 
     @Test func onlyFoundationModelsPrefersFoundationModels() {
         #expect(CleanupBackendChoice.foundationModels.preference == .foundationModels)
-        #expect(CleanupBackendChoice.auto.preference == .auto)
-        #expect(CleanupBackendChoice.mlx.preference == .auto)
+        #expect(CleanupBackendChoice.coreML.preference == .coreML)
     }
 }
 
@@ -196,65 +196,63 @@ private struct NamedLLM: LLMBackend {
     func respond(instructions: String, prompt: String) async throws -> String { prompt }
 }
 
-/// A registry whose picked MLX model is installed, with the GPU usable or not.
-private func backgroundRegistry(gpu: Bool) -> CleanupRegistry {
-    let spec = MLXModels.spec(id: MLXModels.qwen3_1_7bID)!
+/// Boundary backend fixture: the production typed catalog and install checks still run.
+private func preparedCoreMLRegistry(installed: Bool = true) -> CleanupRegistry {
+    let spec = CoreMLModels.spec(id: CoreMLModels.qwen3_1_7bID)!
     let root = FileManager.default.temporaryDirectory.appending(path: "legato-appservices-\(UUID().uuidString)")
-    let installer = PresentInstaller(folderName: "mlx/\(spec.folderName)")
-    try? InstallMarker.write(in: installer.installFolder(root: root), id: spec.id, stage: .installed)
+    let installer = PresentInstaller(folderName: "coreml/\(spec.folderName)")
+    if installed { try? InstallMarker.write(in: installer.installFolder(root: root), id: spec.id, stage: .installed) }
     let selection = SelectionStore(defaults: freshDefaults())
     selection.set(spec.id, for: .cleanup)
     let manager = ModelManager(root: root, catalog: [spec.descriptor], installers: [spec.id: installer], selection: selection)
-    return CleanupRegistry(
-        models: manager, foundationModels: FakeFoundationModels(available: true),
-        makeMLXBackend: { _, _ in NamedLLM(id: "gpu") }, makeCPUBackend: { _, _ in NamedLLM(id: "cpu") },
-        canUseGPU: { gpu })
+    return CleanupRegistry(models: manager, foundationModels: FakeFoundationModels(available: true),
+                           makeCoreMLBackend: { _, _ in NamedLLM(id: "coreml") })
 }
 
 @Suite struct BackgroundCleanupSettingTests {
-    @Test func backgroundCleanupDefaultsToTheCpu() {
-        #expect(CleanupSettingsStore(defaults: freshDefaults()).backgroundCleanup == .cpu)
+    @Test func backgroundPoliciesAreNotProductionBackendChoices() {
+        #expect(CleanupBackendChoice.allCases == [.foundationModels, .coreML])
     }
 
-    @Test func backgroundCleanupPersists() {
+    @Test func anOldBackgroundPreferenceRemainsDormant() {
         let defaults = freshDefaults()
-        CleanupSettingsStore(defaults: defaults).backgroundCleanup = .foundationModels
-        #expect(CleanupSettingsStore(defaults: defaults).backgroundCleanup == .foundationModels)
-        #expect(CleanupSettingsStore(defaults: defaults).options.background == .foundationModels)
+        defaults.set("off", forKey: "cleanup.background")
+        let store = CleanupSettingsStore(defaults: defaults)
+        #expect(store.backend == .foundationModels)
+        #expect(defaults.string(forKey: "cleanup.background") == "off")
     }
 
-    @Test func aBackgroundRunReportsTheCpu() async throws {
+    @Test func aPreparedCoreMLRunReportsItsRequestedComputePolicy() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.enabled = true
+        store.enabled = true; store.backend = .coreML
         let recorder = Recorder()
-        let processor = CleanupProcessor(
-            registry: backgroundRegistry(gpu: false), settings: store, report: { recorder.record($0) })
+        let processor = CleanupProcessor(registry: preparedCoreMLRegistry(), settings: store, report: { recorder.record($0) })
         _ = try await processor.process("hello world", locale: Locale(identifier: "en_US"))
-        #expect(recorder.reports.first?.backend == "Qwen3 1.7B (4-bit)")
-        #expect(recorder.reports.first?.device == "CPU")
+        #expect(recorder.reports.first?.backend == "Qwen3 1.7B (Core ML)")
+        #expect(recorder.reports.first?.device == "CPU + Neural Engine requested; placement unverified")
     }
 
-    @Test func aForegroundRunReportsTheGpu() async throws {
+    @Test func explicitFoundationModelsBypassesThePreparedCoreMLModel() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.enabled = true
+        store.enabled = true; store.backend = .foundationModels
         let recorder = Recorder()
-        let processor = CleanupProcessor(
-            registry: backgroundRegistry(gpu: true), settings: store, report: { recorder.record($0) })
+        let processor = CleanupProcessor(registry: preparedCoreMLRegistry(), settings: store, report: { recorder.record($0) })
         _ = try await processor.process("hello world", locale: Locale(identifier: "en_US"))
-        #expect(recorder.reports.first?.device == "GPU")
-    }
-
-    @Test func theSettingReachesTheRegistry() async throws {
-        let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.enabled = true
-        store.backgroundCleanup = .off
-        let recorder = Recorder()
-        let processor = CleanupProcessor(
-            registry: backgroundRegistry(gpu: false), settings: store, report: { recorder.record($0) })
-        let out = try await processor.process("hello world", locale: Locale(identifier: "en_US"))
-        #expect(out == "hello world")
+        #expect(recorder.reports.first?.backend == "Apple Foundation Models")
         #expect(recorder.reports.first?.device == nil)
-        #expect(recorder.reports.first?.skipped == [CleanupRegistry.Skip.backgroundCleanupOff.description])
+    }
+
+    @Test(arguments: ["off", "cpu", "foundationModels"])
+    func legacyBackgroundPoliciesCannotDisableOrSubstituteTheSelectedCoreMLModel(policy: String) async throws {
+        let defaults = freshDefaults()
+        defaults.set(policy, forKey: "cleanup.background")
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.enabled = true; store.backend = .coreML
+        let recorder = Recorder()
+        let processor = CleanupProcessor(registry: preparedCoreMLRegistry(), settings: store, report: { recorder.record($0) })
+        _ = try await processor.process("hello world", locale: Locale(identifier: "en_US"))
+        #expect(recorder.reports.first?.backend == "Qwen3 1.7B (Core ML)")
+        #expect(recorder.reports.first?.skipped == [])
     }
 }
 
