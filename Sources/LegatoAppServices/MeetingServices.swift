@@ -330,7 +330,13 @@ public final class MeetingServices {
             batchDiarizer: { await registry.batchDiarizer() },
             diarizationEnabled: { settings.offlineDiarization },
             // A recording that just started has the live model loading: the job is about to be cut short.
-            releaseModels: { if !recording.value.withLock({ $0 }) { await releaseCachedNemotronModels() } },
+            releaseModels: {
+                guard !recording.value.withLock({ $0 }) else { return }
+                let selected = await registry.models.selected(role: .liveDictation)
+                let root = await registry.models.root
+                let folder = selected.flatMap { FluidAudioCatalog.installers()[$0]?.installFolder(root: root) }
+                await FluidAudioModels.releaseUnselected(exceptFolder: folder)
+            },
             onStep: onStep)
     }
 

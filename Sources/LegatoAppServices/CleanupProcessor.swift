@@ -1,5 +1,6 @@
 import Foundation
 import LegatoCore
+import LegatoCoreML
 import LegatoMLX
 import LegatoPostProcessing
 import Observation
@@ -15,6 +16,8 @@ public struct CleanupRunReport: Sendable, Equatable {
     public var refine: Bool
     /// "GPU" or "CPU" for an MLX model; nil for any other backend.
     public var device: String?
+    /// Every outcome is retained when live passes are aggregated.
+    public var outcome: String = "completed"
 
     public init(
         backend: String, skipped: [String], style: CleanupStyle, changed: Bool, milliseconds: Int, refine: Bool,
@@ -160,16 +163,21 @@ public struct CleanupProcessor: TranscriptPostProcessor {
                 raw: text, cleaned: out.text, style: style, runID: runID, locale: locale, suggested: terms)
         }
         let elapsed = start.duration(to: clock.now)
-        let run = CleanupRunReport(
+        var run = CleanupRunReport(
             backend: name(resolution.choice, itn: itn), skipped: resolution.skipped.map(\.description), style: style,
             changed: out.text != text, milliseconds: Int(elapsed / .milliseconds(1)), refine: refine,
-            device: resolution.device?.label)
+            device: resolution.execution ?? resolution.device?.label)
+        run.outcome = Task.isCancelled ? "cancelled"
+            : out.timedOut ? "timedOut"
+            : out.guardRejected ? "guardRejected"
+            : out.failed || resolution.backend == nil ? "rawOrUnavailable" : "completed"
         await report(run)
         return (out, run)
     }
 
     public static func name(_ choice: CleanupRegistry.Choice, itn: Bool) -> String {
         switch choice {
+        case .coreML(let id): CoreMLModels.spec(id: id)?.displayName ?? id
         case .mlx(let id): MLXModels.spec(id: id)?.displayName ?? id
         case .foundationModels: "Apple Foundation Models"
         case .itnOnly: itn ? "ITN only (no language model)" : "None (no language model)"
@@ -199,6 +207,7 @@ final class LiveRunTally: Sendable {
                 return segment
             }
             run.backend = Self.merged(run.backend, segment.backend, separator: " + ")
+            run.outcome = Self.merged(run.outcome, segment.outcome, separator: " + ")
             run.device = Self.merged(run.device, segment.device, separator: "/")
             for reason in segment.skipped where !run.skipped.contains(reason) { run.skipped.append(reason) }
             run.style = segment.style

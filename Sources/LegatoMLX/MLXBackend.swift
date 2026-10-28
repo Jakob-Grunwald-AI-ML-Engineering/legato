@@ -182,7 +182,7 @@ private final class MLXErrorRecorder: Sendable {
 /// no GPU work is submitted (the phone's background). The loaded model is shared with the GPU backend: MLX
 /// arrays live in unified memory and any device computes on them, and the weights load on the CPU stream
 /// either way, so one resident copy serves both and a device switch reloads nothing.
-public final class MLXBackend: LLMBackend {
+public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
     public let spec: MLXModelSpec
     public let folder: URL
     public let device: ComputeDevice
@@ -193,6 +193,23 @@ public final class MLXBackend: LLMBackend {
 
     /// Instructions, prompt and reply together, in characters; small models drift on long input.
     public let maxPromptCharacters: Int? = 4_000
+
+    public func prewarmResources() async throws {
+        try Task.checkCancellation()
+        guard MLXInstaller.isComplete(folder: folder) else {
+            throw LLMError.unavailable(reason: "The selected model is not installed")
+        }
+        let gpuAllowed = await canUseGPU()
+        try Task.checkCancellation()
+        let usableDevice: ComputeDevice = device == .gpu && gpuAllowed ? .gpu : .cpu
+        try await generator.load(spec: spec, folder: folder, device: usableDevice)
+        try Task.checkCancellation()
+    }
+
+    public func releaseWarmResources() async {
+        // Dropping the cache's reference does not join or destroy a native generation worker.
+        await MLXModelCache.shared.evict(folder: folder)
+    }
 
     /// - Parameters:
     ///   - device: where the model runs while the GPU is usable; ``ComputeDevice/cpu`` always runs on the CPU.

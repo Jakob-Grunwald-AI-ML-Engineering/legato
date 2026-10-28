@@ -27,6 +27,10 @@ struct CleanupSettingsView: View {
         selectedMLX.flatMap { id in models.cleanupModels.first { $0.id == id }?.displayName }
     }
 
+    private var usesCoreML: Bool {
+        backend == .coreML || (backend == .auto && selectedMLX.map { models.cleanupChoice(for: $0) == .coreML } == true)
+    }
+
     var body: some View {
         Form {
             Section {
@@ -62,12 +66,12 @@ struct CleanupSettingsView: View {
             }
 
             Section {
-                backendRow("Auto", detail: "Your MLX model when one is picked, else Apple Foundation Models", choice: .auto)
+                backendRow("Auto", detail: "Your selected model; Apple Foundation Models when none is selected", choice: .auto)
                 backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence)", choice: .foundationModels)
                 ForEach(models.cleanupModels) { descriptor in
                     ModelRow(
                         descriptor: descriptor, manager: models.manager,
-                        isSelected: backend == .mlx && selectedMLX == descriptor.id,
+                        isSelected: backend == models.cleanupChoice(for: descriptor.id) && selectedMLX == descriptor.id,
                         isPending: pending == descriptor.id, failure: failures[descriptor.id],
                         onCancel: { cancelDownload(descriptor.id) }
                     ) { pickMLX(descriptor.id) }
@@ -78,18 +82,21 @@ struct CleanupSettingsView: View {
             } header: {
                 Text("Backend")
             } footer: {
-                Text("Picking a model downloads it first. Auto uses the MLX model picked last: \(selectedMLXName ?? "none yet").")
+                Text("Picking a model downloads it first. Auto uses the model picked last: \(selectedMLXName ?? "none yet").")
+                if usesCoreML { Text("Core ML uses the same selected model in Legato and from the keyboard.") }
             }
 
-            Section {
-                Picker("Background cleanup", selection: $background) {
-                    Text("CPU (slower)").tag(CleanupRegistry.BackgroundCleanup.cpu)
-                    Text("Apple Foundation Models").tag(CleanupRegistry.BackgroundCleanup.foundationModels)
-                    Text("Off").tag(CleanupRegistry.BackgroundCleanup.off)
+            if !usesCoreML {
+                Section {
+                    Picker("Background cleanup", selection: $background) {
+                        Text("CPU (slower)").tag(CleanupRegistry.BackgroundCleanup.cpu)
+                        Text("Apple Foundation Models").tag(CleanupRegistry.BackgroundCleanup.foundationModels)
+                        Text("Off").tag(CleanupRegistry.BackgroundCleanup.off)
+                    }
+                    .accessibilityIdentifier("cleanup.background")
+                } footer: {
+                    Text(Self.explain(background))
                 }
-                .accessibilityIdentifier("cleanup.background")
-            } footer: {
-                Text(Self.explain(background))
             }
 
             Section {
@@ -106,11 +113,20 @@ struct CleanupSettingsView: View {
         }
         .navigationTitle("Cleanup")
         .onAppear { selectedMLX = models.selected(.cleanup) }
-        .onChange(of: enabled) { _, new in Settings.cleanupEnabled = new }
+        .onChange(of: enabled) { _, new in
+            Settings.cleanupEnabled = new
+            controller.cleanupSettingsChanged()
+        }
         .onChange(of: delivery) { _, new in Settings.cleanupDelivery = new }
         .onChange(of: style) { _, new in Settings.cleanupStyle = new }
-        .onChange(of: backend) { _, new in Settings.cleanupBackend = new }
-        .onChange(of: background) { _, new in Settings.cleanupBackground = new }
+        .onChange(of: backend) { _, new in
+            Settings.cleanupBackend = new
+            controller.cleanupSettingsChanged()
+        }
+        .onChange(of: background) { _, new in
+            Settings.cleanupBackground = new
+            controller.cleanupSettingsChanged()
+        }
         .onChange(of: itn) { _, new in Settings.cleanupITN = new }
         .onChange(of: timeout) { _, new in Settings.cleanupTimeoutSeconds = Int(new) }
     }
@@ -140,7 +156,9 @@ struct CleanupSettingsView: View {
                 failures[id] = String(describing: error)
             } else {
                 selectedMLX = models.selected(.cleanup)
-                backend = .mlx
+                backend = models.cleanupChoice(for: id)
+                Settings.cleanupBackend = backend
+                controller.cleanupSettingsChanged()
             }
         }
     }
@@ -155,7 +173,9 @@ struct CleanupSettingsView: View {
         Task {
             await models.manager.delete(id)
             selectedMLX = models.selected(.cleanup)
-            if selectedMLX == nil, backend == .mlx { backend = .auto }
+            if selectedMLX == nil, backend == .mlx || backend == .coreML { backend = .auto }
+            Settings.cleanupBackend = backend
+            controller.cleanupSettingsChanged()
         }
     }
 

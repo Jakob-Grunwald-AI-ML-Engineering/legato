@@ -9,14 +9,38 @@ import FoundationModels
 /// Every call builds a fresh session, so nothing carries over between calls. The system model has a small
 /// context window (about 4,000 tokens for prompt and reply together), so callers chunk long input at
 /// ``maxPromptCharacters``.
-public struct FoundationModelsBackend: LLMBackend {
+public struct FoundationModelsBackend: LLMBackend, ModelResourceLifecycle {
     public let id = "apple-foundation-models"
 
     /// Instructions, prompt and reply together, in characters. About 4,000 tokens at roughly 2.5
     /// characters per token for German, with room to spare.
     public let maxPromptCharacters: Int? = 6_000
 
+    private let warmResources = WarmResources()
+
+    private actor WarmResources {
+        private var session: LanguageModelSession?
+        func prepare() {
+            guard session == nil else { return }
+            let session = LanguageModelSession(model: .default)
+            session.prewarm()
+            self.session = session
+        }
+        func release() { session = nil }
+    }
+
     public init() {}
+
+    /// Requests system-owned resource preparation without generating a reply. This is best effort:
+    /// Foundation Models does not expose or guarantee its physical residency.
+    public func prewarmResources() async throws {
+        try Task.checkCancellation()
+        if case .unavailable(let reason) = Self.currentAvailability() { throw LLMError.unavailable(reason: reason) }
+        await warmResources.prepare()
+        try Task.checkCancellation()
+    }
+
+    public func releaseWarmResources() async { await warmResources.release() }
 
     public var availability: LLMAvailability {
         get async { Self.currentAvailability() }

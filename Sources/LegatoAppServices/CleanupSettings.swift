@@ -5,14 +5,22 @@ import LegatoPostProcessing
 
 /// Which backend cleanup uses. Stored as its raw value.
 public enum CleanupBackendChoice: String, CaseIterable, Sendable {
-    /// The picked MLX model (on the CPU in the phone's background, as the background setting says), else Apple Foundation Models.
+    /// The selected Core ML or MLX model; Foundation Models when no local model is selected.
     case auto
     /// Apple Foundation Models only.
     case foundationModels
     /// The picked MLX model (in the phone's background as the background setting says: on the CPU by default).
     case mlx
+    /// The selected Core ML model; prewarmed CPU/Neural Engine resources work in the background.
+    case coreML
 
-    public var preference: CleanupRegistry.BackendPreference { self == .foundationModels ? .foundationModels : .auto }
+    public var preference: CleanupRegistry.BackendPreference {
+        switch self {
+        case .foundationModels: .foundationModels
+        case .coreML: .coreML
+        case .auto, .mlx: .auto
+        }
+    }
 }
 
 /// The cleanup settings at one moment.

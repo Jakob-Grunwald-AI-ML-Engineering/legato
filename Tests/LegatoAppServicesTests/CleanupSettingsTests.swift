@@ -355,3 +355,35 @@ private struct AnsweringFoundationModels: LLMBackend {
     var availability: LLMAvailability { get async { .available } }
     func respond(instructions: String, prompt: String) async throws -> String { "<text>\(reply)</text>" }
 }
+
+
+@Suite struct CleanupOutcomeReportTests {
+    private struct Backend: LLMBackend {
+        let id = "test"
+        let maxPromptCharacters: Int? = nil
+        let fails: Bool
+        var availability: LLMAvailability { .available }
+        func respond(instructions: String, prompt: String) async throws -> String {
+            if fails { throw LLMError.failed("No result") }
+            return "hello world"
+        }
+    }
+    @Test func backendFailureIsNotReportedAsCompleted() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        let recorder = Recorder()
+        let processor = CleanupProcessor(registry: CleanupRegistry(models: emptyManager(), foundationModels: Backend(fails: true)), settings: store, report: { recorder.record($0) })
+        let result = try await processor.process("hello world", locale: Locale(identifier: "en"))
+        #expect(result == "hello world")
+        #expect(recorder.reports.last?.outcome == "rawOrUnavailable")
+    }
+    @Test func unchangedSuccessfulOutputIsCompleted() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        let recorder = Recorder()
+        let processor = CleanupProcessor(registry: CleanupRegistry(models: emptyManager(), foundationModels: Backend(fails: false)), settings: store, report: { recorder.record($0) })
+        let result = try await processor.process("hello world", locale: Locale(identifier: "en"))
+        #expect(result == "hello world")
+        #expect(recorder.reports.last?.outcome == "completed")
+    }
+}

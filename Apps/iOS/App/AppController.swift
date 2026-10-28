@@ -9,6 +9,7 @@ import LegatoKeyboardCore
 import LegatoPostProcessing
 import Observation
 import os
+import UIKit
 
 /// The app's single composition root: a thin adapter that wires the system ports into LegatoCore's
 /// `DictationCoordinator`. All dictation logic lives there; this type adds only app state for the UI,
@@ -69,6 +70,12 @@ final class AppController {
     /// that repeats it after the hop runs with these, not with a fresh decision: the app is in front by
     /// then, so the keyboard no longer looks visible and the run would silently lose its target.
     @ObservationIgnored private var hopOptions: StartOptions?
+    @ObservationIgnored private let modelAdmission = ModelAdmission()
+    @ObservationIgnored private var modelRevision = 0
+    @ObservationIgnored private var engineRevision = 0
+    @ObservationIgnored private var resolvingEngine = false
+    @ObservationIgnored private var resourcePreparation: Task<Void, Never>?
+    private enum PreparationError: Error { case needsForeground }
     #if LEGATO_INTERNAL
     /// One instance for the process: it remembers whether a session is being held between runs.
     @ObservationIgnored private let sessionControl: KeepActiveSessionControl
@@ -193,7 +200,7 @@ final class AppController {
         meetings.isInBackground = { [weak self] in self?.startEnvironment.current().inBackground ?? false }
         meetings.dictationActive = { [weak self] in
             guard let self else { return false }
-            return isDictating || keyboardRunActive
+            return !coordinator.isIdle || isDictating || keyboardRunActive || modelAdmission.isPreparing || resolvingEngine
         }
         meetings.releaseKeptMicrophone = { [weak self] in await self?.endKeepAlive() }
         meetings.onActiveChanged = { [weak self] active in self?.keyboardLink?.link.meetingChanged(active: active) }
@@ -215,7 +222,16 @@ final class AppController {
     /// released and the next start builds one with the new engine. During a run, the run's session is
     /// released when the run ends instead of being kept.
     func refreshEngine(releasingKeptMicrophone: Bool = true) async {
+        modelRevision += 1
+        engineRevision += 1
+        let revision = engineRevision
+        resolvingEngine = true
+        readiness.selectedResourcesReady = false
+        modelAdmission.cancel()
+        resourcePreparation?.cancel()
+        if releasingKeptMicrophone { await coordinator.invalidateKeptSession() }
         let resolution = await models.engines.liveEngine()
+        guard revision == engineRevision else { return }
         engineBox.engine = resolution.engine
         readiness.modelEngineReady = resolution.modelID != nil
         engineStatus = EngineStatus(
@@ -225,8 +241,66 @@ final class AppController {
         #if DEBUG
         E2E.log("engine.resolved id=\(resolution.engine.id) fallback=\(resolution.fallback.map(Self.describe) ?? "none")")
         #endif
-        if releasingKeptMicrophone { await coordinator.invalidateKeptSession() }
+        resolvingEngine = false
+        if !startEnvironment.current().inBackground { await warmSelectedResources() }
+        guard revision == engineRevision else { return }
         await refreshReadiness()
+    }
+
+    /// Settings change resource ownership, independently of the microphone's keep-ready duration.
+    func cleanupSettingsChanged() {
+        modelRevision += 1
+        readiness.selectedResourcesReady = false
+        modelAdmission.cancel()
+        scheduleResourcePreparation()
+    }
+
+    private func scheduleResourcePreparation() {
+        resourcePreparation?.cancel()
+        resourcePreparation = Task { [weak self] in await self?.warmSelectedResources() }
+    }
+
+    private func warmSelectedResources() async {
+        guard !resolvingEngine, !modelAdmission.isResetting, !startEnvironment.current().inBackground else { return }
+        do { try await prepareSelectedResources() }
+        catch is CancellationError { }
+        catch { armFailure = "Could not prepare selected models: \(error.localizedDescription)" }
+    }
+
+    private func prepareSelectedResources() async throws {
+        #if DEBUG
+        if E2E.fakeEngine != nil {
+            readiness.selectedResourcesReady = true
+            return
+        }
+        #endif
+        let revision = modelRevision
+        let options = Settings.cleanupStore.options
+        let inBackground = startEnvironment.current().inBackground
+        if inBackground, await !models.selectedModelsAreWarm(options: options) {
+            throw PreparationError.needsForeground
+        }
+        do {
+            try await models.prepareSelectedModels(options: options, inBackground: inBackground)
+        } catch SelectedModelWarmup.PreparationError.needsForeground {
+            throw PreparationError.needsForeground
+        } catch SelectedModelWarmup.PreparationError.superseded {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+        guard revision == modelRevision, !resolvingEngine, !modelAdmission.isResetting else { throw CancellationError() }
+        readiness.selectedResourcesReady = true
+    }
+
+    /// Revoke held readiness before relinquishing model ownership; active runs keep their own resources.
+    private func releaseModelsForMemoryPressure() async {
+        modelRevision += 1
+        readiness.selectedResourcesReady = false
+        resourcePreparation?.cancel()
+        await modelAdmission.reset {
+            await self.coordinator.invalidateKeptSession()
+            await self.models.releaseSelectedModels()
+        }
     }
 
     private static func describe(_ fallback: EngineFallback) -> String {
@@ -239,6 +313,7 @@ final class AppController {
     /// The keyboard's Refine key: a stronger rewrite (message style) of `text`, or nil when there is none.
     /// Runs in the background too, as the background cleanup setting says (the MLX model on the CPU by default).
     func refine(_ text: String) async -> String? {
+        if !startEnvironment.current().inBackground { await warmSelectedResources() }
         let reports = cleanupReports
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
         let out = await CleanupProcessor.run(
@@ -357,7 +432,28 @@ final class AppController {
                 #endif
                 return false
             }
-            let outcome = await coordinator.arm(keepAlive: Settings.keepAliveLinger)
+            let outcome: DictationCoordinator.ArmOutcome
+            do {
+                outcome = try await modelAdmission.admit(
+                    isIdle: { self.coordinator.isIdle },
+                    canStart: { !self.meetings.isActive && !self.resolvingEngine },
+                    prepare: { try await self.prepareSelectedResources() },
+                    operation: { await self.coordinator.arm(keepAlive: Settings.keepAliveLinger) })
+            } catch PreparationError.needsForeground {
+                armFailure = "Open Legato to prepare the selected models."
+                return false
+            } catch ModelAdmission.AdmissionError.busy {
+                return !coordinator.isIdle
+            } catch is CancellationError {
+                return false
+            } catch DictationError.assetsNotInstalled {
+                armFailure = "Legato needs the speech model first. Open Legato's home screen to set it up."
+                await refreshReadiness()
+                return false
+            } catch {
+                armFailure = "Could not prepare selected models: \(error.localizedDescription)"
+                return false
+            }
             #if DEBUG
             E2E.log("arm outcome=\(Self.describe(outcome))")
             #endif
@@ -381,6 +477,7 @@ final class AppController {
 
     /// Releases the microphone kept ready between dictations.
     func endKeepAlive() async {
+        modelAdmission.cancel()
         await coordinator.endKeepAlive()
     }
 
@@ -404,6 +501,11 @@ final class AppController {
     private func run(
         _ options: StartOptions, hopReason reason: ForegroundReason? = nil, startOnly: Bool = false, source: String
     ) async -> DictationCoordinator.Outcome? {
+        // A stop never waits for model preparation, including a second toggle during a cold start.
+        if !startOnly, modelAdmission.isPreparing || !coordinator.isIdle {
+            return await stopIfRunning() ?? .busy
+        }
+        if startOnly, !coordinator.isIdle { return nil }
         // A meeting owns the microphone: no dictation from the keyboard, the Action Button or the app.
         if let notice = MeetingArbitration.dictationRefusal(meetingActive: meetings.isActive) {
             armFailure = notice
@@ -421,8 +523,26 @@ final class AppController {
         #endif
         startEnvironment.assumeForeground = reason != nil
         defer { startEnvironment.assumeForeground = false }
-        guard let outcome = startOnly ? await coordinator.startIfIdle(options) : await coordinator.toggle(options) else {
-            return nil
+        let outcome: DictationCoordinator.Outcome
+        do {
+            if resolvingEngine, startEnvironment.current().inBackground {
+                throw PreparationError.needsForeground
+            }
+            outcome = try await modelAdmission.admit(
+                isIdle: { self.coordinator.isIdle },
+                canStart: { !self.meetings.isActive && !self.resolvingEngine },
+                prepare: { try await self.prepareSelectedResources() },
+                operation: { await self.coordinator.startIfIdle(options) ?? .busy })
+        } catch PreparationError.needsForeground {
+            outcome = .needsForeground(.backgroundStartRefused)
+        } catch ModelAdmission.AdmissionError.busy {
+            outcome = .busy
+        } catch is CancellationError {
+            outcome = .busy
+        } catch DictationError.assetsNotInstalled {
+            outcome = .needsOnboarding(.assetsMissing)
+        } catch {
+            outcome = .failed("Could not prepare selected models: \(error.localizedDescription)")
         }
         if case .needsForeground = outcome { hopOptions = options } // the press that repeats this one keeps them
         await didFinish(outcome, hopReason: reason, finishedBefore: finishedBefore)
@@ -438,7 +558,9 @@ final class AppController {
     @discardableResult
     func stopIfRunning(releasingLease: Bool = false) async -> DictationCoordinator.Outcome? {
         let finishedBefore = idleCount
-        guard let outcome = await coordinator.stopIfRunning(releasingLease: releasingLease) else { return nil }
+        guard let outcome = await modelAdmission.stop(operation: {
+            await self.coordinator.stopIfRunning(releasingLease: releasingLease)
+        }) else { return nil }
         await didFinish(outcome, finishedBefore: finishedBefore)
         return outcome
     }
@@ -603,6 +725,10 @@ final class AppController {
     private func installInterruptionObservers() {
         let center = NotificationCenter.default
 
+        center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in await self?.releaseModelsForMemoryPressure() }
+        }
+
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
@@ -691,6 +817,7 @@ final class AppController {
     func appBecameActive() {
         keyboardLink?.drainChoices() // choices whose Darwin note arrived while the app was suspended
         self.meetings.appBecameActive()
+        scheduleResourcePreparation()
     }
 
     func refreshReadiness() async {

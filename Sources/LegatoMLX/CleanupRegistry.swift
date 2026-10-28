@@ -6,8 +6,8 @@ import LegatoPostProcessing
 import UIKit
 #endif
 
-/// Picks the backend for LLM cleanup: the user's MLX model (on the GPU, or on the CPU while the GPU is not
-/// usable and ``BackgroundCleanup/cpu`` allows it), else Apple Foundation Models, else none.
+/// Resolves the selected cleanup model. Prepared Core ML resources serve every app state without
+/// substitution. Legacy MLX choices retain their compute policy; no local selection uses Foundation Models.
 ///
 /// The registry only reads. It never installs, downloads or warms a model: a selected model that is not
 /// on disk simply falls through, and the user installs by picking (`ModelManager.select(_:role:)`).
@@ -15,6 +15,7 @@ public struct CleanupRegistry: Sendable {
     public enum Choice: Sendable, Equatable {
         /// The installed MLX model the user picked.
         case mlx(modelID: String)
+        case coreML(modelID: String)
         case foundationModels
         /// No LLM stage: only inverse text normalization runs.
         case itnOnly
@@ -24,6 +25,7 @@ public struct CleanupRegistry: Sendable {
     private let foundationModels: (any LLMBackend)?
     private let makeMLXBackend: @Sendable (MLXModelSpec, URL) -> any LLMBackend
     private let makeCPUBackend: @Sendable (MLXModelSpec, URL) -> any LLMBackend
+    private let makeCoreMLBackend: (@Sendable (String, URL) async -> (any LLMBackend)?)?
     private let cleanupGuard: CleanupGuard
     private let canUseGPU: @Sendable () async -> Bool
 
@@ -43,6 +45,7 @@ public struct CleanupRegistry: Sendable {
         foundationModels: (any LLMBackend)?,
         cleanupGuard: CleanupGuard = CleanupGuard(),
         makeMLXBackend: (@Sendable (MLXModelSpec, URL) -> any LLMBackend)? = nil,
+        makeCoreMLBackend: (@Sendable (String, URL) async -> (any LLMBackend)?)? = nil,
         makeCPUBackend: @escaping @Sendable (MLXModelSpec, URL) -> any LLMBackend = {
             MLXBackend(spec: $0, folder: $1, device: .cpu)
         },
@@ -51,6 +54,7 @@ public struct CleanupRegistry: Sendable {
         self.models = models
         self.foundationModels = foundationModels
         self.cleanupGuard = cleanupGuard
+        self.makeCoreMLBackend = makeCoreMLBackend
         // The GPU backend asks the same check before each load and generation, and falls back to the CPU.
         self.makeMLXBackend = makeMLXBackend ?? { MLXBackend(spec: $0, folder: $1, canUseGPU: canUseGPU) }
         self.makeCPUBackend = makeCPUBackend
@@ -89,6 +93,8 @@ public struct CleanupRegistry: Sendable {
     public enum BackendPreference: String, Sendable, Equatable, CaseIterable {
         /// The picked MLX model (GPU, or as ``BackgroundCleanup`` says without it), else Foundation Models, else none.
         case auto
+        /// The selected Core ML model only; unavailable resources preserve the input.
+        case coreML
         /// Foundation Models only (an installed MLX pick is passed over), else none.
         case foundationModels
     }
@@ -97,6 +103,7 @@ public struct CleanupRegistry: Sendable {
     public enum Skip: Sendable, Equatable, CustomStringConvertible {
         /// The picked MLX model is not (fully) installed.
         case mlxNotInstalled(modelID: String)
+        case coreMLUnavailable(modelID: String, reason: String)
         /// The GPU is not usable now (the app is in the background on the phone) and background cleanup is
         /// set to Foundation Models.
         case mlxNeedsForeground(modelID: String)
@@ -110,6 +117,7 @@ public struct CleanupRegistry: Sendable {
 
         public var description: String {
             switch self {
+            case .coreMLUnavailable(let id, let reason): "\(id) unavailable: \(reason)"
             case .mlxNotInstalled(let id): "\(Self.name(id)) is not installed"
             case .mlxNeedsForeground(let id): "\(Self.name(id)) runs only in the foreground (background cleanup: Apple Foundation Models)"
             case .backgroundCleanupOff: "Background cleanup is off"
@@ -129,22 +137,42 @@ public struct CleanupRegistry: Sendable {
         public let skipped: [Skip]
         /// Where an MLX model runs; nil for any other backend.
         public let device: ComputeDevice?
+        public let execution: String?
 
-        public init(choice: Choice, backend: (any LLMBackend)?, skipped: [Skip], device: ComputeDevice? = nil) {
+        public init(choice: Choice, backend: (any LLMBackend)?, skipped: [Skip], device: ComputeDevice? = nil, execution: String? = nil) {
             self.choice = choice
             self.backend = backend
             self.skipped = skipped
             self.device = device
+            self.execution = execution
         }
     }
 
-    /// The first usable backend for `preference`, in order MLX (``BackendPreference/auto`` only),
-    /// Foundation Models, none, with the reasons the earlier ones were passed over. While the GPU is not
+    /// Resolves the explicit Core ML selection without model substitution. Otherwise resolves legacy
+    /// MLX/Foundation Models choices, with reasons unavailable backends were passed over. While the GPU is not
     /// usable, `background` decides: the MLX model on the CPU, Foundation Models, or no language model.
     /// The default keeps the call's old meaning (Foundation Models); the setting itself defaults to the CPU.
     public func resolve(preference: BackendPreference, background: BackgroundCleanup = .foundationModels) async -> Resolution {
         var skipped: [Skip] = []
         // Asked only when it matters: an installed MLX pick, or background cleanup off (which stops any model).
+        if preference != .foundationModels, let id = await models.selected(role: .cleanup),
+           let makeCoreMLBackend, let backend = await makeCoreMLBackend(id, await models.root) {
+            // Core ML uses the same retained resources in every app state. Legacy MLX background
+            // policies cannot silently substitute a different model for this explicit selection.
+            guard case .installed = await models.state(of: id) else {
+                return Resolution(choice: .itnOnly, backend: nil, skipped: [.coreMLUnavailable(modelID: id, reason: "Model is not installed")])
+            }
+            switch await backend.availability {
+            case .available:
+                return Resolution(choice: .coreML(modelID: id), backend: backend, skipped: [],
+                                  execution: "CPU + Neural Engine requested; placement unverified")
+            case .unavailable(let reason):
+                return Resolution(choice: .itnOnly, backend: nil, skipped: [.coreMLUnavailable(modelID: id, reason: reason)])
+            }
+        }
+        if preference == .coreML {
+            return Resolution(choice: .itnOnly, backend: nil, skipped: [.coreMLUnavailable(modelID: "Core ML", reason: "Choose and prepare a Core ML model in Legato")])
+        }
         if background == .off, await !canUseGPU() {
             return Resolution(choice: .itnOnly, backend: nil, skipped: [.backgroundCleanupOff])
         }

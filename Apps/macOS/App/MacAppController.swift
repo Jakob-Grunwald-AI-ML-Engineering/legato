@@ -93,6 +93,13 @@ final class MacAppController {
     @ObservationIgnored private var armTask: Task<Void, Never>?
     @ObservationIgnored private var triggerPressedAt: TimeInterval?
     @ObservationIgnored private var bootstrapped = false
+    @ObservationIgnored private let modelAdmission = ModelAdmission()
+    @ObservationIgnored private var modelRevision = 0
+    @ObservationIgnored private var engineRevision = 0
+    @ObservationIgnored private var resolvingEngine = false
+    @ObservationIgnored private var resourcePreparation: Task<Void, Never>?
+    @ObservationIgnored private var memoryPressure: (any DispatchSourceMemoryPressure)?
+    private(set) var isPreparingModels = false
 
     private enum Command: Sendable {
         case start, stop, cancel
@@ -196,7 +203,7 @@ final class MacAppController {
 
     // MARK: Derived state for the UI
 
-    var isDictating: Bool { phase != .idle }
+    var isDictating: Bool { phase != .idle || isPreparingModels }
 
     var permissionsDone: Bool {
         permissions.micGranted && permissions.accessibility && permissions.hotkeyTapActive
@@ -208,6 +215,7 @@ final class MacAppController {
     }
 
     var statusText: String {
+        if isPreparingModels { return "Preparing models…" }
         switch phase {
         case .preparing: return "Starting…"
         case .listening: return "Listening…"
@@ -242,6 +250,7 @@ final class MacAppController {
             }
         }
         attachSession()
+        installModelLifecycleObservers()
         Task { [weak self, samples = tap.samples] in
             for await sample in samples { self?.handle(sample) }
         }
@@ -304,7 +313,14 @@ final class MacAppController {
     /// Resolves the live engine from the pick and the engine settings, for the runs from now on. A run in
     /// progress keeps its engine; the session is rebuilt before the next one.
     func refreshEngine() async {
+        modelRevision += 1
+        engineRevision += 1
+        let revision = engineRevision
+        resolvingEngine = true
+        modelAdmission.cancel()
+        resourcePreparation?.cancel()
         let resolution = await models.engines.liveEngine()
+        guard revision == engineRevision else { return }
         engine = resolution.engine
         sessionIsStale = true
         rebuildSessionIfStale()
@@ -313,8 +329,64 @@ final class MacAppController {
             modelID: resolution.modelID,
             name: resolution.modelID.map { models.engineName(for: $0) } ?? "Apple Speech",
             fallback: resolution.fallback?.explanation)
+        resolvingEngine = false
+        await warmSelectedResources()
+        guard revision == engineRevision else { return }
         await refreshInstalledModels()
         if resolution.modelID == nil { await permissions.refreshModel() }
+    }
+
+    func cleanupSettingsChanged() {
+        modelRevision += 1
+        modelAdmission.cancel()
+        scheduleResourcePreparation()
+    }
+
+    private func scheduleResourcePreparation() {
+        resourcePreparation?.cancel()
+        resourcePreparation = Task { [weak self] in await self?.warmSelectedResources() }
+    }
+
+    private func prepareSelectedResources() async throws {
+        let revision = modelRevision
+        do {
+            try await models.prepareSelectedModels(options: settings.cleanupStore.options, inBackground: false)
+        } catch SelectedModelWarmup.PreparationError.superseded {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+        guard revision == modelRevision, !resolvingEngine, !modelAdmission.isResetting else { throw CancellationError() }
+    }
+
+    private func warmSelectedResources() async {
+        guard !resolvingEngine, !modelAdmission.isResetting else { return }
+        do { try await prepareSelectedResources() }
+        catch is CancellationError { }
+        catch { Self.log.error("selected model preparation failed: \(Self.describe(error), privacy: .public)") }
+    }
+
+    private func installModelLifecycleObservers() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.scheduleResourcePreparation() }
+        }
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in await self?.releaseModelsForMemoryPressure() }
+        }
+        memoryPressure = source
+        source.resume()
+    }
+
+    private func releaseModelsForMemoryPressure() async {
+        modelRevision += 1
+        resourcePreparation?.cancel()
+        await modelAdmission.reset {
+            // The active session keeps its own engine; the next run receives a fresh session.
+            self.sessionIsStale = true
+            await self.models.releaseSelectedModels()
+        }
     }
 
     func refreshInstalledModels() async {
@@ -361,6 +433,7 @@ final class MacAppController {
         guard phase == .idle, !isRefining, let entry = lastDictation else { return }
         isRefining = true
         defer { isRefining = false }
+        await warmSelectedResources()
         hud.show(toast: "Refining…", for: 30)
         let reports = cleanupReports
         let store = settings.cleanupStore
@@ -500,8 +573,12 @@ final class MacAppController {
     private func dispatch(_ action: HotkeyGesture.Action?) {
         switch action {
         case .start: commands?.yield(.start)
-        case .stop: commands?.yield(.stop)
-        case .cancel: commands?.yield(.cancel)
+        case .stop:
+            modelAdmission.cancel() // the command pump may be waiting for resource preparation
+            commands?.yield(.stop)
+        case .cancel:
+            modelAdmission.cancel()
+            commands?.yield(.cancel)
         case nil: break
         }
     }
@@ -566,6 +643,29 @@ final class MacAppController {
             flagSetup()
             return
         }
+        isPreparingModels = true
+        defer { isPreparingModels = false }
+        do {
+            try await modelAdmission.admit(
+                isIdle: { self.activeRun == nil && self.phase == .idle },
+                canStart: { !self.resolvingEngine },
+                prepare: { try await self.prepareSelectedResources() },
+                operation: { await self.startPreparedRun() })
+        } catch is CancellationError {
+            gesture.runEnded()
+        } catch ModelAdmission.AdmissionError.busy {
+            gesture.runEnded()
+        } catch DictationError.assetsNotInstalled {
+            gesture.runEnded()
+            flagSetup()
+        } catch {
+            gesture.runEnded()
+            hud.show(toast: "Could not prepare selected models: \(error.localizedDescription)")
+        }
+    }
+
+    /// Called only after resource admission rechecks the selection state.
+    private func startPreparedRun() async {
         rebuildSessionIfStale()
 
         let target: AXTextTarget?
