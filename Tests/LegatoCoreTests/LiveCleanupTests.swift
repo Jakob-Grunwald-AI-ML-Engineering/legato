@@ -187,7 +187,7 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         engine.emit(final("two "), run: 0)
         engine.emit(final("three "), run: 0)
         #expect(await eventually { recorder.commits.count == 3 })
-        try await Task.sleep(for: .milliseconds(40))
+        await Task.yield()
         #expect(processor.calls.count == 1, "one pass in flight at most")
 
         processor.release("one")
@@ -253,7 +253,7 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         #expect(await eventually { aborted })
         #expect(await eventually { processor.cancelled == ["hello world"] })
         processor.release("hello world")
-        try await Task.sleep(for: .milliseconds(30))
+        #expect(await eventually { recorder.edits.count == s.editCount })
         #expect(recorder.revisions.isEmpty)
         #expect(s.partialEntry()?.text == "hello world", "the salvage stays the raw text")
     }
@@ -321,7 +321,7 @@ private func final(_ text: String) -> TranscriptEvent { TranscriptEvent(text: te
         #expect(entry.text == "One. two")
         #expect(entry.rawText == "one two")
         #expect(processor.cancelled == ["one two"])
-        try await Task.sleep(for: .milliseconds(30))
+        #expect(await eventually { recorder.edits.count == s.editCount })
         #expect(recorder.revisions.count == 1, "nothing is published after the deadline")
         #expect(recorder.passes.last?.outcome == .timeout)
         #expect(recorder.passes.last?.final == true)

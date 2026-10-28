@@ -324,6 +324,9 @@ public final class ModelServices {
         return locales.count == 1 ? locales[0] : nil
     }
 
+    /// The current operation, for callers inside the package that need to observe its settlement.
+    func currentPickTask(for role: ModelRole) -> Task<Void, Never>? { picks[role] }
+
     /// Picks `id` for `role`: installs and warms it first when missing, then switches. `done` runs on the
     /// main actor with nil on success or the error. A newer pick for the role cancels this one's wait and the
     /// selection does not switch to it; its download stops too (``supersededPick(inFlight:next:)``), unless
@@ -423,15 +426,20 @@ public final class ModelServices {
 
     /// Back to the zero-download default for `role` (Apple Speech, or no local cleanup model): cancels a pick in
     /// flight and its download, unless something else still waits for it.
-    public func clearPick(_ role: ModelRole) {
+    public func clearPick(_ role: ModelRole) { _ = clearPickOperation(role) }
+
+    /// Returns the existing abandonment operation without changing the public fire-and-forget action.
+    func clearPickOperation(_ role: ModelRole) -> Task<Void, Never>? {
+        var abandonment: Task<Void, Never>?
         picks[role]?.cancel()
         picks[role] = nil
         if let abandoned = pickIDs[role]?.id {
             let manager = self.manager
-            Task { await manager.abandon(abandoned, besidesPicksFor: role) }
+            abandonment = Task { await manager.abandon(abandoned, besidesPicksFor: role) }
         }
         pickIDs[role] = nil
         selection.set(nil, for: role)
+        return abandonment
     }
 }
 

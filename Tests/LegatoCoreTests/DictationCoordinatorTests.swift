@@ -598,12 +598,13 @@ struct CoordinatorRig {
 
     @Test func finalStateUsesTheEntryTextNotTheThrottledBuffer() async throws {
         let r = CoordinatorRig()
+        r.attachSink()
         _ = await r.coordinator.toggle()
         r.time.advance(1)
         r.engine.emit(.init(text: "hello", isFinal: true), run: 0)
         #expect(await eventually { r.activity.updates.last?.content.tail == "hello" })
         r.engine.emit(.init(text: " world", isFinal: true), run: 0) // inside the window: not published
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { r.sink.updates.last?.committed == "hello world" })
         #expect(r.activity.updates.last?.content.tail == "hello")
         #expect(await r.coordinator.toggle() == .stopped("hello world"))
         #expect(r.activity.ends.first?.tail == "hello world")
@@ -635,7 +636,7 @@ struct CoordinatorRig {
         #expect(await r.history.entries.map(\.text) == ["partial text"])
         #expect(r.activity.ends.map(\.phase) == [.copied])
         #expect(r.activity.ends.first?.tail == "partial text")
-        try? await Task.sleep(for: .milliseconds(30))
+        await r.built.all[0].settled()
         #expect(await r.history.entries.count == 1) // still once
         #expect(r.log.count("idle") == 1)
     }
@@ -676,13 +677,14 @@ struct CoordinatorRig {
 
     @Test func editsReachTheActivityAtMostOncePerSecond() async throws {
         let r = CoordinatorRig()
+        r.attachSink()
         _ = await r.coordinator.toggle()
         r.time.advance(1)
         r.engine.emit(.init(text: "hello", isFinal: false), run: 0)
         #expect(await eventually { r.activity.updates.last?.content.tail == "hello" })
         let published = r.activity.updates.count
         r.engine.emit(.init(text: "hello wor", isFinal: false), run: 0) // same instant: held back
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { r.sink.updates.last?.volatile == "hello wor" })
         #expect(r.activity.updates.count == published)
         r.time.advance(1)
         r.engine.emit(.init(text: "hello world", isFinal: false), run: 0)
@@ -694,11 +696,12 @@ struct CoordinatorRig {
 
     @Test func aThrottledEditIsPublishedWhenTheWindowEnds() async throws {
         let r = CoordinatorRig()
+        r.attachSink()
         _ = await r.coordinator.toggle() // first publish at T
         let published = r.activity.updates.count
         r.time.advance(0.4)
         r.engine.emit(.init(text: "hello", isFinal: false), run: 0) // inside the window, then silence
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { r.sink.updates.last?.volatile == "hello" && r.throttle.pendingCount == 1 })
         #expect(r.activity.updates.count == published) // never faster than once a second
         r.time.advance(0.6) // the window ends at T + 1 s
         r.throttle.tick()
@@ -710,6 +713,7 @@ struct CoordinatorRig {
 
     @Test func theTrailingPublishWaitsOutTheRestOfTheWindowAndCarriesTheLatestTail() async throws {
         let r = CoordinatorRig()
+        r.attachSink()
         _ = await r.coordinator.toggle()
         let published = r.activity.updates.count
         r.time.advance(0.4)
@@ -720,7 +724,7 @@ struct CoordinatorRig {
         })
         r.time.advance(0.1)
         r.engine.emit(.init(text: "hello world", isFinal: false), run: 0)
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { r.sink.updates.last?.volatile == "hello world" })
         #expect(r.activity.updates.count == published) // one pending publish, not one per edit
         r.time.advance(0.5)
         r.throttle.tick()
@@ -731,31 +735,34 @@ struct CoordinatorRig {
 
     @Test func aPublishThatIsDueSupersedesThePendingTrailingOne() async throws {
         let r = CoordinatorRig()
+        r.attachSink()
         _ = await r.coordinator.toggle()
         let published = r.activity.updates.count
         r.time.advance(0.4)
         r.engine.emit(.init(text: "hello", isFinal: false), run: 0) // held back; trailing pending
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { r.sink.updates.last?.volatile == "hello" && r.throttle.pendingCount == 1 })
         r.time.advance(0.7)
         r.engine.emit(.init(text: "hello world", isFinal: false), run: 0) // window over: published now
         #expect(await eventually { r.activity.updates.last?.content.tail == "hello world" })
+        #expect(await eventually { r.throttle.cancelledCount == 1 })
         r.throttle.tick() // the superseded trailing publish must not add a duplicate
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.activity.updates.count == published + 1)
         _ = await r.coordinator.toggle()
     }
 
     @Test func stoppingCancelsThePendingTrailingPublish() async throws {
         let r = CoordinatorRig()
+        r.attachSink()
         _ = await r.coordinator.toggle()
         r.time.advance(0.4)
         r.engine.emit(.init(text: "hello", isFinal: true), run: 0)
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { r.sink.updates.last?.committed == "hello" && r.throttle.pendingCount == 1 })
         _ = await r.coordinator.toggle()
         let after = r.activity.calls.count
         r.time.advance(1)
         r.throttle.tick()
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.activity.calls.count == after)
         #expect(r.activity.ends.first?.phase == .copied)
     }
@@ -777,10 +784,11 @@ struct CoordinatorRig {
         #expect(r.sleeps.durations.allSatisfy { $0 == .seconds(10) })
 
         // It stops with the run.
+        #expect(await eventually { r.heartbeat.pendingCount == 1 })
         _ = await r.coordinator.toggle()
         let after = r.activity.calls.count
         r.heartbeat.tick()
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.activity.calls.count == after)
     }
 

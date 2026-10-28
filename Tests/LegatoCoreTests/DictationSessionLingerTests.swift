@@ -24,12 +24,12 @@ import Testing
         #expect(clock.requested == [.seconds(30), .seconds(30)]) // the whole linger again, not the 10 s left
 
         clock.advance(by: .seconds(20)) // t = 40: past the first run's expiry
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.session.leaseState == .armed)
         #expect(r.log.count("deactivate") == 0)
 
         clock.advance(by: .seconds(9)) // t = 49
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.session.leaseState == .armed)
 
         clock.advance(by: .seconds(1)) // t = 50: the second run's expiry
@@ -45,7 +45,7 @@ import Testing
         try await run(r)
         #expect(clock.requested.isEmpty)
         clock.advance(by: .seconds(100_000))
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.session.leaseState == .armed)
         #expect(r.log.count("deactivate") == 0)
 
@@ -84,7 +84,7 @@ import Testing
         #expect(await eventually { clock.requested.count == 2 })
         #expect(clock.requested == [.seconds(600), .seconds(60)])
         clock.advance(by: .seconds(59))
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.session.leaseState == .armed)
         clock.advance(by: .seconds(1))
         #expect(await eventually { r.session.leaseState == .idle })
@@ -104,8 +104,9 @@ import Testing
         try await run(r)
         #expect(await eventually { clock.requested.count == 1 })
         await r.session.setLinger(.indefinite)
+        #expect(await eventually { clock.pendingCount == 0 })
         clock.advance(by: .seconds(10_000))
-        try? await Task.sleep(for: .milliseconds(50))
+        await Task.yield()
         #expect(r.session.leaseState == .armed)
         #expect(r.log.count("deactivate") == 0)
     }

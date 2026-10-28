@@ -131,6 +131,36 @@ func finalEvent(_ text: String, _ range: Range<TimeInterval>? = nil, stream: Tra
     TranscriptEvent(stream: stream, text: text, isFinal: true, range: range)
 }
 
+/// A held fake operation waits for an explicit release, even if its caller is cancelled.
+final class HeldOperation: Sendable {
+    private struct State {
+        var held = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+    private let state = Mutex(State())
+    init(held: Bool = false) { state.withLock { $0.held = held } }
+    func hold(_ held: Bool) {
+        let waiters = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+            s.held = held
+            guard !held else { return [] }
+            let waiters = s.waiters
+            s.waiters = []
+            return waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let waiting = state.withLock { s in
+                guard s.held else { return false }
+                s.waiters.append(continuation)
+                return true
+            }
+            if !waiting { continuation.resume() }
+        }
+    }
+}
+
 struct EngineBoom: Error {}
 
 /// An engine whose result stream fails at once; it records whether its audio input was ended.
@@ -155,17 +185,17 @@ final class FailingEngine: DictationEngine {
 /// An engine that reads its audio only once the test opens the gate (a transcriber that lags behind).
 final class GatedEngine: DictationEngine {
     let id = "gated"
-    private let gate = Mutex(false)
+    private let gate = HeldOperation(held: true)
     private let got = Mutex<[AudioChunk]>([])
     var chunks: [AudioChunk] { got.withLock { $0 } }
-    func open() { gate.withLock { $0 = true } }
+    func open() { gate.hold(false) }
 
     func installAssets(locale: Locale?) -> AsyncStream<Double> { AsyncStream { $0.finish() } }
     func prepare(locale: Locale?) async throws -> AudioFormatSpec { recFormat }
     func transcribe(_ input: AsyncStream<AudioChunk>) -> AsyncThrowingStream<TranscriptEvent, Error> {
         let (stream, cont) = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
         let task = Task {
-            while !gate.withLock({ $0 }) { try? await Task.sleep(for: .milliseconds(2)) }
+            await gate.wait()
             for await chunk in input { got.withLock { $0.append(chunk) } }
             cont.finish()
         }

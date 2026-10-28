@@ -2,6 +2,36 @@ import Foundation
 import Synchronization
 @testable import LegatoCore
 
+/// A held fake operation waits for an explicit release, even if its caller is cancelled.
+final class HeldOperation: Sendable {
+    private struct State {
+        var held = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+    private let state = Mutex(State())
+    init(held: Bool = false) { state.withLock { $0.held = held } }
+    func hold(_ held: Bool) {
+        let waiters = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+            s.held = held
+            guard !held else { return [] }
+            let waiters = s.waiters
+            s.waiters = []
+            return waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let waiting = state.withLock { s in
+                guard s.held else { return false }
+                s.waiters.append(continuation)
+                return true
+            }
+            if !waiting { continuation.resume() }
+        }
+    }
+}
+
 struct TestError: Error, Equatable { var tag = "boom" }
 
 /// Ordered, thread-safe event log shared by the fakes.
@@ -61,11 +91,11 @@ final class FakeSource: AudioSource {
     /// `start` fails this many more times, then works.
     private let startFailuresLeft = Mutex<(error: (any Error)?, count: Int)>((nil, 0))
     private let routeError = Mutex<(any Error)?>(nil)
-    private let stopHold = Mutex(false)
+    private let stopHold = HeldOperation()
 
     init(log: EventLog) { self.log = log }
     /// Keeps `stop` pending (after it logged) until released: a teardown a test can interleave with.
-    func holdStop(_ on: Bool) { stopHold.withLock { $0 = on } }
+    func holdStop(_ on: Bool) { stopHold.hold(on) }
     func failStart(with e: any Error) { startError.withLock { $0 = e } }
     func clearStartFailure() { startError.withLock { $0 = nil } }
     func failNextStarts(_ count: Int, with e: any Error) { startFailuresLeft.withLock { $0 = (e, count) } }
@@ -102,7 +132,7 @@ final class FakeSource: AudioSource {
     }
     func stop() async {
         log.add("source.stop")
-        while stopHold.withLock({ $0 }) { try? await Task.sleep(for: .milliseconds(5)) }
+        await stopHold.wait()
         continuation.withLock { $0?.finish(); $0 = nil }
     }
 }
@@ -220,9 +250,14 @@ struct ManualClock: Sendable {
         private struct State {
             var pending = 0
             var nextID = 0
+            var registered = 0
+            var cancelled = 0
             var waiters: [Int: CheckedContinuation<Void, any Error>] = [:]
         }
         private let state = Mutex(State())
+        var pendingCount: Int { state.withLock { $0.waiters.count } }
+        var registeredCount: Int { state.withLock { $0.registered } }
+        var cancelledCount: Int { state.withLock { $0.cancelled } }
 
         func tick() {
             let waiter = state.withLock { s -> CheckedContinuation<Void, any Error>? in
@@ -242,6 +277,7 @@ struct ManualClock: Sendable {
                         if Task.isCancelled { return .cancel }
                         if s.pending > 0 { s.pending -= 1; return .resume }
                         s.waiters[id] = c
+                        s.registered += 1
                         return .wait
                     }
                     switch next {
@@ -251,7 +287,11 @@ struct ManualClock: Sendable {
                     }
                 }
             } onCancel: {
-                let waiter = state.withLock { $0.waiters.removeValue(forKey: id) }
+                let waiter = state.withLock { s in
+                    let waiter = s.waiters.removeValue(forKey: id)
+                    if waiter != nil { s.cancelled += 1 }
+                    return waiter
+                }
                 waiter?.resume(throwing: CancellationError())
             }
         }
@@ -259,6 +299,9 @@ struct ManualClock: Sendable {
 
     private let source = Source()
     func tick() { source.tick() }
+    var pendingCount: Int { source.pendingCount }
+    var registeredCount: Int { source.registeredCount }
+    var cancelledCount: Int { source.cancelledCount }
     var sleep: @Sendable (Duration) async throws -> Void {
         let source = self.source
         return { _ in try await source.wait() }
@@ -298,12 +341,15 @@ final class FakeActivity: ActivityClient {
     private(set) var dismissals = 0
     /// Makes `request` throw (Live Activities refused).
     var requestError: (any Error)?
-    /// Keeps `request` pending until cleared (polled, like `FakeEngine`'s prepare hold).
-    var holdRequest = false
+    /// Keeps `request` pending until cleared.
+    private let requestHold = HeldOperation()
+    var holdRequest = false { didSet { requestHold.hold(holdRequest) } }
     /// Keeps `dismiss` pending after it logged, until cleared.
-    var holdDismiss = false
+    private let dismissHold = HeldOperation()
+    var holdDismiss = false { didSet { dismissHold.hold(holdDismiss) } }
     /// Keeps `update` pending after it logged, until cleared.
-    var holdUpdate = false
+    private let updateHold = HeldOperation()
+    var holdUpdate = false { didSet { updateHold.hold(holdUpdate) } }
 
     init(log: EventLog) { self.log = log }
 
@@ -318,13 +364,13 @@ final class FakeActivity: ActivityClient {
     func request(_ content: DictationActivityContent) async throws {
         log.add("activity.request:\(content.phase.rawValue)")
         calls.append(.request(content))
-        while holdRequest { try? await Task.sleep(for: .milliseconds(5)) }
+        await requestHold.wait()
         if let requestError { throw requestError }
     }
     func update(_ content: DictationActivityContent, staleDate: Date?) async {
         log.add("activity.update:\(content.phase.rawValue)")
         calls.append(.update(content, staleDate: staleDate))
-        while holdUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+        await updateHold.wait()
     }
     func end(_ content: DictationActivityContent) async {
         log.add("activity.end:\(content.phase.rawValue)")
@@ -333,7 +379,7 @@ final class FakeActivity: ActivityClient {
     func dismiss() async {
         log.add("activity.dismiss")
         dismissals += 1
-        while holdDismiss { try? await Task.sleep(for: .milliseconds(5)) }
+        await dismissHold.wait()
     }
 }
 

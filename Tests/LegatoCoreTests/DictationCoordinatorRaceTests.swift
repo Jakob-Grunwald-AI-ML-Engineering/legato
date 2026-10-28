@@ -89,8 +89,13 @@ import Testing
         let ending = Task { await r.coordinator.endKeepAlive() }
         #expect(await eventually { r.log.count("source.stop") == 1 }) // releasing, not yet deactivated
         #expect(!r.coordinator.isIdle)
-        let start = Task { await r.coordinator.toggle(Self.keyboard) }
-        try await Task.sleep(for: .milliseconds(40))
+        let entered = Done()
+        let start = Task {
+            entered.value = true
+            return await r.coordinator.toggle(Self.keyboard)
+        }
+        #expect(await eventually { entered.value })
+        await Task.yield()
         #expect(r.log.count("activate") == 1) // the new session has not activated over the old teardown
         #expect(r.log.count("deactivate") == 0)
         r.source.holdStop(false)
@@ -112,12 +117,15 @@ import Testing
         r.engine.failStream(with: TestError(tag: "stream"), run: 0) // the session starts tearing itself down
         #expect(await eventually { r.log.count("source.stop") == 1 })
         let done = Done()
+        let entered = Done()
         let stopping = Task {
+            entered.value = true
             let outcome = await r.coordinator.toggle() // a press lands in the middle of that teardown
             done.value = true
             return outcome
         }
-        try await Task.sleep(for: .milliseconds(40))
+        #expect(await eventually { entered.value })
+        await Task.yield()
         #expect(!done.value) // still waiting for the teardown
         #expect(!r.coordinator.isIdle)
         #expect(r.log.count("deactivate") == 0)
@@ -140,8 +148,13 @@ import Testing
         r.source.holdStop(true)
         r.lingerClock.tick() // the window ends; the teardown starts and hangs
         #expect(await eventually { r.log.count("source.stop") == 1 })
-        let start = Task { await r.coordinator.toggle(Self.keyboard) }
-        try await Task.sleep(for: .milliseconds(40))
+        let entered = Done()
+        let start = Task {
+            entered.value = true
+            return await r.coordinator.toggle(Self.keyboard)
+        }
+        #expect(await eventually { entered.value })
+        await Task.yield()
         #expect(r.log.count("activate") == 1)
         r.source.holdStop(false)
         #expect(await start.value == .started)
@@ -192,7 +205,7 @@ import Testing
         #expect(await eventually { r.log.count("activity.update:listening") == 1 })
         #expect(await eventually { r.sink.updates.last?.committed == "partial text" })
         r.engine.failStream(with: TestError(tag: "stream"), run: 0) // the run dies before the start returns
-        try await Task.sleep(for: .milliseconds(40))
+        #expect(await eventually { r.log.count("source.stop") == 1 })
         r.activity.holdUpdate = false
         let outcome = await first.value
         #expect(outcome == .stopped("partial text")) // not `.started` for a run that is already over

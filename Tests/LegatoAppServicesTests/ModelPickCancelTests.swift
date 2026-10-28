@@ -108,8 +108,11 @@ private let parakeet = "parakeet-eou-320"
         let rig = Rig()
         let done = Done()
         rig.services.pick(multilingual, role: .liveDictation, done: done.callback("pick"))
+        let pick = try #require(rig.services.currentPickTask(for: .liveDictation))
         #expect(await until { await rig.downloading(multilingual) })
-        rig.services.clearPick(.liveDictation)
+        let abandonment = try #require(rig.services.clearPickOperation(.liveDictation))
+        await abandonment.value
+        await pick.value
         #expect(await until { rig.installers[multilingual]!.cancelled == 1 })
         #expect(await until { await rig.state(multilingual) == .notInstalled })
         #expect(!rig.leftovers(multilingual))
@@ -122,9 +125,11 @@ private let parakeet = "parakeet-eou-320"
         let other = Task { for await _ in await rig.services.manager.install(multilingual) {} }
         #expect(await until { await rig.downloading(multilingual) })
         rig.services.pick(multilingual, role: .liveDictation, done: { _ in })
-        try await Task.sleep(for: .milliseconds(20))
-        rig.services.clearPick(.liveDictation)
-        try await Task.sleep(for: .milliseconds(50))
+        let pick = try #require(rig.services.currentPickTask(for: .liveDictation))
+        #expect(await until { await rig.services.manager.selectionWaiterCount(multilingual, role: .liveDictation) == 1 })
+        let abandonment = try #require(rig.services.clearPickOperation(.liveDictation))
+        await abandonment.value
+        await pick.value
         #expect(rig.installers[multilingual]!.cancelled == 0)
         rig.installers[multilingual]!.release()
         await other.value
@@ -136,12 +141,13 @@ private let parakeet = "parakeet-eou-320"
         let done = Done()
         let previous = rig.services.selected(.liveDictation)
         rig.services.pick(multilingual, role: .liveDictation, done: done.callback("pick"))
+        let pick = try #require(rig.services.currentPickTask(for: .liveDictation))
         #expect(await until { await rig.downloading(multilingual) })
         await rig.services.cancelDownload(multilingual)
         #expect(await until { await rig.state(multilingual) == .notInstalled })
         #expect(rig.installers[multilingual]!.cancelled == 1)
         #expect(!rig.leftovers(multilingual))
-        try await Task.sleep(for: .milliseconds(30))
+        await pick.value
         #expect(done.calls.isEmpty, "a cancel is no failure")
         #expect(rig.services.selected(.liveDictation) == previous)
     }
@@ -151,11 +157,12 @@ private let parakeet = "parakeet-eou-320"
         let done = Done()
         let qwen = CoreMLModels.qwen3_1_7bID
         rig.services.pick(qwen, role: .cleanup, done: done.callback("pick"))
+        let pick = try #require(rig.services.currentPickTask(for: .cleanup))
         #expect(await until { await rig.downloading(qwen) })
         await rig.services.cancelDownload(qwen)
         #expect(await until { await rig.state(qwen) == .notInstalled })
         #expect(!rig.leftovers(qwen))
-        try await Task.sleep(for: .milliseconds(30))
+        await pick.value
         #expect(done.calls.isEmpty)
     }
 
@@ -163,10 +170,11 @@ private let parakeet = "parakeet-eou-320"
         let rig = Rig()
         let done = Done()
         rig.services.pick(multilingual, role: .liveDictation, done: done.callback("pick"))
+        let pick = try #require(rig.services.currentPickTask(for: .liveDictation))
         #expect(await until { await rig.downloading(multilingual) })
         await rig.services.manager.delete(multilingual)
         #expect(await rig.state(multilingual) == .notInstalled)
-        try await Task.sleep(for: .milliseconds(30))
+        await pick.value
         #expect(done.calls.isEmpty, "the row goes back to not installed, without an error")
     }
 }

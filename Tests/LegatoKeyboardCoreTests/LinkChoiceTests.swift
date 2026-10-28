@@ -106,7 +106,11 @@ private struct ChoiceRig {
         store.write(ChoiceRecord(original: "a", chosen: "b", fromVocabulary: false, at: t0), forKey: LinkChannel.Key.choicePrefix + "1")
         link.runStarted(id: "r", target: .keyboard)
         link.runEnded(committed: "hello")
-        try? await Task.sleep(for: .milliseconds(100)) // the zero-length retention sleep returns at once
+        let deadline = ContinuousClock.now + .seconds(30)
+        while store.read(HostState.self, forKey: LinkChannel.Key.host)?.runID != nil,
+              ContinuousClock.now < deadline { await Task.yield() }
+        let scrubbed = store.read(HostState.self, forKey: LinkChannel.Key.host)
+        #expect(scrubbed?.runID == nil && scrubbed?.committed == "")
         #expect(backing.keys(withPrefix: LinkChannel.Key.choicePrefix).count == 1)
     }
 

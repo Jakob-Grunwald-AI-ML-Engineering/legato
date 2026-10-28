@@ -327,6 +327,11 @@ public actor ModelManager {
         return stream
     }
 
+    /// Selection subscriptions already attached to this install (used for package synchronization).
+    package func selectionWaiterCount(_ id: String, role: ModelRole) -> Int {
+        subscribers[id, default: [:]].values.filter { $0.owner == .select(role) }.count
+    }
+
     private func unsubscribe(_ id: String, _ token: UUID) {
         subscribers[id]?[token] = nil
     }

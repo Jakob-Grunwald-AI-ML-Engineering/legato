@@ -193,8 +193,7 @@ import LegatoCore
         rig.micSource.push(tone(16_000, 0.2))  // 0-1 s
         #expect(await eventually { rig.sink.calls.contains(.write(.mic, Array(repeating: 0.2, count: 16_000))) })
         rig.clock.now = 1.12  // a quick restart: 0.12 s with nothing
-        rig.micSource.resume()
-        try await Task.sleep(for: .milliseconds(100))
+        await rig.session.fillGap(stream: .mic)
         rig.clock.now = 1.22
         rig.micSource.push(tone(1_600, 0.4))  // heard 1.12-1.22 s
         #expect(await eventually { rig.sink.calls.contains(.write(.mic, Array(repeating: 0.4, count: 1_600))) })
@@ -247,7 +246,11 @@ import LegatoCore
         try await session.start()
         rig.micSource.push(tone(8_000))
         rig.clock.now = 2
-        let finished = await session.stop()  // the tap takes 300 ms (and a clock second) to stop
+        let stopping = Task { await session.stop() }
+        #expect(await eventually { slow.isStopping })
+        #expect(rig.clock.now == 3)
+        slow.release()
+        let finished = await stopping.value
         #expect(finished.duration == 2)
         #expect(rig.engineSamples.count == 32_000, "the mix is as long as the meeting, not as long as the stop took")
         #expect(rig.mixWrites.count == 32_000)
@@ -315,7 +318,6 @@ import LegatoCore
         await rig.session.setMuted(true, stream: .mic)
         rig.clock.now = 6
         await rig.session.setMuted(false, stream: .mic)
-        try await Task.sleep(for: .milliseconds(80))
         #expect(try await rig.store.meeting(id: rig.meeting.id)?.mutedRanges.isEmpty == true)
     }
 
@@ -354,7 +356,6 @@ import LegatoCore
 
         // Nothing brings it back, not even a late stop.
         _ = await rig.session.stop()
-        try await Task.sleep(for: .milliseconds(80))
         #expect(!FileManager.default.fileExists(atPath: folder.path))
     }
 
@@ -417,7 +418,12 @@ import LegatoCore
         #expect(await eventually { (try? await rig.store.liveTurns(for: rig.meeting.id)) == settled })
         rig.clock.now = 10.5  // more rounds of the diarizer, the same answer
         #expect(await eventually { diarizer.fedSamples >= 103 * 1_600 })
-        try await Task.sleep(for: .milliseconds(100))
+        rig.clock.now = 10.6
+        #expect(await eventually { diarizer.fedSamples >= 104 * 1_600 })
+        // The next feed entered: the serial consumer finished the preceding turns round.
+        // A saved transcript commit then drains the preceding turns-file writes.
+        rig.engine.emit(finalEvent("After the round.", 10..<10.5))
+        #expect(await eventually { await rig.stored().contains { $0.text == "After the round." } })
         #expect(try await rig.store.liveTurns(for: rig.meeting.id) == settled, "written once, not rewritten")
         _ = await rig.session.stop()
         #expect(try await rig.store.liveTurns(for: rig.meeting.id) == settled + [SpeakerTurn(speaker: "P2", start: 2, end: 9)])
@@ -586,13 +592,32 @@ import LegatoCore
 final class SlowStopSource: AudioSource {
     let inner = ScriptedSource()
     let clock: TestClock
+    private let gate = Mutex((entered: false, released: false, waiter: CheckedContinuation<Void, Never>?.none))
+    var isStopping: Bool { gate.withLock { $0.entered } }
+    func release() {
+        let waiter = gate.withLock { s in
+            s.released = true
+            let waiter = s.waiter
+            s.waiter = nil
+            return waiter
+        }
+        waiter?.resume()
+    }
     init(clock: TestClock) { self.clock = clock }
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> { try await inner.start(format: format) }
     func route() async throws -> AsyncStream<AudioChunk> { try await inner.route() }
     func detach() async { await inner.detach() }
     func stop() async {
         clock.now += 1
-        try? await Task.sleep(for: .milliseconds(300))
+        await withCheckedContinuation { continuation in
+            let released = gate.withLock { s in
+                s.entered = true
+                if s.released { return true }
+                s.waiter = continuation
+                return false
+            }
+            if released { continuation.resume() }
+        }
         await inner.stop()
     }
 }
@@ -600,13 +625,14 @@ final class SlowStopSource: AudioSource {
 /// A streaming diarizer that takes its first frame only once the test opens it (one that lags), and answers
 /// with the turns it is given.
 final class GatedDiarizer: SpeakerDiarizer {
-    private let state = Mutex((open: false, fed: 0, turns: [SpeakerTurn]()))
+    private let state = Mutex((fed: 0, turns: [SpeakerTurn]()))
     var fedSamples: Int { state.withLock { $0.fed } }
-    func open() { state.withLock { $0.open = true } }
+    private let gate = HeldOperation(held: true)
+    func open() { gate.hold(false) }
     func script(_ turns: [SpeakerTurn]) { state.withLock { $0.turns = turns } }
 
     func feed(_ chunk: AudioChunk) async throws {
-        while !state.withLock({ $0.open }) { try? await Task.sleep(for: .milliseconds(2)) }
+        await gate.wait()
         state.withLock { $0.fed += chunk.samples.count }
     }
     func turns() async -> [SpeakerTurn] { state.withLock { $0.turns } }
