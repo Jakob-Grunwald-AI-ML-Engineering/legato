@@ -1,0 +1,162 @@
+{
+  "actualAcceptedCorrections" : "unmeasured",
+  "arms" : {
+    "lexical" : {
+      "counts" : {
+        "ambiguousOffers" : 0,
+        "empty" : 13,
+        "harmfulOffers" : 2,
+        "opportunities" : 24,
+        "repairNeeded" : 18,
+        "repairUsefulAt1" : 9,
+        "repairUsefulAt3" : 9,
+        "semanticMissOrUnassessed" : 0,
+        "unnecessaryOffers" : 0,
+        "usefulAt1" : 9,
+        "usefulAt3" : 9
+      },
+      "groups" : {
+        "DE" : {
+          "opportunities" : 8,
+          "usefulAt3" : 3
+        },
+        "EN" : {
+          "opportunities" : 8,
+          "usefulAt3" : 2
+        },
+        "MX" : {
+          "opportunities" : 8,
+          "usefulAt3" : 4
+        }
+      },
+      "qualityScoring" : "stopped-context repetition 0 only; synthetic contextual intent; semantic misses valid outcomes",
+      "stateObservationsUnique" : 48,
+      "timingsAll" : {
+        "medianMs" : 0.105917,
+        "n" : 144,
+        "p95Ms" : 0.669709
+      },
+      "timingsFirstPerOpportunity" : {
+        "medianMs" : 0.114875,
+        "n" : 24,
+        "p95Ms" : 0.82116699999999998
+      },
+      "timingsLater" : {
+        "medianMs" : 0.084834000000000007,
+        "n" : 120,
+        "p95Ms" : 0.59054200000000001
+      },
+      "usefulAt1RateAll" : 0.375,
+      "usefulAt1RateRepairNeeded" : 0.5,
+      "usefulAt3RateAll" : 0.375,
+      "usefulAt3RateRepairNeeded" : 0.5
+    },
+    "macOS-platform" : {
+      "counts" : {
+        "ambiguousOffers" : 9,
+        "empty" : 0,
+        "harmfulOffers" : 2,
+        "opportunities" : 24,
+        "repairNeeded" : 18,
+        "repairUsefulAt1" : 9,
+        "repairUsefulAt3" : 9,
+        "semanticMissOrUnassessed" : 41,
+        "unnecessaryOffers" : 9,
+        "usefulAt1" : 9,
+        "usefulAt3" : 9
+      },
+      "groups" : {
+        "DE" : {
+          "opportunities" : 8,
+          "usefulAt3" : 3
+        },
+        "EN" : {
+          "opportunities" : 8,
+          "usefulAt3" : 2
+        },
+        "MX" : {
+          "opportunities" : 8,
+          "usefulAt3" : 4
+        }
+      },
+      "qualityScoring" : "stopped-context repetition 0 only; synthetic contextual intent; semantic misses valid outcomes",
+      "stateObservationsUnique" : 48,
+      "timingsAll" : {
+        "medianMs" : 12.68075,
+        "n" : 144,
+        "p95Ms" : 30.20975
+      },
+      "timingsFirstPerOpportunity" : {
+        "medianMs" : 20.898125,
+        "n" : 24,
+        "p95Ms" : 36.322791000000002
+      },
+      "timingsLater" : {
+        "medianMs" : 11.854041,
+        "n" : 120,
+        "p95Ms" : 22.903666999999999
+      },
+      "usefulAt1RateAll" : 0.375,
+      "usefulAt1RateRepairNeeded" : 0.5,
+      "usefulAt3RateAll" : 0.375,
+      "usefulAt3RateRepairNeeded" : 0.5
+    }
+  },
+  "assertionFailures" : 0,
+  "audioGroundtruth" : "none; authored diagnostic contexts",
+  "evidence" : "harness",
+  "manualChoicePrecedence" : "unmeasured; no UIKit tap\/controller path exercised",
+  "opportunities" : 24,
+  "physicalPhone" : false,
+  "platformAvailableLanguages" : [
+    "en_GB",
+    "en_AU",
+    "en_IN",
+    "en_SG",
+    "en_ZA",
+    "en",
+    "en_CA",
+    "en_JP",
+    "en_NZ",
+    "ru",
+    "de",
+    "cs",
+    "da",
+    "es",
+    "fr",
+    "ga",
+    "id",
+    "it",
+    "is",
+    "lt",
+    "hu",
+    "nl",
+    "nb",
+    "nn",
+    "pl",
+    "pt_BR",
+    "pt_PT",
+    "ro",
+    "sl",
+    "fi",
+    "sv",
+    "vi",
+    "tr",
+    "el",
+    "bg",
+    "uk",
+    "he",
+    "ar",
+    "ars",
+    "hi",
+    "pa",
+    "te",
+    "ko"
+  ],
+  "records" : 288,
+  "requestedLanguageAvailability" : {
+    "de" : true,
+    "en" : true
+  },
+  "runtimeRecognizerCandidatesConfidence" : "unmeasured"
+}

@@ -1,0 +1,51 @@
+{
+  "assertionFailures" : 2,
+  "evidence" : "harness",
+  "latency" : {
+    "medianMs" : 0.052928924560546875,
+    "n" : 164,
+    "p95Ms" : 0.19490718841552734
+  },
+  "nativeLatency" : "unmeasured",
+  "operationVolume" : {
+    "experimental" : {
+      "insertedCharacters" : 47,
+      "operationCount" : 52,
+      "removedCharacters" : 57,
+      "unchangedSuffixRewritten" : 0
+    },
+    "field-final" : {
+      "insertedCharacters" : 453,
+      "operationCount" : 16,
+      "removedCharacters" : 473,
+      "unchangedSuffixRewritten" : 367
+    },
+    "field-live" : {
+      "insertedCharacters" : 371,
+      "operationCount" : 16,
+      "removedCharacters" : 385,
+      "unchangedSuffixRewritten" : 367
+    },
+    "proxy-final" : {
+      "insertedCharacters" : 323,
+      "operationCount" : 20,
+      "removedCharacters" : 321,
+      "unchangedSuffixRewritten" : 283
+    },
+    "proxy-live" : {
+      "insertedCharacters" : 323,
+      "operationCount" : 30,
+      "removedCharacters" : 321,
+      "unchangedSuffixRewritten" : 283
+    }
+  },
+  "outcomes" : {
+    "safely-declined" : 31,
+    "uncertain-landing" : 37,
+    "unsupported" : 36,
+    "verified-applied" : 60
+  },
+  "physicalPhone" : false,
+  "records" : 164,
+  "scenarioCount" : 12
+}

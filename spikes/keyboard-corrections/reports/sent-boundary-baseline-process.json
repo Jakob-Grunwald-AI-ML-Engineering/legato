@@ -1,0 +1,30 @@
+{
+  "name": "sent-boundary-baseline",
+  "command": [
+    "swift",
+    "test",
+    "--package-path",
+    "/private/tmp/legato-followup-evaluations/source",
+    "--scratch-path",
+    "/private/tmp/legato-followup-evaluations/build-baseline",
+    "--cache-path",
+    "/private/tmp/legato-followup-evaluations/cache",
+    "--config-path",
+    "/private/tmp/legato-followup-evaluations/config",
+    "--security-path",
+    "/private/tmp/legato-followup-evaluations/security",
+    "--disable-sandbox",
+    "--jobs",
+    "4",
+    "--filter",
+    "LiveSentBoundary|DictationVersionsLive|AppliedCursorCoding"
+  ],
+  "environment": {
+    "LEGATO_STUB_DEPS": "1",
+    "CLANG_MODULE_CACHE_PATH": "/private/tmp/legato-followup-evaluations/module-cache",
+    "SWIFTPM_MODULECACHE_OVERRIDE": "/private/tmp/legato-followup-evaluations/module-cache",
+    "TMPDIR": "/private/tmp/legato-followup-evaluations/tmp"
+  },
+  "exit": 0,
+  "seconds": 4.323858976364136
+}

@@ -1,0 +1,13 @@
+{
+  "evidence": "sdk-compile",
+  "exitStatus": 0,
+  "sdk": "27.1",
+  "sourceSHA256": "9d7c55eed54d383a6b0dcfebaae1a27cd4d8a705d40f5c6e7ef340007df6e0ed",
+  "checks": [
+    "progressive preset retains its configuration",
+    "request alternativeTranscriptions",
+    "request transcriptionConfidence",
+    "read Result.alternatives as AttributedString array"
+  ],
+  "runtimeRecognitionMeasured": false
+}

@@ -1,0 +1,23 @@
+{
+  "evidence": "fresh portable harness reproduction + sdk typecheck",
+  "sourceRevision": "9e113ed85b1d24449028ac200ef71a464d1ee3e0",
+  "processExits": {
+    "patch-baseline": 0,
+    "sent-boundary-baseline": 0,
+    "alternatives": 0,
+    "alternative-baseline": 0,
+    "harness-boundaries": 0,
+    "patch": 0
+  },
+  "sdkTypecheckExit": 0,
+  "patchRecords": 164,
+  "alternativeRecords": 288,
+  "usefulRepairCasesAt3": {
+    "lexical": 9,
+    "macOS-platform": 9
+  },
+  "sourceInventoryUnchanged": true,
+  "fixtureInventoryUnchanged": true,
+  "reproductionScriptSHA256": "f66e6df1a44628114c2318c5ba6fc00c3d93abe347b289145db192e792cc0593",
+  "physicalExperimentalBehaviorMeasured": false
+}
