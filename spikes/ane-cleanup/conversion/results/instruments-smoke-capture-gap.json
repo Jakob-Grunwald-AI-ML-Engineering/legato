@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "evidenceKind": "instruments-smoke-capture-unattributed",
+  "source": "private-results/usb-coreml-all-20261027T2102-toc.xml",
+  "captureStartUTC": "2026-10-27T21:01:49.015000+00:00",
+  "durationSeconds": 1.610771,
+  "endReason": "Device disconnected",
+  "target": "all processes",
+  "instrumentsVersion": "27.1 (27A9275)",
+  "schemasDeclared": [
+    "OSSignpostIntervals",
+    "PointsOfInterestEvents",
+    "StateReportingIntervals",
+    "ane-hw-intervals",
+    "coreml-os-signpost",
+    "dyld-library-load",
+    "kdebug",
+    "kdebug-strings",
+    "os-log",
+    "os-signpost",
+    "os-signpost-arg",
+    "process-info",
+    "thread-info",
+    "tick"
+  ],
+  "gemmaFailureSettledUTC": "2026-10-27T21:01:48Z",
+  "captureBeginsAfterGemmaFailure": true,
+  "interpretation": "TOC declares ANE/CoreML schemas but contains no inference-correlated dispatch evidence. Capture begins after Gemma failure and cannot have caused it. Prior PID/name attachment attempts failed to find the process, as reported by the parent; those logs are not in this TOC."
+}

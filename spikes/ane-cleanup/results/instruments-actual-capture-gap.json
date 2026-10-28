@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "date": "2026-10-27",
+  "scope": "Synthetic nonpersonal cleanup fixtures only; instrumented foreground executions, not detached latency benchmarks or microphone-resident tests",
+  "device": {"marketingModel": "iPhone 17", "productType": "iPhone18,3", "osVersion": "26.6.1", "osBuild": "23G83"},
+  "instruments": {"version": "27.1", "build": "27A9275"},
+  "installedBuildID": "87b6d708ae21267d588a247bfe7ab588aa95f351736ead4a8be46d646378dbe2",
+  "finalPreparedBuildID": "52f809a39dd339da7bda77c1470502f03d2778db46a855419150f6f68d20d0f9",
+  "transportObservation": {
+    "coreDeviceWiredConnectionAvailable": true,
+    "instrumentsOnlineListingIntermittent": true,
+    "readOnlyHold": "devicectl device info displays --stream --timeout <bounded-seconds>",
+    "interpretation": "A bounded display subscription accompanied successful short transport controls. It did not ensure actual inference trace finalization. Idle tunnel release was observed; no cable fault or permanent deadlock is established."
+  },
+  "controls": [
+    {"instrument": "Time Profiler", "allProcesses": true, "requestedSeconds": 5, "exitCode": 0, "traceFinalized": true, "tocStartUTC": "2026-10-27T21:25:20.849Z", "tocEndUTC": "2026-10-27T21:25:27.104Z", "tocDurationSeconds": 6.254951, "fixtureTriggered": false, "privateArtifact": "private-results/transport-20261027212510Z/time-profiler.trace"},
+    {"instrument": "Neural Engine", "allProcesses": true, "requestedSeconds": 5, "exitCode": 0, "traceFinalized": true, "tocStartUTC": "2026-10-27T21:26:03.641Z", "tocEndUTC": "2026-10-27T21:26:09.053Z", "tocDurationSeconds": 5.411544, "declaredSchema": "ane-hw-intervals", "fixtureTriggered": false, "privateArtifact": "private-results/transport-20261027212510Z/neural-engine.trace", "interpretation": "Finalized instrument transport control and schema declaration; no model dispatch attribution."}
+  ],
+  "actualFixtureCaptures": [
+    {"instruments": ["Core ML", "Neural Engine", "Points of Interest"], "allProcesses": true, "requestedSeconds": 30, "recordingStartedNotificationObserved": true, "recordingReachedTimeLimit": true, "exitCode": 1, "traceFinalized": false, "runID": "F583CAA8-2E1E-4534-99AC-84D095E44144", "pid": 30193, "fixtureStartUTC": "2026-10-27T21:27:39Z", "fixtureSettledUTC": "2026-10-27T21:27:43Z", "fixtureStatus": "completed", "qualityPassed": true, "inputTokens": 848, "outputTokens": 19, "stopReason": "eos_token", "instrumentedEndToEndMs": 3433.530167, "preservedSymbolErrorLines": 14488, "errorCountScope": "Matching lines retained from a bounded five-minute host log query, not an exhaustive trace-lifetime total", "privateArtifactDirectory": "private-results/qwen-instrumented-20261027212713Z", "cleanup": "Authorized SIGINT did not finish within the follow-up ten-second check; authorized SIGTERM subsequently ended recorder PID 17178. Unfinalized trace cloned before termination."},
+    {"instruments": ["Neural Engine"], "allProcesses": true, "requestedSeconds": 20, "recordingStartedNotificationObserved": true, "recordingReachedTimeLimit": true, "exitCode": 1, "traceFinalized": false, "runID": "7FD4F0DF-8199-4463-B7E0-B2FB0AC53C27", "pid": 30193, "fixtureStartUTC": "2026-10-27T21:33:46Z", "fixtureSettledUTC": "2026-10-27T21:33:50Z", "fixtureStatus": "completed", "qualityPassed": true, "inputTokens": 848, "outputTokens": 19, "stopReason": "eos_token", "instrumentedEndToEndMs": 4318.286208, "preservedSymbolErrorLines": 3748, "errorCountScope": "Matching lines retained from a bounded two-minute host log query, not an exhaustive trace-lifetime total", "privateArtifactDirectory": "private-results/qwen-ne-only-20261027213334Z", "cleanup": "Authorized SIGTERM ended recorder PID 25752. Unfinalized trace cloned before termination."}
+  ],
+  "model": {"name": "Qwen3-1.7B", "repository": "anemll/anemll-Qwen-Qwen3-1.7B-ctx2048_0.3.5", "revision": "0977a61d00e39118aab5ed1e510f1d228df5eefd", "metadataSHA256": "42aafed122b95fef156fea692afa52c3c7b097a5b8e73be0180ec13d48e19b62", "state": "Warm weights; fresh KV", "fixture": "de-short-01-time", "computePermission": "cpuAndNeuralEngine"},
+  "postprocessingBlock": {
+    "observedError": "DVTDeviceSupportFilesSymbolCacheError Code 3: No device support symbols could be located at a compatible location",
+    "observedHostStacks": ["XRSymbolicationEmissionOracle invoke -> dispatch semaphore wait", "XRRemoteDevice baseSymbolsPath -> DVTDeviceSupportFiles existingSymbolsDirectoryForPlatform:model:architecture:version:build:error:"],
+    "evidence": "Bounded host error logs and one-second xctrace process samples retained beside each private trace",
+    "interpretation": "Repeated failed symbol lookup and symbolication waits during trace finalization; underlying toolchain cause and permanent-deadlock status remain unproven. Removing Core ML and Points of Interest did not resolve the actual-inference finalization gap."
+  },
+  "claims": {"actualInferenceFixtureSucceeded": true, "actualInferenceTraceFinalized": false, "processAttributedANEDispatchVerified": false, "modelProgramAttributedANEDispatchVerified": false, "allOperationsOnANEVerified": false, "backgroundANEPlacementVerified": false, "thermalMatchedComparison": false, "completedTOCOrANERowsFromActualCaptures": false},
+  "cleanup": {"ownedXctraceProcessesRemaining": 0, "boundedDisplayObserversRemaining": 0, "phoneInstallOrRestartDuringCaptures": false},
+  "remainingGap": "Obtain a finalized real-inference trace, export actual ANE/Core ML events and correlate process/model program and time window. All-process activity or table declarations alone cannot establish Qwen placement."
+}

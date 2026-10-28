@@ -298,7 +298,7 @@ public final class DictationCoordinator {
     /// own `keepAlive` says. A lease already held is replaced by a fresh one (its mic may have died).
     /// The sink hears the lease (`leaseChanged`) and nothing else.
     public func arm(keepAlive: Linger) async -> ArmOutcome {
-        guard !Task.isCancelled else { return .failed("Microphone preparation was cancelled.") }
+        guard !Task.isCancelled else { return .failed("Preparation cancelled") }
         guard phase == .idle else { return .busy }
         phase = .arming
         defer { phase = .idle }
@@ -308,22 +308,22 @@ public final class DictationCoordinator {
             await release(lease)
         }
         // Live Activities are not used here: only the other readiness items matter.
-        if let issue = await readiness.check(), issue != .liveActivitiesDisabled { return .needsOnboarding(issue) }
+        if Task.isCancelled { return .failed("Preparation cancelled") }
+        let issue = await readiness.check()
+        if Task.isCancelled { return .failed("Preparation cancelled") }
+        if let issue, issue != .liveActivitiesDisabled { return .needsOnboarding(issue) }
 
         let context = startEnvironment.current()
         let linger = Self.armLinger(for: keepAlive)
         var policy = context.audioPolicy
         var inputRetries = 0
         while true {
-            guard !Task.isCancelled else { return .failed("Microphone preparation was cancelled.") }
+            if Task.isCancelled { return .failed("Preparation cancelled") }
             let epoch = sessionEpoch
             let s = makeSession(policy, linger)
             do {
                 try await s.armLease()
-                if Task.isCancelled {
-                    await s.endLease()
-                    return .failed("Microphone preparation was cancelled.")
-                }
+                try Task.checkCancellation()
                 if epoch != sessionEpoch {
                     // The settings changed while arming: arm a session built from the new ones.
                     await s.endLease()
@@ -333,10 +333,8 @@ public final class DictationCoordinator {
                 reportLease(leaseEnd(for: linger))
                 return .armed
             } catch {
-                if Task.isCancelled || error is CancellationError {
-                    await s.endLease()
-                    return .failed("Microphone preparation was cancelled.")
-                }
+                await s.endLease()
+                if error is CancellationError || Task.isCancelled { return .failed("Preparation cancelled") }
                 // The session tore its own lease down. Same retries as a start.
                 if context.inBackground, startEnvironment.isBackgroundRefusal(error) {
                     guard policy != .default else { return .needsForeground(.backgroundStartRefused) }

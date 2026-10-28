@@ -1,0 +1,60 @@
+{
+  "synthetic": true,
+  "cleanup_model": false,
+  "device_measurement": false,
+  "geometry": {
+    "hidden": 1024,
+    "intermediate": 3072,
+    "query_heads": 16,
+    "kv_heads": 8,
+    "head_dim": 128,
+    "context": 2048,
+    "rope_theta": 1000000.0,
+    "epsilon": 1e-06
+  },
+  "seed_weights": 39,
+  "seed_inputs": 1901,
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "python": "3.12.10 (main, Apr  9 2025, 03:49:38) [Clang 20.1.0 ]",
+  "torch": "2.7.0",
+  "coremltools": "9.0",
+  "output_tolerance": {
+    "atol": 0.02,
+    "rtol": 0.02
+  },
+  "state_tolerance": {
+    "atol": 0.005,
+    "rtol": 0.02
+  },
+  "free_bytes_before": 55766482944,
+  "compute_runs": [
+    {
+      "status": "failed",
+      "compute_permissions": "CPU_ONLY",
+      "error": "\nNot equal to tolerance rtol=0.02, atol=0.005\n\nMismatched elements: 508 / 2097152 (0.0242%)\nMax absolute difference: 0.03417969\nMax relative difference: 1663.\n x: array([[[[ 1.467133e-02, -2.216797e+00,  1.317383e+00, ...,\n          -2.280273e-01, -3.149414e-01, -8.071289e-01],\n         [-3.762207e-01,  6.591797e-02, -7.680664e-01, ...,...\n y: array([[[[ 1.4503e-02, -2.2168e+00,  1.3164e+00, ..., -2.2876e-01,\n          -3.1323e-01, -8.0518e-01],\n         [-3.7134e-01,  6.7383e-02, -7.6416e-01, ..., -8.2703e-02,..."
+    },
+    {
+      "status": "failed",
+      "compute_permissions": "CPU_AND_NE",
+      "error": "\nNot equal to tolerance rtol=0.02, atol=0.005\n\nMismatched elements: 10 / 2097152 (0.000477%)\nMax absolute difference: 0.02539062\nMax relative difference: 287.\n x: array([[[[ 1.412964e-02, -2.216797e+00,  1.317383e+00, ...,\n          -2.285156e-01, -3.129883e-01, -8.056641e-01],\n         [-3.715820e-01,  6.640625e-02, -7.641602e-01, ...,...\n y: array([[[[ 1.4503e-02, -2.2168e+00,  1.3164e+00, ..., -2.2876e-01,\n          -3.1323e-01, -8.0518e-01],\n         [-3.7134e-01,  6.7383e-02, -7.6416e-01, ..., -8.2703e-02,..."
+    }
+  ],
+  "state_transfer": "explicit Python read_state/write_state between separate prefill and decode models",
+  "weights_fp16_bytes": 31461888,
+  "kv_state_bytes": 8388608,
+  "exports": {
+    "1": {
+      "seconds": 1.5155332919675857,
+      "bytes": 32599907
+    },
+    "64": {
+      "seconds": 2.1296235420159064,
+      "bytes": 32600256
+    }
+  },
+  "total_seconds": 8.765806292009074,
+  "process_peak_rss_bytes": 954056704,
+  "artifact_bytes": 130399276,
+  "free_bytes_after": 55282028544,
+  "status": "failed"
+}

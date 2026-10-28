@@ -292,9 +292,11 @@ public final class DictationSession {
     }
 
     private func arm(_ format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
+        try Task.checkCancellation()
         leaseState = .arming
         try sessionControl.activate(policy.sessionConfig)
         let input = try await source.start(format: format)
+        try Task.checkCancellation()
         leaseState = .armed
         return input
     }
@@ -669,13 +671,14 @@ public final class DictationSession {
                 _ = try await arm(format)
                 try Task.checkCancellation()
                 await source.detach() // armed and idle, like a lease between two runs
+                try Task.checkCancellation()
             }
+            await releaseLease()
             try Task.checkCancellation()
         } catch {
             await teardownLease()
             throw error
         }
-        await releaseLease()
     }
 
     /// Sets the linger for the run that is about to reuse the held lease, leaving the lease itself alone

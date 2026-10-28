@@ -1,0 +1,7 @@
+.cache/
+.build/
+.swiftpm/
+Gen/
+*.xcodeproj/
+models/
+private-results/

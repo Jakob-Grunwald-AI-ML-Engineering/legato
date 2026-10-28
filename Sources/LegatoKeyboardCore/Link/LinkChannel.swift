@@ -4,7 +4,7 @@ import Foundation
 /// notification names and the timing constants. Every JSON value lives under a `link.*` key; every
 /// Darwin note carries no payload (readers always re-read the key).
 public enum LinkChannel {
-    public static let appGroupID = "group.de.gruenwald.legato"
+    public static let appGroupID = RuntimeIdentity.current.appGroupID
 
     /// App Group `UserDefaults` keys.
     public enum Key {
@@ -28,14 +28,14 @@ public enum LinkChannel {
 
     /// Darwin notification names, one per key.
     public enum Note {
-        public static let host = "de.gruenwald.legato.link.host"
-        public static let request = "de.gruenwald.legato.link.request"
-        public static let ack = "de.gruenwald.legato.link.ack"
-        public static let presence = "de.gruenwald.legato.link.presence"
-        public static let applied = "de.gruenwald.legato.link.applied"
-        public static let refine = "de.gruenwald.legato.link.refine"
-        public static let refined = "de.gruenwald.legato.link.refined"
-        public static let choice = "de.gruenwald.legato.link.choice"
+        public static let host = "\(RuntimeIdentity.current.notificationNamespace).link.host"
+        public static let request = "\(RuntimeIdentity.current.notificationNamespace).link.request"
+        public static let ack = "\(RuntimeIdentity.current.notificationNamespace).link.ack"
+        public static let presence = "\(RuntimeIdentity.current.notificationNamespace).link.presence"
+        public static let applied = "\(RuntimeIdentity.current.notificationNamespace).link.applied"
+        public static let refine = "\(RuntimeIdentity.current.notificationNamespace).link.refine"
+        public static let refined = "\(RuntimeIdentity.current.notificationNamespace).link.refined"
+        public static let choice = "\(RuntimeIdentity.current.notificationNamespace).link.choice"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.

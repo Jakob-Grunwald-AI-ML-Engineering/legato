@@ -15,11 +15,18 @@ public struct MeetingPostPass: Sendable {
     private let store: MeetingStore
     private let reader: any AudioSampleReader
     private let transcriber: any BatchTranscriber
+    private let window: TimeInterval
 
-    public init(store: MeetingStore, reader: any AudioSampleReader, transcriber: any BatchTranscriber) {
+    /// - Parameter window: the longest stretch transcribed at once; ``AudioWindowing/maxWindow`` in the app,
+    ///   shorter in tests so they scan less audio.
+    public init(
+        store: MeetingStore, reader: any AudioSampleReader, transcriber: any BatchTranscriber,
+        window: TimeInterval = AudioWindowing.maxWindow
+    ) {
         self.store = store
         self.reader = reader
         self.transcriber = transcriber
+        self.window = window
     }
 
     /// - Parameter progress: told after each window, how much of the recording is transcribed (0 to 1, over all the
@@ -77,7 +84,7 @@ public struct MeetingPostPass: Sendable {
         var start: TimeInterval = 0
         while start < duration {
             try Task.checkCancellation()
-            let end = try await AudioWindowing.nextCut(from: start, duration: duration, stream: stream, reader: reader)
+            let end = try await AudioWindowing.nextCut(from: start, duration: duration, stream: stream, reader: reader, window: window)
             let samples = try await reader.samples(of: stream, in: start..<end)
             let events = try await transcriber.transcribe(samples: samples, stream: stream)
             for event in events where event.isFinal {

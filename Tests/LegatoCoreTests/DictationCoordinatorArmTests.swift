@@ -223,6 +223,25 @@ private actor NonCancellingArmEngine: DictationEngine {
         #expect(sink.leases.isEmpty)
     }
 
+    @Test(arguments: [false, true])
+    func cancellingAnArmDuringLeaseReleaseNeverReadiesAnotherMicrophone(invalidate: Bool) async throws {
+        let r = CoordinatorRig()
+        r.attachSink()
+        #expect(await r.coordinator.arm(keepAlive: .off) == .armed)
+        r.source.holdStop(true)
+        let replacing = Task { await r.coordinator.arm(keepAlive: .off) }
+        #expect(await eventually { r.log.count("source.stop") == 1 })
+        replacing.cancel()
+        if invalidate { await r.coordinator.invalidateKeptSession() }
+        r.source.holdStop(false)
+        let outcome = await replacing.value
+        if case .armed = outcome { Issue.record("A cancelled arm published ready") }
+        #expect(r.log.count("activate") == 1)
+        #expect(r.log.count("source.start") == 1)
+        #expect(r.log.count("sink.lease:set") == 1)
+        #expect(!r.coordinator.holdsLease && r.coordinator.isIdle)
+    }
+
     // MARK: readiness and failures
 
     @Test(arguments: [ReadinessIssue.micPermission, .assetsMissing])

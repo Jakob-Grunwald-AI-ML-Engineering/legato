@@ -1,0 +1,175 @@
+# Isolated composition of production sources; fixture-project.yml retains the earlier harness.
+---
+name: ANECleanupSpike
+options:
+  bundleIdPrefix: de.gruenwald.legato
+  deploymentTarget:
+    iOS: '26.0'
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    DEVELOPMENT_TEAM: XWSGN23W75
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: '0.1'
+    CURRENT_PROJECT_VERSION: '1'
+    GENERATE_INFOPLIST_FILE: false
+    TARGETED_DEVICE_FAMILY: '1'
+packages:
+  LegatoKit:
+    path: "../.."
+  ANECleanupSpike:
+    path: "."
+targets:
+  ANECleanupSpike:
+    type: application
+    platform: iOS
+    sources:
+    - "../../Apps/iOS/App"
+    - "../../Apps/iOS/Shared"
+    - "../../Apps/iOS/KeyboardUI"
+    - Parity
+    dependencies:
+    - target: ANESpikeWidgets
+    - target: ANESpikeKeyboard
+    - package: LegatoKit
+      product: LegatoCore
+    - package: LegatoKit
+      product: LegatoAudio
+    - package: LegatoKit
+      product: LegatoAppleSpeech
+    - package: LegatoKit
+      product: LegatoKeyboardCore
+    - package: LegatoKit
+      product: LegatoModels
+    - package: LegatoKit
+      product: LegatoFluidAudio
+    - package: LegatoKit
+      product: LegatoEngines
+    - package: LegatoKit
+      product: LegatoPostProcessing
+    - package: LegatoKit
+      product: LegatoMLX
+    - package: LegatoKit
+      product: LegatoAppServices
+    - package: LegatoKit
+      product: LegatoMeetings
+    - package: LegatoKit
+      product: LegatoClaude
+    - package: ANECleanupSpike
+      product: ANECleanupCore
+    - package: LegatoKit
+      product: LegatoVocabulary
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.ane-spike
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_TARGET LEGATO_INTERNAL
+          ANE_CLEANUP_SPIKE"
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_TARGET LEGATO_INTERNAL
+            ANE_CLEANUP_SPIKE"
+    entitlements:
+      path: Gen/App.entitlements
+      properties:
+        com.apple.security.application-groups:
+        - group.de.gruenwald.legato.ane-spike
+    info:
+      path: Gen/App-Info.plist
+      properties:
+        CFBundleDisplayName: ANE Cleanup Spike
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+        - UIInterfaceOrientationPortrait
+        UIBackgroundModes:
+        - audio
+        - processing
+        BGTaskSchedulerPermittedIdentifiers:
+        - de.gruenwald.legato.ane-spike.meeting-processing
+        NSSupportsLiveActivities: true
+        ITSAppUsesNonExemptEncryption: false
+        NSMicrophoneUsageDescription: Legato records your voice to turn it into text.
+          For meeting notes it also saves the meeting audio on this device.
+        NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this
+          device.
+        CFBundleURLTypes:
+        - CFBundleURLName: de.gruenwald.legato.ane-spike
+          CFBundleURLSchemes:
+          - anecleanup39
+        LegatoAppGroupID: group.de.gruenwald.legato.ane-spike
+        LegatoURLScheme: anecleanup39
+        LegatoNotificationNamespace: de.gruenwald.legato.ane-spike
+        SpikeBuildID: "$(SPIKE_BUILD_ID)"
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+  ANESpikeWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+    - "../../Apps/iOS/Widgets"
+    - "../../Apps/iOS/Shared"
+    - "../../Sources/LegatoKeyboardCore/Link/RuntimeIdentity.swift"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.ane-spike.widgets
+    entitlements:
+      path: Gen/Widgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+        - group.de.gruenwald.legato.ane-spike
+    info:
+      path: Gen/Widgets-Info.plist
+      properties:
+        CFBundleDisplayName: ANE Spike Activity
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        LegatoAppGroupID: group.de.gruenwald.legato.ane-spike
+        LegatoURLScheme: anecleanup39
+        LegatoNotificationNamespace: de.gruenwald.legato.ane-spike
+  ANESpikeKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+    - "../../Apps/iOS/Keyboard"
+    - "../../Apps/iOS/KeyboardUI"
+    dependencies:
+    - package: LegatoKit
+      product: LegatoKeyboardCore
+    - package: LegatoKit
+      product: LegatoVocabulary
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.ane-spike.keyboard
+        APPLICATION_EXTENSION_API_ONLY: true
+    entitlements:
+      path: Gen/Keyboard.entitlements
+      properties:
+        com.apple.security.application-groups:
+        - group.de.gruenwald.legato.ane-spike
+    info:
+      path: Gen/Keyboard-Info.plist
+      properties:
+        CFBundleDisplayName: ANE Spike Keyboard
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).KeyboardViewController"
+          NSExtensionAttributes:
+            IsASCIICapable: true
+            PrefersRightToLeft: false
+            PrimaryLanguage: en-US
+            RequestsOpenAccess: true
+        LegatoAppGroupID: group.de.gruenwald.legato.ane-spike
+        LegatoURLScheme: anecleanup39
+        LegatoNotificationNamespace: de.gruenwald.legato.ane-spike
+schemes:
+  ANECleanupSpike:
+    build:
+      targets:
+        ANECleanupSpike: all

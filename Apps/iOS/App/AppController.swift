@@ -1,3 +1,6 @@
+#if ANE_CLEANUP_SPIKE
+import ANECleanupCore
+#endif
 import AVFAudio
 import Foundation
 import LegatoAppServices
@@ -81,7 +84,15 @@ final class AppController {
     @ObservationIgnored private let sessionControl: KeepActiveSessionControl
     #endif
 
+    #if ANE_CLEANUP_SPIKE
+    @ObservationIgnored private let spike: SpikeComposition
+    @ObservationIgnored private var spikeMemoryObserver: NSObjectProtocol?
+    #endif
+
     private init() {
+        #if ANE_CLEANUP_SPIKE
+        ParityBootstrap.apply(defaults: AppGroup.defaults)
+        #endif
         Settings.migrateKeepAliveChoices() // before anything reads the setting
         // The one writer of history.jsonl. Without the App Group container (misconfigured signing) fall
         // back to the app's own Application Support, so dictation still works, just not shared.
@@ -106,11 +117,19 @@ final class AppController {
         self.engineBox = engineBox
         let reports = cleanupReports
         let engineSettings = models.engineSettings
+        #if ANE_CLEANUP_SPIKE
+        let spike = SpikeComposition(defaults: AppGroup.defaults, vocabulary: vocabulary,
+            preferredLocale: { ModelServices.singleLocale(engineSettings) },
+            report: { report in await reports.record(report) })
+        self.spike = spike
+        let cleanup = spike.processor
+        #else
         let cleanup = CleanupProcessor(
             registry: models.cleanup, settings: Settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             vocabulary: vocabulary,
             report: { report in await reports.record(report) })
+        #endif
         self.history = history
         let meetingRoot = directory.appending(path: "Meetings", directoryHint: .isDirectory)
         #if DEBUG
@@ -180,7 +199,18 @@ final class AppController {
                 self?.keyboardRunActive = active
                 if active { self?.clearResult() } // a new run's activity replaces the result's
             }
-            keyboardLink.onLease = { [weak self] until in self?.micReadyUntil = until }
+            keyboardLink.onLease = { [weak self] until in
+                self?.micReadyUntil = until
+                #if ANE_CLEANUP_SPIKE
+                self?.spike.record("microphone.lease", ["held": String(until != nil)])
+                #endif
+            }
+            #if ANE_CLEANUP_SPIKE
+            keyboardLink.onRunStarted = { [weak self] runID in self?.spike.runStarted(runID) }
+            keyboardLink.onDelivery = { [weak self] runID, applied in
+                self?.spike.record("keyboard.finalApplied", ["runID": runID, "confirmed": String(applied)])
+            }
+            #endif
             keyboardLink.link.onRequest = { [weak self] request in await self?.perform(request.command) ?? false }
             keyboardLink.link.onRefine = { [weak self] text in await self?.refine(text) }
             keyboardLink.deliveryForRun = { Settings.hostDelivery }
@@ -200,10 +230,25 @@ final class AppController {
         meetings.isInBackground = { [weak self] in self?.startEnvironment.current().inBackground ?? false }
         meetings.dictationActive = { [weak self] in
             guard let self else { return false }
+            #if ANE_CLEANUP_SPIKE
+            return !coordinator.isIdle || isDictating || keyboardRunActive || spike.admission.isPreparing || resolvingEngine
+            #else
             return !coordinator.isIdle || isDictating || keyboardRunActive || modelAdmission.isPreparing || resolvingEngine
+            #endif
         }
         meetings.releaseKeptMicrophone = { [weak self] in await self?.endKeepAlive() }
         meetings.onActiveChanged = { [weak self] active in self?.keyboardLink?.link.meetingChanged(active: active) }
+        #if ANE_CLEANUP_SPIKE
+        spikeMemoryObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.readiness.selectedResourcesReady = false
+                await self.spike.reset { await self.coordinator.invalidateKeptSession() }
+            }
+        }
+        #endif
         installInterruptionObservers()
         #if LEGATO_INTERNAL
         AudioDiagnostics.install()
@@ -228,6 +273,9 @@ final class AppController {
         resolvingEngine = true
         readiness.selectedResourcesReady = false
         modelAdmission.cancel()
+        #if ANE_CLEANUP_SPIKE
+        spike.admission.cancel()
+        #endif
         resourcePreparation?.cancel()
         if releasingKeptMicrophone { await coordinator.invalidateKeptSession() }
         let resolution = await models.engines.liveEngine()
@@ -252,6 +300,9 @@ final class AppController {
         modelRevision += 1
         readiness.selectedResourcesReady = false
         modelAdmission.cancel()
+        #if ANE_CLEANUP_SPIKE
+        spike.admission.cancel()
+        #endif
         scheduleResourcePreparation()
     }
 
@@ -261,10 +312,12 @@ final class AppController {
     }
 
     private func warmSelectedResources() async {
+        #if !ANE_CLEANUP_SPIKE
         guard !resolvingEngine, !modelAdmission.isResetting, !startEnvironment.current().inBackground else { return }
         do { try await prepareSelectedResources() }
         catch is CancellationError { }
         catch { armFailure = "Could not prepare selected models: \(error.localizedDescription)" }
+        #endif
     }
 
     private func prepareSelectedResources() async throws {
@@ -313,6 +366,9 @@ final class AppController {
     /// The keyboard's Refine key: a stronger rewrite (message style) of `text`, or nil when there is none.
     /// Runs in the background too, as the background cleanup setting says (the MLX model on the CPU by default).
     func refine(_ text: String) async -> String? {
+        #if ANE_CLEANUP_SPIKE
+        return await spike.refine(text, locale: ModelServices.singleLocale(models.engineSettings) ?? Locale.current)
+        #else
         if !startEnvironment.current().inBackground { await warmSelectedResources() }
         let reports = cleanupReports
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
@@ -326,6 +382,7 @@ final class AppController {
         E2E.log("refine changed=\(refined != text ? 1 : 0)")
         #endif
         return refined.isEmpty || refined == text ? nil : refined
+        #endif
     }
 
     // MARK: Dictation
@@ -432,6 +489,7 @@ final class AppController {
                 #endif
                 return false
             }
+            #if !ANE_CLEANUP_SPIKE
             let outcome: DictationCoordinator.ArmOutcome
             do {
                 outcome = try await modelAdmission.admit(
@@ -454,6 +512,37 @@ final class AppController {
                 armFailure = "Could not prepare selected models: \(error.localizedDescription)"
                 return false
             }
+            #else
+            let outcome: DictationCoordinator.ArmOutcome
+            do {
+                outcome = try await spike.admission.admit(isIdle: { self.coordinator.isIdle }, canStart: { !self.meetings.isActive }, prepare: {
+                    try await self.spike.prepare(inBackground: self.startEnvironment.current().inBackground)
+                    self.readiness.selectedResourcesReady = true
+                }) { await self.coordinator.arm(keepAlive: Settings.keepAliveLinger) }
+            } catch is CancellationError {
+                await coordinator.endKeepAlive()
+                armFailure = "Dictation preparation was cancelled. Return to the keyboard and tap the microphone to try again."
+                return false
+            } catch ParityPreparationError.needsForeground {
+                armFailure = "Open the app to prepare dictation, then return to the keyboard."
+                return false
+            } catch ParityPreparationError.busy {
+                if let notice = MeetingArbitration.dictationRefusal(meetingActive: meetings.isActive) {
+                    armFailure = notice
+                    return false
+                }
+                if spike.admission.isResetting {
+                    armFailure = "Dictation is releasing its model. Return to the keyboard and try the microphone again."
+                    return false
+                }
+                return true
+            }
+            catch {
+                armFailure = "The cleanup model could not be readied. Check the staged Qwen3 model and try again."
+                spike.record("model.prepare.failed", ["errorType": String(describing: type(of: error))])
+                return false
+            }
+            #endif
             #if DEBUG
             E2E.log("arm outcome=\(Self.describe(outcome))")
             #endif
@@ -478,6 +567,9 @@ final class AppController {
     /// Releases the microphone kept ready between dictations.
     func endKeepAlive() async {
         modelAdmission.cancel()
+        #if ANE_CLEANUP_SPIKE
+        spike.admission.cancel()
+        #endif
         await coordinator.endKeepAlive()
     }
 
@@ -523,6 +615,7 @@ final class AppController {
         #endif
         startEnvironment.assumeForeground = reason != nil
         defer { startEnvironment.assumeForeground = false }
+        #if !ANE_CLEANUP_SPIKE
         let outcome: DictationCoordinator.Outcome
         do {
             if resolvingEngine, startEnvironment.current().inBackground {
@@ -534,7 +627,7 @@ final class AppController {
                 prepare: { try await self.prepareSelectedResources() },
                 operation: { await self.coordinator.startIfIdle(options) ?? .busy })
         } catch PreparationError.needsForeground {
-            outcome = .needsForeground(.backgroundStartRefused)
+            outcome = .needsForeground(.modelPreparationRequired)
         } catch ModelAdmission.AdmissionError.busy {
             outcome = .busy
         } catch is CancellationError {
@@ -544,6 +637,43 @@ final class AppController {
         } catch {
             outcome = .failed("Could not prepare selected models: \(error.localizedDescription)")
         }
+        #else
+        let outcome: DictationCoordinator.Outcome
+        if spike.admission.isPreparing {
+            if startOnly { return nil }
+            _ = await stopIfRunning()
+            return .stopped(nil)
+        } else if isDictating || keyboardRunActive {
+            // A Stop/toggle is never gated on cleanup model availability.
+            guard !startOnly else { return nil }
+            outcome = await coordinator.toggle(options)
+        } else {
+            do {
+                outcome = try await spike.admission.admit(isIdle: { self.coordinator.isIdle }, canStart: { !self.meetings.isActive }, prepare: {
+                    try await self.spike.prepare(inBackground: self.startEnvironment.current().inBackground)
+                    self.readiness.selectedResourcesReady = true
+                }) { await self.coordinator.startIfIdle(options) ?? .busy }
+            } catch ParityPreparationError.needsForeground {
+                // The existing intent continues in the foreground; the keyboard receives its normal hop response.
+                outcome = .needsForeground(.modelPreparationRequired)
+                spike.record("start.modelNeedsForeground")
+            } catch is CancellationError {
+                _ = await coordinator.stopIfRunning()
+                await coordinator.endKeepAlive()
+                return .stopped(nil)
+            } catch ParityPreparationError.busy {
+                if let notice = MeetingArbitration.dictationRefusal(meetingActive: meetings.isActive) {
+                    armFailure = notice
+                    return .failed(notice)
+                }
+                return .busy
+            }
+            catch {
+                spike.record("model.prepare.failed", ["errorType": String(describing: type(of: error))])
+                return .failed("The cleanup model could not be prepared.")
+            }
+        }
+        #endif
         if case .needsForeground = outcome { hopOptions = options } // the press that repeats this one keeps them
         await didFinish(outcome, hopReason: reason, finishedBefore: finishedBefore)
         return outcome
@@ -558,9 +688,16 @@ final class AppController {
     @discardableResult
     func stopIfRunning(releasingLease: Bool = false) async -> DictationCoordinator.Outcome? {
         let finishedBefore = idleCount
+        #if !ANE_CLEANUP_SPIKE
         guard let outcome = await modelAdmission.stop(operation: {
             await self.coordinator.stopIfRunning(releasingLease: releasingLease)
         }) else { return nil }
+        #else
+        let stopped = await spike.admission.stop {
+            await self.coordinator.stopIfRunning(releasingLease: releasingLease)
+        }
+        guard let outcome = stopped else { return nil }
+        #endif
         await didFinish(outcome, finishedBefore: finishedBefore)
         return outcome
     }
@@ -570,6 +707,9 @@ final class AppController {
     ) async {
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("toggle.end", ["outcome": Self.outcomeKind(outcome)])
+        #endif
+        #if ANE_CLEANUP_SPIKE
+        spike.record("dictation.outcome", ["outcome": Self.outcomeKind(outcome)])
         #endif
         if case .started = outcome, idleCount == finishedBefore { isDictating = true }
         if case .needsOnboarding = outcome { await refreshReadiness() }
@@ -687,6 +827,9 @@ final class AppController {
     private func runDidEnd() {
         idleCount += 1
         isDictating = false
+        #if ANE_CLEANUP_SPIKE
+        spike.sampleMemory("run.ended")
+        #endif
         Task { await refreshLastTranscript() }
     }
 
@@ -725,9 +868,11 @@ final class AppController {
     private func installInterruptionObservers() {
         let center = NotificationCenter.default
 
+        #if !ANE_CLEANUP_SPIKE
         center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in await self?.releaseModelsForMemoryPressure() }
         }
+        #endif
 
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt

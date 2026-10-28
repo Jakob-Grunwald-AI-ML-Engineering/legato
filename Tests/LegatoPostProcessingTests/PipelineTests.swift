@@ -42,6 +42,16 @@ private let neverFires: @Sendable (Duration) async throws -> Void = { _ in try a
 /// A sleeper that fires at once: every timeout expires immediately.
 private let firesAtOnce: @Sendable (Duration) async throws -> Void = { _ in }
 
+/// Polls until `condition` holds or a generous 30 s deadline passes (a hang guard, not a speed bound).
+private func eventually(_ condition: @Sendable () -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while ContinuousClock.now < deadline {
+        if condition() { return true }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    return condition()
+}
+
 @Suite("PostProcessingPipeline")
 struct PipelineTests {
     @Test func stagesRunInOrderEachSeeingThePreviousOutput() async {
@@ -111,10 +121,14 @@ struct PipelineTests {
         // however slow the runner (no wall-clock bound to miss).
         let release = AsyncStream<Void>.makeStream()
         defer { release.continuation.finish() }
+        // The deadline passes (the sleeper returns) once the stubborn stage is running, with no real wait.
+        let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let timers = Mutex(0)
         let pipeline = PostProcessingPipeline(
             stages: [
                 // A cold model load: nothing in it checks for cancellation.
                 SpyStage("stubborn", log: log) { _ in
+                    entered.continuation.yield()
                     await Task.detached { for await _ in release.stream {} }.value
                     finished.set()
                     return "too late"
@@ -122,7 +136,13 @@ struct PipelineTests {
                 SpyStage("after", log: log) { $0 + "!" },
             ],
             timeout: .milliseconds(100),
-            sleeper: { try await Task.sleep(for: $0) })
+            sleeper: { duration in
+                // Only the stubborn stage's timer fires; the next stage's never does.
+                let first = timers.withLock { n in n += 1; return n == 1 }
+                guard first else { return try await neverFires(duration) }
+                for await _ in entered.stream { break }
+                try Task.checkCancellation()
+            })
 
         let out = await pipeline.process("x", locale: en)
 
@@ -130,7 +150,8 @@ struct PipelineTests {
         #expect(!finished.isSet, "returned at the deadline while the stage was still running")
     }
 
-    @Test func aTimedOutStageIsCancelled() async {
+    @Test(.timeLimit(.minutes(1)))
+    func aTimedOutStageIsCancelled() async {
         let log = CallLog()
         let sawCancel = FlagBox()
         let pipeline = PostProcessingPipeline(
@@ -143,11 +164,11 @@ struct PipelineTests {
             ],
             sleeper: firesAtOnce)
         #expect(await pipeline.process("x", locale: en) == "x")
-        for _ in 0..<200 where !sawCancel.isSet { try? await Task.sleep(for: .milliseconds(5)) }
-        #expect(sawCancel.isSet)
+        #expect(await eventually { sawCancel.isSet })
     }
 
-    @Test func aStageThatBeatsTheTimeoutStopsTheTimer() async {
+    @Test(.timeLimit(.minutes(1)))
+    func aStageThatBeatsTheTimeoutStopsTheTimer() async {
         let log = CallLog()
         let timerCancelled = FlagBox()
         let pipeline = PostProcessingPipeline(
@@ -156,8 +177,7 @@ struct PipelineTests {
                 do { try await Task.sleep(for: .seconds(3600)) } catch { timerCancelled.set(); throw error }
             })
         #expect(await pipeline.process("x", locale: en) == "xA")
-        for _ in 0..<200 where !timerCancelled.isSet { try? await Task.sleep(for: .milliseconds(5)) }
-        #expect(timerCancelled.isSet)
+        #expect(await eventually { timerCancelled.isSet })
     }
 
     /// No wall-clock bound: the stage never finishes on its own, so returning at all proves the caller did not
@@ -172,7 +192,7 @@ struct PipelineTests {
             }],
             sleeper: neverFires)
         let caller = Task { await pipeline.process("x", locale: en) }
-        for _ in 0..<200 where log.names.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        #expect(await eventually { !log.names.isEmpty }, "the stage started")
         let clock = ContinuousClock()
         let started = clock.now
         caller.cancel()

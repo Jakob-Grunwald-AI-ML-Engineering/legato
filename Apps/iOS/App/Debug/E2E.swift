@@ -3,6 +3,7 @@ import AVFAudio
 import Foundation
 import LegatoAudio
 import LegatoCore
+import LegatoKeyboardCore
 import Synchronization
 import os
 
@@ -261,7 +262,7 @@ final class E2EFakeMeetingMic: AudioSource, Sendable {
 extension AppController {
     /// Handles the debug-only URLs. Returns whether `url` was one of them.
     func handleE2E(_ url: URL) async -> Bool {
-        guard url.scheme == "legato", let command = url.host, command == "toggle" || command == "interrupt" else {
+        guard url.scheme == RuntimeIdentity.current.urlScheme, let command = url.host, command == "toggle" || command == "interrupt" else {
             return false
         }
         await runE2E(command)
@@ -356,7 +357,7 @@ extension E2E {
                     else { return }
                     Task { @MainActor in await AppController.shared.runE2E(command) }
                 },
-                "de.gruenwald.legato.e2e.\(command)" as CFString, nil, .deliverImmediately)
+                "\(RuntimeIdentity.current.notificationNamespace).e2e.\(command)" as CFString, nil, .deliverImmediately)
         }
     }
 }

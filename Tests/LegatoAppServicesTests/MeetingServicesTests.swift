@@ -358,7 +358,8 @@ private struct Rig {
     }
 }
 
-/// Its first answer takes two seconds, unless the task is cancelled first; later answers come at once.
+/// Its first answer does not come on its own: it ends when the task is cancelled (the test's stop for a
+/// recording), so no clock decides the outcome. The five minutes only bound a hang. Later answers come at once.
 private final class BlockingLLM: LLMBackend {
     let id = "blocking"
     let calls = Mutex(0)
@@ -366,12 +367,12 @@ private final class BlockingLLM: LLMBackend {
     var availability: LLMAvailability { get async { .available } }
     func respond(instructions: String, prompt: String) async throws -> String {
         let n = calls.withLock { $0 += 1; return $0 }
-        if n == 1 { try await Task.sleep(for: .seconds(2)) }
+        if n == 1 { try await Task.sleep(for: .seconds(300)) }
         return "## Summary\nblocking"
     }
 }
 
-/// Its first answer waits up to ten seconds and records whether it was cancelled; later answers come at once.
+/// Its first answer does not come on its own: it waits for cancellation (a five-minute bound only stops a hang) and records it; later answers come at once.
 private final class HoldingLLM: LLMBackend {
     let id = "holding"
     let calls = Mutex(0)
@@ -381,7 +382,7 @@ private final class HoldingLLM: LLMBackend {
     func respond(instructions: String, prompt: String) async throws -> String {
         let n = calls.withLock { $0 += 1; return $0 }
         if n == 1 {
-            do { try await Task.sleep(for: .seconds(10)) } catch {
+            do { try await Task.sleep(for: .seconds(300)) } catch {
                 cancelled.withLock { $0 += 1 }
                 throw error
             }
@@ -877,7 +878,10 @@ private final class TrackSink: MeetingAudioSink {
             _ = try await services.regenerate(meetingID: id)
             ended.withLock { $0 = true }
         }
-        _ = await eventually(timeout: .milliseconds(500)) { ended.withLock { $0 } }
+        // The deferred job's post-pass is held (until `release()`), so the lane stays taken and the manual job
+        // cannot finish; yielding lets it try, with no wall-clock wait.
+        for _ in 0..<200 { await Task.yield() }
+        #expect(!ended.withLock { $0 }, "the manual job waits for the lane")
         #expect(services.stage(of: id)?.isRunning == true, "the deferred job still runs, and its stage says so")
 
         transcriber.release()

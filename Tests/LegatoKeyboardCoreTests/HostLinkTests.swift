@@ -115,8 +115,10 @@ private final class Received {
 }
 
 @MainActor
+/// Polls until `condition` holds or a generous 30 s deadline passes (a hang guard, not a speed bound).
 private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
-    for _ in 0..<400 {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while ContinuousClock.now < deadline {
         if condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))
     }
