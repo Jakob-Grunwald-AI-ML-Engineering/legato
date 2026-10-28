@@ -35,6 +35,9 @@ public final class HostLink {
     private var appliedWaiter: (runID: String, continuation: CheckedContinuation<Bool, Never>)?
     private var appliedTimeout: Task<Void, Never>?
     private var scrub: Task<Void, Never>?
+    /// The accepted start still awaiting its result. Stop invalidates it before cancelling admission.
+    private var pendingStartID: String?
+    private var pendingStartRequests: Set<String> = []
 
     public init(
         store: LinkStore,
@@ -63,6 +66,7 @@ public final class HostLink {
     /// it from the start, because `.hold` keeps the field free while listening.
     public func runStarted(id: String, target: HostTarget, delivery: HostDelivery? = nil) {
         cancelScrub()
+        state.preparingRequestID = nil
         state.runID = id
         state.target = target
         state.phase = .starting
@@ -212,6 +216,20 @@ public final class HostLink {
         publish()
     }
 
+    /// Explicit user cancellation (also from the app's Stop) invalidates the old request's reply.
+    public func cancelPreparingStart() {
+        settlePreparingStart(needsForeground: false)
+    }
+
+    private func settlePreparingStart(needsForeground: Bool) {
+        guard pendingStartID != nil else { return }
+        state.startCompletion = HostStartCompletion(requestIDs: pendingStartRequests.sorted(), needsForeground: needsForeground)
+        pendingStartID = nil
+        pendingStartRequests = []
+        state.preparingRequestID = nil
+        publish()
+    }
+
     /// A meeting started (true) or ended (false). While it records the state says so and keeps beating, so
     /// the keyboard trusts it and can say "Meeting recording" instead of offering to dictate.
     public func meetingChanged(active: Bool) {
@@ -244,7 +262,7 @@ public final class HostLink {
     }
 
     private var isActive: Bool {
-        (state.runID != nil && state.phase != .idle) || state.leaseUntil != nil || state.meetingRecording == true
+        (state.runID != nil && state.phase != .idle) || state.preparingRequestID != nil || state.leaseUntil != nil || state.meetingRecording == true
     }
 
     private func updateBeat() {
@@ -284,13 +302,31 @@ public final class HostLink {
             return
         }
         _ = ledger.admit(id: request.id)
+        if request.command == .start, pendingStartID != nil {
+            pendingStartRequests.insert(request.id)
+        }
         // Ack first: acting (a dictation start) takes longer than the keyboard is willing to wait.
         acknowledge(request.id, .accepted)
         if willChangeSomething(request.command) {
+            if request.command == .start {
+                pendingStartID = request.id
+                pendingStartRequests = [request.id]
+                state.preparingRequestID = request.id
+                publish()
+            } else if request.command == .stop || request.command == .endKeepAlive {
+                cancelPreparingStart()
+            }
             let succeeded = await onRequest?(request) ?? true
             // The keyboard took the first ack as "on it" and has stopped waiting. A start that then failed
             // (refused, not ready) needs the user to open the app: say so.
-            if !succeeded, request.command == .start { acknowledge(request.id, .hop) }
+            if request.command == .start, pendingStartID == request.id {
+                settlePreparingStart(needsForeground: !succeeded)
+                if !succeeded { acknowledge(request.id, .hop) }
+            }
+        } else if request.command == .start, pendingStartID == nil {
+            // Already running/finishing: this accepted request needs no second admission or watcher.
+            state.startCompletion = HostStartCompletion(requestIDs: [request.id], needsForeground: false)
+            publish()
         }
     }
 
@@ -344,7 +380,7 @@ public final class HostLink {
     private func canAct(on command: RequestCommand) -> Bool {
         switch command {
         case .start: state.acceptsRemoteStart || isRunning
-        case .stop: isRunning
+        case .stop: isRunning || pendingStartID != nil || state.leaseUntil != nil
         case .endKeepAlive: state.leaseUntil != nil
         case .arm: false // arming activates audio: only from the front, through the URL that opens the app
         }
@@ -352,7 +388,7 @@ public final class HostLink {
 
     /// A start while a run is already going is accepted but needs no action.
     private func willChangeSomething(_ command: RequestCommand) -> Bool {
-        command != .start || !isRunning
+        command != .start || (!isRunning && pendingStartID == nil)
     }
 
     private func acknowledge(_ id: String, _ result: AckResult) {

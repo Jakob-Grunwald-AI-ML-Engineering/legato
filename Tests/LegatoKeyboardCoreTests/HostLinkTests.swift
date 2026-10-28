@@ -429,6 +429,137 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
 
     // MARK: requests
 
+    @Test func earlyAppCancellationPublishesDurableCompletionForAllAcceptedStartRequests() async throws {
+        let r = Rig()
+        r.link.leaseChanged(until: t0.addingTimeInterval(30))
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        var entered = false
+        r.link.onRequest = { _ in
+            entered = true
+            for await _ in gate { break }
+            return false
+        }
+        r.send(.start, id: "first")
+        let start = Task { await r.link.processInbox() }
+        #expect(await eventually { entered })
+        r.send(.start, id: "duplicate")
+        await r.link.processInbox()
+        r.link.cancelPreparingStart() // App Stop can happen before the keyboard ever reads preparing.
+        release.yield(()); release.finish()
+        await start.value
+        r.env.advance(3)
+        r.env.beat.tick()
+        #expect(await eventually { r.host?.beatAt == r.env.now })
+        let payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(r.link.state)) as? [String: Any]
+        let completion = payload?["startCompletion"] as? [String: Any]
+        #expect(completion?["requestIDs"] as? [String] == ["duplicate", "first"])
+        #expect(completion?["needsForeground"] as? Bool == false)
+        #expect(r.ack == KeyboardAck(id: "duplicate", result: .accepted))
+    }
+
+    @Test func aFailedPendingStartPublishesTheResultForItsAcceptedDuplicate() async throws {
+        let r = Rig()
+        r.link.leaseChanged(until: t0.addingTimeInterval(30))
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        var entered = false
+        r.link.onRequest = { _ in
+            entered = true
+            for await _ in gate { break }
+            return false
+        }
+        r.send(.start, id: "first")
+        let start = Task { await r.link.processInbox() }
+        #expect(await eventually { entered })
+        r.send(.start, id: "duplicate")
+        await r.link.processInbox()
+        release.yield(()); release.finish()
+        await start.value
+        let payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(r.link.state)) as? [String: Any]
+        let completion = payload?["startCompletion"] as? [String: Any]
+        #expect(completion?["requestIDs"] as? [String] == ["duplicate", "first"])
+        #expect(completion?["needsForeground"] as? Bool == true)
+    }
+
+    @Test func preparingAStartPublishesACancellableStateWithoutClaimingToListen() async throws {
+        let r = Rig()
+        r.link.leaseChanged(until: t0.addingTimeInterval(30))
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        var entered = false
+        r.link.onRequest = { _ in
+            entered = true
+            for await _ in gate { break }
+            return true
+        }
+        r.send(.start)
+        let start = Task { await r.link.processInbox() }
+        #expect(await eventually { entered })
+        let payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(r.link.state)) as? [String: Any]
+        #expect(payload?["preparingRequestID"] as? String == "req-1")
+        #expect(r.host?.phase == .idle)
+        #expect(r.host?.runID == nil)
+        #expect(MicKeyMode.resolve(host: r.host, now: r.env.now, fullAccess: true) == .remote(.stop))
+        release.yield(()); release.finish()
+        await start.value
+        #expect(MicKeyMode.resolve(host: r.host, now: r.env.now, fullAccess: true) == .remote(.start))
+    }
+
+    @Test func stoppingPreparationKeepsTheStopAckWhenTheCancelledStartReturnsLate() async {
+        let r = Rig()
+        r.link.leaseChanged(until: t0.addingTimeInterval(30))
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        var commands: [RequestCommand] = []
+        r.link.onRequest = { request in
+            commands.append(request.command)
+            if request.command == .start {
+                for await _ in gate { break }
+                return false // cancellation reaches the pending start after the stop was acknowledged
+            }
+            return true
+        }
+        r.send(.start)
+        let start = Task { await r.link.processInbox() }
+        #expect(await eventually { commands == [.start] })
+        r.send(.stop, id: "cancel")
+        await r.link.processInbox()
+        #expect(commands == [.start, .stop])
+        #expect(r.ack == KeyboardAck(id: "cancel", result: .accepted))
+        release.yield(()); release.finish()
+        await start.value
+        #expect(r.ack == KeyboardAck(id: "cancel", result: .accepted))
+        #expect(MicKeyMode.resolve(host: r.host, now: r.env.now, fullAccess: true) == .remote(.start))
+    }
+
+    @Test func aSecondStartWhilePreparationIsPendingDoesNotCreateAnotherAdmissionOrHop() async {
+        let r = Rig()
+        r.link.leaseChanged(until: t0.addingTimeInterval(30))
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        var admissions = 0
+        r.link.onRequest = { _ in
+            admissions += 1
+            for await _ in gate { break }
+            return true
+        }
+        r.send(.start)
+        let start = Task { await r.link.processInbox() }
+        #expect(await eventually { admissions == 1 })
+        r.send(.start, id: "second")
+        let duplicate = Task { await r.link.processInbox() }
+        #expect(await eventually { r.ack?.id == "second" })
+        #expect(admissions == 1)
+        #expect(r.ack == KeyboardAck(id: "second", result: .accepted))
+        release.yield(()); release.finish()
+        await start.value; await duplicate.value
+    }
+
+    @Test func aStopRacingTheFirstStartNoteIsSafeWhileTheMicrophoneLeaseIsHeld() async {
+        let r = Rig()
+        r.link.leaseChanged(until: t0.addingTimeInterval(30))
+        r.send(.stop)
+        await r.link.processInbox()
+        #expect(r.ack == KeyboardAck(id: "req-1", result: .accepted))
+        #expect(r.received.requests.map(\.command) == [.stop])
+    }
+
     @Test func aRemoteStartWithALeaseIsActedOnAndAccepted() async {
         let r = Rig()
         r.link.leaseChanged(until: t0.addingTimeInterval(30))

@@ -66,6 +66,29 @@ enum E2E {
 
     static let showsKeyboardHarness = UserDefaults.standard.bool(forKey: "LegatoKeyboardHarness")
 
+    /// Holds selected-resource admission without loading native models in simulator fake mode.
+    /// Cancelling one waiter leaves the simulated shared preparation held for other waiters.
+    @MainActor private static var preparationHeld = UserDefaults.standard.bool(forKey: "LegatoFakePreparationHeld")
+    @MainActor static func waitForSelectedPreparation() async throws {
+        guard fakeEngine != nil, preparationHeld else { return }
+        log("preparation.wait")
+        while preparationHeld { try await Task.sleep(for: .milliseconds(25)) }
+        try Task.checkCancellation()
+        log("preparation.ready")
+    }
+    @MainActor static func releaseSelectedPreparation() {
+        preparationHeld = false
+        log("preparation.release")
+    }
+    @MainActor private static var startWatchHeld = UserDefaults.standard.bool(forKey: "LegatoFakeStartWatchHeld")
+    @MainActor static func waitForStartWatch() async {
+        guard fakeEngine != nil, startWatchHeld else { return }
+        log("watcher.wait")
+        while startWatchHeld, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(25)) }
+        log("watcher.released")
+    }
+    @MainActor static func releaseStartWatch() { startWatchHeld = false }
+
     static let fakeEngine: E2EScriptedEngine? = {
         guard let text = UserDefaults.standard.string(forKey: "LegatoFakeEngine"), !text.isEmpty else { return nil }
         let delay = UserDefaults.standard.integer(forKey: "LegatoFakeWordDelayMs")
@@ -325,6 +348,10 @@ extension AppController {
             E2E.setFakeInBackground(false)
         case "background":
             E2E.setFakeInBackground(true)
+        case "preparation-release":
+            E2E.releaseSelectedPreparation()
+        case "watcher-release":
+            E2E.releaseStartWatch()
         case "toggle-after-hop":
             // What the intent does after `continueInForeground`, with the fake background still on.
             _ = await toggle(afterForegroundHop: .backgroundStartRefused)
@@ -340,7 +367,7 @@ extension E2E {
         "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-pause", "meeting-resume", "meeting-discard", "meeting-export", "meeting-route-change",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-arm", "kbd-hop-start", "kbd-hop-arm-url-first", "kbd-forged-url",
-        "harness-mic", "harness-mic-hop", "harness-type", "harness-numbers",
+        "harness-mic", "harness-mic-hop", "harness-type", "harness-numbers", "harness-status", "harness-host-missing", "preparation-release", "watcher-release",
     ]
 
     /// Darwin notifications `de.gruenwald.legato.e2e.<command>`, posted from the host with

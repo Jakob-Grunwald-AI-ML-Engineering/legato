@@ -264,6 +264,11 @@ assert_log() { # assert_log <description> <fixed string>: appears in the scenari
 assert_no_log() {
   if grep -q -F -- "$2" "$LOG"; then record FAIL "$1" "unexpected: $(grep -F -- "$2" "$LOG" | head -1 | cut -c1-200)"; else record PASS "$1"; fi
 }
+assert_no_log_after() { # description, first marker, forbidden text (exclude the legitimate initial arm hop)
+  if awk -v marker="$2" 'index($0, marker) { seen = 1 } seen' "$LOG" | grep -F -- "$3" > /dev/null; then
+    record FAIL "$1" "unexpected <$3> after <$2>"
+  else record PASS "$1"; fi
+}
 assert_count() { # assert_count <description> <fixed string> <n>
   local n; n="$(grep -c -F -- "$2" "$LOG")"
   if [ "$n" = "$3" ]; then record PASS "$1"; else record FAIL "$1" "<$2> logged $n times, expected $3"; fi
@@ -771,6 +776,111 @@ scenario_m() {
   assert_log "no lease: the keyboard is told to hop" "kbd.ack result=hop"
   assert_no_log "nothing started" "e2e outcome kind=started"
   assert_no_log "no session built" "session.make"
+}
+
+scenario_n3() {
+  begin "n3. app cancels before first keyboard poll" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoFakeStartWatchHeld YES \
+    -LegatoKeepAliveSeconds 30 -LegatoFakeBackgroundRefusal pla || return
+  wait_log "harness ready" 10
+  trigger harness-mic-hop
+  wait_log "arm outcome=armed" 10
+  trigger background
+  trigger harness-mic
+  wait_log "watcher.wait" 10
+  trigger toggle
+  wait_log "outcome kind=busy" 10
+  trigger preparation-release
+  trigger watcher-release
+  wait_log "watcher.released" 5
+  sleep 0.5
+  trigger harness-status
+  wait_log "harness status=" 5
+  assert_log "early app cancellation clears keyboard preparation" 'harness status="" capturing=0 command=start'
+  assert_no_log "early app cancellation cannot start late" "outcome kind=started"
+  assert_no_log_after "early cancellation causes no old hop" "harness mic mode=remote-start" "harness ack result=hop"
+  assert_eq "early cancelled run has no history" "0" "$(history_texts | grep -c .)"
+
+  begin "n3. accepted request loses host visibility" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoFakeStartWatchHeld YES \
+    -LegatoKeepAliveSeconds 30 -LegatoFakeBackgroundRefusal pla || return
+  wait_log "harness ready" 10
+  trigger harness-mic-hop
+  wait_log "arm outcome=armed" 10
+  trigger background
+  trigger harness-mic
+  wait_log "watcher.wait" 10
+  trigger toggle
+  wait_log "outcome kind=busy" 10
+  trigger preparation-release
+  trigger harness-host-missing
+  trigger watcher-release
+  wait_log "watcher.released" 5
+  sleep 3.5
+  trigger harness-status
+  wait_log "harness status=" 5
+  assert_log "missing host is bounded by freshness rather than preparing forever" 'harness status="" capturing=0 command=arm'
+  assert_no_log "missing host cannot resume cancelled capture" "outcome kind=started"
+}
+
+scenario_n2() {
+  # The real keyboard controller, App Group transport and AppController admission, with only
+  # native resources/audio replaced. Hold longer than the keyboard's old eight-second watcher.
+  begin "n2. cancel keyboard preparation" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoKeepAliveSeconds 30 \
+    -LegatoFakeBackgroundRefusal pla || return
+  wait_log "harness ready" 10
+  trigger harness-mic-hop
+  wait_log "arm outcome=armed" 10
+  assert_log "cold preparation does not block microphone arm" "arm outcome=armed"
+  trigger background
+  trigger harness-mic
+  wait_log "harness ack result=accepted" 10
+  sleep 9
+  trigger harness-status
+  wait_log "harness status=" 5
+  assert_log "keyboard visibly prepares rather than claiming listening" 'harness status="Preparing dictation…" capturing=0 command=stop'
+  assert_no_log "preparation has not started a recording" "outcome kind=started"
+  trigger harness-mic
+  sleep 0.5
+  trigger preparation-release
+  wait_log "preparation.ready" 10
+  sleep 2
+  trigger harness-status
+  wait_log_n "harness status=" 2 5
+  assert_log "second mic press cancels pending admission" "harness mic mode=remote-stop"
+  assert_no_log "cancelled preparation never starts late" "outcome kind=started"
+  assert_no_log "no repeat foreground hop" "harness ack result=hop-after-accept"
+  assert_no_log_after "no hop acknowledgment after remote start" "harness mic mode=remote-start" "harness ack result=hop"
+  assert_no_log_after "cancellation never forces an open-app mic" "harness mic mode=remote-start" "command=arm"
+  assert_log "cancelled keyboard returns to ready mic" 'harness status="" capturing=0 command=start'
+  assert_eq "cancelled run creates no history" "0" "$(history_texts | grep -c .)"
+
+  begin "n2. finish keyboard preparation" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoKeepAliveSeconds 30 \
+    -LegatoFakeBackgroundRefusal pla || return
+  wait_log "harness ready" 10
+  trigger harness-mic-hop
+  wait_log "arm outcome=armed" 10
+  trigger background
+  trigger harness-mic
+  wait_log "harness ack result=accepted" 10
+  sleep 9
+  trigger harness-status
+  wait_log "harness status=" 5
+  assert_log "pending completion remains cancellable beyond eight seconds" 'harness status="Preparing dictation…" capturing=0 command=stop'
+  trigger preparation-release
+  wait_log "outcome kind=started" 10
+  assert_log "prepared dictation starts on held background mic" "outcome kind=started"
+  sleep 2
+  trigger harness-mic
+  wait_log "outcome kind=stopped" 10
+  assert_log "dictation stops through the keyboard" "outcome kind=stopped"
+  assert_eq "keyboard roundtrip inserts the transcript" "$TEXT " "$(log_field_last "harness apply final=1" doc)"
+  assert_eq "one completed history entry" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  assert_count "completion reuses microphone armed in foreground" "audio.start" 1
+  assert_no_log "completion needs no foreground hop" "harness ack result=hop-after-accept"
+  assert_no_log_after "completion never acknowledges a hop" "harness mic mode=remote-start" "harness ack result=hop"
 }
 
 scenario_n() {
@@ -1366,7 +1476,7 @@ scenario_z() {
 
 t_run=$SECONDS
 wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
-for s in a b c d e f g h i p j o k l m n q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
+for s in a b c d e f g h i p j o k l m n n2 n3 q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
 if wanted v; then
   scenario_v "retry succeeds" duckOthers 1 2 yes
   scenario_v "default fails twice" duckOthers 9 2 no

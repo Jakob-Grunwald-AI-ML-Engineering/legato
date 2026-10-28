@@ -211,6 +211,11 @@ final class AppController {
             }
             keyboardLink.onLease = { [weak self] until in
                 self?.micReadyUntil = until
+                // Preparation never extends the user's finite microphone lease. A lost lease revokes
+                // its pending keyboard start before native preparation can complete in the background.
+                if until == nil, self?.keyboardLink?.link.state.preparingRequestID != nil {
+                    self?.modelAdmission.cancel()
+                }
                 #if ANE_CLEANUP_SPIKE
                 self?.spike.record("microphone.lease", ["held": String(until != nil)])
                 #endif
@@ -390,15 +395,18 @@ final class AppController {
     }
 
     private func prepareSelectedResources() async throws {
+        let revision = modelRevision
         #if DEBUG
         if E2E.fakeEngine != nil {
+            try await E2E.waitForSelectedPreparation()
+            try Task.checkCancellation()
+            guard revision == modelRevision, !resolvingEngine, !modelAdmission.isResetting else { throw CancellationError() }
             readiness.selectedResourcesReady = true
             recognitionPreparing = false
             recognitionFailure = nil
             return
         }
         #endif
-        let revision = modelRevision
         let options = Settings.cleanupStore.options
         let inBackground = startEnvironment.current().inBackground
         do {
@@ -665,6 +673,7 @@ final class AppController {
 
     /// Releases the microphone kept ready between dictations.
     func endKeepAlive() async {
+        keyboardLink?.link.cancelPreparingStart()
         modelAdmission.cancel()
         #if ANE_CLEANUP_SPIKE
         spike.admission.cancel()
@@ -725,7 +734,15 @@ final class AppController {
                 canStart: { !self.meetings.isActive && !self.resolvingEngine },
                 resolve: { try await self.joinEngineResolution() },
                 prepare: { try await self.prepareSelectedResources() },
-                operation: { await self.coordinator.startIfIdle(options) ?? .busy })
+                operation: {
+                    // Preparation can outlive a finite lease. Do not silently open fresh background
+                    // capture for an old keyboard tap after its armed microphone disappeared.
+                    if source == "keyboard", self.startEnvironment.current().inBackground,
+                       self.micReadyUntil.map({ $0 > Date() }) != true {
+                        return .needsForeground(.backgroundStartRefused)
+                    }
+                    return await self.coordinator.startIfIdle(options) ?? .busy
+                })
         } catch PreparationError.needsForeground {
             outcome = .needsForeground(.modelPreparationRequired)
         } catch ModelAdmission.AdmissionError.busy {
@@ -787,6 +804,7 @@ final class AppController {
     /// system event means that lease is dead).
     @discardableResult
     func stopIfRunning(releasingLease: Bool = false) async -> DictationCoordinator.Outcome? {
+        keyboardLink?.link.cancelPreparingStart()
         let finishedBefore = idleCount
         #if !ANE_CLEANUP_SPIKE
         guard let outcome = await modelAdmission.stop(operation: {

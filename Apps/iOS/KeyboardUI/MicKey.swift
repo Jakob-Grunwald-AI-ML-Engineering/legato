@@ -25,13 +25,14 @@ struct MicKey: View {
     }
 
     private var capturing: Bool { controller.isCapturing }
+    private var canStop: Bool { controller.micMode == .remote(.stop) }
 
     /// The pill of the top bar: an outlined capsule; while capturing, filled red with a pulsing stop glyph.
     private var label: some View {
         ZStack {
             Capsule().fill(capturing ? Color.red : Color.clear)
             Capsule().strokeBorder(capturing ? Color.clear : Color.primary.opacity(0.22), lineWidth: 2)
-            Image(systemName: capturing ? "stop.fill" : "mic.fill")
+            Image(systemName: canStop ? "stop.fill" : "mic.fill")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(capturing ? Color.white : Color.primary)
                 .symbolEffect(.pulse, isActive: capturing)
@@ -39,5 +40,6 @@ struct MicKey: View {
         .padding(hitInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(hitInsets == EdgeInsets() ? AnyShape(Capsule()) : AnyShape(Rectangle()))
+        .accessibilityLabel(canStop ? (capturing ? "Stop dictation" : "Cancel dictation") : "Start dictation")
     }
 }
