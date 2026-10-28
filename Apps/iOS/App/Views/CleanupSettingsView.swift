@@ -1,6 +1,6 @@
 import LegatoAppServices
 import LegatoCore
-import LegatoMLX
+import LegatoCoreML
 import LegatoModels
 import LegatoPostProcessing
 import SwiftUI
@@ -14,21 +14,21 @@ struct CleanupSettingsView: View {
     @State private var delivery = Settings.cleanupDelivery
     @State private var style = Settings.cleanupStyle
     @State private var backend = Settings.cleanupBackend
-    @State private var background = Settings.cleanupBackground
     @State private var itn = Settings.cleanupITN
     @State private var timeout = Double(Settings.cleanupTimeoutSeconds)
-    @State private var selectedMLX: String?
+    @State private var selectedModel: String?
+    @State private var modelTerms: CleanupModelTerms?
     @State private var pending: String?
     @State private var failures: [String: String] = [:]
 
     private var models: ModelServices { controller.models }
 
-    private var selectedMLXName: String? {
-        selectedMLX.flatMap { id in models.cleanupModels.first { $0.id == id }?.displayName }
+    private var selectedModelName: String? {
+        selectedModel.flatMap { id in models.cleanupModels.first { $0.id == id }?.displayName }
     }
 
     private var usesCoreML: Bool {
-        backend == .coreML || (backend == .auto && selectedMLX.map { models.cleanupChoice(for: $0) == .coreML } == true)
+        backend == .coreML
     }
 
     var body: some View {
@@ -73,36 +73,38 @@ struct CleanupSettingsView: View {
             }
             #else
             Section {
-                backendRow("Auto", detail: "Your selected model; Apple Foundation Models when none is selected", choice: .auto)
                 backendRow("Apple Foundation Models", detail: "Built in (Apple Intelligence)", choice: .foundationModels)
                 ForEach(models.cleanupModels) { descriptor in
                     ModelRow(
                         descriptor: descriptor, manager: models.manager,
-                        isSelected: backend == models.cleanupChoice(for: descriptor.id) && selectedMLX == descriptor.id,
+                        isSelected: backend == models.cleanupChoice(for: descriptor.id) && selectedModel == descriptor.id,
                         isPending: pending == descriptor.id, failure: failures[descriptor.id],
                         onCancel: { cancelDownload(descriptor.id) }
-                    ) { pickMLX(descriptor.id) }
+                    ) { pickModel(descriptor.id) }
                     .swipeActions {
                         Button("Delete", role: .destructive) { delete(descriptor.id) }
                     }
+                    if descriptor.id == CoreMLModels.qwen3_0_6bID {
+                        Text("Experimental: review numbers and times carefully; this model can change them incorrectly.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else if descriptor.id == CoreMLModels.gemma3_1bID {
+                        Text("Experimental: preparation can fail on some devices. If it fails, choose another model.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             } header: {
-                Text("Backend")
+                Text("Cleanup model")
             } footer: {
-                Text("Picking a model downloads it first. Auto uses the model picked last: \(selectedMLXName ?? "none yet").")
-                if usesCoreML { Text("Core ML uses the same selected model in Legato and from the keyboard.") }
-            }
-
-            if !usesCoreML {
-                Section {
-                    Picker("Background cleanup", selection: $background) {
-                        Text("CPU (slower)").tag(CleanupRegistry.BackgroundCleanup.cpu)
-                        Text("Apple Foundation Models").tag(CleanupRegistry.BackgroundCleanup.foundationModels)
-                        Text("Off").tag(CleanupRegistry.BackgroundCleanup.off)
+                Text("Picking a downloaded model installs and prepares it first. While an installed model prepares, dictation can use Apple Foundation Models. The selected model is used for new dictations once ready.")
+                if backend == .coreML, selectedModelName == nil { Text("Choose a Core ML model to install and prepare it.") }
+                if usesCoreML, selectedModelName != nil {
+                    Text(models.cleanupPreparation.description)
+                        .foregroundStyle(models.cleanupPreparation.state == .failed ? .red : .secondary)
+                    if models.cleanupPreparation.state == .failed {
+                        Button("Retry preparation") {
+                            Task { await models.retryCleanupPreparation(inBackground: false) }
+                        }
                     }
-                    .accessibilityIdentifier("cleanup.background")
-                } footer: {
-                    Text(Self.explain(background))
                 }
             }
 
@@ -121,7 +123,13 @@ struct CleanupSettingsView: View {
             }
         }
         .navigationTitle("Cleanup")
-        .onAppear { selectedMLX = models.selected(.cleanup) }
+        .sheet(item: $modelTerms) { terms in
+            CleanupTermsSheet(terms: terms) {
+                modelTerms = nil
+                downloadModel(terms.id)
+            }
+        }
+        .onAppear { selectedModel = models.selected(.cleanup) }
         .onChange(of: enabled) { _, new in
             Settings.cleanupEnabled = new
             controller.cleanupSettingsChanged()
@@ -131,10 +139,6 @@ struct CleanupSettingsView: View {
         .onChange(of: backend) { _, new in
             Settings.cleanupBackend = new
             timeout = Double(Settings.cleanupTimeoutSeconds)
-            controller.cleanupSettingsChanged()
-        }
-        .onChange(of: background) { _, new in
-            Settings.cleanupBackground = new
             controller.cleanupSettingsChanged()
         }
         .onChange(of: itn) { _, new in Settings.cleanupITN = new }
@@ -160,7 +164,14 @@ struct CleanupSettingsView: View {
         .accessibilityIdentifier("cleanup.backend.\(choice.rawValue)")
     }
 
-    private func pickMLX(_ id: String) {
+    private func pickModel(_ id: String) {
+        do {
+            if let terms = try CleanupModelTerms.forModel(id) { modelTerms = terms }
+            else { downloadModel(id) }
+        } catch { failures[id] = "Model terms could not be opened: \(error.localizedDescription)" }
+    }
+
+    private func downloadModel(_ id: String) {
         failures[id] = nil
         pending = id
         models.pick(id, role: .cleanup) { error in
@@ -168,7 +179,7 @@ struct CleanupSettingsView: View {
             if let error {
                 failures[id] = String(describing: error)
             } else {
-                selectedMLX = models.selected(.cleanup)
+                selectedModel = models.selected(.cleanup)
                 backend = models.cleanupChoice(for: id)
                 Settings.cleanupBackend = backend
                 controller.cleanupSettingsChanged()
@@ -185,21 +196,9 @@ struct CleanupSettingsView: View {
         if pending == id { pending = nil }
         Task {
             await models.manager.delete(id)
-            selectedMLX = models.selected(.cleanup)
-            if selectedMLX == nil, backend == .mlx || backend == .coreML { backend = .auto }
+            selectedModel = models.selected(.cleanup)
             Settings.cleanupBackend = backend
             controller.cleanupSettingsChanged()
-        }
-    }
-
-    static func explain(_ background: CleanupRegistry.BackgroundCleanup) -> String {
-        switch background {
-        case .cpu:
-            "With Legato in the background iOS allows no GPU work, so your MLX model runs on the CPU: same text, a few times slower. Apple Foundation Models work in the background as they are."
-        case .foundationModels:
-            "With Legato in the background your MLX model is passed over and Apple Foundation Models clean up instead."
-        case .off:
-            "With Legato in the background no language model runs; the raw text is kept."
         }
     }
 
@@ -214,5 +213,34 @@ struct CleanupSettingsView: View {
         case .live:
             "Live: after each phrase the whole text so far is cleaned again and replaces what you see, so a later \"no wait, Thursday\" can fix an earlier phrase; a last pass runs when you stop. Once you edit the text it stays as you left it. Sending the message (the field clears) keeps going with a fresh text."
         }
+    }
+}
+
+/// Terms stay available offline in the same flow that authorizes the download.
+private struct CleanupTermsSheet: View {
+    let terms: CleanupModelTerms
+    let agree: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Gemma model terms").font(.title2)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(terms.notice)
+                    Text("Your use of Gemma is governed by the Gemma Terms of Use and its Prohibited Use Policy below. Agreeing to download means you agree to comply with both, including the use restrictions in Section 3.2.")
+                    Text("Terms of Use").font(.headline)
+                    Text(terms.terms)
+                    Text("Prohibited Use Policy").font(.headline)
+                    Text(terms.restrictions)
+                }
+                .textSelection(.enabled)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) { dismiss() }
+                Spacer()
+                Button("Agree and download", action: agree).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
     }
 }

@@ -1,7 +1,6 @@
 import Foundation
 import LegatoCore
 import LegatoEngines
-import LegatoMLX
 import LegatoModels
 import LegatoPostProcessing
 import LegatoVocabulary

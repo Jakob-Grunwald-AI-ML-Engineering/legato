@@ -82,6 +82,11 @@ final class KeyboardController {
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var isTornDown = false
     private var forcedOpenAppUntil: Date?
+    private var remoteRequestID: String?
+    private var pendingRemoteStartID: String?
+    #if DEBUG
+    @ObservationIgnored var beforeStartWatch: (@MainActor () async -> Void)?
+    #endif
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var reapply: Task<Void, Never>?
     @ObservationIgnored private var hintTimeout: Task<Void, Never>?
@@ -149,9 +154,9 @@ final class KeyboardController {
 
     /// A dictation or a Refine is running: the word row is taken over and ↶ ↷ are dimmed.
     var runActive: Bool {
-        if isRefining { return true }
+        if isRefining || pendingRemoteStartID != nil { return true }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
-        return host.phase != .idle
+        return host.phase != .idle || host.preparingRequestID != nil
     }
 
     /// Tells the word row what has taken it over (status or run), so it pauses and takes up again.
@@ -193,6 +198,8 @@ final class KeyboardController {
     }
 
     func disappeared() {
+        remoteRequestID = nil
+        pendingRemoteStartID = nil
         // Text still to be revealed goes in now; with no field left to type into this does nothing, and the
         // rest is typed from the cursor when the keyboard (or the run's final state) is seen again.
         if reveal.needsTicks { applyHost(flush: true) }
@@ -656,14 +663,15 @@ final class KeyboardController {
 
     // MARK: Mic key
 
-    /// Whether the app is capturing right now (a fresh beat and a run starting or listening).
+    /// Whether the app is listening right now, rather than preparing resources or starting capture.
     var isCapturing: Bool {
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
-        return host.phase == .starting || host.phase == .listening
+        return host.phase == .listening
     }
 
     /// What tapping the mic key does now.
     var micMode: MicKeyMode {
+        if pendingRemoteStartID != nil, hasFullAccess() { return .remote(.stop) }
         if let until = forcedOpenAppUntil, until > now, hasFullAccess() { return .openApp }
         return MicKeyMode.resolve(host: host, now: now, fullAccess: hasFullAccess())
     }
@@ -696,16 +704,21 @@ final class KeyboardController {
             }
         case .remote(let action):
             trace?("mic mode=remote-\(action == .start ? "start" : "stop")")
-            Task { await sendRemote(action) }
+            let id = UUID().uuidString
+            remoteRequestID = id
+            pendingRemoteStartID = action == .start ? id : nil
+            syncRowTakeover()
+            Task { await sendRemote(action, id: id) }
         }
     }
 
     /// Asks the running app; without an ack in time (or an ack of `hop`) the key becomes an open-app
     /// key for a few seconds, because opening the app takes a real tap on the Link.
-    private func sendRemote(_ action: RemoteAction) async {
-        let id = UUID().uuidString
+    private func sendRemote(_ action: RemoteAction, id: String) async {
+        guard remoteRequestID == id else { return }
         link.send(action == .start ? .start : .stop, id: id)
         let result = await link.awaitAck(id: id, timeout: LinkChannel.ackTimeout)
+        guard remoteRequestID == id, isVisible else { return }
         trace?("ack result=\(result?.rawValue ?? "timeout")")
         guard result != .accepted else {
             // "Accepted" is the app taking the request on; a start can still fail afterwards (the system
@@ -713,26 +726,54 @@ final class KeyboardController {
             if action == .start { await watchForFailedStart(id: id) }
             return
         }
+        pendingRemoteStartID = nil
         needsAppOpened()
     }
 
     /// Watches a start the app accepted until the run is listening, or the app says it could not start.
     private func watchForFailedStart(id: String) async {
-        let deadline = ContinuousClock.now + .seconds(Self.startWatchSeconds)
-        while ContinuousClock.now < deadline, isVisible {
+        #if DEBUG
+        await beforeStartWatch?()
+        #endif
+        var missingHostSince: ContinuousClock.Instant?
+        while remoteRequestID == id, isVisible {
             if let ack = link.readAck(), ack.id == id, ack.result == .hop {
                 trace?("ack result=hop-after-accept")
+                pendingRemoteStartID = nil
                 needsAppOpened()
                 return
             }
             reloadHost()
-            if let host, host.isLive(now: now), host.phase == .listening { return }
+            if let host {
+                missingHostSince = nil
+                if now.timeIntervalSince(host.beatAt) >= LinkChannel.beatFreshness {
+                    pendingRemoteStartID = nil
+                    needsAppOpened()
+                    return
+                }
+                if let completion = host.startCompletion, completion.requestIDs.contains(id) {
+                    pendingRemoteStartID = nil
+                    syncRowTakeover()
+                    if completion.needsForeground { needsAppOpened() }
+                    return
+                }
+                if host.phase == .listening {
+                    pendingRemoteStartID = nil
+                    syncRowTakeover()
+                    return
+                }
+            } else {
+                let instant = ContinuousClock.now
+                if missingHostSince == nil { missingHostSince = instant }
+                if let missingHostSince, instant - missingHostSince >= .seconds(LinkChannel.beatFreshness) {
+                    pendingRemoteStartID = nil
+                    needsAppOpened()
+                    return
+                }
+            }
             try? await Task.sleep(for: .milliseconds(150))
         }
     }
-
-    /// How long a remote start is watched for failing after it was accepted.
-    private static let startWatchSeconds = 8.0
 
     /// The app can't dictate from where it is: the mic key becomes an open-app key for a few seconds.
     private func needsAppOpened() {
@@ -832,9 +873,13 @@ final class KeyboardController {
     /// The top bar's dictation line: the live text while a `.hold` run listens (nothing is typed then),
     /// "Listening…" otherwise, "Cleaning up…" while a run with cleanup finishes.
     var dictationStatus: String? {
+        if pendingRemoteStartID != nil, host?.phase != .starting, host?.phase != .listening { return "Preparing dictation…" }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return nil }
+        if host.preparingRequestID != nil { return "Preparing dictation…" }
         switch host.phase {
-        case .starting, .listening:
+        case .starting:
+            return "Starting dictation…"
+        case .listening:
             let live = host.committed + host.volatile
             guard host.delivery == .hold, !live.trimmingCharacters(in: .whitespaces).isEmpty else { return "Listening…" }
             return live.count > 90 ? "…" + live.suffix(90) : live

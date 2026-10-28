@@ -309,7 +309,7 @@ public final class DictationCoordinator {
         }
         // Live Activities are not used here: only the other readiness items matter.
         if Task.isCancelled { return .failed("Preparation cancelled") }
-        let issue = await readiness.check()
+        let issue = await readiness.checkMicrophone()
         if Task.isCancelled { return .failed("Preparation cancelled") }
         if let issue, issue != .liveActivitiesDisabled { return .needsOnboarding(issue) }
 

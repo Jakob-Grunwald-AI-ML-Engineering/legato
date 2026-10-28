@@ -62,7 +62,7 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
         self.spec = spec; self.folder = folder; self.outputLimit = outputTokenLimit
         self.loader = { cancellation in
             try CoreMLInstaller.validateInstalled(folder: folder, spec: spec)
-            return try await NativeCoreMLDriver.load(folder: folder, cancellation: cancellation)
+            return try await NativeCoreMLDriver.load(spec: spec, folder: folder, cancellation: cancellation)
         }
     }
     init(spec: CoreMLModelSpec, folder: URL, outputTokenLimit: Int = 1_024,

@@ -27,6 +27,7 @@ public enum MicKeyMode: Sendable, Equatable {
     public static func resolve(host: HostState?, now: Date, fullAccess: Bool) -> MicKeyMode {
         guard fullAccess else { return .needsFullAccess }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return .openApp }
+        if host.preparingRequestID != nil { return .remote(.stop) }
         switch host.phase {
         case .starting, .listening:
             return .remote(.stop)

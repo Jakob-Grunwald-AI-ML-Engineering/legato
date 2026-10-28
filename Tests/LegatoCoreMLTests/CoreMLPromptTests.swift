@@ -12,6 +12,23 @@ struct CoreMLPromptTests {
         #expect(messages.compactMap { $0["content"] as? String } == ["Clean", "um A", "A", "C"])
     }
 
+    @Test func gemmaFoldsInstructionsIntoFirstUserTurnAndPreservesAllExamples() {
+        let rendered = CoreMLPrompt.render(instructions: "  Clean\n", examples: [
+            .init(user: "  um A\n", assistant: " A "), .init(user: "uh B", assistant: "B")
+        ], prompt: "  C\n", family: .gemma3)
+        #expect(rendered == "<bos><start_of_turn>user\n  Clean\n\n\num A<end_of_turn>\n<start_of_turn>model\nA<end_of_turn>\n<start_of_turn>user\nuh B<end_of_turn>\n<start_of_turn>model\nB<end_of_turn>\n<start_of_turn>user\nC<end_of_turn>\n<start_of_turn>model\n")
+    }
+
+    @Test func gemmaWithoutExamplesPlacesInstructionsInTheFinalUserTurn() {
+        let rendered = CoreMLPrompt.render(instructions: "Clean", examples: [], prompt: "  C\n", family: .gemma3)
+        #expect(rendered == "<bos><start_of_turn>user\nClean\n\nC<end_of_turn>\n<start_of_turn>model\n")
+    }
+
+    @Test func largerCheckpointsKeepTheSameOutputReservation() throws {
+        try CoreMLPrompt.validate(input: 3_070, outputLimit: 1_024, context: 4_096)
+        #expect(throws: LLMError.contextTooLong) { try CoreMLPrompt.validate(input: 3_071, outputLimit: 1_024, context: 4_096) }
+    }
+
     @Test func reservesOutputAndTwoWindowTokens() throws {
         try CoreMLPrompt.validate(input: 1_022, outputLimit: 1_024, context: 2_048)
         #expect(throws: LLMError.contextTooLong) { try CoreMLPrompt.validate(input: 1_023, outputLimit: 1_024, context: 2_048) }

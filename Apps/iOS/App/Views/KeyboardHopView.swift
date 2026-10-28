@@ -10,13 +10,16 @@ struct KeyboardHopView: View {
     var body: some View {
         VStack(spacing: 24) {
             Spacer(minLength: 0)
-            if controller.keyboardRunActive {
+            switch controller.keyboardHopState {
+            case .running:
                 run
-            } else if controller.micReadyUntil != nil {
-                ready
-            } else if let failure = controller.armFailure {
+            case .ready:
+                ready()
+            case .readyWithRecognitionFailure(let message):
+                ready(recognitionFailure: message)
+            case .failed(let failure):
                 failed(failure)
-            } else {
+            case .preparing:
                 ProgressView("Getting the microphone ready…")
                     .accessibilityIdentifier("hop.arming")
             }
@@ -26,7 +29,7 @@ struct KeyboardHopView: View {
     }
 
     /// The microphone is armed; nothing is recording.
-    private var ready: some View {
+    private func ready(recognitionFailure: String? = nil) -> some View {
         VStack(spacing: 24) {
             Image(systemName: "mic.circle")
                 .font(.system(size: 56))
@@ -34,6 +37,16 @@ struct KeyboardHopView: View {
             Text("Microphone ready")
                 .font(.title2.bold())
                 .accessibilityIdentifier("hop.ready")
+            if let recognitionFailure {
+                Label(recognitionFailure, systemImage: "exclamationmark.triangle")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("hop.recognitionFailure")
+            } else if controller.recognitionPreparing {
+                Text("Your selected speech model is still preparing. You can return to the keyboard; dictation will wait for it.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
             Text("Go back with ◀ at the top left, or swipe back, then tap the microphone key on the keyboard to dictate.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)

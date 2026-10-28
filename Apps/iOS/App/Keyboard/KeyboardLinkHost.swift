@@ -45,13 +45,25 @@ final class KeyboardLinkHost: TranscriptSink {
             return nil
         }
         link = HostLink(store: LinkStore(backing))
-        #if DEBUG
+        #if DEBUG || LEGATO_INTERNAL
+        #if LEGATO_INTERNAL
+        var wasPreparing = false
+        #endif
         link.onPublish = { state in
+            #if DEBUG
             E2E.log("""
                 link.host phase=\(state.phase.rawValue) final=\(state.isFinal ? 1 : 0) target=\(state.target.rawValue) \
                 committed=\(E2E.quote(state.committed)) volatile=\(E2E.quote(state.volatile)) \
-                lease=\(state.leaseUntil == nil ? 0 : 1) accepts=\(state.acceptsRemoteStart ? 1 : 0) meeting=\(state.meetingRecording == true ? 1 : 0) seq=\(state.seq)
+                lease=\(state.leaseUntil == nil ? 0 : 1) accepts=\(state.acceptsRemoteStart ? 1 : 0) meeting=\(state.meetingRecording == true ? 1 : 0) seq=\(state.seq) preparing=\(state.preparingRequestID == nil ? 0 : 1)
                 """)
+            #endif
+            #if LEGATO_INTERNAL
+            let preparing = state.preparingRequestID != nil
+            if preparing != wasPreparing {
+                AudioDiagnostics.log("keyboard.preparation", ["pending": preparing, "phase": state.phase.rawValue])
+                wasPreparing = preparing
+            }
+            #endif
         }
         #endif
     }

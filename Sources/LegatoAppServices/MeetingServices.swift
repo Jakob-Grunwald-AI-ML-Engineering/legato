@@ -5,7 +5,6 @@ import LegatoClaude
 import LegatoCore
 import LegatoEngines
 import LegatoFluidAudio
-import LegatoMLX
 import LegatoMeetings
 import LegatoModels
 import Synchronization
@@ -91,7 +90,7 @@ public final class MeetingServices {
 
     private let registry: EngineRegistry
     private let cleanup: CleanupRegistry
-    private let background: CleanupRegistry.BackgroundCleanup
+    private let acquireSummary: @Sendable @MainActor () async throws -> SummaryBackendLease?
     private let makeClaude: @Sendable () -> any LLMBackend
     private let sampler: @Sendable () -> IdleSample
     private let immediateProcessing: Bool
@@ -100,7 +99,6 @@ public final class MeetingServices {
 
     /// - Parameters:
     ///   - cleanup: the registry the summary backend resolves through; the models' own by default.
-    ///   - background: what the summary does while the GPU is not usable (the phone in the background).
     ///   - claudeBackend: replaces the Claude backend (tests); nil builds a ``ClaudeBackend`` over `keyStore`.
     ///   - sampler: the machine's load and input idleness (the Mac's real one; the phone's always idle).
     ///   - immediateProcessing: run the heavy steps without waiting for idleness (the debug launch argument).
@@ -108,15 +106,27 @@ public final class MeetingServices {
     public init(
         models: ModelServices, store: MeetingStore, settings: MeetingSettings, keyStore: any APIKeyStore,
         claudeSession: URLSession? = nil, cleanup: CleanupRegistry? = nil,
-        claudeBackend: (any LLMBackend)? = nil, background: CleanupRegistry.BackgroundCleanup = .cpu,
+        claudeBackend: (any LLMBackend)? = nil,
+        isInBackground: @escaping @MainActor @Sendable () -> Bool = { false },
         sampler: @escaping @Sendable () -> IdleSample = { .idle },
         immediateProcessing: Bool = ProcessingScheduler.launchImmediate, pollInterval: Duration? = .seconds(5)
     ) {
         self.store = store
         self.settings = settings
         self.registry = models.engines
-        self.cleanup = cleanup ?? models.cleanup
-        self.background = background
+        let registry = cleanup ?? models.cleanup
+        self.cleanup = registry
+        self.acquireSummary = {
+            // Injected registries keep their existing test/tool contract; production admits its resources.
+            if cleanup != nil {
+                guard let backend = await registry.resolve(preference: settings.backend.preference).backend else { return nil }
+                return SummaryBackendLease(backend: backend)
+            }
+            let choice = settings.backend
+            do { return try await models.acquireSummaryBackend(backend: choice, inBackground: isInBackground()) }
+            catch is CancellationError { throw CancellationError() }
+            catch { throw SummaryPreparationRequired("The selected summary model needs preparation in Legato: \(error.localizedDescription)") }
+        }
         self.sampler = sampler
         self.immediateProcessing = immediateProcessing
         self.pollInterval = pollInterval
@@ -229,7 +239,7 @@ public final class MeetingServices {
 
     /// The on-device backend for Summarize (and the automatic summary), as the stored choice resolves. Never Claude.
     public func summaryBackend() async -> (any LLMBackend)? {
-        await cleanup.resolve(preference: settings.backend.preference, background: background).backend
+        await cleanup.resolve(preference: settings.backend.preference).backend
     }
 
     /// The Claude backend. Used only by ``summarizeWithClaude(meetingID:)``.
@@ -318,13 +328,14 @@ public final class MeetingServices {
     public func pipeline(onStep: @escaping @Sendable (Meeting.Step) -> Void = { _ in }) -> MeetingPipeline {
         if let pipelineOverride { return pipelineOverride().reporting(onStep) }
         let registry = self.registry, cleanup = self.cleanup, settings = self.settings
-        let background = self.background
+        let acquireSummary = self.acquireSummary
         let recording = self.recording
         return MeetingPipeline(
             store: store,
             audio: { MeetingAudioWriter(folder: $0) },
             transcriber: { await registry.postPassTranscriber() },
-            backend: { await cleanup.resolve(preference: settings.backend.preference, background: background).backend },
+            backend: { await cleanup.resolve(preference: settings.backend.preference).backend },
+            summaryAdmission: { try await acquireSummary() },
             sections: { settings.sections(for: $0) },
             summarizeAutomatically: { settings.summarizeAutomatically },
             batchDiarizer: { await registry.batchDiarizer() },
@@ -385,12 +396,19 @@ public final class MeetingServices {
     @discardableResult
     public func regenerate(meetingID id: UUID) async throws -> URL {
         guard !isRecording else { throw MeetingServicesError.recording }
-        guard let backend = await summaryBackend() else {
-            throw LLMError.unavailable(reason: "No on-device model is available for a summary.")
-        }
         return try await manual(id, .running(.summary)) { [weak self] in
             guard let self else { throw CancellationError() }
-            return try await pipeline(reportingFor: id).summarize(meetingID: id, using: backend)
+            guard let lease = try await acquireSummary() else {
+                throw LLMError.unavailable(reason: "No on-device model is available for a summary.")
+            }
+            do {
+                let result = try await pipeline(reportingFor: id).summarize(meetingID: id, using: lease.backend)
+                await lease.release()
+                return result
+            } catch {
+                await lease.release()
+                throw error
+            }
         }
     }
 
@@ -400,8 +418,11 @@ public final class MeetingServices {
         do {
             let outcome = try await pipeline(reportingFor: id).runDeferred(meetingID: id)
             // A step failed: the meeting stays queued and is tried again (a few times; see MeetingPipeline).
-            setStage(id, outcome.willRetry ? .queued : nil)
+            setStage(id, outcome.willRetry && outcome.summaryPreparationRequired == nil ? .queued : nil)
             onProcessed?(id, outcome, nil)
+            // Remove model-deferred work from the polling lane. Foreground recovery/settings admission
+            // requeues the still-processing meeting; missing weights cannot create an idle retry loop.
+            if outcome.summaryPreparationRequired != nil { return true }
             if outcome.willRetry { return false }
         } catch is CancellationError {
             setStage(id, .queued)  // cut short (a recording started): waiting again

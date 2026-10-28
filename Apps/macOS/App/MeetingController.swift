@@ -492,6 +492,14 @@ final class MeetingController {
         }
     }
 
+    /// Retry model-deferred work after foreground preparation or a preference change.
+    func resumeProcessing() {
+        for meeting in meetings where (meeting.state == .processing || meeting.state == .interrupted)
+            && !busy.contains(meeting.id) && processing[meeting.id] == nil && !liveMeetingIDs.contains(meeting.id) {
+            process(meeting.id)
+        }
+    }
+
     /// The meeting a live session owns, if any: recovery and the after-stop chain leave it alone.
     private var liveMeetingIDs: Set<UUID> { session.map { [$0.meetingID] } ?? [] }
 
@@ -558,11 +566,6 @@ final class MeetingController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                guard await services.summaryBackend() != nil else {
-                    notices.post("No on-device model is available for a summary.", kind: .action, meeting: id)
-                    busy.remove(id)
-                    return
-                }
                 try await services.regenerate(meetingID: id)
             } catch {
                 if !(error is CancellationError) {

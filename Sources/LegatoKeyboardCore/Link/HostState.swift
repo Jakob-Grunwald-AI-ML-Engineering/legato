@@ -8,6 +8,18 @@ public enum HostPhase: String, Codable, Sendable, Equatable {
     case finishing
 }
 
+/// A durable answer for every Start accepted into one admission, including duplicate presses.
+/// Cancellation is a successful settlement: it never requires reopening the app.
+public struct HostStartCompletion: Codable, Sendable, Equatable {
+    public var requestIDs: [String]
+    public var needsForeground: Bool
+
+    public init(requestIDs: [String], needsForeground: Bool) {
+        self.requestIDs = requestIDs
+        self.needsForeground = needsForeground
+    }
+}
+
 /// Where a run's text goes.
 public enum HostTarget: String, Codable, Sendable, Equatable {
     /// The app's own screen (hop view or home): nothing is typed into a field.
@@ -89,6 +101,11 @@ public struct HostState: Codable, Sendable, Equatable {
     public var revision: HostRevision?
     /// A meeting is recording: dictation is blocked. Absent (nil) otherwise, so older readers see the same state.
     public var meetingRecording: Bool?
+    /// A keyboard start is preparing selected resources; its microphone key cancels that admission.
+    /// Optional for compatibility with states written by an older host.
+    public var preparingRequestID: String?
+    /// Retained after preparation clears, so a keyboard need not observe a fleeting pending state.
+    public var startCompletion: HostStartCompletion?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,

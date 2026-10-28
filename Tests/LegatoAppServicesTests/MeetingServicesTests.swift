@@ -2,7 +2,6 @@ import Foundation
 import LegatoClaude
 import LegatoCore
 import LegatoFluidAudio
-import LegatoMLX
 import LegatoMeetings
 import LegatoModels
 import Synchronization

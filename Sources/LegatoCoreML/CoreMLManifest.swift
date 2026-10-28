@@ -9,10 +9,7 @@ struct CoreMLManifest: Codable, Sendable {
 
     func validate(for spec: CoreMLModelSpec) throws {
         for file in files { try Self.validatePath(file.path) }
-        let parts = ["qwen_embeddings", "qwen_lm_head_lut6", "qwen_FFN_PF_lut6_chunk_01of02", "qwen_FFN_PF_lut6_chunk_02of02"]
-        let required = Set(["README.md", "config.json", "meta.yaml", "tokenizer.json", "tokenizer_config.json"] + parts.flatMap { part in
-            ["analytics/coremldata.bin", "coremldata.bin", "metadata.json", "model.mil", "weights/weight.bin"].map { "\(part).mlmodelc/\($0)" }
-        })
+        let required = spec.requiredArtifactPaths
         guard repository == spec.repo, revision == spec.revision, revision.count == 40,
               revision.allSatisfy({ $0.isHexDigit && !$0.isUppercase }),
               Set(files.map(\.path)) == required, files.count == required.count,
@@ -27,7 +24,7 @@ struct CoreMLManifest: Codable, Sendable {
         }
     }
     static func bundled(for spec: CoreMLModelSpec) throws -> CoreMLManifest {
-        guard let url = Bundle.module.url(forResource: "qwen3-1.7b", withExtension: "json") else { throw CoreMLInstallError.invalidManifest }
+        guard let url = Bundle.module.url(forResource: spec.manifestResource, withExtension: "json") else { throw CoreMLInstallError.invalidManifest }
         let manifest = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
         try manifest.validate(for: spec)
         return manifest

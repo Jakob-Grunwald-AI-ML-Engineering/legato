@@ -1,0 +1,111 @@
+{
+  "repository": "anemll/anemll-google-gemma-3-1b-it-ctx4096_0.3.5",
+  "revision": "a1b00f628f348c8ff55c9fe088e5db97535fd567",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 4339,
+      "sha256": "496caabebcae0ad568c7105f045aa31efdb35093406ea1c70d173bd97a833218"
+    },
+    {
+      "path": "config.json",
+      "bytes": 66,
+      "sha256": "57e37d62b88fe19bf8edfcc64189adeabd412b05ae6ce8c8f605bc36f1e6c677"
+    },
+    {
+      "path": "gemma3_FFN_PF_lut6_chunk_01of01.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "sha256": "5428848963a0f646e91d7e7f14334b6b7fe57eab46c32e7af1aeb43121536a0e"
+    },
+    {
+      "path": "gemma3_FFN_PF_lut6_chunk_01of01.mlmodelc/coremldata.bin",
+      "bytes": 1655,
+      "sha256": "ebf9f991115223c6521704e80eb9b03690d0dae486f8727f199bc4eabe097482"
+    },
+    {
+      "path": "gemma3_FFN_PF_lut6_chunk_01of01.mlmodelc/metadata.json",
+      "bytes": 18245,
+      "sha256": "8fa3fc9eae0c6c6c53559fa04efceb4a1d1492aeac45245c2938f64acd9fccb8"
+    },
+    {
+      "path": "gemma3_FFN_PF_lut6_chunk_01of01.mlmodelc/model.mil",
+      "bytes": 4509841,
+      "sha256": "822060a955a3d25733e80d748cd9bacf19e0e17d088d16151d466eec601ae90c"
+    },
+    {
+      "path": "gemma3_FFN_PF_lut6_chunk_01of01.mlmodelc/weights/weight.bin",
+      "bytes": 555097216,
+      "sha256": "faddf2fb58eb95da2b2160b560968a448bb5aec5e84e706012d0332cda25eb6a"
+    },
+    {
+      "path": "gemma3_embeddings_lut8.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "sha256": "7478f61e509dffd5dc8d9e01806296e2e05e45c8c88cf3ce84b872375a007036"
+    },
+    {
+      "path": "gemma3_embeddings_lut8.mlmodelc/coremldata.bin",
+      "bytes": 587,
+      "sha256": "1c69b647bec6f40ae75d785fc4f34cd72c24005fbadf40a89c835f71984dbe54"
+    },
+    {
+      "path": "gemma3_embeddings_lut8.mlmodelc/metadata.json",
+      "bytes": 2054,
+      "sha256": "4478777a70eb5050bf17d27d74854b8d1fb3eac225a656d88a55244d345afc41"
+    },
+    {
+      "path": "gemma3_embeddings_lut8.mlmodelc/model.mil",
+      "bytes": 2315,
+      "sha256": "910d986c8ab72c4bebf15d6df770e7958c395b0ea3c1a578e14598c46631bc5b"
+    },
+    {
+      "path": "gemma3_embeddings_lut8.mlmodelc/weights/weight.bin",
+      "bytes": 603979904,
+      "sha256": "573ae2fd94e5b742800087ebc6d11c6531f0c3955a911e71d7844433a60fcaa5"
+    },
+    {
+      "path": "gemma3_lm_head_lut6.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "sha256": "476e22675a5e6eb52a2a560ea66a0f36cf0e367d8af3fee7000feacb6e3739e2"
+    },
+    {
+      "path": "gemma3_lm_head_lut6.mlmodelc/coremldata.bin",
+      "bytes": 600,
+      "sha256": "1227384eea5776e75f3f454bea85dd2877aae7e3c3865435478729e6da3759da"
+    },
+    {
+      "path": "gemma3_lm_head_lut6.mlmodelc/metadata.json",
+      "bytes": 2457,
+      "sha256": "5f8788a6cd7da7d4f30a23f82917384f6a26caa80b0ee42e25e19796baf90956"
+    },
+    {
+      "path": "gemma3_lm_head_lut6.mlmodelc/model.mil",
+      "bytes": 56788,
+      "sha256": "774fd3191f0b79c5f9a25410602f5b53a0b0ed46438cae39c5ee2005a3607c3d"
+    },
+    {
+      "path": "gemma3_lm_head_lut6.mlmodelc/weights/weight.bin",
+      "bytes": 234883136,
+      "sha256": "5e5141ce851f2d8f53b241e7aac9e10655769c3a0b1ffa30940cba7aba887d6a"
+    },
+    {
+      "path": "meta.yaml",
+      "bytes": 2238,
+      "sha256": "377114b49a7213f6212707347ea05ebdb07fc61b5ea6f812d085c2433430f535"
+    },
+    {
+      "path": "tokenizer.json",
+      "bytes": 33384568,
+      "sha256": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795"
+    },
+    {
+      "path": "tokenizer.model",
+      "bytes": 4689074,
+      "sha256": "1299c11d7cf632ef3b4e11937501358ada021bbdf7c47638d13c0ee982f2e79c"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "bytes": 1156999,
+      "sha256": "bfe25c2735e395407beb78456ea9a6984a1f00d8c16fa04a8b75f2a614cf53e1"
+    }
+  ]
+}

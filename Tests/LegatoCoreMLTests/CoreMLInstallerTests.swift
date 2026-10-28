@@ -34,8 +34,8 @@ struct CoreMLInstallerTests {
         let embeddings = try #require(manifest.files.first { $0.path == "qwen_embeddings.mlmodelc/weights/weight.bin" })
         #expect(embeddings.sha256 == "80d4a53fa6ef9baa7f3411fbab47dfcc6434c4045af34d06fba90fbff676d8c8")
         #expect(embeddings.bytes == 622_329_984)
-        #expect(Set(CoreMLModels.descriptors(platform: .iOS).map(\.id)) == ["coreml-qwen3-1.7b-lut6"])
-        #expect(Set(CoreMLModels.descriptors(platform: .macOS).map(\.id)) == ["coreml-qwen3-1.7b-lut6"])
+        #expect(Set(CoreMLModels.descriptors(platform: .iOS).map(\.id)) == ["coreml-qwen3-1.7b-lut6", "coreml-qwen3-0.6b-lut8", "coreml-gemma3-1b-lut6"])
+        #expect(Set(CoreMLModels.descriptors(platform: .macOS).map(\.id)) == ["coreml-qwen3-1.7b-lut6", "coreml-qwen3-0.6b-lut8", "coreml-gemma3-1b-lut6"])
     }
     @Test(arguments: ["../escape", "/absolute", "a/../../escape", "a//b", "a/./b"])
     func rejectsTraversalAndAbsolutePaths(_ path: String) {

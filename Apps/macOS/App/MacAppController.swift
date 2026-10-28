@@ -155,11 +155,13 @@ final class MacAppController {
         let hud = HUDPanelController()
         self.hud = hud
         let engineSettings = models.engineSettings
+        let cleanupSettings = settings.cleanupStore
         let cleanup = CleanupProcessor(
             registry: models.cleanup, settings: settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             willRun: { await hud.setPhase(.cleaningUp) },
             vocabulary: vocabulary,
+            acquireRun: { try await models.acquireDictationCleanup(options: cleanupSettings.options, inBackground: true) },
             report: { report in await reports.record(report) })
         self.cleanup = cleanup
         let engine = AppleSpeechEngine(vocabulary: vocabulary)
@@ -342,6 +344,15 @@ final class MacAppController {
         scheduleResourcePreparation()
     }
 
+    /// Meeting preferences change retention without superseding dictation admission.
+    func meetingSettingsChanged() {
+        Task { [weak self] in
+            guard let self else { return }
+            await models.reconcileSelectedModels(options: settings.cleanupStore.options, inBackground: false)
+            meetings.resumeProcessing()
+        }
+    }
+
     private func scheduleResourcePreparation() {
         resourcePreparation?.cancel()
         resourcePreparation = Task { [weak self] in await self?.warmSelectedResources() }
@@ -360,7 +371,7 @@ final class MacAppController {
 
     private func warmSelectedResources() async {
         guard !resolvingEngine, !modelAdmission.isResetting else { return }
-        do { try await prepareSelectedResources() }
+        do { try await prepareSelectedResources(); meetings.resumeProcessing() }
         catch is CancellationError { }
         catch { Self.log.error("selected model preparation failed: \(Self.describe(error), privacy: .public)") }
     }

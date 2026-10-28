@@ -1,0 +1,431 @@
+{
+  "limits": [
+    "macOS Apple M1 Pro 32GiB; not iPhone/background/keyboard/app admission proof",
+    "CPU+NE allowed; physical ANE dispatch unobserved",
+    "Three short public cleanup fixtures; no broad quality clearance",
+    "No native per-phase/token trace; successful outputs passed production canonical parity and EOS-only completion policy",
+    "Qwen06 first two calls exceeded 8000ms but reported timedOut=false; preserve observed pipeline scheduling behavior",
+    "No candidate artifacts or guards changed; failed historical LUT6 derivative not used"
+  ],
+  "models": {
+    "gemma3-1b": {
+      "executedCleanupFixtures": 0,
+      "fixtures": [],
+      "guardRejectedFixtures": 0,
+      "maximumResidentSetSizeBytes": 4484907008,
+      "passedCleanupFixtures": 0,
+      "peakMemoryFootprintBytes": 3235531632,
+      "preparation": {
+        "error": "LegatoANEMLL.ModelError.inferenceError(\"Failed to load inference chunk 1: Error Domain=com.apple.CoreML Code=0 \\\"`MLModelConfiguration`\\'s `.functionName` property must be `nil` unless the model type is ML Program.\\\" UserInfo={NSLocalizedDescription=`MLModelConfiguration`\\'s `.functionName` property must be `nil` unless the model type is ML Program.}\")",
+        "event": "preparation-error",
+        "milliseconds": 22126.148042
+      },
+      "rawLogSHA256": "07311ab607adf26aafdd9b309536d275e263703466cfbf409f15da68c14f3350",
+      "rawPreservedFixtures": 0,
+      "releasedPreparedFalse": true,
+      "resultsSHA256": "5caebd66ce80e2bd44008fbd67b1f3e412a0d9c9bc73061c9471de4f98fe7d1d",
+      "timeLogSHA256": "6a1b178899e46a9081ade10b969b35d78c28d0e78d5ba74fceeac3ebcb9cb3a3",
+      "timedOutFixtures": 0,
+      "qualityFailedFixtures": 0,
+      "modelID": "coreml-gemma3-1b-lut6",
+      "revision": "a1b00f628f348c8ff55c9fe088e5db97535fd567",
+      "computeUnitsAllowed": "cpuAndNeuralEngine"
+    },
+    "qwen3-0.6b": {
+      "executedCleanupFixtures": 3,
+      "fixtures": [
+        {
+          "additionalSettlementMilliseconds": 0.038292,
+          "event": "pipeline-fixture",
+          "failed": false,
+          "fixture": "de-short-01-time",
+          "forbidden": [
+            "dreißig"
+          ],
+          "guardRejected": false,
+          "input": "wir treffen uns morgen um neun uhr dreißig im café am marktplatz",
+          "missing": [
+            "30"
+          ],
+          "modelPreparedAfter": true,
+          "observations": [
+            {
+              "backendMilliseconds": 8024.61975,
+              "error": null,
+              "rawReply": "Wir treffen uns morgen um 19 Uhr dreißig im Café am Marktplatz."
+            }
+          ],
+          "output": "Wir treffen uns morgen um 19 Uhr dreißig im Café am Marktplatz.",
+          "outputEqualsReference": false,
+          "pipelineMilliseconds": 8026.054166,
+          "qualityPassed": false,
+          "rawPreserved": false,
+          "reference": "Wir treffen uns morgen um 9:30 Uhr im Café am Marktplatz.",
+          "thermalAfter": 0,
+          "thermalBefore": 0,
+          "timedOut": false,
+          "timeoutSeconds": 8,
+          "use": "first-generation"
+        },
+        {
+          "additionalSettlementMilliseconds": 0.025416,
+          "event": "pipeline-fixture",
+          "failed": false,
+          "fixture": "mixed-short-01-meeting",
+          "forbidden": [],
+          "guardRejected": false,
+          "input": "können wir das meeting auf donnerstag verschieben der sprint review ist erst nächste woche",
+          "missing": [
+            "Können wir"
+          ],
+          "modelPreparedAfter": true,
+          "observations": [
+            {
+              "backendMilliseconds": 8119.719708999999,
+              "error": null,
+              "rawReply": "können wir das Meeting auf Donnerstag verschieben? Der Sprint-Review ist erst nächste Woche."
+            }
+          ],
+          "output": "können wir das Meeting auf Donnerstag verschieben? Der Sprint-Review ist erst nächste Woche.",
+          "outputEqualsReference": false,
+          "pipelineMilliseconds": 8120.652125,
+          "qualityPassed": false,
+          "rawPreserved": false,
+          "reference": "Können wir das Meeting auf Donnerstag verschieben? Der Sprint Review ist erst nächste Woche.",
+          "thermalAfter": 0,
+          "thermalBefore": 0,
+          "timedOut": false,
+          "timeoutSeconds": 8,
+          "use": "retained-warm-generation"
+        },
+        {
+          "additionalSettlementMilliseconds": 27.388666,
+          "event": "pipeline-fixture",
+          "failed": false,
+          "fixture": "en-short-01-reschedule",
+          "forbidden": [
+            "three thirty"
+          ],
+          "guardRejected": false,
+          "input": "can you move the call with tom from tuesday to thursday at three thirty p m",
+          "missing": [
+            "Can you",
+            "Tom",
+            "Tuesday",
+            "Thursday",
+            "3:30"
+          ],
+          "modelPreparedAfter": true,
+          "observations": [
+            {
+              "backendMilliseconds": 8195.315208,
+              "error": "Swift.CancellationError()",
+              "rawReply": null
+            }
+          ],
+          "output": "can you move the call with tom from tuesday to thursday at three thirty p m",
+          "outputEqualsReference": false,
+          "pipelineMilliseconds": 8168.172708,
+          "qualityPassed": false,
+          "rawPreserved": true,
+          "reference": "Can you move the call with Tom from Tuesday to Thursday at 3:30 p.m.?",
+          "thermalAfter": 0,
+          "thermalBefore": 0,
+          "timedOut": true,
+          "timeoutSeconds": 8,
+          "use": "retained-warm-generation"
+        }
+      ],
+      "guardRejectedFixtures": 0,
+      "maximumResidentSetSizeBytes": 2698854400,
+      "passedCleanupFixtures": 0,
+      "peakMemoryFootprintBytes": 2047756328,
+      "preparation": {
+        "event": "preparation",
+        "milliseconds": 42433.487917,
+        "prepared": true,
+        "thermal": 0
+      },
+      "rawLogSHA256": "e34f24fcc12c0229770d96f4ff21d59b7d346a3ed212b52b4958089670d53e28",
+      "rawPreservedFixtures": 1,
+      "releasedPreparedFalse": true,
+      "resultsSHA256": "8d814c3208373d223d86d68451115f6fbaf647ace22255f558b386bc7a238695",
+      "timeLogSHA256": "333affec4de0109c8ac3c0a23cb6fe7150f6a4f25a99a4d8dfe2657314e8a33b",
+      "timedOutFixtures": 1,
+      "qualityFailedFixtures": 3,
+      "modelID": "coreml-qwen3-0.6b-lut8",
+      "revision": "1eb386120ff45628b308e9027cb1567e185b431d",
+      "computeUnitsAllowed": "cpuAndNeuralEngine"
+    },
+    "qwen3-1.7b": {
+      "executedCleanupFixtures": 3,
+      "fixtures": [
+        {
+          "additionalSettlementMilliseconds": 0.037333,
+          "event": "pipeline-fixture",
+          "failed": false,
+          "fixture": "de-short-01-time",
+          "forbidden": [],
+          "guardRejected": false,
+          "input": "wir treffen uns morgen um neun uhr dreißig im café am marktplatz",
+          "missing": [],
+          "modelPreparedAfter": true,
+          "observations": [
+            {
+              "backendMilliseconds": 6667.109584,
+              "error": null,
+              "rawReply": "Wir treffen uns morgen um 9:30 Uhr im Café am Marktplatz."
+            }
+          ],
+          "output": "Wir treffen uns morgen um 9:30 Uhr im Café am Marktplatz.",
+          "outputEqualsReference": true,
+          "pipelineMilliseconds": 6668.001667,
+          "qualityPassed": true,
+          "rawPreserved": false,
+          "reference": "Wir treffen uns morgen um 9:30 Uhr im Café am Marktplatz.",
+          "thermalAfter": 0,
+          "thermalBefore": 0,
+          "timedOut": false,
+          "timeoutSeconds": 8,
+          "use": "first-generation"
+        },
+        {
+          "additionalSettlementMilliseconds": 0.014917,
+          "event": "pipeline-fixture",
+          "failed": false,
+          "fixture": "mixed-short-01-meeting",
+          "forbidden": [],
+          "guardRejected": false,
+          "input": "können wir das meeting auf donnerstag verschieben der sprint review ist erst nächste woche",
+          "missing": [],
+          "modelPreparedAfter": true,
+          "observations": [
+            {
+              "backendMilliseconds": 6662.029541,
+              "error": null,
+              "rawReply": "Können wir das Meeting auf Donnerstag verschieben? Der Sprint Review ist erst nächste Woche."
+            }
+          ],
+          "output": "Können wir das Meeting auf Donnerstag verschieben? Der Sprint Review ist erst nächste Woche.",
+          "outputEqualsReference": true,
+          "pipelineMilliseconds": 6662.954583000001,
+          "qualityPassed": true,
+          "rawPreserved": false,
+          "reference": "Können wir das Meeting auf Donnerstag verschieben? Der Sprint Review ist erst nächste Woche.",
+          "thermalAfter": 0,
+          "thermalBefore": 0,
+          "timedOut": false,
+          "timeoutSeconds": 8,
+          "use": "retained-warm-generation"
+        },
+        {
+          "additionalSettlementMilliseconds": 0.0185,
+          "event": "pipeline-fixture",
+          "failed": false,
+          "fixture": "en-short-01-reschedule",
+          "forbidden": [],
+          "guardRejected": false,
+          "input": "can you move the call with tom from tuesday to thursday at three thirty p m",
+          "missing": [],
+          "modelPreparedAfter": true,
+          "observations": [
+            {
+              "backendMilliseconds": 7204.58675,
+              "error": null,
+              "rawReply": "<text>Can you move the call with Tom from Tuesday to Thursday at 3:30 p.m.?</text>"
+            }
+          ],
+          "output": "Can you move the call with Tom from Tuesday to Thursday at 3:30 p.m.?",
+          "outputEqualsReference": true,
+          "pipelineMilliseconds": 7205.164416,
+          "qualityPassed": true,
+          "rawPreserved": false,
+          "reference": "Can you move the call with Tom from Tuesday to Thursday at 3:30 p.m.?",
+          "thermalAfter": 0,
+          "thermalBefore": 0,
+          "timedOut": false,
+          "timeoutSeconds": 8,
+          "use": "retained-warm-generation"
+        }
+      ],
+      "guardRejectedFixtures": 0,
+      "maximumResidentSetSizeBytes": 5140430848,
+      "meetingOvercontext": {
+        "error": "LegatoCore.LLMError.contextTooLong",
+        "event": "meeting-overcontext",
+        "observations": [
+          {
+            "backendMilliseconds": 172.714375,
+            "error": "LegatoCore.LLMError.contextTooLong",
+            "rawReply": null
+          },
+          {
+            "backendMilliseconds": 148.65375,
+            "error": "LegatoCore.LLMError.contextTooLong",
+            "rawReply": null
+          },
+          {
+            "backendMilliseconds": 148.355917,
+            "error": "LegatoCore.LLMError.contextTooLong",
+            "rawReply": null
+          },
+          {
+            "backendMilliseconds": 149.111208,
+            "error": "LegatoCore.LLMError.contextTooLong",
+            "rawReply": null
+          },
+          {
+            "backendMilliseconds": 151.761208,
+            "error": "LegatoCore.LLMError.contextTooLong",
+            "rawReply": null
+          },
+          {
+            "backendMilliseconds": 152.060666,
+            "error": "LegatoCore.LLMError.contextTooLong",
+            "rawReply": null
+          },
+          {
+            "backendMilliseconds": 150.795459,
+            "error": "LegatoCore.LLMError.contextTooLong",
+            "rawReply": null
+          }
+        ],
+        "outcome": "truthful rejection"
+      },
+      "meetingShort": {
+        "boundary": "MeetingSummarizer default summary instructions; no cleanup prompt/guard/deadline",
+        "event": "meeting-short",
+        "inventedSpeakerMarkers": [],
+        "milliseconds": 17158.682834,
+        "missing": [],
+        "observations": [
+          {
+            "backendMilliseconds": 17158.206208,
+            "error": null,
+            "rawReply": "## Summary\nThe meeting discussed the launch schedule, approved budget, and the responsibility for sending the launch checklist.\n\n## Decisions\n- The launch is on Thursday.\n- The approved budget is 5000 euros.\n- Maria will send the launch checklist by Wednesday.\n\n## Action items\n- Maria will send the launch checklist by Wednesday."
+          }
+        ],
+        "output": "## Summary\nThe meeting discussed the launch schedule, approved budget, and the responsibility for sending the launch checklist.\n\n## Decisions\n- The launch is on Thursday.\n- The approved budget is 5000 euros.\n- Maria will send the launch checklist by Wednesday.\n\n## Action items\n- Maria will send the launch checklist by Wednesday.",
+        "qualityPassed": true
+      },
+      "passedCleanupFixtures": 3,
+      "peakMemoryFootprintBytes": 4042263984,
+      "preparation": {
+        "event": "preparation",
+        "milliseconds": 230782.484958,
+        "prepared": true,
+        "thermal": 0
+      },
+      "rawLogSHA256": "01b6e2b08904fb2da9e5a806a32c45cf6db2aa27db56d8f568e4947f56da41d2",
+      "rawPreservedFixtures": 0,
+      "releasedPreparedFalse": true,
+      "resultsSHA256": "0bdf30fefe68902ffa47fc64a4ea8e468292e738fb94d7722bbad8bd2a058dd4",
+      "timeLogSHA256": "cec6594655e433ca127a51ac2c4331ff65adbc5bd9c25d8fadbc1ae9bde54a7f",
+      "timedOutFixtures": 0,
+      "qualityFailedFixtures": 0,
+      "modelID": "coreml-qwen3-1.7b-lut6",
+      "revision": "0977a61d00e39118aab5ed1e510f1d228df5eefd",
+      "computeUnitsAllowed": "cpuAndNeuralEngine"
+    }
+  },
+  "sourceCommit": "c99fad5b9d24bec6aae9eab8f076e0c3195688db",
+  "schemaVersion": 1,
+  "issue": 64,
+  "hardware": {
+    "chip": "Apple M1 Pro",
+    "os": "26.6.2",
+    "osBuild": "25G83",
+    "physicalMemoryBytes": 34359738368
+  },
+  "date": "2026-10-28",
+  "sourceBoundary": "Immutable runtime checkpoint c99fad5; app selection and resource-role migrations in later commits are not exercised by this binary.",
+  "cleanupWorkload": "LLMCleanupStage with full verbatim production prompt and examples, production guard, and PostProcessingPipeline eight-second deadline; ITN off. Three unique public inputs per model. No broad quality guarantee.",
+  "memoryScope": "Each model runs in a separate process under /usr/bin/time -l. Peak RSS/footprint are native Mac host-process measurements, exclude compiler/ANE service memory, and do not establish iPhone memory viability.",
+  "provenance": {
+    "executableSHA256": "13366dcb52ceb1eefdec756cab4ee3ade534cce286387fde2f20e52866e5c24d",
+    "harnessSHA256": {
+      "Package.resolved": "8b52a84930f798e73f06b67abda25a5e6a8624d8083348910f7aa260cc33c087",
+      "Package.swift": "b19f2035bbf62e74a2d965c998b7421cf237fd3190a2f9a53ba9213dd4d7880f",
+      "Sources/Probe/Probe.swift": "68ebc1db520a041bbef557f8d4b288ab76a6539660442b749db888ec3bd4b314",
+      "fixtures.json": "71ff7b36d9b398c969e28d1b373a5e843e9c24010fbb9a4b1fd16aba893aa421"
+    },
+    "sourceSHA256": {
+      "Sources/LegatoCoreML/CoreMLBackend.swift": "00acb0838e389c8f753ca3642e9f45ec79364e14678f26f43485054bf6c40153",
+      "Sources/LegatoCoreML/CoreMLInstaller.swift": "4e676b8002ab99369c65ca7f12f7eee21ddbb4f71dda819aeb0faf40748216e9",
+      "Sources/LegatoCoreML/CoreMLManifest.swift": "7a7e84fa267544e98391744eba39c9374d12c57981da0b10bc34da68384c8fd6",
+      "Sources/LegatoCoreML/CoreMLModels.swift": "288c5aac138d104fdb89c2696543e1cb1b4e0b8fbed59015b1429b4165003580",
+      "Sources/LegatoCoreML/CoreMLPrompt.swift": "f16c95ddbeede1e16a6f34e36444ec875515e0528a34e5d9d2de052f542ee73f",
+      "Sources/LegatoCoreML/CoreMLRuntimeConfiguration.swift": "3a7b19d8374022fbc36dad481657f36e9dc09d1877452aae14986ade2617a5d4",
+      "Sources/LegatoCoreML/NativeCoreMLDriver.swift": "ccbcc600142be60197c496e670ea42cfa8d55e7aa4d0484840503163c612a7fd",
+      "Sources/LegatoCoreML/Resources/GemmaNotice.txt": "66f856d7da72797f528fca46b7c80634ab481f917bfe020960e123d84b19f75f",
+      "Sources/LegatoCoreML/Resources/GemmaProhibitedUsePolicy.txt": "d30ecea6152965449bd9c4e3bd55e16b3d47cc7ce1e0c86bd87759630841f07f",
+      "Sources/LegatoCoreML/Resources/GemmaTermsOfUse.txt": "4cf53fe82e8fa23e79064ad87081fbc6fbe9af8698190a0cacc792a1369822b4",
+      "Sources/LegatoCoreML/Resources/ThirdPartyNotices.txt": "bd264d5c984b564efab58a9333ff7020a251150a26ecb32e7eeee0ed78e75079",
+      "Sources/LegatoCoreML/Resources/gemma3-1b.json": "b932f20b68aa65375a541367f2f1ea791a33b1c61a682eeb755e428217a75a99",
+      "Sources/LegatoCoreML/Resources/qwen3-0.6b.json": "e56eaad592af78846b01c4a3fe264c2f319cbcb0436c86494685b46eeb812de6",
+      "Sources/LegatoCoreML/Resources/qwen3-1.7b.json": "0f75fe3f2b814c604df7f00002a02baa3de639da6e12d3ef0d713e93c4ab9606",
+      "Sources/LegatoMeetings/MeetingSummarizer.swift": "1b7ac24eb8833841b559b8be975b40090d78cbc5858437e1ee628f2daaed8bdd",
+      "Sources/LegatoPostProcessing/CleanupGuard.swift": "6f990e1c83bab60f8c8cbb74ccc3ba027d56f3b4279edf881b4a9576e17172c6",
+      "Sources/LegatoPostProcessing/CleanupPrompt.swift": "d22b243f7e32eb8660333ccc562bd5521cb85ca285674a6b06504a57ce5b5c0b",
+      "Sources/LegatoPostProcessing/CleanupStyle.swift": "a48e8f294b47aa2ec127c2e7e2a62938ba3463a22575b4b3603d6a64aa590da3",
+      "Sources/LegatoPostProcessing/FoundationModelsBackend.swift": "cca6afbed25e00bd612091099dfb6af74bbd04955780d62656994fe900492d80",
+      "Sources/LegatoPostProcessing/ITNStage.swift": "88e634955b5498cefe125c4518906a98ceab60a8a310417e77e1620bd9688876",
+      "Sources/LegatoPostProcessing/LLMAlternativeReranker.swift": "304c5d958f34adabab3e41971bb05020ed5b6096b1ed50b011d9280ac7a8a7be",
+      "Sources/LegatoPostProcessing/LLMCleanupStage.swift": "1a058a68cfc6ece633278102098a9b4b2e9c0ec3149623b0bd64e19345c2feb3",
+      "Sources/LegatoPostProcessing/PostProcessingPipeline.swift": "5d1a224456e9669716060611fdb7cfad94fed0dd3727c680c947c4525fef07fa",
+      "Vendor/ANEMLL/LICENSE-MIT.txt": "da0005be863c8495980f1092a9ea06277098a374aaafc947d13cacee6683a8ad",
+      "Vendor/ANEMLL/PROVENANCE.json": "ca9ca2099a6db0bd8e69872ae52ece6382ef02f42bfaa25c9d3c3d7acbfe1f12",
+      "Vendor/ANEMLL/QWEN-LICENSE.txt": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+      "Vendor/ANEMLL/QWEN-MODEL-CARD.md": "16cc899592e9d604c89536b7ad47176c8ea9d57cf2c70f80f3f497c9d504aa4b",
+      "Vendor/ANEMLL/README.md": "8fe31c5051d0df7afaf0f6ec64d2431a2ea6426f4d81792446da2a6dda7e4d47",
+      "Vendor/ANEMLL/Sources/AnemllCore/FFNChunk.swift": "a2b7ee6d52641cee3af2bf9bbd882cf3bed3b3f863548a285729a6cdf0b5d750",
+      "Vendor/ANEMLL/Sources/AnemllCore/InferenceManager.swift": "c46055976f84a332490e305b59e900578af3ebe90f7b4316fd26251bf6b3143d",
+      "Vendor/ANEMLL/Sources/AnemllCore/MetalArgmax.swift": "2fc4fed2f1de0b838367c8f65dc3a18ab261940ec2a3aa56d037d39a24e39971",
+      "Vendor/ANEMLL/Sources/AnemllCore/ModelLoader.swift": "ab7f1c4015323909b9eb01e8186bed97f208940553163a5d1efd6d64d433733b",
+      "Vendor/ANEMLL/Sources/AnemllCore/SamplingConfig.swift": "132006c29a4203d746ad38043e4cfdce04c17a265410023712f5eb952ef9a7ff",
+      "Vendor/ANEMLL/Sources/AnemllCore/Tokenizer.swift": "006df06e37b7120d2bed07a42a48c48a84dd760652b023432048468a4de6b3f0",
+      "Vendor/ANEMLL/Sources/AnemllCore/YAMLConfig.swift": "b86cd3b7cc6a4aee3bce8d7757d0f42e92f73ff63ad05ae5a9aa23d6593dee29",
+      "Vendor/ANEMLL/UPSTREAM-README.md": "3e10758566ee62934fd91e9db570325badf37206bac0bce85f9e2be8dd0041b9",
+      "Vendor/ANEMLL/UPSTREAM-SWIFT-README.md": "d758b3ccd8b29f4f32ff98fec43166ac2046f66e0fc24c6f7f45b90675ffee27",
+      "Vendor/ANEMLL/UPSTREAM-pyproject.toml": "c20aee98d7213b0498a3eff91cfc4b283806e8abe2bc62400bd25e246e6360c4",
+      "Vendor/ANEMLL/anemll-cancellation.patch": "e9144375a22a4a08791fa9edfef9a226d0ad8c85850a8cf8a65f73c17366c2c8",
+      "Vendor/ANEMLL/anemll-tokenizer.patch": "a459cc20c77be06d3a969ef85ce84d73aff088393e157e3e6e2fbddd117fa5b6",
+      "Vendor/ANEMLL/legato-production.patch": "7fce9219a956fed39057d085fcb7635289684a177e7b03710f2a4ce74df2ae80"
+    }
+  },
+  "gemmaLoadDiagnostic": {
+    "conclusion": "Direct CPU+NE infer load reproduces ANE compiler failure and subsequent functionName error. Explicit CPU-only infer and prefill load successfully with distinct 1/64-token interfaces. Isolates allowed-compute load path; does not establish root compiler cause, CPU inference quality, production fallback, or phone support.",
+    "generationPerformed": false,
+    "productionChanges": false,
+    "auditSHA256": "8085641ad3ba45da4455949ebaaf3bd0269c4478a44714d1a339aeb75b86b2e2",
+    "cells": {
+      "cpu-ane-infer": {
+        "event": "load-error",
+        "computeUnits": "cpuAndNeuralEngine",
+        "functionName": "infer",
+        "milliseconds": 5661.78775,
+        "error": {
+          "code": 0,
+          "domain": "com.apple.CoreML",
+          "localizedDescription": "`MLModelConfiguration`'s `.functionName` property must be `nil` unless the model type is ML Program.",
+          "userInfo": {
+            "NSLocalizedDescription": "`MLModelConfiguration`'s `.functionName` property must be `nil` unless the model type is ML Program."
+          }
+        }
+      },
+      "cpu-only-infer": {
+        "event": "loaded",
+        "computeUnits": "cpuOnly",
+        "functionName": "infer",
+        "milliseconds": 4241.05
+      },
+      "cpu-only-prefill": {
+        "event": "loaded",
+        "computeUnits": "cpuOnly",
+        "functionName": "prefill",
+        "milliseconds": 4200.263792
+      }
+    }
+  },
+  "verification": "Root independently recomputed all 231 archived source hashes and four harness hashes, reparsed raw JSONL and checked fixture counts/quality flags, raw-log hashes and all released prepared=false observations. Full harness/provenance/raw artifacts retained locally under /tmp/legato-coreml-native-pilot."
+}

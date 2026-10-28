@@ -132,6 +132,7 @@ final class KeyboardHarnessModel {
 
     let document = HarnessDocument()
     let controller: KeyboardController
+    private let link: LinkClient
 
     /// Scripted typing: the key sequences `harness-type` feeds through `TypingModel.press`, the same
     /// commit path the touches use. Tokens: `shift`, `space`, `delete`, `return`, a key id
@@ -150,8 +151,10 @@ final class KeyboardHarnessModel {
 
     private init() {
         let document = self.document
+        let link = LinkClient()
+        self.link = link
         controller = KeyboardController(
-            document: document, link: LinkClient(), hasFullAccess: { true },
+            document: document, link: link, hasFullAccess: { true },
             preferences: {
                 var preferences = KeyboardPreferences.load()
                 if ["YES", "TRUE", "1"].contains(UserDefaults.standard.string(forKey: "LegatoHarnessStrip")?.uppercased() ?? "") {
@@ -160,6 +163,7 @@ final class KeyboardHarnessModel {
                 return preferences
             })
         controller.trace = { message in E2E.log("harness \(message) doc=\(E2E.quote(document.text))") }
+        controller.beforeStartWatch = { await E2E.waitForStartWatch() }
         document.onChange = { [weak controller] in controller?.documentDidChange() }
     }
 
@@ -176,6 +180,9 @@ final class KeyboardHarnessModel {
     func run(_ command: String) {
         switch command {
         case "harness-mic": controller.micTapped()
+        case "harness-host-missing": link.hidesHost = true
+        case "harness-status":
+            E2E.log("harness status=\(E2E.quote(controller.dictationStatus ?? "")) capturing=\(controller.isCapturing ? 1 : 0) command=\(controller.micMode.request?.rawValue ?? "none") doc=\(E2E.quote(document.text))")
         case "harness-mic-hop":
             // What the open-app mic key does: the Link opens the app with its URL as the tap lands.
             let url = KeyboardURL.make(command: controller.openAppCommand, requestID: controller.openAppRequestID)

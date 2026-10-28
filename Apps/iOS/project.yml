@@ -64,8 +64,6 @@ targets:
       - package: LegatoKit
         product: LegatoPostProcessing
       - package: LegatoKit
-        product: LegatoMLX
-      - package: LegatoKit
         product: LegatoAppServices
       # Meetings: the session, the store and the summaries; Claude is the opt-in summary backend.
       - package: LegatoKit

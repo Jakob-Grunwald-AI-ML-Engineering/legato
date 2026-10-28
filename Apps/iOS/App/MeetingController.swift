@@ -165,7 +165,8 @@ final class MeetingController {
         language = settings.language
         keyStore = keys
         hasClaudeKey = Self.keyExists(keys)
-        services = MeetingServices(models: models, store: store, settings: settings, keyStore: keys)
+        services = MeetingServices(models: models, store: store, settings: settings, keyStore: keys,
+                                   isInBackground: { UIApplication.shared.applicationState == .background })
         services.onProgress = { [weak self] id, stage in
             self?.processing[id] = stage
         }
@@ -667,11 +668,6 @@ final class MeetingController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                guard await services.summaryBackend() != nil else {
-                    notices.post("No on-device model is available for a summary.", kind: .action, meeting: id)
-                    busy.remove(id)
-                    return
-                }
                 try await services.regenerate(meetingID: id)
             } catch {
                 if !(error is CancellationError) {

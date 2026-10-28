@@ -15,9 +15,16 @@ final class PasteboardClient: Clipboard {
         return forceWrite(text, source: "coordinator")
     }
 
-    /// Writes regardless of the debug override. For user-initiated copies in the foreground.
+    /// Foreground copies ignore the debug override; the DEBUG simulator can refuse an activity Copy.
     @discardableResult
     func forceWrite(_ text: String, source: String = "user") -> Bool {
+        #if DEBUG
+        // The simulator can exercise a dropped background Copy without changing foreground copy-last.
+        if source == "activity-copy", Settings.debugForceTapToCopy {
+            E2E.log("clipboard.write source=activity-copy changed=false forced=tapToCopy")
+            return false
+        }
+        #endif
         let pasteboard = UIPasteboard.general
         let before = pasteboard.changeCount
         pasteboard.string = text

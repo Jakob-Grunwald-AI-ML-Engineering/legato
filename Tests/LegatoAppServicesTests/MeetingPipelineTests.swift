@@ -195,6 +195,125 @@ private struct Rig {
 }
 
 @Suite struct MeetingPipelineTests {
+    @Test func publicRunPreservesSummaryPreparationReason() async throws {
+        let rig = Rig(); try await rig.seed(steps: [.postPass, .diarize])
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio }, transcriber: { nil }, backend: { nil },
+            summaryAdmission: { throw SummaryPreparationRequired("Open Legato to prepare the selected summary model.") }, summarizeAutomatically: { true })
+        let result = try await pipeline.run(meetingID: rig.id)
+        #expect(result.summaryPreparationRequired == "Open Legato to prepare the selected summary model.")
+        #expect(result.willRetry)
+        #expect(try await rig.meeting().state == .processing)
+    }
+
+    @Test func missingBackgroundSummaryPreparationDefersWithoutFinishingOrConsumingAttempts() async throws {
+        let rig = Rig()
+        try await rig.seed(steps: [.postPass, .diarize])
+        try await rig.store.update(id: rig.id) { $0.failedRuns = 1 }
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio }, transcriber: { nil }, backend: { nil },
+            summaryAdmission: { throw SummaryPreparationRequired("Open Legato to prepare the selected summary model.") }, summarizeAutomatically: { true })
+        let result = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(result.willRetry)
+        #expect(result.summaryPreparationRequired == "Open Legato to prepare the selected summary model.")
+        #expect(try await rig.meeting().state == .processing)
+        #expect(try await rig.meeting().failedRuns == 1)
+        #expect(try await rig.meeting().completedSteps.contains(.summary) == false)
+    }
+
+    @Test func improvedTranscriptKeepsSummaryPendingAcrossPreparationDeferral() async throws {
+        let rig = Rig()
+        try await rig.seed(steps: [.audio, .diarize, .summary])
+        try await rig.store.saveSummary("Earlier live transcript summary", backendID: rig.llm.id, sections: ["summary"], for: rig.id)
+        try await rig.store.update(id: rig.id) { $0.failedRuns = 1 }
+        let admissionAttempts = Mutex(0)
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio },
+            transcriber: { FakeTranscriber(log: rig.log) }, backend: { nil },
+            summaryAdmission: {
+                let attempt = admissionAttempts.withLock { $0 += 1; return $0 }
+                if attempt == 1 { throw SummaryPreparationRequired("Open Legato to prepare the selected summary model.") }
+                return SummaryBackendLease(backend: rig.llm, release: {})
+            }, summarizeAutomatically: { true })
+        let deferred = try await pipeline.runDeferred(meetingID: rig.id)
+        let pending = try await rig.meeting()
+        #expect(deferred.willRetry)
+        #expect(deferred.summaryPreparationRequired == "Open Legato to prepare the selected summary model.")
+        #expect(pending.state == .processing)
+        #expect(pending.failedRuns == 0, "The successful post-pass resets its earlier failed attempt")
+        #expect(pending.completedSteps == [.audio, .diarize, .postPass], "The older summary no longer completes the improved transcript")
+        #expect(try await rig.store.summaries(for: rig.id).map(\.text) == ["Earlier live transcript summary"])
+        #expect(rig.llm.prompts.withLock { $0 }.isEmpty)
+
+        let resumed = try await pipeline.run(meetingID: rig.id)
+        #expect(resumed.summaryBackendID == rig.llm.id)
+        #expect(admissionAttempts.withLock { $0 } == 2)
+        #expect(try await rig.meeting().state == .finished)
+        #expect(try await rig.meeting().completedSteps == [.audio, .diarize, .postPass, .summary])
+        #expect(try await rig.meeting().failedRuns == 0)
+        #expect(rig.log.count("post-pass") == 2, "The completed post-pass is not repeated on foreground resumption")
+        let prompt = try #require(rig.llm.prompts.withLock { $0.first })
+        #expect(prompt.contains("accurate mine") && prompt.contains("accurate theirs") && !prompt.contains("live mine"))
+        #expect(try await rig.store.summaries(for: rig.id).map(\.text) == ["## Summary\nDone."])
+    }
+
+    @Test func modelDeferralDoesNotRestartExhaustedPostPassAttempts() async throws {
+        let rig = Rig(); try await rig.seed()
+        try await rig.store.update(id: rig.id) { $0.failedRuns = 3 }
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio },
+            transcriber: { FakeTranscriber(log: rig.log) }, backend: { nil },
+            summaryAdmission: { throw SummaryPreparationRequired("Install the selected summary model.") }, summarizeAutomatically: { true })
+        let result = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(result.willRetry)
+        #expect(try await rig.meeting().failedRuns == 3)
+        #expect(try await rig.meeting().state == .processing)
+        #expect(rig.log.count("post-pass") == 0)
+    }
+
+    @Test func summaryAdmissionLeaseIsReleasedAfterTheSummaryIsSaved() async throws {
+        let rig = Rig(); try await rig.seed(steps: [.postPass, .diarize])
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio }, transcriber: { nil }, backend: { nil },
+            summaryAdmission: {
+                rig.log.add("acquire-summary")
+                return SummaryBackendLease(backend: rig.llm, release: { rig.log.add("release-summary") })
+            }, summarizeAutomatically: { true })
+        let result = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(result.summaryBackendID == "fake-llm")
+        #expect(rig.log.all.filter { $0.contains("summary") } == ["acquire-summary", "summary", "release-summary"])
+        #expect(try await rig.meeting().completedSteps.contains(.summary))
+    }
+
+    @Test func summaryLeaseSpansAllTranscriptChunksAndTheMerge() async throws {
+        let rig = Rig(); try await rig.seed(steps: [.postPass, .diarize])
+        for index in 0..<8 {
+            try await rig.store.appendSegment(MeetingSegment(stream: .mic, text: String(repeating: "discussion ", count: 150), start: Double(index * 10), end: Double(index * 10 + 9)), to: rig.id)
+        }
+        let model = ChunkLeaseBackend(log: rig.log)
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio }, transcriber: { nil }, backend: { nil },
+            summaryAdmission: { SummaryBackendLease(backend: model, release: { rig.log.add("release-summary") }) }, summarizeAutomatically: { true })
+        let result = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(result.summaryBackendID == "chunk-llm")
+        #expect(rig.log.count("part") >= 2)
+        #expect(rig.log.count("merge") == 1)
+        #expect(rig.log.all.last == "release-summary")
+    }
+
+    @Test func summaryLeaseReleasesWhenTheOperationIsCancelled() async throws {
+        let rig = Rig(); try await rig.seed(steps: [.postPass, .diarize])
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio }, transcriber: { nil }, backend: { nil },
+            summaryAdmission: { SummaryBackendLease(backend: LeaseFailureBackend(cancel: true), release: { rig.log.add("release-summary") }) }, summarizeAutomatically: { true })
+        await #expect(throws: CancellationError.self) { try await pipeline.runDeferred(meetingID: rig.id) }
+        #expect(rig.log.count("release-summary") == 1)
+        #expect(try await rig.meeting().completedSteps.contains(.summary) == false)
+    }
+
+    @Test func summaryAdmissionLeaseReleasesWhenGenerationFails() async throws {
+        let rig = Rig(); try await rig.seed(steps: [.postPass, .diarize])
+        let pipeline = MeetingPipeline(store: rig.store, audio: { _ in rig.audio }, transcriber: { nil }, backend: { nil },
+            summaryAdmission: { SummaryBackendLease(backend: LeaseFailureBackend(), release: { rig.log.add("release-summary") }) },
+            summarizeAutomatically: { true })
+        let result = try await pipeline.runDeferred(meetingID: rig.id)
+        #expect(result.summaryBackendID == nil)
+        #expect(rig.log.count("release-summary") == 1)
+    }
+
     @Test func theChainRunsM4aThenPostPassThenSummaryAndFinishes() async throws {
         let rig = Rig()
         try await rig.seed()
@@ -801,5 +920,28 @@ private struct Rig {
         #expect(saved.title == "Renamed mid-chain")
         #expect(saved.state == .finished)
         #expect(saved.completedSteps == [.audio, .postPass, .summary])
+    }
+}
+
+private struct LeaseFailureBackend: LLMBackend {
+    var cancel = false
+    let id = "failure"
+    var maxPromptCharacters: Int? { nil }
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        if cancel { throw CancellationError() }
+        throw LLMError.failed("generation failed")
+    }
+}
+
+private struct ChunkLeaseBackend: LLMBackend {
+    let id = "chunk-llm"
+    let log: Log
+    var maxPromptCharacters: Int? { 2_500 }
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        #expect(log.count("release-summary") == 0)
+        log.add(prompt.hasPrefix("Part 1 of ") ? "merge" : "part")
+        return "Brief meeting notes."
     }
 }

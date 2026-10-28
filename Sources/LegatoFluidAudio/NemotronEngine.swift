@@ -62,6 +62,11 @@ public final class NemotronEngine: DictationEngine {
         EngineSupport.installAssets(models: models, id: modelID)
     }
 
+    public func captureFormat(locale: Locale?) async throws -> AudioFormatSpec {
+        try await EngineSupport.requireInstalled(models: models, id: modelID)
+        return EngineSupport.audioFormat
+    }
+
     public func prepare(locale: Locale?) async throws -> AudioFormatSpec {
         try await EngineSupport.requireInstalled(models: models, id: modelID)
         let folder = NemotronInstaller(variant: variant, chunkMs: chunkMs).installFolder(root: await models.root)

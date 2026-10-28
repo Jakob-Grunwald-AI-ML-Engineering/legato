@@ -8,7 +8,7 @@ import SwiftUI
 struct MeetingSettingsView: View {
     let controller: AppController
 
-    @State private var backend = CleanupBackendChoice.auto
+    @State private var backend = CleanupBackendChoice.foundationModels
     @State private var summarizeAutomatically = false
     @State private var noiseFilter = true
     @State private var liveDiarization = true
@@ -26,6 +26,13 @@ struct MeetingSettingsView: View {
     private var meetings: MeetingController { controller.meetings }
     private var models: ModelServices { controller.models }
 
+    private var selectedCleanupName: String {
+        guard let id = models.selected(.cleanup), let model = models.cleanupModels.first(where: { $0.id == id }) else {
+            return "Core ML model — choose in Cleanup"
+        }
+        return model.displayName
+    }
+
     var body: some View {
         Form {
             MeetingSectionsSection(settings: meetings.settings)
@@ -33,15 +40,14 @@ struct MeetingSettingsView: View {
             Section {
                 Toggle("Summarize automatically after the meeting", isOn: $summarizeAutomatically)
                     .accessibilityIdentifier("settings.summarizeAutomatically")
-                Picker("Backend", selection: $backend) {
-                    Text("Auto").tag(CleanupBackendChoice.auto)
+                Picker("Summary model", selection: $backend) {
                     Text("Apple Foundation Models").tag(CleanupBackendChoice.foundationModels)
-                    Text("MLX model").tag(CleanupBackendChoice.mlx)
+                    Text(selectedCleanupName).tag(CleanupBackendChoice.coreML)
                 }
             } header: {
                 Text("Summary")
             } footer: {
-                Text("Off: each meeting has a Summarize button, so you can name the speakers first. On: the summary is written once the other after-meeting steps are done. Either way it runs on this iPhone with the backend above (the MLX model is the one picked in Cleanup).")
+                Text("Off: each meeting has a Summarize button, so you can name the speakers first. On: the summary is written once the other after-meeting steps are done. The chosen model is used for every summary. Core ML uses the model selected in Cleanup; prepare it in Legato first. An unavailable model never switches to Apple Foundation Models.")
             }
 
             Section {
@@ -150,7 +156,7 @@ struct MeetingSettingsView: View {
             hasKey = meetings.hasClaudeKey
             postPass = models.selected(.postPass)
         }
-        .onChange(of: backend) { _, new in meetings.settings.backend = new }
+        .onChange(of: backend) { _, new in meetings.settings.backend = new; controller.meetingSettingsChanged() }
         .onChange(of: summarizeAutomatically) { _, new in meetings.settings.summarizeAutomatically = new }
         .onChange(of: noiseFilter) { _, new in meetings.settings.echoNoise = new ? .localVQE : .off }
         .onChange(of: liveDiarization) { _, new in meetings.settings.liveDiarization = new }

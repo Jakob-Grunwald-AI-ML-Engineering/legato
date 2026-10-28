@@ -8,6 +8,9 @@ import LegatoKeyboardCore
 final class LinkClient {
     private let store: LinkStore?
     private var observers: [DarwinObserver] = []
+    #if DEBUG
+    var hidesHost = false
+    #endif
 
     /// `store` is nil when the App Group is unavailable (no Full Access, or misconfigured signing):
     /// every read is then empty and every write a no-op.
@@ -25,7 +28,12 @@ final class LinkClient {
     /// Stops the `link.host` observation; the handlers never run again.
     func stopObserving() { observers.removeAll() }
 
-    func readHost() -> HostState? { store?.read(HostState.self, forKey: LinkChannel.Key.host) }
+    func readHost() -> HostState? {
+        #if DEBUG
+        if hidesHost { return nil }
+        #endif
+        return store?.read(HostState.self, forKey: LinkChannel.Key.host)
+    }
     func readAck() -> KeyboardAck? { store?.read(KeyboardAck.self, forKey: LinkChannel.Key.ack) }
     func readApplied() -> AppliedCursor? { store?.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) }
 

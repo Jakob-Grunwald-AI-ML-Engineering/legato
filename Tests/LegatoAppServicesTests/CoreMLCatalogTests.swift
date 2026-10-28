@@ -1,7 +1,6 @@
 import Foundation
 import LegatoCore
 import LegatoModels
-import LegatoMLX
 import Testing
 @testable import LegatoAppServices
 
@@ -13,16 +12,15 @@ import Testing
         #expect(descriptor?.displayName == "Qwen3 1.7B (Core ML)")
         #expect(models.selected(.cleanup) == nil)
         #expect(models.cleanupChoice(for: "coreml-qwen3-1.7b-lut6") == .coreML)
-        #expect(models.cleanupChoice(for: "mlx-qwen3-0.6b-4bit") == .mlx)
+        #expect(!models.cleanupModels.contains { $0.id.hasPrefix("mlx-") })
         #expect(await models.manager.state(of: "coreml-qwen3-1.7b-lut6") == .notInstalled)
     }
-    @Test func coreMLPreferenceAndExistingMLXRawValueRoundTrip() {
+    @Test func unsupportedOldBackendUsesTheNewBuiltInDefault() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let settings = CleanupSettingsStore(defaults: defaults)
-        settings.backend = .coreML
-        #expect(CleanupSettingsStore(defaults: defaults).backend.preference == .coreML)
         defaults.set("mlx", forKey: "cleanup.backend")
-        #expect(settings.backend == .mlx)
-        #expect(settings.backend.preference == .auto)
+        let settings = CleanupSettingsStore(defaults: defaults)
+        #expect(settings.backend == .foundationModels)
+        #expect(settings.backend.preference == .foundationModels)
+        #expect(CleanupSettingsStore(defaults: defaults).backend.preference == .foundationModels)
     }
 }
