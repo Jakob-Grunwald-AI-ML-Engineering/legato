@@ -67,12 +67,13 @@ public struct MeetingPipeline: Sendable {
         public var notes: [String] = []
         /// A step failed and the meeting stays `processing` for another run.
         public var willRetry = false
+        public var summaryPreparationRequired: String?
     }
 
     private let store: MeetingStore
     private let audio: @Sendable (URL) -> any MeetingAudioFinalizing
     private let transcriber: @Sendable () async -> (any BatchTranscriber)?
-    private let backend: @Sendable () async -> (any LLMBackend)?
+    private let summaryAdmission: @Sendable () async throws -> SummaryBackendLease?
     private let sections: @Sendable (Meeting) -> [SummarySection]
     private let summarizeAutomatically: @Sendable () -> Bool
     private let batchDiarizer: @Sendable () async -> (any BatchDiarizer)?
@@ -100,6 +101,7 @@ public struct MeetingPipeline: Sendable {
         audio: @escaping @Sendable (URL) -> any MeetingAudioFinalizing,
         transcriber: @escaping @Sendable () async -> (any BatchTranscriber)?,
         backend: @escaping @Sendable () async -> (any LLMBackend)?,
+        summaryAdmission: (@Sendable () async throws -> SummaryBackendLease?)? = nil,
         sections: @escaping @Sendable (Meeting) -> [SummarySection] = {
             SummarySection.resolve($0.sections ?? SummarySection.defaultIDs, in: SummarySection.builtIns)
         },
@@ -114,7 +116,10 @@ public struct MeetingPipeline: Sendable {
         self.store = store
         self.audio = audio
         self.transcriber = transcriber
-        self.backend = backend
+        self.summaryAdmission = summaryAdmission ?? {
+            guard let model = await backend() else { return nil }
+            return SummaryBackendLease(backend: model)
+        }
         self.sections = sections
         self.summarizeAutomatically = summarizeAutomatically
         self.batchDiarizer = batchDiarizer
@@ -156,6 +161,7 @@ public struct MeetingPipeline: Sendable {
         outcome.summaryBackendID = rest.summaryBackendID
         outcome.notes += rest.notes
         outcome.willRetry = rest.willRetry
+        outcome.summaryPreparationRequired = rest.summaryPreparationRequired
         return outcome
     }
 
@@ -189,11 +195,14 @@ public struct MeetingPipeline: Sendable {
         var outcome = Outcome()
         guard let meeting = try await processable(meetingID) else { return outcome }
         let recordings = audio(await store.folder(for: meetingID))
-        var stepFailed = false
+        let exhausted = meeting.failedRuns >= Self.maxAttempts
+        var stepFailed = exhausted
+        var attemptedSteps = false
         // A step that succeeded after the summary was written (a retry): the summary is written again.
         var improved = false
 
-        if !meeting.completedSteps.contains(.postPass), let batch = await transcriber() {
+        if !exhausted, !meeting.completedSteps.contains(.postPass), let batch = await transcriber() {
+            attemptedSteps = true
             await onEvent(.started(.postPass))
             try Task.checkCancellation()  // never free the live models for a job that was just cut short
             await releaseModels()
@@ -214,7 +223,8 @@ public struct MeetingPipeline: Sendable {
             await releasePostPassModels()
         }
 
-        if !meeting.completedSteps.contains(.diarize), diarizationEnabled(), let diarizer = await batchDiarizer() {
+        if !exhausted, !meeting.completedSteps.contains(.diarize), diarizationEnabled(), let diarizer = await batchDiarizer() {
+            attemptedSteps = true
             switch try await diarize(meetingID, with: diarizer, recordings: recordings, outcome: &outcome) {
             case true?: improved = true
             case false?: stepFailed = true
@@ -229,8 +239,8 @@ public struct MeetingPipeline: Sendable {
             try await automaticSummary(meetingID, outcome: &outcome)
         }
 
-        let failedRuns = stepFailed ? meeting.failedRuns + 1 : 0
-        if stepFailed, failedRuns < Self.maxAttempts {
+        let failedRuns = stepFailed ? min(Self.maxAttempts, meeting.failedRuns + 1) : (attemptedSteps ? 0 : meeting.failedRuns)
+        if outcome.summaryPreparationRequired != nil || (stepFailed && failedRuns < Self.maxAttempts) {
             try await store.update(id: meetingID) { $0.failedRuns = failedRuns }
             outcome.willRetry = true
             return outcome
@@ -291,15 +301,23 @@ public struct MeetingPipeline: Sendable {
     }
 
     private func automaticSummary(_ meetingID: UUID, outcome: inout Outcome) async throws {
-        guard let model = await backend() else {
-            outcome.notes.append("No on-device model is available for a summary.")
-            return
-        }
         do {
-            try await summarize(meetingID: meetingID, using: model)
-            outcome.summaryBackendID = model.id
-        } catch is CancellationError {
-            throw CancellationError()
+            guard let lease = try await summaryAdmission() else {
+                outcome.notes.append("No on-device model is available for a summary.")
+                return
+            }
+            do {
+                try await summarize(meetingID: meetingID, using: lease.backend)
+                outcome.summaryBackendID = lease.backend.id
+                await lease.release()
+            } catch {
+                await lease.release()
+                throw error
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as SummaryPreparationRequired {
+            outcome.summaryPreparationRequired = error.reason
+            outcome.notes.append(error.reason)
         } catch let error as LLMError {
             outcome.notes.append("The summary was not written: \(error)")
         }

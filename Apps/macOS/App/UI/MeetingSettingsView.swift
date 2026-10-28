@@ -161,7 +161,7 @@ struct MeetingSettingsView: View {
             hasKey = meetings.hasClaudeKey
             postPass = models.selected(.postPass)
         }
-        .onChange(of: backend) { _, new in meetings.settings.backend = new }
+        .onChange(of: backend) { _, new in meetings.settings.backend = new; app.meetingSettingsChanged() }
         .onChange(of: summarizeAutomatically) { _, new in meetings.settings.summarizeAutomatically = new }
         .onChange(of: echoNoise) { _, new in meetings.settings.echoNoise = new }
         .onChange(of: liveDiarization) { _, new in meetings.settings.liveDiarization = new }

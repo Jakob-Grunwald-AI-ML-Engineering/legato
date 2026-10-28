@@ -25,6 +25,7 @@ public final class ModelServices {
     public let catalog: [ModelDescriptor]
     /// The live (streaming) models grouped by family, each with its latency tiers.
     public let streamingFamilies: [ModelFamily]
+    private let meetingSettings: MeetingSettings
     private let modelRoot: URL
     private let warmup = SelectedModelWarmup()
     private let speechResources: AppleSpeechEngine
@@ -57,6 +58,7 @@ public final class ModelServices {
     ) {
         CleanupSelectionMigration.migrate(defaults)
         self.modelRoot = root
+        meetingSettings = MeetingSettings(defaults: defaults)
         speechResources = AppleSpeechEngine(vocabulary: vocabulary)
         FluidAudioModels.pinRevisions()
         selection = SelectionStore(defaults: defaults)
@@ -81,89 +83,107 @@ public final class ModelServices {
                 }
             })
         engines = EngineRegistry(models: manager, settings: engineSettings, vocabulary: vocabulary)
-        cleanup = CleanupRegistry(models: manager, foundationModels: foundationResources, makeCoreMLBackend: { id, root in
+        let resourceOwner = warmup
+        cleanup = CleanupRegistry(models: manager,
+            foundationModels: ResourceLeasedBackend(backend: foundationResources, owner: resourceOwner, key: "cleanup:foundation-models"), makeCoreMLBackend: { id, root in
             guard let spec = CoreMLModels.spec(id: id) else { return nil }
-            return await CoreMLModelStore.shared.backend(for: spec, root: root)
+            return ResourceLeasedBackend(backend: await CoreMLModelStore.shared.backend(for: spec, root: root), owner: resourceOwner, key: "cleanup:" + id)
         })
     }
 
-    /// Retains selected resources across microphone expiry. This never downloads or starts capture.
-    /// Readiness means selected resources are prepared for admission.
+    /// Reconciles retention for every selected consumer without waiting for their union.
+    public func reconcileSelectedModels(options: CleanupOptions, inBackground: Bool) async {
+        let requests = await selectedResourceRequests(options: options)
+        for role in [SelectedModelWarmup.Role.dictation, .refine, .meetingSummary] {
+            await warmup.setRequested(requests[role] ?? [], for: role, inBackground: inBackground)
+        }
+    }
+    func selectedResourceRequests(options: CleanupOptions) async -> [SelectedModelWarmup.Role: [SelectedModelWarmup.Resource]] {
+        let speech = await speechResource()
+        let refine = await cleanupResource(backend: options.backend)
+        let meeting = await cleanupResource(backend: meetingSettings.backend)
+        return [.dictation: [speech] + (options.enabled ? [refine] : []), .refine: [refine], .meetingSummary: [meeting]]
+    }
+
+    /// Admission awaits only resources required by dictation; Refine and meetings prepare independently.
     public func prepareSelectedModels(options: CleanupOptions, inBackground: Bool) async throws {
-        let resources = await selectedResources(options: options)
-        try await warmup.prepare(resources, inBackground: inBackground)
+        await reconcileSelectedModels(options: options, inBackground: inBackground)
+        let keys = await dictationKeys(options: options)
+        try await warmup.prepare(keys: keys, inBackground: inBackground)
     }
-
     public func selectedModelsAreWarm(options: CleanupOptions) async -> Bool {
-        let resources = await selectedResources(options: options)
-        return await warmup.isReady(for: Set(resources.map(\.key)))
+        await warmup.isReady(for: dictationKeys(options: options))
+    }
+    private func dictationKeys(options: CleanupOptions) async -> Set<String> {
+        var keys: Set<String> = [await speechResource().key]
+        if options.enabled { keys.insert(await cleanupResource(backend: options.backend).key) }
+        return keys
+    }
+    public func releaseSelectedModels() async { await warmup.invalidate() }
+    public func cleanupChoice(for modelID: String) -> CleanupBackendChoice { .coreML }
+
+    public func acquireSummaryBackend(backend: CleanupBackendChoice, inBackground: Bool) async throws -> SummaryBackendLease {
+        let id = selected(.cleanup)
+        let resource = await cleanupResource(backend: backend)
+        await warmup.setRequested([resource], for: .meetingSummary, inBackground: inBackground)
+        let lease = try await warmup.acquire(keys: [resource.key], inBackground: inBackground)
+        let model: any LLMBackend
+        if backend == .foundationModels { model = foundationResources }
+        else if let id, let spec = CoreMLModels.spec(id: id) {
+            model = await CoreMLModelStore.shared.backend(for: spec, root: modelRoot)
+        } else {
+            await lease.release()
+            throw LLMError.unavailable(reason: "Choose a Core ML model in Legato.")
+        }
+        guard await model.availability.isAvailable else {
+            await lease.release()
+            throw LLMError.unavailable(reason: "The selected summary model is unavailable. Open Legato to prepare it.")
+        }
+        return SummaryBackendLease(backend: model, release: { await lease.release() })
+    }
+    public func acquireRefine(options: CleanupOptions, inBackground: Bool) async throws -> SelectedModelWarmup.Lease {
+        let resource = await cleanupResource(backend: options.backend)
+        await warmup.setRequested([resource], for: .refine, inBackground: inBackground)
+        return try await warmup.acquire(keys: [resource.key], inBackground: inBackground)
     }
 
-    /// Revokes readiness, joins outstanding preparation and relinquishes reusable model ownership.
-    /// Run-owned and system-owned resources may remain resident until their owners finish.
-    public func releaseSelectedModels() async {
-        await warmup.invalidate()
-    }
-
-    public func cleanupChoice(for modelID: String) -> CleanupBackendChoice {
-        .coreML
-    }
-
-    private func selectedResources(options: CleanupOptions) async -> [SelectedModelWarmup.Resource] {
-        let root = modelRoot
-        let locale = Self.singleLocale(engineSettings)
-        let speech = speechResources
-        var resources: [SelectedModelWarmup.Resource] = []
-        if let id = selected(.liveDictation),
-           let installer = FluidAudioCatalog.installers()[id],
+    private func speechResource() async -> SelectedModelWarmup.Resource {
+        let root = modelRoot, speech = speechResources, locale = Self.singleLocale(engineSettings)
+        if let id = selected(.liveDictation), let installer = FluidAudioCatalog.installers()[id],
            case .installed = await manager.state(of: id) {
             let folder = installer.installFolder(root: root)
-            resources.append(.init(key: "speech:" + id, prewarm: {
+            return .init(key: "speech:" + id, prewarm: {
                 try await FluidAudioModels.prewarmSelected(id: id, root: root)
-            }, release: { await FluidAudioModels.release(folder: folder) }))
-        } else {
-            resources.append(.init(key: "speech:apple:" + (locale?.identifier ?? "auto"), prewarm: {
-                try await speech.prewarmResources(locale: locale)
-            }, release: { await speech.releaseWarmResources() }))
+            }, release: { await FluidAudioModels.release(folder: folder) })
         }
-        let fallback = foundationResources
-        let preference = options.backend.preference
-        let selectedCleanup = preference == .foundationModels ? nil : selected(.cleanup)
-        let manager = self.manager
-        // A selected local model has the same resource identity in foreground and background.
-        // Disabled cleanup still retains its pick for the independent Refine key.
-        if preference == .foundationModels {
-            resources.append(.init(key: "cleanup:foundation-models", prewarm: {
+        return .init(key: "speech:apple:" + (locale?.identifier ?? "auto"), prewarm: {
+            try await speech.prewarmResources(locale: locale)
+        }, release: { await speech.releaseWarmResources() })
+    }
+    private func cleanupResource(backend: CleanupBackendChoice) async -> SelectedModelWarmup.Resource {
+        let root = modelRoot, manager = self.manager, fallback = foundationResources
+        if backend == .foundationModels {
+            return .init(key: "cleanup:foundation-models", prewarm: {
                 if await fallback.availability.isAvailable { try await fallback.prewarmResources() }
-            }, release: { await fallback.releaseWarmResources() }))
+            }, release: { await fallback.releaseWarmResources() })
         }
-        if preference == .coreML {
-            let id = selectedCleanup ?? "unselected"
-            resources.append(.init(key: "cleanup:" + id, prewarm: { [weak self] in
-                do {
-                    guard case .installed = await manager.state(of: id) else {
-                        throw LLMError.unavailable(reason: "Choose and prepare the selected Core ML cleanup model in Legato.")
-                    }
-                    if let spec = CoreMLModels.spec(id: id) {
-                        try await CoreMLModelStore.shared.backend(for: spec, root: root).prepare()
-                    } else {
-                        throw LLMError.unavailable(reason: "Choose a model from the Core ML cleanup catalog in Legato.")
-                    }
-                    await self?.setCleanupPreparationNotice(nil)
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    // Preserve the selection and surface failure instead of switching model families.
-                    await self?.setCleanupPreparationNotice("The selected cleanup model could not be prepared. Open Legato to retry preparation.")
-                    throw error
+        let id = selected(.cleanup) ?? "unselected", key = "cleanup:" + (selected(.cleanup) ?? "unselected")
+        if case .installed = await manager.state(of: id) { } else { await warmup.revoke(key: key) }
+        return .init(key: key, prewarm: { [weak self] in
+            do {
+                guard case .installed = await manager.state(of: id), let spec = CoreMLModels.spec(id: id) else {
+                    throw LLMError.unavailable(reason: "Choose and install the selected Core ML model in Legato before preparation.")
                 }
-            }, release: {
-                if let spec = CoreMLModels.spec(id: id) {
-                    await CoreMLModels.release(folder: spec.folder(root: root))
-                }
-            }))
-        }
-        return resources
+                try await CoreMLModelStore.shared.backend(for: spec, root: root).prepare()
+                await self?.setCleanupPreparationNotice(nil)
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                await self?.setCleanupPreparationNotice("The selected cleanup model could not be prepared. Open Legato to retry preparation.")
+                throw error
+            }
+        }, release: {
+            if let spec = CoreMLModels.spec(id: id) { await CoreMLModels.release(folder: spec.folder(root: root)) }
+        })
     }
 
     private func setCleanupPreparationNotice(_ notice: String?) { cleanupPreparationNotice = notice }

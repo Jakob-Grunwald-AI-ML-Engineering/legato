@@ -342,6 +342,15 @@ final class MacAppController {
         scheduleResourcePreparation()
     }
 
+    /// Meeting preferences change retention without superseding dictation admission.
+    func meetingSettingsChanged() {
+        Task { [weak self] in
+            guard let self else { return }
+            await models.reconcileSelectedModels(options: settings.cleanupStore.options, inBackground: false)
+            meetings.resumeProcessing()
+        }
+    }
+
     private func scheduleResourcePreparation() {
         resourcePreparation?.cancel()
         resourcePreparation = Task { [weak self] in await self?.warmSelectedResources() }
@@ -360,7 +369,7 @@ final class MacAppController {
 
     private func warmSelectedResources() async {
         guard !resolvingEngine, !modelAdmission.isResetting else { return }
-        do { try await prepareSelectedResources() }
+        do { try await prepareSelectedResources(); meetings.resumeProcessing() }
         catch is CancellationError { }
         catch { Self.log.error("selected model preparation failed: \(Self.describe(error), privacy: .public)") }
     }

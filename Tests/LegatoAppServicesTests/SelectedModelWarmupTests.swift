@@ -62,6 +62,107 @@ private actor WarmGate {
 }
 @Suite(.timeLimit(.minutes(1)))
 struct SelectedModelWarmupTests {
+    @Test func speechAndFoundationReadinessDoesNotWaitForBlockedMeetingModel() async throws {
+        let owner = SelectedModelWarmup(); let speech = WarmResource(); let foundation = WarmResource(); let meeting = WarmResource(); let gate = WarmGate()
+        await meeting.block(on: gate)
+        await owner.setRequested([.init(key: "speech", lifecycle: speech), .init(key: "foundation", lifecycle: foundation)], for: .dictation, inBackground: false)
+        await owner.setRequested([.init(key: "meeting", lifecycle: meeting)], for: .meetingSummary, inBackground: false)
+        await meeting.preparationEntered.wait()
+        try await owner.prepare(keys: ["speech", "foundation"], inBackground: false)
+        #expect(await owner.isReady(for: ["speech", "foundation"]))
+        #expect(await owner.isReady(for: ["meeting"]) == false)
+        await gate.release()
+        try await owner.prepare(keys: ["meeting"], inBackground: true)
+        await owner.invalidate()
+    }
+
+    @Test func disabledCleanupCanAdmitSpeechWhileIndependentRefinePrepares() async throws {
+        let owner = SelectedModelWarmup(); let speech = WarmResource(); let refine = WarmResource(); let gate = WarmGate()
+        await refine.block(on: gate)
+        await owner.setRequested([.init(key: "speech", lifecycle: speech)], for: .dictation, inBackground: false)
+        await owner.setRequested([.init(key: "cleanup", lifecycle: refine)], for: .refine, inBackground: false)
+        await refine.preparationEntered.wait()
+        try await owner.prepare(keys: ["speech"], inBackground: false)
+        #expect(await owner.isReady(for: ["speech"]))
+        #expect(await owner.isReady(for: ["cleanup"]) == false)
+        await gate.release()
+        await owner.invalidate()
+    }
+
+    @Test func roleRemovalRetainsResourcesUntilTheLastOperationLeaseEnds() async throws {
+        let owner = SelectedModelWarmup(); let resource = WarmResource()
+        await owner.setRequested([.init(key: "cleanup", lifecycle: resource)], for: .meetingSummary, inBackground: false)
+        let lease = try await owner.acquire(keys: ["cleanup"], inBackground: false)
+        await owner.setRequested([], for: .meetingSummary, inBackground: false)
+        #expect(await resource.released == 0)
+        #expect(await owner.isReady(for: ["cleanup"]))
+        await lease.release()
+        #expect(await resource.released == 1)
+        #expect(await owner.isReady(for: ["cleanup"]) == false)
+        await lease.release()
+        #expect(await resource.released == 1)
+    }
+
+    @Test func cancelledMeetingWaiterDoesNotCancelSharedDictationLoad() async throws {
+        let owner = SelectedModelWarmup(); let resource = WarmResource(); let gate = WarmGate(); let completion = WarmWaiterCompletion()
+        await resource.block(on: gate)
+        let resources = [SelectedModelWarmup.Resource(key: "shared", lifecycle: resource)]
+        await owner.setRequested(resources, for: .dictation, inBackground: false)
+        await owner.setRequested(resources, for: .meetingSummary, inBackground: false)
+        await resource.preparationEntered.wait()
+        let waiter = Task {
+            do { let lease = try await owner.acquire(keys: ["shared"], inBackground: false); await lease.release(); await completion.finish(cancelled: false) }
+            catch is CancellationError { await completion.finish(cancelled: true) }
+            catch { Issue.record("Wrong error: \(error)"); await completion.finish(cancelled: false) }
+        }
+        waiter.cancel()
+        await completion.finished.wait()
+        #expect(await completion.cancelled == true)
+        #expect(await resource.released == 0)
+        await owner.setRequested([], for: .meetingSummary, inBackground: false)
+        await gate.release()
+        try await owner.prepare(keys: ["shared"], inBackground: true)
+        #expect(await resource.prepared == 1)
+        #expect(await owner.isReady(for: ["shared"]))
+        await waiter.value
+        await owner.invalidate()
+    }
+
+    @Test func failedMeetingPreparationNeverPublishesReadyOrBlocksSpeech() async throws {
+        let owner = SelectedModelWarmup(); let speech = WarmResource(); let meeting = WarmResource()
+        await meeting.failOnce()
+        await owner.setRequested([.init(key: "speech", lifecycle: speech)], for: .dictation, inBackground: false)
+        await owner.setRequested([.init(key: "meeting", lifecycle: meeting)], for: .meetingSummary, inBackground: true)
+        await #expect(throws: WarmError.failed) { try await owner.prepare(keys: ["meeting"], inBackground: false) }
+        try await owner.prepare(keys: ["speech"], inBackground: false)
+        #expect(await owner.isReady(for: ["speech"]))
+        #expect(await owner.isReady(for: ["meeting"]) == false)
+        await owner.invalidate()
+    }
+
+    @Test func pressureReleasesBothRequestedRolesAndRevokesTheirLeases() async throws {
+        let owner = SelectedModelWarmup(); let speech = WarmResource(); let meeting = WarmResource()
+        await owner.setRequested([.init(key: "speech", lifecycle: speech)], for: .dictation, inBackground: false)
+        await owner.setRequested([.init(key: "meeting", lifecycle: meeting)], for: .meetingSummary, inBackground: false)
+        let first = try await owner.acquire(keys: ["speech"], inBackground: false)
+        let second = try await owner.acquire(keys: ["meeting"], inBackground: false)
+        await owner.invalidate()
+        #expect(await owner.isReady(for: ["speech"]) == false)
+        #expect(await owner.isReady(for: ["meeting"]) == false)
+        #expect(await speech.released == 1)
+        #expect(await meeting.released == 1)
+        await first.release(); await second.release()
+        #expect(await speech.released == 1)
+        #expect(await meeting.released == 1)
+    }
+
+    @Test func readinessOfRequiredSubsetIsIndependentOfOtherRetainedResources() async throws {
+        let owner = SelectedModelWarmup(); let speech = WarmResource(); let cleanup = WarmResource()
+        try await owner.prepare([.init(key: "speech", lifecycle: speech), .init(key: "cleanup", lifecycle: cleanup)], inBackground: false)
+        #expect(await owner.isReady(for: ["speech"]))
+        #expect(await owner.isReady(for: ["cleanup"]))
+    }
+
     @Test func repeatedPreparationRetainsSelectedResourcesWithoutReinitializingActiveRun() async throws {
         let owner = SelectedModelWarmup(); let resource = WarmResource()
         let selected = [SelectedModelWarmup.Resource(key: "speech", lifecycle: resource)]

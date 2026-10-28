@@ -306,6 +306,15 @@ final class AppController {
         scheduleResourcePreparation()
     }
 
+    /// Meeting preferences change retention without superseding dictation admission.
+    func meetingSettingsChanged() {
+        Task { [weak self] in
+            guard let self else { return }
+            await models.reconcileSelectedModels(options: Settings.cleanupStore.options, inBackground: startEnvironment.current().inBackground)
+            if !(startEnvironment.current().inBackground) { meetings.resumeProcessing() }
+        }
+    }
+
     private func scheduleResourcePreparation() {
         resourcePreparation?.cancel()
         resourcePreparation = Task { [weak self] in await self?.warmSelectedResources() }
@@ -314,7 +323,7 @@ final class AppController {
     private func warmSelectedResources() async {
         #if !ANE_CLEANUP_SPIKE
         guard !resolvingEngine, !modelAdmission.isResetting, !startEnvironment.current().inBackground else { return }
-        do { try await prepareSelectedResources() }
+        do { try await prepareSelectedResources(); meetings.resumeProcessing() }
         catch is CancellationError { }
         catch { armFailure = "Could not prepare selected models: \(error.localizedDescription)" }
         #endif
@@ -330,9 +339,6 @@ final class AppController {
         let revision = modelRevision
         let options = Settings.cleanupStore.options
         let inBackground = startEnvironment.current().inBackground
-        if inBackground, await !models.selectedModelsAreWarm(options: options) {
-            throw PreparationError.needsForeground
-        }
         do {
             try await models.prepareSelectedModels(options: options, inBackground: inBackground)
         } catch SelectedModelWarmup.PreparationError.needsForeground {
@@ -369,7 +375,9 @@ final class AppController {
         #if ANE_CLEANUP_SPIKE
         return await spike.refine(text, locale: ModelServices.singleLocale(models.engineSettings) ?? Locale.current)
         #else
-        if !startEnvironment.current().inBackground { await warmSelectedResources() }
+        let lease: SelectedModelWarmup.Lease
+        do { lease = try await models.acquireRefine(options: Settings.cleanupStore.options, inBackground: startEnvironment.current().inBackground) }
+        catch { return nil }
         let reports = cleanupReports
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
         let out = await CleanupProcessor.run(
@@ -377,6 +385,7 @@ final class AppController {
             timeout: .seconds(max(Settings.cleanupTimeoutSeconds * 2, 8)), settings: Settings.cleanupStore,
             registry: models.cleanup,
             report: { report in await reports.record(report) }, vocabulary: vocabulary)
+        await lease.release()
         let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
         #if DEBUG
         E2E.log("refine changed=\(refined != text ? 1 : 0)")
