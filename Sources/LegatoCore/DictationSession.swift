@@ -669,7 +669,7 @@ public final class DictationSession {
         do {
             try Task.checkCancellation()
             if leaseState != .armed {
-                let format = try await engine.prepare(locale: locale)
+                let format = try await engine.captureFormat(locale: locale)
                 // Native model preparation may complete even after Swift cancellation. Never let that
                 // late completion activate capture for an admission the user or a reset revoked.
                 try Task.checkCancellation()

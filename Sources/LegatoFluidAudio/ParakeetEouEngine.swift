@@ -41,6 +41,11 @@ public final class ParakeetEouEngine: DictationEngine {
         EngineSupport.installAssets(models: models, id: modelID)
     }
 
+    public func captureFormat(locale: Locale?) async throws -> AudioFormatSpec {
+        try await EngineSupport.requireInstalled(models: models, id: modelID)
+        return EngineSupport.audioFormat
+    }
+
     public func prepare(locale: Locale?) async throws -> AudioFormatSpec {
         try await EngineSupport.requireInstalled(models: models, id: modelID)
         let folder = ParakeetEouInstaller(chunk: chunk).installFolder(root: await models.root)

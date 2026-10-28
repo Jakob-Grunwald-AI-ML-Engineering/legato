@@ -61,6 +61,12 @@ public enum ReadinessIssue: Sendable, Equatable, CaseIterable {
 public protocol Readiness: AnyObject {
     /// nil when dictation can start, otherwise the first thing that is missing.
     func check() async -> ReadinessIssue?
+    /// Permission and installed assets required to hold capture; recognition need not be warm yet.
+    func checkMicrophone() async -> ReadinessIssue?
+}
+
+extension Readiness {
+    public func checkMicrophone() async -> ReadinessIssue? { await check() }
 }
 
 /// What the app knows about the moment a start is requested.

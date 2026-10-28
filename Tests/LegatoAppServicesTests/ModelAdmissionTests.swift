@@ -33,6 +33,64 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 @MainActor struct ModelAdmissionTests {
+    @Test func coldEngineResolutionPrecedesReadinessAdmission() async {
+        let admission = ModelAdmission()
+        var resolving = true
+        var arms = 0
+        do {
+            try await admission.admit(isIdle: { true }, canStart: { !resolving }, resolve: {
+                resolving = false
+            }, prepare: {}) { arms += 1 }
+        } catch { Issue.record("The first keyboard tap must join resolution: \(error)") }
+        #expect(arms == 1)
+        #expect(!resolving)
+    }
+
+    @Test func coldFirstArmWaitsForPublishedResolutionButNotSubsequentModelWarmup() async throws {
+        let admission = ModelAdmission(), resolutionGate = AdmissionGate(), nativeWarmup = AdmissionGate()
+        var resolving = true; var arms = 0
+        // As in AppController.init, publish identity resolution synchronously before scheduling the URL.
+        let resolution = Task { await resolutionGate.wait(); resolving = false }
+        let launch = Task { await resolution.value; await nativeWarmup.wait() }
+        let arm = Task {
+            try await admission.admit(isIdle: { true }, canStart: { !resolving }, resolve: {
+                try await ModelAdmission.waitForResolution(resolution)
+            }, prepare: {}) { arms += 1 }
+        }
+        await resolutionGate.entered.wait()
+        #expect(arms == 0)
+        resolutionGate.release()
+        try await arm.value
+        await nativeWarmup.entered.wait()
+        #expect(arms == 1)
+        #expect(!admission.isPreparing)
+        nativeWarmup.release(); await launch.value
+    }
+
+    @Test func cancelledHopResolutionReturnsWithoutLateCaptureAndDoesNotCancelSharedResolution() async {
+        let admission = ModelAdmission(), gate = AdmissionGate(), joining = AdmissionSignal()
+        var arms = 0; var cancelled = false; var resolved = false
+        let resolution = Task { await gate.wait(); resolved = true }
+        let arm = Task {
+            do {
+                try await admission.admit(isIdle: { true }, resolve: {
+                    joining.signal()
+                    try await ModelAdmission.waitForResolution(resolution)
+                }, prepare: {}) { arms += 1 }
+            } catch is CancellationError { cancelled = true }
+            catch { Issue.record("Unexpected hop failure: \(error)") }
+        }
+        await gate.entered.wait(); await joining.wait()
+        admission.cancel()
+        await arm.value
+        #expect(cancelled)
+        #expect(!admission.isPreparing)
+        #expect(!resolved)
+        #expect(arms == 0)
+        gate.release(); await resolution.value
+        #expect(resolved)
+        #expect(arms == 0)
+    }
     @Test func stopBypassesBlockedPreparationAndPreventsLateStart() async throws {
         let admission = ModelAdmission(); let gate = AdmissionGate()
         var starts = 0; var stops = 0

@@ -18,7 +18,7 @@ struct ReadinessStatus: Equatable {
 final class SystemReadiness: Readiness {
     /// The live engine is a downloaded model that is installed: Apple Speech's assets are not needed then.
     var modelEngineReady = false
-    /// Resource admission prepares the selected speech and cleanup resources before capture can start.
+    /// Recognition admission prepares selected speech and effective cleanup before a dictation run.
     var selectedResourcesReady = false
 
     func snapshot() async -> ReadinessStatus {
@@ -41,6 +41,13 @@ final class SystemReadiness: Readiness {
         if !status.activitiesEnabled { return .liveActivitiesDisabled }
         if !status.assetsInstalled { return .assetsMissing }
         if !selectedResourcesReady { return .assetsMissing }
+        return nil
+    }
+
+    func checkMicrophone() async -> ReadinessIssue? {
+        let status = await snapshot()
+        if !status.micGranted { return .micPermission }
+        if !status.assetsInstalled { return .assetsMissing }
         return nil
     }
 

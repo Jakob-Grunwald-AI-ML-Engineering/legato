@@ -38,6 +38,13 @@ final class AppController {
     private(set) var micReadyUntil: Date?
     /// The keyboard's arm failed (readiness, a refused activation): what the hop screen tells the user.
     private(set) var armFailure: String?
+    /// A microphone lease can be ready while its selected recognizer is still preparing.
+    private(set) var recognitionPreparing = true
+    private var keyboardActivations = 0
+    var keyboardHopState: KeyboardHopState {
+        .resolve(runActive: keyboardRunActive, microphoneReady: micReadyUntil != nil,
+            failure: armFailure, arming: keyboardActivations > 0)
+    }
 
     /// Apple Speech, for onboarding's asset download (dictation uses `engineBox`, which is Apple Speech by default).
     @ObservationIgnored let appleSpeech: AppleSpeechEngine
@@ -77,6 +84,7 @@ final class AppController {
     @ObservationIgnored private var modelRevision = 0
     @ObservationIgnored private var engineRevision = 0
     @ObservationIgnored private var resolvingEngine = false
+    @ObservationIgnored private var engineResolution: Task<Void, Never>?
     @ObservationIgnored private var resourcePreparation: Task<Void, Never>?
     private enum PreparationError: Error { case needsForeground }
     #if LEGATO_INTERNAL
@@ -257,7 +265,9 @@ final class AppController {
         #if DEBUG
         E2E.applyLaunchSettings()
         #endif
-        Task { await refreshEngine(releasingKeptMicrophone: false) }
+        // Publish the resolution task before a cold-launch URL can reserve microphone admission.
+        let initialResolution = beginEngineResolution(releasingKeptMicrophone: false)
+        Task { await finishEngineRefresh(initialResolution) }
         Task { await meetings.recoverAtLaunch() }
     }
 
@@ -268,38 +278,66 @@ final class AppController {
     /// released and the next start builds one with the new engine. During a run, the run's session is
     /// released when the run ends instead of being kept.
     func refreshEngine(releasingKeptMicrophone: Bool = true) async {
+        await finishEngineRefresh(beginEngineResolution(releasingKeptMicrophone: releasingKeptMicrophone))
+    }
+
+    /// Only engine identity resolution belongs to this task; cold native preparation follows separately.
+    private func beginEngineResolution(releasingKeptMicrophone: Bool) -> (revision: Int, task: Task<Void, Never>) {
         modelRevision += 1
         engineRevision += 1
         let revision = engineRevision
         resolvingEngine = true
+        recognitionPreparing = true
         readiness.selectedResourcesReady = false
         modelAdmission.cancel()
         #if ANE_CLEANUP_SPIKE
         spike.admission.cancel()
         #endif
         resourcePreparation?.cancel()
-        if releasingKeptMicrophone { await coordinator.invalidateKeptSession() }
-        let resolution = await models.engines.liveEngine()
-        guard revision == engineRevision else { return }
-        engineBox.engine = resolution.engine
-        readiness.modelEngineReady = resolution.modelID != nil
-        engineStatus = EngineStatus(
-            modelID: resolution.modelID,
-            name: resolution.modelID.flatMap { id in models.streamingModels.first { $0.id == id }?.displayName } ?? "Apple Speech",
-            fallback: resolution.fallback.map(Self.describe))
-        #if DEBUG
-        E2E.log("engine.resolved id=\(resolution.engine.id) fallback=\(resolution.fallback.map(Self.describe) ?? "none")")
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("microphone.engine-resolution.begin", ["revision": revision])
         #endif
-        resolvingEngine = false
+        let task = Task { @MainActor in
+            if releasingKeptMicrophone { await self.coordinator.invalidateKeptSession() }
+            let resolution = await self.models.engines.liveEngine()
+            guard revision == self.engineRevision else { return }
+            self.engineBox.engine = resolution.engine
+            self.readiness.modelEngineReady = resolution.modelID != nil
+            self.engineStatus = EngineStatus(
+                modelID: resolution.modelID,
+                name: resolution.modelID.flatMap { id in self.models.streamingModels.first { $0.id == id }?.displayName } ?? "Apple Speech",
+                fallback: resolution.fallback.map(Self.describe))
+            #if DEBUG
+            E2E.log("engine.resolved id=\(resolution.engine.id) fallback=\(resolution.fallback.map(Self.describe) ?? "none")")
+            #endif
+            self.resolvingEngine = false
+            #if LEGATO_INTERNAL
+            AudioDiagnostics.log("microphone.engine-resolution.end", ["revision": revision, "engine": resolution.engine.id])
+            #endif
+        }
+        engineResolution = task
+        return (revision, task)
+    }
+
+    private func finishEngineRefresh(_ resolution: (revision: Int, task: Task<Void, Never>)) async {
+        await resolution.task.value
+        guard resolution.revision == engineRevision else { return }
         if !startEnvironment.current().inBackground { await warmSelectedResources() }
-        guard revision == engineRevision else { return }
+        guard resolution.revision == engineRevision else { return }
         await refreshReadiness()
+    }
+
+    private func joinEngineResolution() async throws {
+        if let engineResolution { try await ModelAdmission.waitForResolution(engineResolution) }
+        try Task.checkCancellation()
+        guard !resolvingEngine else { throw CancellationError() }
     }
 
     /// Settings change resource ownership, independently of the microphone's keep-ready duration.
     func cleanupSettingsChanged() {
         modelRevision += 1
         readiness.selectedResourcesReady = false
+        recognitionPreparing = true
         modelAdmission.cancel()
         #if ANE_CLEANUP_SPIKE
         spike.admission.cancel()
@@ -326,14 +364,28 @@ final class AppController {
         guard !resolvingEngine, !modelAdmission.isResetting, !startEnvironment.current().inBackground else { return }
         do { try await prepareSelectedResources(); meetings.resumeProcessing() }
         catch is CancellationError { }
-        catch { armFailure = "Could not prepare selected models: \(error.localizedDescription)" }
+        catch { recognitionPreparing = false; armFailure = "Could not prepare selected models: \(error.localizedDescription)" }
         #endif
+    }
+
+    /// Retain/start selected resources without waiting for recognition or cleanup before a mic-only lease.
+    private func prepareMicrophoneResources() async throws {
+        #if DEBUG
+        if E2E.fakeEngine != nil { return }
+        #endif
+        let revision = modelRevision
+        await models.reconcileSelectedModels(options: Settings.cleanupStore.options,
+            inBackground: startEnvironment.current().inBackground)
+        try Task.checkCancellation()
+        guard revision == modelRevision, !resolvingEngine, !modelAdmission.isResetting else { throw CancellationError() }
+        scheduleResourcePreparation()
     }
 
     private func prepareSelectedResources() async throws {
         #if DEBUG
         if E2E.fakeEngine != nil {
             readiness.selectedResourcesReady = true
+            recognitionPreparing = false
             return
         }
         #endif
@@ -350,12 +402,17 @@ final class AppController {
         try Task.checkCancellation()
         guard revision == modelRevision, !resolvingEngine, !modelAdmission.isResetting else { throw CancellationError() }
         readiness.selectedResourcesReady = true
+        recognitionPreparing = false
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("microphone.recognition-ready", ["engine": engineBox.engine.id])
+        #endif
     }
 
     /// Revoke held readiness before relinquishing model ownership; active runs keep their own resources.
     private func releaseModelsForMemoryPressure() async {
         modelRevision += 1
         readiness.selectedResourcesReady = false
+        recognitionPreparing = true
         resourcePreparation?.cancel()
         await modelAdmission.reset {
             await self.coordinator.invalidateKeptSession()
@@ -482,16 +539,25 @@ final class AppController {
         #endif
         switch command {
         case .start:
+            keyboardActivations += 1
+            defer { keyboardActivations -= 1 }
+            armFailure = nil
             // A start never toggles: a second one while running must not stop the run.
             let options = StartOptions(activity: .bestEffort, keepAlive: Settings.keepAliveLinger, target: .keyboard)
             guard let outcome = await run(options, startOnly: true, source: "keyboard") else { return true }
             if case .started = outcome { return true }
             return false
         case .arm:
+            keyboardActivations += 1
+            defer { keyboardActivations -= 1 }
             // The keyboard's first tap opened the app: ready the microphone and nothing else. No run, no
             // history entry, no Live Activity, no clipboard; the next tap, back in the host app, starts
             // the dictation on this lease.
             armFailure = nil
+            #if LEGATO_INTERNAL
+            AudioDiagnostics.log("microphone.admission.begin", ["resolvingEngine": resolvingEngine])
+            defer { AudioDiagnostics.log("microphone.admission.end", ["armed": micReadyUntil != nil, "recognitionPreparing": recognitionPreparing, "failed": armFailure != nil]) }
+            #endif
             if let notice = MeetingArbitration.dictationRefusal(meetingActive: meetings.isActive) {
                 armFailure = notice
                 #if DEBUG
@@ -505,14 +571,26 @@ final class AppController {
                 outcome = try await modelAdmission.admit(
                     isIdle: { self.coordinator.isIdle },
                     canStart: { !self.meetings.isActive && !self.resolvingEngine },
-                    prepare: { try await self.prepareSelectedResources() },
-                    operation: { await self.coordinator.arm(keepAlive: Settings.keepAliveLinger) })
+                    resolve: { try await self.joinEngineResolution() },
+                    prepare: { try await self.prepareMicrophoneResources() },
+                    operation: {
+                        #if LEGATO_INTERNAL
+                        AudioDiagnostics.log("microphone.capture.begin")
+                        #endif
+                        let result = await self.coordinator.arm(keepAlive: Settings.keepAliveLinger)
+                        #if LEGATO_INTERNAL
+                        AudioDiagnostics.log("microphone.capture.end", ["armed": self.micReadyUntil != nil])
+                        #endif
+                        return result
+                    })
             } catch PreparationError.needsForeground {
                 armFailure = "Open Legato to prepare the selected models."
                 return false
             } catch ModelAdmission.AdmissionError.busy {
+                if coordinator.isIdle { armFailure = "Microphone activation is busy. Return to the keyboard and try again." }
                 return !coordinator.isIdle
             } catch is CancellationError {
+                armFailure = "Microphone activation was cancelled. Return to the keyboard and try again."
                 return false
             } catch DictationError.assetsNotInstalled {
                 armFailure = "Legato needs the speech model first. Open Legato's home screen to set it up."
@@ -634,6 +712,7 @@ final class AppController {
             outcome = try await modelAdmission.admit(
                 isIdle: { self.coordinator.isIdle },
                 canStart: { !self.meetings.isActive && !self.resolvingEngine },
+                resolve: { try await self.joinEngineResolution() },
                 prepare: { try await self.prepareSelectedResources() },
                 operation: { await self.coordinator.startIfIdle(options) ?? .busy })
         } catch PreparationError.needsForeground {

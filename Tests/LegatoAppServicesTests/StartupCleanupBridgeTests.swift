@@ -64,11 +64,18 @@ private struct BridgeInstaller: ModelInstaller {
     func warm(root: URL) async throws { Issue.record("No installer warmup") }
 }
 private final class BridgeEngine: DictationEngine {
-    let id = "selected-speech"
+    let id: String
+    private let preparationCount = Mutex(0)
+    init(id: String = "selected-speech") { self.id = id }
+    var preparations: Int { preparationCount.withLock { $0 } }
     private let stream = Mutex<AsyncThrowingStream<TranscriptEvent, any Error>.Continuation?>(nil)
     private let final = Mutex<String?>(nil)
     func installAssets(locale: Locale?) -> AsyncStream<Double> { AsyncStream { $0.finish() } }
-    func prepare(locale: Locale?) async throws -> AudioFormatSpec { .init(sampleRate: 16_000, channelCount: 1) }
+    func captureFormat(locale: Locale?) async throws -> AudioFormatSpec { .init(sampleRate: 16_000, channelCount: 1) }
+    func prepare(locale: Locale?) async throws -> AudioFormatSpec {
+        preparationCount.withLock { $0 += 1 }
+        return .init(sampleRate: 16_000, channelCount: 1)
+    }
     func transcribe(_ input: AsyncStream<AudioChunk>) -> AsyncThrowingStream<TranscriptEvent, any Error> {
         let (events, continuation) = AsyncThrowingStream<TranscriptEvent, any Error>.makeStream()
         stream.withLock { $0 = continuation }; return events
@@ -103,9 +110,28 @@ private actor BridgeReports {
     let first = BridgeSignal()
     func record(_ report: CleanupRunReport) async { reports.append(report); await first.signal() }
 }
+@MainActor private final class BridgeReadiness: Readiness {
+    var recognitionReady = false
+    func check() async -> ReadinessIssue? { recognitionReady ? nil : .assetsMissing }
+    func checkMicrophone() async -> ReadinessIssue? { nil }
+}
+@MainActor private final class BridgeActivity: ActivityClient {
+    func request(_ content: DictationActivityContent) async throws {}
+    func update(_ content: DictationActivityContent, staleDate: Date?) async {}
+    func end(_ content: DictationActivityContent) async {}
+    func dismiss() async {}
+}
+@MainActor private final class BridgeClipboard: Clipboard {
+    func write(_ text: String) -> Bool { true }
+}
+private actor BridgeSpeechPreparation {
+    let entered = BridgeSignal(), gate = BridgeSignal()
+    var preparations = 0
+    func prepare() async { preparations += 1; await entered.signal(); await gate.wait() }
+}
 @MainActor @Suite(.timeLimit(.minutes(1))) struct StartupCleanupBridgeTests {
     private func rig(local: BridgeBackend, foundation: BridgeBackend = BridgeBackend("foundation"), installed: Bool = true,
-                     speech: SelectedModelWarmup.Resource? = nil)
+                     speech: SelectedModelWarmup.Resource? = nil, speechID: String? = nil)
         throws -> (ModelServices, CleanupSettingsStore) {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
@@ -116,9 +142,94 @@ private actor BridgeReports {
         let models = ModelServices(root: root, defaults: defaults, platform: .macOS,
             installers: [id: BridgeInstaller()], resources: resources)
         SelectionStore(defaults: defaults).set(id, for: .cleanup)
+        if let speechID { SelectionStore(defaults: defaults).set(speechID, for: .liveDictation) }
         let settings = CleanupSettingsStore(defaults: defaults)
         settings.enabled = true; settings.backend = .coreML
         return (models, settings)
+    }
+
+    @Test func coldOwnerReconciliationArmsRealCoordinatorBeforeSpeechAndCleanupThenStartsSelectedRecognition() async throws {
+        let local = BridgeBackend("local"), localGate = BridgeSignal(), speech = BridgeSpeechPreparation()
+        await local.block(localGate)
+        let selectedSpeech = "nemotron-latin-1120"
+        let (models, settings) = try rig(local: local, speech: .init(key: "speech:" + selectedSpeech,
+            prewarm: { await speech.prepare() }, release: {}), speechID: selectedSpeech)
+        let source = BridgeSource(), engine = BridgeEngine(id: selectedSpeech), readiness = BridgeReadiness()
+        let history = BridgeHistory(), admission = ModelAdmission()
+        let processor = CleanupProcessor(registry: models.cleanup, settings: settings,
+            acquireRun: { try await models.acquireDictationCleanup(options: settings.options, inBackground: true) }, report: { _ in })
+        let coordinator = DictationCoordinator(activity: BridgeActivity(), clipboard: BridgeClipboard(),
+            readiness: readiness, startEnvironment: UnrestrictedStartEnvironment(), history: history,
+            makeSession: { policy, linger in
+                DictationSession(engine: engine, source: source, sessionControl: BridgeControl(),
+                    history: history, postProcessor: processor, policy: policy, linger: linger)
+            })
+        let armed = try await admission.admit(isIdle: { coordinator.isIdle }, prepare: {
+            await models.reconcileSelectedModels(options: settings.options, inBackground: false)
+        }, operation: { await coordinator.arm(keepAlive: .indefinite) })
+        await speech.entered.wait(); await local.entered.wait()
+        #expect(armed == .armed)
+        #expect(await source.starts == 1)
+        #expect(engine.preparations == 0)
+        #expect(!readiness.recognitionReady)
+        #expect(!(await models.selectedModelsAreWarm(options: settings.options)))
+        let preparingRun = BridgeSignal()
+        let start = Task {
+            try await admission.admit(isIdle: { coordinator.isIdle }, prepare: {
+                await preparingRun.signal()
+                try await models.prepareSelectedModels(options: settings.options, inBackground: true)
+                readiness.recognitionReady = true
+            }, operation: { await coordinator.startIfIdle(.init(keepAlive: .off, target: .keyboard)) })
+        }
+        await preparingRun.wait()
+        #expect(engine.preparations == 0)
+        #expect(!readiness.recognitionReady)
+        await speech.gate.signal()
+        #expect(try await start.value == .started)
+        #expect(engine.preparations == 1)
+        #expect(await local.ready == false)
+        #expect(models.selected(.liveDictation) == selectedSpeech)
+        #expect(models.selected(.cleanup) == CoreMLModels.qwen3_1_7bID)
+        #expect(settings.backend == .coreML)
+        _ = await coordinator.stopIfRunning()
+        // Losing the mic lease never relinquishes the retained selected weights.
+        let rearmed = try await admission.admit(isIdle: { coordinator.isIdle }, prepare: {
+            await models.reconcileSelectedModels(options: settings.options, inBackground: false)
+        }, operation: { await coordinator.arm(keepAlive: .indefinite) })
+        #expect(rearmed == .armed)
+        #expect(await speech.preparations == 1)
+        #expect(engine.preparations == 1)
+        await coordinator.endKeepAlive()
+        await localGate.signal()
+        await models.releaseSelectedModels()
+    }
+
+    @Test func microphoneExpiryAndRearmPreserveSelectedSpeechPreparation() async throws {
+        let local = BridgeBackend("local"), speech = BridgeSpeechPreparation()
+        await speech.gate.signal()
+        let (models, settings) = try rig(local: local, speech: .init(key: "speech:selected",
+            prewarm: { await speech.prepare() }, release: {}))
+        try await models.prepareSelectedModels(options: settings.options, inBackground: false)
+        let timerEntered = BridgeSignal(), expire = BridgeSignal(), expired = BridgeSignal()
+        let engine = BridgeEngine(), source = BridgeSource()
+        let session = DictationSession(engine: engine, source: source, sessionControl: BridgeControl(), history: BridgeHistory(),
+            linger: .seconds(60), sleep: { _ in
+                await timerEntered.signal(); await expire.wait(); try Task.checkCancellation()
+            })
+        session.onLeaseExpired = { Task { await expired.signal() } }
+        try await session.armLease()
+        await timerEntered.wait(); await expire.signal(); await expired.wait()
+        #expect(session.leaseState == .idle)
+        #expect(await models.selectedModelsAreWarm(options: settings.options))
+        session.adoptLinger(.indefinite)
+        await models.reconcileSelectedModels(options: settings.options, inBackground: false)
+        try await session.armLease()
+        #expect(session.leaseState == .armed)
+        #expect(await speech.preparations == 1)
+        #expect(engine.preparations == 0)
+        #expect(await source.starts == 2)
+        await session.endLease()
+        await models.releaseSelectedModels()
     }
 
     @Test func actualLocalPreparationFailureAdmitsFoundationWithoutChangingSelection() async throws {

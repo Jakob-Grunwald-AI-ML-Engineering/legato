@@ -10,13 +10,14 @@ struct KeyboardHopView: View {
     var body: some View {
         VStack(spacing: 24) {
             Spacer(minLength: 0)
-            if controller.keyboardRunActive {
+            switch controller.keyboardHopState {
+            case .running:
                 run
-            } else if controller.micReadyUntil != nil {
+            case .ready:
                 ready
-            } else if let failure = controller.armFailure {
+            case .failed(let failure):
                 failed(failure)
-            } else {
+            case .preparing:
                 ProgressView("Getting the microphone ready…")
                     .accessibilityIdentifier("hop.arming")
             }
@@ -34,6 +35,11 @@ struct KeyboardHopView: View {
             Text("Microphone ready")
                 .font(.title2.bold())
                 .accessibilityIdentifier("hop.ready")
+            if controller.recognitionPreparing {
+                Text("Your selected speech model is still preparing. You can return to the keyboard; dictation will wait for it.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
             Text("Go back with ◀ at the top left, or swipe back, then tap the microphone key on the keyboard to dictate.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
