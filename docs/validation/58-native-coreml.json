@@ -1,0 +1,220 @@
+{
+  "schemaVersion": 1,
+  "issue": 58,
+  "hardware": {
+    "chip": "Apple M1 Pro",
+    "memoryBytes": 34359738368
+  },
+  "os": "Version 26.6.2 (Build 25G83)",
+  "model": {
+    "id": "coreml-qwen3-1.7b-lut6",
+    "revision": "0977a61d00e39118aab5ed1e510f1d228df5eefd",
+    "manifestSHA256": "0f75fe3f2b814c604df7f00002a02baa3de639da6e12d3ef0d713e93c4ab9606",
+    "artifactProvenance": "local cached checkpoint copied and verified by production installer",
+    "computeUnitsAllowed": "cpuAndNeuralEngine",
+    "physicalPlacement": "unobserved"
+  },
+  "sourceBoundary": "Native measurements precede both the AnemllCore to LegatoANEMLL module rename and the CoreMLModelStore cache-release race fix. The generation algorithm is unchanged; final source builds and lifecycle tests are separate evidence, not measured by these binaries.",
+  "productionSourceSHA256": {
+    "Sources/LegatoCoreML/CoreMLBackend.swift": "e9b604a1cf9313f539d2466a54461a997c675acdd3bd3086c56565940e01d765",
+    "Sources/LegatoCoreML/CoreMLInstaller.swift": "4e676b8002ab99369c65ca7f12f7eee21ddbb4f71dda819aeb0faf40748216e9",
+    "Sources/LegatoCoreML/CoreMLManifest.swift": "cb3ee8cef9b6db62ffd7cbb758aeca3cc65a6094fd2be17ed94f964f56f1e6c6",
+    "Sources/LegatoCoreML/CoreMLModels.swift": "570a652de1b5819ddcb0d05c5ff0bc658e47cf911127c9f76f799a0a653891da",
+    "Sources/LegatoCoreML/CoreMLPrompt.swift": "53f7b8a6cf7e3a8a19e4534807286005dcf3c581509a309e794c9f700bc9edcc",
+    "Sources/LegatoCoreML/NativeCoreMLDriver.swift": "efe86faccb43f84178edb2100ea276c20a376b8f38c515f7af555f52a43c2b38",
+    "Sources/LegatoPostProcessing/CleanupGuard.swift": "6f990e1c83bab60f8c8cbb74ccc3ba027d56f3b4279edf881b4a9576e17172c6",
+    "Sources/LegatoPostProcessing/CleanupPrompt.swift": "d22b243f7e32eb8660333ccc562bd5521cb85ca285674a6b06504a57ce5b5c0b",
+    "Sources/LegatoPostProcessing/CleanupStyle.swift": "a48e8f294b47aa2ec127c2e7e2a62938ba3463a22575b4b3603d6a64aa590da3",
+    "Sources/LegatoPostProcessing/FoundationModelsBackend.swift": "cca6afbed25e00bd612091099dfb6af74bbd04955780d62656994fe900492d80",
+    "Sources/LegatoPostProcessing/ITNStage.swift": "88e634955b5498cefe125c4518906a98ceab60a8a310417e77e1620bd9688876",
+    "Sources/LegatoPostProcessing/LLMAlternativeReranker.swift": "304c5d958f34adabab3e41971bb05020ed5b6096b1ed50b011d9280ac7a8a7be",
+    "Sources/LegatoPostProcessing/LLMCleanupStage.swift": "1a058a68cfc6ece633278102098a9b4b2e9c0ec3149623b0bd64e19345c2feb3",
+    "Sources/LegatoPostProcessing/PostProcessingPipeline.swift": "5d1a224456e9669716060611fdb7cfad94fed0dd3727c680c947c4525fef07fa",
+    "Vendor/ANEMLL/Sources/AnemllCore/FFNChunk.swift": "a2b7ee6d52641cee3af2bf9bbd882cf3bed3b3f863548a285729a6cdf0b5d750",
+    "Vendor/ANEMLL/Sources/AnemllCore/InferenceManager.swift": "c46055976f84a332490e305b59e900578af3ebe90f7b4316fd26251bf6b3143d",
+    "Vendor/ANEMLL/Sources/AnemllCore/MetalArgmax.swift": "2fc4fed2f1de0b838367c8f65dc3a18ab261940ec2a3aa56d037d39a24e39971",
+    "Vendor/ANEMLL/Sources/AnemllCore/ModelLoader.swift": "ab7f1c4015323909b9eb01e8186bed97f208940553163a5d1efd6d64d433733b",
+    "Vendor/ANEMLL/Sources/AnemllCore/SamplingConfig.swift": "132006c29a4203d746ad38043e4cfdce04c17a265410023712f5eb952ef9a7ff",
+    "Vendor/ANEMLL/Sources/AnemllCore/Tokenizer.swift": "006df06e37b7120d2bed07a42a48c48a84dd760652b023432048468a4de6b3f0",
+    "Vendor/ANEMLL/Sources/AnemllCore/YAMLConfig.swift": "b86cd3b7cc6a4aee3bce8d7757d0f42e92f73ff63ad05ae5a9aa23d6593dee29"
+  },
+  "verification": "Reparsed all original JSONL records; checked counts, candidates/output/reference equality, quality and guard flags, deadline flags, readiness and thermal samples. Independently recomputed JSONL, executable, harness and manifest digests. Production source digests preserve the recorded checkpoint snapshot, not the later source tree.",
+  "preparationPolicy": "Each of three separate processes loaded once, without dummy inference; preparation took 119455-122172 ms and is excluded from fixture timings.",
+  "fixtures": {
+    "de-short-01-time": {
+      "input": "wir treffen uns morgen um neun uhr dreißig im café am marktplatz",
+      "reference": "Wir treffen uns morgen um 9:30 Uhr im Café am Marktplatz.",
+      "inputTokens": 848,
+      "reencodedOutputTokens": 19
+    },
+    "mixed-short-01-meeting": {
+      "input": "können wir das meeting auf donnerstag verschieben der sprint review ist erst nächste woche",
+      "reference": "Können wir das Meeting auf Donnerstag verschieben? Der Sprint Review ist erst nächste Woche.",
+      "inputTokens": 847,
+      "reencodedOutputTokens": 22
+    },
+    "en-short-01-reschedule": {
+      "input": "can you move the call with tom from tuesday to thursday at three thirty p m",
+      "reference": "Can you move the call with Tom from Tuesday to Thursday at 3:30 p.m.?",
+      "inputTokens": 725,
+      "reencodedOutputTokens": 26
+    }
+  },
+  "runs": [
+    {
+      "id": "probe",
+      "configuration": "Debug",
+      "scope": "LLMCleanupStage; no pipeline deadline",
+      "preparationMilliseconds": 122064.035542,
+      "calls": 16,
+      "exactReferenceMatches": 16,
+      "guardAccepted": 16,
+      "thermalStates": [
+        0
+      ],
+      "preparedAcrossCalls": true,
+      "releasedAtEnd": true,
+      "resultsSHA256": "9fb8714023fba6a05b5c8e44f68dfb15745b6245498d94dea34c012caca7ab5f",
+      "harnessSourceSHA256": "40a5270b89dc7e6fa393cecd8c704310bf73b0fd9df4c110725e049e8cb216bf",
+      "executableSHA256": "f929f386d5e94c69bbf5ac2019bb7bef13baf4bcb24d850158135e46940a06e1",
+      "firstUserFixture": {
+        "fixture": "de-short-01-time",
+        "backendMilliseconds": 4958.046416,
+        "stageMilliseconds": 4982.6752910000005
+      },
+      "warm": [
+        {
+          "fixture": "de-short-01-time",
+          "calls": 5,
+          "backendMilliseconds": {
+            "min": 4641.727834,
+            "median": 4698.278166,
+            "max": 4838.534583000001
+          },
+          "stageMilliseconds": {
+            "min": 4660.411625,
+            "median": 4713.361667,
+            "max": 4853.833208
+          }
+        },
+        {
+          "fixture": "mixed-short-01-meeting",
+          "calls": 5,
+          "backendMilliseconds": {
+            "min": 4768.664416999999,
+            "median": 4810.7658329999995,
+            "max": 4873.052375
+          },
+          "stageMilliseconds": {
+            "min": 4783.38925,
+            "median": 4828.041667,
+            "max": 4887.680542
+          }
+        },
+        {
+          "fixture": "en-short-01-reschedule",
+          "calls": 5,
+          "backendMilliseconds": {
+            "min": 5185.120416999999,
+            "median": 5220.35975,
+            "max": 5310.110583000001
+          },
+          "stageMilliseconds": {
+            "min": 5199.766083,
+            "median": 5236.700292,
+            "max": 5323.630125
+          }
+        }
+      ]
+    },
+    {
+      "id": "deadline",
+      "configuration": "Debug",
+      "scope": "PostProcessingPipeline + LLMCleanupStage; 8-second deadline",
+      "preparationMilliseconds": 122171.805125,
+      "calls": 3,
+      "exactReferenceMatches": 3,
+      "guardAccepted": 3,
+      "thermalStates": [
+        0
+      ],
+      "preparedAcrossCalls": true,
+      "releasedAtEnd": true,
+      "resultsSHA256": "86bb9ccd47fcdbc678debcfaaead6ba6331d0037dff9c4be3cf54b2b01aa5578",
+      "harnessSourceSHA256": "bc125b1de4bccb2444607e0b6fadbe990437d374fbe639f4ff40a8cd3c52207c",
+      "executableSHA256": "eb86ddef29a5502dd0554de48c20e2dee6b8055a74d58ef13807740ef967fa20",
+      "failedCalls": 0,
+      "timedOutCalls": 0,
+      "guardRejectedCalls": 0,
+      "fixtures": [
+        {
+          "fixture": "de-short-01-time",
+          "backendMilliseconds": 4969.171417,
+          "pipelineMilliseconds": 4993.191209,
+          "additionalSettlementMilliseconds": 0.012
+        },
+        {
+          "fixture": "mixed-short-01-meeting",
+          "backendMilliseconds": 4930.981042,
+          "pipelineMilliseconds": 4946.754040999999,
+          "additionalSettlementMilliseconds": 0.014125
+        },
+        {
+          "fixture": "en-short-01-reschedule",
+          "backendMilliseconds": 5280.200875,
+          "pipelineMilliseconds": 5294.7555409999995,
+          "additionalSettlementMilliseconds": 0.012375
+        }
+      ]
+    },
+    {
+      "id": "deadline-release",
+      "configuration": "Release",
+      "scope": "PostProcessingPipeline + LLMCleanupStage; 8-second deadline",
+      "preparationMilliseconds": 119455.119375,
+      "calls": 3,
+      "exactReferenceMatches": 3,
+      "guardAccepted": 3,
+      "thermalStates": [
+        0
+      ],
+      "preparedAcrossCalls": true,
+      "releasedAtEnd": true,
+      "resultsSHA256": "350de2b9d8c301d08a3480439a35140692be8d7298944e34f687f41bed7b8604",
+      "harnessSourceSHA256": "bc125b1de4bccb2444607e0b6fadbe990437d374fbe639f4ff40a8cd3c52207c",
+      "executableSHA256": "2b756d7b44af70cc0a32a5d7537791bbb7eccbba382746655709a9311b4bdc28",
+      "failedCalls": 0,
+      "timedOutCalls": 0,
+      "guardRejectedCalls": 0,
+      "fixtures": [
+        {
+          "fixture": "de-short-01-time",
+          "backendMilliseconds": 4374.894167,
+          "pipelineMilliseconds": 4390.194417,
+          "additionalSettlementMilliseconds": 0.01925
+        },
+        {
+          "fixture": "mixed-short-01-meeting",
+          "backendMilliseconds": 4345.487167,
+          "pipelineMilliseconds": 4353.737083,
+          "additionalSettlementMilliseconds": 0.014208
+        },
+        {
+          "fixture": "en-short-01-reschedule",
+          "backendMilliseconds": 4727.646958,
+          "pipelineMilliseconds": 4734.747708,
+          "additionalSettlementMilliseconds": 0.009875
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Only three unique short public fixtures; repeated Debug calls do not establish broad accuracy.",
+    "No ITN, microphone, app admission, keyboard delivery or iPhone/background execution was exercised.",
+    "All thermal samples were nominal (0); no energy, steady-state heat or physical accelerator placement measurement.",
+    "The 16-call Debug stage probe had no pipeline timeout; both later 3-call probes used an actual 8-second deadline.",
+    "Release pipeline timings of 4353.737083-4734.747708 ms are observations for these fixtures, not an iPhone or general latency guarantee.",
+    "Output token counts reencode decoded text; they are not native emission telemetry.",
+    "Preparation was repeated in each process; there is no evidence of retained model residency after process loss."
+  ]
+}
