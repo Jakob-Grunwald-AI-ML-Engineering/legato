@@ -262,7 +262,14 @@ public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
             text += result.prefix + result.output
             let next = index + 1
             if prompt.name == "markdown", result.accepted, next < results.count, results[next].accepted,
-               !result.separator.isEmpty, !result.separator.contains("\n") {
+               !result.separator.isEmpty, !result.separator.contains("\n"),
+               CleanupMarkdown.startsWithHeading(result.output),
+               CleanupMarkdown.startsWithHeading(results[next].output),
+               !CleanupMarkdown.startsWithHeading(result.input),
+               !CleanupMarkdown.startsWithHeading(results[next].input),
+               !CleanupMarkdown.codeRegions(in: text, includeUnclosedInline: true).contains(where: { !$0.closed }) {
+                // Only independently generated heading blocks justify replacing a source space.
+                // Accepted prose/code continuations and every fallback keep the exact separator.
                 text += "\n\n"
             } else {
                 text += result.separator
