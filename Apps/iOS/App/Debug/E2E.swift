@@ -28,7 +28,7 @@ import os
 /// - `-LegatoAudioPolicy duckOthers|mixWithOthers|pauseOthers|duckMusicPauseSpoken`: the selected policy
 ///   (the experimental ones are switched on). With the fake engine, absent means the default policy.
 ///
-/// Darwin notifications (see `installTriggers`): `toggle`, `interrupt`, `copy-last`, `foreground`,
+/// Darwin notifications (see `installTriggers`): `toggle`, `interrupt`, `copy-last`, `result-insert`, `result-copy`, `foreground`,
 /// `background`, `toggle-after-hop` (the press that repeats a `needsForeground` one after the hop).
 /// Meetings (with `-LegatoFakeEngine`, the meeting uses the scripted engine and `E2EFakeMeetingMic`, a tone
 /// that arrives in real time): `meeting-start`, `meeting-stop`, `meeting-mute`, `meeting-unmute`, `meeting-pause`, `meeting-resume`, `meeting-discard`,
@@ -292,7 +292,7 @@ extension AppController {
         return true
     }
 
-    /// `toggle`, `interrupt`, `copy-last`, `foreground`, `background`, `toggle-after-hop` or one of the `kbd-` commands.
+    /// `toggle`, `interrupt`, `copy-last`, `result-insert`, `result-copy`, `foreground`, `background`, `toggle-after-hop` or one of the `kbd-` commands.
     func runE2E(_ command: String) async {
         E2E.log("command \(command)")
         if command.hasPrefix("kbd-") {
@@ -342,6 +342,12 @@ extension AppController {
         case "meeting-export":
             await meetings.refresh()
             if let meeting = meetings.meetings.first { _ = await meetings.exportItems(for: meeting) }
+        case "result-insert":
+            await insertResult()
+            E2E.log("result-insert.done")
+        case "result-copy":
+            await copyResult()
+            E2E.log("result-copy.done")
         case "copy-last":
             await handle(DictationAttributes.copyLastURL)
         case "foreground":
@@ -363,7 +369,7 @@ extension AppController {
 
 extension E2E {
     static let commands = [
-        "toggle", "interrupt", "interrupt-end", "copy-last", "foreground", "background", "toggle-after-hop",
+        "toggle", "interrupt", "interrupt-end", "copy-last", "result-insert", "result-copy", "foreground", "background", "toggle-after-hop",
         "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-pause", "meeting-resume", "meeting-discard", "meeting-export", "meeting-route-change",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-arm", "kbd-hop-start", "kbd-hop-arm-url-first", "kbd-forged-url",

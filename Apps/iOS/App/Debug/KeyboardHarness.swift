@@ -182,7 +182,7 @@ final class KeyboardHarnessModel {
         case "harness-mic": controller.micTapped()
         case "harness-host-missing": link.hidesHost = true
         case "harness-status":
-            E2E.log("harness status=\(E2E.quote(controller.dictationStatus ?? "")) capturing=\(controller.isCapturing ? 1 : 0) command=\(controller.micMode.request?.rawValue ?? "none")")
+            E2E.log("harness status=\(E2E.quote(controller.dictationStatus ?? "")) capturing=\(controller.isCapturing ? 1 : 0) command=\(controller.micMode.request?.rawValue ?? "none") doc=\(E2E.quote(document.text))")
         case "harness-mic-hop":
             // What the open-app mic key does: the Link opens the app with its URL as the tap lands.
             let url = KeyboardURL.make(command: controller.openAppCommand, requestID: controller.openAppRequestID)
