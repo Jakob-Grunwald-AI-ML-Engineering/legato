@@ -69,9 +69,18 @@ struct CleanupSettingsView: View {
             } header: {
                 Text("Cleanup model")
             } footer: {
-                Text("Picking a downloaded model installs and prepares it first. The selected model is used in every app state; unavailable models keep the raw text.")
+                Text("Picking a downloaded model installs and prepares it first. While an installed model prepares, dictation can use Apple Foundation Models. The selected model is used for new dictations once ready.")
                     .font(.callout).foregroundStyle(.secondary)
                 if settings.cleanupBackend == .coreML, selectedModelName == nil { Text("Choose a Core ML model to install and prepare it.") }
+                if settings.cleanupBackend == .coreML, selectedModelName != nil {
+                    Text(models.cleanupPreparation.description)
+                        .foregroundStyle(models.cleanupPreparation.state == .failed ? .red : .secondary)
+                    if models.cleanupPreparation.state == .failed {
+                        Button("Retry preparation") {
+                            Task { await models.retryCleanupPreparation(inBackground: false) }
+                        }
+                    }
+                }
             }
 
             Section {

@@ -62,6 +62,17 @@ private actor WarmGate {
 }
 @Suite(.timeLimit(.minutes(1)))
 struct SelectedModelWarmupTests {
+    @Test func foregroundReconciliationDoesNotSilentlyRetryFailedPreparation() async throws {
+        let owner = SelectedModelWarmup(); let resource = WarmResource(); await resource.failOnce()
+        let selected = [SelectedModelWarmup.Resource(key: "cleanup", lifecycle: resource)]
+        await owner.setRequested(selected, for: .refine, inBackground: true)
+        await #expect(throws: WarmError.failed) { try await owner.prepare(keys: ["cleanup"], inBackground: false) }
+        await owner.setRequested(selected, for: .refine, inBackground: false)
+        await #expect(throws: WarmError.failed) { try await owner.prepare(keys: ["cleanup"], inBackground: false) }
+        #expect(await resource.prepared == 1)
+        #expect(await owner.isReady(for: ["cleanup"]) == false)
+        await owner.invalidate()
+    }
     @Test func speechAndFoundationReadinessDoesNotWaitForBlockedMeetingModel() async throws {
         let owner = SelectedModelWarmup(); let speech = WarmResource(); let foundation = WarmResource(); let meeting = WarmResource(); let gate = WarmGate()
         await meeting.block(on: gate)

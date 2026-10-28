@@ -3,6 +3,9 @@ import LegatoCore
 
 /// Retains requested resources independently of microphone capture and individual waiters.
 public actor SelectedModelWarmup {
+    public enum State: Sendable, Equatable {
+        case idle, preparing, ready, failed(String)
+    }
     public struct Resource: Sendable {
         public let key: String
         public let lifecycle: any ModelResourceLifecycle
@@ -29,6 +32,7 @@ public actor SelectedModelWarmup {
         let resource: Resource
         var ready = false
         var task: Task<Void, any Error>?
+        var failure: (any Error)?
     }
     private var entries: [String: Entry] = [:]
     private var requests: [Role: Set<String>] = [:]
@@ -38,6 +42,20 @@ public actor SelectedModelWarmup {
     private var epoch = 0
 
     public init() {}
+    public func state(for key: String) -> State {
+        guard let entry = entries[key] else { return .idle }
+        if entry.ready { return .ready }
+        if let failure = entry.failure { return .failed(String(describing: failure)) }
+        return entry.task == nil ? .idle : .preparing
+    }
+    /// A deliberate retry clears a failed attempt; reconciliation and reads never do.
+    public func retry(keys: Set<String>, inBackground: Bool) {
+        guard !inBackground else { return }
+        for key in keys where entries[key]?.failure != nil {
+            entries[key]?.failure = nil
+            start(key)
+        }
+    }
     public func isReady(for keys: Set<String>) -> Bool {
         keys.allSatisfy { entries[$0]?.ready == true }
     }
@@ -60,6 +78,8 @@ public actor SelectedModelWarmup {
             throw PreparationError.needsForeground
         }
         update(resources, for: .legacy)
+        // Calling this compatibility API is an explicit preparation/retry request.
+        retry(keys: keys, inBackground: inBackground)
         // A legacy selection switch keeps the old native-settlement-before-reload guarantee.
         let retired = Array(releases.values)
         for task in retired { await task.value }
@@ -70,6 +90,7 @@ public actor SelectedModelWarmup {
     public func prepare(keys: Set<String>, inBackground: Bool) async throws {
         for key in keys {
             guard let entry = entries[key] else { throw PreparationError.superseded }
+            if let failure = entry.failure { throw failure }
             if !entry.ready && entry.task == nil {
                 guard !inBackground else { throw PreparationError.needsForeground }
                 start(key)
@@ -108,7 +129,7 @@ public actor SelectedModelWarmup {
     }
 
     private func start(_ key: String) {
-        guard let entry = entries[key], !entry.ready, entry.task == nil else { return }
+        guard let entry = entries[key], !entry.ready, entry.task == nil, entry.failure == nil else { return }
         let resource = entry.resource, token = entry.token
         let releaseBefore = releases[key], pressureBefore = pressureRelease
         entries[key]?.task = Task {
@@ -123,7 +144,10 @@ public actor SelectedModelWarmup {
                     self.entries[key]?.task = nil
                 }
             } catch {
-                if self.entries[key]?.token == token { self.entries[key]?.task = nil }
+                if self.entries[key]?.token == token {
+                    self.entries[key]?.task = nil
+                    if !(error is CancellationError) { self.entries[key]?.failure = error }
+                }
                 throw error
             }
         }

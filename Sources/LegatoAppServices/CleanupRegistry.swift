@@ -70,8 +70,10 @@ public struct CleanupRegistry: Sendable {
     }
 
     public func pipeline(style: CleanupStyle, itn: Bool, preference: BackendPreference,
-                         timeout: Duration, context: String = "", vocabulary: [String] = []) async -> (pipeline: PostProcessingPipeline, resolution: Resolution) {
-        let resolution = await resolve(preference: preference)
+                         timeout: Duration, context: String = "", vocabulary: [String] = [],
+                         resolution frozen: Resolution? = nil) async -> (pipeline: PostProcessingPipeline, resolution: Resolution) {
+        let resolution: Resolution
+        if let frozen { resolution = frozen } else { resolution = await resolve(preference: preference) }
         var stages: [any TranscriptPostProcessor] = itn ? [ITNStage()] : []
         if let backend = resolution.backend {
             stages.append(LLMCleanupStage(backend: backend, cleanupGuard: style == .verbatim ? cleanupGuard : style.cleanupGuard,

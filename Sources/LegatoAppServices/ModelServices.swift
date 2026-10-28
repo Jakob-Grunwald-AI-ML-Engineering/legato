@@ -7,6 +7,35 @@ import LegatoFluidAudio
 import LegatoModels
 import LegatoPostProcessing
 import os
+import Observation
+
+/// Native resource boundaries replaced by latched resources in admission integration tests.
+struct ModelServiceResources: Sendable {
+    let speech: SelectedModelWarmup.Resource
+    let foundation: any LLMBackend & ModelResourceLifecycle
+    let coreML: @Sendable (String, URL) async -> any LLMBackend & ModelResourceLifecycle
+}
+
+@MainActor @Observable public final class CleanupPreparationStatus {
+    public enum State: Equatable { case idle, preparing, ready, failed, missing }
+    public fileprivate(set) var state: State = .idle
+    public fileprivate(set) var modelID: String?
+    public fileprivate(set) var message: String?
+    public fileprivate(set) var usingFoundationModels = false
+    public fileprivate(set) var foundationAvailable = false
+    public var description: String {
+        switch state {
+        case .idle: "The selected model will prepare when Legato is active."
+        case .preparing: foundationAvailable
+            ? "Preparing the selected model. Cleanup can use Apple Foundation Models meanwhile."
+            : "Preparing the selected model."
+        case .ready: usingFoundationModels
+            ? "The selected model is ready for the next dictation. This dictation uses Apple Foundation Models."
+            : "The selected model is ready."
+        case .failed, .missing: message ?? "The selected model is unavailable."
+        }
+    }
+}
 
 /// An app's one owner of the downloadable models: the catalog for this platform (FluidAudio speech models
 /// and Core ML cleanup models) with their install states and picks, the engine registry and the cleanup registry.
@@ -29,9 +58,10 @@ public final class ModelServices {
     private let modelRoot: URL
     private let warmup = SelectedModelWarmup()
     private let speechResources: AppleSpeechEngine
-    private let foundationResources = FoundationModelsBackend()
-    /// Why preparation of the selected cleanup model failed; no alternate backend is substituted.
-    public private(set) var cleanupPreparationNotice: String?
+    private let foundationResources: any LLMBackend & ModelResourceLifecycle
+    private let resourceOverrides: ModelServiceResources?
+    public let cleanupPreparation = CleanupPreparationStatus()
+    public var cleanupPreparationNotice: String? { cleanupPreparation.state == .failed ? cleanupPreparation.message : nil }
     private let selection: SelectionStore
     private let familySelection: FamilySelection
     /// The pick in flight per role; a newer pick (or Apple Speech) cancels it.
@@ -54,10 +84,12 @@ public final class ModelServices {
     /// `installers`: replaces the catalog's real installers (tests); nil for the real ones.
     init(
         root: URL, defaults: UserDefaults, platform: ModelPlatform, installers custom: [String: any ModelInstaller]?,
-        vocabulary: (any VocabularyHintProvider)? = nil
+        vocabulary: (any VocabularyHintProvider)? = nil, resources: ModelServiceResources? = nil
     ) {
         CleanupSelectionMigration.migrate(defaults)
         self.modelRoot = root
+        resourceOverrides = resources
+        foundationResources = resources?.foundation ?? FoundationModelsBackend()
         meetingSettings = MeetingSettings(defaults: defaults)
         speechResources = AppleSpeechEngine(vocabulary: vocabulary)
         FluidAudioModels.pinRevisions()
@@ -83,11 +115,14 @@ public final class ModelServices {
                 }
             })
         engines = EngineRegistry(models: manager, settings: engineSettings, vocabulary: vocabulary)
-        let resourceOwner = warmup
+        let resourceOwner = warmup, nativeOverrides = resources
         cleanup = CleanupRegistry(models: manager,
             foundationModels: ResourceLeasedBackend(backend: foundationResources, owner: resourceOwner, key: "cleanup:foundation-models"), makeCoreMLBackend: { id, root in
             guard let spec = CoreMLModels.spec(id: id) else { return nil }
-            return ResourceLeasedBackend(backend: await CoreMLModelStore.shared.backend(for: spec, root: root), owner: resourceOwner, key: "cleanup:" + id)
+            let backend: any LLMBackend
+            if let nativeOverrides { backend = await nativeOverrides.coreML(id, root) }
+            else { backend = await CoreMLModelStore.shared.backend(for: spec, root: root) }
+            return ResourceLeasedBackend(backend: backend, owner: resourceOwner, key: "cleanup:" + id)
         })
     }
 
@@ -102,24 +137,84 @@ public final class ModelServices {
         let speech = await speechResource()
         let refine = await cleanupResource(backend: options.backend)
         let meeting = await cleanupResource(backend: meetingSettings.backend)
-        return [.dictation: [speech] + (options.enabled ? [refine] : []), .refine: [refine], .meetingSummary: [meeting]]
+        var dictation = [speech] + (options.enabled ? [refine] : [])
+        if options.enabled, options.backend == .coreML, await effectiveDictationBackend(options: options) == .foundationModels {
+            dictation.append(await cleanupResource(backend: .foundationModels))
+        }
+        return [.dictation: dictation, .refine: [refine], .meetingSummary: [meeting]]
     }
 
     /// Admission awaits only resources required by dictation; Refine and meetings prepare independently.
     public func prepareSelectedModels(options: CleanupOptions, inBackground: Bool) async throws {
         await reconcileSelectedModels(options: options, inBackground: inBackground)
-        let keys = await dictationKeys(options: options)
+        let effective = await effectiveDictationBackend(options: options)
+        if effective == .foundationModels && options.backend == .coreML && options.enabled {
+            let speech = await speechResource(), local = await cleanupResource(backend: .coreML)
+            let foundation = await cleanupResource(backend: .foundationModels)
+            await warmup.setRequested([speech, local, foundation], for: .dictation, inBackground: inBackground)
+        }
+        let keys = await dictationKeys(options: options, backend: effective)
         try await warmup.prepare(keys: keys, inBackground: inBackground)
     }
     public func selectedModelsAreWarm(options: CleanupOptions) async -> Bool {
-        await warmup.isReady(for: dictationKeys(options: options))
+        await warmup.isReady(for: dictationKeys(options: options, backend: effectiveDictationBackend(options: options)))
     }
-    private func dictationKeys(options: CleanupOptions) async -> Set<String> {
+    private func dictationKeys(options: CleanupOptions, backend: CleanupBackendChoice) async -> Set<String> {
         var keys: Set<String> = [await speechResource().key]
-        if options.enabled { keys.insert(await cleanupResource(backend: options.backend).key) }
+        if options.enabled { keys.insert(await cleanupResource(backend: backend).key) }
         return keys
     }
-    public func releaseSelectedModels() async { await warmup.invalidate() }
+    private func effectiveDictationBackend(options: CleanupOptions) async -> CleanupBackendChoice {
+        cleanupPreparation.foundationAvailable = await foundationResources.availability.isAvailable
+        guard options.enabled, options.backend == .coreML, let id = selected(.cleanup),
+              CoreMLModels.spec(id: id) != nil, case .installed = await manager.state(of: id),
+              !(await warmup.isReady(for: ["cleanup:" + id])),
+              cleanupPreparation.foundationAvailable else { return options.backend }
+        return .foundationModels
+    }
+
+    /// A new dictation freezes the exact admitted backend object; later readiness affects the next run.
+    public func acquireDictationCleanup(options: CleanupOptions, inBackground: Bool) async throws -> CleanupRunLease? {
+        guard options.enabled else { return nil }
+        let selectedID = selected(.cleanup)
+        try await prepareSelectedModels(options: options, inBackground: inBackground)
+        let backend = await effectiveDictationBackend(options: options)
+        let resource = await cleanupResource(backend: backend)
+        // Reconcile may have removed the bridge if Core ML became ready meanwhile. Re-registering the
+        // effective resource is safe and preserves the selected local preparation independently.
+        if backend == .foundationModels && options.backend == .coreML {
+            await warmup.setRequested([await speechResource(), await cleanupResource(backend: .coreML), resource],
+                                     for: .dictation, inBackground: inBackground)
+        }
+        let lease = try await warmup.acquire(keys: [resource.key], inBackground: inBackground)
+        do {
+            try Task.checkCancellation()
+            guard options.backend != .coreML || selected(.cleanup) == selectedID else { throw CancellationError() }
+            let resolution = await cleanup.resolve(preference: backend.preference)
+            try Task.checkCancellation()
+            guard options.backend != .coreML || selected(.cleanup) == selectedID else { throw CancellationError() }
+            cleanupPreparation.usingFoundationModels = backend == .foundationModels && options.backend == .coreML
+            return CleanupRunLease(resolution: resolution, release: { [weak self] in
+                await lease.release()
+                await self?.dictationCleanupEnded()
+            })
+        } catch { await lease.release(); throw error }
+    }
+    private func dictationCleanupEnded() { cleanupPreparation.usingFoundationModels = false }
+
+    public func retryCleanupPreparation(inBackground: Bool) async {
+        guard let id = selected(.cleanup), case .installed = await manager.state(of: id),
+              case .failed = await warmup.state(for: "cleanup:" + id), !inBackground else { return }
+        cleanupPreparation.message = nil
+        await warmup.retry(keys: ["cleanup:" + id], inBackground: false)
+    }
+
+    public func releaseSelectedModels() async {
+        cleanupPreparation.state = .idle
+        cleanupPreparation.message = nil
+        cleanupPreparation.usingFoundationModels = false
+        await warmup.invalidate()
+    }
     public func cleanupChoice(for modelID: String) -> CleanupBackendChoice { .coreML }
 
     public func acquireSummaryBackend(backend: CleanupBackendChoice, inBackground: Bool) async throws -> SummaryBackendLease {
@@ -148,6 +243,7 @@ public final class ModelServices {
     }
 
     private func speechResource() async -> SelectedModelWarmup.Resource {
+        if let resourceOverrides { return resourceOverrides.speech }
         let root = modelRoot, speech = speechResources, locale = Self.singleLocale(engineSettings)
         if let id = selected(.liveDictation), let installer = FluidAudioCatalog.installers()[id],
            case .installed = await manager.state(of: id) {
@@ -161,32 +257,51 @@ public final class ModelServices {
         }, release: { await speech.releaseWarmResources() })
     }
     private func cleanupResource(backend: CleanupBackendChoice) async -> SelectedModelWarmup.Resource {
-        let root = modelRoot, manager = self.manager, fallback = foundationResources
+        let root = modelRoot, manager = self.manager, fallback = foundationResources, nativeOverrides = resourceOverrides
         if backend == .foundationModels {
             return .init(key: "cleanup:foundation-models", prewarm: {
                 if await fallback.availability.isAvailable { try await fallback.prewarmResources() }
             }, release: { await fallback.releaseWarmResources() })
         }
         let id = selected(.cleanup) ?? "unselected", key = "cleanup:" + (selected(.cleanup) ?? "unselected")
-        if case .installed = await manager.state(of: id) { } else { await warmup.revoke(key: key) }
+        if cleanupPreparation.modelID != id {
+            cleanupPreparation.modelID = id
+            cleanupPreparation.state = .idle
+            cleanupPreparation.message = nil
+        }
+        if case .installed = await manager.state(of: id) { } else {
+            if await warmup.isReady(for: [key]) { await warmup.revoke(key: key) }
+            setCleanupPreparation(id: id, state: .missing, message: "Choose and install the selected Core ML model in Legato.")
+        }
         return .init(key: key, prewarm: { [weak self] in
+            guard case .installed = await manager.state(of: id), let spec = CoreMLModels.spec(id: id) else {
+                await self?.setCleanupPreparation(id: id, state: .missing, message: "Choose and install the selected Core ML model in Legato.")
+                throw LLMError.unavailable(reason: "Choose and install the selected Core ML model in Legato before preparation.")
+            }
+            await self?.setCleanupPreparation(id: id, state: .preparing, message: nil)
             do {
-                guard case .installed = await manager.state(of: id), let spec = CoreMLModels.spec(id: id) else {
-                    throw LLMError.unavailable(reason: "Choose and install the selected Core ML model in Legato before preparation.")
-                }
-                try await CoreMLModelStore.shared.backend(for: spec, root: root).prepare()
-                await self?.setCleanupPreparationNotice(nil)
+                if let nativeOverrides { try await nativeOverrides.coreML(id, root).prewarmResources() }
+                else { try await CoreMLModelStore.shared.backend(for: spec, root: root).prepare() }
+                try Task.checkCancellation()
+                await self?.setCleanupPreparation(id: id, state: .ready, message: nil)
             } catch is CancellationError { throw CancellationError() }
             catch {
-                await self?.setCleanupPreparationNotice("The selected cleanup model could not be prepared. Open Legato to retry preparation.")
+                await self?.setCleanupPreparation(id: id, state: .failed,
+                    message: "The selected cleanup model could not be prepared. Apple Foundation Models will be used when available. Retry preparation in Legato.")
                 throw error
             }
         }, release: {
-            if let spec = CoreMLModels.spec(id: id) { await CoreMLModels.release(folder: spec.folder(root: root)) }
+            if let nativeOverrides { await nativeOverrides.coreML(id, root).releaseWarmResources() }
+            else if let spec = CoreMLModels.spec(id: id) { await CoreMLModels.release(folder: spec.folder(root: root)) }
         })
     }
 
-    private func setCleanupPreparationNotice(_ notice: String?) { cleanupPreparationNotice = notice }
+    private func setCleanupPreparation(id: String, state: CleanupPreparationStatus.State, message: String?) {
+        guard selected(.cleanup) == id else { return }
+        cleanupPreparation.modelID = id
+        cleanupPreparation.state = state
+        cleanupPreparation.message = message
+    }
 
     /// Live dictation models for this device, in catalog order.
     public var streamingModels: [ModelDescriptor] { catalog.filter { $0.kind == .speechStreaming } }

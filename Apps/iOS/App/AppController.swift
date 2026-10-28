@@ -128,6 +128,7 @@ final class AppController {
             registry: models.cleanup, settings: Settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             vocabulary: vocabulary,
+            acquireRun: { try await models.acquireDictationCleanup(options: Settings.cleanupStore.options, inBackground: true) },
             report: { report in await reports.record(report) })
         #endif
         self.history = history

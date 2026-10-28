@@ -10,6 +10,11 @@ public protocol TranscriptPostProcessor: Sendable {
     /// Returns the improved text for `text`, which is spoken in `locale`. Honors task cancellation.
     func process(_ text: String, locale: Locale) async throws -> String
 
+    /// Acquires this run's fixed processing resources before capture, for every delivery mode.
+    func runStarts() async throws
+    /// Relinquishes run resources on every exit, including a failed or cancelled start.
+    func runEnds() async
+
     /// Whether the run that starts now cleans its text while it is still being spoken
     /// (`CleanupDelivery.live`: rolling passes over the run's whole raw text). Read once per run, when it
     /// starts. Default false: the session runs ``process(_:locale:)`` once on the whole text when the run stops.
@@ -32,6 +37,8 @@ public protocol TranscriptPostProcessor: Sendable {
 }
 
 extension TranscriptPostProcessor {
+    public func runStarts() async throws {}
+    public func runEnds() async {}
     public var cleansSegmentsLive: Bool { false }
 
     public var liveStopTimeLimit: Duration? { nil }

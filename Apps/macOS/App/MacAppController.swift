@@ -155,11 +155,13 @@ final class MacAppController {
         let hud = HUDPanelController()
         self.hud = hud
         let engineSettings = models.engineSettings
+        let cleanupSettings = settings.cleanupStore
         let cleanup = CleanupProcessor(
             registry: models.cleanup, settings: settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             willRun: { await hud.setPhase(.cleaningUp) },
             vocabulary: vocabulary,
+            acquireRun: { try await models.acquireDictationCleanup(options: cleanupSettings.options, inBackground: true) },
             report: { report in await reports.record(report) })
         self.cleanup = cleanup
         let engine = AppleSpeechEngine(vocabulary: vocabulary)

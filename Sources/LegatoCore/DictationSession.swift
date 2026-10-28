@@ -197,6 +197,7 @@ public final class DictationSession {
         await consumeTask?.value
         consumeTask = nil
         clearVolatile()
+        await postProcessor?.runEnds()
         runState = .idle
         if let failure {
             await teardownLease()
@@ -246,6 +247,8 @@ public final class DictationSession {
             await cancelLinger()
             let format = try await engine.prepare(locale: locale)
             try Task.checkCancellation()
+            try await postProcessor?.runStarts()
+            try Task.checkCancellation()
 
             let input: AsyncStream<AudioChunk>
             if leaseState == .armed {
@@ -285,6 +288,7 @@ public final class DictationSession {
             let gen = generation
             consumeTask = Task { await self.consume(events, generation: gen) }
         } catch {
+            await postProcessor?.runEnds()
             await teardownLease()
             runState = .idle
             throw error
@@ -321,6 +325,7 @@ public final class DictationSession {
                 consumeTask = nil
                 clearVolatile()
                 await source.detach()
+                await postProcessor?.runEnds()
                 await teardownLease()
                 runState = .idle
                 isAborting = false
