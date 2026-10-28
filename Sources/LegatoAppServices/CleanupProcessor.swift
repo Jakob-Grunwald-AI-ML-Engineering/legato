@@ -14,6 +14,10 @@ public struct CleanupRunLease: Sendable {
     }
 }
 
+private final class FrozenCleanupOptions: Sendable {
+    let value = Mutex<CleanupOptions?>(nil)
+}
+
 private actor RunCleanup {
     var lease: CleanupRunLease?
     var resolution: CleanupRegistry.Resolution? { lease?.resolution }
@@ -59,9 +63,8 @@ public final class CleanupReports {
     public func record(_ report: CleanupRunReport) { last = report }
 }
 
-/// The session's post-processor: resolves the cleanup pipeline per run (so GPU access and the settings
-/// are read when the run ends) and reports what ran. With cleanup off it returns the text unchanged, so a
-/// session kept between runs follows the switch without being rebuilt.
+/// The session's post-processor: captures options and the backend lease at run admission, then reports
+/// what ran. Settings changes apply to the next run. Cleanup off retains the source text.
 public struct CleanupProcessor: TranscriptPostProcessor {
     public let id = "cleanup"
     let registry: CleanupRegistry
@@ -81,6 +84,10 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     private let vocabulary: VocabularyService?
     private let acquireRun: (@Sendable () async throws -> CleanupRunLease?)?
     private let runCleanup = RunCleanup()
+    private let frozenOptions = FrozenCleanupOptions()
+    private let acquireRunWithOptions: (@Sendable (CleanupOptions) async throws -> CleanupRunLease?)?
+
+    private var options: CleanupOptions { frozenOptions.value.withLock { $0 } ?? settings.options }
 
     public init(
         registry: CleanupRegistry,
@@ -89,9 +96,11 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         willRun: @escaping @Sendable () async -> Void = {},
         vocabulary: VocabularyService? = nil,
         acquireRun: (@Sendable () async throws -> CleanupRunLease?)? = nil,
+        acquireRunWithOptions: (@Sendable (CleanupOptions) async throws -> CleanupRunLease?)? = nil,
         report: @escaping @Sendable (CleanupRunReport) async -> Void
     ) {
         self.acquireRun = acquireRun
+        self.acquireRunWithOptions = acquireRunWithOptions
         self.vocabulary = vocabulary
         self.registry = registry
         self.settings = settings
@@ -102,30 +111,42 @@ public struct CleanupProcessor: TranscriptPostProcessor {
 
     public func runStarts() async throws {
         await runCleanup.end()
-        if let acquireRun {
-            let lease = try await acquireRun()
-            await runCleanup.begin(lease)
-        } else if settings.options.enabled {
-            let resolution = await registry.resolve(preference: settings.backend.preference)
-            await runCleanup.begin(CleanupRunLease(resolution: resolution, release: {}))
+        let captured = settings.options
+        frozenOptions.value.withLock { $0 = captured }
+        do {
+            if let acquireRunWithOptions {
+                await runCleanup.begin(try await acquireRunWithOptions(captured))
+            } else if let acquireRun {
+                await runCleanup.begin(try await acquireRun())
+            } else if captured.enabled {
+                let resolution = await registry.resolve(preference: captured.backend.preference)
+                await runCleanup.begin(CleanupRunLease(resolution: resolution, release: {}))
+            }
+            try Task.checkCancellation()
+        } catch {
+            await runCleanup.end()
+            frozenOptions.value.withLock { $0 = nil }
+            throw error
         }
-        try Task.checkCancellation()
     }
-    public func runEnds() async { await runCleanup.end() }
+    public func runEnds() async {
+        await runCleanup.end()
+        frozenOptions.value.withLock { $0 = nil }
+    }
 
     public func process(_ text: String, locale: Locale) async throws -> String {
-        let options = settings.options
+        let options = self.options
         guard options.enabled else { return text }
         await willRun()
         return await Self.run(
             text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
             timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report,
-            vocabulary: vocabulary, runID: UUID(), resolution: await runCleanup.resolution)
+            vocabulary: vocabulary, runID: UUID(), resolution: await runCleanup.resolution, options: options)
     }
 
     /// Cleanup on with delivery Live: the session cleans the run's text in rolling passes while it goes on.
     public var cleansSegmentsLive: Bool {
-        let options = settings.options
+        let options = self.options
         return options.enabled && options.delivery == .live
     }
 
@@ -138,7 +159,7 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     /// The stop of a live run spends at most the setting's time limit on cleanup, the pass in flight and
     /// the final pass together.
     public var liveStopTimeLimit: Duration? {
-        let options = settings.options
+        let options = self.options
         return options.enabled ? .seconds(options.timeoutSeconds) : nil
     }
 
@@ -147,7 +168,7 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     /// The report covers the run so far (``liveRunStarts()``): the time of all its passes, changed when any
     /// changed. The result says which backend ran and whether the guard rejected a reply or time ran out.
     public func cleanLivePass(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> LivePassResult {
-        let options = settings.options
+        let options = self.options
         guard options.enabled else { return LivePassResult(text: text) }
         if atStop { await willRun() }
         let liveRun = liveRun
@@ -156,7 +177,7 @@ public struct CleanupProcessor: TranscriptPostProcessor {
             text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
             timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry,
             report: { await report(liveRun.adding($0)) }, context: context,
-            vocabulary: vocabulary, runID: liveRunID.current, resolution: await runCleanup.resolution)
+            vocabulary: vocabulary, runID: liveRunID.current, resolution: await runCleanup.resolution, options: options)
         return LivePassResult(
             text: ran.pipeline.text, guardRejected: ran.pipeline.guardRejected, timedOut: ran.pipeline.timedOut,
             backend: ran.report.backend, device: ran.report.device)
@@ -172,11 +193,11 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
         settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
         context: String = "", vocabulary: VocabularyService? = nil, runID: UUID = UUID(),
-        resolution: CleanupRegistry.Resolution? = nil
+        resolution: CleanupRegistry.Resolution? = nil, options: CleanupOptions? = nil
     ) async -> String {
         await runReporting(
             text, locale: locale, style: style, refine: refine, timeout: timeout, settings: settings, registry: registry,
-            report: report, context: context, vocabulary: vocabulary, runID: runID, resolution: resolution).pipeline.text
+            report: report, context: context, vocabulary: vocabulary, runID: runID, resolution: resolution, options: options).pipeline.text
     }
 
     /// ``run(_:locale:style:refine:timeout:settings:registry:report:context:)`` with the pipeline's report and
@@ -185,15 +206,16 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         _ text: String, locale: Locale, style: CleanupStyle, refine: Bool, timeout: Duration,
         settings: CleanupSettingsStore, registry: CleanupRegistry, report: @Sendable (CleanupRunReport) async -> Void,
         context: String = "", vocabulary: VocabularyService? = nil, runID: UUID = UUID(),
-        resolution: CleanupRegistry.Resolution? = nil
+        resolution: CleanupRegistry.Resolution? = nil, options: CleanupOptions? = nil
     ) async -> (pipeline: PostProcessingPipeline.Report, report: CleanupRunReport) {
         let clock = ContinuousClock()
         let start = clock.now
-        let itn = settings.itn
+        let options = options ?? settings.options
+        let itn = options.itn && style == .verbatim
         let terms = await vocabulary?.cleanupTerms(for: text) ?? []
         let (pipeline, resolution) = await registry.pipeline(
-            style: style, itn: itn, preference: settings.backend.preference,
-            timeout: timeout, context: context, vocabulary: terms, resolution: resolution)
+            style: style, itn: itn, preference: options.backend.preference,
+            timeout: timeout, context: context, vocabulary: terms, resolution: resolution, emoji: options.emoji)
         let out = await pipeline.processReporting(text, locale: locale)
         if out.text != text {
             vocabulary?.learnFromCleanup(

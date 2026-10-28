@@ -24,6 +24,11 @@ extension Settings {
         set { cleanupStore.style = newValue }
     }
 
+    static var cleanupEmoji: MessageEmojiStyle {
+        get { cleanupStore.emoji }
+        set { cleanupStore.emoji = newValue }
+    }
+
     static var cleanupBackend: CleanupBackendChoice {
         get { cleanupStore.backend }
         set { cleanupStore.backend = newValue }

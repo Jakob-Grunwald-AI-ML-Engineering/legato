@@ -1,0 +1,881 @@
+{
+  "compileCommand": [
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+    "-parse-as-library",
+    "-target",
+    "arm64-apple-macos26.0",
+    "-sdk",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "-I",
+    ".build/debug",
+    "Tests/LegatoPostProcessingTests/Eval/WritingModeHarness.swift",
+    "/tmp/legato-pr73-replay.swift",
+    ".build/debug/LegatoPostProcessing.o",
+    ".build/debug/LegatoCore.o",
+    ".build/debug/LegatoVocabulary.o",
+    ".build/debug/FluidAudio.o",
+    "-o",
+    "/tmp/legato-pr73-replay"
+  ],
+  "deliveriesChanged": 0,
+  "deliveriesCompared": 53,
+  "evidenceSHA256": {
+    "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json": "8b421b4e4a9c56d0b43ce08f6cfcf142650d7dc383b64604cc5e209d22c47617",
+    "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json": "9ae3d7e6765a40a9e207274d8b73018c872e00222c91162c1a7d03d324926392",
+    "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json": "25dc506b3043fdc681e189ca28aba60e0d2b70cadc80660f6bcf3c0a5d87f7bc",
+    "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json": "bb2fa1166f710f92ba2cb777f29a15816fd4acb32b841e5047899051b29452cf"
+  },
+  "extractionsChanged": 0,
+  "extractionsCompared": 54,
+  "focusedGreenLog": "/tmp/legato-pr73-sibling-green.log",
+  "focusedRedLogs": [
+    "/tmp/legato-pr73-red-corrected.log",
+    "/tmp/legato-pr73-review-red.log",
+    "/tmp/legato-pr73-sibling-red.log"
+  ],
+  "frozenPromptSectionsSHA256": "c34b1d354e3626328a755d70d4174af1c2c9e338000611c96b6066ea7b98bcd6",
+  "head": "698d0043e7a98552331b5a1a03a2aa5419152e9d",
+  "method": "saved raw responses only; exact requests and saved hashes verified; production LLMCleanupStage; no model instantiated; timeout/error deliveries excluded",
+  "operationalDeliveriesSkipped": 11,
+  "rawResponseHashesVerified": 54,
+  "replayCommand": [
+    "/tmp/legato-pr73-replay",
+    "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+    "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+    "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+    "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json"
+  ],
+  "replayProvenanceSHA256": {
+    ".build/debug/FluidAudio.o": "160077b07eec206e5367b7af9b7603df64a330f9eb2b22009fc73d184ec86efc",
+    ".build/debug/LegatoCore.o": "52715a53136b232feb905130994f28e010b96736db45cd6b58b9e45c075fa53b",
+    ".build/debug/LegatoPostProcessing.o": "c01ad4f5758f5681242644df2b6254c90e1ba68c396f89a8169284ce7df9cfcd",
+    ".build/debug/LegatoVocabulary.o": "ad89baa2aab2960f2539f4b13f2851c38d1963495cf2381b05a820131ff86ebe",
+    "/tmp/legato-pr73-replay": "fed6ea4d7bbe23ffe19c73e43bb82aa019cc8806b140c83559102f3c08cd2ee1",
+    "/tmp/legato-pr73-replay.swift": "992f9a8d5dd7294531444fe03adc7dc497c703f50c5047274e7faa3c3c95237d",
+    "Sources/LegatoPostProcessing/CleanupPrompt.swift": "9f260d896e69b4e35557fa62f190517a8b43b5690edd6fdda9e4f6a1b37aa2e5",
+    "Sources/LegatoPostProcessing/LLMCleanupStage.swift": "c96c45b27d5bf5aace99cc1767d727e81d3078561e6b8960344ff84fef52dd57",
+    "Tests/LegatoPostProcessingTests/CleanupPromptTests.swift": "a1c92a5572c4b38a1bbff375488f31030bd0447732e30102fc5d6e1c6b8f525e",
+    "Tests/LegatoPostProcessingTests/Eval/WritingModeHarness.swift": "c23a5850bcbc084daa5771354da87546feeeb9a7dc5fd3b26c2d84724a97da5f"
+  },
+  "requestHashesVerified": 64,
+  "rows": [
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "81aecdda53ac747f1d410e3519cb9d8a0b5e46de02f5a7be1c6b6564cd0f4d18",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "81aecdda53ac747f1d410e3519cb9d8a0b5e46de02f5a7be1c6b6564cd0f4d18",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-voice-rhythm",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "4c0361f20a90ee00285826535d81c65b9cf4e5d63777d525004ac9720008a542",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "4c0361f20a90ee00285826535d81c65b9cf4e5d63777d525004ac9720008a542",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-voice-correction",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "00ee2ef0e312a3aa1e3ab69bbf5cace1353c828719f9a099600beba55c50d89d",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "00ee2ef0e312a3aa1e3ab69bbf5cace1353c828719f9a099600beba55c50d89d",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-voice-context",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-voice-ambiguous",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "cf05a6794fd0b5e690d4970d22ee1a1562dfa31e4ffbb8e0f79d88f9ae5dd5db",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "2cfc7fb635b86d0f207bbb8ce431df1ce19ea238983cfccf4e00e36018d8ebe2",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "2cfc7fb635b86d0f207bbb8ce431df1ce19ea238983cfccf4e00e36018d8ebe2",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-voice-facts",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-restructure",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "e4bacd0755898997241b1c2cd4959c0ba91d2086f74f5b627a930b821b4df94a",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-2"
+      ],
+      "afterSHA256": "930ba9f6a85637c411c7cd509182b130314a2f5763ba29149ac59b0ddf4f0957",
+      "beforeObjectiveFailures": [
+        "required-2"
+      ],
+      "beforeSHA256": "930ba9f6a85637c411c7cd509182b130314a2f5763ba29149ac59b0ddf4f0957",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-mixed",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-serious",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "415b426366044dd47f54b1427a023d26f8cae6d36b5e74f7b76ea1675d09e98a",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-off",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "03bdb26d5fb47f9eff57937cca280e6f6c52aab2988d19bd1f50721ec51d2e89",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-subtle",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "ca41b2615a5a4ca310d2be34a3ac1d1d1fd4bd9b72735f147b900551eff9f70d",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-expressive",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "302e2a405cbb09e0a48fb0b1899a113daf9c83fd3ea6782be00d19f3c5329826",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "1f00fda42c8510715a555400dffa33e684ec7559d14815fbdefee6558fb0282f",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "1f00fda42c8510715a555400dffa33e684ec7559d14815fbdefee6558fb0282f",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-dictated-emoji",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "b0117838ad9d1ab97cea5d4d15d4457e18cb5fed891d995682fcc0071d62cca0",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "b0117838ad9d1ab97cea5d4d15d4457e18cb5fed891d995682fcc0071d62cca0",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-markdown-list",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-2"
+      ],
+      "afterSHA256": "2e6ce2871148891374cd21c8cddbdb3d44a631367edcb4368381a5fc6c4baa75",
+      "beforeObjectiveFailures": [
+        "required-2"
+      ],
+      "beforeSHA256": "2e6ce2871148891374cd21c8cddbdb3d44a631367edcb4368381a5fc6c4baa75",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-markdown-injection",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "b50d19d85330b7bc1f0a58bf34b90a3816c690f47fdccb3bb744161b18923e7f",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "b50d19d85330b7bc1f0a58bf34b90a3816c690f47fdccb3bb744161b18923e7f",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-message-paragraphs",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/dev-69694091-1457-4B90-A64E-3D6063205556/evidence.json",
+      "id": "dev-markdown-long",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "c286ecd7692bdc6b3190f067254ee6c4f707927ac676c41efa840239d8a5b2f2",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "f039217a8479d3208d607453bbc5c9d86b6e2536611671b978aa057e8461c3b1",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "f039217a8479d3208d607453bbc5c9d86b6e2536611671b978aa057e8461c3b1",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-voice-rhythm",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "afterSHA256": "96faaae226eab1c4efb59f5e1974479f87f845a35d97b54d089e1c0f0a698169",
+      "beforeObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "beforeSHA256": "96faaae226eab1c4efb59f5e1974479f87f845a35d97b54d089e1c0f0a698169",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-voice-correction",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "afterSHA256": "0de186887951442e0484e0814641e4bb8876d8c509502867f8b21a755b93f76e",
+      "beforeObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "beforeSHA256": "0de186887951442e0484e0814641e4bb8876d8c509502867f8b21a755b93f76e",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-voice-context",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "6e8c86b9d9d9e7c01a5866542e9e43c9688876c57042d9f4fed0abab6a71473a",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "6e8c86b9d9d9e7c01a5866542e9e43c9688876c57042d9f4fed0abab6a71473a",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-voice-ambiguous",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "b124acca70f2e389e521ca34633369c7e9e984ea8ab3ccdfcb969a258167627d",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "b124acca70f2e389e521ca34633369c7e9e984ea8ab3ccdfcb969a258167627d",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-voice-facts",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "89998571dcc9323f06aabab871753b964cf851774e5d762533a3c865ddba66d9",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "89998571dcc9323f06aabab871753b964cf851774e5d762533a3c865ddba66d9",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-restructure",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "62fdff0dcd5625ff8d8c5e45027f5e06abd426824efee6c28f56b1e6563a7325",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "62fdff0dcd5625ff8d8c5e45027f5e06abd426824efee6c28f56b1e6563a7325",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-mixed",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "55631d5408aef90ae35c15a8a24dc619128a54144fced4c46fb14d45e211718d",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "55631d5408aef90ae35c15a8a24dc619128a54144fced4c46fb14d45e211718d",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-serious",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "1433ff5a04fa8fd36b24a2330aa9696a6e1a9a5c94a57b6674a2ac4f8b178bcb",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "1433ff5a04fa8fd36b24a2330aa9696a6e1a9a5c94a57b6674a2ac4f8b178bcb",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-off",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "a64fd899dce6ea569e72ece986f8856dcef953f80a2a7f835c483896aa5e63be",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "a64fd899dce6ea569e72ece986f8856dcef953f80a2a7f835c483896aa5e63be",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-subtle",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-expressive",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "a70a663b542f0b162032af15b7aec01137da6a7acfdb40d2954c23f39c6479de",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "487266b6b0113861b0d603f35f7d684d818f9bed39ef339a7565f79d3fc366c5",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "487266b6b0113861b0d603f35f7d684d818f9bed39ef339a7565f79d3fc366c5",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-dictated-emoji",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "75c2ab0350d4bcab8ab1ff3527a8d1d2fe317b033f4aadfbeab9bc9c9ef81837",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "75c2ab0350d4bcab8ab1ff3527a8d1d2fe317b033f4aadfbeab9bc9c9ef81837",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-markdown-list",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "da1782ae9fcd30bf26720ed50414e1346694dc2ef34e3d6911d0c0140722dbf8",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "da1782ae9fcd30bf26720ed50414e1346694dc2ef34e3d6911d0c0140722dbf8",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-markdown-injection",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "9f9a7f0b0ea2cdac5d171b0df572b0f7c60470041ea1fe5d6ebc9d28ddd8310f",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "9f9a7f0b0ea2cdac5d171b0df572b0f7c60470041ea1fe5d6ebc9d28ddd8310f",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-message-paragraphs",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/runs/validation-B2891F21-DEBE-45EA-91AE-B9083AB6BAB0/evidence.json",
+      "id": "validation-markdown-long",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "47194a6b19467a056777ec6e95eb8efbfc25583c6953c0cd5b512137cb511384",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "81aecdda53ac747f1d410e3519cb9d8a0b5e46de02f5a7be1c6b6564cd0f4d18",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "81aecdda53ac747f1d410e3519cb9d8a0b5e46de02f5a7be1c6b6564cd0f4d18",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-voice-rhythm",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "afterSHA256": "adbf07599ed4daa9d7c2df9a99d12c07b3609970a2e092a9447a250d164ae887",
+      "beforeObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "beforeSHA256": "adbf07599ed4daa9d7c2df9a99d12c07b3609970a2e092a9447a250d164ae887",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-voice-correction",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "forbidden-1"
+      ],
+      "afterSHA256": "f38c7d6f9f7a8ac9c338f7b1fd853c9c2cc9a39ae507f47588bcbd0dbd3076b2",
+      "beforeObjectiveFailures": [
+        "forbidden-1"
+      ],
+      "beforeSHA256": "f38c7d6f9f7a8ac9c338f7b1fd853c9c2cc9a39ae507f47588bcbd0dbd3076b2",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-voice-context",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "697da4233b377a4f46647e10299b710df0eab721c8b415e33881d626cf3bafb4",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "697da4233b377a4f46647e10299b710df0eab721c8b415e33881d626cf3bafb4",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-voice-ambiguous",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "02806dded29e222e9782882e6a16247692e3b815923c9d8bb9996ed0045b9ce6",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "02806dded29e222e9782882e6a16247692e3b815923c9d8bb9996ed0045b9ce6",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-voice-facts",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "ca467f719edca1e00870f3b47c57ae9deb31122cba704971cb7bde20424a3bfc",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "ca467f719edca1e00870f3b47c57ae9deb31122cba704971cb7bde20424a3bfc",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-restructure",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "04b6effde65d0512dd37087e2b07a446a29a9438d03e8131c840dab393f98f09",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "04b6effde65d0512dd37087e2b07a446a29a9438d03e8131c840dab393f98f09",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-mixed",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "ed52fc7c183c98ff126e75351ec5361786ebaea9f994775ac18babffc0cc7086",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "ed52fc7c183c98ff126e75351ec5361786ebaea9f994775ac18babffc0cc7086",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-serious",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "16dfd90221e82f68844673daa60aa2b3ebd7861ce84ce462f35d419ef4d36a6e",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "16dfd90221e82f68844673daa60aa2b3ebd7861ce84ce462f35d419ef4d36a6e",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-off",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "94fe887a9863e582e2950d552afcdd274a25fc82faef1667008bc5059142f5ff",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "94fe887a9863e582e2950d552afcdd274a25fc82faef1667008bc5059142f5ff",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-subtle",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "661701b45a7b28fe3b87ae461e88e7e86c55bd6b853fd9234f30b2b4a4f73c69",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "661701b45a7b28fe3b87ae461e88e7e86c55bd6b853fd9234f30b2b4a4f73c69",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-expressive",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "e477c75d44d4d0f1df5f04036992718aea9acfc54c70db62d8625b60cd6d64f3",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "e477c75d44d4d0f1df5f04036992718aea9acfc54c70db62d8625b60cd6d64f3",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-dictated-emoji",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "5150286591448366f5b3fedb84112d2753a01223c4997ee3c70cc471da94f4db",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "5150286591448366f5b3fedb84112d2753a01223c4997ee3c70cc471da94f4db",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-markdown-list",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-2"
+      ],
+      "afterSHA256": "3773493a84ade31121380175c7bb62d4514ae90cb838699274bc446e5f1d857f",
+      "beforeObjectiveFailures": [
+        "required-2"
+      ],
+      "beforeSHA256": "3773493a84ade31121380175c7bb62d4514ae90cb838699274bc446e5f1d857f",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-markdown-injection",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "b50d19d85330b7bc1f0a58bf34b90a3816c690f47fdccb3bb744161b18923e7f",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "b50d19d85330b7bc1f0a58bf34b90a3816c690f47fdccb3bb744161b18923e7f",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-message-paragraphs",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/dev-92A4FFDA-F16F-42BA-8D2A-234C580FB864/evidence.json",
+      "id": "dev-markdown-long",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "c286ecd7692bdc6b3190f067254ee6c4f707927ac676c41efa840239d8a5b2f2",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "97afbda7e0fec2ff71ee445a6759bb40ad35e17a0bd1945a3093616144721847",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "97afbda7e0fec2ff71ee445a6759bb40ad35e17a0bd1945a3093616144721847",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-voice-rhythm",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "afterSHA256": "68475175fafe97e1a95781976c791e4fe3aa91b5f6ae22dc75979a0e74f0d081",
+      "beforeObjectiveFailures": [
+        "forbidden-0"
+      ],
+      "beforeSHA256": "68475175fafe97e1a95781976c791e4fe3aa91b5f6ae22dc75979a0e74f0d081",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-voice-correction",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-0",
+        "required-1"
+      ],
+      "afterSHA256": "d689d64e8d519095bc575eb18258ef8e436e6c70394b03d2fb2b52ff1e63e79d",
+      "beforeObjectiveFailures": [
+        "required-0",
+        "required-1"
+      ],
+      "beforeSHA256": "d689d64e8d519095bc575eb18258ef8e436e6c70394b03d2fb2b52ff1e63e79d",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-voice-context",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "6e8c86b9d9d9e7c01a5866542e9e43c9688876c57042d9f4fed0abab6a71473a",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "6e8c86b9d9d9e7c01a5866542e9e43c9688876c57042d9f4fed0abab6a71473a",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-voice-ambiguous",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "f94c4ceca9e0911dd3d457c039c7a1a10a1f7656c5aa76116000ef0802bce0a9",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "f94c4ceca9e0911dd3d457c039c7a1a10a1f7656c5aa76116000ef0802bce0a9",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-voice-facts",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "f1980fe163686030a10dbb01d06b59e3b7675169ded4acb6669157da92bd89e3",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "f1980fe163686030a10dbb01d06b59e3b7675169ded4acb6669157da92bd89e3",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-restructure",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "a38f4fb6055a034e7b81c7da056718a4ec6c3ac18d90169f5ab66eaea2c6a0ac",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "a38f4fb6055a034e7b81c7da056718a4ec6c3ac18d90169f5ab66eaea2c6a0ac",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-mixed",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "f9835da8c5ed96bb08924e82dcf52afddc32cd803317de979f5accb46ab128c0",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "f9835da8c5ed96bb08924e82dcf52afddc32cd803317de979f5accb46ab128c0",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-serious",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "1433ff5a04fa8fd36b24a2330aa9696a6e1a9a5c94a57b6674a2ac4f8b178bcb",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "1433ff5a04fa8fd36b24a2330aa9696a6e1a9a5c94a57b6674a2ac4f8b178bcb",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-off",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "33be0c4502564d17998ecdc9718c554d3e0c2417461b6094ede3b4c29e251f55",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "33be0c4502564d17998ecdc9718c554d3e0c2417461b6094ede3b4c29e251f55",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-subtle",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "ec3aed40aed7bf8fc8bb8f50a89d8a474cdcc9487223ca6cf177c0d3f0ba6eaa",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "ec3aed40aed7bf8fc8bb8f50a89d8a474cdcc9487223ca6cf177c0d3f0ba6eaa",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-expressive",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [
+        "required-1"
+      ],
+      "afterSHA256": "6ec44dc6077c25d21c00220298ead565f6eeef71f2bf110821a044d1c6838053",
+      "beforeObjectiveFailures": [
+        "required-1"
+      ],
+      "beforeSHA256": "6ec44dc6077c25d21c00220298ead565f6eeef71f2bf110821a044d1c6838053",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-dictated-emoji",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "98bb438c963bafccc604f44ec2110017824b1d276ca81bb46819f635af559c25",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "98bb438c963bafccc604f44ec2110017824b1d276ca81bb46819f635af559c25",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-markdown-list",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "bec5245ba78977d5f13a7edb18acf3e46f524deed0f28bd5e594310067be724a",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "bec5245ba78977d5f13a7edb18acf3e46f524deed0f28bd5e594310067be724a",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-markdown-injection",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "afterObjectiveFailures": [],
+      "afterSHA256": "e9cdcef6f4586b3c2b755a753c5d9ddd6e867727f3aa8aaab892c0a95c66d7fc",
+      "beforeObjectiveFailures": [],
+      "beforeSHA256": "e9cdcef6f4586b3c2b755a753c5d9ddd6e867727f3aa8aaab892c0a95c66d7fc",
+      "calls": 1,
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-message-paragraphs",
+      "kind": "delivery-replay",
+      "scorerUnchanged": true,
+      "unchanged": true
+    },
+    {
+      "evidence": "/tmp/legato-writing-standalone/coreml/runs/validation-C3C443FE-A853-486A-97A0-941210229A3C/evidence.json",
+      "id": "validation-markdown-long",
+      "kind": "delivery-not-replayed",
+      "originalDeliverySHA256": "47194a6b19467a056777ec6e95eb8efbfc25583c6953c0cd5b512137cb511384",
+      "originalFailed": false,
+      "originalObjectiveFailures": [],
+      "originalTimedOut": true,
+      "reason": "original timeout/error or incomplete retained response sequence"
+    }
+  ],
+  "scorerChanges": 0,
+  "scorerComparisons": 53
+}

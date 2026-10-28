@@ -50,16 +50,19 @@ private let grunwald = [EntitySpan(text: "Grunwald", kind: .person)]
         await rig.service.waitForLearning()
     }
 
-    @Test func observesTheFinalTextWithTheEntryID() async throws {
+    @Test func observesRawTextWhenPresentWithTheEntryID() async throws {
         let rig = VocabularyRig(spans: grunwald); defer { rig.cleanUp() }
         let store = LearningHistoryStore(MemoryHistory(), vocabulary: rig.service)
-        // The final text names Grunwald; the raw engine text does not.
+        // Generated wording must not count as a spoken sighting of Grunwald.
         let first = entry("we met Grunwald", raw: "we met grün wald")
         try await store.append(first)
         try await store.append(first)  // the same id again counts once
         await rig.service.waitForLearning()
         #expect(try await rig.entries().isEmpty)
         try await store.append(entry("ask Grunwald today"))
+        await rig.service.waitForLearning()
+        #expect(try await rig.entries().isEmpty)
+        try await store.append(entry("we met Grunwald again"))
         await rig.service.waitForLearning()
         #expect(try await rig.entries().map(\.text) == ["Grunwald"])
     }

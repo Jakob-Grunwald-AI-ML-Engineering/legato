@@ -142,7 +142,7 @@ final class AppController {
             registry: models.cleanup, settings: Settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             vocabulary: vocabulary,
-            acquireRun: { try await models.acquireDictationCleanup(options: Settings.cleanupStore.options, inBackground: true) },
+            acquireRunWithOptions: { options in try await models.acquireDictationCleanup(options: options, inBackground: true) },
             report: { report in await reports.record(report) })
         #endif
         self.history = history
@@ -465,22 +465,23 @@ final class AppController {
         }
     }
 
-    /// The keyboard's Refine key: a stronger rewrite (message style) of `text`, or nil when there is none.
-    /// Runs in the background too, as the background cleanup setting says (the MLX model on the CPU by default).
+    /// Refines `text` in the selected mode (Voice uses Message), or returns nil when unchanged.
     func refine(_ text: String) async -> String? {
         #if ANE_CLEANUP_SPIKE
         return await spike.refine(text, locale: ModelServices.singleLocale(models.engineSettings) ?? Locale.current)
         #else
+        let options = Settings.cleanupStore.options
         let lease: SelectedModelWarmup.Lease
-        do { lease = try await models.acquireRefine(options: Settings.cleanupStore.options, inBackground: startEnvironment.current().inBackground) }
+        do { lease = try await models.acquireRefine(options: options, inBackground: startEnvironment.current().inBackground) }
         catch { return nil }
         let reports = cleanupReports
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
         let out = await CleanupProcessor.run(
-            text, locale: locale, style: .message, refine: true,
-            timeout: .seconds(max(Settings.cleanupTimeoutSeconds * 2, 8)), settings: Settings.cleanupStore,
+            text, locale: locale, style: options.style.refineStyle, refine: true,
+            timeout: .seconds(max(options.timeoutSeconds * 2, 8)), settings: Settings.cleanupStore,
             registry: models.cleanup,
-            report: { report in await reports.record(report) }, vocabulary: vocabulary)
+            report: { report in await reports.record(report) }, vocabulary: vocabulary,
+            resolution: await models.cleanup.resolve(preference: options.backend.preference), options: options)
         await lease.release()
         let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
         #if DEBUG

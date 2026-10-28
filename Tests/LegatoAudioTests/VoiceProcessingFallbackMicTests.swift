@@ -287,8 +287,11 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
 
     @Test func aRestartOfTheMicIsJudgedAgain() async throws {
         let factory = Factory([])
+        // Audio-duration judgment is independent of wall-clock scheduler stalls.
+        // Watchdog restart behavior has separate tests with an advancing clock.
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: false, guardian: MicSilenceGuard(window: 1, grace: 0), make: { factory.make($0) })
+            voiceProcessing: false, guardian: MicSilenceGuard(window: 1, grace: 0),
+            clock: { 0 }, makeMic: { factory.make($0, $1) })
         let notices = Tally(source.notices), resumptions = Tally(source.resumptions)
         let stream = try await source.start(format: format)
         let (got, reader) = collect(stream)

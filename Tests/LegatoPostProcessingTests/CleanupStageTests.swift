@@ -184,13 +184,13 @@ struct CleanupStageTests {
         // The nearest example counts most, so the last one is in the transcript's language.
         let german = CleanupPrompt.standard.examples(de)
         let english = CleanupPrompt.standard.examples(en)
-        #expect(german.last?.assistant.contains("Samstag") == true)
-        #expect(english.last?.assistant.contains("morning") == true)
+        #expect(german.last?.assistant.contains("Donnerstag") == true)
+        #expect(english.last?.assistant.contains("Thursday") == true)
     }
 
-    @Test func theInstructionsForbidAddingOrDroppingContent() {
+    @Test func voiceInstructionsPreserveMeaningAndExplicitCorrections() {
         let text = CleanupPrompt.standard.instructions(en, []).lowercased()
-        for phrase in ["punctuation", "spelling", "every sentence", "never translate", "add anything", "nothing else"] {
+        for phrase in ["punctuation", "spelling", "wording", "self-corrections", "uncertainty", "never translate", "add no facts", "nothing else"] {
             #expect(text.contains(phrase), "missing: \(phrase)")
         }
     }
@@ -270,9 +270,17 @@ struct CleanupStageTests {
     @Test func theTermsLineShrinksTheChunkBudget() async throws {
         let long = String(repeating: "wort ", count: 20).trimmingCharacters(in: .whitespaces) + "."
         let text = Array(repeating: long, count: 12).joined(separator: " ")
+        // Fixed neutral overhead isolates vocabulary budgeting from evolving production mode prompts.
+        let prompt = CleanupPrompt(
+            name: "terms-budget", instructions: { _, _ in "Correct the transcript." }, examples: { _ in [] },
+            userMessage: { text, _, terms in
+                (terms.isEmpty ? "" : "<terms>\(terms.joined(separator: ", "))</terms>\n")
+                    + "<text>\(text)</text>"
+            })
         func calls(vocabulary: [String]) async throws -> Int {
-            let backend = FakeBackend(maxPromptCharacters: 4_000) { transcript(in: $0) }
-            _ = try await LLMCleanupStage(backend: backend, vocabulary: vocabulary).process(text, locale: de)
+            let backend = FakeBackend(maxPromptCharacters: 900) { transcript(in: $0) }
+            let result = try await LLMCleanupStage(backend: backend, vocabulary: vocabulary, prompt: prompt).process(text, locale: de)
+            #expect(result == text, "budgeting must not discard source text")
             return backend.prompts.count
         }
         let terms = (1...20).map { "Fachbegriff\($0)" }

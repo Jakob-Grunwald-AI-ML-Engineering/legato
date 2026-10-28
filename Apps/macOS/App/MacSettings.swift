@@ -70,6 +70,10 @@ final class MacSettings {
         didSet { cleanupStore.style = cleanupStyle }
     }
 
+    var cleanupEmoji: MessageEmojiStyle {
+        didSet { cleanupStore.emoji = cleanupEmoji }
+    }
+
     var cleanupBackend: CleanupBackendChoice {
         didSet {
             cleanupStore.backend = cleanupBackend
@@ -97,6 +101,7 @@ final class MacSettings {
         cleanupEnabled = cleanup.enabled
         cleanupDelivery = cleanup.delivery
         cleanupStyle = cleanup.style
+        cleanupEmoji = cleanup.emoji
         cleanupBackend = cleanup.backend
         cleanupITN = cleanup.itn
         cleanupTimeoutSeconds = cleanup.timeoutSeconds

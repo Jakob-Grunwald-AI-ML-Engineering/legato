@@ -26,6 +26,23 @@ private func predictions(_ url: URL, after word: String) -> [String] {
 }
 
 @Suite struct VocabularyPairsTests {
+    @Test func generatedHeadingsNeverTeachPairsDuringAppendOrRebuild() async throws {
+        let rig = VocabularyRig(withPairs: true); defer { rig.cleanUp() }
+        let base = PairsHistory()
+        let history = LearningHistoryStore(base, vocabulary: rig.service)
+        let kept = DictationEntry(date: t, text: "project overview", rawText: "see you tomorrow", localeIdentifier: "en-US", engineID: "test", duration: 1)
+        let removed = dictation("good morning")
+        try await history.append(kept)
+        try await history.append(removed)
+        await rig.service.waitForLearning()
+        #expect(predictions(rig.pairsURL, after: "project").isEmpty)
+        #expect(predictions(rig.pairsURL, after: "see") == ["you"])
+        try await history.delete(id: removed.id)
+        await rig.service.waitForLearning()
+        #expect(predictions(rig.pairsURL, after: "project").isEmpty)
+        #expect(predictions(rig.pairsURL, after: "see") == ["you"])
+    }
+
     @Test func aDictationTeachesWordPairs() async throws {
         let rig = VocabularyRig(withPairs: true); defer { rig.cleanUp() }
         rig.service.learnFromDictation(text: "see you tomorrow", locale: Locale(identifier: "en-US"), id: UUID())

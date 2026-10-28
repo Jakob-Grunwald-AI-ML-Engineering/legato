@@ -155,13 +155,12 @@ final class MacAppController {
         let hud = HUDPanelController()
         self.hud = hud
         let engineSettings = models.engineSettings
-        let cleanupSettings = settings.cleanupStore
         let cleanup = CleanupProcessor(
             registry: models.cleanup, settings: settings.cleanupStore,
             preferredLocale: { ModelServices.singleLocale(engineSettings) },
             willRun: { await hud.setPhase(.cleaningUp) },
             vocabulary: vocabulary,
-            acquireRun: { try await models.acquireDictationCleanup(options: cleanupSettings.options, inBackground: true) },
+            acquireRunWithOptions: { options in try await models.acquireDictationCleanup(options: options, inBackground: true) },
             report: { report in await reports.record(report) })
         self.cleanup = cleanup
         let engine = AppleSpeechEngine(vocabulary: vocabulary)
@@ -439,20 +438,25 @@ final class MacAppController {
         swapLast(to: raw, label: "raw text")
     }
 
-    /// A stronger rewrite (message style) of the last dictation, swapped in like `revertLastToRaw`.
+    /// Refines the last dictation in the selected mode (Voice uses Message), swapped in like `revertLastToRaw`.
     func refineLast() async {
         guard phase == .idle, !isRefining, let entry = lastDictation else { return }
         isRefining = true
         defer { isRefining = false }
-        await warmSelectedResources()
+        let options = settings.cleanupStore.options
+        let lease: SelectedModelWarmup.Lease
+        do { lease = try await models.acquireRefine(options: options, inBackground: false) }
+        catch { hud.show(toast: "Refine unavailable."); return }
         hud.show(toast: "Refining…", for: 30)
         let reports = cleanupReports
         let store = settings.cleanupStore
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale(identifier: entry.localeIdentifier)
         let out = await CleanupProcessor.run(
-            entry.text, locale: locale, style: .message, refine: true,
-            timeout: .seconds(max(store.timeoutSeconds * 2, 8)), settings: store, registry: models.cleanup,
-            report: { report in await reports.record(report) }, vocabulary: vocabulary)
+            entry.text, locale: locale, style: options.style.refineStyle, refine: true,
+            timeout: .seconds(max(options.timeoutSeconds * 2, 8)), settings: store, registry: models.cleanup,
+            report: { report in await reports.record(report) }, vocabulary: vocabulary,
+            resolution: await models.cleanup.resolve(preference: options.backend.preference), options: options)
+        await lease.release()
         let refined = out.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !refined.isEmpty, refined != entry.text else {
             hud.show(toast: "Refine changed nothing.")

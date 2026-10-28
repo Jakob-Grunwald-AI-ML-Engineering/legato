@@ -101,7 +101,7 @@ let package = Package(
         ),
         .testTarget(
             name: "LegatoPostProcessingTests",
-            dependencies: ["LegatoPostProcessing", "LegatoCore", "LegatoModels", "LegatoMLX", "LegatoVocabulary"],
+            dependencies: ["LegatoPostProcessing", "LegatoCore", "LegatoModels", "LegatoCoreML", "LegatoMLX", "LegatoVocabulary"],
             resources: [.copy("Fixtures")]
         ),
         .target(

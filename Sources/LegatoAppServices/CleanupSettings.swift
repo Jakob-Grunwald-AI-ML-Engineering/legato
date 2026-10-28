@@ -19,6 +19,7 @@ public struct CleanupOptions: Sendable, Equatable {
     public var enabled: Bool
     public var delivery: CleanupDelivery
     public var style: CleanupStyle
+    public var emoji: MessageEmojiStyle
     public var backend: CleanupBackendChoice
     /// Inverse text normalization before the language model.
     public var itn: Bool
@@ -27,8 +28,9 @@ public struct CleanupOptions: Sendable, Equatable {
 
     public init(
         enabled: Bool, delivery: CleanupDelivery, style: CleanupStyle, backend: CleanupBackendChoice, itn: Bool,
-        timeoutSeconds: Int
+        timeoutSeconds: Int, emoji: MessageEmojiStyle = .off
     ) {
+        self.emoji = emoji
         self.enabled = enabled
         self.delivery = delivery
         self.style = style
@@ -49,6 +51,7 @@ public struct CleanupSettingsStore: Sendable {
         static let enabled = "cleanup.enabled"
         static let delivery = "cleanup.delivery"
         static let style = "cleanup.style"
+        static let emoji = "cleanup.messageEmoji"
         static let backend = "cleanup.backend"
         static let itn = "cleanup.itn"
         static let timeoutSeconds = "cleanup.timeoutSeconds"
@@ -73,6 +76,11 @@ public struct CleanupSettingsStore: Sendable {
     public var style: CleanupStyle {
         get { defaults.string(forKey: Key.style).flatMap(CleanupStyle.init(rawValue:)) ?? .verbatim }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.style) }
+    }
+
+    public var emoji: MessageEmojiStyle {
+        get { defaults.string(forKey: Key.emoji).flatMap(MessageEmojiStyle.init(rawValue:)) ?? .off }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.emoji) }
     }
 
     public var backend: CleanupBackendChoice {
@@ -102,6 +110,6 @@ public struct CleanupSettingsStore: Sendable {
 
     public var options: CleanupOptions {
         CleanupOptions(
-            enabled: enabled, delivery: delivery, style: style, backend: backend, itn: itn, timeoutSeconds: timeoutSeconds)
+            enabled: enabled, delivery: delivery, style: style, backend: backend, itn: itn, timeoutSeconds: timeoutSeconds, emoji: emoji)
     }
 }

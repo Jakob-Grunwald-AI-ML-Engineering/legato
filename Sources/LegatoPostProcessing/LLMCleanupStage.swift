@@ -1,11 +1,15 @@
 import Foundation
 import LegatoCore
 
-/// Cleans a transcript with a language model: punctuation, casing, spelling, written forms and likely
-/// misrecognitions, without adding or dropping content.
+/// Acceptance of extracted model output. Omitted acceptance retains the legacy guard.
+public enum CleanupAcceptance: Sendable, Equatable {
+    case promptLed
+}
+
+/// Applies the chosen writing prompt to a transcript, retaining source structure on operational fallback.
 ///
-/// Long input is cut at sentence boundaries and cleaned chunk by chunk. A chunk whose reply drifts past
-/// the ``CleanupGuard``, comes back empty or trips the backend's guardrail keeps its own text, so one bad
+/// Long input is cut at sentence/word boundaries and cleaned chunk by chunk. A chunk whose reply fails
+/// acceptance, comes back empty or trips the backend's guardrail keeps its own text, so one bad
 /// chunk never costs the rest. An unavailable backend or any other error throws, which the pipeline turns
 /// into "no change".
 public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
@@ -17,6 +21,7 @@ public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
     private let vocabulary: [String]
     private let prompt: CleanupPrompt
     private let context: String
+    private let acceptance: CleanupAcceptance?
 
     /// How many characters of `context` the model sees at most (its end).
     public static let maxContextCharacters = 400
@@ -34,8 +39,10 @@ public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
         maxChunkCharacters: Int = 1200,
         vocabulary: [String] = [],
         prompt: CleanupPrompt = .standard,
-        context: String = ""
+        context: String = "",
+        acceptance: CleanupAcceptance? = nil
     ) {
+        self.acceptance = acceptance
         self.backend = backend
         self.cleanupGuard = cleanupGuard
         self.maxChunkCharacters = maxChunkCharacters
@@ -172,21 +179,21 @@ public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
         var reply: String?
         /// What the stage keeps: the cleaned reply, or `input` when the reply was missing or rejected.
         var output: String
-        /// Whether the reply passed the ``CleanupGuard``.
+        /// Whether the extracted reply passed the configured acceptance policy.
         var accepted: Bool
+        var prefix: String = ""
+        var separator: String = ""
     }
 
     public func process(_ text: String, locale: Locale) async throws -> String {
-        let joiner = Self.isUnspaced(locale) ? "" : " "
         let results = try await processChunks(text, locale: locale)
-        return results.isEmpty ? text : results.map(\.output).joined(separator: joiner)
+        return assemble(results, original: text)
     }
 
     /// ``process(_:locale:)``, and whether the guard rejected a chunk's reply (that chunk kept its text).
     func processGuarded(_ text: String, locale: Locale) async throws -> (text: String, rejected: Bool) {
-        let joiner = Self.isUnspaced(locale) ? "" : " "
         let results = try await processChunks(text, locale: locale)
-        let out = results.isEmpty ? text : results.map(\.output).joined(separator: joiner)
+        let out = assemble(results, original: text)
         return (out, results.contains { $0.reply != nil && !$0.accepted })
     }
 
@@ -197,17 +204,78 @@ public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
         }
         let instructions = prompt.instructions(locale, vocabulary) + (context.isEmpty ? "" : "\n" + Self.contextInstruction)
         let examples = prompt.examples(locale)
-        let joiner = Self.isUnspaced(locale) ? "" : " "
         let overhead = instructions.count + contextPrefix.count + termsLineLength(locale)
             + examples.reduce(0) { $0 + $1.user.count + $1.assistant.count }
-        let chunks = Self.chunks(of: text, maxCharacters: chunkLimit(overhead: overhead), joiner: joiner)
+        let chunks = Self.structuredChunks(text, limit: chunkLimit(overhead: overhead))
 
         var results: [ChunkResult] = []
         for chunk in chunks {
             try Task.checkCancellation()
-            results.append(try await clean(chunk, instructions: instructions, examples: examples, locale: locale))
+            var result = try await clean(chunk.text, instructions: instructions, examples: examples, locale: locale)
+            result.prefix = chunk.prefix
+            result.separator = chunk.separator
+            results.append(result)
         }
         return results
+    }
+
+    /// Exact source separators are kept separately from text presented to the model.
+    private static func structuredChunks(_ text: String, limit: Int) -> [(prefix: String, text: String, separator: String)] {
+        let limit = max(1, limit)
+        var rest = text[...]
+        var result: [(prefix: String, text: String, separator: String)] = []
+        while !rest.isEmpty {
+            let prefix = rest.prefix(while: \.isWhitespace)
+            rest = rest.dropFirst(prefix.count)
+            guard !rest.isEmpty else {
+                if !result.isEmpty { result[result.count - 1].separator += prefix }
+                break
+            }
+            var end = rest.index(rest.startIndex, offsetBy: min(limit, rest.count))
+            if end < rest.endIndex {
+                let window = rest[..<end]
+                // Prefer sentence/newline boundaries, then words, then a grapheme boundary.
+                let sentence = window.indices.last { index in
+                    let next = window.index(after: index)
+                    return window[index] == "\n" || (".!?。！？".contains(window[index]) && (next == window.endIndex || window[next].isWhitespace))
+                }
+                if let sentence { end = rest.index(after: sentence) }
+                else if let gap = window.lastIndex(where: \.isWhitespace), gap > rest.startIndex { end = gap }
+            }
+            let piece = rest[..<end]
+            let trailing = piece.reversed().prefix(while: \.isWhitespace).count
+            let content = piece.dropLast(trailing)
+            var separator = String(piece.suffix(trailing))
+            rest = rest[end...]
+            let gaps = rest.prefix(while: \.isWhitespace)
+            separator += gaps
+            rest = rest.dropFirst(gaps.count)
+            result.append((String(prefix), String(content), separator))
+        }
+        return result
+    }
+
+    private func assemble(_ results: [ChunkResult], original: String) -> String {
+        guard !results.isEmpty else { return original }
+        var text = ""
+        for (index, result) in results.enumerated() {
+            text += result.prefix + result.output
+            let next = index + 1
+            if prompt.name == "markdown", result.accepted, next < results.count, results[next].accepted,
+               !result.separator.isEmpty, !result.separator.contains("\n"),
+               CleanupMarkdown.startsWithHeading(result.output),
+               CleanupMarkdown.startsWithHeading(results[next].output),
+               !CleanupMarkdown.startsWithHeading(result.input),
+               !CleanupMarkdown.startsWithHeading(results[next].input),
+               !CleanupMarkdown.codeRegions(in: text, includeUnclosedInline: true).contains(where: { !$0.closed }) {
+                // Only independently generated heading blocks justify replacing a source space.
+                // Accepted prose/code continuations and every fallback keep the exact separator.
+                text += "\n\n"
+            } else {
+                text += result.separator
+            }
+        }
+        return text
     }
 
     private func clean(
@@ -226,7 +294,9 @@ public struct LLMCleanupStage: TranscriptPostProcessor, GuardedStage {
             return ChunkResult(input: chunk, reply: nil, output: chunk, accepted: false)
         }
         let candidate = prompt.extractText(reply)
-        let accepted = cleanupGuard.accepts(candidate, reference: chunk)
+        let accepted = acceptance == .promptLed
+            ? !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            : cleanupGuard.accepts(candidate, reference: chunk)
         return ChunkResult(input: chunk, reply: reply, output: accepted ? candidate : chunk, accepted: accepted)
     }
 

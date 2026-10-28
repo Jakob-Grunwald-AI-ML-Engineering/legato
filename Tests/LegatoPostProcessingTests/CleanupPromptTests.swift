@@ -68,6 +68,94 @@ private func probe(extract: @escaping @Sendable (String) -> String = { $0 }) -> 
 
 @Suite("CleanupPrompt")
 struct CleanupPromptTests {
+    @Test(arguments: CleanupStyle.allCases)
+    func firstCompleteOuterBlockIgnoresTrailingEmptyWrappers(style: CleanupStyle) async throws {
+        let expected = "Also, ich bleibe lieber hier und schaue noch ein bisschen auf den Regen."
+        let backend = TurnRecordingBackend { _ in "<text>\(expected)</text>\n\n<text>\n</text>" }
+        let stage = LLMCleanupStage(backend: backend, prompt: style.prompt, acceptance: .promptLed)
+        let result = try await stage.process("also ich bleibe lieber hier und schaue noch ein bisschen auf den regen", locale: de)
+        #expect(result == expected)
+    }
+
+    @Test func balancedNestedTextTagsRemainLiteralInsideTheFirstOuterBlock() {
+        let expected = "# Prompt\n\nUse `<text>first <text>inner</text></text>`.\n\n- Keep 🙂."
+        let reply = "<text>\n\(expected)\n</text>\n<text></text>"
+        #expect(CleanupPrompt.extractTaggedText(reply) == expected)
+    }
+
+    @Test(arguments: [
+        "Use `</text>` here.",
+        "Use ``a ` </text> b`` here.",
+        "Use `\\</text>` here.",
+        "Use `literal <text>` here.",
+        "```xml\n</text>\n```\nKeep this paragraph.",
+        "~~~xml\n</text>\n~~~\nKeep this paragraph.",
+        "Fence:\n   ````xml\n```\n</text>\n````\nKeep this paragraph.",
+        "```xml\n</text>\n``` trailing text\n</text>\n```\nKeep this paragraph.",
+        "Use \\</text> here.",
+    ])
+    func literalTagsInCodeAndEscapesRemainContent(expected: String) {
+        #expect(CleanupPrompt.extractTaggedText("<text>\n\(expected)\n</text><text></text>") == expected)
+    }
+
+    @Test(arguments: CleanupStyle.allCases)
+    func literalClosingTagReachesCallerWithoutTruncation(style: CleanupStyle) async throws {
+        let backend = TurnRecordingBackend { _ in "<text>Use `</text>` here.</text>" }
+        let result = try await LLMCleanupStage(backend: backend, prompt: style.prompt, acceptance: .promptLed)
+            .process("use the closing text tag here", locale: en)
+        #expect(result == "Use `</text>` here.")
+    }
+
+    @Test(arguments: ["A stray ` marker.", "A stray `` marker.", "A stray \\` marker."])
+    func unmatchedOrEscapedBackticksDoNotHideTheOuterClose(expected: String) {
+        #expect(CleanupPrompt.extractTaggedText("<text>\(expected)</text><text>later</text>") == expected)
+    }
+
+    @Test(arguments: ["```", "~~~"])
+    func closingFenceMayTouchTheOuterWrapper(fence: String) {
+        let expected = "\(fence)xml\n</text>\n\(fence)"
+        #expect(CleanupPrompt.extractTaggedText("<text>\(expected)</text><text></text>") == expected)
+    }
+
+    @Test(arguments: ["", "\n\n", " \t"])
+    func unmatchedInlineBacktickCannotPairWithALaterSibling(separator: String) {
+        let reply = "<text>A stray ` marker.</text>\(separator)<text>`later</text>"
+        #expect(CleanupPrompt.extractTaggedText(reply) == "A stray ` marker.")
+    }
+
+    @Test func boundedInlineMatchingPreservesBalancedLiteralSiblingTags() {
+        let expected = "Use `<text>one</text><text>two</text>` here."
+        #expect(CleanupPrompt.extractTaggedText("<text>\(expected)</text><text>`later</text>") == expected)
+    }
+
+    @Test func anUnclosedFenceUsesTheIncompleteBlockFallback() {
+        let expected = "```xml\n</text>\nstill code"
+        #expect(CleanupPrompt.extractTaggedText("<text>\n\(expected)") == expected)
+    }
+
+    @Test func balancedPlainNestedTagsRemainInsideTheOuterBlock() {
+        let expected = "Literal <text>first <text>inner</text></text>."
+        #expect(CleanupPrompt.extractTaggedText("<text>\(expected)</text><text></text>") == expected)
+    }
+
+    @Test func aPlainUnescapedClosingTagRemainsAWrapperDelimiter() {
+        #expect(CleanupPrompt.extractTaggedText("<text>Use </text> here.</text>") == "Use")
+        #expect(CleanupPrompt.extractTaggedText(#"<text>Use \\</text> here.</text>"#) == #"Use \\"#)
+    }
+
+    @Test func incompleteOuterBlockKeepsAllRemainingContentIncludingNestedTags() {
+        let expected = "# Prompt\n\nLiteral <text>nested</text>"
+        #expect(CleanupPrompt.extractTaggedText("<text>\n\(expected)\n") == expected)
+    }
+
+    @Test func anEmptyFirstBlockDoesNotSelectALaterSibling() {
+        #expect(CleanupPrompt.extractTaggedText("<text> \n</text><text>later sibling</text>") == "")
+    }
+
+    @Test func anUntaggedReplyRetainsLegacyWrapperRemoval() {
+        #expect(CleanupPrompt.extractTaggedText("“Hello.”") == "Hello.")
+    }
+
     @Test func theStageSendsTheExamplesAsTurnsAndNotInsideTheInstructions() async throws {
         let backend = TurnRecordingBackend { _ in "Hello there." }
         _ = try await LLMCleanupStage(backend: backend, prompt: probe()).process("hello there", locale: de)
@@ -174,4 +262,112 @@ struct CleanupPromptTests {
         ])
     }
     #endif
+}
+
+@Suite struct WritingModeStructureTests {
+    @Test(arguments: [
+        "`alpha beta gamma delta`",
+        "``alpha beta ` gamma delta``",
+        "alpha beta gamma delta",
+        "# alpha beta gamma delta",
+        "[alpha beta gamma delta](https://example.com)",
+        "**alpha beta gamma delta**",
+        "```swift\nlet value = alpha beta gamma delta\n```",
+        "~~~text\nalpha beta gamma delta\n~~~",
+        "  - alpha beta gamma delta\n    continuation words here\n",
+    ])
+    func acceptedMarkdownEchoPreservesSourceSeparators(source: String) async throws {
+        // Echo the request's payload directly: the oracle must not use the extractor under test.
+        let backend = TurnRecordingBackend { prompt in
+            String(prompt.dropFirst("<text>\n".count).dropLast("\n</text>".count))
+        }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 15,
+            prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed).process(source, locale: en)
+        #expect(result == source)
+    }
+
+    @Test func acceptedProseKeepsMultipleSpacesBetweenChunks() async throws {
+        let backend = TurnRecordingBackend { prompt in
+            String(prompt.dropFirst("<text>\n".count).dropLast("\n</text>".count)).uppercased()
+        }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 10,
+            prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed)
+            .process("alpha beta   alpha beta", locale: en)
+        #expect(result == "ALPHA BETA   ALPHA BETA")
+    }
+
+    @Test func fallbackKeepsExactSpaceSeparatorBesideGeneratedHeading() async throws {
+        let backend = TurnRecordingBackend { prompt in
+            prompt.contains("first section") ? "<text># First</text>" : ""
+        }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 15,
+            prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed)
+            .process("first section.   second section.", locale: en)
+        #expect(result == "# First   second section.")
+    }
+
+    @Test func headingLikeOutputInsideAnOpenFenceKeepsTheSourceSeparator() async throws {
+        let backend = TurnRecordingBackend { prompt in
+            prompt.contains("first section") ? "# First\n```text" : "# Second"
+        }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 15,
+            prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed)
+            .process("first section. second section.", locale: en)
+        #expect(result == "# First\n```text # Second")
+    }
+
+    @Test(arguments: [false, true])
+    func generatedHeadingJoinRespectsInlineCodeState(closed: Bool) async throws {
+        let first = closed ? "# First\n`done`" : "# First\n`"
+        let second = closed ? "# Second" : "# Second`"
+        let backend = TurnRecordingBackend { prompt in prompt.contains("first section") ? first : second }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 15,
+            prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed)
+            .process("first section. second section.", locale: en)
+        #expect(result == (closed ? "# First\n`done`\n\n# Second" : "# First\n` # Second`"))
+    }
+
+    @Test func emptyChunkFallbackPreservesParagraphsAndIndentation() async throws {
+        let source = "  # Heading\n\n- first item\n    nested item\n\nLast paragraph.  "
+        let backend = TurnRecordingBackend { _ in "" }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 18).process(source, locale: Locale(identifier: "en"))
+        #expect(result == source)
+    }
+}
+
+@Suite struct PromptLedAcceptanceTests {
+    @Test(arguments: CleanupStyle.allCases)
+    func substantialRewritesAndFormattedOutputReachCaller(style: CleanupStyle) async throws {
+        let expected = "# Next steps\n\n- Prüfe den Build.\n- Review tomorrow, vielleicht. 🙂"
+        let backend = TurnRecordingBackend { _ in "<text>\(expected)</text>" }
+        let stage = LLMCleanupStage(backend: backend, prompt: style.prompt, acceptance: .promptLed)
+        let result = try await stage.processGuarded("äh der billed und dann review morgen vielleicht", locale: Locale(identifier: "de"))
+        #expect(result.text == expected)
+        #expect(!result.rejected)
+    }
+
+    @Test(arguments: ["", "   ", "<text>\n\n</text>"])
+    func emptyExtractedOutputRetainsExactSource(reply: String) async throws {
+        let source = "  # Heading\n\n    - Item\n\nLast paragraph.  "
+        let backend = TurnRecordingBackend { _ in reply }
+        let stage = LLMCleanupStage(backend: backend, maxChunkCharacters: 16, prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed)
+        #expect(try await stage.process(source, locale: Locale(identifier: "en")) == source)
+    }
+
+    @Test func aRefusedChunkKeepsSeparatorsBesideAnAcceptedChunk() async throws {
+        let source = "first paragraph.\n\n    second paragraph.\n"
+        let backend = TurnRecordingBackend { prompt in
+            prompt.contains("first paragraph") ? "<text>First paragraph.</text>" : ""
+        }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 20, prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed)
+            .process(source, locale: Locale(identifier: "en"))
+        #expect(result == "First paragraph.\n\n    second paragraph.\n")
+    }
+
+    @Test func markdownChunksJoinAsSeparateBlocks() async throws {
+        let backend = TurnRecordingBackend { prompt in prompt.contains("first section") ? "<text># First</text>" : "<text># Second</text>" }
+        let result = try await LLMCleanupStage(backend: backend, maxChunkCharacters: 15, prompt: CleanupStyle.markdown.prompt, acceptance: .promptLed)
+            .process("first section. second section.", locale: Locale(identifier: "en"))
+        #expect(result == "# First\n\n# Second")
+    }
 }

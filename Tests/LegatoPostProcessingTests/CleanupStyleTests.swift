@@ -9,7 +9,7 @@ struct CleanupStyleTests {
 
     /// The raw values persist in the settings.
     @Test func rawValuesAreStable() {
-        #expect(CleanupStyle.allCases.map(\.rawValue) == ["verbatim", "message"])
+        #expect(CleanupStyle.allCases.map(\.rawValue) == ["verbatim", "message", "markdown"])
     }
 
     @Test func verbatimIsTodaysPromptWithTheStrictGuard() {
@@ -18,19 +18,19 @@ struct CleanupStyleTests {
         #expect(CleanupStyle.verbatim.cleanupGuard.maxDrift == CleanupGuard.defaultMaxDrift)
     }
 
-    @Test func messageAddsToTheSameBasePrompt() {
+    @Test func messageHasIndependentInstructions() {
         let base = CleanupPrompt.standard.instructions(en, ["Legato"])
         let message = CleanupStyle.message.prompt.instructions(en, ["Legato"])
-        #expect(message.hasPrefix(base))
-        #expect(message.count > base.count)
+        #expect(!message.hasPrefix(base))
+        #expect(message != base)
         for word in ["filler", "false starts", "correct", "grammar", "meaning"] {
             #expect(message.localizedCaseInsensitiveContains(word), "mentions \(word)")
         }
     }
 
-    @Test func messageKeepsTheExamplesUserMessageAndReader() {
+    @Test func messageHasIndependentExamplesAndCompatibleReader() {
         let message = CleanupStyle.message.prompt
-        #expect(message.examples(en) == CleanupPrompt.standard.examples(en))
+        #expect(message.examples(en) != CleanupPrompt.standard.examples(en))
         #expect(message.userMessage("hi", en, ["X"]) == CleanupPrompt.standard.userMessage("hi", en, ["X"]))
         #expect(message.extractText("<text>Hi.</text>") == "Hi.")
     }
@@ -119,5 +119,115 @@ struct CleanupGuardMessageFaithfulnessTests {
         #expect(CleanupGuard.message.accepts(
             "Hey, I wanted to let you know that the new Legato build is ready and you can try it on your phone tonight.",
             reference: spoken))
+    }
+}
+
+@Suite struct WritingModeContractTests {
+    @Test func persistedModesAndRefineSelectionRemainCompatible() throws {
+        #expect(CleanupStyle(rawValue: "verbatim") == .verbatim)
+        #expect(CleanupStyle(rawValue: "message") == .message)
+        #expect(CleanupStyle(rawValue: "markdown") == .markdown)
+        #expect(CleanupStyle.verbatim.title == "Voice")
+        #expect(CleanupStyle.verbatim.refineStyle == .message)
+        #expect(CleanupStyle.message.refineStyle == .message)
+        #expect(CleanupStyle.markdown.refineStyle == .markdown)
+        for mode in CleanupStyle.allCases {
+            #expect(try JSONDecoder().decode(CleanupStyle.self, from: JSONEncoder().encode(mode)) == mode)
+            #expect(!mode.explanation.isEmpty)
+        }
+    }
+
+    @Test func emojiPreferenceOnlyChangesMessage() {
+        let locale = Locale(identifier: "en")
+        for mode in [CleanupStyle.verbatim, .markdown] {
+            #expect(mode.prompt(emoji: .expressive).instructions(locale, []) == mode.prompt.instructions(locale, []))
+            #expect(mode.prompt(emoji: .expressive).examples(locale) == mode.prompt.examples(locale))
+        }
+        let off = CleanupStyle.message.prompt.instructions(locale, [])
+        #expect(off.contains("Do not add automatic emoji"))
+        #expect(off != CleanupStyle.message.prompt(emoji: .subtle).instructions(locale, []))
+        #expect(off != CleanupStyle.message.prompt(emoji: .expressive).instructions(locale, []))
+        #expect(MessageEmojiStyle.allCases.map(\.rawValue) == ["off", "subtle", "expressive"])
+    }
+
+    @Test func modesHaveIndependentWorkedExamplesAndPreserveMixedLanguage() {
+        for identifier in ["en-US", "de-DE"] {
+            let locale = Locale(identifier: identifier)
+            let voice = CleanupStyle.verbatim.prompt.examples(locale)
+            let message = CleanupStyle.message.prompt.examples(locale)
+            let markdown = CleanupStyle.markdown.prompt.examples(locale)
+            #expect(voice != message)
+            #expect(message != markdown)
+            #expect(markdown != voice)
+            for examples in [voice, message, markdown] {
+                #expect(examples.contains { $0.assistant.contains("Build") })
+                #expect(examples.contains { $0.assistant.contains("Please check") || $0.assistant.contains("Please check".lowercased()) || $0.assistant.contains("Next steps") })
+            }
+        }
+    }
+}
+
+/// Prompt construction contracts only: these do not establish real-model writing quality.
+@Suite struct CleanupStylePromptQualityTests {
+    @Test(arguments: CleanupStyle.allCases)
+    func localeRulesPreservePassageLanguagesAndNumericValues(mode: CleanupStyle) {
+        let german = mode.prompt.instructions(Locale(identifier: "de-DE"), [])
+        let english = mode.prompt.instructions(Locale(identifier: "en-US"), [])
+        #expect(german != english)
+        #expect(german.contains("Nie übersetzen"))
+        #expect(english.contains("Never translate"))
+        for instructions in [german, english] {
+            #expect(instructions.contains("24-hour"))
+            #expect(instructions.contains("numeric values"))
+            #expect(instructions.contains("exact dictated emoji type"))
+        }
+    }
+
+    @Test(arguments: ["de-DE", "en-US"])
+    func emojiExamplesReflectPreferenceWithoutChangingDictatedTypes(identifier: String) {
+        let locale = Locale(identifier: identifier)
+        let german = identifier == "de-DE"
+        let serious = german
+            ? "Die Untersuchung ist verschoben. Du musst heute nichts klären."
+            : "The appointment was postponed. You do not need to decide today."
+        let dictated = german ? "Gute Nacht 🌙" : "Welcome home 🌻"
+        for (emoji, count) in [(MessageEmojiStyle.off, 0), (.subtle, 1), (.expressive, 2)] {
+            let examples = CleanupStyle.message.prompt(emoji: emoji).examples(locale)
+            let positive = examples.last?.assistant ?? ""
+            #expect(positive.filter { "🙌👏🙂".contains($0) }.count == count)
+            #expect(examples.contains { $0.assistant == "<text>\(serious)</text>" })
+            #expect(examples.contains { $0.assistant == "<text>\(dictated)</text>" })
+            #expect(positive.contains("\n\n"))
+        }
+    }
+
+    @Test func examplesEndInTheLocaleAndShowLayoutRatherThanCueHeadings() {
+        let de = Locale(identifier: "de-DE"), en = Locale(identifier: "en-US")
+        #expect(CleanupStyle.message.prompt.examples(de).last?.assistant.hasPrefix("<text>Danke") == true)
+        #expect(CleanupStyle.message.prompt.examples(en).last?.assistant.hasPrefix("<text>The rehearsal") == true)
+        #expect(CleanupStyle.markdown.prompt.examples(de).last?.assistant.hasPrefix("<text># Werkbank") == true)
+        #expect(CleanupStyle.markdown.prompt.examples(en).last?.assistant.hasPrefix("<text># Packing") == true)
+        for locale in [de, en] {
+            let markdown = CleanupStyle.markdown.prompt
+            #expect(markdown.instructions(locale, []).contains("layout cues"))
+            #expect(markdown.instructions(locale, []).contains("never create headings named New Paragraph/List"))
+            #expect(markdown.examples(locale).contains { $0.assistant.contains("\n\n- ") || $0.assistant.contains("\n\n1. ") })
+            #expect(CleanupStyle.message.prompt.instructions(locale, []).contains("Preserve existing paragraphs"))
+        }
+    }
+
+    @Test func staticPromptBudgetsRemainCompact() {
+        for identifier in ["en-US", "de-DE"] {
+            let locale = Locale(identifier: identifier)
+            for mode in CleanupStyle.allCases {
+                for emoji in (mode == .message ? MessageEmojiStyle.allCases : [.off]) {
+                    let prompt = mode.prompt(emoji: emoji)
+                    let count = prompt.instructions(locale, []).count + prompt.examples(locale).reduce(0) { $0 + $1.user.count + $1.assistant.count }
+                    let cap = mode == .verbatim ? 1400 : mode == .message ? 1800 : 1650
+                    print("PROMPT_BUDGET \(identifier) \(mode.rawValue) \(emoji.rawValue) \(count) characters")
+                    #expect(count <= cap)
+                }
+            }
+        }
     }
 }

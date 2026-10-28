@@ -71,13 +71,13 @@ public struct CleanupRegistry: Sendable {
 
     public func pipeline(style: CleanupStyle, itn: Bool, preference: BackendPreference,
                          timeout: Duration, context: String = "", vocabulary: [String] = [],
-                         resolution frozen: Resolution? = nil) async -> (pipeline: PostProcessingPipeline, resolution: Resolution) {
+                         resolution frozen: Resolution? = nil, emoji: MessageEmojiStyle = .off) async -> (pipeline: PostProcessingPipeline, resolution: Resolution) {
         let resolution: Resolution
         if let frozen { resolution = frozen } else { resolution = await resolve(preference: preference) }
-        var stages: [any TranscriptPostProcessor] = itn ? [ITNStage()] : []
+        var stages: [any TranscriptPostProcessor] = itn && style == .verbatim ? [ITNStage()] : []
         if let backend = resolution.backend {
             stages.append(LLMCleanupStage(backend: backend, cleanupGuard: style == .verbatim ? cleanupGuard : style.cleanupGuard,
-                                          vocabulary: vocabulary, prompt: style.prompt, context: context))
+                                          vocabulary: vocabulary, prompt: style.prompt(emoji: emoji), context: context, acceptance: .promptLed))
         }
         return (PostProcessingPipeline(stages: stages, timeout: timeout), resolution)
     }

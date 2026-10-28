@@ -381,18 +381,24 @@ private struct SlowFoundationModels: LLMBackend {
         #expect(recorder.starts == 1)
     }
 
-    @Test func aPassWhoseReplyTheGuardRejectsSaysSo() async throws {
+    @Test func aContextualCorrectionIsDeliveredWithoutLexicalVeto() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         store.enabled = true
         store.delivery = .live
+        let source = "the billed compiled no wait the build still fails"
+        let corrected = "The build still fails."
+        // Context repairs the ASR word and the speaker's later correction determines final intent.
+        // This is substantial enough that the historical lexical guard would veto it.
+        #expect(!CleanupGuard().accepts(corrected, reference: source))
         let p = CleanupProcessor(
             registry: CleanupRegistry(
-                models: emptyManager(), foundationModels: AnsweringFoundationModels(reply: "The capital of France is Paris, a city on the Seine with many museums.")),
+                models: emptyManager(), foundationModels: AnsweringFoundationModels(reply: corrected)),
             settings: store, report: { _ in })
         let out = try await p.cleanLivePass(
-            "what is the capital of france", context: "", locale: Locale(identifier: "en_US"), atStop: false)
-        #expect(out.text == "what is the capital of france", "the raw text is kept")
-        #expect(out.guardRejected)
+            source, context: "", locale: Locale(identifier: "en_US"), atStop: false)
+        #expect(out.text == corrected)
+        #expect(!out.guardRejected)
+        #expect(!out.timedOut)
     }
 
     @Test func withCleanupOffAPassChangesNothing() async throws {
@@ -441,5 +447,117 @@ private struct AnsweringFoundationModels: LLMBackend {
         let result = try await processor.process("hello world", locale: Locale(identifier: "en"))
         #expect(result == "hello world")
         #expect(recorder.reports.last?.outcome == "completed")
+    }
+}
+
+@Suite struct WritingModeRuntimeTests {
+    private struct RewritingBackend: LLMBackend {
+        let id = "writing"
+        let maxPromptCharacters: Int? = nil
+        var availability: LLMAvailability { .available }
+        func respond(instructions: String, prompt: String) async throws -> String { "<text>Thursday.</text>" }
+    }
+
+    @Test(arguments: CleanupStyle.allCases)
+    func explicitCorrectionIsDeliveredWithoutLexicalVeto(style: CleanupStyle) async throws {
+        let registry = CleanupRegistry(models: emptyManager(), foundationModels: RewritingBackend())
+        let (pipeline, _) = await registry.pipeline(style: style, itn: false, preference: .foundationModels, timeout: .seconds(4))
+        #expect(await pipeline.process("Friday no wait Thursday", locale: Locale(identifier: "en")) == "Thursday.")
+    }
+
+    @Test func liveRunFreezesStyleAndEnabledUntilNextRun() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true
+        store.style = .message
+        let recorder = Recorder()
+        let processor = CleanupProcessor(registry: CleanupRegistry(models: emptyManager(), foundationModels: RewritingBackend()), settings: store, report: { recorder.record($0) })
+        try await processor.runStarts()
+        store.style = .verbatim
+        store.enabled = false
+        let first = try await processor.cleanLivePass("Friday no wait Thursday", context: "", locale: Locale(identifier: "en"), atStop: false)
+        #expect(first.text == "Thursday.")
+        #expect(recorder.reports.last?.style == .message)
+        await processor.runEnds()
+        try await processor.runStarts()
+        #expect(try await processor.process("raw", locale: Locale(identifier: "en")) == "raw")
+        await processor.runEnds()
+    }
+}
+
+@Suite struct WritingModePreferenceTests {
+    @Test func emojiDefaultsOffAndPersistsWithMarkdownAndLegacyModes() {
+        let defaults = freshDefaults()
+        let store = CleanupSettingsStore(defaults: defaults)
+        #expect(store.emoji == .off)
+        #expect(store.options.emoji == .off)
+        for mode in CleanupStyle.allCases {
+            store.style = mode
+            for emoji in MessageEmojiStyle.allCases {
+                store.emoji = emoji
+                let reopened = CleanupSettingsStore(defaults: defaults)
+                #expect(reopened.style == mode)
+                #expect(reopened.options.emoji == emoji)
+            }
+        }
+    }
+
+    @Test(arguments: CleanupStyle.allCases)
+    func itnOnlyRunsForVoice(style: CleanupStyle) async {
+        let registry = CleanupRegistry(models: emptyManager(), foundationModels: nil)
+        let (pipeline, _) = await registry.pipeline(style: style, itn: true, preference: .foundationModels, timeout: .seconds(4))
+        #expect(pipeline.stages.map(\.id) == (style == .verbatim ? ["itn"] : []))
+    }
+
+    private final class PromptBackend: LLMBackend {
+        let id = "writing-options"
+        let maxPromptCharacters: Int? = nil
+        let instructions = Mutex<[String]>([])
+        var sent: [String] { instructions.withLock { $0 } }
+        var availability: LLMAvailability { .available }
+        func respond(instructions: String, prompt: String) async throws -> String {
+            self.instructions.withLock { $0.append(instructions) }
+            return "<text>Thanks! 🙂</text>"
+        }
+    }
+
+    @Test func leaseAndAllLivePassesUseSameCapturedOptionsUntilNextRun() async throws {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = true; store.delivery = .live; store.style = .message; store.emoji = .expressive
+        let backend = PromptBackend()
+        let registry = CleanupRegistry(models: emptyManager(), foundationModels: backend)
+        let leased = Mutex<[CleanupOptions]>([])
+        let processor = CleanupProcessor(registry: registry, settings: store, acquireRunWithOptions: { options in
+            leased.withLock { $0.append(options) }
+            // A settings change during admission must not leak into this run.
+            store.style = .markdown; store.emoji = .off; store.itn = true; store.timeoutSeconds = 9
+            return CleanupRunLease(resolution: await registry.resolve(preference: options.backend.preference), release: {})
+        }, report: { _ in })
+        try await processor.runStarts()
+        for atStop in [false, true] {
+            _ = try await processor.cleanLivePass("thanks", context: "", locale: Locale(identifier: "en"), atStop: atStop)
+        }
+        #expect(processor.liveStopTimeLimit == .seconds(4))
+        #expect(leased.withLock { $0.first?.style } == .message)
+        #expect(leased.withLock { $0.first?.emoji } == .expressive)
+        #expect(backend.sent.count == 2)
+        #expect(backend.sent.allSatisfy { $0.contains("more frequent, expressive emoji") })
+        await processor.runEnds()
+        try await processor.runStarts()
+        _ = try await processor.process("thanks", locale: Locale(identifier: "en"))
+        #expect(leased.withLock { $0.last?.style } == .markdown)
+        #expect(backend.sent.last?.contains("Compose the dictated content") == true)
+        await processor.runEnds()
+    }
+
+    @Test func explicitRefineUsesCapturedOptionsEvenWithCleanupDisabled() async {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.enabled = false; store.style = .message; store.emoji = .expressive
+        let captured = store.options
+        store.style = .markdown; store.emoji = .off
+        let backend = PromptBackend()
+        let result = await CleanupProcessor.run("thanks", locale: Locale(identifier: "en"), style: captured.style.refineStyle, refine: true,
+            timeout: .seconds(4), settings: store, registry: CleanupRegistry(models: emptyManager(), foundationModels: backend), report: { _ in }, options: captured)
+        #expect(result == "Thanks! 🙂")
+        #expect(backend.sent.first?.contains("more frequent, expressive emoji") == true)
     }
 }
