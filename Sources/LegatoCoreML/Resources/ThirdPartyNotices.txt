@@ -225,3 +225,15 @@ Converted by ANEMLL. Converted-model metadata declares MIT and expressly notes t
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+
+Qwen3-0.6B Core ML model
+Original model: Qwen/Qwen3-0.6B (Apache-2.0; full Apache license reproduced above).
+Converted checkpoint: https://huggingface.co/stemwats/anemll-Qwen3-0.6B-ctx4096-lut8_v0.3.4/tree/1eb386120ff45628b308e9027cb1567e185b431d
+The community checkpoint declares ANEMLL 0.3.4 and Core ML Tools 8.3.0. Its original model revision and converter source commit are undeclared. This does not use or endorse the historical failed local LUT6 conversion. Checkpoint integrity does not establish conversion parity or cleanup quality.
+
+Gemma 3 1B Core ML model
+Original model: google/gemma-3-1b-it, subject to Google's Gemma Terms of Use regardless of the converter model card's MIT label.
+Converted checkpoint: https://huggingface.co/anemll/anemll-google-gemma-3-1b-it-ctx4096_0.3.5/tree/a1b00f628f348c8ff55c9fe088e5db97535fd567
+The checkpoint metadata records original source revision dcc83ea841ab6100d6b47a070329e1ba4cf78752. Legato downloads the pinned converted files unchanged; it does not claim to have produced this conversion.
+GemmaNotice.txt supplies Google's required notice. GemmaTermsOfUse.txt and GemmaProhibitedUsePolicy.txt contain copies of the official terms and referenced policy retrieved from ai.google.dev on 2026-10-28. Distribution must also satisfy the agreement and user-notice requirements in Section 3.1 of those terms.

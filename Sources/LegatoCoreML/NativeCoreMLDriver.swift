@@ -6,18 +6,23 @@ import LegatoCore
 /// Native objects are confined to CoreMLBackend's lease, including cancellation and preparation.
 final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
     let contextLength: Int
+    private let promptFamily: CoreMLPromptFamily
     private let tokenizer: LegatoANEMLL.Tokenizer
     private let manager: InferenceManager
     private let cancellation: CoreMLCancellation
-    private init(config: YAMLConfig, tokenizer: LegatoANEMLL.Tokenizer, manager: InferenceManager, cancellation: CoreMLCancellation) {
-        self.contextLength = config.contextLength; self.tokenizer = tokenizer; self.manager = manager; self.cancellation = cancellation
+    private init(config: YAMLConfig, promptFamily: CoreMLPromptFamily, tokenizer: LegatoANEMLL.Tokenizer, manager: InferenceManager, cancellation: CoreMLCancellation) {
+        self.promptFamily = promptFamily; self.contextLength = config.contextLength; self.tokenizer = tokenizer; self.manager = manager; self.cancellation = cancellation
     }
-    static func load(folder: URL, cancellation: CoreMLCancellation) async throws -> NativeCoreMLDriver {
+    static func load(spec: CoreMLModelSpec, folder: URL, cancellation: CoreMLCancellation) async throws -> NativeCoreMLDriver {
         let config = try YAMLConfig.load(from: folder.appending(path: "meta.yaml").path)
-        guard config.contextLength == 2_048, config.batchSize == 64, config.numChunks == 2,
-              config.modelPrefix == "qwen", config.splitLMHead == 16 else { throw CoreMLInstallError.invalidManifest }
+        try spec.runtimeConfiguration.validate(.init(
+            version: config.configVersion, contextLength: config.contextLength, batchSize: config.batchSize,
+            numChunks: config.numChunks, modelPrefix: config.modelPrefix, splitLMHead: config.splitLMHead,
+            argmaxInModel: config.argmaxInModel, slidingWindow: config.slidingWindow,
+            updateMaskPrefill: config.updateMaskPrefill, prefillDynamicSlice: config.prefillDynamicSlice,
+            vocabSize: config.vocabSize, lmHeadChunkSizes: config.lmHeadChunkSizes))
         try cancellation.check()
-        let tokenizer = try await LegatoANEMLL.Tokenizer(modelPath: folder.path, template: "qwen3", debugLevel: 0)
+        let tokenizer = try await LegatoANEMLL.Tokenizer(modelPath: folder.path, template: spec.promptFamily.rawValue, debugLevel: 0)
         try cancellation.check()
         let loader = ModelLoader()
         let models = try await withTaskCancellationHandler {
@@ -32,14 +37,14 @@ final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
             modelPrefix: config.modelPrefix, vocabSize: config.vocabSize, lmHeadChunkSizes: config.lmHeadChunkSizes)
         manager.setSamplingConfig(.greedy)
         manager.cancellationCheck = { try cancellation.check() }
-        return .init(config: config, tokenizer: tokenizer, manager: manager, cancellation: cancellation)
+        return .init(config: config, promptFamily: spec.promptFamily, tokenizer: tokenizer, manager: manager, cancellation: cancellation)
     }
     func tokens(instructions: String, examples: [LLMExample], prompt: String) async throws -> [Int] {
         try cancellation.check()
-        let rendered = CoreMLPrompt.render(instructions: instructions, examples: examples, prompt: prompt)
+        let rendered = CoreMLPrompt.render(instructions: instructions, examples: examples, prompt: prompt, family: promptFamily)
         let tokens = tokenizer.rawTokens(rendered)
         let canonical = try tokenizer.canonicalChatTokens(messages: CoreMLPrompt.messages(instructions: instructions, examples: examples, prompt: prompt), thinking: false)
-        guard tokens == canonical else { throw LLMError.failed("The installed checkpoint chat template differs from the supported Qwen3 format.") }
+        guard tokens == canonical else { throw LLMError.failed("The installed checkpoint chat template differs from the supported \(promptFamily.rawValue) format.") }
         return tokens
     }
     func generate(tokens: [Int], outputLimit: Int) async throws -> CoreMLGeneration {
