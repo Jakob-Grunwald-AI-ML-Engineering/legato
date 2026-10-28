@@ -30,6 +30,7 @@ private final class FakeMic: ResumableAudioSource {
     private let resumeSink: AsyncStream<Void>.Continuation
     let resumptions: AsyncStream<Void>
     var stopCount: Int { stops.withLock { $0 } }
+    var hasStarted: Bool { continuation.withLock { $0 != nil } }
 
     init(voiceProcessing: Bool, device: UInt32? = nil, failStart: Bool = false, refuseDevice: Bool = false, endsImmediately: Bool = false, startDelay: Duration? = nil, startGate: StartGate? = nil) {
         self.voiceProcessing = voiceProcessing
@@ -75,17 +76,19 @@ private final class Factory: Sendable {
     private let plan: Mutex<[(vp: Bool, fail: Bool)]>
     private let refused: Set<UInt32>
     private let immediateEnds: Mutex<Int>
+    private let startDelay: Duration?
     let made = Mutex<[FakeMic]>([])
-    init(_ plan: [(vp: Bool, fail: Bool)], refused: Set<UInt32> = [], immediateEnds: Int = 0) {
+    init(_ plan: [(vp: Bool, fail: Bool)], refused: Set<UInt32> = [], immediateEnds: Int = 0, startDelay: Duration? = nil) {
         self.plan = Mutex(plan)
         self.refused = refused
         self.immediateEnds = Mutex(immediateEnds)
+        self.startDelay = startDelay
     }
     func make(_ vp: Bool, _ device: UInt32? = nil) -> any AudioSource {
         let next = plan.withLock { $0.isEmpty ? (vp: vp, fail: false) : $0.removeFirst() }
         let refuse = device.map { refused.contains($0) } ?? false
         let end = immediateEnds.withLock { count in defer { count = max(0, count - 1) }; return count > 0 }
-        let mic = FakeMic(voiceProcessing: vp, device: device, failStart: next.fail, refuseDevice: refuse, endsImmediately: end)
+        let mic = FakeMic(voiceProcessing: vp, device: device, failStart: next.fail, refuseDevice: refuse, endsImmediately: end, startDelay: startDelay)
         made.withLock { $0.append(mic) }
         return mic
     }
@@ -358,49 +361,51 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
     @Test func anUnexpectedEndRecoversTheSameExplicitInputWithoutVoiceProcessing() async throws {
         let factory = Factory([])
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: true, device: builtIn, strictDevice: true, makeMic: { factory.make($0, $1) })
+            voiceProcessing: true, device: builtIn, strictDevice: true, clock: { 0 }, makeMic: { factory.make($0, $1) })
         let stream = try await source.start(format: format)
         let (got, reader) = collect(stream)
         factory.mics[0].endUnexpectedly()
-        try #require(await eventually(timeout: .seconds(1)) { factory.mics.count == 2 })
+        try #require(await eventually { factory.mics.count == 2 })
         #expect(factory.mics.map(\.device) == [builtIn, builtIn])
         #expect(factory.mics.map(\.voiceProcessing) == [true, false])
         factory.mics[1].push(0.4)
-        #expect(await eventually(timeout: .seconds(1)) { got.values == [0.4] })
+        #expect(await eventually { got.values == [0.4] })
         await source.stop()
         await reader.value
     }
 
     @Test func immediatelyEndingSourcesExhaustRecoveryAndEndThePublicStream() async throws {
-        let factory = Factory([], immediateEnds: 10)
+        let factory = Factory([], immediateEnds: 10, startDelay: .milliseconds(1200))
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: false, device: builtIn, strictDevice: true, makeMic: { factory.make($0, $1) })
+            voiceProcessing: false, device: builtIn, strictDevice: true, clock: { 0 }, makeMic: { factory.make($0, $1) })
         let notices = Tally(source.notices)
         let stream = try await source.start(format: format)
         let ended = Got()
         let reader = Task { for await _ in stream {}; ended.append(1) }
-        #expect(await eventually(timeout: .seconds(1)) { ended.values == [1] })
+        #expect(await eventually { ended.values == [1] })
         #expect(factory.mics.map(\.device) == [builtIn, builtIn, builtIn])
-        #expect(await eventually(timeout: .seconds(1)) { notices.values.contains(VoiceProcessingFallbackMic.restartFailedNotice) })
+        #expect(await eventually { notices.values.contains(VoiceProcessingFallbackMic.restartFailedNotice) })
         await source.stop()
         await reader.value
     }
 
     @Test func watchdogRecoveryDoesNotInheritItsCancelledWatchdogTask() async throws {
         let made = Mutex<[FakeMic]>([])
+        let clock = Mutex(0.0)
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: false, device: builtIn, strictDevice: true, stallTimeout: 0.05,
-            makeMic: { vp, device in
-                let mic = FakeMic(voiceProcessing: vp, device: device, startDelay: .milliseconds(10))
+            voiceProcessing: false, device: builtIn, strictDevice: true,
+            clock: { clock.withLock { $0 } }, makeMic: { vp, device in
+                // Recovery must tolerate a cancellable start slower than the old assertion deadline.
+                let mic = FakeMic(voiceProcessing: vp, device: device, startDelay: .milliseconds(1200))
                 made.withLock { $0.append(mic) }
                 return mic
             })
         let stream = try await source.start(format: format)
         let (got, reader) = collect(stream)
-        try #require(await eventually(timeout: .seconds(1)) { made.withLock { $0.count == 2 } })
-        try await Task.sleep(for: .milliseconds(30))
+        clock.withLock { $0 = 4 } // Past the production three-second stall threshold, then hold time still.
+        try #require(await eventually { made.withLock { $0.count == 2 && $0[1].hasStarted } })
         made.withLock { $0[1] }.push(0.4)
-        #expect(await eventually(timeout: .seconds(1)) { got.values == [0.4] })
+        #expect(await eventually { got.values == [0.4] })
         await source.stop()
         await reader.value
     }
@@ -409,7 +414,7 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
         let gate = StartGate()
         let made = Mutex<[FakeMic]>([])
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: false, device: builtIn, strictDevice: true,
+            voiceProcessing: false, device: builtIn, strictDevice: true, clock: { 0 },
             makeMic: { vp, device in
                 made.withLock { mics in
                     let mic = FakeMic(voiceProcessing: vp, device: device, startGate: mics.count == 1 ? gate : nil)
@@ -426,18 +431,20 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
         await gate.fail()
         await switching.value
         made.withLock { $0[2] }.push(0.5)
-        #expect(await eventually(timeout: .seconds(1)) { got.values == [0.5] })
+        #expect(await eventually { got.values == [0.5] })
         await source.stop()
         await reader.value
     }
 
     @Test func aStalledOpenStreamRecoversWithoutUsingSilenceAsAFailure() async throws {
-        let factory = Factory([])
+        let factory = Factory([], startDelay: .milliseconds(1200))
+        let clock = Mutex(0.0)
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: false, device: builtIn, strictDevice: true, stallTimeout: 0.05,
-            makeMic: { factory.make($0, $1) })
+            voiceProcessing: false, device: builtIn, strictDevice: true,
+            clock: { clock.withLock { $0 } }, makeMic: { factory.make($0, $1) })
         _ = try await source.start(format: format)
-        #expect(await eventually(timeout: .seconds(1)) { factory.mics.count == 2 })
+        clock.withLock { $0 = 4 }
+        #expect(await eventually { factory.mics.count == 2 && factory.mics[1].hasStarted })
         #expect(factory.mics.map(\.device) == [builtIn, builtIn])
         await source.stop()
     }
@@ -452,7 +459,7 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
         let (got, reader) = collect(stream)
         for count in 1...20 {
             factory.mics[0].push(0)
-            try #require(await eventually(timeout: .seconds(1)) { got.values.count == count })
+            try #require(await eventually { got.values.count == count })
             clock.withLock { $0 += 0.05 }
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -462,16 +469,16 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
     }
 
     @Test func aFailedRecoveryEndsThePublicStreamWithANotice() async throws {
-        let factory = Factory([(vp: false, fail: false), (vp: false, fail: true)])
+        let factory = Factory([(vp: false, fail: false), (vp: false, fail: true)], startDelay: .milliseconds(1200))
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: false, device: builtIn, strictDevice: true, makeMic: { factory.make($0, $1) })
+            voiceProcessing: false, device: builtIn, strictDevice: true, clock: { 0 }, makeMic: { factory.make($0, $1) })
         let notices = Tally(source.notices)
         let stream = try await source.start(format: format)
         let ended = Got()
         let reader = Task { for await _ in stream {}; ended.append(1) }
         factory.mics[0].endUnexpectedly()
-        #expect(await eventually(timeout: .seconds(1)) { ended.values == [1] })
-        #expect(await eventually(timeout: .seconds(1)) { notices.values.contains(VoiceProcessingFallbackMic.restartFailedNotice) })
+        #expect(await eventually { ended.values == [1] })
+        #expect(await eventually { notices.values.contains(VoiceProcessingFallbackMic.restartFailedNotice) })
         #expect(factory.mics.map(\.device) == [builtIn, builtIn])
         await source.stop()
         await reader.value
@@ -480,7 +487,7 @@ private func eventually(timeout: Duration = .seconds(30), _ condition: @Sendable
     @Test func anIntentionalSwitchDoesNotStartStaleRecovery() async throws {
         let factory = Factory([])
         let source = VoiceProcessingFallbackMic(
-            voiceProcessing: false, device: airPods, makeMic: { factory.make($0, $1) })
+            voiceProcessing: false, device: airPods, clock: { 0 }, makeMic: { factory.make($0, $1) })
         _ = try await source.start(format: format)
         await source.follow(device: builtIn)
         try await Task.sleep(for: .milliseconds(50))
