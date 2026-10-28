@@ -20,6 +20,10 @@ private actor WarmResource: ModelResourceLifecycle {
     func releaseWarmResources() { released += 1 }
 }
 private enum WarmError: Error { case failed }
+private actor WarmWaiterCompletion {
+    var cancelled: Bool?
+    func finish(cancelled: Bool) { self.cancelled = cancelled }
+}
 private actor WarmGate {
     private var open = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -108,6 +112,38 @@ struct SelectedModelWarmupTests {
         #expect(await new.prepared == 1)
         #expect(!(await owner.isReady(for: ["old"])))
         #expect(await owner.isReady(for: ["new"]))
+    }
+
+    @Test func cancelledWaiterReturnsBeforeSharedNativePreparationCompletes() async throws {
+        let owner = SelectedModelWarmup(); let resource = WarmResource(); let gate = WarmGate()
+        let completion = WarmWaiterCompletion()
+        await resource.block(on: gate)
+        let selected = [SelectedModelWarmup.Resource(key: "speech", lifecycle: resource)]
+        let cancelled = Task {
+            do {
+                try await owner.prepare(selected, inBackground: false)
+                await completion.finish(cancelled: false)
+            } catch is CancellationError {
+                await completion.finish(cancelled: true)
+            } catch {
+                Issue.record("Wrong failure: \(error)")
+                await completion.finish(cancelled: false)
+            }
+        }
+        await waitForWarm { await resource.prepared == 1 }
+        cancelled.cancel()
+        await waitForWarm { await completion.cancelled != nil }
+        #expect(await completion.cancelled == true)
+        #expect(await resource.prepared == 1)
+        #expect(await resource.released == 0)
+        #expect(!(await owner.isReady(for: ["speech"])))
+        let joined = Task { try await owner.prepare(selected, inBackground: true) }
+        await gate.release()
+        await cancelled.value
+        try await joined.value
+        #expect(await owner.isReady(for: ["speech"]))
+        #expect(await resource.prepared == 1)
+        #expect(await resource.released == 0)
     }
 
     @Test func cancelledWaiterDoesNotEraseAnotherWaitersSuccessfulReadiness() async throws {

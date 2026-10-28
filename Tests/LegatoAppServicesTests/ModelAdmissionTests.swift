@@ -4,9 +4,11 @@ import Testing
 
 @MainActor private final class AdmissionGate {
     var entered = false
+    var entries = 0
     private var continuation: CheckedContinuation<Void, Never>?
     func wait() async {
         entered = true
+        entries += 1
         await withCheckedContinuation { continuation = $0 }
     }
     func release() { continuation?.resume(); continuation = nil }
@@ -34,6 +36,48 @@ import Testing
         gate.release()
         _ = await start.result
         #expect(starts == 0)
+    }
+    @Test func cancellingWarmupReturnsAdmissionBeforeNativePreparationCompletesAndAllowsRetry() async {
+        let admission = ModelAdmission(); let owner = SelectedModelWarmup(); let gate = AdmissionGate()
+        let selected = [SelectedModelWarmup.Resource(key: "speech", prewarm: { await gate.wait() }, release: {})]
+        var firstFinished = false; var firstCancelled = false; var firstStarts = 0
+        let first = Task {
+            do {
+                try await admission.admit(isIdle: { true }, prepare: {
+                    try await owner.prepare(selected, inBackground: false)
+                }) { firstStarts += 1 }
+            } catch is CancellationError { firstCancelled = true }
+            catch { Issue.record("Wrong first admission failure: \(error)") }
+            firstFinished = true
+        }
+        await waitForAdmission { gate.entered }
+        admission.cancel()
+        await waitForAdmission { firstFinished }
+        #expect(firstCancelled)
+        #expect(!admission.isPreparing)
+        #expect(firstStarts == 0)
+        #expect(gate.entries == 1)
+        var secondPreparing = false; var secondFinished = false; var secondStarts = 0
+        let second = Task {
+            do {
+                try await admission.admit(isIdle: { true }, prepare: {
+                    secondPreparing = true
+                    try await owner.prepare(selected, inBackground: true)
+                }) { secondStarts += 1 }
+            } catch { Issue.record("Retry admission failed: \(error)") }
+            secondFinished = true
+        }
+        await waitForAdmission { secondPreparing || secondFinished }
+        #expect(secondPreparing)
+        #expect(admission.isPreparing)
+        #expect(secondStarts == 0)
+        gate.release()
+        await first.value; await second.value
+        #expect(firstStarts == 0)
+        #expect(secondStarts == 1)
+        #expect(gate.entries == 1)
+        #expect(!admission.isPreparing)
+        #expect(await owner.isReady(for: ["speech"]))
     }
     @Test func meetingOwnershipIsRecheckedAfterPreparation() async {
         let admission = ModelAdmission(); let gate = AdmissionGate()

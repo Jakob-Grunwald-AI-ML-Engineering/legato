@@ -80,8 +80,11 @@ public actor SelectedModelWarmup {
             operation = Pending(generation: admitted, keys: keys, task: task)
             pending = operation
         }
+        // Waiting is cancellable even when native preparation is not. A cancelled waiter must
+        // leave the shared load and its readiness bookkeeping available to the next admission.
+        let result = try await Self.waitForPreparation(operation.task)
         do {
-            try await operation.task.value
+            try result.get()
             guard generation == operation.generation else { throw PreparationError.superseded }
             // Every waiter may publish the same completed generation; none may publish an older one.
             pending = nil
@@ -93,6 +96,18 @@ public actor SelectedModelWarmup {
         // Cancellation belongs to this waiter, not the shared resource load that completed. In
         // particular it must not clear readiness another waiter has already observed.
         try Task.checkCancellation()
+    }
+
+    private nonisolated static func waitForPreparation(_ task: Task<Void, any Error>) async throws -> Result<Void, any Error> {
+        let (stream, continuation) = AsyncStream<Result<Void, any Error>>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        Task {
+            continuation.yield(await task.result)
+            continuation.finish()
+        }
+        var iterator = stream.makeAsyncIterator()
+        guard let result = await iterator.next() else { throw CancellationError() }
+        try Task.checkCancellation()
+        return result
     }
 
     /// Revokes readiness before suspension, then joins preparation before relinquishing resources.

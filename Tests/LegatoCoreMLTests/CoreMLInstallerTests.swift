@@ -40,7 +40,7 @@ struct CoreMLInstallerTests {
     @Test(arguments: ["../escape", "/absolute", "a/../../escape", "a//b", "a/./b"])
     func rejectsTraversalAndAbsolutePaths(_ path: String) {
         let manifest = CoreMLManifest(repository: spec.repo, revision: spec.revision, files: [.init(path: path, bytes: 7, sha256: fixtureHash)])
-        #expect(throws: (any Error).self) { try manifest.validate(for: spec) }
+        #expect(throws: CoreMLInstallError.invalidPath(path)) { try manifest.validate(for: spec) }
     }
     @Test func rejectsMissingChunkAndWrongRevision() {
         let fixture = fixtureManifest()
