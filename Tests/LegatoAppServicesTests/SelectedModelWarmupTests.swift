@@ -8,11 +8,13 @@ private actor WarmResource: ModelResourceLifecycle {
     var released = 0
     var failure = false
     var gate: WarmGate?
+    let preparationEntered = WarmSignal()
     var activeRunText = "dictation continues"
     func block(on gate: WarmGate) { self.gate = gate }
     func failOnce() { failure = true }
     func prewarmResources() async throws {
         prepared += 1
+        await preparationEntered.signal()
         if let gate { await gate.wait() }
         try Task.checkCancellation()
         if failure { failure = false; throw WarmError.failed }
@@ -22,7 +24,28 @@ private actor WarmResource: ModelResourceLifecycle {
 private enum WarmError: Error { case failed }
 private actor WarmWaiterCompletion {
     var cancelled: Bool?
-    func finish(cancelled: Bool) { self.cancelled = cancelled }
+    let finished = WarmSignal()
+    func finish(cancelled: Bool) async {
+        self.cancelled = cancelled
+        await finished.signal()
+    }
+}
+// Latched events avoid scheduler-sensitive polling; cancellation lets the suite watchdog unwind.
+private actor WarmSignal {
+    private var signalled = false
+    private var waiters: [AsyncStream<Void>.Continuation] = []
+    func wait() async {
+        if signalled { return }
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        waiters.append(continuation)
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+    func signal() {
+        signalled = true
+        let waiting = waiters; waiters = []
+        for waiter in waiting { waiter.yield(()); waiter.finish() }
+    }
 }
 private actor WarmGate {
     private var open = false
@@ -37,15 +60,7 @@ private actor WarmGate {
         for waiter in waiting { waiter.resume() }
     }
 }
-private func waitForWarm(_ condition: () async -> Bool) async {
-    let deadline = ContinuousClock.now + .seconds(2)
-    while ContinuousClock.now < deadline {
-        if await condition() { return }
-        await Task.yield()
-    }
-    Issue.record("Timed out waiting for model lifecycle operation")
-}
-
+@Suite(.timeLimit(.minutes(1)))
 struct SelectedModelWarmupTests {
     @Test func repeatedPreparationRetainsSelectedResourcesWithoutReinitializingActiveRun() async throws {
         let owner = SelectedModelWarmup(); let resource = WarmResource()
@@ -71,7 +86,7 @@ struct SelectedModelWarmupTests {
         let gate = WarmGate(); await cleanup.block(on: gate)
         let resources = [SelectedModelWarmup.Resource(key: "speech", lifecycle: speech), .init(key: "cleanup", lifecycle: cleanup)]
         let first = Task { try await owner.prepare(resources, inBackground: false) }
-        await waitForWarm { await cleanup.prepared == 1 }
+        await cleanup.preparationEntered.wait()
         #expect(!(await owner.isReady(for: ["speech", "cleanup"])))
         let second = Task { try await owner.prepare(resources, inBackground: false) }
         await gate.release()
@@ -84,7 +99,7 @@ struct SelectedModelWarmupTests {
         let owner = SelectedModelWarmup(); let resource = WarmResource(); let gate = WarmGate()
         await resource.block(on: gate)
         let prepare = Task { try await owner.prepare([.init(key: "old", lifecycle: resource)], inBackground: false) }
-        await waitForWarm { await resource.prepared == 1 }
+        await resource.preparationEntered.wait()
         let invalidate = Task { await owner.invalidate() }
         await Task.yield()
         #expect(!(await owner.isReady(for: ["old"])))
@@ -130,9 +145,9 @@ struct SelectedModelWarmupTests {
                 await completion.finish(cancelled: false)
             }
         }
-        await waitForWarm { await resource.prepared == 1 }
+        await resource.preparationEntered.wait()
         cancelled.cancel()
-        await waitForWarm { await completion.cancelled != nil }
+        await completion.finished.wait()
         #expect(await completion.cancelled == true)
         #expect(await resource.prepared == 1)
         #expect(await resource.released == 0)
@@ -152,7 +167,7 @@ struct SelectedModelWarmupTests {
             await resource.block(on: gate)
             let selected = [SelectedModelWarmup.Resource(key: "speech", lifecycle: resource)]
             let cancelled = Task(priority: .background) { try await owner.prepare(selected, inBackground: false) }
-            await waitForWarm { await resource.prepared == 1 }
+            await resource.preparationEntered.wait()
             let waiting = Task(priority: .userInitiated) { try await owner.prepare(selected, inBackground: false) }
             cancelled.cancel()
             await gate.release()
@@ -167,7 +182,7 @@ struct SelectedModelWarmupTests {
         let owner = SelectedModelWarmup(); let old = WarmResource(); let new = WarmResource(); let gate = WarmGate()
         await old.block(on: gate)
         let first = Task { try await owner.prepare([.init(key: "old", lifecycle: old)], inBackground: false) }
-        await waitForWarm { await old.prepared == 1 }
+        await old.preparationEntered.wait()
         let second = Task { try await owner.prepare([.init(key: "new", lifecycle: new)], inBackground: false) }
         await Task.yield()
         #expect(!(await owner.isReady(for: ["new"])))

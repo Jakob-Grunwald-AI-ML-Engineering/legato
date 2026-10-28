@@ -3,25 +3,35 @@ import Testing
 @testable import LegatoAppServices
 
 @MainActor private final class AdmissionGate {
-    var entered = false
+    let entered = AdmissionSignal()
     var entries = 0
     private var continuation: CheckedContinuation<Void, Never>?
     func wait() async {
-        entered = true
         entries += 1
+        entered.signal()
         await withCheckedContinuation { continuation = $0 }
     }
     func release() { continuation?.resume(); continuation = nil }
 }
-@MainActor private func waitForAdmission(_ condition: () -> Bool) async {
-    let deadline = ContinuousClock.now + .seconds(2)
-    while ContinuousClock.now < deadline {
-        if condition() { return }
-        await Task.yield()
+// Latched events avoid polling; cancellation lets the suite watchdog unwind.
+@MainActor private final class AdmissionSignal {
+    private var signalled = false
+    private var waiters: [AsyncStream<Void>.Continuation] = []
+    func wait() async {
+        if signalled { return }
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        waiters.append(continuation)
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
     }
-    Issue.record("Timed out waiting for model admission")
+    func signal() {
+        signalled = true
+        let waiting = waiters; waiters = []
+        for waiter in waiting { waiter.yield(()); waiter.finish() }
+    }
 }
 
+@Suite(.timeLimit(.minutes(1)))
 @MainActor struct ModelAdmissionTests {
     @Test func stopBypassesBlockedPreparationAndPreventsLateStart() async throws {
         let admission = ModelAdmission(); let gate = AdmissionGate()
@@ -29,7 +39,7 @@ import Testing
         let start = Task {
             try await admission.admit(isIdle: { true }, prepare: { await gate.wait() }) { starts += 1 }
         }
-        await waitForAdmission { gate.entered }
+        await gate.entered.wait()
         #expect(admission.isPreparing)
         await admission.stop { stops += 1 }
         #expect(stops == 1)
@@ -40,7 +50,8 @@ import Testing
     @Test func cancellingWarmupReturnsAdmissionBeforeNativePreparationCompletesAndAllowsRetry() async {
         let admission = ModelAdmission(); let owner = SelectedModelWarmup(); let gate = AdmissionGate()
         let selected = [SelectedModelWarmup.Resource(key: "speech", prewarm: { await gate.wait() }, release: {})]
-        var firstFinished = false; var firstCancelled = false; var firstStarts = 0
+        let firstFinished = AdmissionSignal()
+        var firstCancelled = false; var firstStarts = 0
         let first = Task {
             do {
                 try await admission.admit(isIdle: { true }, prepare: {
@@ -48,26 +59,28 @@ import Testing
                 }) { firstStarts += 1 }
             } catch is CancellationError { firstCancelled = true }
             catch { Issue.record("Wrong first admission failure: \(error)") }
-            firstFinished = true
+            firstFinished.signal()
         }
-        await waitForAdmission { gate.entered }
+        await gate.entered.wait()
         admission.cancel()
-        await waitForAdmission { firstFinished }
+        await firstFinished.wait()
         #expect(firstCancelled)
         #expect(!admission.isPreparing)
         #expect(firstStarts == 0)
         #expect(gate.entries == 1)
-        var secondPreparing = false; var secondFinished = false; var secondStarts = 0
+        let secondProgressed = AdmissionSignal()
+        var secondPreparing = false; var secondStarts = 0
         let second = Task {
             do {
                 try await admission.admit(isIdle: { true }, prepare: {
                     secondPreparing = true
+                    secondProgressed.signal()
                     try await owner.prepare(selected, inBackground: true)
                 }) { secondStarts += 1 }
             } catch { Issue.record("Retry admission failed: \(error)") }
-            secondFinished = true
+            secondProgressed.signal()
         }
-        await waitForAdmission { secondPreparing || secondFinished }
+        await secondProgressed.wait()
         #expect(secondPreparing)
         #expect(admission.isPreparing)
         #expect(secondStarts == 0)
@@ -85,7 +98,7 @@ import Testing
         let start = Task {
             try await admission.admit(isIdle: { true }, canStart: { !meeting }, prepare: { await gate.wait() }) { starts += 1 }
         }
-        await waitForAdmission { gate.entered }
+        await gate.entered.wait()
         meeting = true; gate.release()
         _ = await start.result
         #expect(starts == 0)
@@ -96,7 +109,7 @@ import Testing
         let first = Task {
             try await admission.admit(isIdle: { true }, prepare: { await gate.wait() }) { starts += 1 }
         }
-        await waitForAdmission { gate.entered }
+        await gate.entered.wait()
         do {
             try await admission.admit(isIdle: { true }, prepare: { extraPreparations += 1 }) { starts += 1 }
             Issue.record("Concurrent admission succeeded")
@@ -108,7 +121,7 @@ import Testing
     @Test func resetReservesAdmissionBeforeResourceRelease() async {
         let admission = ModelAdmission(); let gate = AdmissionGate(); var starts = 0
         let reset = Task { await admission.reset { await gate.wait() } }
-        await waitForAdmission { gate.entered }
+        await gate.entered.wait()
         #expect(admission.isResetting)
         do {
             try await admission.admit(isIdle: { true }, prepare: {}) { starts += 1 }
