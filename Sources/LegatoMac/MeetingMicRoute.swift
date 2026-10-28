@@ -26,7 +26,8 @@ public enum MeetingMicRoute {
     ///   - processes: the processes with the mic or the speakers running now (our own may be among them).
     ///   - defaultInput: the system default input device, if known.
     /// - Returns: the first call app's first input device, else the default input.
-    public static func choose(processes: [AutoMuteProcess], ownPID: Int32, defaultInput: UInt32?) -> MeetingMicChoice {
+    public static func choose(processes: [AutoMuteProcess], ownPID: Int32, defaultInput: UInt32?, selectedInput: UInt32? = nil) -> MeetingMicChoice {
+        if let selectedInput { return MeetingMicChoice(device: selectedInput, followsCall: true) }
         let callInput = processes.lazy
             .filter { $0.pid != ownPID && $0.isRunningInput && $0.isRunningOutput }
             .compactMap(\.inputDevices.first)

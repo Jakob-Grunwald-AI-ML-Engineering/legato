@@ -120,6 +120,34 @@ public enum AudioDevices {
         ids(of: AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, scope: kAudioObjectPropertyScopeGlobal)
     }
 
+    /// Public devices that actually have input channels. UIDs remain stable across reconnects.
+    public static func inputs() -> [(id: UInt32, uid: String, name: String)] {
+        all().compactMap { id in
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamConfiguration, mScope: kAudioObjectPropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain)
+            var size: UInt32 = 0
+            guard AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr, size > 0 else { return nil }
+            let memory = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+            defer { memory.deallocate() }
+            guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, memory) == noErr,
+                UnsafeMutableAudioBufferListPointer(memory.assumingMemoryBound(to: AudioBufferList.self)).contains(where: { $0.mNumberChannels > 0 }),
+                let uid = uid(of: id) else { return nil }
+            return (id, uid, name(of: id) ?? uid)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    public static func uid(of device: UInt32) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID, mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr,
+            let value else { return nil }
+        return value.takeRetainedValue() as String
+    }
+
     /// A device's name, for notices.
     public static func name(of device: UInt32) -> String? {
         var addr = AudioObjectPropertyAddress(

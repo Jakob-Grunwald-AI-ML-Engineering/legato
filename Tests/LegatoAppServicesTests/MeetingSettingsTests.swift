@@ -31,6 +31,17 @@ import Testing
         #expect(!again.autoMute)
     }
 
+    @Test func microphoneSelectionPersistsByStableUIDAndCanReturnToAuto() {
+        let suite = "legato.meeting-input.\(UUID().uuidString)"
+        let s = MeetingSettings(defaults: UserDefaults(suiteName: suite)!)
+        #expect(s.inputDeviceUID == nil)
+        s.inputDeviceUID = "BuiltInMicrophoneDevice"
+        let again = MeetingSettings(defaults: UserDefaults(suiteName: suite)!)
+        #expect(again.inputDeviceUID == "BuiltInMicrophoneDevice")
+        again.inputDeviceUID = nil
+        #expect(s.inputDeviceUID == nil)
+    }
+
     @Test func theClaudeDisclosureIsForgottenWheneverTheKeyChangesOrGoes() throws {
         let s = settings()
         let keys = InMemoryAPIKeyStore()

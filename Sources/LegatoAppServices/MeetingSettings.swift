@@ -37,11 +37,18 @@ public struct MeetingSettings: Sendable {
         static let idleProcessing = "meeting.idleProcessing"
         static let language = "meeting.language"
         static let echoNoise = "meeting.echoNoise"
+        static let inputDeviceUID = "meeting.inputDeviceUID"
     }
 
     public init(defaults: UserDefaults) {
         CleanupSelectionMigration.migrate(defaults)
         self.defaults = defaults
+    }
+
+    /// Mac: stable Core Audio input-device UID; nil automatically follows the call's input.
+    public var inputDeviceUID: String? {
+        get { defaults.string(forKey: Key.inputDeviceUID) }
+        nonmutating set { defaults.set(newValue, forKey: Key.inputDeviceUID) }
     }
 
     /// The summary prompt from before templates existed. Kept so it can move into the "My notes" section
