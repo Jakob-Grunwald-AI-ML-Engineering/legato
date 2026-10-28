@@ -104,6 +104,8 @@ public final class DictationSession {
     /// Past the cap: the frozen start of the segment (its raw end, the text shown for it).
     private var frozen: (end: Int, text: String)?
     private var pass: LivePass?
+    /// The current pass operation, including its final actor callback, for package synchronization.
+    var currentLivePassTask: Task<Void, Never>? { pass?.task }
     /// A stop began: no pass starts but the stop's own.
     private var liveStopping = false
     private let passClock = ContinuousClock()

@@ -227,7 +227,11 @@ private struct Rig {
 
     @Test func aMeetingWithLiveSpeakersOnStartsDownloadingTheMissingModelAndGoesOnWithout() async throws {
         let rig = Rig()
-        let engines = await rig.services().engines(for: .macOS)
+        let services = rig.services()
+        var requests: [ModelRole] = []
+        services.onBackgroundDownloadRequested = { requests.append($0) }
+        let engines = await services.engines(for: .macOS)
+        #expect(requests.contains(.liveSpeakers))
         #expect(engines.diarizer == nil, "this meeting runs without live speakers")
         #expect(engines.speakersNote?.localizedCaseInsensitiveContains("speaker") == true)
         #expect(await eventually(timeout: .seconds(30)) { await installed(rig, FluidAudioModels.sortformerID) }, "downloaded in the background")
@@ -237,7 +241,11 @@ private struct Rig {
 
     @Test func aMissingLocalVqeIsDownloadedWhenAMeetingStarts() async throws {
         let rig = Rig()
-        _ = await rig.services().engines(for: .macOS)
+        let services = rig.services()
+        var requests: [ModelRole] = []
+        services.onBackgroundDownloadRequested = { requests.append($0) }
+        _ = await services.engines(for: .macOS)
+        #expect(requests.contains(.echoNoiseCancellation))
         #expect(await eventually(timeout: .seconds(30)) { await installed(rig, FluidAudioModels.localVqeID) })
         #expect(await rig.services().engines(for: .macOS).enhancer != nil)
     }
@@ -246,8 +254,12 @@ private struct Rig {
         let rig = Rig()
         rig.settings.liveDiarization = false
         rig.settings.echoNoise = .appleVoiceProcessing
-        let engines = await rig.services().engines(for: .macOS)
+        let services = rig.services()
+        var requests: [ModelRole] = []
+        services.onBackgroundDownloadRequested = { requests.append($0) }
+        let engines = await services.engines(for: .macOS)
         #expect(engines.speakersNote == nil)
+        #expect(requests.isEmpty)
         // engines(for:) has completed both enabled-model decisions.
         #expect(rig.installers[FluidAudioModels.sortformerID]!.requests.withLock { $0 } == 0)
         #expect(rig.installers[FluidAudioModels.localVqeID]!.requests.withLock { $0 } == 0)
