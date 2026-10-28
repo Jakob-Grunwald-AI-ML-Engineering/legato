@@ -93,7 +93,10 @@ public actor SelectedModelWarmup {
             try await prepare(keys: keys, inBackground: inBackground)
             return Lease(id: id, owner: self)
         } catch {
-            await release(id)
+            // A waiter never admitted to the operation need not join native retirement.
+            // retireUnused keeps that cleanup tracked and gates a later load on its settlement.
+            leases.removeValue(forKey: id)
+            retireUnused()
             throw error
         }
     }

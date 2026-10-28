@@ -128,6 +128,44 @@ struct SelectedModelWarmupTests {
         await owner.invalidate()
     }
 
+    @Test func cancelledLastMeetingWaiterReturnsBeforeNativeRetirementSettles() async throws {
+        let owner = SelectedModelWarmup(); let resource = WarmResource(); let gate = WarmGate()
+        let completion = WarmWaiterCompletion()
+        await resource.block(on: gate)
+        let selected = [SelectedModelWarmup.Resource(key: "meeting", lifecycle: resource)]
+        // Only acquire starts preparation, so this event also proves its lease is already pinned.
+        await owner.setRequested(selected, for: .meetingSummary, inBackground: true)
+        let waiter = Task {
+            do {
+                let lease = try await owner.acquire(keys: ["meeting"], inBackground: false)
+                await lease.release()
+                await completion.finish(cancelled: false)
+            } catch is CancellationError {
+                await completion.finish(cancelled: true)
+            } catch {
+                Issue.record("Wrong error: \(error)")
+                await completion.finish(cancelled: false)
+            }
+        }
+        await resource.preparationEntered.wait()
+        await owner.setRequested([], for: .meetingSummary, inBackground: false)
+        waiter.cancel()
+        await completion.finished.wait()
+        #expect(await completion.cancelled == true, "Cancellation returns while native preparation is still blocked")
+        #expect(await resource.released == 0, "Native resources cannot be released before preparation settles")
+        #expect(await owner.isReady(for: ["meeting"]) == false)
+        await gate.release()
+        await waiter.value
+        await owner.invalidate() // joins retirement even though the cancelled waiter already returned
+        #expect(await resource.released == 1)
+        #expect(await resource.prepared == 1)
+        #expect(await owner.isReady(for: ["meeting"]) == false, "Retired preparation cannot publish late readiness")
+        try await owner.prepare(selected, inBackground: false)
+        #expect(await resource.prepared == 2, "A subsequent request prepares a fresh identity after retirement")
+        #expect(await owner.isReady(for: ["meeting"]))
+        await owner.invalidate()
+    }
+
     @Test func failedMeetingPreparationNeverPublishesReadyOrBlocksSpeech() async throws {
         let owner = SelectedModelWarmup(); let speech = WarmResource(); let meeting = WarmResource()
         await meeting.failOnce()

@@ -235,6 +235,8 @@ public struct MeetingPipeline: Sendable {
         if !stepFailed { await recordings.discardLosslessAudio() }
 
         if summary, !meeting.completedSteps.contains(.summary) || improved {
+            // Keep regeneration pending across preparation deferral without deleting the previous summary.
+            if improved { try await store.update(id: meetingID) { $0.completedSteps.remove(.summary) } }
             await onEvent(.started(.summary))
             try await automaticSummary(meetingID, outcome: &outcome)
         }
