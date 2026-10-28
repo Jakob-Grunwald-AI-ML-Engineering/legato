@@ -40,10 +40,11 @@ final class AppController {
     private(set) var armFailure: String?
     /// A microphone lease can be ready while its selected recognizer is still preparing.
     private(set) var recognitionPreparing = true
+    private(set) var recognitionFailure: String?
     private var keyboardActivations = 0
     var keyboardHopState: KeyboardHopState {
         .resolve(runActive: keyboardRunActive, microphoneReady: micReadyUntil != nil,
-            failure: armFailure, arming: keyboardActivations > 0)
+            failure: armFailure, arming: keyboardActivations > 0, recognitionFailure: recognitionFailure)
     }
 
     /// Apple Speech, for onboarding's asset download (dictation uses `engineBox`, which is Apple Speech by default).
@@ -288,6 +289,7 @@ final class AppController {
         let revision = engineRevision
         resolvingEngine = true
         recognitionPreparing = true
+        recognitionFailure = nil
         readiness.selectedResourcesReady = false
         modelAdmission.cancel()
         #if ANE_CLEANUP_SPIKE
@@ -338,6 +340,7 @@ final class AppController {
         modelRevision += 1
         readiness.selectedResourcesReady = false
         recognitionPreparing = true
+        recognitionFailure = nil
         modelAdmission.cancel()
         #if ANE_CLEANUP_SPIKE
         spike.admission.cancel()
@@ -362,9 +365,14 @@ final class AppController {
     private func warmSelectedResources() async {
         #if !ANE_CLEANUP_SPIKE
         guard !resolvingEngine, !modelAdmission.isResetting, !startEnvironment.current().inBackground else { return }
+        let revision = modelRevision
         do { try await prepareSelectedResources(); meetings.resumeProcessing() }
         catch is CancellationError { }
-        catch { recognitionPreparing = false; armFailure = "Could not prepare selected models: \(error.localizedDescription)" }
+        catch {
+            guard revision == modelRevision, !resolvingEngine, !modelAdmission.isResetting else { return }
+            recognitionPreparing = false
+            recognitionFailure = "Could not prepare selected models: \(error.localizedDescription)"
+        }
         #endif
     }
 
@@ -386,6 +394,7 @@ final class AppController {
         if E2E.fakeEngine != nil {
             readiness.selectedResourcesReady = true
             recognitionPreparing = false
+            recognitionFailure = nil
             return
         }
         #endif
@@ -403,6 +412,7 @@ final class AppController {
         guard revision == modelRevision, !resolvingEngine, !modelAdmission.isResetting else { throw CancellationError() }
         readiness.selectedResourcesReady = true
         recognitionPreparing = false
+        recognitionFailure = nil
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("microphone.recognition-ready", ["engine": engineBox.engine.id])
         #endif
@@ -413,6 +423,7 @@ final class AppController {
         modelRevision += 1
         readiness.selectedResourcesReady = false
         recognitionPreparing = true
+        recognitionFailure = nil
         resourcePreparation?.cancel()
         await modelAdmission.reset {
             await self.coordinator.invalidateKeptSession()
