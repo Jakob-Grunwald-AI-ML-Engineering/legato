@@ -131,12 +131,15 @@ struct WritingModeHarnessTests {
     }
 
     @Test func cancelledCallerSettlementStillHonorsFiniteGrace() async {
-        let worker = Task.detached { _ = try? await Task.sleep(for: .milliseconds(150)) }
+        // Keep the worker pending until the assertion, independent of CI scheduling delays.
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        let worker = Task.detached { for await _ in release {} }
         let observer = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             return await writingModeWaitForSettlement(worker: worker, seconds: 0.01)
         }
         #expect(await observer.value == false)
+        continuation.finish()
         await worker.value
     }
 }
