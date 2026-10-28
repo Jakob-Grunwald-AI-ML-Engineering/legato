@@ -133,6 +133,14 @@ public final class MicSource: ResumableAudioSource {
     private let router = TapRouter()
     private let onAttempt: (@Sendable (Attempt) -> Void)?
     private let onFirstBuffer: (@Sendable (FirstBuffer) -> Void)?
+    /// A source-scoped engine event. Recheck after scheduling: stop/start can supersede it meanwhile.
+    public struct ConfigurationChange: Sendable {
+        private let validate: @Sendable () -> Bool
+        fileprivate init(validate: @escaping @Sendable () -> Bool) { self.validate = validate }
+        public var requiresStop: Bool { validate() }
+    }
+
+    private let onConfigurationChange: (@Sendable (ConfigurationChange) -> Void)?
     private let voiceProcessing: Bool
     private let device: UInt32?
     private let resumeSink: AsyncStream<Void>.Continuation
@@ -152,12 +160,16 @@ public final class MicSource: ResumableAudioSource {
     ///     engine before its format is read. nil (the default) records from the system default input and follows
     ///     it. A device that cannot be bound makes `start(format:)` throw `MicSourceError.deviceNotSelected`;
     ///     when it goes away later, the rebuilt engine records from the default input.
+    ///   - onConfigurationChange: iOS only; schedules invalidation after this source's engine stops for a
+    ///     configuration change. Check `requiresStop` again when handling it, as stop/start can supersede it.
     public init(
         onAttempt: (@Sendable (Attempt) -> Void)? = nil,
         onFirstBuffer: (@Sendable (FirstBuffer) -> Void)? = nil,
         voiceProcessing: Bool = false,
-        device: UInt32? = nil
+        device: UInt32? = nil,
+        onConfigurationChange: (@Sendable (ConfigurationChange) -> Void)? = nil
     ) {
+        self.onConfigurationChange = onConfigurationChange
         self.onAttempt = onAttempt
         self.onFirstBuffer = onFirstBuffer
         self.voiceProcessing = voiceProcessing
@@ -272,7 +284,7 @@ public final class MicSource: ResumableAudioSource {
     }
 
     /// macOS: a device or format change stops the engine; with the lease armed it is rebuilt and the
-    /// current run's stream carries on. (iOS handles route changes in the session controller.)
+    /// current run's stream carries on. iOS reports only a stopped engine belonging to this source.
     private func installConfigurationObserver(for box: EngineBox) {
         #if os(macOS)
         let token = NotificationCenter.default.addObserver(
@@ -282,7 +294,28 @@ public final class MicSource: ResumableAudioSource {
             Task { await self.restartAfterConfigurationChange(box) }
         }
         state.withLock { $0.observer = ObserverBox(token) }
+        #else
+        guard let onConfigurationChange else { return }
+        let token = Self.observeConfigurationChanges(of: box.engine, isCurrent: { [weak self] in
+            self?.state.withLock { $0.engine === box } == true
+        }, onChange: onConfigurationChange)
+        state.withLock { $0.observer = ObserverBox(token) }
         #endif
+    }
+
+    /// Kept separate so source filtering and queued-event validity can be checked without opening a mic.
+    static func observeConfigurationChanges(
+        of engine: AVAudioEngine, isCurrent: @escaping @Sendable () -> Bool,
+        onChange: @escaping @Sendable (ConfigurationChange) -> Void
+    ) -> any NSObjectProtocol {
+        let box = EngineBox(engine)
+        return NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { _ in
+            let change = ConfigurationChange { isCurrent() && !box.engine.isRunning }
+            guard change.requiresStop else { return }
+            onChange(change) // only schedules work; never tears down an engine on its notification queue
+        }
     }
 
     private func restartAfterConfigurationChange(_ old: EngineBox) async {

@@ -194,6 +194,18 @@ final class KeyboardHarnessModel {
             let url = KeyboardURL.make(command: controller.openAppCommand, requestID: controller.openAppRequestID)
             controller.micTapped()
             Task { await AppController.shared.handle(url) }
+        case "harness-mic-hop-retry":
+            Task {
+                for _ in 0..<2 {
+                    let url = KeyboardURL.make(command: controller.openAppCommand, requestID: controller.openAppRequestID)
+                    controller.micTapped()
+                    await AppController.shared.handle(url)
+                    // Return to the host keyboard immediately after the failed activation.
+                    controller.disappeared()
+                    controller.appeared()
+                }
+                E2E.log("harness hop-retry.done")
+            }
         case "harness-numbers": controller.typing.press(keyID: "mode:numbers")
         case "harness-type": runTypingCases()
         default: E2E.log("harness.unknown \(command)")

@@ -306,6 +306,8 @@ extension AppController {
         switch command {
         case "toggle":
             _ = await toggle()
+        case "foreign-engine-change":
+            NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: AVAudioEngine())
         case "interrupt":
             E2EFakeMeetingMic.taken.withLock { $0 = true }
             NotificationCenter.default.post(
@@ -369,11 +371,11 @@ extension AppController {
 
 extension E2E {
     static let commands = [
-        "toggle", "interrupt", "interrupt-end", "copy-last", "result-insert", "result-copy", "foreground", "background", "toggle-after-hop",
+        "toggle", "foreign-engine-change", "interrupt", "interrupt-end", "copy-last", "result-insert", "result-copy", "foreground", "background", "toggle-after-hop",
         "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-pause", "meeting-resume", "meeting-discard", "meeting-export", "meeting-route-change",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-arm", "kbd-hop-start", "kbd-hop-arm-url-first", "kbd-forged-url",
-        "harness-mic", "harness-mic-hop", "harness-type", "harness-numbers", "harness-status", "harness-host-missing", "preparation-release", "watcher-release",
+        "harness-mic", "harness-mic-hop", "harness-mic-hop-retry", "harness-type", "harness-numbers", "harness-status", "harness-host-missing", "preparation-release", "watcher-release",
     ]
 
     /// Darwin notifications `de.gruenwald.legato.e2e.<command>`, posted from the host with

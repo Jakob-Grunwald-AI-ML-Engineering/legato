@@ -21,6 +21,11 @@ import UIKit
 final class AppController {
     static let shared = AppController()
 
+    /// Installed after initialization; each source carries its own queued-event validity check.
+    @MainActor private final class MicrophoneEvents {
+        var onChange: ((MicSource.ConfigurationChange) -> Void)?
+    }
+
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "app")
 
     /// True from a successful start until the run is over (stopped, aborted or failed).
@@ -162,6 +167,7 @@ final class AppController {
         self.keyboardLink = keyboardLink
         let activityClient = ActivityKitClient()
         self.activityClient = activityClient
+        let microphoneEvents = MicrophoneEvents()
         coordinator = DictationCoordinator(
             activity: activityClient,
             clipboard: pasteboard,
@@ -175,10 +181,14 @@ final class AppController {
                 }
                 #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
+                let onConfigurationChange: @Sendable (MicSource.ConfigurationChange) -> Void = { change in
+                    Task { @MainActor in microphoneEvents.onChange?(change) }
+                }
                 #if LEGATO_INTERNAL
-                let source = MicSource(onAttempt: AudioDiagnostics.micAttempt, onFirstBuffer: AudioDiagnostics.micFirstBuffer)
+                let source = MicSource(onAttempt: AudioDiagnostics.micAttempt, onFirstBuffer: AudioDiagnostics.micFirstBuffer,
+                    onConfigurationChange: onConfigurationChange)
                 #else
-                let source = MicSource()
+                let source = MicSource(onConfigurationChange: onConfigurationChange)
                 let sessionControl = AudioSessionController()
                 #endif
                 return DictationSession(
@@ -190,6 +200,9 @@ final class AppController {
                     policy: policy,
                     linger: linger)
             })
+        microphoneEvents.onChange = { [weak self] change in
+            self?.stopForSystemEvent("engine configuration change", ifCurrent: { change.requiresStop })
+        }
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
         coordinator.onResult = { [weak self] result in self?.resultReady(result) }
         coordinator.onStartFallback = { from, to, error in
@@ -210,6 +223,9 @@ final class AppController {
                 if active { self?.clearResult() } // a new run's activity replaces the result's
             }
             keyboardLink.onLease = { [weak self] until in
+                #if LEGATO_INTERNAL
+                AudioDiagnostics.log("microphone.lease", ["held": until != nil, "previousHeld": self?.micReadyUntil != nil])
+                #endif
                 self?.micReadyUntil = until
                 // Preparation never extends the user's finite microphone lease. A lost lease revokes
                 // its pending keyboard start before native preparation can complete in the background.
@@ -428,6 +444,9 @@ final class AppController {
 
     /// Revoke held readiness before relinquishing model ownership; active runs keep their own resources.
     private func releaseModelsForMemoryPressure() async {
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("microphone.invalidation-request", ["cause": "memory pressure", "leaseHeld": micReadyUntil != nil])
+        #endif
         modelRevision += 1
         readiness.selectedResourcesReady = false
         recognitionPreparing = true
@@ -666,6 +685,9 @@ final class AppController {
             await stopIfRunning()
             return true
         case .endKeepAlive:
+            #if LEGATO_INTERNAL
+            AudioDiagnostics.log("microphone.invalidation-request", ["cause": "keyboard end keep alive", "leaseHeld": micReadyUntil != nil])
+            #endif
             await endKeepAlive()
             return true
         }
@@ -924,6 +946,10 @@ final class AppController {
             try? await Task.sleep(for: .milliseconds(150))
             admission = keyboardLink.link.admitURL(requestID: requestID, command: command)
         }
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("keyboard.url", ["admission": String(describing: admission), "command": command.rawValue,
+            "recognitionPreparing": recognitionPreparing, "leaseHeld": micReadyUntil != nil, "arming": keyboardActivations > 0])
+        #endif
         #if DEBUG
         E2E.log("keyboard.url admission=\(admission)")
         #endif
@@ -961,14 +987,20 @@ final class AppController {
     ///
     /// `releasesHeldSession`: also deactivate an audio session that the "keep session active" debug
     /// switch is holding between runs (interruption, media reset).
-    private func stopForSystemEvent(_ reason: String, releasesHeldSession: Bool = false) {
-        #if LEGATO_INTERNAL
-        if releasesHeldSession || isDictating { sessionControl.release(reason: reason) }
-        #endif
+    private func stopForSystemEvent(
+        _ reason: String, releasesHeldSession: Bool = false, ifCurrent: @escaping @Sendable () -> Bool = { true }
+    ) {
         Task {
+            guard ifCurrent() else { return }
+            #if LEGATO_INTERNAL
+            AudioDiagnostics.log("microphone.invalidated", ["cause": reason, "leaseHeld": micReadyUntil != nil, "dictating": isDictating])
+            if releasesHeldSession || isDictating { sessionControl.release(reason: reason) }
+            #endif
             // The system took the microphone or the route: a lease kept for the keyboard is dead too, idle
             // or not, and the run this stops must not keep one either.
             await endKeepAlive()
+            // Releasing an idle lease can suspend; a fresh source may have started in the meantime.
+            guard ifCurrent() else { return }
             #if DEBUG
             E2E.log("system-event reason=\(E2E.quote(reason))")
             #endif
@@ -1034,7 +1066,8 @@ final class AppController {
         center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if self.meetings.isActive { self.meetings.routeChanged() } else { self.stopForSystemEvent("engine configuration change") }
+                if self.meetings.isActive { self.meetings.routeChanged() }
+                // Dictation observes only its own source's engine, with a validity check at stop time.
             }
         }
 
