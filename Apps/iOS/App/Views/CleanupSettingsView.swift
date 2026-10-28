@@ -130,6 +130,7 @@ struct CleanupSettingsView: View {
         .onChange(of: style) { _, new in Settings.cleanupStyle = new }
         .onChange(of: backend) { _, new in
             Settings.cleanupBackend = new
+            timeout = Double(Settings.cleanupTimeoutSeconds)
             controller.cleanupSettingsChanged()
         }
         .onChange(of: background) { _, new in
@@ -137,7 +138,10 @@ struct CleanupSettingsView: View {
             controller.cleanupSettingsChanged()
         }
         .onChange(of: itn) { _, new in Settings.cleanupITN = new }
-        .onChange(of: timeout) { _, new in Settings.cleanupTimeoutSeconds = Int(new) }
+        .onChange(of: timeout) { _, new in
+            // Reflecting a backend default must not turn it into an explicit user preference.
+            if Settings.cleanupTimeoutSeconds != Int(new) { Settings.cleanupTimeoutSeconds = Int(new) }
+        }
     }
 
     private func backendRow(_ title: String, detail: String, choice: CleanupBackendChoice) -> some View {

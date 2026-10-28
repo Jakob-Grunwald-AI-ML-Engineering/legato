@@ -71,7 +71,10 @@ final class MacSettings {
     }
 
     var cleanupBackend: CleanupBackendChoice {
-        didSet { cleanupStore.backend = cleanupBackend }
+        didSet {
+            cleanupStore.backend = cleanupBackend
+            cleanupTimeoutSeconds = cleanupStore.timeoutSeconds
+        }
     }
 
     /// Number normalization before the language model. Off by default (#22).
@@ -81,7 +84,10 @@ final class MacSettings {
 
     /// Per-stage limit, 1 to 10 seconds.
     var cleanupTimeoutSeconds: Int {
-        didSet { cleanupStore.timeoutSeconds = cleanupTimeoutSeconds }
+        didSet {
+            // A backend default refresh is not an explicit time-limit choice.
+            if cleanupStore.timeoutSeconds != cleanupTimeoutSeconds { cleanupStore.timeoutSeconds = cleanupTimeoutSeconds }
+        }
     }
 
     init(defaults: UserDefaults = .standard) {

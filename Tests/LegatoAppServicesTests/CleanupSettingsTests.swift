@@ -68,6 +68,64 @@ private final class Recorder: Sendable {
         #expect(store.timeoutSeconds == 1)
     }
 
+    @Test func coreMLUsesEightSecondsWhenNoTimeLimitWasChosen() {
+        let defaults = freshDefaults()
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.backend = .coreML
+        #expect(store.timeoutSeconds == 8)
+        #expect(store.options.timeoutSeconds == 8)
+        #expect(CleanupSettingsStore(defaults: defaults).timeoutSeconds == 8)
+        #expect(defaults.object(forKey: "cleanup.timeoutSeconds") == nil)
+    }
+
+    @Test(arguments: [CleanupBackendChoice.auto, .foundationModels, .mlx])
+    func otherBackendsKeepFourSecondsWhenNoTimeLimitWasChosen(backend: CleanupBackendChoice) {
+        let store = CleanupSettingsStore(defaults: freshDefaults())
+        store.backend = .coreML
+        store.backend = backend
+        #expect(store.timeoutSeconds == 4)
+    }
+
+    @Test(arguments: [CleanupBackendChoice.auto, .mlx])
+    func aSelectedCoreMLModelGetsEightSecondsThroughAutomaticResolution(backend: CleanupBackendChoice) {
+        let defaults = freshDefaults()
+        SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.backend = backend
+        #expect(store.timeoutSeconds == 8)
+        #expect(store.options.timeoutSeconds == 8)
+        #expect(defaults.object(forKey: "cleanup.timeoutSeconds") == nil)
+    }
+
+    @Test func automaticCoreMLPreservesAnExplicitFourSecondLimit() {
+        let defaults = freshDefaults()
+        SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.timeoutSeconds = 4
+        store.backend = .auto
+        #expect(store.timeoutSeconds == 4)
+    }
+
+    @Test func explicitFoundationModelsIgnoresTheSelectedCoreMLDefault() {
+        let defaults = freshDefaults()
+        SelectionStore(defaults: defaults).set("coreml-qwen3-1.7b-lut6", for: .cleanup)
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.backend = .foundationModels
+        #expect(store.timeoutSeconds == 4)
+    }
+
+    @Test(arguments: [4, 7])
+    func anExplicitTimeLimitSurvivesEveryBackendSelection(seconds: Int) {
+        let defaults = freshDefaults()
+        let store = CleanupSettingsStore(defaults: defaults)
+        store.timeoutSeconds = seconds
+        for backend in CleanupBackendChoice.allCases {
+            store.backend = backend
+            #expect(store.timeoutSeconds == seconds)
+            #expect(CleanupSettingsStore(defaults: defaults).timeoutSeconds == seconds)
+        }
+    }
+
     @Test func onlyFoundationModelsPrefersFoundationModels() {
         #expect(CleanupBackendChoice.foundationModels.preference == .foundationModels)
         #expect(CleanupBackendChoice.auto.preference == .auto)
