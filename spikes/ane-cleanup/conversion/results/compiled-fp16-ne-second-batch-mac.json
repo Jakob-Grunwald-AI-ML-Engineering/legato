@@ -1,0 +1,73 @@
+{
+  "status": "failed",
+  "compute_permissions": "CPU_AND_NE",
+  "device_measurement": false,
+  "observed_ane_dispatch": false,
+  "quantization": "fp16",
+  "atol": 0.1,
+  "rtol": 0.02,
+  "require_prefix_top1_match": true,
+  "state_ownership": "one shared global MLState across chunks/functions, matching pinned Swift/Python runtime",
+  "runner_pid": 13469,
+  "phase": "finished",
+  "rows": [
+    {
+      "passed": false,
+      "max_absolute_error": 0.1708965301513672,
+      "mean_absolute_error": 0.027988756075501442,
+      "elements_outside_tolerance": 78,
+      "elements": 151936,
+      "actual_top1": 93985,
+      "expected_top1": 93985,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 129,
+      "fixture_id": "controlled128-token-prefill",
+      "path": "decode_after_prefill"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 0.1160815954208374,
+      "mean_absolute_error": 0.021754706278443336,
+      "elements_outside_tolerance": 2,
+      "elements": 151936,
+      "actual_top1": 650,
+      "expected_top1": 650,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 130,
+      "fixture_id": "controlled128-token-prefill",
+      "path": "decode_after_prefill"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 0.1961517333984375,
+      "mean_absolute_error": 0.030835021287202835,
+      "elements_outside_tolerance": 98,
+      "elements": 151936,
+      "actual_top1": 423,
+      "expected_top1": 423,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 131,
+      "fixture_id": "controlled128-token-prefill",
+      "path": "decode_after_prefill"
+    }
+  ],
+  "loaded_compiled_artifacts": true,
+  "last_prefill_windows": [
+    [
+      0,
+      64
+    ],
+    [
+      64,
+      64
+    ]
+  ],
+  "seconds": 8.858420291042421,
+  "process_peak_rss_bytes": 4633952256
+}

@@ -1,0 +1,73 @@
+{
+  "test_first": {
+    "cache_masks": {
+      "red": "9 failed",
+      "green": "9 passed"
+    },
+    "independent_decoder": {
+      "red": "4 failed",
+      "green": "13 passed including cache contracts"
+    },
+    "coreml_position_regression": {
+      "red": "1 failed at position64 (slot0 overwritten)",
+      "green": "14 passed; 8 upstream NumPy deprecation warnings"
+    },
+    "original_weight_gate": {
+      "red": "4 failed, 1 passed",
+      "green": "5 passed"
+    },
+    "prefill_validation_contract": {
+      "red": "2 failed",
+      "green": "2 passed",
+      "contract": "ignore unnormalized prefill output; validate following infer logits against corresponding prefix"
+    },
+    "quantized_strict_opt_in": {
+      "red": "3 failed (missing contract),5 existing passed",
+      "green": "10 targeted parity/prefill contracts passed",
+      "contract": "Quantized artifact rejected by default; explicit opt-in reports actual precision and retains original tolerances/top1 requirement."
+    },
+    "verdict_and_converter_provenance": {
+      "red": "6 failed: missingreportinventory(2),arbitraryupstreamacceptance(1),modifieddependencyacceptance(3); no real networkdownloads in tests",
+      "green": "7 provenancechecks including pinnedarchivepositivecontrol; fullfrozengate31passed8upstreamwarnings5.05s",
+      "logs": [
+        "artifacts/provenance-red-closure-contracts.log",
+        "artifacts/final-provenance-gate.log"
+      ]
+    }
+  },
+  "final_check": "31passed8upstreamNumPywarningsin5.05s; Ruffclean;strictPyright0errors0warnings;py_compilepassed. FP16/LUT6 exact-input-bound parityreruns retainedasfailedwithunchangednumeric/top1gates.",
+  "synthetic_model_status": "exported; fullgeometry numerical state threshold failed; no tolerance changes",
+  "source_sha256": {
+    "checks/test_block.py": "e7e672160a200dab988406977a6fa52b5cf83c8967062fafc577c3dc383739e4",
+    "checks/test_contracts.py": "f3ee870f80886cef38c7972e9d0f6df0a36d3ce57206a2c3b900d0412243d7d1",
+    "checks/test_coreml.py": "e5c85d32fe87d453b4bb33a0876cffbafbcdba81eba52c44b8c87aa9cae15f9c",
+    "checks/test_parity_gate.py": "e688462619c581fc38efcdb8d863ae9dd07cd8a05f718936651372a59211bd03",
+    "checks/test_prefill_contract.py": "f6aa43b53215b810fc378aab3bdda6cc3cef7c187f8acfe0d44c03e7bb791787",
+    "convert.py": "4e01d9bff47bd5c0ff7cdc676b00d1ca2b2fc35670cbb8a313b8dc1ce60f288f",
+    "full_convert.py": "1870e1c84a6af555d02041133dcbc29c2513156ebd688b9681ca0f359e1a3078",
+    "src/ane_conversion/__init__.py": "1d71673ae9786f54c56f9f1a39103976c6f16e29d2453fb9659d45a0366bfc05",
+    "src/ane_conversion/contracts.py": "28400406da158c507b5d82666ffede8d5fcf37230323b97b93de55b7c1800e40",
+    "src/ane_conversion/experiment.py": "7b8b917d54b5b7bbbb7434a7092e4fae8829688949744860ca517f141647af3f",
+    "src/ane_conversion/geometry.py": "c7ae9ebcd3418c89adb0c45437ca92e1e3ffe6799601efa1f726332d5ba5d20e",
+    "src/ane_conversion/layout.py": "53a05425b4acd461d921eab18492e36e965f75d0799aaa391403c95966ad52f8",
+    "src/ane_conversion/parity_gate.py": "e9bb4ccaeadcf9e559ccee038cbe4ac3cf5e78bf90800956b7758a571187d3b2",
+    "src/ane_conversion/prefill_contract.py": "990b8bc091dc40d155dc16d41a74408277f40ff20d96b4adad5943d2851ff573",
+    "src/ane_conversion/reference.py": "8d663c7f301e8d0cbe64026d6e750ee34aa67840ac76eba22188f5a1a5e3f418",
+    "validate_coreml.py": "d712c197e295cd2e0f2bc9ae5acbd192c4046b3bce625606b0ac628a7da18eb3",
+    "validate_original.py": "a24d74f33ae845430ddd41f6448ed15fd213f52b2f055f4e6d674199fc97287c",
+    "src/ane_conversion/provenance.py": "ee8ea99dda06600f4e44416fd6f2a21113f4b584d5f5e50a316e8b7c9940a9c6",
+    "checks/test_provenance.py": "9421c709d3d49e038d01b6f9a27e8f67f09b9cc9310ec7e67eea6e9805caf741",
+    "pyproject.toml": "f405102c838e302a34b9fdbe784fe4006fb6e64dc68de0709b915609c4173ae4",
+    "provenance/anemll-f4ad26d-source.json": "7ff24f290599a028cb05ca0caf71bbd97a13abf8af20320feabe16eb58482e96"
+  },
+  "original_weight_parity": "9 originalHF/unquantizedANEMLLPyTorch prefix rows passed .10atol/.02rtol and exacttop1; not CoreMLlowering proof",
+  "compiled_fp16_numeric_gate": "failed9of15 under CPU_AND_NE; all15 top1 IDs matched; CPU_ONLY separate failure",
+  "incremental_check": "10 targeted parity/prefill contracts passed in0.07s; ruff clean; strict pyright0errors0warnings; LUT6 strict compiled gate ran and failed all15numericrows/3top1.",
+  "final_whitespace_check": {
+    "change": "Removed trailing spaces only from blank lines128/135; no numeric/behavior changes.",
+    "checks": "17affectedprovenance/parity/prefill tests passedin4.00s;Ruffclean;strictPyright0errors0warnings;syntaxpassed.",
+    "log": "artifacts/whitespace-final-checks.log",
+    "parity": "Both exact-input-bound reports rerun after whitespace cleanup; same failed numeric/top1 verdicts.",
+    "previousReports": "Retained as compiled-{fp16,lut6}-ne-parity-bound-before-whitespace-mac.json."
+  }
+}

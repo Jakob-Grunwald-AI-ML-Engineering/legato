@@ -1,3 +1,6 @@
+#if APP_TARGET
+import LegatoKeyboardCore
+#endif
 import ActivityKit
 import Foundation
 
@@ -34,5 +37,5 @@ struct DictationAttributes: ActivityAttributes {
     }
 
     /// Opened by tapping an activity in the `tapToCopy` phase; the app copies the last transcript.
-    static let copyLastURL = URL(string: "legato://copy-last")!
+    static let copyLastURL = URL(string: "\(RuntimeIdentity.current.urlScheme)://copy-last")!
 }

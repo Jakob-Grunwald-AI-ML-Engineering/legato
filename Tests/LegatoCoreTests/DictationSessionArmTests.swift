@@ -15,6 +15,18 @@ import Testing
         #expect(await r.history.entries.isEmpty)
     }
 
+    @Test func anAlreadyCancelledArmNeverActivatesMicrophone() async throws {
+        let r = Rig(linger: .seconds(60))
+        let arming = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await r.session.armLease()
+        }
+        await #expect(throws: CancellationError.self) { try await arming.value }
+        #expect(r.log.count("activate") == 0)
+        #expect(r.log.count("source.start") == 0)
+        #expect(r.session.leaseState == .idle)
+    }
+
     @Test func theNextRunReusesTheArmedLeaseWithoutActivatingAgain() async throws {
         let r = Rig(linger: .seconds(60))
         try await r.session.armLease()

@@ -108,7 +108,10 @@ targets:
   LegatoWidgets:
     type: app-extension
     platform: iOS
-    sources: [Widgets, Shared]
+    sources:
+      - Widgets
+      - Shared
+      - ../../Sources/LegatoKeyboardCore/Link/RuntimeIdentity.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.widgets

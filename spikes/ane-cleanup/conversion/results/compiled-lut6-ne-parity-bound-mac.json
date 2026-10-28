@@ -1,0 +1,507 @@
+{
+  "status": "failed",
+  "compute_permissions": "CPU_AND_NE",
+  "device_measurement": false,
+  "observed_ane_dispatch": false,
+  "quantization": "ffn=lut6;lm_head=lut6",
+  "atol": 0.1,
+  "rtol": 0.02,
+  "require_prefix_top1_match": true,
+  "state_ownership": "one shared global MLState across chunks/functions, matching pinned Swift/Python runtime",
+  "runner_pid": 28278,
+  "phase": "finished",
+  "rows": [
+    {
+      "passed": false,
+      "max_absolute_error": 3.972682476043701,
+      "mean_absolute_error": 0.4944581985473633,
+      "elements_outside_tolerance": 124330,
+      "elements": 151936,
+      "actual_top1": 12478,
+      "expected_top1": 38297,
+      "top1_matches": false,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "de-new-prefix",
+      "prefix_tokens": 1,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.2304496765136719,
+      "mean_absolute_error": 0.19399003684520721,
+      "elements_outside_tolerance": 85724,
+      "elements": 151936,
+      "actual_top1": 330,
+      "expected_top1": 330,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "de-new-prefix",
+      "prefix_tokens": 8,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.4726018905639648,
+      "mean_absolute_error": 0.287153959274292,
+      "elements_outside_tolerance": 108592,
+      "elements": 151936,
+      "actual_top1": 8408,
+      "expected_top1": 8408,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "de-new-prefix",
+      "prefix_tokens": 39,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 4.430288314819336,
+      "mean_absolute_error": 0.5550527572631836,
+      "elements_outside_tolerance": 126512,
+      "elements": 151936,
+      "actual_top1": 12478,
+      "expected_top1": 14582,
+      "top1_matches": false,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "en-new-prefix",
+      "prefix_tokens": 1,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.2521226406097412,
+      "mean_absolute_error": 0.2015497386455536,
+      "elements_outside_tolerance": 90216,
+      "elements": 151936,
+      "actual_top1": 4143,
+      "expected_top1": 4143,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "en-new-prefix",
+      "prefix_tokens": 8,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.1608167886734009,
+      "mean_absolute_error": 0.2086934745311737,
+      "elements_outside_tolerance": 90570,
+      "elements": 151936,
+      "actual_top1": 576,
+      "expected_top1": 576,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "en-new-prefix",
+      "prefix_tokens": 21,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 3.972682476043701,
+      "mean_absolute_error": 0.4944581985473633,
+      "elements_outside_tolerance": 124330,
+      "elements": 151936,
+      "actual_top1": 12478,
+      "expected_top1": 38297,
+      "top1_matches": false,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "mixed-new-prefix",
+      "prefix_tokens": 1,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.460200309753418,
+      "mean_absolute_error": 0.2702989876270294,
+      "elements_outside_tolerance": 97430,
+      "elements": 151936,
+      "actual_top1": 406,
+      "expected_top1": 406,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "mixed-new-prefix",
+      "prefix_tokens": 8,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.106825351715088,
+      "mean_absolute_error": 0.20200397074222565,
+      "elements_outside_tolerance": 89783,
+      "elements": 151936,
+      "actual_top1": 220,
+      "expected_top1": 220,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "fixture_id": "mixed-new-prefix",
+      "prefix_tokens": 26,
+      "path": "sequential_infer"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 2.767216682434082,
+      "mean_absolute_error": 0.3904965817928314,
+      "elements_outside_tolerance": 97278,
+      "elements": 151936,
+      "actual_top1": 529,
+      "expected_top1": 529,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 65,
+      "fixture_id": "controlled64-token-prefill",
+      "path": "decode_after_prefill"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.3918964862823486,
+      "mean_absolute_error": 0.23637713491916656,
+      "elements_outside_tolerance": 99458,
+      "elements": 151936,
+      "actual_top1": 13,
+      "expected_top1": 13,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 66,
+      "fixture_id": "controlled64-token-prefill",
+      "path": "decode_after_prefill"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.8689637184143066,
+      "mean_absolute_error": 0.3114120066165924,
+      "elements_outside_tolerance": 108866,
+      "elements": 151936,
+      "actual_top1": 220,
+      "expected_top1": 220,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 67,
+      "fixture_id": "controlled64-token-prefill",
+      "path": "decode_after_prefill"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.8174676895141602,
+      "mean_absolute_error": 0.3209472894668579,
+      "elements_outside_tolerance": 103451,
+      "elements": 151936,
+      "actual_top1": 93985,
+      "expected_top1": 93985,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 129,
+      "fixture_id": "controlled128-token-prefill",
+      "path": "decode_after_prefill"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.1676549911499023,
+      "mean_absolute_error": 0.19333453476428986,
+      "elements_outside_tolerance": 70777,
+      "elements": 151936,
+      "actual_top1": 650,
+      "expected_top1": 650,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 130,
+      "fixture_id": "controlled128-token-prefill",
+      "path": "decode_after_prefill"
+    },
+    {
+      "passed": false,
+      "max_absolute_error": 1.8205047845840454,
+      "mean_absolute_error": 0.2820475101470947,
+      "elements_outside_tolerance": 86373,
+      "elements": 151936,
+      "actual_top1": 423,
+      "expected_top1": 423,
+      "top1_matches": true,
+      "atol": 0.1,
+      "rtol": 0.02,
+      "prefix_tokens": 131,
+      "fixture_id": "controlled128-token-prefill",
+      "path": "decode_after_prefill"
+    }
+  ],
+  "input_provenance": {
+    "model_root": "/Users/work/Documents/legato/.claude/worktrees/quiet-amber-koala/spikes/ane-cleanup/conversion/artifacts/qwen3-06b-full/converted",
+    "source_root": "/Users/work/Documents/legato/.claude/worktrees/quiet-amber-koala/spikes/ane-cleanup/conversion/artifacts/qwen3-06b-full/source",
+    "source_files": {
+      "LICENSE": {
+        "bytes": 11343,
+        "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+      },
+      "README.md": {
+        "bytes": 13965,
+        "sha256": "1ab64a26fcb3b461423b89a433a8c858f1bf8d4086f979cbb3ff878d47cf20e9"
+      },
+      "config.json": {
+        "bytes": 726,
+        "sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
+      },
+      "generation_config.json": {
+        "bytes": 239,
+        "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+      },
+      "merges.txt": {
+        "bytes": 1671853,
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+      },
+      "model.safetensors": {
+        "bytes": 1503300328,
+        "sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+      },
+      "tokenizer.json": {
+        "bytes": 11422654,
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+      },
+      "tokenizer_config.json": {
+        "bytes": 9732,
+        "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+      },
+      "vocab.json": {
+        "bytes": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    },
+    "compiled_files": {
+      "meta.yaml": {
+        "bytes": 2408,
+        "sha256": "9d16ce7e596e63a541d02fe7d494ee1b5c00109b6eedfc29425efedb922190d8"
+      },
+      "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/analytics/coremldata.bin": {
+        "bytes": 243,
+        "sha256": "fb6870b0a6ed90037cbb40816cdecfc64cb1a54b8a910e67d844d24150e33d98"
+      },
+      "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/coremldata.bin": {
+        "bytes": 981,
+        "sha256": "573e6cc255f5ec8c9dcce74ad3f74f53a58a74f781e0b7b35b2debdf4daa9276"
+      },
+      "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/metadata.json": {
+        "bytes": 10194,
+        "sha256": "1ba9797013d284ae2022bdf9d658076eb9c25c530db6e5def09b4dd317dbd2fb"
+      },
+      "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/model.mil": {
+        "bytes": 1090484,
+        "sha256": "42016dc9847bc3be90e9d590c85ff15f9b3596e86fecee88dc3b1b782a4d124b"
+      },
+      "qwen_FFN_PF_lut6_chunk_01of02.mlmodelc/weights/weight.bin": {
+        "bytes": 172833728,
+        "sha256": "c7a6b482ae21a2cd244ea4110cabaa5b8a51ba225010dcd4c0ff10f80fd61e53"
+      },
+      "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/analytics/coremldata.bin": {
+        "bytes": 243,
+        "sha256": "2de453d268b18996ed6da778fd32355e3d3f473ab95a2fe526fe36d12530bbd2"
+      },
+      "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/coremldata.bin": {
+        "bytes": 981,
+        "sha256": "8ad768154f9cd62fb4730d56ae9b99a1650cbf1d4363ee61198b9cf3a158e3bd"
+      },
+      "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/metadata.json": {
+        "bytes": 10192,
+        "sha256": "fce0738799b281a72b01c1d0d51cb04f4f60a76e8d974eda34b18a716a12b6e6"
+      },
+      "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/model.mil": {
+        "bytes": 1093691,
+        "sha256": "fe115d1cf22fe98fa71e96366f869e56c7deae32317e6b3500b24de4f0f7a5c4"
+      },
+      "qwen_FFN_PF_lut6_chunk_02of02.mlmodelc/weights/weight.bin": {
+        "bytes": 172835840,
+        "sha256": "94894cc0508d18f0627f662180e09db5cd4169d9541430738ffc0af41ed11dfc"
+      },
+      "qwen_embeddings.mlmodelc/analytics/coremldata.bin": {
+        "bytes": 243,
+        "sha256": "1eaebdb9c60c721b68b7a7f2c7dcbd874e55f09561250eab620bf5c8cecb6832"
+      },
+      "qwen_embeddings.mlmodelc/coremldata.bin": {
+        "bytes": 560,
+        "sha256": "78aaa41a92ec0eeb13a534b27b8a7e3ba0de4b66d4ed6f9f606c5e7db1573bac"
+      },
+      "qwen_embeddings.mlmodelc/metadata.json": {
+        "bytes": 1989,
+        "sha256": "c6021762f74fc7b124db08526411eb5162fe4681d79ef5df9aad2dd44bf19140"
+      },
+      "qwen_embeddings.mlmodelc/model.mil": {
+        "bytes": 2119,
+        "sha256": "07a30ea280623c33e86c787729efcfec0665384eac0cdecbf28b70dd404450b1"
+      },
+      "qwen_embeddings.mlmodelc/weights/weight.bin": {
+        "bytes": 311165056,
+        "sha256": "90eec811aae04b859ff1b0879c55240ed89e4e3f0c45af421763005861b17446"
+      },
+      "qwen_lm_head_lut6.mlmodelc/analytics/coremldata.bin": {
+        "bytes": 243,
+        "sha256": "73daf198ee7e50e3c26182a34df2a8e8adbd01385bf1eeafc0b0a9bc93792359"
+      },
+      "qwen_lm_head_lut6.mlmodelc/coremldata.bin": {
+        "bytes": 1107,
+        "sha256": "a609bb89272b5de374a5c36e3f75b420d298f1c0cd80c701a022fe54890b9352"
+      },
+      "qwen_lm_head_lut6.mlmodelc/metadata.json": {
+        "bytes": 6787,
+        "sha256": "f3a4dcb313f02209f19f455c127f6d3840a5db254a3cb5f8f7292e2c482b0039"
+      },
+      "qwen_lm_head_lut6.mlmodelc/model.mil": {
+        "bytes": 30442,
+        "sha256": "c3ba6c296de0528d33a641cd7ed8d62c7cb2ebd317d4f7499717659492665ec6"
+      },
+      "qwen_lm_head_lut6.mlmodelc/weights/weight.bin": {
+        "bytes": 121550912,
+        "sha256": "c737bf9677e94f8e536de0fb239f3cd4cfa7d0e0ad42bde844c410cc84479611"
+      }
+    },
+    "fixture": {
+      "path": "/Users/work/Documents/legato/.claude/worktrees/quiet-amber-koala/spikes/ane-cleanup/conversion/checks/fixtures/prefix-parity.json",
+      "bytes": 446,
+      "sha256": "46cc8587a24423bd829c4e449a7572a939ce2bbd89873bd67a7db7f7e60c1257"
+    },
+    "validator_files": {
+      "validate_coreml.py": {
+        "bytes": 10014,
+        "sha256": "d712c197e295cd2e0f2bc9ae5acbd192c4046b3bce625606b0ac628a7da18eb3"
+      },
+      "uv.lock": {
+        "bytes": 39801,
+        "sha256": "a608d390a2da7a82405b9fbd158b7917486495ca624ccfa7f24e17ba237c93cd"
+      },
+      "pyproject.toml": {
+        "bytes": 1053,
+        "sha256": "f405102c838e302a34b9fdbe784fe4006fb6e64dc68de0709b915609c4173ae4"
+      },
+      ".python-version": {
+        "bytes": 8,
+        "sha256": "5b703ca38d3fd391f3e889f7ba893f94b921ff9e7b7e5d8d6622d5f7daca7049"
+      },
+      "src/ane_conversion/__init__.py": {
+        "bytes": 74,
+        "sha256": "1d71673ae9786f54c56f9f1a39103976c6f16e29d2453fb9659d45a0366bfc05"
+      },
+      "src/ane_conversion/contracts.py": {
+        "bytes": 1273,
+        "sha256": "28400406da158c507b5d82666ffede8d5fcf37230323b97b93de55b7c1800e40"
+      },
+      "src/ane_conversion/experiment.py": {
+        "bytes": 10783,
+        "sha256": "7b8b917d54b5b7bbbb7434a7092e4fae8829688949744860ca517f141647af3f"
+      },
+      "src/ane_conversion/geometry.py": {
+        "bytes": 1483,
+        "sha256": "c7ae9ebcd3418c89adb0c45437ca92e1e3ffe6799601efa1f726332d5ba5d20e"
+      },
+      "src/ane_conversion/layout.py": {
+        "bytes": 4624,
+        "sha256": "53a05425b4acd461d921eab18492e36e965f75d0799aaa391403c95966ad52f8"
+      },
+      "src/ane_conversion/parity_gate.py": {
+        "bytes": 1838,
+        "sha256": "e9bb4ccaeadcf9e559ccee038cbe4ac3cf5e78bf90800956b7758a571187d3b2"
+      },
+      "src/ane_conversion/prefill_contract.py": {
+        "bytes": 647,
+        "sha256": "990b8bc091dc40d155dc16d41a74408277f40ff20d96b4adad5943d2851ff573"
+      },
+      "src/ane_conversion/provenance.py": {
+        "bytes": 5912,
+        "sha256": "ee8ea99dda06600f4e44416fd6f2a21113f4b584d5f5e50a316e8b7c9940a9c6"
+      },
+      "src/ane_conversion/reference.py": {
+        "bytes": 1949,
+        "sha256": "8d663c7f301e8d0cbe64026d6e750ee34aa67840ac76eba22188f5a1a5e3f418"
+      }
+    },
+    "options": {
+      "compute": "cpu-and-ne",
+      "prefill_batches": [
+        1,
+        2
+      ],
+      "skip_prefixes": false,
+      "strict_quantized_gate": true
+    },
+    "python": "3.12.10 (main, Apr  9 2025, 03:49:38) [Clang 20.1.0 ]",
+    "python_executable": "/Users/work/Documents/legato/.claude/worktrees/quiet-amber-koala/spikes/ane-cleanup/conversion/.venv/bin/python3",
+    "installed_packages": {
+      "Jinja2": "3.1.6",
+      "MarkupSafe": "3.0.4",
+      "PyYAML": "6.0.3",
+      "Pygments": "2.21.0",
+      "attrs": "26.1.0",
+      "cattrs": "26.2.1",
+      "certifi": "2026.10.23",
+      "charset-normalizer": "3.5.2",
+      "cloudpickle": "3.1.2",
+      "coremltools": "9.0",
+      "filelock": "4.2.4",
+      "fsspec": "2026.9.0",
+      "huggingface-hub": "0.30.2",
+      "idna": "3.20",
+      "iniconfig": "2.3.1",
+      "joblib": "1.6.0",
+      "legato-ane-conversion-spike": "0.1.0",
+      "mpmath": "1.3.0",
+      "networkx": "3.7",
+      "nodeenv": "1.11.0",
+      "numpy": "1.26.4",
+      "packaging": "26.3",
+      "pluggy": "1.7.0",
+      "protobuf": "7.36.2",
+      "psutil": "7.0.0",
+      "pyaml": "26.7.0",
+      "pyright": "1.1.407",
+      "pytest": "8.4.2",
+      "regex": "2026.9.29",
+      "requests": "2.34.2",
+      "ruff": "0.14.2",
+      "safetensors": "0.5.3",
+      "scikit-learn": "1.5.1",
+      "scipy": "1.17.1",
+      "sentencepiece": "0.2.0",
+      "setuptools": "84.2.1",
+      "sympy": "1.14.0",
+      "threadpoolctl": "3.7.0",
+      "tokenizers": "0.21.4",
+      "torch": "2.7.0",
+      "tqdm": "4.70.1",
+      "transformers": "4.51.3",
+      "typing_extensions": "4.16.0",
+      "urllib3": "2.8.0"
+    },
+    "scope": "Exact source inputs, selected compiled trees/meta, fixture, validator/helpers/lock/runtime/options; excludes output reports and install manifests to avoid circular identity.",
+    "inventory_sha256": "1b0d19107cc313f83c17f27af8a81cae04550d9842b3eb87c6499a911802697f"
+  },
+  "strict_quantized_gate": true,
+  "model_quantization_parameters": {
+    "lut_embeddings": "none",
+    "lut_ffn": 6,
+    "lut_ffn_per_channel": 4,
+    "lut_lmhead": 6,
+    "lut_lmhead_per_channel": 4
+  },
+  "loaded_compiled_artifacts": true,
+  "last_prefill_windows": [
+    [
+      0,
+      64
+    ],
+    [
+      64,
+      64
+    ]
+  ],
+  "seconds": 9.972023083013482,
+  "process_peak_rss_bytes": 5029986304
+}

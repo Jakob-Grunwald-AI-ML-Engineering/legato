@@ -1,6 +1,7 @@
 import AVFAudio
 import BackgroundTasks
 import Foundation
+import LegatoKeyboardCore
 import LegatoAppServices
 import LegatoAudio
 import LegatoClaude
@@ -52,7 +53,7 @@ private final class BackgroundToken {
 /// The system-scheduled processing task that finishes a meeting's heavy steps (post-pass, speakers, summary)
 /// when the app was suspended before they ran.
 enum MeetingBackgroundTask {
-    static let identifier = "de.gruenwald.legato.meeting-processing"
+    static let identifier = RuntimeIdentity.current.notificationNamespace + ".meeting-processing"
 
     /// Asks iOS for a processing window. Replaces an earlier request with the same identifier; fails quietly
     /// where the system offers none (the simulator).

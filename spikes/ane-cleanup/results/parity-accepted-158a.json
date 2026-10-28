@@ -1,0 +1,489 @@
+{
+  "schema": 1,
+  "evidenceKind": "user-accepted-shared-source-dictation-feasibility-operational-only",
+  "buildID": "158a0273e8053e81d1bc07596bfc8baf993ba790fea8fe2bf14004a5768286f6",
+  "modelRevision": "0977a61d00e39118aab5ed1e510f1d228df5eefd",
+  "sourceSnapshot": "private-results/20261027T233448Z-parity-accepted/ParityEvidence/events.jsonl",
+  "sourceSHA256": "f810423e90f271fd5abd311b1ab3063c9b2de7502e6209af0ea4a254940fe564",
+  "rawEventCount": 238,
+  "fieldPolicy": {
+    "eventWhitelist": [
+      "anePlacement",
+      "appState",
+      "backend",
+      "background",
+      "code",
+      "computeUnits",
+      "confirmed",
+      "domain",
+      "errorType",
+      "event",
+      "failedInvocations",
+      "held",
+      "inputTokens",
+      "invocations",
+      "modelRevision",
+      "outcome",
+      "outputCap",
+      "physicalFootprintBytes",
+      "pid",
+      "reason",
+      "refine",
+      "retention",
+      "runID",
+      "sourceBuildID",
+      "status",
+      "stopReason",
+      "time",
+      "tokens",
+      "type"
+    ],
+    "excluded": "No private speech, transcript, history, stored result values, rendered prompts, progress detail, stage text or absolute phone paths.",
+    "selection": "Only composition identity, finalApplied acknowledgments, load cancellation/failure, reset/unload/settlement and post-reset readiness records are published. Per-run counters summarize other whitelisted events."
+  },
+  "acceptance": {
+    "userAcceptedSuccessfulFeasibility": true,
+    "physicalTestingConcludedAtUserRequest": true,
+    "scope": "Successful shared-source recording/cleanup/regular keyboard delivery feasibility; not a production backend rollout or proof of physical ANE placement.",
+    "followUp": "https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/issues/58"
+  },
+  "eventCounts": {
+    "cancel.request": 1,
+    "cleanup.outcome": 30,
+    "composition.ready": 2,
+    "decode.end": 9,
+    "decode.firstToken": 17,
+    "dictation.outcome": 10,
+    "dictation.runStarted": 5,
+    "keyboard.finalApplied": 5,
+    "lifecycle": 38,
+    "memory.sample": 11,
+    "microphone.lease": 5,
+    "model.load.begin": 4,
+    "model.load.cancelled": 1,
+    "model.load.completed": 2,
+    "model.load.end": 2,
+    "model.load.failed": 1,
+    "model.load.progress": 38,
+    "model.prepare.failed": 1,
+    "model.prepare.request": 8,
+    "model.ready": 6,
+    "model.reset.request": 1,
+    "model.reset.settled": 1,
+    "model.unloaded": 1,
+    "prefill.begin": 18,
+    "prepare.settled": 3,
+    "worker.settled": 18
+  },
+  "byPID": [
+    {
+      "pid": "31530",
+      "eventCount": 21,
+      "firstEventUTC": "2026-10-27T23:27:14Z",
+      "lastEventUTC": "2026-10-27T23:29:15Z",
+      "eventCounts": {
+        "composition.ready": 1,
+        "lifecycle": 12,
+        "model.load.begin": 1,
+        "model.load.progress": 6,
+        "model.prepare.request": 1
+      },
+      "cleanupPassStatusCounts": {}
+    },
+    {
+      "pid": "31560",
+      "eventCount": 217,
+      "firstEventUTC": "2026-10-27T23:29:18Z",
+      "lastEventUTC": "2026-10-27T23:34:29Z",
+      "eventCounts": {
+        "cancel.request": 1,
+        "cleanup.outcome": 30,
+        "composition.ready": 1,
+        "decode.end": 9,
+        "decode.firstToken": 17,
+        "dictation.outcome": 10,
+        "dictation.runStarted": 5,
+        "keyboard.finalApplied": 5,
+        "lifecycle": 26,
+        "memory.sample": 11,
+        "microphone.lease": 5,
+        "model.load.begin": 3,
+        "model.load.cancelled": 1,
+        "model.load.completed": 2,
+        "model.load.end": 2,
+        "model.load.failed": 1,
+        "model.load.progress": 32,
+        "model.prepare.failed": 1,
+        "model.prepare.request": 7,
+        "model.ready": 6,
+        "model.reset.request": 1,
+        "model.reset.settled": 1,
+        "model.unloaded": 1,
+        "prefill.begin": 18,
+        "prepare.settled": 3,
+        "worker.settled": 18
+      },
+      "cleanupPassStatusCounts": {
+        "cancelled": 1,
+        "completed": 9,
+        "rawOrUnavailable": 10,
+        "timedOut": 10
+      }
+    }
+  ],
+  "dictationRuns": [
+    {
+      "runID": "555D93E0-3543-413D-B581-9EA88CD79FFE",
+      "pid": "31560",
+      "startUTC": "2026-10-27T23:31:05Z",
+      "startAppState": "active",
+      "finalAppliedUTC": "2026-10-27T23:32:19Z",
+      "finalAppliedAppState": "background",
+      "finalAppliedConfirmed": false,
+      "fullyBackgroundThroughConfirmedFinalApplied": false,
+      "firstEventIndex": 71,
+      "finalAppliedEventIndex": 100,
+      "recordedAppStatesThroughFinalApplied": {
+        "active": 27,
+        "background": 2,
+        "inactive": 1
+      },
+      "cleanupPassStatusCounts": {
+        "rawOrUnavailable": 8,
+        "timedOut": 5
+      },
+      "refinePassStatusCounts": {},
+      "triggerAttribution": "not logged; do not assign keyboard versus Action Button",
+      "cleanupPassSourceIndices": [
+        74,
+        78,
+        85,
+        86,
+        87,
+        88,
+        90,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97
+      ]
+    },
+    {
+      "runID": "0A76AE22-DE2F-4A05-888B-400D33310E02",
+      "pid": "31560",
+      "startUTC": "2026-10-27T23:32:27Z",
+      "startAppState": "background",
+      "finalAppliedUTC": "2026-10-27T23:32:35Z",
+      "finalAppliedAppState": "background",
+      "finalAppliedConfirmed": true,
+      "fullyBackgroundThroughConfirmedFinalApplied": true,
+      "firstEventIndex": 130,
+      "finalAppliedEventIndex": 137,
+      "recordedAppStatesThroughFinalApplied": {
+        "background": 8
+      },
+      "cleanupPassStatusCounts": {
+        "completed": 2
+      },
+      "refinePassStatusCounts": {
+        "completed": 1
+      },
+      "triggerAttribution": "not logged; do not assign keyboard versus Action Button",
+      "cleanupPassSourceIndices": [
+        136,
+        145
+      ]
+    },
+    {
+      "runID": "801BB43E-269D-4887-89BC-3CE0D6AB33DF",
+      "pid": "31560",
+      "startUTC": "2026-10-27T23:32:43Z",
+      "startAppState": "background",
+      "finalAppliedUTC": "2026-10-27T23:32:48Z",
+      "finalAppliedAppState": "active",
+      "finalAppliedConfirmed": true,
+      "fullyBackgroundThroughConfirmedFinalApplied": false,
+      "firstEventIndex": 149,
+      "finalAppliedEventIndex": 158,
+      "recordedAppStatesThroughFinalApplied": {
+        "active": 6,
+        "background": 3,
+        "inactive": 1
+      },
+      "cleanupPassStatusCounts": {
+        "completed": 1
+      },
+      "refinePassStatusCounts": {},
+      "triggerAttribution": "not logged; do not assign keyboard versus Action Button",
+      "cleanupPassSourceIndices": [
+        157
+      ]
+    },
+    {
+      "runID": "F268A8D3-3060-47EE-B773-915688FC3804",
+      "pid": "31560",
+      "startUTC": "2026-10-27T23:33:07Z",
+      "startAppState": "background",
+      "finalAppliedUTC": "2026-10-27T23:33:56Z",
+      "finalAppliedAppState": "background",
+      "finalAppliedConfirmed": true,
+      "fullyBackgroundThroughConfirmedFinalApplied": true,
+      "firstEventIndex": 167,
+      "finalAppliedEventIndex": 214,
+      "recordedAppStatesThroughFinalApplied": {
+        "background": 48
+      },
+      "cleanupPassStatusCounts": {
+        "cancelled": 1,
+        "completed": 4,
+        "rawOrUnavailable": 2,
+        "timedOut": 5
+      },
+      "refinePassStatusCounts": {},
+      "triggerAttribution": "not logged; do not assign keyboard versus Action Button",
+      "cleanupPassSourceIndices": [
+        173,
+        178,
+        183,
+        188,
+        191,
+        195,
+        199,
+        200,
+        204,
+        205,
+        209,
+        213
+      ]
+    },
+    {
+      "runID": "83C98AF8-92A6-40A4-B2AE-52A020EDDF91",
+      "pid": "31560",
+      "startUTC": "2026-10-27T23:34:14Z",
+      "startAppState": "background",
+      "finalAppliedUTC": "2026-10-27T23:34:29Z",
+      "finalAppliedAppState": "background",
+      "finalAppliedConfirmed": true,
+      "fullyBackgroundThroughConfirmedFinalApplied": true,
+      "firstEventIndex": 222,
+      "finalAppliedEventIndex": 234,
+      "recordedAppStatesThroughFinalApplied": {
+        "background": 13
+      },
+      "cleanupPassStatusCounts": {
+        "completed": 2
+      },
+      "refinePassStatusCounts": {},
+      "triggerAttribution": "not logged; do not assign keyboard versus Action Button",
+      "cleanupPassSourceIndices": [
+        228,
+        233
+      ]
+    }
+  ],
+  "summary": {
+    "dictationRunsStarted": 5,
+    "confirmedFinalApplied": 4,
+    "confirmedFinalAppliedWhileBackground": 3,
+    "confirmedFinalAppliedAfterForegroundTransition": 1,
+    "unconfirmedFinalApplied": 1,
+    "cleanupPassStatusCounts": {
+      "cancelled": 1,
+      "completed": 9,
+      "rawOrUnavailable": 10,
+      "timedOut": 10
+    },
+    "refineCompletedPasses": 1,
+    "countingRule": "Cleanup outcomes are live/refine passes, not independent dictation runs; logged invocation counts do not establish unique native-invocation totals. A confirmed insertion can deliver timeout/raw fallback and is not a cleanup quality score.",
+    "computePermission": "cpuAndNeuralEngine",
+    "observedANEPlacement": "unverified"
+  },
+  "preparationAndRecovery": {
+    "firstPID": "31530",
+    "replacementPID": "31560",
+    "initialLoadOutcome": "No terminal model-load completion in first PID; PID change cause unestablished, no jetsam inference.",
+    "laterLoadCancellationUTC": "2026-10-27T23:30:27Z",
+    "resetRequestUTC": "2026-10-27T23:31:32Z",
+    "resetSettledUTC": "2026-10-27T23:31:49Z",
+    "successfulReloadReadyUTC": "2026-10-27T23:32:23Z",
+    "lastObservedUTC": "2026-10-27T23:34:29Z",
+    "postReloadObservedSeconds": 126,
+    "postReloadLoadBeginEvents": 0,
+    "retentionLimit": "Finite observations across requests only; no forever-residency, controlled idle, microphone-expiry or battery-safety proof."
+  },
+  "sampledProcessFootprint": {
+    "sampleCount": 11,
+    "minimumBytes": 58623088,
+    "maximumBytes": 438830336,
+    "postReloadSampleCount": 9,
+    "postReloadMinimumBytes": 335561936,
+    "postReloadMaximumBytes": 438830336,
+    "scope": "Point samples, including unloaded state; not a continuous peak, isolated model footprint or full-device/system-service memory."
+  },
+  "thermalFeedback": {
+    "userReportedPossibleWarmth": true,
+    "attribution": "unattributed",
+    "initializationContribution": "user hypothesis; not established",
+    "measurement": "No energy or sustained thermal measurement."
+  },
+  "limitations": [
+    "Private uncontrolled speech has no published transcript or independent quality score.",
+    "Trigger type is not logged; regular keyboard delivery is established by finalApplied acknowledgment, not inferred keyboard-versus-Action-Button attribution.",
+    "Event timestamps have second resolution; no new detached latency benchmark is derived.",
+    "Historical failures and timeouts remain retained; accepted feasibility does not mean every cleanup pass succeeded.",
+    "Qwen0.6 FP16/LUT6 strict numeric gates remain failed; this Qwen1.7 trial does not clear them.",
+    "Broader quality, sustained latency/energy, placement and production integration remain follow-up validation."
+  ],
+  "eventProjectionSHA256": "30eead0650dbdf8ad00c96f2312cfbb7f3419a71703c55de9e4857332124f019",
+  "eventProjectionDigestFormat": "SHA256 of UTF-8 JSON array of all 238 whitelisted records; sorted object keys and separators comma/colon without whitespace.",
+  "selectedEvents": [
+    {
+      "sourceEventIndex": 0,
+      "record": {
+        "sourceBuildID": "158a0273e8053e81d1bc07596bfc8baf993ba790fea8fe2bf14004a5768286f6",
+        "retention": "model-resident; configured microphone lease",
+        "appState": "background",
+        "pid": "31530",
+        "time": "2026-10-27T23:27:14Z",
+        "modelRevision": "0977a61d00e39118aab5ed1e510f1d228df5eefd",
+        "event": "composition.ready"
+      }
+    },
+    {
+      "sourceEventIndex": 21,
+      "record": {
+        "retention": "model-resident; configured microphone lease",
+        "event": "composition.ready",
+        "pid": "31560",
+        "time": "2026-10-27T23:29:18Z",
+        "sourceBuildID": "158a0273e8053e81d1bc07596bfc8baf993ba790fea8fe2bf14004a5768286f6",
+        "modelRevision": "0977a61d00e39118aab5ed1e510f1d228df5eefd",
+        "appState": "background"
+      }
+    },
+    {
+      "sourceEventIndex": 48,
+      "record": {
+        "time": "2026-10-27T23:30:27Z",
+        "appState": "active",
+        "event": "model.load.cancelled",
+        "pid": "31560"
+      }
+    },
+    {
+      "sourceEventIndex": 49,
+      "record": {
+        "time": "2026-10-27T23:30:27Z",
+        "event": "model.load.failed",
+        "code": "3",
+        "appState": "active",
+        "type": "ModelError",
+        "domain": "AnemllCore.ModelError",
+        "pid": "31560"
+      }
+    },
+    {
+      "sourceEventIndex": 51,
+      "record": {
+        "pid": "31560",
+        "appState": "active",
+        "time": "2026-10-27T23:30:27Z",
+        "errorType": "ModelError",
+        "event": "model.prepare.failed"
+      }
+    },
+    {
+      "sourceEventIndex": 82,
+      "record": {
+        "appState": "active",
+        "event": "model.reset.request",
+        "pid": "31560",
+        "time": "2026-10-27T23:31:32Z"
+      }
+    },
+    {
+      "sourceEventIndex": 89,
+      "record": {
+        "pid": "31560",
+        "time": "2026-10-27T23:31:49Z",
+        "event": "model.unloaded",
+        "appState": "active"
+      }
+    },
+    {
+      "sourceEventIndex": 91,
+      "record": {
+        "time": "2026-10-27T23:31:49Z",
+        "event": "model.reset.settled",
+        "appState": "active",
+        "pid": "31560"
+      }
+    },
+    {
+      "sourceEventIndex": 100,
+      "record": {
+        "time": "2026-10-27T23:32:19Z",
+        "confirmed": "false",
+        "runID": "555D93E0-3543-413D-B581-9EA88CD79FFE",
+        "appState": "background",
+        "pid": "31560",
+        "event": "keyboard.finalApplied"
+      }
+    },
+    {
+      "sourceEventIndex": 122,
+      "record": {
+        "pid": "31560",
+        "time": "2026-10-27T23:32:23Z",
+        "event": "model.ready",
+        "appState": "active"
+      }
+    },
+    {
+      "sourceEventIndex": 137,
+      "record": {
+        "confirmed": "true",
+        "pid": "31560",
+        "runID": "0A76AE22-DE2F-4A05-888B-400D33310E02",
+        "time": "2026-10-27T23:32:35Z",
+        "appState": "background",
+        "event": "keyboard.finalApplied"
+      }
+    },
+    {
+      "sourceEventIndex": 158,
+      "record": {
+        "event": "keyboard.finalApplied",
+        "time": "2026-10-27T23:32:48Z",
+        "confirmed": "true",
+        "runID": "801BB43E-269D-4887-89BC-3CE0D6AB33DF",
+        "appState": "active",
+        "pid": "31560"
+      }
+    },
+    {
+      "sourceEventIndex": 214,
+      "record": {
+        "pid": "31560",
+        "appState": "background",
+        "runID": "F268A8D3-3060-47EE-B773-915688FC3804",
+        "event": "keyboard.finalApplied",
+        "time": "2026-10-27T23:33:56Z",
+        "confirmed": "true"
+      }
+    },
+    {
+      "sourceEventIndex": 234,
+      "record": {
+        "event": "keyboard.finalApplied",
+        "confirmed": "true",
+        "time": "2026-10-27T23:34:29Z",
+        "pid": "31560",
+        "appState": "background",
+        "runID": "83C98AF8-92A6-40A4-B2AE-52A020EDDF91"
+      }
+    }
+  ]
+}
