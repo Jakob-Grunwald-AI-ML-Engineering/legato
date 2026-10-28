@@ -49,6 +49,7 @@ final class PartialBox: Sendable {
 struct EngineRun<Backend: StreamingBackend>: Sendable {
     let backend: Backend
     let clamp: LanguageClamp
+    var languageUpdates: LiveLanguageUpdates? = nil
     /// Ends when the input ends; failures reach the consumer through the event stream, not here.
     var task: Task<Void, Never>?
 }

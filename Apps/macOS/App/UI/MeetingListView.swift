@@ -2,7 +2,7 @@ import LegatoMeetings
 import SwiftUI
 
 /// The meetings page: grouped by day, one card per meeting (title, one line of what it was about, the time),
-/// a search over everything, and the language the next meeting records in.
+/// and a search over everything.
 struct MeetingListView: View {
     @Environment(MacAppController.self) private var app
     @Binding var selection: UUID?
@@ -75,23 +75,6 @@ struct MeetingListView: View {
         .toolbar {
             ToolbarItem(placement: .navigation) { Text("Meetings").font(.headline) }
             ToolbarItem {
-                Menu {
-                    Button { meetings.language = nil } label: {
-                        if meetings.language == nil { Label("Auto", systemImage: "checkmark") } else { Text("Auto") }
-                    }
-                    Divider()
-                    ForEach(Self.languages, id: \.id) { language in
-                        Button { meetings.language = language.id } label: {
-                            if meetings.language == language.id { Label(language.name, systemImage: "checkmark") } else { Text(language.name) }
-                        }
-                    }
-                } label: {
-                    Label(languageName, systemImage: "globe")
-                }
-                .help("The language of the next meeting")
-                .disabled(meetings.isRecording)
-            }
-            ToolbarItem {
                 Button {
                     searching.toggle()
                     if searching { searchFocused = true } else { query = "" }
@@ -111,10 +94,6 @@ struct MeetingListView: View {
                 .accessibilityIdentifier("meetings.start")
             }
         }
-    }
-
-    private var languageName: String {
-        meetings.language.flatMap { id in Self.languages.first { $0.id == id }?.name ?? id } ?? "Auto"
     }
 
     @ViewBuilder private var emptyState: some View {

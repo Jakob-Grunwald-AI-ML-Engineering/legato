@@ -1,5 +1,6 @@
 import AVFAudio
 import LegatoCore
+import LegatoAudioBridge
 import Synchronization
 #if os(macOS)
 import AudioToolbox
@@ -297,8 +298,20 @@ public final class MicSource: ResumableAudioSource {
                 throw MicSourceError.converterUnavailable
             }
             let probe = onFirstBuffer.map { FirstBufferProbe(sampleRate: inFormat.sampleRate, report: $0) }
-            input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(router, converter, probe))
-            engine.prepare()
+            var tapInstalled = false
+            // A route may change between the format read and installTap. AVFAudio raises an
+            // Objective-C exception for that race; Swift catch alone cannot contain it.
+            if let error = LegatoAudioCatchException({
+                input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(self.router, converter, probe))
+                tapInstalled = true
+                engine.prepare()
+            }) {
+                if tapInstalled { input.removeTap(onBus: 0) }
+                engine.stop()
+                lastError = error
+                report(error)
+                continue
+            }
             do {
                 try engine.start()
             } catch {
@@ -308,6 +321,19 @@ public final class MicSource: ResumableAudioSource {
                 report(error)
                 continue
             }
+            #if os(macOS)
+            // Starting another device can make AVAudioEngine replace this unit with an implicit
+            // aggregate. Never report success or deliver the wrong microphone in that case.
+            if let boundDevice,
+                input.audioUnit.flatMap({ Self.inputDevice(of: $0) }) != boundDevice {
+                let error = MicSourceError.deviceNotSelected(device: device ?? boundDevice, status: 0)
+                input.removeTap(onBus: 0)
+                engine.stop()
+                lastError = error
+                report(error)
+                continue
+            }
+            #endif
             report(nil)
             #if os(macOS)
             diagnose("engine.started", engine: engine, boundDevice: boundDevice)

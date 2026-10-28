@@ -52,7 +52,7 @@ final class MacMeetingDiagnostics: Sendable {
     @MainActor
     func install(meetings: MeetingController) {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
-        for command in ["status", "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "probe-speaker"] {
+        for command in ["status", "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "probe-speaker", "input-auto", "input-all", "input-builtin", "language-en", "language-de", "language-auto"] {
             CFNotificationCenterAddObserver(center, nil, { _, _, name, _, _ in
                 guard let raw = name?.rawValue as String?, let command = raw.split(separator: ".").last.map(String.init) else { return }
                 Task { @MainActor in await MacMeetingDiagnostics.shared?.command(command, meetings: MacAppController.shared.meetings) }
@@ -79,6 +79,12 @@ final class MacMeetingDiagnostics: Sendable {
                 Self.probePlayer = player
                 event("probe.started", fields: ["playing": String(player.play())])
             } else { event("probe.unavailable") }
+        case "input-auto": await meetings.setMicrophoneSelection(.auto)
+        case "input-all": await meetings.setMicrophoneSelection(.all)
+        case "input-builtin": await meetings.setMicrophoneSelection(.device("BuiltInMicrophoneDevice"))
+        case "language-en": await meetings.setLiveLanguage("en")
+        case "language-de": await meetings.setLiveLanguage("de")
+        case "language-auto": await meetings.setLiveLanguage(nil)
         case "meeting-start": await meetings.start()
         case "meeting-stop": _ = await meetings.stop()
         case "meeting-mute": if !meetings.isMuted { meetings.toggleManualMute() }
@@ -93,6 +99,10 @@ final class MacMeetingDiagnostics: Sendable {
         var fields = [
             "phase": String(describing: meetings.phase), "muted": String(meetings.isMuted),
             "paused": String(meetings.isPaused), "selectedMicrophoneUID": meetings.settings.inputDeviceUID ?? "auto",
+            "microphoneSelection": String(describing: meetings.inputSelection),
+            "activeMicrophoneUID": meetings.activeInputUID ?? "none",
+            "liveLanguage": meetings.liveLanguage ?? "auto", "changingLanguage": String(meetings.changingLanguage),
+            "liveLanguageSupported": String(meetings.liveLanguageCodes != nil),
             "engine": meetings.engineName ?? "none", "tap": String(describing: meetings.tapStatus),
             "engineFailed": String(!(meetings.live?.engineErrors.isEmpty ?? true)),
             "audioFailed": String(meetings.live?.audioError != nil),
@@ -142,11 +152,13 @@ final class MacMeetingDiagnostics: Sendable {
     }
 }
 
-/// Counts raw capture before enhancement, while preserving the original microphone's restart stream.
+/// Counts raw capture before enhancement and preserves restart notifications when the source has them.
 struct DiagnosticMicSource: ResumableAudioSource {
-    let source: VoiceProcessingFallbackMic
+    let source: any AudioSource
     let diagnostics: MacMeetingDiagnostics
-    var resumptions: AsyncStream<Void> { source.resumptions }
+    var resumptions: AsyncStream<Void> {
+        (source as? any ResumableAudioSource)?.resumptions ?? AsyncStream { $0.finish() }
+    }
     func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         tracked(try await source.start(format: format))
     }

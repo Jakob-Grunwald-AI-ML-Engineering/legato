@@ -42,6 +42,38 @@ import Testing
         #expect(s.inputDeviceUID == nil)
     }
 
+    @Test func allMicrophonesModeDoesNotResolveAStaleLegacyPinnedDevice() {
+        let defaults = UserDefaults(suiteName: "legato.meeting-input.\(UUID().uuidString)")!
+        defaults.set("old-headset", forKey: "meeting.inputDeviceUID")
+        defaults.set("all", forKey: "meeting.inputMode")
+        #expect(MeetingSettings(defaults: defaults).inputDeviceUID == nil)
+    }
+
+    @Test func microphoneModesPersistIndependentlyAndMigrateUIDOnlyPreferences() {
+        let defaults = UserDefaults(suiteName: "legato.meeting-input.\(UUID().uuidString)")!
+        let settings = MeetingSettings(defaults: defaults)
+        #expect(settings.inputSelection == .auto)
+        defaults.set("BuiltInMicrophoneDevice", forKey: "meeting.inputDeviceUID")
+        #expect(settings.inputSelection == .device("BuiltInMicrophoneDevice"))
+        settings.inputSelection = .all
+        #expect(MeetingSettings(defaults: defaults).inputSelection == .all)
+        #expect(settings.inputDeviceUID == nil)
+        settings.inputSelection = .device("headset-uid")
+        #expect(MeetingSettings(defaults: defaults).inputSelection == .device("headset-uid"))
+        settings.inputSelection = .auto
+        #expect(MeetingSettings(defaults: defaults).inputSelection == .auto)
+        #expect(defaults.string(forKey: "meeting.inputDeviceUID") == nil)
+    }
+
+    @Test func emptyLegacyUIDAndEmptyDeviceSelectionResolveToAuto() {
+        let defaults = UserDefaults(suiteName: "legato.meeting-input.\(UUID().uuidString)")!
+        defaults.set("", forKey: "meeting.inputDeviceUID")
+        let settings = MeetingSettings(defaults: defaults)
+        #expect(settings.inputSelection == .auto)
+        settings.inputSelection = .device("")
+        #expect(settings.inputSelection == .auto)
+    }
+
     @Test func theClaudeDisclosureIsForgottenWheneverTheKeyChangesOrGoes() throws {
         let s = settings()
         let keys = InMemoryAPIKeyStore()

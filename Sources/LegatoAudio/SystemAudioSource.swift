@@ -37,7 +37,7 @@ public enum SystemAudioSourceError: Error, Sendable, Equatable {
 /// read after the device exists and checked again every second. The first needs no permission; the first start of a tap triggers the
 /// System Audio Recording prompt. Not covered by unit tests (real hardware); the app self-test does.
 public final class SystemAudioSource: ResumableAudioSource {
-    private struct Handles {
+    private struct Handles: @unchecked Sendable {
         var tap = AudioObjectID(kAudioObjectUnknown)
         var aggregate = AudioObjectID(kAudioObjectUnknown)
         var proc: AudioDeviceIOProcID?
@@ -51,9 +51,12 @@ public final class SystemAudioSource: ResumableAudioSource {
     private struct State {
         var armed = false
         var format: AudioFormatSpec?
-        var handles = Handles()
+        var tap: SystemAudioTapLease?
         var rebuilding = false
         var generation = 0
+        var attempt = 0
+        var failures = 0
+        var retryAt: TimeInterval = 0
         var listener: ListenerBox?
         var poller: Task<Void, Never>?
     }
@@ -93,66 +96,97 @@ public final class SystemAudioSource: ResumableAudioSource {
     private let watch = Watch()
     private let queue = DispatchQueue(label: "legato.systemaudio", qos: .userInitiated)
     private let ownPID = getpid()
+    private let injectedBuild: SystemAudioTapBuilder?
+    private let clock: @Sendable () -> TimeInterval
 
     public init() {
+        injectedBuild = nil
+        clock = { ProcessInfo.processInfo.systemUptime }
+        (statuses, statusSink) = AsyncStream.makeStream(of: SystemAudioStatus.self)
+        (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+    }
+
+    init(clock: @escaping @Sendable () -> TimeInterval, build: @escaping SystemAudioTapBuilder) {
+        injectedBuild = build
+        self.clock = clock
         (statuses, statusSink) = AsyncStream.makeStream(of: SystemAudioStatus.self)
         (resumptions, resumeSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
     }
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
-        await stop()
-        state.withLock { s in
-            s.armed = true
-            s.format = format
-            s.generation += 1
-        }
+        let token = reset(arming: format)
         do {
-            try await buildTap()
+            let tap = try await buildTap(format: format, generation: token.generation, attempt: token.attempt)
+            let accepted = state.withLock { s -> Bool in
+                guard s.armed, s.generation == token.generation, s.attempt == token.attempt else { return false }
+                s.tap = tap
+                s.rebuilding = false
+                return true
+            }
+            guard accepted else { tap.close(); throw CancellationError() }
+            watch.reset()
+            if injectedBuild == nil {
+                installListener(generation: token.generation)
+                startPolling(generation: token.generation)
+            }
+            return try makeStream(generation: token.generation, reportRunning: true)
         } catch {
-            await stop()
+            _ = reset(arming: nil, ifGeneration: token.generation)
             throw error
         }
-        installListener()
-        startPolling()
-        statusSink.yield(.running)
-        return makeStream()
     }
 
-    public func route() async throws -> AsyncStream<AudioChunk> {
-        guard state.withLock({ $0.armed }) else { throw SystemAudioSourceError.notArmed }
-        return makeStream()
-    }
+    public func route() async throws -> AsyncStream<AudioChunk> { try makeStream() }
+    public func detach() async { state.withLock { _ in router.setSink(nil) } }
+    public func stop() async { _ = reset(arming: nil) }
 
-    public func detach() async {
-        router.setSink(nil)
-    }
-
-    public func stop() async {
-        router.setSink(nil)
-        let (listener, poller) = state.withLock { s -> (ListenerBox?, Task<Void, Never>?) in
-            s.armed = false
-            s.generation += 1
-            defer { s.listener = nil; s.poller = nil }
-            return (s.listener, s.poller)
+    /// Reserves the new lifecycle before destroying the previous resources. Native teardown never
+    /// reaches into shared state, so a simultaneous restart cannot lose its new tap or stream.
+    @discardableResult
+    private func reset(arming format: AudioFormatSpec?, ifGeneration expected: Int? = nil) -> (generation: Int, attempt: Int) {
+        let old = state.withLock { s -> (SystemAudioTapLease?, ListenerBox?, Task<Void, Never>?, Int, Int)? in
+            if let expected, s.generation != expected { return nil }
+            let previous = (s.tap, s.listener, s.poller)
+            s.generation += 1; s.attempt += 1
+            s.armed = format != nil; s.format = format
+            s.tap = nil; s.listener = nil; s.poller = nil
+            s.rebuilding = format != nil; s.failures = 0; s.retryAt = 0
+            router.setSink(nil)
+            return (previous.0, previous.1, previous.2, s.generation, s.attempt)
         }
-        poller?.cancel()
-        if let listener {
+        guard let old else { return (-1, -1) }
+        old.2?.cancel()
+        if let listener = old.1 {
             var addr = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
             AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, queue, listener.block)
         }
-        tearDownTap()
+        old.0?.close()
+        return (old.3, old.4)
     }
 
-    private func makeStream() -> AsyncStream<AudioChunk> {
-        let (stream, continuation) = AsyncStream.makeStream(of: AudioChunk.self)
-        router.setSink(continuation)
+    private func makeStream(generation: Int? = nil, reportRunning: Bool = false) throws -> AsyncStream<AudioChunk> {
+        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
+        let accepted = state.withLock { s -> Bool in
+            guard s.armed, generation == nil || generation == s.generation else { return false }
+            router.setSink(continuation)
+            if reportRunning { statusSink.yield(.running) }
+            return true
+        }
+        guard accepted else { continuation.finish(); throw SystemAudioSourceError.notArmed }
         return stream
     }
 
     // MARK: Tap lifecycle
 
-    private func buildTap() async throws {
-        guard let spec = state.withLock({ $0.format }) else { throw SystemAudioSourceError.notArmed }
+    private func buildTap(format spec: AudioFormatSpec, generation: Int, attempt: Int) async throws -> SystemAudioTapLease {
+        let deliver: @Sendable (AudioChunk) -> Void = { [weak self] chunk in
+            guard let self else { return }
+            self.state.withLock { s in
+                guard s.armed, s.generation == generation, s.attempt == attempt else { return }
+                self.router.handle(chunk)
+            }
+        }
+        if let injectedBuild { return try await injectedBuild(spec, deliver) }
         var excluded: [AudioObjectID] = []
         for attempt in 0..<Self.exclusionAttempts {
             if let own = Self.processObject(pid: ownPID) {
@@ -211,17 +245,21 @@ public final class SystemAudioSource: ResumableAudioSource {
         handles.rate = asbd.mSampleRate
 
         let block = Self.ioBlock(
-            format: tapFormat, converter: converter, router: router, watch: watch,
-            onAction: { [weak self] action in self?.handle(action) })
+            format: tapFormat, converter: converter, onChunk: deliver, watch: watch,
+            onAction: { [weak self] action in self?.handle(action, generation: generation, attempt: attempt) })
         err = AudioDeviceCreateIOProcIDWithBlock(&handles.proc, handles.aggregate, queue, block)
         guard err == noErr else { throw fail("AudioDeviceCreateIOProcIDWithBlock", err) }
         // The permission prompt appears on the first start of a device that contains a tap.
         err = AudioDeviceStart(handles.aggregate, handles.proc)
         guard err == noErr else { throw fail("AudioDeviceStart", err) }
 
-        watch.reset()
         installRateListener(on: [outputID, handles.aggregate], into: &handles)
-        state.withLock { $0.handles = handles }
+        let owned = handles
+        return SystemAudioTapLease(needsRebuild: {
+            var nominal = Float64(0)
+            guard Self.read(owned.aggregate, kAudioDevicePropertyNominalSampleRate, &nominal) == noErr else { return true }
+            return TapRate.needsRebuild(built: owned.rate, deviceNominal: nominal)
+        }, close: { [queue] in Self.destroy(owned, queue: queue) })
     }
 
     /// Rebuilds when the output device or the aggregate device changes its nominal sample rate.
@@ -237,21 +275,13 @@ public final class SystemAudioSource: ResumableAudioSource {
         if !handles.rateDevices.isEmpty { handles.rateListener = ListenerBox(listener) }
     }
 
-    /// The listener and the once-a-second check both land here; a rate the tap was built for does nothing.
-    private func rebuildIfRateChanged() async {
-        let (aggregate, built) = state.withLock { ($0.handles.aggregate, $0.handles.rate) }
-        guard aggregate != kAudioObjectUnknown else { return }
-        var nominal = Float64(0)
-        guard Self.read(aggregate, kAudioDevicePropertyNominalSampleRate, &nominal) == noErr else { return }
-        if TapRate.needsRebuild(built: built, deviceNominal: nominal) { await rebuild() }
-    }
-
-    private func tearDownTap() {
-        let handles = state.withLock { s -> Handles in
-            defer { s.handles = Handles() }
-            return s.handles
+    /// The poller also retries a missing tap: a failed rate/profile transition must not leave it dead.
+    func rebuildIfRateChanged() async {
+        let current = state.withLock { ($0.armed, $0.tap, $0.generation, $0.attempt) }
+        guard current.0 else { return }
+        if current.1 == nil || current.1?.needsRebuild() == true {
+            await rebuild(expectedGeneration: current.2, expectedAttempt: current.3)
         }
-        Self.destroy(handles, queue: queue)
     }
 
     private static func destroy(_ h: Handles, queue: DispatchQueue) {
@@ -267,75 +297,104 @@ public final class SystemAudioSource: ResumableAudioSource {
         if h.tap != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(h.tap) }
     }
 
-    /// Tears the tap down and builds it again, once at a time. A no-op after `stop()`.
-    private func rebuild() async {
-        let generation = state.withLock { s -> Int? in
-            guard s.armed, !s.rebuilding else { return nil }
-            s.rebuilding = true
-            return s.generation
+    /// One attempt owns only its lease. A slow obsolete attempt cannot publish over or destroy a newer tap.
+    func rebuild(expectedGeneration: Int? = nil, expectedAttempt: Int? = nil) async {
+        let now = clock()
+        let reserved = state.withLock { s -> (Int, Int, AudioFormatSpec, SystemAudioTapLease?)? in
+            guard s.armed, !s.rebuilding, now >= s.retryAt, let format = s.format else { return nil }
+            if let expectedGeneration, s.generation != expectedGeneration { return nil }
+            if let expectedAttempt, s.attempt != expectedAttempt { return nil }
+            let previous = s.tap
+            s.tap = nil; s.rebuilding = true; s.attempt += 1
+            statusSink.yield(.rebuilding)
+            return (s.generation, s.attempt, format, previous)
         }
-        guard let generation else { return }
-        statusSink.yield(.rebuilding)
-        tearDownTap()
-        var failure: SystemAudioStatus = .running
-        do { try await buildTap() } catch { failure = .failed("\(error)") }
-        let stale = state.withLock { s -> Bool in
-            s.rebuilding = false
-            return s.generation != generation || !s.armed
-        }
-        if stale {
-            tearDownTap()
-        } else {
-            statusSink.yield(failure)
-            if failure == .running { resumeSink.yield() }
+        guard let (generation, attempt, format, previous) = reserved else { return }
+        previous?.close()
+        do {
+            let tap = try await buildTap(format: format, generation: generation, attempt: attempt)
+            let accepted = state.withLock { s -> Bool in
+                guard s.armed, s.generation == generation, s.attempt == attempt else { return false }
+                s.tap = tap; s.rebuilding = false; s.failures = 0; s.retryAt = 0
+                watch.reset()
+                statusSink.yield(.running)
+                resumeSink.yield(())
+                return true
+            }
+            if !accepted { tap.close() }
+        } catch {
+            state.withLock { s in
+                guard s.armed, s.generation == generation, s.attempt == attempt else { return }
+                s.rebuilding = false
+                s.failures = min(5, s.failures + 1)
+                s.retryAt = clock() + min(8, 0.5 * pow(2, Double(s.failures - 1)))
+                statusSink.yield(.failed("\(error) — retrying system audio automatically"))
+            }
         }
     }
 
-    private func handle(_ action: TapWatchdog.Action) {
+    private func handle(_ action: TapWatchdog.Action, generation: Int, attempt: Int) {
         switch action {
         case .none: break
-        case .rebuild: Task { await rebuild() }
-        case .reportSilent: statusSink.yield(.systemAudioSilent)
+        case .rebuild: Task { await rebuild(expectedGeneration: generation, expectedAttempt: attempt) }
+        case .reportSilent:
+            state.withLock { s in
+                guard s.armed, s.generation == generation, s.attempt == attempt else { return }
+                statusSink.yield(.systemAudioSilent)
+            }
         }
     }
 
     // MARK: Output device changes and the process list
 
-    private func installListener() {
+    private func installListener(generation: Int) {
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
-            Task { await self.rebuild() }
+            Task { await self.rebuild(expectedGeneration: generation) }
         }
         var addr = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
         let err = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, queue, listener)
-        if err == noErr { state.withLock { $0.listener = ListenerBox(listener) } }
+        if err == noErr {
+            let accepted = state.withLock { s -> Bool in
+                guard s.armed, s.generation == generation else { return false }
+                s.listener = ListenerBox(listener)
+                return true
+            }
+            if !accepted { AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, queue, listener) }
+        }
     }
 
-    /// Once a second: refreshes "does another process have output running" for the watchdog and checks the sample rate.
-    private func startPolling() {
+    /// Once a second: watches other playback and repairs missing or rate-changed taps with bounded backoff.
+    private func startPolling(generation: Int) {
         let (watch, own) = (watch, ownPID)
         let task = Task.detached { [weak self] in
             while !Task.isCancelled {
+                guard let self, self.state.withLock({ $0.armed && $0.generation == generation }) else { return }
                 let others = (try? Self.outputPIDs()) ?? []
                 watch.setOutputting(others.contains { $0 != own })
-                await self?.rebuildIfRateChanged() // backs up the property listener
-                try? await Task.sleep(for: .seconds(1))
+                await self.rebuildIfRateChanged()
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
             }
         }
-        state.withLock { $0.poller = task }
+        let accepted = state.withLock { s -> Bool in
+            guard s.armed, s.generation == generation else { return false }
+            s.poller = task
+            return true
+        }
+        if !accepted { task.cancel() }
     }
 
     /// Built outside any actor: a closure formed in an isolated context inherits that isolation,
     /// and Swift 6 traps when Core Audio calls it on its own thread.
     nonisolated private static func ioBlock(
-        format: AVAudioFormat, converter: BufferConverter, router: TapRouter, watch: Watch,
+        format: AVAudioFormat, converter: BufferConverter, onChunk: @escaping @Sendable (AudioChunk) -> Void, watch: Watch,
         onAction: @escaping @Sendable (TapWatchdog.Action) -> Void
     ) -> AudioDeviceIOBlock {
         { _, inData, _, _, _ in
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inData, deallocator: nil) else { return }
             let action = watch.observe(allZero: isAllZero(buffer), at: ProcessInfo.processInfo.systemUptime)
             if action != .none { onAction(action) }
-            if let chunk = converter.convert(buffer) { router.handle(chunk) }
+            if let chunk = converter.convert(buffer) { onChunk(chunk) }
         }
     }
 

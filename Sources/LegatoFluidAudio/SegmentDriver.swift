@@ -21,16 +21,19 @@ struct SegmentDriver {
     private var endpointer: SilenceEndpointer
     private var mapper: PartialEventMapper
     private var clamp: LanguageClamp
+    private let languageUpdates: LiveLanguageUpdates?
+    private var languageRevision = 0
     private var fed = 0
     private var base = 0
     private var hasText = false
 
     private static let sampleRate = 16_000
 
-    init(endpointer: SilenceEndpointer, mapper: PartialEventMapper, clamp: LanguageClamp) {
+    init(endpointer: SilenceEndpointer, mapper: PartialEventMapper, clamp: LanguageClamp, languageUpdates: LiveLanguageUpdates? = nil) {
         self.endpointer = endpointer
         self.mapper = mapper
         self.clamp = clamp
+        self.languageUpdates = languageUpdates
     }
 
     /// Consumes `input` until it ends or the task is cancelled, emitting events as they happen.
@@ -43,6 +46,8 @@ struct SegmentDriver {
                 throw FluidAudioEngineError.unsupportedFormat
             }
             guard !chunk.samples.isEmpty else { continue }
+            // While idle, apply a selection before the first samples of the next phrase.
+            if !endpointer.heardSpeech && !hasText { _ = await applyLanguageUpdate(backend) }
             fed += chunk.samples.count
             try await backend.process(chunk.samples)
 
@@ -63,6 +68,15 @@ struct SegmentDriver {
         }
     }
 
+    /// Only the driver touches the backend: language updates cannot interleave with processing or reset.
+    private mutating func applyLanguageUpdate(_ backend: some StreamingBackend) async -> Bool {
+        guard let update = languageUpdates?.newer(than: languageRevision) else { return false }
+        languageRevision = update.revision
+        clamp = LanguageClamp(preferred: update.preferred)
+        await backend.applyLanguage(clamp.hint)
+        return true
+    }
+
     private mutating func commitSegment(_ backend: some StreamingBackend, _ emit: (TranscriptEvent) -> Void) async throws {
         clamp.observe(detected: await backend.detectedLanguage())
         let text = try await backend.commit()
@@ -72,6 +86,8 @@ struct SegmentDriver {
         base = fed
         hasText = false
         endpointer.reset()
-        if let hint = clamp.segmentBoundary() { await backend.applyLanguage(hint) }
+        if !(await applyLanguageUpdate(backend)), let hint = clamp.segmentBoundary() {
+            await backend.applyLanguage(hint)
+        }
     }
 }

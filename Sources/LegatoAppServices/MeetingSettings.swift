@@ -1,4 +1,5 @@
 import Foundation
+import LegatoAudio
 import LegatoClaude
 import LegatoMeetings
 
@@ -38,6 +39,7 @@ public struct MeetingSettings: Sendable {
         static let language = "meeting.language"
         static let echoNoise = "meeting.echoNoise"
         static let inputDeviceUID = "meeting.inputDeviceUID"
+        static let inputMode = "meeting.inputMode"
     }
 
     public init(defaults: UserDefaults) {
@@ -45,10 +47,36 @@ public struct MeetingSettings: Sendable {
         self.defaults = defaults
     }
 
-    /// Mac: stable Core Audio input-device UID; nil automatically follows the call's input.
+    /// Mac: live microphone mode. Legacy UID-only preferences retain the selected device.
+    public var inputSelection: MeetingMicrophoneSelection {
+        get {
+            switch defaults.string(forKey: Key.inputMode) {
+            case "all": return .all
+            case "auto": return .auto
+            default:
+                guard let uid = defaults.string(forKey: Key.inputDeviceUID), !uid.isEmpty else { return .auto }
+                return .device(uid)
+            }
+        }
+        nonmutating set {
+            switch newValue {
+            case .auto, .device(""):
+                defaults.removeObject(forKey: Key.inputDeviceUID)
+                defaults.set("auto", forKey: Key.inputMode)
+            case .all:
+                defaults.removeObject(forKey: Key.inputDeviceUID)
+                defaults.set("all", forKey: Key.inputMode)
+            case .device(let uid):
+                defaults.set(uid, forKey: Key.inputDeviceUID)
+                defaults.set("device", forKey: Key.inputMode)
+            }
+        }
+    }
+
+    /// Compatibility for UID-only callers. Auto and All do not pin an individual input.
     public var inputDeviceUID: String? {
-        get { defaults.string(forKey: Key.inputDeviceUID) }
-        nonmutating set { defaults.set(newValue, forKey: Key.inputDeviceUID) }
+        get { if case .device(let uid) = inputSelection { uid } else { nil } }
+        nonmutating set { inputSelection = newValue.map(MeetingMicrophoneSelection.device) ?? .auto }
     }
 
     /// The summary prompt from before templates existed. Kept so it can move into the "My notes" section

@@ -1,3 +1,4 @@
+import CoreAudio
 import Testing
 @testable import LegatoMac
 
@@ -55,5 +56,29 @@ import Testing
 
     @Test func noDefaultAndNoCallAppIsNoDevice() {
         #expect(MeetingMicRoute.choose(processes: [], ownPID: me, defaultInput: nil) == MeetingMicChoice(device: nil, followsCall: false))
+    }
+}
+
+@Suite struct MeetingInputClassificationTests {
+    @Test func aggregateClassIsExcludedFromAutomaticCaptureEvenWithUnknownTransport() {
+        let aggregate = MeetingInputClassification(classID: kAudioAggregateDeviceClassID, transport: kAudioDeviceTransportTypeUnknown, isPrivate: false)
+        #expect(aggregate.isAggregate)
+        #expect(aggregate.isSelectable, "a user-created public aggregate remains a named choice")
+    }
+
+    @Test func privateCaptureAggregatesAreNotSelectable() {
+        let capture = MeetingInputClassification(classID: kAudioAggregateDeviceClassID, transport: kAudioDeviceTransportTypeUnknown, isPrivate: true)
+        #expect(!capture.isSelectable)
+    }
+
+    @Test func physicalAndVirtualInputsRemainAvailableAndAggregateTransportIsFallback() {
+        let physical = MeetingInputClassification(classID: kAudioDeviceClassID, transport: kAudioDeviceTransportTypeBuiltIn, isPrivate: false)
+        #expect(!physical.isAggregate)
+        #expect(physical.isSelectable)
+        let virtual = MeetingInputClassification(classID: kAudioDeviceClassID, transport: kAudioDeviceTransportTypeVirtual, isPrivate: false)
+        #expect(!virtual.isAggregate)
+        #expect(virtual.isSelectable)
+        let fallback = MeetingInputClassification(classID: nil, transport: kAudioDeviceTransportTypeAggregate, isPrivate: false)
+        #expect(fallback.isAggregate)
     }
 }

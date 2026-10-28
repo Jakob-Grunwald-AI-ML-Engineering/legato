@@ -30,3 +30,11 @@ extension DictationEngine {
         try await prepare(locale: locale)
     }
 }
+
+/// A running engine whose language hint can change without preparing or reloading its model.
+public protocol LiveLanguageConfigurableEngine: DictationEngine {
+    /// Supported ISO language codes; nil locale selects automatic detection.
+    var liveLanguageCodes: [String] { get }
+    /// Accepts a hint for the next segment boundary, leaving capture and recognition running.
+    func setLanguage(_ locale: Locale?) async -> Bool
+}
