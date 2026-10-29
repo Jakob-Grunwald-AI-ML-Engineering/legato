@@ -76,6 +76,7 @@ public final class QueuedFieldWriteChannel: FieldWriteChannel {
             case .conflict(_, let conflict) where conflict.reason == .verifyFailed: return
             case .conflict(_, let conflict): throw Rejected(reason: conflict.reason)
             case .superseded: throw Rejected(reason: .overlap)
+            case .withdrawn: throw Rejected(reason: .writeFailed)
             }
         }
         if executor.isAwaitingReadback(transaction.id) { return }

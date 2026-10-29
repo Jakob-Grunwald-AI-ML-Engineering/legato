@@ -385,7 +385,7 @@ public final class AXFieldExecutor {
 extension QueueEvent {
     fileprivate var transactionID: UUID {
         switch self {
-        case .applied(let id, _), .superseded(let id, _), .conflict(let id, _): id
+        case .applied(let id, _), .superseded(let id, _), .conflict(let id, _), .withdrawn(let id): id
         }
     }
 }
