@@ -28,6 +28,9 @@ public struct FeedMirror: Sendable, Equatable {
     public private(set) var results: [UUID: Result] = [:]
     /// The field was cleared (a send) since the run began.
     public private(set) var wasCleared = false
+    /// Some of the run's text left the window since the run began (iOS: the host's before-context lost its head,
+    /// or a reset the run's text could not be found again in): the field no longer shows all of it.
+    public private(set) var lostRunText = false
     private var lastSeq = 0
     /// The changes that landed since the last reset, with the version each left: for mapping an edit's steps from
     /// its base to the field now.
@@ -51,6 +54,7 @@ public struct FeedMirror: Sendable, Equatable {
             if batch.session != session || text != window {
                 // As the agent does: the same queue's window is searched for the run's text, another queue's is not.
                 let anchored = batch.session == session ? reanchored(in: text) : nil
+                if (anchored?.runs.count ?? 0) < runs.count { lostRunText = true }
                 runs = anchored?.runs ?? []
                 touched = anchored?.touched ?? []
                 changes = []
@@ -88,10 +92,13 @@ public struct FeedMirror: Sendable, Equatable {
         case .rebased(let text, let shift, _):
             window = text
             runs = runs.map { Span(location: $0.location + shift, length: $0.length) }
+            let length = (text as NSString).length
+            if runs.contains(where: { $0.location < 0 || $0.end > length }) { lostRunText = true }
             touched = touched.map { Span(location: $0.location + shift, length: $0.length) }
             changes = []  // offsets before the shift are not mapped across it
         case .reset(let reason, let text, _):
             let anchored = reason == .cleared ? nil : reanchored(in: text)
+            if reason != .cleared, (anchored?.runs.count ?? 0) < runs.count { lostRunText = true }
             window = text
             runs = anchored?.runs ?? []
             touched = anchored?.touched ?? []
@@ -192,6 +199,34 @@ public struct FeedMirror: Sendable, Equatable {
         let steps = TextPatches.steps(from: raw, to: cleaned, at: shown.location)
         guard !steps.isEmpty else { return nil }
         return EditTransaction(origin: origin, owner: owner, base: version, steps: steps, session: session)
+    }
+
+    /// Why ``patch(from:to:owner:origin:)`` has no edit for `raw` (nil: it has one, or nothing changes).
+    public enum Unpatchable: String, Sendable, Equatable {
+        /// Nothing was read from the keyboard.
+        case noFeed
+        /// The field was cleared (a send) and nothing of the run is in it.
+        case cleared
+        /// Nothing in the field is attributed to the run.
+        case noRunText
+        /// The field shows only part of the run's text (its head left the caret-relative window): a step outside
+        /// the window is never written.
+        case outOfWindow
+        /// The user wrote or changed text inside the run's.
+        case userEdited
+        /// The field shows other text as the run's than `raw`.
+        case textDiffers
+    }
+
+    /// Why there is no patch for `raw` in the field as it is: see ``Unpatchable``.
+    public func unpatchable(raw: String) -> Unpatchable? {
+        guard session != nil else { return .noFeed }
+        guard let region = runRegion else { return wasCleared ? .cleared : lostRunText ? .outOfWindow : .noRunText }
+        if touched.contains(where: { Self.touches($0, region) }) { return .userEdited }
+        let shown = Self.trimmedText(region, in: window).text
+        let raw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard shown != raw else { return nil }
+        return lostRunText || (raw.hasSuffix(shown) && !shown.isEmpty) ? .outOfWindow : .textDiffers
     }
 
     /// `current` (the run's text) with each unapplied edit's steps applied where they are now: mapped from the

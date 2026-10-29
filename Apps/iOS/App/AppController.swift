@@ -315,6 +315,7 @@ final class AppController {
         #if DEBUG
         E2E.applyLaunchSettings()
         #endif
+        Self.installCleanupCallTrace()
         // Publish the resolution task before a cold-launch URL can reserve microphone admission.
         let initialResolution = beginEngineResolution(releasingKeptMicrophone: false)
         Task { await finishEngineRefresh(initialResolution) }
@@ -546,9 +547,30 @@ final class AppController {
         }
     }
 
+    /// Every cleanup model call and model load (`CleanupCallTrace`): to `audio-diag.jsonl` with a memory sample
+    /// (internal builds), and to the e2e log (DEBUG). Counts and times only, no text.
+    private static func installCleanupCallTrace() {
+        #if LEGATO_INTERNAL || DEBUG
+        CleanupCallTrace.install { event, fields in
+            #if LEGATO_INTERNAL
+            var line: [String: Any] = fields
+            for (key, value) in AudioDiagnostics.memoryFields() { line[key] = value }
+            AudioDiagnostics.log(event, line)
+            #endif
+            #if DEBUG
+            E2E.log("\(event) " + fields.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
+            #endif
+        }
+        #endif
+    }
+
     /// Today's stateless final cleanup pass (the one the agent gate suppresses), for a Live run whose agent was
     /// absent at its stop: on the backend a run takes at its start, leased for the pass.
     private func statelessFinalPass(_ raw: String) async -> String? {
+        await CleanupCallTrace.$kind.withValue("stateless") { await statelessFinalPassCall(raw) }
+    }
+
+    private func statelessFinalPassCall(_ raw: String) async -> String? {
         #if DEBUG
         if let fake = E2E.fakeCleanup { return try? await fake.process(raw, locale: Locale.current) }
         #endif

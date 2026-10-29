@@ -163,6 +163,7 @@ final class KeyboardLinkHost: TranscriptSink {
     // MARK: TranscriptSink
 
     func runStarted(_ run: DictationRun) {
+        CleanupCallTrace.currentRun = run.id.uuidString
         onRunStarted?(run.id.uuidString)
         // Cleanup delivery is about the keyboard's field: a run for the app's own screen or the activity's
         // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
@@ -243,6 +244,9 @@ final class KeyboardLinkHost: TranscriptSink {
             let stop = await linked.stop(
                 mode, committed: committed, text: text, finalText: finalText, applied: applied,
                 statelessPass: { await statelessPass($0) }, copy: { copy($0) })
+            #if LEGATO_INTERNAL
+            if let report = linked.stopReport { trace.linkedStop(report) }
+            #endif
             if let cleaned = stop.cleaned { await correctHistory(text, cleaned) }
             if !visible {
                 #if LEGATO_INTERNAL
@@ -292,7 +296,10 @@ final class KeyboardLinkHost: TranscriptSink {
                 if dropped > 0 { self?.linkTrace?("link.edits dropped=\(dropped)") }
             })
         let agent = runDelivery == .live ? makeAgent(runID) : nil
-        let run = LinkedCleanupRun(owner: runID, agent: agent, transport: transport, agentWait: agentWait())
+        let passTimeout = agentWait()
+        let run = LinkedCleanupRun(
+            owner: runID, agent: agent, transport: transport, agentWait: passTimeout,
+            finalWait: LinkedCleanupRun.stopWait(passTimeout: passTimeout))
         run.trace = linkTrace
         linked = run
         // The agent cleans a Live run; the session runs no rolling passes and no final pass of its own.

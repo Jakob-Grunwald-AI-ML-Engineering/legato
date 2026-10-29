@@ -57,8 +57,11 @@ public final class LinkedCleanupRun {
         case timedOut
     }
 
-    /// The longest a stop waits for the run's edits to land.
+    /// The longest a stop waits for the run's edits to land (``stopWait(passTimeout:)``).
     public let finalWait: Duration
+    /// The stop's wait for its edits: the cleanup pass timeout plus a margin. The keyboard may still be verifying
+    /// the stream's last writes, or run slowly in the background; a fixed 2 s gave up on edits that then landed.
+    public static func stopWait(passTimeout: Duration) -> Duration { passTimeout + .seconds(2) }
     /// The longest a stop waits for an agent that is not there yet.
     public let agentWait: Duration
     /// The keyboard's field as the feed told it.
@@ -78,6 +81,18 @@ public final class LinkedCleanupRun {
     /// The agent's edits sent, by id, until their outcome.
     private var outstanding: [UUID: EditTransaction] = [:]
     private var sent: [UUID: EditTransaction] = [:]
+    /// A pump task is running (an agent call may hold the model).
+    private var pumpRunning = false
+    /// What the stop sent and heard back so far (``StopReport``).
+    private var stats = StopStats()
+    /// Why the last ``deliver(raw:cleaned:)`` found nothing to patch (``FeedMirror/Unpatchable``).
+    public private(set) var notShownReason: String?
+    /// How the last ``stop(_:committed:text:finalText:applied:statelessPass:copy:)`` went (counts, no text).
+    public private(set) var stopReport: StopReport?
+
+    private struct StopStats {
+        var sent = 0, acked = 0, steps = 0, waitMs = 0
+    }
 
     private enum Work {
         case batch(FeedBatch)
@@ -149,7 +164,9 @@ public final class LinkedCleanupRun {
 
     private func pump() {
         guard pumping == nil, !closed, !work.isEmpty, let made else { return }
+        pumpRunning = true
         pumping = Task { [weak self] in
+            defer { self?.pumpRunning = false }
             guard let agent = await made.value else {
                 self?.pumping = nil
                 self?.work = []
@@ -234,7 +251,10 @@ public final class LinkedCleanupRun {
         // Every edit of the run without an outcome yet: the final pass's, and rolling ones still on their way. One
         // handed back earlier was re-planned by the agent already.
         let awaited = Set(outstanding.keys)
+        stats.sent += awaited.count
+        stats.steps += awaited.compactMap { sent[$0]?.steps.count }.reduce(0, +)
         await waitForOutcomes(of: awaited)
+        stats.acked += awaited.filter { mirror.results[$0] != nil }.count
         closed = true
         let unapplied = awaited.compactMap { id -> EditTransaction? in
             mirror.results[id] == .applied ? nil : sent[id]
@@ -250,14 +270,18 @@ public final class LinkedCleanupRun {
         let cleanedText = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanedText.isEmpty, cleanedText != rawText else { return .unchanged }
         guard let transaction = mirror.patch(from: rawText, to: cleanedText, owner: owner) else {
-            trace?("final.patch result=notShown")
+            notShownReason = mirror.unpatchable(raw: rawText)?.rawValue ?? "unknown"
+            trace?("final.patch result=notShown reason=\(notShownReason ?? "-")")
             return .notShown
         }
         outstanding[transaction.id] = transaction
         sent[transaction.id] = transaction
         trace?("final.patch steps=\(transaction.steps.count)")
         transport.send([transaction])
+        stats.sent += 1
+        stats.steps += transaction.steps.count
         await waitForOutcomes(of: [transaction.id])
+        if mirror.results[transaction.id] != nil { stats.acked += 1 }
         let delivery: Delivery
         switch mirror.results[transaction.id] {
         case .applied: delivery = .applied
@@ -270,7 +294,7 @@ public final class LinkedCleanupRun {
     }
 
     /// How the run's cleaned text reaches the field.
-    public enum Mode: Sendable, Equatable {
+    public enum Mode: String, Sendable, Equatable {
         /// The cleanup agent edits the run as it goes (or, absent, the stop's stateless pass as patches).
         case live
         /// The session's final pass, written as patches at the stop.
@@ -291,6 +315,48 @@ public final class LinkedCleanupRun {
         }
     }
 
+    /// How a stop went, for the device's diagnostics (`linked.stop` in `audio-diag.jsonl`): which branch it took,
+    /// how long it waited for the keyboard, how many edits it sent and how many came back with an outcome.
+    public struct StopReport: Sendable, Equatable {
+        public enum Branch: String, Sendable, Equatable {
+            /// Everything the stop sent landed.
+            case applied
+            /// The cleaned text is the raw text: nothing to write.
+            case unchanged
+            /// The field does not show the run's text as the run's (`reason`: ``FeedMirror/Unpatchable``).
+            case notShown
+            /// The keyboard handed the edit back (`reason`: the conflict's).
+            case conflict
+            /// No outcome within the wait.
+            case timedOut
+            /// No visible keyboard to confirm anything: the clipboard (Live) or the session's fallback.
+            case noKeyboard
+            /// Replace: the session's text is its raw text (the pass changed nothing, failed or timed out).
+            case noFinalText
+            /// Live: no agent at the stop; `reason` says how its stateless pass went.
+            case agentAbsent
+            /// Live: some of the agent's edits did not land (`reason`: how many); the clipboard has the text.
+            case unapplied
+            /// Live: the keyboard restarted, the run's spans are unknown; the clipboard has the text.
+            case spansUnknown
+        }
+
+        public var mode: Mode
+        public var branch: Branch
+        public var reason: String?
+        public var waitMs = 0
+        public var sent = 0
+        public var acked = 0
+        public var steps = 0
+        public var copied = false
+        public var landed = false
+
+        public var line: String {
+            "linked.stop mode=\(mode.rawValue) branch=\(branch.rawValue) reason=\(reason ?? "-") waitMs=\(waitMs) "
+                + "sent=\(sent) acked=\(acked) steps=\(steps) copied=\(copied ? 1 : 0) landed=\(landed ? 1 : 0)"
+        }
+    }
+
     /// The whole stop of the run. `text`: the session's text (Live with the agent: the raw text; its own final
     /// pass was off); `finalText`: the session's cleaned text when it differs from the trimmed `committed`.
     /// `applied`: waits for the keyboard to confirm the streamed text; nil when no visible keyboard can.
@@ -299,59 +365,95 @@ public final class LinkedCleanupRun {
         _ mode: Mode, committed: String, text: String, finalText: String?, applied: (@MainActor () async -> Bool)?,
         statelessPass: @MainActor (String) async -> String?, copy: @MainActor (String) -> Bool
     ) async -> Stop {
+        stats = StopStats()
+        notShownReason = nil
+        func done(_ stop: Stop, _ branch: StopReport.Branch, reason: String? = nil, copied: Bool = false) -> Stop {
+            let report = StopReport(
+                mode: mode, branch: branch, reason: reason, waitMs: stats.waitMs, sent: stats.sent, acked: stats.acked,
+                steps: stats.steps, copied: copied, landed: stop.landed)
+            stopReport = report
+            trace?(report.line)
+            return stop
+        }
         guard let applied else {
-            cancel()
+            // An agent call still in flight holds the model (a single-worker runtime refuses a second caller):
+            // it is cancelled and settled before the stateless pass.
+            await settle()
             // The agent was to clean this run, so the session's own final pass was off and `text` is raw: the
             // stateless pass cleans it for the clipboard (as for an absent agent). Without an agent the session's
             // text is already its cleaned text.
             guard mode == .live, hasAgent, let pass = await statelessPass(text), Self.changes(pass, text) else {
-                return Stop(landed: false)
+                return done(Stop(landed: false), .noKeyboard)
             }
-            let landed = copy(pass)
-            trace?("link.fallback copied=\(landed ? 1 : 0) keyboard=0")
-            return Stop(landed: landed, cleaned: pass)
+            let copied = copy(pass)
+            trace?("link.fallback copied=\(copied ? 1 : 0) keyboard=0")
+            // The history claims the cleaned text only where the user has it.
+            return done(Stop(landed: copied, cleaned: copied ? pass : nil), .noKeyboard, copied: copied)
         }
         let confirmed = await applied()
         if mode == .replace {
-            guard let finalText else { return Stop(landed: confirmed) }
+            guard let finalText else {
+                return done(Stop(landed: confirmed), .noFinalText, reason: confirmed ? nil : "unconfirmed")
+            }
+            // A Replace run's one cleanup call is the session's own pass (`finalText`); the stop makes none.
             switch await deliver(raw: committed, cleaned: finalText) {
-            case .applied, .unchanged: return Stop(landed: confirmed)  // unchanged: the stream is the text
-            default: return Stop(landed: false)  // today's fallback: the session copies its cleaned text
+            case .applied: return done(Stop(landed: confirmed), .applied, reason: confirmed ? nil : "unconfirmed")
+            case .unchanged: return done(Stop(landed: confirmed), .unchanged)  // the stream is the text
+            // Today's fallback: the session copies its cleaned text (with its notice), and its history entry keeps
+            // that text with the raw text as its other version, as for any clipboard delivery.
+            case .notShown: return done(Stop(landed: false), .notShown, reason: notShownReason)
+            case .conflicted(let conflict): return done(Stop(landed: false), .conflict, reason: conflict.reason.rawValue)
+            case .timedOut: return done(Stop(landed: false), .timedOut)
             }
         }
         let outcome = await finish()
         var cleaned: String?
         var fallback: String?
+        var branch = StopReport.Branch.applied
+        var reason: String?
         if outcome.agentAbsent {
+            branch = .agentAbsent
             if let pass = await statelessPass(text) {
-                switch await deliver(raw: committed, cleaned: pass) {
+                let delivery = await deliver(raw: committed, cleaned: pass)
+                reason = delivery == .notShown ? notShownReason : Self.describe(delivery)
+                switch delivery {
                 case .applied: cleaned = pass
                 case .unchanged: break
                 default: fallback = pass
                 }
+            } else {
+                reason = "noPass"
             }
         } else if mirror.runText == nil, !mirror.wasCleared, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // The run's spans are unknown (the keyboard restarted: another queue's window is not searched): where
             // the agent's edits are cannot be told. The whole text cleaned by the stateless pass goes to the
             // clipboard, or the session's own text: never nothing.
             trace?("link.spans unknown")
-            guard let pass = await statelessPass(text), Self.changes(pass, text) else { return Stop(landed: false) }
-            let landed = copy(pass)
-            trace?("link.fallback copied=\(landed ? 1 : 0)")
-            return Stop(landed: landed, cleaned: pass)
+            guard let pass = await statelessPass(text), Self.changes(pass, text) else {
+                return done(Stop(landed: false), .spansUnknown, reason: "noPass")
+            }
+            let copied = copy(pass)
+            trace?("link.fallback copied=\(copied ? 1 : 0)")
+            return done(Stop(landed: copied, cleaned: copied ? pass : nil), .spansUnknown, copied: copied)
         } else if outcome.unapplied.isEmpty {
             cleaned = mirror.runText
         } else {
+            branch = .unapplied
+            reason = "n=\(outcome.unapplied.count)"
             fallback = fallbackText(unapplied: outcome.unapplied)
         }
         var landed = confirmed
+        var copied = false
         if fallback != nil || !confirmed, let clip = fallback ?? cleaned, clip != text {
             // The field changed under the agent's edits (or never confirmed): the cleaned text goes to the clipboard.
-            landed = copy(clip)
-            trace?("link.fallback copied=\(landed ? 1 : 0)")
-            cleaned = clip
+            copied = copy(clip)
+            landed = copied
+            trace?("link.fallback copied=\(copied ? 1 : 0)")
+            // A fallback text the clipboard refused is nowhere the user has it: the history keeps the session's.
+            cleaned = copied || fallback == nil ? clip : nil
         }
-        return Stop(landed: landed, cleaned: mirror.wasCleared ? nil : cleaned)
+        if !confirmed, reason == nil { reason = "unconfirmed" }
+        return done(Stop(landed: landed, cleaned: mirror.wasCleared ? nil : cleaned), branch, reason: reason, copied: copied)
     }
 
     /// The cleaned text for a clipboard fallback: the run's text as the field holds it, with each unapplied edit
@@ -368,14 +470,24 @@ public final class LinkedCleanupRun {
         pumping = nil
     }
 
-    private func waitForOutcomes(of ids: Set<UUID>) async {
+    /// ``cancel()``, then waits (``finalWait`` at most) until an agent call in flight has given the model back.
+    private func settle() async {
+        cancel()
         let clock = ContinuousClock()
         let deadline = clock.now + finalWait
+        while pumpRunning, clock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    private func waitForOutcomes(of ids: Set<UUID>) async {
+        let clock = ContinuousClock()
+        let start = clock.now
+        let deadline = start + finalWait
         while ids.contains(where: { mirror.results[$0] == nil }), clock.now < deadline {
             try? await Task.sleep(for: .milliseconds(25))
             let batches = transport.read()
             for batch in batches { fold(batch) }
         }
+        stats.waitMs += Int(start.duration(to: clock.now) / .milliseconds(1))
     }
 
     /// Whether the agent is there, or nil when that is not known within `limit`. Neither side is waited for once

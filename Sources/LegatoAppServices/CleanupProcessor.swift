@@ -138,10 +138,13 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         let options = self.options
         guard options.enabled else { return text }
         await willRun()
-        return await Self.run(
-            text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
-            timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report,
-            vocabulary: vocabulary, runID: UUID(), resolution: await runCleanup.resolution, options: options)
+        let resolution = await runCleanup.resolution
+        return await CleanupCallTrace.$kind.withValue("session") {
+            await Self.run(
+                text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
+                timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry, report: report,
+                vocabulary: vocabulary, runID: UUID(), resolution: resolution, options: options)
+        }
     }
 
     /// Cleanup on with delivery Live: the session cleans the run's text in rolling passes while it goes on.
@@ -173,11 +176,14 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         if atStop { await willRun() }
         let liveRun = liveRun
         let report = report
-        let ran = await Self.runReporting(
-            text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
-            timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry,
-            report: { await report(liveRun.adding($0)) }, context: context,
-            vocabulary: vocabulary, runID: liveRunID.current, resolution: await runCleanup.resolution, options: options)
+        let resolution = await runCleanup.resolution, runID = liveRunID.current
+        let ran = await CleanupCallTrace.$kind.withValue("sessionLive") {
+            await Self.runReporting(
+                text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
+                timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry,
+                report: { await report(liveRun.adding($0)) }, context: context,
+                vocabulary: vocabulary, runID: runID, resolution: resolution, options: options)
+        }
         return LivePassResult(
             text: ran.pipeline.text, guardRejected: ran.pipeline.guardRejected, timedOut: ran.pipeline.timedOut,
             backend: ran.report.backend, device: ran.report.device)
@@ -230,6 +236,10 @@ public struct CleanupProcessor: TranscriptPostProcessor {
             : out.timedOut ? "timedOut"
             : out.guardRejected ? "guardRejected"
             : out.failed || resolution.backend == nil ? "rawOrUnavailable" : "completed"
+        CleanupCallTrace.emit("cleanup.call", [
+            "kind": CleanupCallTrace.kind, "backend": run.backend, "ms": String(run.milliseconds),
+            "outcome": run.outcome, "changed": run.changed ? "1" : "0", "inChars": String(text.count),
+        ])
         await report(run)
         return (out, run)
     }

@@ -380,7 +380,7 @@ public actor CleanupAgent: FieldAgent {
         }
 
         guard await makeRoom(for: plan.request) else { return fail(plan) }
-        let reply = await ask(plan.request)
+        let reply = await ask(plan.request, final: final)
         if Task.isCancelled { return [] }
         if case .timedOut = reply {
             // The turn may still complete and stay in the session's history: say its answer was thrown away.
@@ -406,9 +406,17 @@ public actor CleanupAgent: FieldAgent {
             reviewed.insert(new)
             transactions.append(transaction)
         }
+        // A sentence the answer left out ("needs no change") is settled only by the final pass: a small model may
+        // skip one it should have fixed, so while listening it is set aside (as after a failed pass) for the final
+        // pass to review again, never left raw for good.
+        let answered = Set(answer.map { plan.sentences[$0.sentence - 1].text })
         for sentence in plan.sentences where sentence.role == .review {
-            reviewed.insert(sentence.text)
-            skipped.remove(sentence.text)
+            if final || answered.contains(sentence.text) {
+                reviewed.insert(sentence.text)
+                skipped.remove(sentence.text)
+            } else {
+                skipped.insert(sentence.text)
+            }
         }
         return transactions
     }
@@ -445,9 +453,10 @@ public actor CleanupAgent: FieldAgent {
         }
     }
 
-    private func ask(_ request: String) async -> Reply {
+    private func ask(_ request: String, final: Bool) async -> Reply {
         let session = session, timeout = options.timeout
-        return await withTaskGroup(of: Reply.self) { group in
+        let start = ContinuousClock.now
+        let reply = await withTaskGroup(of: Reply.self) { group in
             group.addTask {
                 do { return .edits(try await session.respondStructured([SentenceEdit].self, to: request)) } catch { return .failed }
             }
@@ -461,6 +470,17 @@ public actor CleanupAgent: FieldAgent {
             group.cancelAll()
             return first
         }
+        let outcome: String
+        switch reply {
+        case .edits(let edits): outcome = "edits=\(edits.count)"
+        case .timedOut: outcome = "timedOut"
+        case .failed: outcome = "failed"
+        }
+        CleanupCallTrace.emit("cleanup.call", [
+            "kind": "agent", "final": final ? "1" : "0", "backend": String(describing: type(of: session)),
+            "ms": CleanupCallTrace.milliseconds(since: start), "outcome": outcome, "inChars": String(request.count),
+        ])
+        return reply
     }
 
     // MARK: Text helpers

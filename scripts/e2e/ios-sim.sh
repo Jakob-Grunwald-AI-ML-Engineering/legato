@@ -1886,6 +1886,31 @@ scenario_fa() {
   assert_log "and confirmed them as the swap" "harness fe.link outcome origin=finalSwap result=applied"
   assert_eq "field: cleaned" "the cat sat. A dog ran. " "$(harness_doc)"
   assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+  assert_log "the stop says it landed" "link linked.stop mode=replace branch=applied reason=- "
+  assert_count "one cleanup call per run: the session's own pass (the Action Button run's and this one)" "cleanup.call backend=e2e-fake kind=session" 2
+  assert_no_log "the stop made no second pass" "kind=stateless"
+  assert_no_log "and no agent call" "cleanup.call backend=E2EFakeAgentSession"
+
+  # The device defect (iPhone, WhatsApp): the host's before-context loses the run's head as the text grows, so the
+  # field cannot show the run's text is still all there. Its patches are not written (a step outside the window
+  # never is), the session's cleaned text goes to the clipboard with today's notice, and the stop says why.
+  SCENARIO="fa. Replace: the run's head out of the host's window"
+  relaunch "${common[@]}" -LegatoCleanupDelivery replace -LegatoHarnessContextLimit 12 || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  fa_start 2
+  sleep 2
+  fa_stop 2
+  wait_log "link linked.stop mode=replace" 20
+  sleep 0.5
+  assert_log "the patch was not made: out of the window" "link final.patch result=notShown reason=outOfWindow"
+  assert_log "the stop says why" "link linked.stop mode=replace branch=notShown reason=outOfWindow"
+  assert_eq "field: the raw stream, typed once" "teh cat sat. A dgo ran. " "$(harness_doc)"
+  assert_eq "clipboard: the cleaned text" "the cat sat. A dog ran." "$(pasteboard)"
+  assert_eq "history: the cleaned text (the clipboard's), its raw version kept" "the cat sat. A dog ran." "$(history_texts | tail -1)"
+  assert_no_log "nothing was typed twice" "fe.duplicate"
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"  # the next scenario expects the clipboard as the first one left it
 
   SCENARIO="fa. Hold: the end-of-run insert through the queue"
   relaunch "${common[@]}" -LegatoCleanupDelivery hold || return

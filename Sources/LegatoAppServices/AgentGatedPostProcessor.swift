@@ -24,7 +24,11 @@ public final class AgentGatedPostProcessor: TranscriptPostProcessor {
     public var id: String { base.id }
 
     public func process(_ text: String, locale: Locale) async throws -> String {
-        agentRuns ? text : try await base.process(text, locale: locale)
+        guard !agentRuns else {
+            CleanupCallTrace.emit("cleanup.skip", ["kind": "session", "reason": "agent"])
+            return text
+        }
+        return try await CleanupCallTrace.$kind.withValue("session") { try await base.process(text, locale: locale) }
     }
 
     public func runStarts() async throws { try await base.runStarts() }
@@ -32,7 +36,9 @@ public final class AgentGatedPostProcessor: TranscriptPostProcessor {
     public var cleansSegmentsLive: Bool { agentRuns ? false : base.cleansSegmentsLive }
 
     public func cleanLivePass(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> LivePassResult {
-        try await base.cleanLivePass(text, context: context, locale: locale, atStop: atStop)
+        try await CleanupCallTrace.$kind.withValue("sessionLive") {
+            try await base.cleanLivePass(text, context: context, locale: locale, atStop: atStop)
+        }
     }
 
     public var liveStopTimeLimit: Duration? { base.liveStopTimeLimit }

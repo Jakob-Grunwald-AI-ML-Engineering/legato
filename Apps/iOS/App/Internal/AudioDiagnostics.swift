@@ -54,6 +54,19 @@ enum AudioDiagnostics {
         log("launch")
     }
 
+    /// The process footprint (what jetsam counts) and what iOS says is left before the limit, in MB.
+    static func memoryFields() -> [String: Int] {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let status = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        let footprint = status == KERN_SUCCESS ? Int(info.phys_footprint / 1_048_576) : -1
+        return ["footprintMB": footprint, "availableMB": Int(os_proc_available_memory() / 1_048_576)]
+    }
+
     /// Appends one event. Safe from any thread; the file write happens on a serial queue.
     static func log(_ event: String, _ fields: [String: Any] = [:]) {
         var line = snapshot()

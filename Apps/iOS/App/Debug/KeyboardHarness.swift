@@ -132,9 +132,16 @@ final class HarnessDocument: TextDocument {
     var contextBefore: String { lag != nil ? reported?.before ?? liveBefore : liveBefore }
     var contextAfter: String { lag != nil ? reported?.after ?? liveAfter : liveAfter }
 
+    /// `-LegatoHarnessContextLimit <n>`: the host reports the text before the caret only from the last multiple
+    /// of `n` UTF-16 units on, like an iOS host (WhatsApp) whose before-context loses its head as the text grows.
+    private static let contextLimit = Int(argument("LegatoHarnessContextLimit") ?? "") ?? 0
+
     private var liveBefore: String {
         let ns = text as NSString
-        return ns.substring(to: min(textView.selectedRange.location, ns.length))
+        let caret = min(textView.selectedRange.location, ns.length)
+        guard Self.contextLimit > 0, caret > 0 else { return ns.substring(to: caret) }
+        let start = (caret - 1) / Self.contextLimit * Self.contextLimit
+        return ns.substring(with: NSRange(location: start, length: caret - start))
     }
 
     private var liveAfter: String {
