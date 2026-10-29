@@ -134,12 +134,13 @@ private struct WordSlotStyle: ButtonStyle {
 }
 
 /// One slot's word as glyphs that change like the system's suggestion bar: letters both texts share stay and glide
-/// to their new places, removed ones fade out right to left, inserted ones fade in as the old ones finish; nothing
-/// blurs, scales or moves vertically. Each glyph is its own `Text` (a stable view per `GlyphMorph` id), so the word
+/// to their new places, removed ones fade out right to left, and new ones grow and fade in left to right around
+/// their baseline. Each glyph is its own `Text` (a stable view per `GlyphMorph` id), so the word
 /// loses the kerning a whole-word `Text` has. The slot is one accessibility element: the word.
 private struct MorphingWord: View {
     let text: String
     let fontSize: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var morph: GlyphMorph
     @State private var staggers = GlyphStaggers()
     /// The natural width of the last non-empty word: the word is centered by it, so a word that empties fades out
@@ -169,7 +170,8 @@ private struct MorphingWord: View {
                         .font(.system(size: fontSize))
                         .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                         .fixedSize()
-                        .transition(GlyphFade(id: glyph.id, staggers: staggers))
+                        .transition(GlyphReveal(id: glyph.id, staggers: staggers,
+                                                baseline: glyphBaseline, reduceMotion: reduceMotion))
                 }
             }
             .scaleEffect(scale, anchor: .leading)
@@ -179,13 +181,19 @@ private struct MorphingWord: View {
         .onChange(of: text) { _, new in
             let next = morph.morphing(to: new)
             staggers.record(next)
-            withAnimation(.easeInOut(duration: 0.25)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
                 morph = next
                 if !next.glyphs.isEmpty { anchorWidth = Self.naturalWidth(of: next, fontSize: fontSize) }
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
+    }
+
+    /// Scale new glyphs around the font baseline so their feet stay level with retained letters.
+    private var glyphBaseline: UnitPoint {
+        let font = UIFont.systemFont(ofSize: fontSize)
+        return UnitPoint(x: 0.5, y: font.ascender / font.lineHeight)
     }
 
     /// Long words shrink to fit (down to `minimumScale`), as the whole-word `Text` did.
@@ -222,21 +230,26 @@ private final class GlyphStaggers {
         .easeOut(duration: 0.1).delay(Self.step * Double(removal[id] ?? 0))
     }
 
-    /// 120 ms ease-out, starting as the removed glyphs finish (at once when nothing is removed).
+    /// A short grow/fade, staggered from the left after the old glyphs begin disappearing.
     func insertionAnimation(_ id: Int) -> Animation {
-        .easeOut(duration: 0.12).delay(Self.step * Double(insertion[id] ?? 0) + (hasRemovals ? 0.08 : 0))
+        .easeOut(duration: 0.18).delay(Self.step * Double(insertion[id] ?? 0) + (hasRemovals ? 0.08 : 0))
     }
 }
 
-/// Fade only: opacity with the glyph's own delay.
-private struct GlyphFade: Transition {
+/// The phone reference shows new letters growing toward their settled size while retained letters slide.
+/// The initial scale is a restrained approximation; the capture establishes growth, not Apple's hidden start value.
+private struct GlyphReveal: Transition {
     let id: Int
     let staggers: GlyphStaggers
+    let baseline: UnitPoint
+    let reduceMotion: Bool
 
     func body(content: Content, phase: TransitionPhase) -> some View {
         content
+            .scaleEffect(phase == .willAppear && !reduceMotion ? 0.85 : 1, anchor: baseline)
             .opacity(phase.isIdentity ? 1 : 0)
-            .animation(phase == .didDisappear ? staggers.removalAnimation(id) : staggers.insertionAnimation(id), value: phase.isIdentity)
+            .animation(reduceMotion ? nil : phase == .didDisappear
+                       ? staggers.removalAnimation(id) : staggers.insertionAnimation(id), value: phase.isIdentity)
     }
 }
 

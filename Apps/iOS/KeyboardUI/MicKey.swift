@@ -3,10 +3,10 @@ import SwiftUI
 
 /// The dictation key. What a tap does comes from `MicKeyMode` (see `KeyboardController.micTapped`):
 /// an explainer without Full Access, a `Link` that opens the app when it is not running, a request to
-/// the running app otherwise. It is the pill at the right of the top bar and fills the frame it is given.
+/// the running app otherwise. It is a tool-row key and fills the frame it is given.
 struct MicKey: View {
     let controller: KeyboardController
-    /// Touch area beyond the drawn pill on each side; the frame given includes it.
+    /// Touch area beyond the drawn key on each side; the frame given includes it.
     var hitInsets = EdgeInsets()
 
     var body: some View {
@@ -27,11 +27,10 @@ struct MicKey: View {
     private var capturing: Bool { controller.isCapturing }
     private var canStop: Bool { controller.micMode == .remote(.stop) }
 
-    /// The pill of the top bar: an outlined capsule; while capturing, filled red with a pulsing stop glyph.
+    /// A native key face; while capturing, filled red with a pulsing stop glyph.
     private var label: some View {
         ZStack {
-            Capsule().fill(capturing ? Color.red : Color.clear)
-            Capsule().strokeBorder(capturing ? Color.clear : Color.primary.opacity(0.22), lineWidth: 2)
+            RoundedRectangle(cornerRadius: KeyGeometry.keyRadius).fill(capturing ? Color.red : Color(uiColor: KeyColors.key))
             Image(systemName: canStop ? "stop.fill" : "mic.fill")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(capturing ? Color.white : Color.primary)
@@ -39,7 +38,7 @@ struct MicKey: View {
         }
         .padding(hitInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(hitInsets == EdgeInsets() ? AnyShape(Capsule()) : AnyShape(Rectangle()))
+        .contentShape(Rectangle())
         .accessibilityLabel(canStop ? (capturing ? "Stop dictation" : "Cancel dictation") : "Start dictation")
     }
 }

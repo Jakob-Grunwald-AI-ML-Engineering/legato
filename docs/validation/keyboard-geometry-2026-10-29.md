@@ -1,5 +1,7 @@
 # Keyboard geometry — 29 October 2026
 
+The [native rows follow-up](keyboard-native-rows-2026-10-29.md) supersedes the top-control and compact dimensions below. This earlier report retains the typing-grid corrections and their original evidence.
+
 Native comparisons found three visible problems: portrait key rows were 7 pt too high, portrait capital letters were too large and reached 2⅓ pt too high inside their faces, and landscape added the system's side insets a second time. The corrections align the key faces in both orientations and the measured letter top/bottom edges. Glyph widths are not identical to Apple's font; the remaining uppercase width discrepancy is retained explicitly.
 
 Device: dedicated `legato-4-geometry` iPhone 17 simulator (`BF601895-00FF-449A-9AF1-12FCE1DB811A`), iOS 26.5, 3× screenshots, light appearance. Portrait is 402 × 874 pt; landscape is 874 × 402 pt. Native English and Legato were switched in the same ordinary nonsecure `SystemFieldHost` field with autocorrection and capitalization disabled. Legato captures show the actual installed extension, not the in-app keyboard rendering harness. Native captures were inspected to confirm the system suggestion bar and matching English layout.

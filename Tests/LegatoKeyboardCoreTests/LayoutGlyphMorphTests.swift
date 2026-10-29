@@ -36,14 +36,14 @@ import Testing
         #expect(ids(next.glyphs) == [5, 6])
         #expect(next.removals.map(\.glyph.character) == ["e", "r", "e", "h", "t"])
         #expect(next.removals.map(\.stagger) == [0, 1, 2, 3, 4])
-        #expect(next.insertionStagger == [5: 1, 6: 0])
+        #expect(next.insertionStagger == [5: 0, 6: 1])
     }
 
-    @Test func emptyToWordInsertsEveryGlyphRightmostFirst() {
+    @Test func emptyToWordInsertsEveryGlyphLeftmostFirst() {
         let next = GlyphMorph(text: "").morphing(to: "abc")
         #expect(ids(next.glyphs) == [0, 1, 2])
         #expect(next.removals.isEmpty)
-        #expect(next.insertionStagger == [0: 2, 1: 1, 2: 0])
+        #expect(next.insertionStagger == [0: 0, 1: 1, 2: 2])
     }
 
     @Test func wordToEmptyRemovesEveryGlyphRightToLeft() {
@@ -55,13 +55,13 @@ import Testing
         #expect(next.insertionStagger.isEmpty)
     }
 
-    @Test func insertionsInTheMiddleStaggerFromTheRight() {
+    @Test func insertionsInTheMiddleStaggerFromTheLeft() {
         let next = GlyphMorph(text: "hlo").morphing(to: "hello")
         // h, l, o keep their ids (the earlier of two equal matches wins); e and the second l are new.
         #expect(chars(next.glyphs) == "hello")
         #expect(ids(next.glyphs) == [0, 3, 1, 4, 2])
         #expect(next.removals.isEmpty)
-        #expect(next.insertionStagger == [3: 1, 4: 0])
+        #expect(next.insertionStagger == [3: 0, 4: 1])
     }
 
     @Test func keptGlyphsKeepTheirIdsWhenTheyShiftRight() {

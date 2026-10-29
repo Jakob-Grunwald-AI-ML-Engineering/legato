@@ -30,8 +30,8 @@ public struct StripCell: Sendable, Equatable {
 /// further. The touch areas tile the whole width (each gap is split in the middle; the chevron and the
 /// mic reach the screen edges), so the mic pill stays easy to hit.
 public struct StripRow: Sendable, Equatable {
-    public static let margin = 8.0
-    public static let gap = 8.0
+    public static let margin = 6.33
+    public static let gap = 6.0
     public static let keyWidth = 44.0
     /// The smallest a key gets on a phone-sized width (375 pt and up), globe and text return included.
     public static let minKeyWidth = 36.0
@@ -39,10 +39,10 @@ public struct StripRow: Sendable, Equatable {
     public static let pillWidth = 81.0
     /// One hotkey button (undo, redo, Refine).
     public static let hotkeyButtonWidth = 30.0
-    /// The narrowest the hotkeys cell gets with undo, redo and Refine: three buttons.
-    public static let minHotkeysWidth = 3 * hotkeyButtonWidth
-    /// The narrowest it gets without redo: undo and Refine.
-    public static let minCompactHotkeysWidth = 2 * hotkeyButtonWidth
+    /// Three 30 pt key faces with the same 6 pt gaps as the key grid.
+    public static let minHotkeysWidth = 3 * hotkeyButtonWidth + 2 * gap
+    /// Two 30 pt key faces and their 6 pt gap when redo does not fit.
+    public static let minCompactHotkeysWidth = 2 * hotkeyButtonWidth + gap
 
     public let cells: [StripCell]
     /// Whether the hotkeys cell has room for redo (it is left out on the narrowest rows).

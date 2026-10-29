@@ -2,7 +2,7 @@ import LegatoKeyboardCore
 import SwiftUI
 import UIKit
 
-/// The keyboard: the word row and the hotkeys (and the mic pill) over the key grid, which is one touch
+/// The keyboard: the word row and the tool key row over the key grid, which is one touch
 /// surface; the globe key is a view on top of its place in the layout. Geometry: `KeyboardMetrics.swift`.
 struct KeyboardRootView: View {
     let controller: KeyboardController
@@ -31,13 +31,13 @@ struct KeyboardRootView: View {
                         }
                     }
                     let buttons = controller.expansion.control == .collapse ? 4 : 3
-                    let wordFrame = g.wordRowFrame(buttons: buttons)
+                    let wordFrame = g.wordRowFrame
                     place(wordFrame) {
                         WordRowView(
                             controller: controller, slots: WordRowLayout.visibleSlots(width: Double(wordFrame.width)), swipe: swipe)
                     }
-                    place(g.hotkeyFrame(buttons: buttons)) { HotkeyBar(controller: controller, swipe: swipe) }
-                    place(g.pillFrame) { MicKey(controller: controller).simultaneousGesture(swipe) }
+                    place(g.hotkeyFrame(buttons: buttons)) { HotkeyBar(controller: controller, buttonWidth: g.toolWidth(buttons: buttons), swipe: swipe) }
+                    place(g.micFrame(buttons: buttons)) { MicKey(controller: controller).simultaneousGesture(swipe) }
                     if typing.showsEmojiPanel {
                         place(CGRect(x: 0, y: g.firstRowTop, width: geometry.size.width, height: max(geometry.size.height - g.firstRowTop, 0))) {
                             EmojiPickerView(typing: typing, controller: controller)
@@ -60,35 +60,36 @@ struct KeyboardRootView: View {
 
     /// The compact layout: the word row above one row as high as `stripHeight`: the chevron that opens the full
     /// keyboard, the globe key (when iOS asks for it), the hotkeys (↶ ↷ and an icon-only Refine), delete, return and the mic key at the full
-    /// keyboard's pill size. `StripRow` decides the slots and widths for the keyboard width and the
+    /// keyboard's native key height. `StripRow` decides the slots and widths for the keyboard width and the
     /// touch areas that tile the row. Status and hints show in the word row.
     private func strip(typing: TypingModel, size: CGSize) -> some View {
         // The word row goes above the strip's row (the height requested is the row plus the word row); the
         // debug heights that leave nothing to touch have none.
-        let wordRowHeight = CGFloat(StripHeight.requested(row: controller.stripHeight) - controller.stripHeight)
+        let landscape = KeyGeometry.isLandscape(width: size.width)
+        let keyRowHeight = StripHeight.keyRowHeight(row: controller.stripHeight, landscape: landscape)
+        let wordRowHeight = CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: landscape) - keyRowHeight)
         let rowHeight = max(size.height - wordRowHeight, 0)
         // At the full keyboard's height: the strip's own height would scale the pill down (`vScale`).
-        let fullHeight = KeyGeometry.height(landscape: KeyGeometry.isLandscape(width: size.width))
+        let fullHeight = KeyGeometry.height(landscape: landscape)
         let pill = KeyGeometry(size: CGSize(width: size.width, height: fullHeight)).pillSize
-        let controlHeight = max(min(rowHeight - 6, pill.height), 0)
+        let controlHeight = max(min(rowHeight - (landscape ? 10 : 11), pill.height), 0)
         let returnStyle: StripReturnStyle = KeyLabels.returnSymbol(for: typing.presentation.returnLabel) == nil ? .text : .glyph
         let row = StripRow.make(width: size.width, showsGlobe: controller.showsGlobe, returnStyle: returnStyle)
-        let vertical = max((rowHeight - controlHeight) / 2, 0)
+        let bottom = min(landscape ? 4 : 3, max(rowHeight - controlHeight, 0))
+        let top = max(rowHeight - controlHeight - bottom, 0)
         return VStack(spacing: 0) {
             if wordRowHeight > 0 {
                 stripWordRow(width: size.width)
                     .frame(width: size.width, height: wordRowHeight)
             }
-            stripRow(typing: typing, row: row, size: CGSize(width: size.width, height: rowHeight), controlHeight: controlHeight, vertical: vertical)
+            stripRow(typing: typing, row: row, size: CGSize(width: size.width, height: rowHeight), controlHeight: controlHeight, top: top, bottom: bottom)
         }
         .frame(width: size.width, height: size.height, alignment: .top)
     }
 
     private func stripWordRow(width: CGFloat) -> some View {
-        let inset: CGFloat = StripRow.margin
-        let slots = WordRowLayout.visibleSlots(width: Double(width - 2 * inset))
+        let slots = WordRowLayout.visibleSlots(width: Double(width))
         return WordRowView(controller: controller, slots: slots, swipe: swipe)
-            .padding(.horizontal, inset)
             // Not clear: the keyboard gets no touches on fully clear pixels.
             .background(Color.black.opacity(0.001).gesture(swipe))
             #if DEBUG
@@ -97,12 +98,12 @@ struct KeyboardRootView: View {
     }
 
     private func stripRow(
-        typing: TypingModel, row: StripRow, size: CGSize, controlHeight: CGFloat, vertical: CGFloat
+        typing: TypingModel, row: StripRow, size: CGSize, controlHeight: CGFloat, top: CGFloat, bottom: CGFloat
     ) -> some View {
         HStack(spacing: 0) {
             ForEach(row.cells, id: \.slot) { cell in
                 // The key is drawn inside its touch area (`StripCell` insets, and the strip's full height).
-                let insets = EdgeInsets(top: vertical, leading: cell.leadingInset, bottom: vertical, trailing: cell.trailingInset)
+                let insets = EdgeInsets(top: top, leading: cell.leadingInset, bottom: bottom, trailing: cell.trailingInset)
                 Group {
                     switch cell.slot {
                     case .expand:
@@ -112,11 +113,15 @@ struct KeyboardRootView: View {
                         // A UIKit button: the drawn size is its touch area.
                         GlobeKey(target: controller.inputModeTarget, typing: typing)
                             .frame(width: cell.width, height: controlHeight)
+                            .padding(.top, top)
+                            .padding(.bottom, bottom)
                             .padding(.leading, cell.leadingInset)
                             .padding(.trailing, cell.trailingInset)
                             .simultaneousGesture(swipe)
                     case .hotkeys:
-                        HotkeyButtons(controller: controller, iconOnlyRefine: true, dividers: false, showsRedo: row.showsRedo, swipe: swipe)
+                        HotkeyButtons(controller: controller, iconOnlyRefine: true, showsRedo: row.showsRedo, swipe: swipe)
+                            .padding(.top, top)
+                            .padding(.bottom, bottom)
                             .padding(.leading, cell.leadingInset)
                             .padding(.trailing, cell.trailingInset)
                     case .delete:

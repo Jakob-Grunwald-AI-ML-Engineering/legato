@@ -45,6 +45,5 @@ struct EmojiPickerView: View {
         .padding(.horizontal, 6)
         .padding(.bottom, 4)
         .background(Color.black.opacity(0.001))
-        .accessibilityIdentifier("emoji.panel")
     }
 }

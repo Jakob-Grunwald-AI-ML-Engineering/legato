@@ -1,6 +1,6 @@
 # Contextual iOS keyboard suggestions
 
-Research: 2026-10-29, issue #4. Recommendation: retain tap-only insertion, match native **correction emphasis**, and compare broader-context local models before choosing an engine. Production suggestion code was not changed.
+Research: 2026-10-29, issue #4. Recommendation: retain tap-only insertion, match native **correction emphasis**, and compare broader-context local models before choosing an engine. The contextual suggestion backend remains unchanged; the correction treatment and native-style glyph motion are implemented separately.
 
 ## Native behavior observed
 
@@ -13,7 +13,7 @@ A separate scratch UIKit app enabled native autocorrection and selected English/
 
 This establishes a correction-candidate treatment, separate from the temporary underline on an already-corrected word described by [Apple Support](https://support.apple.com/en-ie/104995). It does **not** expose a probability or justify treating every first-ranked candidate as confident. Recommend a capsule for the proposed correction action, distinguished from ordinary completion and touch-down feedback.
 
-The English recording requested 30 fps but captured approximately 21.3 fps: 1,157 frames over 54.36 seconds. Frame samples show candidate glyph changes/reflow and intermediate fading. They do not reliably establish individual letter-size interpolation. The user's size-morph observation remains plausible; exact per-glyph bounds need a higher-rate capture. Legato currently uses glyph fades and whole-word fitting for long candidates, so its existing implementation does not establish animation parity.
+The first simulator recording showed glyph changes and fading without establishing per-letter scaling. A later physical iPhone recording confirmed new letters growing and fading in from left to right, with their ink bottoms stable while retained letters slide. Legato now follows that motion; its 0.85 initial scale and 180 ms ease-out are approximations, because the capture does not reveal Apple's hidden starting scale or exact easing. The [native rows follow-up](../validation/keyboard-native-rows-2026-10-29.md) retains the reference clip, simulator implementation clip, measurements and remaining verification limits.
 
 Scratch evidence: `/tmp/legato-4-suggestion-research/`, including `native-english.mp4`, screenshots, `NativeSuggestions.app` and `NativeHost.swift`. Captures used simulator `BF601895-00FF-449A-9AF1-12FCE1DB811A`; it was returned to geometry verification.
 

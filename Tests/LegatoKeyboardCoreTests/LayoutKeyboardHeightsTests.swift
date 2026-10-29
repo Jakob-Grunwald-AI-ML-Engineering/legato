@@ -12,18 +12,14 @@ import Testing
         #expect(firstFaceTop + 3 * 54 + 43 == 796)
     }
 
-    @Test func portraitGrowsByTheShortfallSoTheWordRowFitsAbovePill() {
-        // Today: pill top = 86 - 15.7 - 43.3 = 27 pt below the keyboard top; the word row needs 32.
-        #expect(KeyboardHeights.wordRowHeight(landscape: false) == 32)
-        #expect(KeyboardHeights.firstRowTop(landscape: false) == 91)
-        #expect(KeyboardHeights.height(landscape: false) == 299)
-    }
-
-    @Test func thePillKeepsItsSizeAndTheWordRowFitsAboveIt() {
-        let top = KeyboardHeights.firstRowTop(landscape: false)
-        let pillTop = top - KeyboardHeights.pillGapToRow(landscape: false) - KeyboardHeights.pillHeight(landscape: false)
-        #expect(KeyboardHeights.pillHeight(landscape: false) == 43.3)
-        #expect(pillTop >= KeyboardHeights.wordRowHeight(landscape: false) - 0.0001)
+    @Test func portraitAddsOneNativeToolRowBelowNativePredictions() {
+        // Native predictions are 44 pt; native Q starts 8 pt below that row.
+        // The tools add one native 54 pt key pitch before the unchanged typing grid.
+        #expect(KeyboardHeights.wordRowHeight(landscape: false) == 44)
+        #expect(KeyboardHeights.pillHeight(landscape: false) == 43)
+        #expect(KeyboardHeights.pillGapToRow(landscape: false) == 11)
+        #expect(KeyboardHeights.firstRowTop(landscape: false) == 106)
+        #expect(KeyboardHeights.height(landscape: false) == 314)
     }
 
     @Test func landscapeKeyRowsAlignWithTheNativeScreenBottom() {
@@ -34,10 +30,19 @@ import Testing
         #expect(abs(firstFaceTop + 3 * 35.33 + 27.33 - 377) <= 1)
     }
 
-    @Test func landscapeKeepsTheSharedPillRowAndNativeKeyHeight() {
-        #expect(KeyboardHeights.firstRowTop(landscape: true) == 51)
-        #expect(KeyboardHeights.height(landscape: true) == 51 + 3 * 35.33 + 27.33 + 4)
-        #expect(KeyboardHeights.wordRowHeight(landscape: true) == 0)
+    @Test func landscapeAddsOneNativeToolRowBelowNativePredictions() {
+        // Physical iPhone: predictions y194..238, first letter face y244.
+        #expect(KeyboardHeights.wordRowHeight(landscape: true) == 44)
+        #expect(KeyboardHeights.pillHeight(landscape: true) == 27.33)
+        #expect(KeyboardHeights.pillGapToRow(landscape: true) == 8)
+        #expect(abs(KeyboardHeights.firstRowTop(landscape: true) - 85.33) < 0.0001)
+        #expect(abs(KeyboardHeights.height(landscape: true) - 222.65) < 0.0001)
+    }
+
+    @Test func compactLandscapeContainsPredictionsAndOneNativeLandscapeKeyRow() {
+        // Predictions 44, then 6 pt top gap, 27.33 pt face and 4 pt bottom gap.
+        #expect(abs(StripHeight.keyRowHeight(row: 54, landscape: true) - 37.33) < 0.0001)
+        #expect(abs(StripHeight.requested(row: 54, landscape: true) - 81.33) < 0.0001)
     }
 
     @Test func portraitRowsKeepNativePitchAndThreePointBottomGap() {
@@ -54,10 +59,11 @@ import Testing
     }
 
     @Test func theStripGrowsByTheWordRow() {
-        #expect(WordRowHeight.strip == 40)
-        #expect(StripHeight.requested(row: 44) == 84)
-        #expect(StripHeight.requested(row: 56) == 96)
-        #expect(StripHeight.requested(row: 30) == 70)
+        #expect(WordRowHeight.strip == 44)
+        #expect(StripHeight.requested(row: 54) == 98)
+        #expect(StripHeight.resolve(stored: 56) == 54)
+        #expect(StripHeight.resolve(stored: 44) == 54)
+        #expect(StripHeight.requested(row: 30) == 74)
     }
 
     @Test func theDebugHeightsThatLeaveNothingToTouchStayAsRequested() {

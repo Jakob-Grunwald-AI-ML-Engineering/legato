@@ -122,7 +122,7 @@ import Testing
     // MARK: height
 
     @Test func theHeightCandidatesAreTheExperimentsList() {
-        #expect(StripHeight.candidates == [0, 1, 30, 44, 56])
+        #expect(StripHeight.candidates == [0, 1, 30, 54])
     }
 
     @Test func cyclingWalksTheCandidatesAndWrapsAround() {
@@ -132,7 +132,7 @@ import Testing
             height = StripHeight.next(after: height)
             seen.append(height)
         }
-        #expect(seen == [0, 1, 30, 44, 56, 0])
+        #expect(seen == [0, 1, 30, 54, 0])
     }
 
     @Test func cyclingFromAnUnknownHeightStartsTheList() {

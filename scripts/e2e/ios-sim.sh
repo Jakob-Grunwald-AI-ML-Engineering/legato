@@ -1261,7 +1261,7 @@ scenario_r() {
   # The real keyboard extension, not the harness: the system presents it for a plain text field, and the
   # extension logs where its keys are (`kbd.geometry`, Debug builds; KeyboardGeometryLog.swift). All four key
   # rows must lie inside the visible keyboard, at the height the extension asked for. Regression for a
-  # portrait keyboard (402 x 299) read as landscape because it is wider than tall: 190 pt, rows 3 and 4 cut.
+  # portrait keyboard (402 x 314) read as landscape because it is wider than tall: 190 pt, rows 3 and 4 cut.
   # Enabling the keyboard: the Settings preferences below (a simulator reads them when the app starts).
   # Screenshots go to $LEGATO_E2E_SHOTS (default: inside the work directory).
   local dir="${LEGATO_E2E_SHOTS:-$WORK/shots}"
@@ -1279,9 +1279,9 @@ scenario_r() {
     fi
     sleep 2.5   # the system resizes the keyboard while it comes up; the last layout counts
     assert_log "the system presented the Legato keyboard extension" "kbd.geometry"
-    assert_log "the extension asked for the portrait height (299 pt, not landscape's 188)" "constraint=299@999"
-    assert_no_log "portrait is never taken for landscape" "constraint=188@"
-    assert_eq "the keyboard view is 299 pt high" "299" "$(last_line "kbd.view" | sed -n 's/.* bounds=[0-9-]*,[0-9-]*,[0-9]*x\([0-9]*\) .*/\1/p')"
+    assert_log "the extension asked for the portrait height (314 pt, not landscape's 223)" "constraint=314@999"
+    assert_no_log "portrait is never taken for landscape" "constraint=223@"
+    assert_eq "the keyboard view is 314 pt high" "314" "$(last_line "kbd.view" | sed -n 's/.* bounds=[0-9-]*,[0-9-]*,[0-9]*x\([0-9]*\) .*/\1/p')"
     assert_eq "all four key rows are inside the visible keyboard" "1" "$(log_kv_last kbd.geometry visible)"
     local bottom height
     bottom="$(log_kv_last kbd.geometry keysMaxY)"

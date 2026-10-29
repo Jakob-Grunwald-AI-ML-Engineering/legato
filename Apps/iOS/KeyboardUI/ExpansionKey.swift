@@ -26,7 +26,7 @@ struct ExpansionKey: View {
 }
 
 /// A key's look for a SwiftUI button: the key fill, the pressed fill while held, the key radius.
-private struct KeyButtonStyle: ButtonStyle {
+struct KeyButtonStyle: ButtonStyle {
     var insets = EdgeInsets()
 
     func makeBody(configuration: Configuration) -> some View {

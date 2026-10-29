@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Protocol, TypedDict, cast
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 class RGBPixels(Protocol):
@@ -49,15 +49,15 @@ def runs(values: list[int], minimum: float) -> list[tuple[int, int]]:
 
 def measure(path: Path) -> Measurements:
     with Image.open(path) as source:
-        image = source.convert("RGB")
+        image = ImageOps.exif_transpose(source).convert("RGB")
     landscape = image.width > image.height
     reference_width, reference_height = (874, 402) if landscape else (402, 874)
     scale = image.width / reference_width
     if image.height / scale != reference_height:
         raise ValueError(f"{path}: expected 402 x 874 pt portrait or 874 x 402 pt landscape")
     pixels = cast(RGBPixels, image.load())
-    # Restrict to the four key rows; omit the white host and system globe area.
-    start, end = (0.59, 0.945) if landscape else (0.64, 0.92)
+    # Restrict to the four typing rows; omit the added tools, host and system globe area.
+    start, end = (0.59, 0.945) if landscape else (0.66, 0.92)
     white_rows = [
         y for y in range(round(image.height * start), round(image.height * end))
         if sum(min(pixels[x, y]) > 245 for x in range(round(6 * scale), image.width - round(6 * scale)))

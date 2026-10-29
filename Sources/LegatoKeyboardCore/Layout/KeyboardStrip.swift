@@ -88,8 +88,8 @@ public struct KeyboardExpansion: Sendable, Equatable {
 /// The strip's height, in points, for the height experiment: which values are tried and how to step through them.
 public enum StripHeight {
     /// 0 and 1 may leave nothing to touch; the debug picker in the app chooses the height a session starts with.
-    public static let candidates: [Double] = [0, 1, 30, 44, 56]
-    public static let standard: Double = 44
+    public static let candidates: [Double] = [0, 1, 30, 54]
+    public static let standard: Double = 54
 
     /// The candidate after `height`, wrapping around; the first one for a height that is not a candidate.
     public static func next(after height: Double) -> Double {
@@ -99,8 +99,12 @@ public enum StripHeight {
 
     /// The height to request from the system for a strip row of `row` points: the word row goes above it.
     /// The debug heights that leave nothing to touch (0 and 1) stay as they are.
-    public static func requested(row: Double) -> Double {
-        row >= 30 ? row + WordRowHeight.strip : row
+    public static func keyRowHeight(row: Double, landscape: Bool) -> Double {
+        row == standard && landscape ? 37.33 : row
+    }
+
+    public static func requested(row: Double, landscape: Bool = false) -> Double {
+        row >= 30 ? keyRowHeight(row: row, landscape: landscape) + WordRowHeight.strip : row
     }
 
     /// The stored starting height when it is a candidate, the standard one otherwise.
