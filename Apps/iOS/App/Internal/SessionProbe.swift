@@ -48,7 +48,10 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
 /// `LEGATO_PROBE_BG`: `audio` (microphone lease + background task: the measured case), `none` (background task
 /// only; iOS suspends after ~30 s), `foreground` (no wait, no lease). Optional: `LEGATO_PROBE_WPS` (2.5),
 /// `LEGATO_PROBE_REPEATS` (2), `LEGATO_PROBE_WARM` (0), `LEGATO_PROBE_SEED` (95; run r uses seed + r - 1),
-/// `LEGATO_PROBE_WINDOW` (1000 context tokens, the same for every backend). Results go to
+/// `LEGATO_PROBE_WINDOW` (1000 context tokens, the same for every backend). Rewrite mode (ContinuousRewriteProbe.swift):
+/// `LEGATO_PROBE_MODE=rewrite` (default `edits`), `LEGATO_PROBE_LAYOUT` (`onepass`, `turns`), `LEGATO_PROBE_CTX_PCT`
+/// (25: the share of the model's real window, 2048 for Core ML 1.7B, 4096 otherwise, every request stays within),
+/// `LEGATO_PROBE_PAUSE_MS` (700) and `LEGATO_PROBE_MAX_WORDS` (30) for the endpointer. Results go to
 /// `Library/Caches/continuous-probe.jsonl` (append-only) and audio-diag.jsonl (restarts at 1 MB):
 ///
 ///     xcrun devicectl device copy from --device $D --domain-type appDataContainer --domain-identifier de.gruenwald.legato \

@@ -15,7 +15,9 @@
 // --window 1000, --root (default ~/Library/Application Support/Legato/Models, the Mac app's own store; a model
 // missing there downloads once, at its pinned revision, and is reused by every later run and by the app),
 // --out (JSON lines; both tables go to the same name .txt), --cpu-compile off (MLX CPU runs with compile off, as
-// on the phone; it then stays off for the process), --sentences n (only the first n corpus sentences). One pass is 562 words, about 225 s at 2.5 words/s, so
+// on the phone; it then stays off for the process), --sentences n (only the first n corpus sentences), --mode
+// edits|rewrite, --layout onepass|turns, --ctx-pct 25 (rewrite: the share of the model's window per request),
+// --pause-ms 700 and --max-sentence-words 30 (rewrite: the endpointer). One pass is 562 words, about 225 s at 2.5 words/s, so
 // one combination takes about 4 × 3.75 min plus load; the whole matrix about 90 min.
 import PackageDescription
 

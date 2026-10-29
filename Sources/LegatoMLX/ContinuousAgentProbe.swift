@@ -375,6 +375,20 @@ public struct ProbeTurnRecord: Sendable {
     public var error: String?
     public var trimmed = false
     public var contextTokens: Int?
+    // Rewrite mode only (nil in edits mode, so its lines are unchanged).
+    /// Why the endpointer released the sentence: punctuation, pause, length, end.
+    public var endpoint: String?
+    /// From the sentence's last spoken word to the endpointer's decision.
+    public var endpointDelayMs: Int?
+    /// Tokens the request holds (head, history, sentence) against the budget and the model's window.
+    public var ctxTokens: Int?
+    public var ctxBudget: Int?
+    public var ctxWindow: Int?
+    /// Oldest history sentences left out to stay within the budget (onepass).
+    public var historyDropped: Int?
+    /// The drift guard turned the reply down; its drift score.
+    public var rejected: Bool?
+    public var drift: Double?
 
     public init(rep: Int, phase: String, chunk: Int, words: Int, speechMs: Int, lagMs: Int) {
         self.rep = rep; self.phase = phase; self.chunk = chunk; self.words = words; self.speechMs = speechMs; self.lagMs = lagMs
@@ -396,6 +410,15 @@ public struct ProbeTurnRecord: Sendable {
         if let parseNote { fields["parseNote"] = parseNote }
         if let error { fields["error"] = error }
         if let contextTokens { fields["contextTokens"] = contextTokens }
+        if let endpoint { fields["endpoint"] = endpoint }
+        if let endpointDelayMs { fields["endpointDelayMs"] = endpointDelayMs }
+        if let ctxTokens { fields["ctxTokens"] = ctxTokens }
+        if let ctxBudget { fields["ctxBudget"] = ctxBudget }
+        if let ctxWindow { fields["ctxWindow"] = ctxWindow }
+        if let ctxTokens, let ctxWindow, ctxWindow > 0 { fields["ctxPctUsed"] = (Double(ctxTokens) * 1_000 / Double(ctxWindow)).rounded() / 10 }
+        if let historyDropped { fields["historyDropped"] = historyDropped }
+        if let rejected { fields["rejected"] = rejected }
+        if let drift { fields["drift"] = drift }
         return fields
     }
 }
@@ -508,6 +531,14 @@ public enum ProbeReport {
         fields["maxLagMs"] = records.map(\.lagMs).max() ?? 0
         fields["parseOk"] = ProbeStats.ratio(records.filter(\.parseOK).count, records.count)
         fields["trims"] = records.filter(\.trimmed).count
+        if records.contains(where: { $0.endpoint != nil }) {  // rewrite mode
+            fields["rejects"] = ProbeStats.ratio(ok.filter { $0.rejected == true }.count, ok.count)
+            fields.merge(ProbeStats.describe(records.compactMap { $0.endpointDelayMs.map(Double.init) }, "endpointDelayMs")) { $1 }
+            fields.merge(ProbeStats.describe(records.compactMap { $0.ctxTokens.map(Double.init) }, "ctxTokens")) { $1 }
+            if let most = records.compactMap(\.ctxTokens).max() { fields["ctxTokensMax"] = most }
+            if let budget = records.compactMap(\.ctxBudget).first { fields["ctxBudget"] = budget }
+            if let window = records.compactMap(\.ctxWindow).first { fields["ctxWindow"] = window }
+        }
         return fields
     }
 
@@ -568,6 +599,16 @@ public struct ProbeConfig: Sendable {
     /// Chunk sizes, in words.
     public var minWords = 5
     public var maxWords = 15
+    /// `edits` (structured edit per chunk) or `rewrite` (plain-text rewrite per endpointed sentence).
+    public var mode: ProbeMode = .edits
+    /// Rewrite mode: the prompt layout.
+    public var layout: ProbeLayout = .onepass
+    /// Rewrite mode: the share of the model's context window every request stays within (percent).
+    public var contextPercent = 25
+    /// Rewrite mode: the model's context window (tokens), from the host; nil: the session's budget.
+    public var contextWindow: Int?
+    /// Rewrite mode: when a sentence is ready.
+    public var endpoint = ProbeEndpointer.Config()
 
     public init(wordsPerSecond: Double = 2.5, repeats: Int = 3, warmContinuation: Bool = true, seed: UInt64 = 95, window: Int = 1_000) {
         self.wordsPerSecond = wordsPerSecond; self.repeats = repeats; self.warmContinuation = warmContinuation
@@ -575,7 +616,8 @@ public struct ProbeConfig: Sendable {
     }
 
     /// From `LEGATO_PROBE_WPS`, `LEGATO_PROBE_REPEATS`, `LEGATO_PROBE_WARM` (1/0), `LEGATO_PROBE_SEED`,
-    /// `LEGATO_PROBE_WINDOW`.
+    /// `LEGATO_PROBE_WINDOW`; rewrite mode: `LEGATO_PROBE_MODE` (edits, rewrite), `LEGATO_PROBE_LAYOUT` (onepass,
+    /// turns), `LEGATO_PROBE_CTX_PCT` (25), `LEGATO_PROBE_PAUSE_MS` (700), `LEGATO_PROBE_MAX_WORDS` (30).
     public init(environment: [String: String], defaultRepeats: Int = 3, defaultWarm: Bool = true) {
         let defaults = ProbeConfig(repeats: defaultRepeats, warmContinuation: defaultWarm)
         self.init(wordsPerSecond: environment["LEGATO_PROBE_WPS"].flatMap(Double.init) ?? defaults.wordsPerSecond,
@@ -583,6 +625,18 @@ public struct ProbeConfig: Sendable {
                   warmContinuation: environment["LEGATO_PROBE_WARM"].map { $0 != "0" } ?? defaults.warmContinuation,
                   seed: environment["LEGATO_PROBE_SEED"].flatMap(UInt64.init) ?? defaults.seed,
                   window: environment["LEGATO_PROBE_WINDOW"].flatMap(Int.init) ?? defaults.window)
+        mode = environment["LEGATO_PROBE_MODE"].flatMap(ProbeMode.init(rawValue:)) ?? .edits
+        layout = environment["LEGATO_PROBE_LAYOUT"].flatMap(ProbeLayout.init(rawValue:)) ?? .onepass
+        contextPercent = environment["LEGATO_PROBE_CTX_PCT"].flatMap(Int.init).map { min(100, max(1, $0)) } ?? 25
+        if let pause = environment["LEGATO_PROBE_PAUSE_MS"].flatMap(Double.init) { endpoint.pauseSeconds = pause / 1_000 }
+        if let words = environment["LEGATO_PROBE_MAX_WORDS"].flatMap(Int.init) { endpoint.maxWords = max(1, words) }
+    }
+
+    /// The rewrite settings, for the start line (`mode` always; the rest in rewrite mode).
+    public var modeFields: [String: any Sendable] {
+        guard mode == .rewrite else { return ["mode": mode.rawValue] }
+        return ["mode": mode.rawValue, "layout": layout.rawValue, "ctxPct": contextPercent, "ctxWindow": contextWindow ?? 0,
+                "pauseMs": Int(endpoint.pauseSeconds * 1_000), "maxSentenceWords": endpoint.maxWords, "draft": "off"]
     }
 
     /// Stream seconds of one pass at this pace.
@@ -613,9 +667,12 @@ public enum ContinuousAgentProbe {
         var kept: (session: any LLMSession, context: Int?)?
         for rep in 1...max(1, config.repeats) {
             do {
-                let session = try await open(backend, hooks: hooks, rep: rep)
-                let (result, context) = await replay(session: session, corpus: corpus, config: config, rep: rep, phase: "fresh",
-                                                     seed: config.seed &+ UInt64(rep - 1), numberOffset: 0, context: nil, hooks: hooks)
+                let session = try await open(backend, config: config, hooks: hooks, rep: rep)
+                let seed = config.seed &+ UInt64(rep - 1)
+                let (result, context) = config.mode == .rewrite
+                    ? (await replayRewrite(session: session, corpus: corpus, config: config, rep: rep, phase: "fresh", seed: seed, hooks: hooks), nil)
+                    : await replay(session: session, corpus: corpus, config: config, rep: rep, phase: "fresh",
+                                   seed: seed, numberOffset: 0, context: nil, hooks: hooks)
                 results.append(result)
                 await hooks.onEvent("run", ProbeReport.run(result))
                 if rep == config.repeats, config.warmContinuation { kept = (session, context) } else { await session.close() }
@@ -625,9 +682,12 @@ public enum ContinuousAgentProbe {
         }
         if let kept {
             let rep = config.repeats + 1
-            let (result, _) = await replay(session: kept.session, corpus: corpus, config: config, rep: rep, phase: "warm",
-                                           seed: config.seed &+ UInt64(config.repeats), numberOffset: corpus.count,
-                                           context: kept.context, hooks: hooks)
+            let result = config.mode == .rewrite
+                ? await replayRewrite(session: kept.session, corpus: corpus, config: config, rep: rep, phase: "warm",
+                                      seed: config.seed &+ UInt64(config.repeats), hooks: hooks)
+                : await replay(session: kept.session, corpus: corpus, config: config, rep: rep, phase: "warm",
+                               seed: config.seed &+ UInt64(config.repeats), numberOffset: corpus.count,
+                               context: kept.context, hooks: hooks).0
             results.append(result)
             await hooks.onEvent("run", ProbeReport.run(result))
             await kept.session.close()
@@ -635,9 +695,9 @@ public enum ContinuousAgentProbe {
         return results
     }
 
-    private static func open(_ backend: any LLMBackend, hooks: Hooks, rep: Int) async throws -> any LLMSession {
+    private static func open(_ backend: any LLMBackend, config: ProbeConfig, hooks: Hooks, rep: Int) async throws -> any LLMSession {
         let session = try await backend.makeSession()
-        try await session.append(.instructions(ProbeInstructions.head()))
+        try await session.append(.instructions(config.mode == .rewrite ? ProbeRewriteInstructions.head(layout: config.layout) : ProbeInstructions.head()))
         let clock = ContinuousClock()
         let start = clock.now
         try await session.warm()
@@ -693,17 +753,7 @@ public enum ContinuousAgentProbe {
                 record.totalMs = ms(end - turnStart)
                 record.keptUp = record.totalMs < record.speechMs
                 record.reply = reply
-                let metrics = await (session as? any LLMSessionMetrics)?.lastTurnMetrics()
-                record.promptTokens = metrics?.promptTokens
-                record.prefillTokens = metrics?.prefilledTokens
-                record.prefillMs = metrics?.prefillSeconds.map { Int($0 * 1_000) }
-                if let first = await MLXProbeSupport.firstChunkSeconds(session) {
-                    record.ttftMs = Int(first * 1_000); record.ttftSource = "stream"
-                } else {
-                    record.ttftMs = record.prefillMs
-                }
-                record.decodeTokens = await hooks.countTokens(reply)
-                record.decodeMs = record.ttftMs.map { max(0, record.totalMs - $0) }
+                await measure(&record, session: session, reply: reply, hooks: hooks)
                 let parsed = ProbeReply.parse(reply)
                 record.parseOK = parsed.parseOK
                 switch parsed {
@@ -757,6 +807,21 @@ public enum ContinuousAgentProbe {
         let result = ProbeRunResult(rep: rep, phase: phase, records: records, mistakes: flat, edits: editOutcomes,
                                     wallSeconds: seconds(clock.now))
         return (result, context)
+    }
+
+    /// The turn's prompt, prefill, first-chunk and decode figures, from the session and the reply.
+    static func measure(_ record: inout ProbeTurnRecord, session: any LLMSession, reply: String, hooks: Hooks) async {
+        let metrics = await (session as? any LLMSessionMetrics)?.lastTurnMetrics()
+        record.promptTokens = metrics?.promptTokens
+        record.prefillTokens = metrics?.prefilledTokens
+        record.prefillMs = metrics?.prefillSeconds.map { Int($0 * 1_000) }
+        if let first = await MLXProbeSupport.firstChunkSeconds(session) {
+            record.ttftMs = Int(first * 1_000); record.ttftSource = "stream"
+        } else {
+            record.ttftMs = record.prefillMs
+        }
+        record.decodeTokens = await hooks.countTokens(reply)
+        record.decodeMs = record.ttftMs.map { max(0, record.totalMs - $0) }
     }
 
     static func ms(_ duration: Duration) -> Int {

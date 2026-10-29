@@ -222,6 +222,8 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
 
     /// The context a session keeps (tokens, reply included): the small-model window, not the checkpoint's.
     static let sessionWindow = 4_096
+    /// ``sessionWindow``, for hosts that size a context share (spike #95).
+    public static var contextWindow: Int { sessionWindow }
     /// Tokens a reply may take.
     static let replyLimit = 1_024
     /// Sessions handed out; releasing the model ends them.

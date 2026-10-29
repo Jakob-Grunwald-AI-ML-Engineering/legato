@@ -29,7 +29,10 @@ struct ContinuousProbeOptions: Sendable {
         guard let b = Backend(rawValue: backend) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_BACKEND \(backend) (coreml, mlx-cpu)")) }
         guard let m = Model(rawValue: model) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_MODEL \(model) (qwen3-1.7b, qwen3-0.6b)")) }
         guard let k = Keep(rawValue: keep) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_BG \(keep) (audio, none, foreground)")) }
-        return .success(ContinuousProbeOptions(backend: b, model: m, keep: k, config: ProbeConfig(environment: environment, defaultRepeats: 2, defaultWarm: false)))
+        var options = ContinuousProbeOptions(backend: b, model: m, keep: k, config: ProbeConfig(environment: environment, defaultRepeats: 2, defaultWarm: false))
+        // Rewrite mode sizes its context share from the model's real window.
+        options.config.contextWindow = b == .coreml ? options.coreMLSpec.runtimeConfiguration.contextLength : MLXBackend.contextWindow
+        return .success(options)
     }
 
     var coreMLSpec: CoreMLModelSpec {
@@ -38,7 +41,12 @@ struct ContinuousProbeOptions: Sendable {
     var mlxSpec: MLXModelSpec {
         MLXModels.spec(id: model == .qwen3_1_7b ? MLXModels.qwen3_1_7bID : MLXModels.qwen3_0_6bID)!
     }
-    var label: String { "\(backend.rawValue)/\(model.rawValue)/\(keep.rawValue)" }
+    var label: String {
+        let mode = config.mode == .rewrite ? "rewrite-\(config.layout.rawValue)-\(config.contextPercent)" : config.mode.rawValue
+        return "\(backend.rawValue)/\(model.rawValue)/\(keep.rawValue)/\(mode)"
+    }
+    /// The Core ML reply reserve: rewrite replies are one sentence, so the session may hold more of the window.
+    static let rewriteOutputLimit = 256
 }
 
 /// Appends the continuous probe's lines to `Library/Caches/continuous-probe.jsonl` as well: the shared
@@ -82,7 +90,10 @@ extension SessionProbe {
         defer { running = false; block?(false) }
         let keepAlive = options.keep == .foreground ? nil : BackgroundTask(mode: .continuous)
         defer { keepAlive?.end() }
-        let base: [String: any Sendable] = ["backend": options.backend.rawValue, "model": options.model.rawValue, "bg": options.keep.rawValue]
+        var baseFields: [String: any Sendable] = ["backend": options.backend.rawValue, "model": options.model.rawValue, "bg": options.keep.rawValue,
+                                              "mode": options.config.mode.rawValue]
+        if options.config.mode == .rewrite { baseFields["layout"] = options.config.layout.rawValue; baseFields["ctxPct"] = options.config.contextPercent }
+        let base = baseFields
         func emit(_ event: String, _ fields: [String: any Sendable] = [:]) { line(event, fields, base) }
 
         UIDevice.current.isBatteryMonitoringEnabled = true
@@ -107,7 +118,7 @@ extension SessionProbe {
             "corpusWords": ProbeCorpus.wordCount, "corpusMistakes": ProbeCorpus.mistakeCount,
             "window": options.config.window, "linger": String(describing: Settings.keepAliveLinger),
             "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled,
-        ])
+        ].merging(options.config.modeFields) { $1 })
 
         say("releasing the app's own models")
         await AppController.shared.releaseModelsForProbe()
@@ -149,7 +160,9 @@ extension SessionProbe {
         do {
             switch options.backend {
             case .coreml:
-                let coreML = await CoreMLModelStore.shared.backend(for: options.coreMLSpec, root: root)
+                let coreML = options.config.mode == .rewrite
+                    ? CoreMLBackend(spec: options.coreMLSpec, folder: folder, outputTokenLimit: ContinuousProbeOptions.rewriteOutputLimit)
+                    : await CoreMLModelStore.shared.backend(for: options.coreMLSpec, root: root)
                 try await coreML.prepare()
                 backend = coreML
                 release = { await coreML.releaseWarmResources(); await CoreMLModelStore.shared.release(folder: folder) }

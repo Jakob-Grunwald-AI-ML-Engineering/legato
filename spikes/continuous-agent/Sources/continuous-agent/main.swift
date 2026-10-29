@@ -24,6 +24,7 @@ struct Arguments {
         usage: continuous-agent [--backend coreml|mlx-gpu|mlx-cpu|all] [--model qwen3-1.7b|qwen3-0.6b|all]
                                 [--wps 2.5] [--repeats 3] [--warm 1|0] [--seed 95] [--window 1000] [--root <models>] [--out <file.jsonl>]
                                 [--cpu-compile on|off] [--sentences n]
+                                [--mode edits|rewrite] [--layout onepass|turns] [--ctx-pct 25] [--pause-ms 700] [--max-sentence-words 30]
         """
 
     static func parse(_ argv: [String]) throws -> Arguments {
@@ -55,6 +56,17 @@ struct Arguments {
                 guard v == "on" || v == "off" else { throw Failure("--cpu-compile is on or off") }
                 MLXCompile.allowedOnCPU = v == "on"
             case "--sentences": args.sentences = Int(try value(flag))
+            case "--mode":
+                let v = try value(flag)
+                guard let mode = ProbeMode(rawValue: v) else { throw Failure("--mode is edits or rewrite") }
+                args.config.mode = mode
+            case "--layout":
+                let v = try value(flag)
+                guard let layout = ProbeLayout(rawValue: v) else { throw Failure("--layout is onepass or turns") }
+                args.config.layout = layout
+            case "--ctx-pct": args.config.contextPercent = min(100, max(1, Int(try value(flag)) ?? args.config.contextPercent))
+            case "--pause-ms": args.config.endpoint.pauseSeconds = (Double(try value(flag)) ?? 700) / 1_000
+            case "--max-sentence-words": args.config.endpoint.maxWords = max(1, Int(try value(flag)) ?? args.config.endpoint.maxWords)
             case "--root": args.root = URL(fileURLWithPath: try value(flag), isDirectory: true)
             case "--out": args.out = URL(fileURLWithPath: try value(flag))
             case "-h", "--help": print(usage); exit(0)
@@ -133,7 +145,9 @@ actor Peak {
 struct ComboReport { var rows: [[String: any Sendable]] = []; var breakdown: [[String: any Sendable]] = [] }
 
 func runOne(_ backend: Backend, _ model: Model, _ args: Arguments, _ sink: Sink) async -> ComboReport {
-    let base: [String: any Sendable] = ["backend": backend.rawValue, "model": model.rawValue, "host": "mac"]
+    var baseFields: [String: any Sendable] = ["backend": backend.rawValue, "model": model.rawValue, "host": "mac", "mode": args.config.mode.rawValue]
+    if args.config.mode == .rewrite { baseFields["layout"] = args.config.layout.rawValue; baseFields["ctxPct"] = args.config.contextPercent }
+    let base = baseFields
     func emit(_ event: String, _ fields: [String: any Sendable] = [:]) { sink.line(event, fields.merging(base) { $1 }) }
     let wallStart = ContinuousClock.now
     let thermalStart = thermal()
@@ -141,10 +155,14 @@ func runOne(_ backend: Backend, _ model: Model, _ args: Arguments, _ sink: Sink)
     let mlxSpec = MLXModels.spec(id: model == .qwen3_1_7b ? MLXModels.qwen3_1_7bID : MLXModels.qwen3_0_6bID)!
     let installer: any ModelInstaller = backend == .coreml ? CoreMLInstaller(spec: coreMLSpec) : MLXInstaller(spec: mlxSpec)
     let folder = backend == .coreml ? coreMLSpec.folder(root: args.root) : mlxSpec.folder(root: args.root)
+    var config = args.config
+    // Rewrite mode sizes its context share from the model's real window.
+    config.contextWindow = backend == .coreml ? coreMLSpec.runtimeConfiguration.contextLength : MLXBackend.contextWindow
     if backend == .mlxCPU { MLXCompile.prepare(for: .cpu) }
     emit("start", ["compile": MLXCompile.label, "thermal": thermal(), "footprintMB": footprintMB(), "folder": folder.path, "wps": args.config.wordsPerSecond,
                    "repeats": args.config.repeats, "warm": args.config.warmContinuation, "streamSeconds": Int(args.config.streamSeconds(args.corpus)),
-                   "corpusWords": ProbeCorpus.wordCount, "corpusMistakes": ProbeCorpus.mistakeCount, "corpusSentences": args.corpus.count, "seed": Int(args.config.seed), "window": args.config.window])
+                   "corpusWords": ProbeCorpus.wordCount, "corpusMistakes": ProbeCorpus.mistakeCount, "corpusSentences": args.corpus.count, "seed": Int(args.config.seed), "window": args.config.window]
+        .merging(config.modeFields) { $1 })
 
     if await !installer.isInstalled(root: args.root) {
         let start = ContinuousClock.now
@@ -165,7 +183,10 @@ func runOne(_ backend: Backend, _ model: Model, _ args: Arguments, _ sink: Sink)
     do {
         switch backend {
         case .coreml:
-            let coreML = await CoreMLModelStore.shared.backend(for: coreMLSpec, root: args.root)
+            // Rewrite replies are one sentence: a small reply reserve leaves the session more of the window.
+            let coreML = config.mode == .rewrite
+                ? CoreMLBackend(spec: coreMLSpec, folder: folder, outputTokenLimit: 256)
+                : await CoreMLModelStore.shared.backend(for: coreMLSpec, root: args.root)
             try await coreML.prepare()
             llm = coreML
         case .mlxGPU, .mlxCPU:
@@ -187,7 +208,7 @@ func runOne(_ backend: Backend, _ model: Model, _ args: Arguments, _ sink: Sink)
         onTurn: { record in sink.line("turn", record.fields.merging(base) { $1 }) },
         onEvent: { name, fields in sink.line(name, fields.merging(base) { $1 }) })
     let replayStart = ContinuousClock.now
-    let results = await ContinuousAgentProbe.runAll(backend: llm, config: args.config, hooks: hooks, corpus: args.corpus)
+    let results = await ContinuousAgentProbe.runAll(backend: llm, config: config, hooks: hooks, corpus: args.corpus)
     let peakMB = await peak.stop()
     var report = ComboReport()
     for result in results { report.rows.append(base.merging(ProbeReport.run(result)) { $1 }.merging(["row": "\(result.phase) \(result.rep)"]) { $1 }) }
@@ -217,10 +238,10 @@ func table(_ rows: [[String: any Sendable]], _ columns: [String]) -> String {
     return ([render(columns)] + cells.map(render)).joined(separator: "\n")
 }
 
-let runColumns = ["backend", "model", "row", "localLatencyMsMedian", "localLatencyMsMean", "localLatencyMsP95", "localLatencyMsSd",
+let runColumns = ["backend", "model", "mode", "layout", "ctxPct", "row", "localLatencyMsMedian", "localLatencyMsMean", "localLatencyMsP95", "localLatencyMsSd",
                   "localFixed", "localFixedWithin2", "sentenceLatencyMsMedian", "sentenceLatencyMsP95", "sentenceFixed",
                   "wrongEdits", "turnMsMedian", "turnMsMean", "turnMsP95", "turnMsSd", "ttftMsMedian", "decodeTokPerSMedian",
-                  "keepUpPct", "maxLagMs", "parseOk", "trims", "localLatencyRunMedianSd", "peakFootprintMB", "wallS"]
+                  "keepUpPct", "maxLagMs", "parseOk", "trims", "rejects", "endpointDelayMsMedian", "ctxTokensMax", "localLatencyRunMedianSd", "peakFootprintMB", "wallS"]
 let breakdownColumns = ["backend", "model", "group", "localFixed", "localLatencyMsMedian", "localLatencyMsP95",
                         "sentenceFixed", "sentenceLatencyMsMedian", "wrongEdits"]
 
