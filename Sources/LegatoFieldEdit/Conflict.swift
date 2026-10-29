@@ -41,9 +41,12 @@ public struct Conflict: Sendable, Hashable, Codable {
 
 /// What happened to a submitted transaction.
 public enum QueueEvent: Sendable, Hashable {
-    /// Written and confirmed by a host read.
+    /// Written and confirmed by a host read. A write confirmed only in part is followed by a `verifyFailed`
+    /// conflict for its missing steps (the feed's `applied` carries the landed ones).
     case applied(UUID, version: FieldVersion)
     /// Overtaken by the same owner's own newer edit; the source re-plans (no user note).
     case superseded(UUID, by: UUID)
     case conflict(UUID, Conflict)
+    /// Cancelled while pending (``FieldEditQueue/withdraw(_:)``); never written.
+    case withdrawn(UUID)
 }

@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var clicks = Settings.keyboardClicks
     @State private var automaticAutoFill = Settings.keyboardAutomaticAutoFill
     @State private var strip = Settings.keyboardStrip
+    @State private var fieldEdits = Settings.fieldEdits
     #if DEBUG
     @State private var stripHeight = Settings.keyboardStripHeight
     #endif
@@ -106,15 +107,26 @@ struct SettingsView: View {
                 Text("Haptics and clicks need Allow Full Access for the Legato keyboard (Settings > Legato > Keyboards). Clicks also follow the system's Keyboard Clicks switch in Settings > Sounds & Haptics. The compact keyboard is one row with the dictation status and the mic key; its chevron opens the full keyboard. AutoFill switching moves to the next enabled keyboard on username, password and verification-code fields. iOS controls keyboard order; long-press the key in Legato to choose a keyboard. You can switch back to Legato to keep typing.")
             }
 
+            Section {
+                Toggle("Experimental: edit queue and cleanup agent", isOn: $fieldEdits)
+                    .accessibilityIdentifier("settings.fieldEdits")
+            } footer: {
+                Text("Routes the keyboard's field edits through one queue and lets a cleanup agent revise text while you dictate. Takes effect with the next dictation. Off by default.")
+            }
+
             #if LEGATO_INTERNAL
             Section {
                 Toggle("Keep audio session active", isOn: $keepSessionActive)
                 Toggle("Offer experimental audio options", isOn: $showPauseOthers)
                 Toggle("Force tap-to-copy", isOn: $forceTapToCopy)
+                Button("Session probe") { Task { await SessionProbe.run(mode: .foreground, models: controller.models) } }
+                Button("Session probe in 10 s") {
+                    Task { await SessionProbe.run(mode: .foreground, delay: .seconds(10), models: controller.models) }
+                }
             } header: {
                 Text("Debug")
             } footer: {
-                Text("Keep audio session active: a stop leaves the session on, so the session, and any lowering or pausing of music from its last start, stays in place between dictations, and the Audio setting does not apply until an interruption or this switch ends it. Diagnostics: Library/Caches/audio-diag.jsonl in the app container.")
+                Text("Keep audio session active: a stop leaves the session on, so the session, and any lowering or pausing of music from its last start, stays in place between dictations, and the Audio setting does not apply until an interruption or this switch ends it. Session probe: times persistent LLM sessions (Foundation Models and the selected Core ML model); \"in 10 s\" leaves time to lock the phone or leave the app. Diagnostics: Library/Caches/audio-diag.jsonl in the app container.")
             }
             #endif
         }
@@ -136,6 +148,7 @@ struct SettingsView: View {
         .onChange(of: clicks) { _, new in Settings.keyboardClicks = new }
         .onChange(of: automaticAutoFill) { _, new in Settings.keyboardAutomaticAutoFill = new }
         .onChange(of: strip) { _, new in Settings.keyboardStrip = new }
+        .onChange(of: fieldEdits) { _, new in Settings.fieldEdits = new }
         #if DEBUG
         .onChange(of: stripHeight) { _, new in Settings.keyboardStripHeight = new }
         #endif

@@ -126,6 +126,11 @@ public final class ModelServices {
         })
     }
 
+    /// Whether any selected-model load is running, whoever started it.
+    public func hasLoadsInFlight() async -> Bool { await warmup.hasLoadsInFlight }
+    /// Called when the last running load ends (see `MemoryWarningPolicy.loadFinished`).
+    public func onLoadsSettled(_ handler: @escaping @Sendable () -> Void) async { await warmup.onLoadsSettled(handler) }
+
     /// Reconciles retention for every selected consumer without waiting for their union.
     public func reconcileSelectedModels(options: CleanupOptions, inBackground: Bool) async {
         let requests = await selectedResourceRequests(options: options)
@@ -217,6 +222,18 @@ public final class ModelServices {
     }
     public func cleanupChoice(for modelID: String) -> CleanupBackendChoice { .coreML }
 
+    /// What the rolling cleanup session starts with (instructions, examples), prefilled when the model is
+    /// prepared. Set before the first preparation; a change applies to sessions opened afterwards.
+    public var rollingSessionHead: @Sendable () async -> [LLMSessionChunk] = {
+        [.instructions(CleanupPrompt.standard.instructions(.current, []))]
+    }
+
+    /// The selected cleanup backend's one rolling session (see ``SelectedModelWarmup/rollingSession(key:)``):
+    /// warm, kept across runs, released only with the model. Nil until the model is prepared.
+    public func rollingCleanupSession(for backend: CleanupBackendChoice) async -> (any LLMSession)? {
+        await warmup.rollingSession(key: await cleanupResource(backend: backend).key)
+    }
+
     public func acquireSummaryBackend(backend: CleanupBackendChoice, inBackground: Bool) async throws -> SummaryBackendLease {
         let id = selected(.cleanup)
         let resource = await cleanupResource(backend: backend)
@@ -258,10 +275,12 @@ public final class ModelServices {
     }
     private func cleanupResource(backend: CleanupBackendChoice) async -> SelectedModelWarmup.Resource {
         let root = modelRoot, manager = self.manager, fallback = foundationResources, nativeOverrides = resourceOverrides
+        let head: @Sendable () async -> [LLMSessionChunk] = { [weak self] in await self?.rollingSessionHead() ?? [] }
         if backend == .foundationModels {
             return .init(key: "cleanup:foundation-models", prewarm: {
                 if await fallback.availability.isAvailable { try await fallback.prewarmResources() }
-            }, release: { await fallback.releaseWarmResources() })
+            }, release: { await fallback.releaseWarmResources() },
+            session: .init(head: head, make: { try await fallback.makeSession() }))
         }
         let id = selected(.cleanup) ?? "unselected", key = "cleanup:" + (selected(.cleanup) ?? "unselected")
         if cleanupPreparation.modelID != id {
@@ -293,7 +312,11 @@ public final class ModelServices {
         }, release: {
             if let nativeOverrides { await nativeOverrides.coreML(id, root).releaseWarmResources() }
             else if let spec = CoreMLModels.spec(id: id) { await CoreMLModels.release(folder: spec.folder(root: root)) }
-        })
+        }, session: .init(head: head, make: {
+            if let nativeOverrides { return try await nativeOverrides.coreML(id, root).makeSession() }
+            guard let spec = CoreMLModels.spec(id: id) else { throw LLMError.unavailable(reason: "Unknown Core ML model.") }
+            return try await CoreMLModelStore.shared.backend(for: spec, root: root).makeSession()
+        }))
     }
 
     private func setCleanupPreparation(id: String, state: CleanupPreparationStatus.State, message: String?) {

@@ -16,6 +16,7 @@ enum Settings {
         static let audioPolicy = "audioPolicy"
         static let keepAliveSeconds = "keepAliveSeconds"
         static let keepAliveChoicesVersion = "keepAliveChoicesVersion"
+        static let fieldEdits = "fieldEdits"
         #if LEGATO_INTERNAL
         static let keepSessionActiveBetweenRuns = "keepSessionActiveBetweenRuns"
         static let debugShowPauseOthers = "debugShowPauseOthers"
@@ -141,6 +142,13 @@ enum Settings {
             AppGroup.defaults.set(newValue, forKey: Key.debugShowPauseOthers)
             #endif
         }
+    }
+
+    /// "Experimental: edit queue and cleanup agent". Off by default; frozen per run (`HostState.fieldEdits`).
+    /// Available in release builds.
+    static var fieldEdits: Bool {
+        get { AppGroup.defaults.bool(forKey: Key.fieldEdits) }
+        set { AppGroup.defaults.set(newValue, forKey: Key.fieldEdits) }
     }
 
     /// Debug: the pasteboard client reports "didn't change", so the activity ends in `tapToCopy`. `LEGATO_INTERNAL`

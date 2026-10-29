@@ -5,7 +5,9 @@
 
 import Foundation
 
-public final class ModelContainer: Sendable {}
+public final class ModelContainer: Sendable {
+    public var tokenizer: any Tokenizer { get async { fatalError("stub: ModelContainer.tokenizer") } }
+}
 
 public struct ModelConfiguration: Sendable {
     public init(directory: URL, extraEOSTokens: Set<String> = []) {}
@@ -25,13 +27,31 @@ public enum Chat {
     }
 }
 
+public struct GenerateCompletionInfo: Sendable {
+    public let promptTokenCount: Int
+    public var cachedPromptTokenCount: Int
+    public let promptTime: TimeInterval
+}
+
+public enum Generation: Sendable {
+    case chunk(String)
+    case info(GenerateCompletionInfo)
+}
+
 public final class ChatSession: @unchecked Sendable {
     public init(
         _ model: ModelContainer, instructions: String? = nil, generateParameters: GenerateParameters = .init(),
         additionalContext: [String: any Sendable]? = nil
     ) {}
+    public init(
+        _ model: ModelContainer, instructions: String? = nil, history: [Chat.Message],
+        generateParameters: GenerateParameters = .init(), additionalContext: [String: any Sendable]? = nil
+    ) {}
     public func streamResponse(to messages: [Chat.Message]) -> AsyncThrowingStream<String, any Error> {
         fatalError("stub: ChatSession.streamResponse")
+    }
+    public func streamDetails(to messages: [Chat.Message]) -> AsyncThrowingStream<Generation, any Error> {
+        fatalError("stub: ChatSession.streamDetails")
     }
 }
 
