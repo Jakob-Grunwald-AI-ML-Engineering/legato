@@ -92,7 +92,10 @@ extension SessionProbe {
         defer { keepAlive?.end() }
         var baseFields: [String: any Sendable] = ["backend": options.backend.rawValue, "model": options.model.rawValue, "bg": options.keep.rawValue,
                                               "mode": options.config.mode.rawValue]
-        if options.config.mode == .rewrite { baseFields["layout"] = options.config.layout.rawValue; baseFields["ctxPct"] = options.config.contextPercent }
+        if options.config.mode == .rewrite {
+            baseFields["layout"] = options.config.layout.rawValue; baseFields["ctxPct"] = options.config.contextPercent
+            baseFields["prompt"] = options.config.prompt.rawValue
+        }
         let base = baseFields
         func emit(_ event: String, _ fields: [String: any Sendable] = [:]) { line(event, fields, base) }
 

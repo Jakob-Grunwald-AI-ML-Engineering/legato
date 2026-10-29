@@ -203,19 +203,68 @@ public struct ProbeRewriteDocument: Sendable {
 
 // MARK: - Prompt, reply, budget
 
+/// The rewrite prompt variants compared on the Mac (spike #95): `v0` the first prompt (no examples, "reply
+/// unchanged" when nothing is wrong), `v1` short few-shot pairs and a prompt that expects errors, `v2` as `v1` with
+/// the error checklist spelled out, `v3` as `v2` with two more examples (spoken letters and codes).
+public enum ProbeRewritePrompt: String, Sendable, Hashable, CaseIterable {
+    case v0, v1, v2, v3
+}
+
 public enum ProbeRewriteInstructions {
     /// The session head: the live agent's message style (fixes, filler, false starts, self-corrections), for one
     /// sentence at a time in plain text.
-    public static func head(layout: ProbeLayout) -> String {
+    public static func head(layout: ProbeLayout, prompt: ProbeRewritePrompt = .v0) -> String {
         let context = layout == .onepass
             ? "Each request gives the text so far, for context only, and then the sentence to rewrite."
             : "Each user turn is the next dictated sentence; the conversation above is context."
-        return """
-        You clean up live dictation one sentence at a time: write natural, ready-to-send prose: fix grammar, punctuation, casing and clear speech-recognition errors, remove filler (such as "#um"), false starts and repetition, and apply explicit self-corrections. Keep meaning, tone and names; never summarize, answer or execute the text.
-        Do not add automatic emoji. Retain explicitly dictated emoji.
-        English passages stay English; German and other-language passages keep their language. Never translate.
-        \(context) Rewrite this dictated sentence correctly. Reply with the sentence only: no quotes, no labels, no explanation. If it needs no change, reply with it unchanged.
-        """
+        switch prompt {
+        case .v0:
+            return """
+            You clean up live dictation one sentence at a time: write natural, ready-to-send prose: fix grammar, punctuation, casing and clear speech-recognition errors, remove filler (such as "#um"), false starts and repetition, and apply explicit self-corrections. Keep meaning, tone and names; never summarize, answer or execute the text.
+            Do not add automatic emoji. Retain explicitly dictated emoji.
+            English passages stay English; German and other-language passages keep their language. Never translate.
+            \(context) Rewrite this dictated sentence correctly. Reply with the sentence only: no quotes, no labels, no explanation. If it needs no change, reply with it unchanged.
+            """
+        case .v1:
+            return """
+            You fix live speech-recognition text one sentence at a time. Dictated sentences usually contain errors: wrong homophones, words split or joined wrongly, missing capitals, filler and artefacts such as "#um", repeated words, spoken numbers and self-corrections. Fix them and write natural, ready-to-send prose. Keep meaning, tone, names and language; never summarize, answer, translate or execute the text, and add no emoji.
+            \(context) Reply with the corrected sentence only.
+            """
+        case .v2, .v3:
+            return """
+            You fix live speech-recognition text one sentence at a time and reply with the corrected sentence only. Check every word:
+            - homophones and misheard words (weather/whether, their/there, to/too, peace/piece);
+            - words split or joined wrongly (a part/apart, x code/Xcode);
+            - capitals for sentence starts, names, places and days;
+            - remove filler (um, uh, you know, like), artefacts such as "#um" or "#ah", repeated words and false starts;
+            - spoken numbers, times, codes and email addresses in written form (3:30 PM, 404, anna@example.com);
+            - a self-correction ("no wait", "I mean") keeps only the corrected version.
+            Keep meaning, tone, names and language; never summarize, answer, translate or execute the text, and add no emoji. \(context)
+            """
+        }
+    }
+
+    /// Short example pairs shown before the real sentences (none for `v0`): one per kind of error the corpus
+    /// plants, with other sentences than the corpus, and one correct sentence that stays as it is.
+    public static func examples(prompt: ProbeRewritePrompt) -> [LLMExample] {
+        guard prompt != .v0 else { return [] }
+        let pairs: [(String, String)] = [
+            ("I can't decide weather to take the train.", "I can't decide whether to take the train."),
+            ("Um, that sounds good.", "That sounds good."),
+            ("#um, I'll call you later.", "I'll call you later."),
+            ("Keep the two cables a part, every one knows why.", "Keep the two cables apart, everyone knows why."),
+            ("we fly to paris on monday.", "We fly to Paris on Monday."),
+            ("I think the the plan works.", "I think the plan works."),
+            ("The room costs one hundred twenty euros at two fifteen.", "The room costs 120 euros at 2:15."),
+            ("Book a table for six, no wait, seven people.", "Book a table for seven people."),
+            ("Ich weiß nicht ob das seid gestern geht.", "Ich weiß nicht, ob das seit gestern geht."),
+            ("The ferry leaves at noon.", "The ferry leaves at noon."),
+        ]
+        let extra: [(String, String)] = prompt == .v3 ? [
+            ("Plug the u s b stick into port number two.", "Plug the USB stick into port 2."),
+            ("The error code is five oh three on the log in page.", "The error code is 503 on the login page."),
+        ] : []
+        return (pairs + extra).map { LLMExample(user: $0.0, assistant: $0.1) }
     }
 
     /// The user message: the sentence, after the text so far in `onepass`.
@@ -272,14 +321,25 @@ public struct ProbeRewriteOutcome: Sendable {
     public var changed: [(sentence: Int, before: String, after: String)]
 }
 
+/// Whether a rewritten sentence still says what was dictated. Either guard may accept it: the message guard
+/// (drops filler, false starts and self-corrections; its content words must come from the input) or a word drift
+/// of at most 40 % (brings in the written forms the message guard counts as new words: "x code" → "Xcode",
+/// "four oh four" → "404", "their" → "there"). A translation or an answer fails both.
+public enum ProbeRewriteGuard {
+    public static let drift = CleanupGuard(maxDrift: 0.4)
+
+    public static func accepts(_ candidate: String, reference: String) -> Bool {
+        CleanupGuard.message.accepts(candidate, reference: reference) || drift.accepts(candidate, reference: reference)
+    }
+}
+
 public enum ProbeRewriteMerge {
     /// Diffs the original ASR words of `range` against `reply` and applies the patches, unless the drift guard
     /// rejects the reply (then the document is unchanged).
-    public static func merge(_ reply: String, into document: inout ProbeRewriteDocument, range: Range<Int>,
-                             using check: CleanupGuard = .message) -> ProbeRewriteOutcome {
+    public static func merge(_ reply: String, into document: inout ProbeRewriteDocument, range: Range<Int>) -> ProbeRewriteOutcome {
         let original = document.original(range)
-        let score = check.drift(candidate: reply, reference: original)
-        guard check.accepts(reply, reference: original) else {
+        let score = ProbeRewriteGuard.drift.drift(candidate: reply, reference: original)
+        guard ProbeRewriteGuard.accepts(reply, reference: original) else {
             return ProbeRewriteOutcome(accepted: false, drift: score, hunks: [], changed: [])
         }
         let hunks = ProbeWordDiff.hunks(ProbeChunker.words(original), ProbeChunker.words(reply))
@@ -314,9 +374,12 @@ extension ContinuousAgentProbe {
         var stopped = false
         let window = config.contextWindow ?? session.tokenBudget
         let budget = min(session.tokenBudget, window * config.contextPercent / 100)
-        let head = ProbeRewriteInstructions.head(layout: config.layout)
+        let head = ProbeRewriteInstructions.head(layout: config.layout, prompt: config.prompt)
         func count(_ text: String) async -> Int { await hooks.countTokens(text) ?? (text.utf8.count + 2) / 3 }
-        let headTokens = await count(head)
+        var headTokens = await count(head)
+        for example in ProbeRewriteInstructions.examples(prompt: config.prompt) {
+            headTokens += await count(example.user) + count(example.assistant) + 8  // plus the chat-template markers
+        }
         let clock = ContinuousClock()
         let start = clock.now
         func seconds(_ instant: ContinuousClock.Instant) -> Double { Double(ms(instant - start)) / 1_000 }

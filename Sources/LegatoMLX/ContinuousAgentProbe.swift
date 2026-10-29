@@ -609,6 +609,8 @@ public struct ProbeConfig: Sendable {
     public var contextWindow: Int?
     /// Rewrite mode: when a sentence is ready.
     public var endpoint = ProbeEndpointer.Config()
+    /// Rewrite mode: the prompt variant.
+    public var prompt: ProbeRewritePrompt = .v2
 
     public init(wordsPerSecond: Double = 2.5, repeats: Int = 3, warmContinuation: Bool = true, seed: UInt64 = 95, window: Int = 1_000) {
         self.wordsPerSecond = wordsPerSecond; self.repeats = repeats; self.warmContinuation = warmContinuation
@@ -617,7 +619,8 @@ public struct ProbeConfig: Sendable {
 
     /// From `LEGATO_PROBE_WPS`, `LEGATO_PROBE_REPEATS`, `LEGATO_PROBE_WARM` (1/0), `LEGATO_PROBE_SEED`,
     /// `LEGATO_PROBE_WINDOW`; rewrite mode: `LEGATO_PROBE_MODE` (edits, rewrite), `LEGATO_PROBE_LAYOUT` (onepass,
-    /// turns), `LEGATO_PROBE_CTX_PCT` (25), `LEGATO_PROBE_PAUSE_MS` (700), `LEGATO_PROBE_MAX_WORDS` (30).
+    /// turns), `LEGATO_PROBE_CTX_PCT` (25), `LEGATO_PROBE_PAUSE_MS` (700), `LEGATO_PROBE_MAX_WORDS` (30),
+    /// `LEGATO_PROBE_PROMPT` (v0, v1, v2, v3).
     public init(environment: [String: String], defaultRepeats: Int = 3, defaultWarm: Bool = true) {
         let defaults = ProbeConfig(repeats: defaultRepeats, warmContinuation: defaultWarm)
         self.init(wordsPerSecond: environment["LEGATO_PROBE_WPS"].flatMap(Double.init) ?? defaults.wordsPerSecond,
@@ -630,12 +633,15 @@ public struct ProbeConfig: Sendable {
         contextPercent = environment["LEGATO_PROBE_CTX_PCT"].flatMap(Int.init).map { min(100, max(1, $0)) } ?? 25
         if let pause = environment["LEGATO_PROBE_PAUSE_MS"].flatMap(Double.init) { endpoint.pauseSeconds = pause / 1_000 }
         if let words = environment["LEGATO_PROBE_MAX_WORDS"].flatMap(Int.init) { endpoint.maxWords = max(1, words) }
+        if let variant = environment["LEGATO_PROBE_PROMPT"].flatMap(ProbeRewritePrompt.init(rawValue:)) { prompt = variant }
     }
 
     /// The rewrite settings, for the start line (`mode` always; the rest in rewrite mode).
     public var modeFields: [String: any Sendable] {
         guard mode == .rewrite else { return ["mode": mode.rawValue] }
+        // `window` is the edits mode's fixed context; in rewrite mode the share is of the model's own window.
         return ["mode": mode.rawValue, "layout": layout.rawValue, "ctxPct": contextPercent, "ctxWindow": contextWindow ?? 0,
+                "window": contextWindow ?? 0, "prompt": prompt.rawValue,
                 "pauseMs": Int(endpoint.pauseSeconds * 1_000), "maxSentenceWords": endpoint.maxWords, "draft": "off"]
     }
 
@@ -697,7 +703,12 @@ public enum ContinuousAgentProbe {
 
     private static func open(_ backend: any LLMBackend, config: ProbeConfig, hooks: Hooks, rep: Int) async throws -> any LLMSession {
         let session = try await backend.makeSession()
-        try await session.append(.instructions(config.mode == .rewrite ? ProbeRewriteInstructions.head(layout: config.layout) : ProbeInstructions.head()))
+        if config.mode == .rewrite {
+            try await session.append(.instructions(ProbeRewriteInstructions.head(layout: config.layout, prompt: config.prompt)))
+            for example in ProbeRewriteInstructions.examples(prompt: config.prompt) { try await session.append(.example(example)) }
+        } else {
+            try await session.append(.instructions(ProbeInstructions.head()))
+        }
         let clock = ContinuousClock()
         let start = clock.now
         try await session.warm()

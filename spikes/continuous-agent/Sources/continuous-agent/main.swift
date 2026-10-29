@@ -24,7 +24,7 @@ struct Arguments {
         usage: continuous-agent [--backend coreml|mlx-gpu|mlx-cpu|all] [--model qwen3-1.7b|qwen3-0.6b|all]
                                 [--wps 2.5] [--repeats 3] [--warm 1|0] [--seed 95] [--window 1000] [--root <models>] [--out <file.jsonl>]
                                 [--cpu-compile on|off] [--sentences n]
-                                [--mode edits|rewrite] [--layout onepass|turns] [--ctx-pct 25] [--pause-ms 700] [--max-sentence-words 30]
+                                [--mode edits|rewrite] [--layout onepass|turns] [--ctx-pct 25] [--pause-ms 700] [--max-sentence-words 30] [--prompt v0|v1|v2|v3]
         """
 
     static func parse(_ argv: [String]) throws -> Arguments {
@@ -64,6 +64,10 @@ struct Arguments {
                 let v = try value(flag)
                 guard let layout = ProbeLayout(rawValue: v) else { throw Failure("--layout is onepass or turns") }
                 args.config.layout = layout
+            case "--prompt":
+                let v = try value(flag)
+                guard let prompt = ProbeRewritePrompt(rawValue: v) else { throw Failure("--prompt is v0, v1, v2 or v3") }
+                args.config.prompt = prompt
             case "--ctx-pct": args.config.contextPercent = min(100, max(1, Int(try value(flag)) ?? args.config.contextPercent))
             case "--pause-ms": args.config.endpoint.pauseSeconds = (Double(try value(flag)) ?? 700) / 1_000
             case "--max-sentence-words": args.config.endpoint.maxWords = max(1, Int(try value(flag)) ?? args.config.endpoint.maxWords)
@@ -146,7 +150,10 @@ struct ComboReport { var rows: [[String: any Sendable]] = []; var breakdown: [[S
 
 func runOne(_ backend: Backend, _ model: Model, _ args: Arguments, _ sink: Sink) async -> ComboReport {
     var baseFields: [String: any Sendable] = ["backend": backend.rawValue, "model": model.rawValue, "host": "mac", "mode": args.config.mode.rawValue]
-    if args.config.mode == .rewrite { baseFields["layout"] = args.config.layout.rawValue; baseFields["ctxPct"] = args.config.contextPercent }
+    if args.config.mode == .rewrite {
+        baseFields["layout"] = args.config.layout.rawValue; baseFields["ctxPct"] = args.config.contextPercent
+        baseFields["prompt"] = args.config.prompt.rawValue
+    }
     let base = baseFields
     func emit(_ event: String, _ fields: [String: any Sendable] = [:]) { sink.line(event, fields.merging(base) { $1 }) }
     let wallStart = ContinuousClock.now
@@ -238,7 +245,7 @@ func table(_ rows: [[String: any Sendable]], _ columns: [String]) -> String {
     return ([render(columns)] + cells.map(render)).joined(separator: "\n")
 }
 
-let runColumns = ["backend", "model", "mode", "layout", "ctxPct", "row", "localLatencyMsMedian", "localLatencyMsMean", "localLatencyMsP95", "localLatencyMsSd",
+let runColumns = ["backend", "model", "mode", "layout", "ctxPct", "prompt", "row", "localLatencyMsMedian", "localLatencyMsMean", "localLatencyMsP95", "localLatencyMsSd",
                   "localFixed", "localFixedWithin2", "sentenceLatencyMsMedian", "sentenceLatencyMsP95", "sentenceFixed",
                   "wrongEdits", "turnMsMedian", "turnMsMean", "turnMsP95", "turnMsSd", "ttftMsMedian", "decodeTokPerSMedian",
                   "keepUpPct", "maxLagMs", "parseOk", "trims", "rejects", "endpointDelayMsMedian", "ctxTokensMax", "localLatencyRunMedianSd", "peakFootprintMB", "wallS"]

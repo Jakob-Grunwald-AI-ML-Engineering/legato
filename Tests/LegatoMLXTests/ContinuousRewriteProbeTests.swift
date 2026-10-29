@@ -90,6 +90,15 @@ import Testing
         #expect(document.current(0..<5) == "Send the report on Monday.")
     }
 
+    @Test func writtenFormsPassTheGuardAndTranslationsDoNot() {
+        #expect(ProbeRewriteGuard.accepts("The build fails because Xcode can't find the Swift package for MLX.",
+                                          reference: "The build fails because x code can't find the swift package for m l x."))
+        #expect(ProbeRewriteGuard.accepts("I need to cancel the order for the new sails.",
+                                          reference: "I want to, no wait, I need to cancel the order for the new sails."))
+        #expect(!ProbeRewriteGuard.accepts("The deployment failed because the API key has expired.",
+                                           reference: "Das deployment ist gescheitert, weil der API key abgelaufen ist."))
+    }
+
     @Test func aDriftingReplyIsRejectedAndChangesNothing() {
         var document = document()
         let merged = ProbeRewriteMerge.merge("Here is a summary of your dictated note about a meeting.", into: &document, range: 0..<5)
@@ -128,7 +137,8 @@ import Testing
         #expect(config.endpoint == .init(pauseSeconds: 0.9, maxWords: 20))
         #expect(config.modeFields["mode"] as? String == "rewrite")
         let defaults = ProbeConfig(environment: [:])
-        #expect(defaults.mode == .edits && defaults.layout == .onepass && defaults.contextPercent == 25)
+        #expect(defaults.mode == .edits && defaults.layout == .onepass && defaults.contextPercent == 25 && defaults.prompt == .v2)
+        #expect(ProbeConfig(environment: ["LEGATO_PROBE_PROMPT": "v0"]).prompt == .v0)
         #expect(defaults.modeFields.count == 1)
     }
 }
