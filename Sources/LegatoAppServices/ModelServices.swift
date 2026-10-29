@@ -234,6 +234,12 @@ public final class ModelServices {
         await warmup.rollingSession(key: await cleanupResource(backend: backend).key)
     }
 
+    /// The rolling session of the backend a dictation run with `options` uses (the one it leased), for the cleanup
+    /// agent. Nil when that backend has none ready: the run then keeps today's cleanup.
+    public func rollingDictationSession(options: CleanupOptions) async -> (any LLMSession)? {
+        await rollingCleanupSession(for: await effectiveDictationBackend(options: options))
+    }
+
     public func acquireSummaryBackend(backend: CleanupBackendChoice, inBackground: Bool) async throws -> SummaryBackendLease {
         let id = selected(.cleanup)
         let resource = await cleanupResource(backend: backend)

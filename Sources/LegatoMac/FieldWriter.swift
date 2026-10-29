@@ -85,6 +85,9 @@ public final class FieldWriter {
     private var revision: TranscriptRevision?
     /// Everything the engine committed, with live cleanup's newest revision applied.
     private var committed: String {
+        // Someone else's edits (the cleanup agent) changed what the field shows: it is what was written, then the
+        // raw text not written yet.
+        if absorbed { return written + String(rawCommitted.dropFirst(droppedLead + writtenRaw)) }
         guard let revision else { return rawCommitted }
         return String(rawCommitted.prefix(revision.start)) + revision.text + String(rawCommitted.dropFirst(revision.end))
     }
@@ -94,11 +97,16 @@ public final class FieldWriter {
     private var writtenRaw = 0
     /// A revision was skipped (the user worked in the field): later ones are too.
     private var revisionsSkipped = false
+    /// ``absorb(_:)`` changed `written`: it is no longer a copy of the raw committed text.
+    private var absorbed = false
     /// The committed text verified to be in the field, starting at `spanStart` (UTF-16).
     private var written = ""
     private var spanStart: Int?
     /// Streaming live only: tentative text currently shown in the field right after `written`.
     private var tentative = ""
+    /// Tentative text an agent step swallowed into `written` (a step across the edge): the next commit starts with
+    /// it, and it is not written again.
+    private var swallowed = ""
     /// A write was attempted whose landing could not be verified (the readback failed).
     private var uncertainWrite = false
     /// What the first write replaced: `replacedText` is nil when the selection could not be read.
@@ -269,24 +277,107 @@ public final class FieldWriter {
     ///   `finish(finalText: cleanedText)`. A field that does not show it (a revision was skipped) is left, and
     ///   the result is `.copy(cleanedText)`.
     public func finish(rawText: String?, cleanedText: String, delivery: CleanupDelivery) -> FinishAction {
+        switch prepareFinish(rawText: rawText, cleanedText: cleanedText, delivery: delivery) {
+        case .action(let action): return action
+        case .swap(let cleaned): return Self.action(for: swapWritten(for: cleaned), cleaned: cleaned)
+        }
+    }
+
+    /// ``finish(rawText:cleanedText:delivery:)`` where a final swap held back by typing (``SwapResult/held``) is
+    /// tried again after the wait `wait` performs, for at most `budget` seconds in all; then, as without the
+    /// retry, the cleaned text goes to the pasteboard (`.copy`).
+    public func finish(
+        rawText: String?, cleanedText: String, delivery: CleanupDelivery, retryingFor budget: TimeInterval,
+        wait: @MainActor (TimeInterval) async -> Void
+    ) async -> FinishAction {
+        switch prepareFinish(rawText: rawText, cleanedText: cleanedText, delivery: delivery) {
+        case .action(let action):
+            return action
+        case .swap(let cleaned):
+            var waited: TimeInterval = 0
+            while true {
+                let result = swapWritten(for: cleaned)
+                if case .held(let retryAfter) = result, waited + retryAfter <= budget {
+                    waited += retryAfter
+                    await wait(retryAfter)
+                    continue
+                }
+                return Self.action(for: result, cleaned: cleaned)
+            }
+        }
+    }
+
+    private enum FinishStep {
+        case action(FinishAction)
+        /// The raw text is in the field and finished: swap in the cleaned text.
+        case swap(String)
+    }
+
+    private static func action(for swap: SwapResult, cleaned: String) -> FinishAction {
+        switch swap {
+        case .swapped: .done
+        case .nothingWritten: .paste(cleaned)
+        case .leftInPlace, .held: .copy(cleaned)
+        }
+    }
+
+    private func prepareFinish(rawText: String?, cleanedText: String, delivery: CleanupDelivery) -> FinishStep {
         let cleaned = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if delivery == .live { return finish(finalText: cleaned) }
+        if delivery == .live { return .action(finish(finalText: cleaned)) }
         if spanStart == nil, degradeReason == nil, !uncertainWrite {
-            return finish(finalText: cleaned)
+            return .action(finish(finalText: cleaned))
         }
         switch finish(finalText: rawText) {
         case .paste:
-            return cleaned.isEmpty ? .done : .paste(cleaned)
+            return .action(cleaned.isEmpty ? .done : .paste(cleaned))
         case .copy:
-            return cleaned.isEmpty ? .done : .copy(cleaned)
+            return .action(cleaned.isEmpty ? .done : .copy(cleaned))
         case .done:
-            guard !cleaned.isEmpty else { return .done }
-            if delivery == .clipboard { return .copy(cleaned) }
-            switch swapWritten(for: cleaned) {
-            case .swapped: return .done
-            case .nothingWritten: return .paste(cleaned)
-            case .leftInPlace, .held: return .copy(cleaned)
-            }
+            guard !cleaned.isEmpty else { return .action(.done) }
+            if delivery == .clipboard { return .action(.copy(cleaned)) }
+            return .swap(cleaned)
+        }
+    }
+
+    // MARK: Edits by others
+
+    /// What the field shows for this run's text.
+    public var shownText: String { written }
+
+    /// Where the run's text starts in the field (UTF-16); nil until the first write landed.
+    public var runStart: Int? { spanStart }
+
+    /// The length (UTF-16) of the tentative text at the end of the run's text (`.streamLive`): not final yet, so
+    /// the cleanup agent must not be offered it.
+    public var tentativeLength: Int { tentative.utf16.count }
+
+    /// A step the cleanup agent landed in the field through the queue: `step` is in field coordinates and was
+    /// applied. Folds it into what the writer believes it wrote, so its next check still reads the field as
+    /// expected. A step inside the run's text (written or tentative) is taken in; one entirely before or after it
+    /// does not concern the writer; one that does not match what was written leaves the writer unable to tell what
+    /// it wrote (`drift`). A step across the edge between written and tentative text is taken in as written text
+    /// (the agent is not offered tentative text, so this is not expected). Call it as soon as the step landed,
+    /// before the writer writes again.
+    public func absorb(_ step: EditStep) {
+        guard !closed, let start = spanStart, degradeReason == nil else { return }
+        let lower = step.span.location - start, upper = step.span.end - start
+        let whole = Array((written + tentative).utf16)
+        if upper < 0 || lower > whole.count { return }
+        guard lower >= 0, upper <= whole.count,
+              String(decoding: whole[lower..<upper], as: UTF16.self) == step.expect
+        else { return degrade(.drift) }
+        let edge = written.utf16.count
+        func text(_ units: ArraySlice<UInt16>) -> String { String(decoding: units, as: UTF16.self) }
+        if upper <= edge {
+            written = text(whole[..<lower]) + step.text + text(whole[upper..<edge])
+            absorbed = true
+        } else if lower >= edge {
+            tentative = text(whole[edge..<lower]) + step.text + text(whole[upper...])
+        } else {
+            swallowed = text(whole[edge..<upper])
+            written = text(whole[..<lower]) + step.text
+            tentative = text(whole[upper...])
+            absorbed = true
         }
     }
 
@@ -308,7 +399,16 @@ public final class FieldWriter {
         if text == body { return .swapped }
         let replacement = text + written.dropFirst(body.count)
         do {
-            try send(span, with: replacement, expect: written, origin: origin)
+            if channel is QueuedFieldWriteChannel {
+                // Through the queue only what differs is written, not the whole span.
+                guard let patch = ContiguousPatch.between(written, replacement, at: start) else { return .swapped }
+                let head = String(decoding: Array(written.utf16)[..<(patch.span.location - start)], as: UTF16.self)
+                try send(
+                    UTF16Range(location: patch.span.location, length: patch.span.length), with: patch.text,
+                    expect: patch.expect, preceding: head.isEmpty ? nil : head, origin: origin)
+            } else {
+                try send(span, with: replacement, expect: written, origin: origin)
+            }
         } catch let held as QueuedFieldWriteChannel.Held {
             return .held(retryAfter: held.retryAfter) // the user is typing: nothing was written
         } catch {
@@ -334,6 +434,14 @@ public final class FieldWriter {
         guard let target else { return }
         var delta = delta
         var newTentative = newTentative
+        // A step took the start of the tentative text into `written`: the commit of that text only adds the rest.
+        var kept = 0
+        if !swallowed.isEmpty, !delta.isEmpty {
+            if delta.hasPrefix(swallowed) {
+                kept = swallowed.count
+                delta = String(delta.dropFirst(kept))
+            }
+        }
         if written.isEmpty {
             let lead = delta.prefix(while: \.isWhitespace).count
             delta = String(delta.dropFirst(lead))
@@ -341,7 +449,10 @@ public final class FieldWriter {
             if delta.isEmpty { newTentative = String(newTentative.drop(while: \.isWhitespace)) }
         }
         let insertion = delta + newTentative
-        if delta.isEmpty, newTentative == tentative { return } // nothing changes
+        if delta.isEmpty, newTentative == tentative { // nothing changes in the field
+            if kept > 0 { writtenRaw += kept; swallowed = "" }
+            return
+        }
         if insertion.isEmpty, tentative.isEmpty { return } // never delete a selection for nothing
         guard target.isFocused() else { return degrade(.focusLost) }
 
@@ -407,7 +518,8 @@ public final class FieldWriter {
         }
         spanStart = start
         written += delta
-        writtenRaw += delta.count
+        writtenRaw += kept + delta.count
+        if !delta.isEmpty || kept > 0 { swallowed = "" }
         tentative = newTentative
     }
 

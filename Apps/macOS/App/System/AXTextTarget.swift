@@ -22,6 +22,11 @@ final class AXTextTarget: TextTarget {
         self.appElement = appElement
     }
 
+    /// The value and selection notifications of this target's element, for the typing guard.
+    func activitySource() -> AXFieldActivitySource {
+        AXFieldActivitySource(element: element, appElement: appElement)
+    }
+
     /// What `captureFocused` found.
     enum Capture {
         /// A text element we can write into with Accessibility.

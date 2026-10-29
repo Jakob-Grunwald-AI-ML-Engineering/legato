@@ -152,7 +152,10 @@ let package = Package(
             ]
         ),
         .target(name: "LegatoMac", dependencies: ["LegatoCore", "LegatoFieldEdit"]),
-        .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
+        .testTarget(
+            name: "LegatoMacTests",
+            dependencies: ["LegatoMac", "LegatoCore", "LegatoFieldEdit", "LegatoAppServices", "LegatoPostProcessing"]
+        ),
         // Meeting notes: a multi-stream session, its store, recovery, echo de-duplication and export. Core only.
         .target(name: "LegatoMeetings", dependencies: ["LegatoCore"]),
         .testTarget(
