@@ -12,6 +12,11 @@ public enum ResetReason: String, Sendable, Hashable, Codable {
 
 /// One entry of the change feed: what the field did, in landing order. Positions are UTF-16 offsets into the
 /// window as it stood right before the event.
+///
+/// Wire format: the synthesized `Codable` coding, frozen per build. Writer and reader (app and keyboard
+/// extension) ship in one bundle and update together, so a case added here needs no migration; decoding is
+/// not tolerant, and a reader of another build fails on an unknown case (a `DecodingError`) rather than
+/// misreading it. A transport that may cross builds must treat that failure as a resync.
 public enum FeedEvent: Sendable, Hashable, Codable {
     /// Recognized text streamed in (Mac only; on iOS the app owns ASR text).
     case asrDelta(String)
@@ -23,6 +28,8 @@ public enum FeedEvent: Sendable, Hashable, Codable {
     /// An edit was overtaken by the same owner's newer edit `by` (a landed overlap or a coalesced tick); its
     /// source re-plans from the feed.
     case superseded(UUID, by: UUID)
+    /// A pending edit was cancelled before it was written (``FieldEditQueue/withdraw(_:)``); it never lands.
+    case withdrawn(UUID)
     /// The caret-relative window's edges moved (iOS: the proxy's context is length-limited) without the text
     /// changing: the window now reads `window`, and a still-visible old offset `p` is now `p + shift`.
     case rebased(window: String, shift: Int, version: FieldVersion)
@@ -34,7 +41,7 @@ public enum FeedEvent: Sendable, Hashable, Codable {
         case .applied(_, _, _, let version), .foreign(_, _, let version), .rebased(_, _, let version),
             .reset(_, _, let version):
             version
-        case .asrDelta, .conflict, .superseded: nil
+        case .asrDelta, .conflict, .superseded, .withdrawn: nil
         }
     }
 }
@@ -107,7 +114,7 @@ public struct FeedLog: Sendable, Hashable {
         case .applied(_, _, let steps, _): for step in steps { fold(step) }
         case .foreign(let step, _, _): fold(step)
         case .rebased(let window, _, _), .reset(_, let window, _): self.window = window
-        case .asrDelta, .conflict, .superseded: break
+        case .asrDelta, .conflict, .superseded, .withdrawn: break
         }
     }
 
