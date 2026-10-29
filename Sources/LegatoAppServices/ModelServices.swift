@@ -225,7 +225,7 @@ public final class ModelServices {
     /// What the rolling cleanup session starts with (instructions, examples), prefilled when the model is
     /// prepared. Set before the first preparation; a change applies to sessions opened afterwards.
     public var rollingSessionHead: @Sendable () async -> [LLMSessionChunk] = {
-        [.instructions(CleanupPrompt.standard.instructions(.current, []))]
+        [.instructions(CleanupPrompt.Agent.sessionHead(locale: .current))]
     }
 
     /// The selected cleanup backend's one rolling session (see ``SelectedModelWarmup/rollingSession(key:)``):
