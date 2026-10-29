@@ -215,6 +215,47 @@ struct LLMSessionLeaseTests {
         await models.releaseSelectedModels()
         #expect(await rolling.closed)
     }
+
+    /// One cleanup model instance per backend: the run's own pass (the run lease's resolution, which a Replace
+    /// stop and Live's stateless fallback use) and the rolling session the agent uses both ask the model store for
+    /// the same model at the same folder, so they share its one loaded instance (`CoreMLModelStore` keeps one
+    /// backend per folder: `storeSharesWarmupAndResolutionUntilRelease`), never a second copy.
+    @MainActor @Test func theRunsPassAndTheRollingSessionUseOneModelInstance() async throws {
+        let foundation = SessionModel()
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let id = CoreMLModels.qwen3_1_7bID
+        try InstallMarker.write(in: LeaseInstaller().installFolder(root: root), id: id, stage: .installed)
+        let asked = Mutex<[String]>([])
+        // Like `CoreMLModelStore`: one instance per model folder, created on the first ask; every creation counts.
+        let instances = Mutex<[String: SessionModel]>([:])
+        let created = Mutex(0)
+        let models = ModelServices(root: root, defaults: defaults, platform: .macOS, installers: [id: LeaseInstaller()],
+            resources: ModelServiceResources(speech: .init(key: "speech:test", prewarm: {}, release: {}),
+                                             foundation: foundation, coreML: { id, root in
+                                                 let key = id + "@" + root.standardizedFileURL.path
+                                                 asked.withLock { $0.append(key) }
+                                                 return instances.withLock { all in
+                                                     if let existing = all[key] { return existing }
+                                                     created.withLock { $0 += 1 }
+                                                     let model = SessionModel()
+                                                     all[key] = model
+                                                     return model
+                                                 }
+                                             }))
+        SelectionStore(defaults: defaults).set(id, for: .cleanup)
+        let settings = CleanupSettingsStore(defaults: defaults)
+        settings.enabled = true; settings.backend = .coreML
+        try await models.prepareSelectedModels(options: settings.options, inBackground: false)
+        let run = try #require(try await models.acquireDictationCleanup(options: settings.options, inBackground: true))
+        #expect(run.resolution.backend != nil)
+        _ = try #require(await models.rollingDictationSession(options: settings.options))
+        await run.release()
+        let requests = asked.withLock { $0 }
+        #expect(requests.count >= 3)  // prepared, resolved for the run, the rolling session made
+        #expect(Set(requests).count == 1, "\(Set(requests))")
+        #expect(created.withLock { $0 } == 1, "the model was created \(created.withLock { $0 }) times")
+    }
 }
 
 private struct LeaseInstaller: ModelInstaller {

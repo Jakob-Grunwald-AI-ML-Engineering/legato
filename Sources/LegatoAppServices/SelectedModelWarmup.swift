@@ -160,8 +160,10 @@ public actor SelectedModelWarmup {
             await releaseBefore?.value
             do {
                 try Task.checkCancellation()
+                let loadStart = ContinuousClock.now
                 try await resource.lifecycle.prewarmResources()
                 try Task.checkCancellation()
+                CleanupCallTrace.emit("model.loaded", ["key": key, "ms": CleanupCallTrace.milliseconds(since: loadStart)])
                 // The rolling session's head prefills before the resource counts as ready, so no run admitted
                 // on it meets that prefill on a single-worker runtime.
                 var session: (any LLMSession)?

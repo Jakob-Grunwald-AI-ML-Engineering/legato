@@ -389,6 +389,19 @@ for line in open(sys.argv[1]):
         print(json.loads(line)["text"])' "$file"
 }
 
+# The other version (`rawText`) of every history entry, oldest first; an empty line where it has none.
+history_others() {
+  local group file
+  group="$(xcrun simctl get_app_container "$UDID" "$BID" groups | awk -F'\t' '$1 == "group.de.gruenwald.legato" {print $2}')"
+  file="$group/history.jsonl"
+  [ -n "$group" ] && [ -f "$file" ] || return 0
+  python3 -I -c '
+import json, sys
+for line in open(sys.argv[1]):
+    if line.strip():
+        print(json.loads(line).get("rawText") or "")' "$file"
+}
+
 # ---------------------------------------------------------------------------------------------- scenarios
 
 # The App Group container of the app on the simulator.
@@ -1882,10 +1895,40 @@ scenario_fa() {
   assert_log "the run is on the link, without an agent" "link link.run delivery=replace agent=0"
   assert_log "its patches went over the link: two steps" "link final.patch steps=2"
   assert_log "they landed" "link final.patch result=applied"
-  assert_log "the keyboard wrote them in the cleanup lane, 4 letters out, 4 in" "harness fe.write origin=finalSwap lane=cleanup del=4 ins=4"
+  assert_count "the keyboard wrote them in the cleanup lane, one write per patch, 2 letters out, 2 in each" "harness fe.write origin=finalSwap lane=cleanup del=2 ins=2" 2
   assert_log "and confirmed them as the swap" "harness fe.link outcome origin=finalSwap result=applied"
   assert_eq "field: cleaned" "the cat sat. A dog ran. " "$(harness_doc)"
   assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+  assert_log "the stop says it landed" "link linked.stop mode=replace branch=applied reason=- "
+  assert_count "one cleanup call per run: the session's own pass (the Action Button run's and this one)" "cleanup.call backend=e2e-fake kind=session" 2
+  assert_no_log "the stop made no second pass" "kind=stateless"
+  assert_no_log "and no agent call" "cleanup.call backend=E2EFakeAgentSession"
+
+  # The device defect (iPhone, WhatsApp): the host's before-context loses the run's head as the text grows. The
+  # patches inside the window are written, the one in the head is not (a step outside the window never is): the
+  # session's whole cleaned text goes to the clipboard, the keyboard shows the partial notice, the stop says why.
+  SCENARIO="fa. Replace: the run's head out of the host's window"
+  relaunch "${common[@]}" -LegatoCleanupDelivery replace -LegatoHarnessContextLimit 12 || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  fa_start 2
+  sleep 2
+  fa_stop 2
+  wait_log "link linked.stop mode=replace" 20
+  sleep 0.5
+  assert_log "the visible patch was sent, the head's was not" "link final.patch steps=1 outOfWindow=1"
+  assert_log "the visible patch landed" "harness fe.link outcome origin=finalSwap result=applied"
+  assert_log "the stop says why" "link linked.stop mode=replace branch=partial reason=outOfWindow"
+  assert_log "and how much landed" "patched=1/2 outOfWindow=1"
+  assert_eq "field: the visible part cleaned, the head raw, typed once" "teh cat sat. A dog ran. " "$(harness_doc)"
+  assert_eq "clipboard: the whole cleaned text" "the cat sat. A dog ran." "$(pasteboard)"
+  assert_log "the app published the partial notice" "link link.notice partial=1"
+  assert_log "the keyboard showed it" "harness notice shown"
+  assert_eq "history: the text the field shows" "teh cat sat. A dog ran." "$(history_texts | tail -1)"
+  assert_eq "history: the cleaned text (the clipboard's) as its other version" "the cat sat. A dog ran." "$(history_others | tail -1)"
+  assert_no_log "nothing was typed twice" "fe.duplicate"
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"  # the next scenario expects the clipboard as the first one left it
 
   SCENARIO="fa. Hold: the end-of-run insert through the queue"
   relaunch "${common[@]}" -LegatoCleanupDelivery hold || return

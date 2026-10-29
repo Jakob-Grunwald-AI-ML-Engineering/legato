@@ -1,5 +1,6 @@
 #if LEGATO_INTERNAL
 import Foundation
+import LegatoAppServices
 import LegatoCore
 import LegatoKeyboardCore
 
@@ -84,6 +85,19 @@ final class LiveTrace {
             fields["finalApplied"] = applied.finalApplied
         }
         AudioDiagnostics.log("live.end", fields)
+    }
+
+    /// The linked stop (the edit queue setting on): which branch it took, how long it waited for the keyboard,
+    /// how many edits it sent and got outcomes for (`LinkedCleanupRun.StopReport`).
+    func linkedStop(_ report: LinkedCleanupRun.StopReport) {
+        var fields: [String: Any] = [
+            "run": runID, "mode": report.mode.rawValue, "branch": report.branch.rawValue, "waitMs": report.waitMs,
+            "sent": report.sent, "acked": report.acked, "steps": report.steps, "copied": report.copied,
+            "landed": report.landed, "ms": elapsedMs,
+            "patched": "\(report.patched)/\(report.patches)", "outOfWindow": report.outOfWindow,
+        ]
+        if let reason = report.reason { fields["reason"] = reason }
+        AudioDiagnostics.log("linked.stop", fields)
     }
 
     private var elapsedMs: Int { Int((Date().timeIntervalSince(started) * 1000).rounded()) }

@@ -70,7 +70,7 @@ extension CleanupPrompt {
             name: "message",
             instructions: { locale, _ in
                 """
-                Write natural ready-to-send prose. Resolve final intent/corrections; remove filler, false starts and repetition; fix grammar. Preserve existing paragraphs; enact spoken layout cues as line breaks/paragraphs, omit cue words. Use punctuation naturally.
+                Write natural ready-to-send prose. Resolve final intent/corrections; remove filler, false starts and repetition (including dictation artefacts like "#um", "#ah", "#hm"); fix grammar. Preserve existing paragraphs; enact spoken layout cues as line breaks/paragraphs, omit cue words. Use punctuation naturally.
                 \(writingFidelity(locale))
                 \(emoji.instruction)
                 """

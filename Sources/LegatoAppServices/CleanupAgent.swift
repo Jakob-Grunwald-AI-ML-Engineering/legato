@@ -197,7 +197,8 @@ public actor CleanupAgent: FieldAgent {
     private func reanchored(in text: String) -> (runs: [Span], touched: [Span]) {
         let old = window as NSString, new = text as NSString
         var kept: [Span] = [], inside: [Span] = []
-        for run in runs where run.length > 0 && run.end <= old.length {
+        // A span part of which left the window (iOS: negative offsets) has no known text to look for.
+        for run in runs where run.length > 0 && run.location >= 0 && run.end <= old.length {
             let known = old.substring(with: NSRange(location: run.location, length: run.length))
             var found: [Int] = []
             var from = 0
@@ -323,15 +324,21 @@ public actor CleanupAgent: FieldAgent {
     private func plan(final: Bool) -> Plan? {
         guard let sessionID, !runs.isEmpty else { return nil }
         let text = window as NSString
-        var found: [(location: Int, text: String)] = []
+        var found: [(location: Int, text: String, cut: Bool)] = []
         for (index, run) in runs.enumerated() {
             // The newest span ends in the tentative text, if any.
             let cut = index == runs.count - 1 ? min(tentativeTail, run.length) : 0
-            let region = NSIntersectionRange(NSRange(location: run.location, length: run.length - cut), NSRange(location: 0, length: text.length))
-            guard region.length > 0 else { continue }
+            // Clipped to the window by hand: `NSIntersectionRange` takes a negative location (iOS: the span's start
+            // left the caret-relative window) as a huge one and returns nothing, which hid the whole run.
+            let start = max(run.location, 0), end = min(run.end - cut, text.length)
+            guard end > start else { continue }
+            let region = NSRange(location: start, length: end - start)
+            // iOS: the span's start left the caret-relative window: its first visible sentence may be cut there.
+            var first = run.location < 0
             text.enumerateSubstrings(in: region, options: .bySentences) { _, range, _, _ in
                 let body = Self.trimmed(range, in: text)
-                if body.length > 0 { found.append((body.location, text.substring(with: body))) }
+                if body.length > 0 { found.append((body.location, text.substring(with: body), first)) }
+                first = false
             }
         }
         guard !found.isEmpty else { return nil }
@@ -351,7 +358,7 @@ public actor CleanupAgent: FieldAgent {
             let role: CleanupPrompt.Agent.Role
             if touched.contains(where: { Self.touches($0, span) }) {
                 role = .locked
-            } else if (!final && sentence.text.contains(where: \.isNewline)) || reviewed.contains(sentence.text)
+            } else if sentence.cut || (!final && sentence.text.contains(where: \.isNewline)) || reviewed.contains(sentence.text)
                 || (!final && skipped.contains(sentence.text))
                 || (!final && isLast && !Self.endsSentence(sentence.text))
             {
@@ -380,7 +387,7 @@ public actor CleanupAgent: FieldAgent {
         }
 
         guard await makeRoom(for: plan.request) else { return fail(plan) }
-        let reply = await ask(plan.request)
+        let reply = await ask(plan.request, final: final)
         if Task.isCancelled { return [] }
         if case .timedOut = reply {
             // The turn may still complete and stay in the session's history: say its answer was thrown away.
@@ -406,9 +413,17 @@ public actor CleanupAgent: FieldAgent {
             reviewed.insert(new)
             transactions.append(transaction)
         }
+        // A sentence the answer left out ("needs no change") is settled only by the final pass: a small model may
+        // skip one it should have fixed, so while listening it is set aside (as after a failed pass) for the final
+        // pass to review again, never left raw for good.
+        let answered = Set(answer.map { plan.sentences[$0.sentence - 1].text })
         for sentence in plan.sentences where sentence.role == .review {
-            reviewed.insert(sentence.text)
-            skipped.remove(sentence.text)
+            if final || answered.contains(sentence.text) {
+                reviewed.insert(sentence.text)
+                skipped.remove(sentence.text)
+            } else {
+                skipped.insert(sentence.text)
+            }
         }
         return transactions
     }
@@ -445,9 +460,10 @@ public actor CleanupAgent: FieldAgent {
         }
     }
 
-    private func ask(_ request: String) async -> Reply {
+    private func ask(_ request: String, final: Bool) async -> Reply {
         let session = session, timeout = options.timeout
-        return await withTaskGroup(of: Reply.self) { group in
+        let start = ContinuousClock.now
+        let reply = await withTaskGroup(of: Reply.self) { group in
             group.addTask {
                 do { return .edits(try await session.respondStructured([SentenceEdit].self, to: request)) } catch { return .failed }
             }
@@ -461,6 +477,17 @@ public actor CleanupAgent: FieldAgent {
             group.cancelAll()
             return first
         }
+        let outcome: String
+        switch reply {
+        case .edits(let edits): outcome = "edits=\(edits.count)"
+        case .timedOut: outcome = "timedOut"
+        case .failed: outcome = "failed"
+        }
+        CleanupCallTrace.emit("cleanup.call", [
+            "kind": "agent", "final": final ? "1" : "0", "backend": String(describing: type(of: session)),
+            "ms": CleanupCallTrace.milliseconds(since: start), "outcome": outcome, "inChars": String(request.count),
+        ])
+        return reply
     }
 
     // MARK: Text helpers

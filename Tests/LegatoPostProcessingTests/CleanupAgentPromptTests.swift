@@ -50,4 +50,13 @@ import Testing
         #expect(digits.contains("as digits"))
         #expect(!CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: []).contains("as digits"))
     }
+
+    /// Apple's dictation writes spoken filler as hashtags ("#um", "#ah", "#hm"): a style that removes filler
+    /// removes those too; one that keeps the wording is not told to.
+    @Test func fillerRemovingStylesDeleteHashtagFillerArtefacts() {
+        let en = Locale(identifier: "en")
+        let message = CleanupPrompt.Agent.instructions(locale: en, style: .message)
+        #expect(message.contains("\"#um\"") && message.contains("\"#ah\"") && message.contains("\"#hm\""))
+        #expect(!CleanupPrompt.Agent.instructions(locale: en, style: .verbatim).contains("#um"))
+    }
 }

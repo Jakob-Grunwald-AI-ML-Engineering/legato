@@ -503,4 +503,23 @@ struct CleanupAgentTests {
         let final = await rig.agent.finish()
         #expect(final.count == 1)
     }
+
+    /// A rolling pass whose answer leaves a sentence out ("needs no change") does not settle it for good: a small
+    /// model may skip one it should have fixed, so the final pass reviews it again. Answered sentences are done.
+    @Test func aSentenceTheModelLeftOutIsReviewedAgainByTheFinalPass() async throws {
+        let rig = await Rig(scripts: [edits((2, "It ran away.")), edits((1, "I saw the dog."))])
+        let rolling = await rig.dictate("I saw teh dog. It rann away.")
+        #expect(rolling.count == 1)
+        rig.submit(rolling)
+        rig.drain()
+        _ = await rig.feed()
+        #expect(await rig.session.requests.count == 1)  // not asked again while listening
+        let final = await rig.agent.finish()
+        let request = try #require(await rig.session.requests.last)
+        #expect(await rig.session.requests.count == 2)
+        #expect(request.contains("Review: 1."))  // the left-out sentence, not the answered one
+        rig.submit(final)
+        rig.drain()
+        #expect(rig.field == "I saw the dog. It ran away.")
+    }
 }

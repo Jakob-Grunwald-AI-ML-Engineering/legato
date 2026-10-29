@@ -9,6 +9,11 @@ import LegatoFieldEdit
 /// text and foreign changes are never the run's. A resync from the same queue, or a reset other than a clear,
 /// re-anchors it as ``CleanupAgent`` does (a span stays where its text occurs exactly once in the new window). A
 /// clear, or a resync from another queue instance, forgets it: nothing is the run's until new automatic text lands.
+///
+/// iOS hosts report only a caret-relative window (`documentContextBefore/AfterInput`; WhatsApp ~100 characters).
+/// When its left edge moves (`rebased`), the run's offsets move with it, so the part of the run that left the window
+/// keeps exact, negative offsets; the text that scrolled out is kept as ``head`` (it ends at window offset 0), so
+/// the run's text stays known. A step is only ever sent for the window, never for the head.
 public struct FeedMirror: Sendable, Equatable {
     public enum Result: Sendable, Equatable {
         case applied
@@ -28,16 +33,37 @@ public struct FeedMirror: Sendable, Equatable {
     public private(set) var results: [UUID: Result] = [:]
     /// The field was cleared (a send) since the run began.
     public private(set) var wasCleared = false
+    /// Some of the run's text left what is known since the run began (iOS: its head left the window past what
+    /// ``head`` kept, or a reset the run's text could not be found again in): not all of it can be told.
+    public var lostRunText: Bool { lostByReset || lostByEdge }
+    private var lostByReset = false
+    /// The run's head is out of what is known because of the window's left edge (clears when the edge returns).
+    private var lostByEdge = false
+    /// A returning head did not match what was kept: what is before the window is not what it was.
+    private var headChanged = false
+    /// The field's text just before the window (it ends at window offset 0) that left the window through its left
+    /// edge, as last seen; only as far back as the oldest span that needs it, and ``headLimit`` units at most.
+    public private(set) var head = ""
+    /// The most UTF-16 units of ``head`` kept: past it, only the run's tail is known.
+    public let headLimit: Int
     private var lastSeq = 0
     /// The changes that landed since the last reset, with the version each left: for mapping an edit's steps from
     /// its base to the field now.
-    private var changes: [(version: FieldVersion, steps: [EditStep])] = []
+    private var changes: [(version: FieldVersion, change: Change)] = []
 
-    public init() {}
+    private enum Change {
+        case steps([EditStep])
+        /// The window's left edge moved: offset `p` is now `p + shift`.
+        case shift(Int)
+    }
+
+    public init(headLimit: Int = 8_192) {
+        self.headLimit = max(0, headLimit)
+    }
 
     public static func == (a: FeedMirror, b: FeedMirror) -> Bool {
         a.window == b.window && a.version == b.version && a.session == b.session && a.runs == b.runs
-            && a.touched == b.touched && a.results == b.results && a.lastSeq == b.lastSeq
+            && a.touched == b.touched && a.results == b.results && a.lastSeq == b.lastSeq && a.head == b.head
     }
 
     /// Whether anything has been read yet.
@@ -51,9 +77,13 @@ public struct FeedMirror: Sendable, Equatable {
             if batch.session != session || text != window {
                 // As the agent does: the same queue's window is searched for the run's text, another queue's is not.
                 let anchored = batch.session == session ? reanchored(in: text) : nil
+                if (anchored?.runs.count ?? 0) < runs.count { lostByReset = true }
                 runs = anchored?.runs ?? []
                 touched = anchored?.touched ?? []
                 changes = []
+                head = ""
+                lostByEdge = false
+                headChanged = false
             }
             session = batch.session
             window = text
@@ -75,29 +105,58 @@ public struct FeedMirror: Sendable, Equatable {
         case .applied(let id, let origin, let steps, let version):
             results[id] = .applied
             for step in steps { fold(step, run: !origin.isUser, user: origin.isUser) }
-            changes.append((version, steps))
+            changes.append((version, .steps(steps)))
         case .foreign(let step, let byUser, let version):
             fold(step, run: false, user: byUser)
-            changes.append((version, [step]))
+            changes.append((version, .steps([step])))
         case .conflict(let id, let conflict):
             results[id] = .conflict(conflict)
         case .superseded(let id, _):
             results[id] = .superseded
         case .withdrawn(let id):
             results[id] = .withdrawn
-        case .rebased(let text, let shift, _):
-            window = text
-            runs = runs.map { Span(location: $0.location + shift, length: $0.length) }
-            touched = touched.map { Span(location: $0.location + shift, length: $0.length) }
-            changes = []  // offsets before the shift are not mapped across it
+        case .rebased(let text, let shift, let version):
+            rebase(to: text, shift: shift)
+            changes.append((version, .shift(shift)))
         case .reset(let reason, let text, _):
             let anchored = reason == .cleared ? nil : reanchored(in: text)
+            if reason != .cleared, (anchored?.runs.count ?? 0) < runs.count { lostByReset = true }
             window = text
+            head = ""
+            lostByEdge = false
+            headChanged = false
             runs = anchored?.runs ?? []
             touched = anchored?.touched ?? []
             changes = []
             if reason == .cleared { wasCleared = true }
         }
+    }
+
+    /// The window's edges moved (no text changed): old offset `p` is now `p + shift`. Text that left through the
+    /// left edge joins ``head``; text that came back through it leaves ``head`` again when it is the same text
+    /// (otherwise what is before the window is not known any more).
+    private mutating func rebase(to text: String, shift: Int) {
+        let old = Array(window.utf16), new = Array(text.utf16)
+        var headUnits = Array(head.utf16)
+        if shift < 0 {
+            if -shift <= old.count { headUnits += old[0..<(-shift)] } else { headUnits = [] }
+        } else if shift > 0 {
+            // Back in the window: the kept head's end, when it is the same text; else nothing before it is known.
+            if shift <= new.count, headUnits.count >= shift, headUnits.suffix(shift).elementsEqual(new[0..<shift]) {
+                headUnits.removeLast(shift)
+            } else {
+                headUnits = []
+                headChanged = true
+            }
+        }
+        window = text
+        runs = runs.map { Span(location: $0.location + shift, length: $0.length) }
+        touched = touched.map { Span(location: $0.location + shift, length: $0.length) }
+        // Only as far back as the oldest span that needs it, within the limit.
+        let needed = max(0, -((runs + touched).map(\.location).min() ?? 0))
+        let kept = min(needed, headLimit, headUnits.count)
+        head = String(decoding: headUnits.suffix(kept), as: UTF16.self)
+        lostByEdge = runs.contains(where: { $0.location < -kept || $0.end > new.count })
     }
 
     private mutating func fold(_ step: EditStep, run: Bool, user: Bool) {
@@ -115,10 +174,11 @@ public struct FeedMirror: Sendable, Equatable {
     /// Each run span and the user-touched spans inside it, found again in `text` after a resync or reset: a span
     /// only when its last known text occurs exactly once there; the others are dropped (`CleanupAgent`'s rule).
     private func reanchored(in text: String) -> (runs: [Span], touched: [Span]) {
-        let old = window as NSString, new = text as NSString
+        let old = known as NSString, new = text as NSString, base = headLength
         var kept: [Span] = [], inside: [Span] = []
-        for run in runs where run.length > 0 && run.end <= old.length {
-            let known = old.substring(with: NSRange(location: run.location, length: run.length))
+        // A span whose text is not all known (part of it left the window unkept) is not searched for.
+        for run in runs where run.length > 0 && run.location >= -base && run.end <= window.utf16.count {
+            let known = old.substring(with: NSRange(location: run.location + base, length: run.length))
             var found: [Int] = []
             var from = 0
             while from < new.length, found.count < 2 {
@@ -165,65 +225,168 @@ public struct FeedMirror: Sendable, Equatable {
 
     // MARK: Reading
 
+    private var headLength: Int { head.utf16.count }
+    /// ``head`` and the window: the field's text as known, from window offset `-headLength` on.
+    private var known: String { head + window }
+
     /// The run's text as the field shows it: from the start of its first span to the end of its last (what the
-    /// user wrote in between included), trimmed; nil when nothing is the run's.
+    /// user wrote in between included, the part in ``head`` too), trimmed; nil when nothing is the run's, or not
+    /// all of it is known.
     public var runText: String? {
-        guard let region = runRegion else { return nil }
-        return Self.trimmedText(region, in: window).text
+        guard let region = runRegion, region.location >= -headLength else { return nil }
+        return Self.trimmedText(Span(location: region.location + headLength, length: region.length), in: known).text
     }
 
+    /// Some of the run's text is before the window's left edge (its head scrolled out).
+    public var runLeftWindow: Bool { (runs.first?.location ?? 0) < 0 }
+
+    /// The run's spans' extent in window offsets (negative where it left the window); nil when nothing is the
+    /// run's, its end is past the window, or it ends before it.
     private var runRegion: Span? {
-        guard let first = runs.first, let last = runs.last else { return nil }
-        let length = (window as NSString).length
-        let start = min(first.location, length), end = min(last.end, length)
-        return end > start ? Span(location: start, length: end - start) : nil
+        guard let first = runs.first, let last = runs.last, last.end <= window.utf16.count, last.end > first.location
+        else { return nil }
+        return Span(location: first.location, length: last.end - first.location)
     }
 
     /// The edit that turns the run's text from `raw` into `cleaned` in the field, as the smallest patches (one step
     /// per changed stretch of words, each trimmed to the Characters that differ), in one transaction based on the
     /// newest version. Nil when the field does not show exactly `raw` as the run's text (the user changed it, it was
-    /// sent, or nothing is attributed to the run), or nothing changes.
+    /// sent, nothing is attributed to the run, or part of it is out of the window), or nothing changes.
     public func patch(from raw: String, to cleaned: String, owner: String, origin: EditOrigin = .finalSwap) -> EditTransaction? {
-        guard let session, let region = runRegion, touched.allSatisfy({ !Self.touches($0, region) }) else { return nil }
-        let shown = Self.trimmedText(region, in: window)
+        guard let plan = patches(from: raw, to: cleaned, owner: owner, origin: origin), plan.outOfWindow == 0,
+            let first = plan.transactions.first
+        else { return nil }
+        return EditTransaction(origin: origin, owner: owner, base: first.base, steps: plan.transactions.flatMap(\.steps), session: first.session)
+    }
+
+    /// ``patches(from:to:owner:origin:)``: the patches the window shows, and how many there are in all.
+    public struct PatchPlan: Sendable, Equatable {
+        /// The patches inside the window, one transaction each (a failed guard leaves only its patch out); empty
+        /// when none of them is.
+        public var transactions: [EditTransaction]
+        /// Every patch between the raw and the cleaned text.
+        public var patches: Int
+        /// The patches outside the window (in the run's head): never written.
+        public var outOfWindow: Int
+    }
+
+    /// The smallest patches from `raw` to `cleaned` for the run's text, split by the window: the ones inside it,
+    /// to be written (each step's `expect` its guard), and how many lie outside it, which are not. The run's place
+    /// is its spans' offsets as the feed moved them; where the head's text is not known, the visible tail is the
+    /// guard (`raw` must end with it, and fill the run's extent), never a search. Nil when there is no such edit
+    /// (``unpatchable(raw:)`` says why) or nothing changes.
+    public func patches(from raw: String, to cleaned: String, owner: String, origin: EditOrigin = .finalSwap) -> PatchPlan? {
         let raw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard shown.text == raw, !cleaned.isEmpty, cleaned != raw else { return nil }
-        let steps = TextPatches.steps(from: raw, to: cleaned, at: shown.location)
+        guard let session, !cleaned.isEmpty, cleaned != raw, case .success(let start) = locate(raw) else { return nil }
+        let steps = TextPatches.steps(from: raw, to: cleaned, at: start)
         guard !steps.isEmpty else { return nil }
-        return EditTransaction(origin: origin, owner: owner, base: version, steps: steps, session: session)
+        let visible = steps.filter { $0.span.location >= 0 && $0.matches(window) }
+        // One transaction per patch: a guard that fails leaves only that patch out. (Grouping by sentence would
+        // need sentence detection, which raw ASR text, lowercase after its periods, often defeats.)
+        let transactions = visible.map {
+            EditTransaction(origin: origin, owner: owner, base: version, steps: [$0], session: session)
+        }
+        return PatchPlan(transactions: transactions, patches: steps.count, outOfWindow: steps.count - visible.count)
+    }
+
+    /// Why ``patch(from:to:owner:origin:)`` has no edit for `raw` (nil: it has one, or nothing changes).
+    public enum Unpatchable: String, Sendable, Equatable, Error {
+        /// Nothing was read from the keyboard.
+        case noFeed
+        /// The field was cleared (a send) and nothing of the run is in it.
+        case cleared
+        /// Nothing in the field is attributed to the run.
+        case noRunText
+        /// None of the run's text is in the caret-relative window, or where it is cannot be told: a step outside
+        /// the window is never written.
+        case outOfWindow
+        /// The user wrote or changed text inside the run's.
+        case userEdited
+        /// The field shows other text as the run's than `raw`.
+        case textDiffers
+        /// The text before the window that came back into it is not what scrolled out.
+        case headChanged
+    }
+
+    /// Why there are no patches for `raw` in the field as it is: see ``Unpatchable``.
+    public func unpatchable(raw: String) -> Unpatchable? {
+        if case .failure(let reason) = locate(raw.trimmingCharacters(in: .whitespacesAndNewlines)) { return reason }
+        return nil
+    }
+
+    /// The most whitespace the run's extent may hold before `raw` where the head is not known (a separator).
+    private static let leadingSlack = 2
+
+    /// Where `raw` (trimmed) starts in window offsets, as the run's text the field holds.
+    private func locate(_ raw: String) -> Swift.Result<Int, Unpatchable> {
+        let differs: Unpatchable = headChanged ? .headChanged : .textDiffers
+        guard session != nil else { return .failure(.noFeed) }
+        guard let region = runRegion else {
+            return .failure(wasCleared ? .cleared : lostRunText || !runs.isEmpty ? .outOfWindow : .noRunText)
+        }
+        if touched.contains(where: { Self.touches($0, region) }) { return .failure(.userEdited) }
+        if region.location >= -headLength {
+            // All of it is known: it must be exactly `raw`.
+            let shown = Self.trimmedText(Span(location: region.location + headLength, length: region.length), in: known)
+            guard shown.text == raw else {
+                return .failure(lostRunText || (raw.hasSuffix(shown.text) && !shown.text.isEmpty) ? .outOfWindow : differs)
+            }
+            return .success(shown.location - headLength)
+        }
+        // Only the tail is known (from the head's kept start on): `raw` ends with it and fills the run's extent.
+        let units = Array(known.utf16)
+        var end = region.end + headLength
+        while end > 0, let scalar = Unicode.Scalar(units[end - 1]), scalar.properties.isWhitespace { end -= 1 }
+        let tail = units[0..<max(end, 0)]
+        guard tail.contains(where: { unit in Unicode.Scalar(unit).map { !$0.properties.isWhitespace } ?? true }) else {
+            return .failure(.outOfWindow)
+        }
+        let rawUnits = Array(raw.utf16)
+        guard rawUnits.count >= tail.count, rawUnits.suffix(tail.count).elementsEqual(tail) else { return .failure(differs) }
+        let start = end - headLength - rawUnits.count
+        guard start >= region.location, start - region.location <= Self.leadingSlack else { return .failure(differs) }
+        return .success(start)
     }
 
     /// `current` (the run's text) with each unapplied edit's steps applied where they are now: mapped from the
-    /// edit's base through everything that landed since; a step whose range is gone, or whose expected text is
-    /// not there any more, is left out. For a clipboard fallback.
+    /// edit's base through everything that landed since (edge shifts included); a step whose range is gone, or
+    /// whose expected text is not there any more, is left out. For a clipboard fallback; nil when the run's text
+    /// is not all known.
     public func text(applying unapplied: [EditTransaction]) -> String? {
-        guard let region = runRegion else { return nil }
+        guard let region = runRegion, region.location >= -headLength else { return nil }
         var steps: [EditStep] = []
         for transaction in unapplied {
             var mapped = transaction.steps
             for change in changes where change.version > transaction.base {
-                for landed in change.steps {
-                    let map = StepMap(landed)
-                    mapped = mapped.compactMap { step in
-                        guard case .moved(let span) = map.map(step.span) else { return nil }
-                        return EditStep(span: span, text: step.text, expect: step.expect)
+                switch change.change {
+                case .shift(let shift):
+                    mapped = mapped.map { EditStep(span: Span(location: $0.span.location + shift, length: $0.span.length), text: $0.text, expect: $0.expect) }
+                case .steps(let landed):
+                    for landed in landed {
+                        let map = StepMap(landed)
+                        mapped = mapped.compactMap { step in
+                            guard case .moved(let span) = map.map(step.span) else { return nil }
+                            return EditStep(span: span, text: step.text, expect: step.expect)
+                        }
                     }
                 }
             }
             steps += mapped
         }
-        var units = Array(window.utf16)
-        var end = region.end
+        let base = headLength
+        var units = Array(known.utf16)
+        var end = region.end + base
         for step in steps.sorted(by: { $0.span.location > $1.span.location }) {
-            guard step.span.location >= region.location, step.span.end <= end, step.span.end <= units.count,
-                String(decoding: units[step.span.location..<step.span.end], as: UTF16.self) == step.expect
+            let location = step.span.location + base
+            guard step.span.location >= region.location, location + step.span.length <= end,
+                String(decoding: units[location..<(location + step.span.length)], as: UTF16.self) == step.expect
             else { continue }
-            units.replaceSubrange(step.span.location..<step.span.end, with: Array(step.text.utf16))
+            units.replaceSubrange(location..<(location + step.span.length), with: Array(step.text.utf16))
             end += step.text.utf16.count - step.span.length
         }
         let text = String(decoding: units, as: UTF16.self)
-        return Self.trimmedText(Span(location: region.location, length: end - region.location), in: text).text
+        return Self.trimmedText(Span(location: region.location + base, length: end - region.location - base), in: text).text
     }
 
     private static func touches(_ touched: Span, _ region: Span) -> Bool {

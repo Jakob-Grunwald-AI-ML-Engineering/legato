@@ -105,6 +105,8 @@ final class KeyboardController {
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var reapply: Task<Void, Never>?
     @ObservationIgnored private var hintTimeout: Task<Void, Never>?
+    /// The run whose stop notice (`HostState.notice`) was shown: once per run.
+    @ObservationIgnored private var noticeShownFor: String?
 
     init(
         document: any TextDocument, link: LinkClient, hasFullAccess: @escaping @MainActor () -> Bool,
@@ -395,6 +397,7 @@ final class KeyboardController {
     private func hostDidChange() {
         guard !isTornDown else { return }
         reloadHost()
+        showStopNotice()
         #if DEBUG
         if let host, let insertAt = host.insertAt {
             let latency = Int((Date().timeIntervalSince(insertAt) * 1000).rounded())
@@ -1267,6 +1270,17 @@ final class KeyboardController {
         case .idle:
             return nil
         }
+    }
+
+    /// A finished run's stop notice (part of its cleanup is on the clipboard), shown once, and only for a run this
+    /// keyboard followed: an old run's state seen again later says nothing.
+    private func showStopNotice() {
+        guard let host, host.isFinal, let notice = host.notice, let runID = host.runID, noticeShownFor != runID,
+            cursor?.runID == runID
+        else { return }
+        noticeShownFor = runID
+        show(notice)
+        trace?("notice shown")
     }
 
     /// The emoji key: the emoji panel lands later; for now it says so.

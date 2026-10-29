@@ -579,10 +579,17 @@ public final class FieldEditCoordinator {
         }
     }
 
-    /// Issues and runs one write; false when none can run now.
+    /// The lane of the write issued last.
+    private var lastLane: Lane?
+
+    /// Issues and runs one write; false when none can run now. After an ASR write the cleanup lane gets the next
+    /// turn (the user lane still first): continuous dictation keeps an ASR write queued behind every one awaiting
+    /// its read, and the queue's lane order alone would hold the cleanup lane until the speaker pauses.
     private func executeNext() -> Bool {
         let window = queue.document.window, caret = queue.document.caret
-        guard let write = queue.next() else { return false }
+        let turn = lastLane == .asr ? queue.next(lanes: [.user, .cleanup]) : nil
+        guard let write = turn ?? queue.next() else { return false }
+        lastLane = write.lane
         guard let calls = ProxyOpCompiler.compile(write, window: window, caret: caret) else {
             queue.abort(write.id, requeue: false, reason: .expectMismatch)
             return true

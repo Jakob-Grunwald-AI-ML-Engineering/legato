@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import LegatoAppServices
 import LegatoCore
 import LegatoFieldEdit
 import Synchronization
@@ -81,6 +82,7 @@ struct E2EFakeCleanup: TranscriptPostProcessor {
     func process(_ text: String, locale: Locale) async throws -> String {
         let out = E2E.applyRules(rules, to: text)
         E2E.log("cleanup.pass changed=\(out != text ? 1 : 0)")
+        CleanupCallTrace.emit("cleanup.call", ["kind": CleanupCallTrace.kind, "backend": "e2e-fake", "ms": "0"])
         return out
     }
 }
