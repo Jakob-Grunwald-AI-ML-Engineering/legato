@@ -74,13 +74,52 @@ private struct ThreeUnverified {
         #expect(run.queue.document.window == "one two")
     }
 
-    @Test func aReadMatchingNoPredictionFailsAllAndIsObservedAgainstTheConfirmedField() {
+    /// Requirement change (Jakob): one failed write does not fail the writes after it. A read that is exactly
+    /// the writes that landed (the missing ones rolled back) confirms those and fails only the others.
+    @Test func aReadShowingOnlyAMiddleWriteConfirmsItAndFailsTheOthers() {
         var run = ThreeUnverified()
-        run.queue.settle(FieldSnapshot(before: "one two!", after: ""))
-        let events = run.queue.takeEvents()
-        #expect(events.count == 3)
-        #expect(events.allSatisfy { if case .conflict(_, let c) = $0 { c.reason == .verifyFailed } else { false } })
+        #expect(run.queue.settle(FieldSnapshot(before: "one two!", after: "")) == .diverged)
+        #expect(run.queue.takeEvents() == [
+            .conflict(run.agent.id, Conflict(.verifyFailed)),
+            .applied(run.key1.id, version: run.queue.document.version),
+            .conflict(run.key2.id, Conflict(.verifyFailed)),
+        ])
         #expect(run.queue.document.window == "one two!")
-        #expect(run.queue.feed.entries.last?.event == .foreign(.insert("!", at: 7), byUser: true, version: run.queue.document.version))
+        #expect(!run.queue.feed.entries.contains { if case .foreign = $0.event { true } else { false } })
+    }
+
+    @Test func aReadShowingTheFirstAndLastWritesConfirmsThemAndFailsOnlyTheMiddle() {
+        var run = ThreeUnverified()
+        let asr = EditTransaction(origin: .asr, owner: "run", base: run.queue.document.version, steps: [.insert(" three", at: 9)])
+        run.queue.submit(asr)
+        #expect(run.queue.settle(FieldSnapshot(before: "One two?", after: "")) == .diverged)
+        #expect(run.queue.takeEvents() == [
+            .applied(run.agent.id, version: FieldVersion(1)),
+            .conflict(run.key1.id, Conflict(.verifyFailed)),
+            .applied(run.key2.id, version: run.queue.document.version),
+        ])
+        #expect(run.queue.document.window == "One two?")
+        #expect(run.queue.document.caret == 8)
+        #expect(run.queue.next()?.steps == [.insert(" three", at: 8)])
+    }
+
+    /// Two different subsets of the writes explain the read: it waits, and a final read resets.
+    @Test func aReadTwoSubsetsExplainWaitsThenResets() {
+        var queue = FieldEditQueue(FieldSnapshot(before: "x", after: ""))
+        let a = EditTransaction(origin: .keystroke, base: FieldVersion(0), steps: [.insert("a", at: 1)])
+        queue.submit(a)
+        _ = queue.next()
+        let b = EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("b", at: 2)])
+        queue.submit(b)
+        _ = queue.next()
+        let c = EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("b", at: 3)])
+        queue.submit(c)
+        _ = queue.next()
+        // "xab": A and B, or A and C (B missing, C mapped onto its place).
+        let read = FieldSnapshot(before: "xab", after: "")
+        #expect(queue.settle(read, final: false) == .notYet)
+        #expect(queue.takeEvents().isEmpty)
+        #expect(queue.settle(read) == .diverged)
+        #expect(queue.feed.entries.last?.event == .reset(.unaligned, window: "xab", version: queue.document.version))
     }
 }

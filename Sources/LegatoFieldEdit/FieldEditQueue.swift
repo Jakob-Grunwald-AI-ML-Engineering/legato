@@ -269,7 +269,8 @@ public struct FieldEditQueue: Sendable {
     /// alone (the user typed on after the write). Every write up to that prediction is confirmed (`applied`);
     /// a foreign remainder lands as a `byUser` step, an edge move as a re-base.
     ///
-    /// Writes the read does not show: with `final` (the Mac's synchronous readback, or the last read before a
+    /// Writes the read does not show: a read that is exactly a subset of them (one in the middle missing) fails
+    /// only the missing ones (see `settleBySubset`). Otherwise, with `final` (the Mac's synchronous readback, or the last read before a
     /// timeout) they fail with `verifyFailed` and are rolled back by inverting their steps; without it, a read
     /// that only lags (shows the oldest writes or none, with no foreign change) returns `notYet` and they wait.
     /// A read consistent with no prediction fails them all and is then observed against the confirmed field.
@@ -328,6 +329,10 @@ public struct FieldEditQueue: Sendable {
             }
         }
 
+        let full = explanations.first.map { $0.k == predictions.count - 1 && $0.alignment == nil } ?? false
+        if !full, !windowBaseMoved(snapshot), let outcome = settleBySubset(snapshot, prefixes: explanations, final: final) {
+            return outcome
+        }
         guard let choice = explanations.first else {
             rollBack(from: 0, requeueFirst: false, requeueRest: false, reason: .verifyFailed)
             observe(snapshot)
@@ -349,6 +354,72 @@ public struct FieldEditQueue: Sendable {
         }
         apply(choice.alignment, snapshot)
         return choice.k == predictions.count - 1 ? .confirmed : .diverged
+    }
+
+    /// Per-write attribution: one write that did not land never fails the writes after it. The read is matched
+    /// byte for byte against every non-prefix subset of the issued writes (the others rolled back by inversion,
+    /// the later ones replayed through that). The largest subset that matches wins if it is larger than every
+    /// prefix explanation without a foreign change: its writes are confirmed (replayed with new versions), only
+    /// the others fail (`verifyFailed`). A tie waits (`notYet`), or resets when `final`. Nil: no subset beats the
+    /// prefix explanations. Pending edits inside a rolled-back write's text are handed back on the way.
+    private mutating func settleBySubset(
+        _ snapshot: FieldSnapshot, prefixes: [(k: Int, alignment: Alignment?)], final: Bool
+    ) -> SettleOutcome? {
+        let count = unverified.count
+        guard count > 1, count <= 8 else { return nil }
+        var best: [(landed: [Bool], queue: FieldEditQueue)] = []
+        var bestSize = 0
+        for bits in 1..<(1 << count) {
+            let landed = (0..<count).map { bits & (1 << $0) != 0 }
+            guard let gap = landed.firstIndex(of: false), landed[gap...].contains(true) else { continue }  // a prefix
+            let size = landed.filter { $0 }.count
+            guard size >= bestSize, let replayed = simulate(landed),
+                byteEqual(replayed.document.window, snapshot.window)
+            else { continue }
+            if size > bestSize { (best, bestSize) = ([], size) }
+            best.append((landed, replayed))
+        }
+        guard let winner = best.first else { return nil }
+        let prefix = prefixes.filter { $0.alignment?.step == nil }.map(\.k).max() ?? -1
+        if prefix > bestSize { return nil }
+        if best.count > 1 || prefix == bestSize {
+            if !final { return .notYet }
+            reset(snapshot, reason: .unaligned)
+            return .diverged
+        }
+        let issued = unverified
+        self = winner.queue
+        for (index, item) in issued.enumerated() {
+            guard winner.landed[index], let write = unverified.first(where: { $0.write.id == item.write.id })?.write else {
+                conflict(item.write.id, Conflict(.verifyFailed))
+                continue
+            }
+            events.append(.applied(write.id, version: write.version))
+            feed.append(.applied(write.id, origin: write.origin, steps: write.steps, version: write.version))
+        }
+        unverified = []
+        document.caret = snapshot.caret
+        return .diverged
+    }
+
+    /// This queue as if only the issued writes marked in `landed` reached the field; nil when a replayed write
+    /// no longer fits (its range is gone or a guard fails).
+    private func simulate(_ landed: [Bool]) -> FieldEditQueue? {
+        var copy = self
+        guard let first = landed.firstIndex(of: false) else { return copy }
+        let ids = copy.unverified[first...].map(\.write.id)
+        copy.rollBack(from: first, requeueFirst: true, requeueRest: true, reason: .verifyFailed)
+        for (offset, id) in ids.enumerated() {
+            guard let index = copy.pending.firstIndex(where: { $0.transaction.id == id }) else { return nil }
+            let item = copy.pending.remove(at: index)
+            if landed[first + offset] {
+                guard copy.check(item.transaction) == nil else { return nil }
+                _ = copy.issue(item)
+            } else {
+                copy.dropAffinities(of: id)
+            }
+        }
+        return copy
     }
 
     /// Confirms the oldest `count` issued writes (`applied`).
