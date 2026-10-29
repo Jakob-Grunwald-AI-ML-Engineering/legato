@@ -9,8 +9,9 @@ protocol FoundationModelsTurning: AnyObject, Sendable {
     func respond(to prompt: String) async throws -> String
     /// Guided generation: the reply is generated against `schema` and returned as its JSON.
     func respondJSON(to prompt: String, schema: GenerationSchema) async throws -> String
-    /// Loads the model and processes the session's transcript ahead of the first prompt.
-    func prewarm()
+    /// Loads the model and caches the session's transcript, and `promptPrefix` (how the next prompt starts),
+    /// ahead of that prompt. Returns at once; the system works in the background.
+    func prewarm(promptPrefix: String?)
 }
 
 /// A `LanguageModelSession`, confined to the owning ``FoundationModelsSession`` actor.
@@ -24,7 +25,7 @@ final class SystemModelTurns: FoundationModelsTurning, @unchecked Sendable {
         try await session.respond(to: prompt, schema: schema, includeSchemaInPrompt: true,
                                   options: GenerationOptions(sampling: .greedy)).content.jsonString
     }
-    func prewarm() { session.prewarm() }
+    func prewarm(promptPrefix: String?) { session.prewarm(promptPrefix: promptPrefix.map { Prompt($0) }) }
 }
 
 /// A persistent Foundation Models conversation: one `LanguageModelSession` serves every turn (the system
@@ -42,6 +43,8 @@ actor FoundationModelsSession: LLMSession {
     private var live: (any FoundationModelsTurning)?
     private var closed = false
     private var gate = LLMTurnGate()
+    /// ``warm()`` was asked for: a trim reopens and prewarms the rebuilt system session right away.
+    private var keepsWarm = false
     /// The schema text of the latest structured turn: reserved in the head for the next one.
     private var schemaReserve = ""
 
@@ -81,17 +84,24 @@ actor FoundationModelsSession: LLMSession {
             try trimmed.carryAppends(from: transcript, since: original)
             transcript = trimmed
             live = nil
+            if keepsWarm { openWarm() }
         }
     }
 
-    /// Opens the system session on the transcript so far (the head) and prewarms it.
+    /// Opens the system session on the transcript so far (the head) and prewarms it, with the pending text
+    /// as the prompt prefix. Kept warm from then on: a trim reopens and prewarms the kept transcript.
     func warm() async throws {
         try await exclusive {
+            keepsWarm = true
             guard live == nil else { return }
-            let turns = makeTurns(Self.transcript(transcript))
-            turns.prewarm()
-            live = turns
+            openWarm()
         }
+    }
+
+    private func openWarm() {
+        let turns = makeTurns(Self.transcript(transcript))
+        turns.prewarm(promptPrefix: transcript.pending.isEmpty ? nil : transcript.pending)
+        live = turns
     }
 
     func close() async { closed = true; live = nil }

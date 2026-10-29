@@ -8,7 +8,7 @@ import Testing
 
 /// Records which transcript each underlying session started from and what each turn sent.
 private final class TurnLog: Sendable {
-    struct State { var created: [Transcript] = []; var prompts: [String] = []; var replies: [String]; var prewarmed = 0 }
+    struct State { var created: [Transcript] = []; var prompts: [String] = []; var replies: [String]; var prewarmed = 0; var prefixes: [String?] = [] }
     let value: Mutex<State>
     init(replies: [String]) { value = Mutex(State(replies: replies)) }
 }
@@ -21,7 +21,7 @@ private final class FakeTurns: FoundationModelsTurning, @unchecked Sendable {
     }
     func respond(to prompt: String) async throws -> String { next(prompt) }
     func respondJSON(to prompt: String, schema: GenerationSchema) async throws -> String { next(prompt) }
-    func prewarm() { log.value.withLock { $0.prewarmed += 1 } }
+    func prewarm(promptPrefix: String?) { log.value.withLock { $0.prewarmed += 1; $0.prefixes.append(promptPrefix) } }
 }
 
 private let words: @Sendable (String) async throws -> Int = { $0.split(whereSeparator: \.isWhitespace).count }
@@ -111,6 +111,44 @@ struct FoundationModelsSessionTests {
         #expect(state.prewarmed == 1)
         #expect(state.created.count == 1)
         #expect(state.created[0].count == 1)  // the instructions only
+    }
+
+    @Test func warmPrewarmsThePendingTextAsThePromptPrefix() async throws {
+        let log = TurnLog(replies: ["One."])
+        let session = fakeSession(log)
+        try await session.append(.instructions("Clean."))
+        try await session.append(.text("run text"))
+        try await session.warm()
+        _ = try await session.respond(to: "Go.")
+        let state = log.value.withLock { $0 }
+        #expect(state.prefixes == ["run text"])
+        #expect(state.prompts == ["run text\n\nGo."])  // the prefix the system cached starts the prompt
+    }
+
+    @Test func aTrimReopensAndPrewarmsTheRollingSessionOnTheKeptTranscript() async throws {
+        let log = TurnLog(replies: ["a", "b", "c", "d"])
+        let session = fakeSession(log)
+        try await session.append(.instructions("Clean the text."))
+        try await session.warm()
+        for index in 1...3 { _ = try await session.respond(to: "turn \(index) has several words in it") }
+        let before = try await session.usage()
+        try await session.trim(keepingSuffix: before.history / 2)
+        // Warm again right away (head and kept turns), not on the next run's first turn.
+        var state = log.value.withLock { $0 }
+        #expect(state.created.count == 2)
+        #expect(state.prewarmed == 2)
+        _ = try await session.respond(to: "after")
+        state = log.value.withLock { $0 }
+        #expect(state.created.count == 2)
+    }
+
+    @Test func aTrimOfAColdSessionStaysCold() async throws {
+        let log = TurnLog(replies: ["a", "b"])
+        let session = fakeSession(log)
+        try await session.append(.instructions("Clean the text."))
+        for index in 1...2 { _ = try await session.respond(to: "turn \(index) has several words in it") }
+        try await session.trim(keepingSuffix: 0)
+        #expect(log.value.withLock { $0.prewarmed } == 0)
     }
 
     @Test func theSchemaInThePromptCountsAgainstTheBudget() async throws {
