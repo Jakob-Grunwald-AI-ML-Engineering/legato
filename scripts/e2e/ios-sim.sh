@@ -1882,7 +1882,7 @@ scenario_fa() {
   assert_log "the run is on the link, without an agent" "link link.run delivery=replace agent=0"
   assert_log "its patches went over the link: two steps" "link final.patch steps=2"
   assert_log "they landed" "link final.patch result=applied"
-  assert_log "the keyboard wrote them in the cleanup lane, 4 letters out, 4 in" "harness fe.write origin=finalSwap lane=cleanup del=4 ins=4"
+  assert_count "the keyboard wrote them in the cleanup lane, one write per patch, 2 letters out, 2 in each" "harness fe.write origin=finalSwap lane=cleanup del=2 ins=2" 2
   assert_log "and confirmed them as the swap" "harness fe.link outcome origin=finalSwap result=applied"
   assert_eq "field: cleaned" "the cat sat. A dog ran. " "$(harness_doc)"
   assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"

@@ -42,6 +42,8 @@ private final class WindowedKeyboard {
     /// UTF-16 units at the field's start the host no longer reports.
     var hidden = 0
     var delay: Duration = .zero
+    /// Runs after the edits taken from the link are queued, before they are written (the user acts meanwhile).
+    var beforeDrain: (() -> Void)?
     private var published: Int?
 
     init(_ text: String = "") {
@@ -67,6 +69,8 @@ private final class WindowedKeyboard {
 
     func receive(_ transactions: [EditTransaction]) {
         for transaction in transactions { queue.submit(transaction) }
+        beforeDrain?()
+        beforeDrain = nil
         if delay == .zero { return drain() }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: self?.delay ?? .zero)
@@ -89,6 +93,12 @@ private final class WindowedKeyboard {
     func asr(_ text: String) {
         queue.submit(EditTransaction(origin: .asr, owner: "run", base: queue.document.version, steps: [.insert(text, at: caret)]))
         drain()
+    }
+
+    /// The user deletes the field's last UTF-16 unit (a backspace at the caret).
+    func userBackspace() {
+        field = String(decoding: Array(field.utf16).dropLast(), as: UTF16.self)
+        queue.observe(FieldSnapshot(window: window, caret: caret))
     }
 
     /// The host stops reporting the field's first `count` UTF-16 units (its before-context got shorter).
@@ -144,7 +154,7 @@ struct LinkedCleanupStopTests {
         #expect(passes == 0)  // the session's own pass is the run's one cleanup call
         #expect(keyboard.field == "Hi the cat sat. a dog ran.")
         let report = run.stopReport
-        #expect(report?.branch == .applied && report?.sent == 1 && report?.acked == 1)
+        #expect(report?.branch == .applied && report?.sent == 2 && report?.acked == 2)  // one edit per patch
         #expect(report?.steps == 2)  // two small patches, not one whole-text replace
     }
 
@@ -250,7 +260,8 @@ struct LinkedCleanupStopTests {
         #expect(mirror.runText == "teh cat sat on the mat. a dgo ran.")
         let plan = mirror.patches(from: "teh cat sat on the mat. a dgo ran.", to: "The cat sat on the mat. A dog ran.", owner: "run")
         #expect(plan?.patches == 3 && plan?.outOfWindow == 1)
-        #expect(plan?.transaction?.steps.allSatisfy { $0.span.location >= 0 } == true)
+        #expect(plan?.transactions.count == 2)  // one per visible patch; the head's is not sent
+        #expect(plan?.transactions.flatMap(\.steps).allSatisfy { $0.span.location >= 0 } == true)
     }
 
     /// Only the run's tail is known (the head's text was not kept): its place comes from the run's offsets the
@@ -267,9 +278,8 @@ struct LinkedCleanupStopTests {
         let raw = "teh cat sat on the mat. a dgo ran."
         let plan = try #require(mirror.patches(from: raw, to: "The cat sat on the mat. A dog ran.", owner: "run"))
         #expect(plan.patches == 3 && plan.outOfWindow == 1)
-        let transaction = try #require(plan.transaction)
-        #expect(transaction.steps.map(\.span.location) == [11, 14])
-        keyboard.receive([transaction])
+        #expect(plan.transactions.flatMap(\.steps).map(\.span.location) == [11, 14])
+        keyboard.receive(plan.transactions)
         #expect(keyboard.field == "teh cat sat on the mat. A dog ran.")
         // The visible text is the guard: a raw text that does not end with it, or that is longer than the run's
         // known extent, has no patches.
@@ -370,5 +380,24 @@ struct LinkedCleanupStopTests {
             applied: { true }, statelessPass: { _ in nil }, copy: { _ in true })
         #expect(run.notice == nil)
         #expect(run.stopReport?.line.hasSuffix(" patched=2/2 outOfWindow=0") == true, "\(run.stopReport?.line ?? "-")")
+    }
+
+    /// One of three patches fails its guard (the user deleted into it before it was written): only that patch is
+    /// left out, the other two land (one edit per patch: a single fail never stops the others).
+    @Test func aFailedGuardLeavesOnlyItsPatchOut() async {
+        let keyboard = WindowedKeyboard()
+        let run = LinkedCleanupRun(owner: "run", agent: nil, transport: keyboard.transport, finalWait: .milliseconds(300))
+        run.feedChanged()
+        keyboard.asr("teh cat sat. A dgo ran. It thrre")
+        keyboard.beforeDrain = { keyboard.userBackspace() }  // "…It thrr": the third patch's text is gone
+        let stop = await run.stop(
+            .replace, committed: "teh cat sat. A dgo ran. It thrre", text: "the cat sat. A dog ran. It three.",
+            finalText: "the cat sat. A dog ran. It three.", applied: { true }, statelessPass: { _ in nil }, copy: { _ in true })
+        #expect(keyboard.field == "the cat sat. A dog ran. It thrr")
+        #expect(stop.landed == false)  // the session copies its whole cleaned text
+        #expect(run.stopReport?.branch == .partial)
+        #expect(run.stopReport?.reason == "conflict")
+        #expect(run.stopReport?.sent == 3)
+        #expect(run.stopReport?.line.hasSuffix(" patched=2/3 outOfWindow=0") == true, "\(run.stopReport?.line ?? "-")")
     }
 }

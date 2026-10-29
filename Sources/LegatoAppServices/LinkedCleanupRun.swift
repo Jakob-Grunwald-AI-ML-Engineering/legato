@@ -20,8 +20,8 @@ import LegatoFieldEdit
 ///   an outcome; what did not land is ``Outcome/unapplied`` (the caller's clipboard fallback,
 ///   ``fallbackText(unapplied:)``).
 /// - **Replace / absent agent.** ``deliver(raw:cleaned:)``: one stateless final pass's text as the smallest
-///   patches of the run's text (``FeedMirror/patches(from:to:owner:origin:)``), one transaction, its outcome waited
-///   for.
+///   patches of the run's text (``FeedMirror/patches(from:to:owner:origin:)``), one transaction per patch (one failed
+///   guard never stops the others), their outcomes waited for.
 /// - **Out of the window (iOS).** Only the patches inside the caret-relative window are written; when any is not
 ///   (the run's head left the window), the whole cleaned text goes to the clipboard and ``notice`` says so
 ///   (``partialNotice``). The whole text, not the missing part: one paste over the run fixes it, while a fragment
@@ -60,8 +60,8 @@ public final class LinkedCleanupRun {
         case unchanged
         /// No outcome within ``finalWait``.
         case timedOut
-        /// Some patches lie outside the window (the run's head left it): they were never written; the ones inside
-        /// it were sent (and may have landed).
+        /// Some patches did not land, the rest did or could not be written: outside the window (the run's head
+        /// left it; never written), or a patch's edit was handed back while another landed.
         case partial
     }
 
@@ -297,25 +297,35 @@ public final class LinkedCleanupRun {
         }
         stats.patches += plan.patches
         stats.outOfWindow += plan.outOfWindow
-        trace?("final.patch steps=\(plan.transaction?.steps.count ?? 0) outOfWindow=\(plan.outOfWindow)")
-        guard let transaction = plan.transaction else {
+        let ids = Set(plan.transactions.map(\.id))
+        trace?("final.patch steps=\(plan.transactions.map(\.steps.count).reduce(0, +)) outOfWindow=\(plan.outOfWindow) edits=\(ids.count)")
+        guard !plan.transactions.isEmpty else {
             trace?("final.patch result=partial")
             return .partial  // nothing of it is in the window
         }
-        outstanding[transaction.id] = transaction
-        sent[transaction.id] = transaction
-        transport.send([transaction])
-        stats.sent += 1
-        stats.steps += transaction.steps.count
-        await waitForOutcomes(of: [transaction.id])
-        if mirror.results[transaction.id] != nil { stats.acked += 1 }
-        if mirror.results[transaction.id] == .applied { stats.patched += transaction.steps.count }
+        // One edit per patch: a guard that fails leaves only its patch out.
+        for transaction in plan.transactions {
+            outstanding[transaction.id] = transaction
+            sent[transaction.id] = transaction
+        }
+        transport.send(plan.transactions)
+        stats.sent += plan.transactions.count
+        stats.steps += plan.transactions.map(\.steps.count).reduce(0, +)
+        await waitForOutcomes(of: ids)
+        stats.acked += ids.filter { mirror.results[$0] != nil }.count
+        let patched = plan.transactions.filter { mirror.results[$0.id] == .applied }.map(\.steps.count).reduce(0, +)
+        stats.patched += patched
         let delivery: Delivery
-        switch mirror.results[transaction.id] {
-        case .applied: delivery = plan.outOfWindow > 0 ? .partial : .applied
-        case .conflict(let conflict): delivery = plan.outOfWindow > 0 ? .partial : .conflicted(conflict)
-        case .superseded, .withdrawn: delivery = plan.outOfWindow > 0 ? .partial : .conflicted(Conflict(.overlap))
-        case nil: delivery = plan.outOfWindow > 0 ? .partial : .timedOut
+        if patched == plan.patches {
+            delivery = .applied
+        } else if patched > 0 || plan.outOfWindow > 0 {
+            delivery = .partial
+        } else {
+            switch plan.transactions.lazy.compactMap({ self.mirror.results[$0.id] }).first {
+            case .conflict(let conflict): delivery = .conflicted(conflict)
+            case .superseded, .withdrawn: delivery = .conflicted(Conflict(.overlap))
+            case .applied, nil: delivery = .timedOut
+            }
         }
         trace?("final.patch result=\(Self.describe(delivery))")
         return delivery
@@ -367,8 +377,9 @@ public final class LinkedCleanupRun {
             case unapplied
             /// Live: the keyboard restarted, the run's spans are unknown; the clipboard has the text.
             case spansUnknown
-            /// Replace: some patches were outside the window (`reason` outOfWindow): the ones inside it were written,
-            /// the session's whole cleaned text goes to the clipboard (``LinkedCleanupRun/partialNotice``).
+            /// Replace: some patches did not land, outside the window (`reason` outOfWindow, with
+            /// ``LinkedCleanupRun/partialNotice``) or handed back (`conflict`); the rest did. The session's whole
+            /// cleaned text goes to the clipboard.
             case partial
         }
 
@@ -444,8 +455,9 @@ public final class LinkedCleanupRun {
             case .timedOut: return done(Stop(landed: false), .timedOut)
             // The session copies its whole cleaned text; the field keeps what landed.
             case .partial:
-                notice = Self.partialNotice
-                return done(Stop(landed: false), .partial, reason: "outOfWindow")
+                let outside = stats.outOfWindow > 0
+                if outside { notice = Self.partialNotice }
+                return done(Stop(landed: false), .partial, reason: outside ? "outOfWindow" : "conflict")
             }
         }
         let outcome = await finish()
@@ -457,7 +469,8 @@ public final class LinkedCleanupRun {
             branch = .agentAbsent
             if let pass = await statelessPass(text) {
                 let delivery = await deliver(raw: committed, cleaned: pass)
-                reason = delivery == .notShown ? notShownReason : delivery == .partial ? "outOfWindow" : Self.describe(delivery)
+                reason = delivery == .notShown ? notShownReason : delivery == .partial && stats.outOfWindow > 0
+                    ? "outOfWindow" : Self.describe(delivery)
                 switch delivery {
                 case .applied: cleaned = pass
                 case .unchanged: break

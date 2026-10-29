@@ -240,14 +240,17 @@ public struct FeedMirror: Sendable, Equatable {
     /// newest version. Nil when the field does not show exactly `raw` as the run's text (the user changed it, it was
     /// sent, nothing is attributed to the run, or part of it is out of the window), or nothing changes.
     public func patch(from raw: String, to cleaned: String, owner: String, origin: EditOrigin = .finalSwap) -> EditTransaction? {
-        guard let plan = patches(from: raw, to: cleaned, owner: owner, origin: origin), plan.outOfWindow == 0 else { return nil }
-        return plan.transaction
+        guard let plan = patches(from: raw, to: cleaned, owner: owner, origin: origin), plan.outOfWindow == 0,
+            let first = plan.transactions.first
+        else { return nil }
+        return EditTransaction(origin: origin, owner: owner, base: first.base, steps: plan.transactions.flatMap(\.steps), session: first.session)
     }
 
     /// ``patches(from:to:owner:origin:)``: the patches the window shows, and how many there are in all.
     public struct PatchPlan: Sendable, Equatable {
-        /// The patches inside the window, in one transaction (nil: none of them is).
-        public var transaction: EditTransaction?
+        /// The patches inside the window, one transaction each (a failed guard leaves only its patch out); empty
+        /// when none of them is.
+        public var transactions: [EditTransaction]
         /// Every patch between the raw and the cleaned text.
         public var patches: Int
         /// The patches outside the window (in the run's head): never written.
@@ -266,9 +269,12 @@ public struct FeedMirror: Sendable, Equatable {
         let steps = TextPatches.steps(from: raw, to: cleaned, at: start)
         guard !steps.isEmpty else { return nil }
         let visible = steps.filter { $0.span.location >= 0 && $0.matches(window) }
-        let transaction = visible.isEmpty
-            ? nil : EditTransaction(origin: origin, owner: owner, base: version, steps: visible, session: session)
-        return PatchPlan(transaction: transaction, patches: steps.count, outOfWindow: steps.count - visible.count)
+        // One transaction per patch: a guard that fails leaves only that patch out. (Grouping by sentence would
+        // need sentence detection, which raw ASR text, lowercase after its periods, often defeats.)
+        let transactions = visible.map {
+            EditTransaction(origin: origin, owner: owner, base: version, steps: [$0], session: session)
+        }
+        return PatchPlan(transactions: transactions, patches: steps.count, outOfWindow: steps.count - visible.count)
     }
 
     /// Why ``patch(from:to:owner:origin:)`` has no edit for `raw` (nil: it has one, or nothing changes).
