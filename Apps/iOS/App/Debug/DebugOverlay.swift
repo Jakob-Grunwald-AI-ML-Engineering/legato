@@ -20,6 +20,9 @@ final class DebugMessages {
 
     private(set) var queue: [Item] = []
     private(set) var status: String?
+    /// While set, the overlay covers the app and swallows every tap except on the banner and the card.
+    private(set) var blocking = false
+    @ObservationIgnored private var shownID: String?
     @ObservationIgnored private var timeouts: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var limits: [String: Double] = [:]
     @ObservationIgnored private var window: DebugOverlayWindow?
@@ -72,12 +75,19 @@ final class DebugMessages {
         if sound { AudioServicesPlaySystemSound(1007) }
         if UIApplication.shared.applicationState != .active { notify(id: id, text: text) }
         if let timeout { limits[id] = timeout }
-        startTimer()
+        frontChanged()
     }
 
-    /// An ask's timeout runs while it is on screen, not while it waits behind other messages.
-    private func startTimer() {
-        guard let id = current?.id, timeouts[id] == nil, let limit = limits[id] else { return }
+    /// When an ask reaches the front it is logged as `shown`, and only then does its timeout start: it runs
+    /// while on screen, not while it waits behind other messages.
+    private func frontChanged() {
+        guard let front = current, !front.choices.isEmpty else { return }
+        if shownID != front.id {
+            shownID = front.id
+            DebugBridge.emit(id: front.id, event: "shown")
+        }
+        guard timeouts[front.id] == nil, let limit = limits[front.id] else { return }
+        let id = front.id
         timeouts[id] = Task { @MainActor in
             try? await Task.sleep(for: .seconds(limit))
             if !Task.isCancelled { reply(id: id, choice: "timeout") }
@@ -89,7 +99,14 @@ final class DebugMessages {
         refreshWindow()
     }
 
+    func setBlocking(_ on: Bool) {
+        blocking = on
+        refreshWindow()
+    }
+
     func clear() {
+        blocking = false
+        shownID = nil
         for item in queue where !item.choices.isEmpty { DebugBridge.emit(id: item.id, event: "reply", ["choice": "cleared"]) }
         queue = []
         status = nil
@@ -108,13 +125,14 @@ final class DebugMessages {
         limits[id] = nil
         DebugBridge.emit(id: id, event: item.choices.isEmpty ? "dismissed" : "reply", ["choice": choice])
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
-        startTimer()
+        frontChanged()
         refreshWindow()
     }
 
     private func enqueue(_ item: Item) {
         queue.append(item)
         refreshWindow()
+        frontChanged()
     }
 
     /// Local notification so an `ask` is seen while the app is in the background; asks for permission on first use.
@@ -132,7 +150,7 @@ final class DebugMessages {
     }
 
     private func refreshWindow() {
-        let visible = current != nil || status != nil
+        let visible = current != nil || status != nil || blocking
         if visible, window == nil,
            let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
                .first(where: { $0.activationState == .foregroundActive }) ??
@@ -154,8 +172,10 @@ final class DebugOverlayWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         // SwiftUI's hosting view is the hit view even over its buttons, so the hit view cannot tell controls from
         // empty space: decide by the frames the overlay reports, then let super route the touch.
-        guard DebugMessages.shared.interactiveRects.values.contains(where: { $0.contains(point) }) else { return nil }
-        return super.hitTest(point, with: event)
+        let messages = DebugMessages.shared
+        guard messages.blocking || messages.interactiveRects.values.contains(where: { $0.contains(point) }) else { return nil }
+        // Blocking: a tap off the controls lands on the hosting view and goes no further (not to the app).
+        return super.hitTest(point, with: event) ?? rootViewController?.view
     }
 }
 
@@ -174,6 +194,25 @@ struct DebugOverlayView: View {
     var messages: DebugMessages
 
     var body: some View {
+        ZStack(alignment: .top) {
+            if messages.blocking {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {}
+                    .overlay(alignment: .bottom) {
+                        Text("Debug mode: taps on the app are blocked.")
+                            .font(.footnote.weight(.semibold)).foregroundStyle(.white)
+                            .padding(10).background(Color.black.opacity(0.85), in: Capsule())
+                            .padding(.bottom, 40)
+                    }
+                    .accessibilityLabel("Debug mode: taps are blocked")
+            }
+            content
+        }
+    }
+
+    private var content: some View {
         VStack(spacing: 8) {
             if let status = messages.status {
                 HStack(spacing: 8) {

@@ -52,6 +52,8 @@ enum DebugBridge {
     private static var handlers: [String: Handler] = [:]
     private static var task: Task<Void, Never>?
     private static var badFiles: [String: Int] = [:]
+    /// Ids already run, so a retried `ctl.sh send` (same id, same file name) is not run twice.
+    private static var seenIDs: [String] = []
     private static let logger = Logger(subsystem: "de.gruenwald.legato", category: "debug-bridge")
 
     static let pollInterval: Duration = .milliseconds(500)
@@ -132,6 +134,12 @@ enum DebugBridge {
     }
 
     static func execute(_ command: BridgeCommand) async {
+        if seenIDs.contains(command.id) {
+            emit(id: command.id, event: "duplicate", ["command": command.command])
+            return
+        }
+        seenIDs.append(command.id)
+        if seenIDs.count > 500 { seenIDs.removeFirst(100) }
         emit(id: command.id, event: "received", ["command": command.command])
         guard let handler = handlers[command.command] else {
             emit(id: command.id, event: "error", ["message": "unknown command \(command.command)"])
@@ -196,10 +204,21 @@ enum DebugBridge {
             defer { messages.reply(id: command.id + "-selftest", choice: "selftest") }
             guard let rect = messages.firstRect else { throw BridgeError.usage("no overlay frame reported") }
             let onCard = messages.overlayHit(at: CGPoint(x: rect.midX, y: rect.midY))
-            let outside = messages.overlayHit(at: CGPoint(x: rect.midX, y: rect.maxY + 200))
-            let result: [String: Any] = ["onCardHits": onCard, "outsideHits": outside]
-            guard onCard, !outside else { throw BridgeError.usage("overlay hit test wrong: \(result)") }
+            let outsidePoint = CGPoint(x: rect.midX, y: rect.maxY + 200)
+            let wasBlocking = messages.blocking
+            messages.setBlocking(false)
+            let outside = messages.overlayHit(at: outsidePoint)
+            messages.setBlocking(true)
+            let outsideBlocked = messages.overlayHit(at: outsidePoint)
+            messages.setBlocking(wasBlocking)
+            let result: [String: Any] = ["onCardHits": onCard, "outsideHits": outside, "outsideHitsWhileBlocking": outsideBlocked]
+            guard onCard, !outside, outsideBlocked else { throw BridgeError.usage("overlay hit test wrong: \(result)") }
             return result
+        }
+        register("block") { command in
+            guard let arg = command.args.first, ["on", "off"].contains(arg) else { throw BridgeError.usage("block on|off") }
+            DebugMessages.shared.setBlocking(arg == "on")
+            return ["blocking": arg == "on"]
         }
         register("clear") { _ in DebugMessages.shared.clear(); return nil }
         register("set-setting") { command in

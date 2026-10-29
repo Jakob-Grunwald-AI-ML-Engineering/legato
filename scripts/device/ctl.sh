@@ -14,7 +14,8 @@
 #   say <text>               show a dismissable message on the phone
 #   ask [--timeout s] <text> <choice>...   show buttons, block until he answers, print the choice (default timeout 300s: prints "timeout")
 #   status <text>            persistent banner on the phone; clear removes it and any messages
-#   clear
+#   clear                    remove the banner, messages and any tap blocking
+#   block on|off             cover the app so taps outside the DEBUG card/banner do nothing
 #   background               launch com.apple.Preferences, which pushes Legato to the background
 #   foreground               bring Legato forward (no restart)
 #   terminate                stop the Legato process
@@ -140,24 +141,50 @@ cmd_send() {
   # NUL-separated so values starting with "-" or holding newlines survive.
   [ $# -le 1 ] || args="$(printf '%s\0' "${@:2}" | jq -Rs 'split("\u0000")[:-1]')"
   jq -nc --arg id "$id" --arg command "$1" --argjson args "$args" '{id: $id, command: $command, args: $args}' > "$file"
-  copy_to "$file" "$BRIDGE/inbox/$id.json" || { rm -f "$file"; return 1; }
+  deliver "$id" "$file" || { rm -f "$file"; return 1; }
   rm -f "$file"
   echo "$id"
+}
+
+# 0 if command <id> reached the phone: its file is still in the inbox or the bridge already logged its id.
+landed() {
+  local probe="$STATE/landed.probe"
+  rm -rf "$probe"
+  copy_from "$BRIDGE/inbox/$1.json" "$probe" 2> /dev/null && return 0
+  pull_log 2> /dev/null && grep -q "\"id\":\"$1\"" "$LOG"
+}
+
+# Copies a command file; CoreDevice sometimes reports an error (7000) although the file arrived, so a failure
+# is verified by reading back before a retry. Retries reuse the id and file name, and the bridge drops duplicates.
+deliver() { # deliver <id> <file>
+  local id="$1" file="$2" try
+  for try in 1 2 3; do
+    xcrun devicectl device copy to --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BID" \
+      --source "$file" --destination "$BRIDGE/inbox/$id.json" > /dev/null 2>&1 && return 0
+    landed "$id" && return 0
+    sleep 1
+  done
+  copy_to "$file" "$BRIDGE/inbox/$id.json" # a last try that prints the reason
 }
 
 cmd_say() { cmd_send say "$@"; }
 cmd_status() { cmd_send status "$@"; }
 cmd_clear() { cmd_send clear; }
+cmd_block() { cmd_send block "$@"; }
 
 cmd_ask() {
   local timeout=300
   if [ "${1:-}" = "--timeout" ]; then timeout="${2:?--timeout needs seconds}"; shift 2; fi
   [ $# -ge 2 ] || die "usage: ask [--timeout s] <text> <choice>..."
-  local id line deadline
+  local id line deadline="" cap
   id="$(cmd_send ask "$1" --timeout "$timeout" "${@:2}")"
-  deadline=$((SECONDS + timeout + 30))
+  cap=$((SECONDS + ${LEGATO_ASK_CAP:-3600})) # the card may queue behind others for a long while
   while :; do
     pull_log || true
+    # The phone starts the timeout when the card reaches the front (event "shown"); so does this.
+    if [ -z "$deadline" ] && jq -e --arg k "$id" 'select(.id == $k and .event == "shown")' "$LOG" > /dev/null 2>&1; then
+      deadline=$((SECONDS + timeout + 30))
+    fi
     line="$(jq -r --arg k "$id" 'select(.id == $k and (.event == "reply" or .event == "error")) | "\(.event) \(.choice // .message)"' "$LOG" 2> /dev/null || true)"
     line="${line%%$'\n'*}"
     if [ -n "$line" ]; then
@@ -165,7 +192,8 @@ cmd_ask() {
       echo "${line#* }"
       return 0
     fi
-    [ "$SECONDS" -lt "$deadline" ] || die "no reply to $id"
+    [ "$SECONDS" -lt "$cap" ] || die "no reply to $id (gave up waiting for it to be shown)"
+    [ -z "$deadline" ] || [ "$SECONDS" -lt "$deadline" ] || die "no reply to $id"
     sleep 1
   done
 }
@@ -235,6 +263,6 @@ cmd_pull() {
 sub="${1:-}"
 [ $# -eq 0 ] || shift
 case "$sub" in
-  devices | build | install | launch | send | say | ask | status | clear | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
+  devices | build | install | launch | send | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;
 esac
