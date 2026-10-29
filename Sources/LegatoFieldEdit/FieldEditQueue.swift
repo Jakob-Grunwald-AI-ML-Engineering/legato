@@ -31,12 +31,12 @@ public struct FieldEditQueue: Sendable {
 
     /// Where an edit's own caret goes: into (or at an edge of) one of its steps' text, or a position of the field
     /// before its steps. Mapped with the steps, resolved when the edit is written.
-    private enum CaretAnchor: Sendable {
+    private enum CaretAnchor: Sendable, Hashable {
         case inStep(Int, offset: Int)
         case position(Int)
     }
 
-    private struct Pending: Sendable {
+    private struct Pending: Sendable, Hashable {
         var transaction: EditTransaction  // steps mapped to `document.version`, sorted by location
         var lane: Lane
         var caret: CaretAnchor?
@@ -360,13 +360,18 @@ public struct FieldEditQueue: Sendable {
     /// byte for byte against every non-prefix subset of the issued writes (the others rolled back by inversion,
     /// the later ones replayed through that). The largest subset that matches wins if it is larger than every
     /// prefix explanation without a foreign change: its writes are confirmed (replayed with new versions), only
-    /// the others fail (`verifyFailed`). A tie waits (`notYet`), or resets when `final`. Nil: no subset beats the
-    /// prefix explanations. Pending edits inside a rolled-back write's text are handed back on the way.
+    /// the others fail (`verifyFailed`). Tied subsets (or a tied prefix) that leave the same field and the same
+    /// pending edits are one outcome, and the earliest writes are confirmed (a doubled letter: either copy failed);
+    /// a real tie waits (`notYet`), or resets when `final`. A lagging read before the final one (a prefix
+    /// explains it) waits without searching. Nil: no subset beats the prefix explanations. Pending edits inside
+    /// a rolled-back write's text are handed back on the way.
     private mutating func settleBySubset(
         _ snapshot: FieldSnapshot, prefixes: [(k: Int, alignment: Alignment?)], final: Bool
     ) -> SettleOutcome? {
         let count = unverified.count
         guard count > 1, count <= 8 else { return nil }
+        let prefix = prefixes.filter { $0.alignment?.step == nil }.map(\.k).max() ?? -1
+        if !final, prefix >= 0 { return nil }
         var best: [(landed: [Bool], queue: FieldEditQueue)] = []
         var bestSize = 0
         for bits in 1..<(1 << count) {
@@ -379,14 +384,23 @@ public struct FieldEditQueue: Sendable {
             if size > bestSize { (best, bestSize) = ([], size) }
             best.append((landed, replayed))
         }
-        guard let winner = best.first else { return nil }
-        let prefix = prefixes.filter { $0.alignment?.step == nil }.map(\.k).max() ?? -1
-        if prefix > bestSize { return nil }
-        if best.count > 1 || prefix == bestSize {
+        guard !best.isEmpty, prefix <= bestSize else { return nil }
+        // Earliest writes first: [true, false, true] before [false, true, true].
+        best.sort { a, b in
+            zip(a.landed, b.landed).first(where: { $0 != $1 }).map { $0.0 } ?? false
+        }
+        if prefix == bestSize {
+            let landed = (0..<count).map { $0 < prefix }
+            guard let replayed = simulate(landed) else { return nil }
+            best.insert((landed, replayed), at: 0)
+        }
+        let winner = best[0]
+        guard best.dropFirst().allSatisfy({ Self.sameOutcome($0.queue, winner.queue) }) else {
             if !final { return .notYet }
             reset(snapshot, reason: .unaligned)
             return .diverged
         }
+        if prefix == bestSize { return nil }  // the prefix explanation stands
         let issued = unverified
         self = winner.queue
         for (index, item) in issued.enumerated() {
@@ -400,6 +414,13 @@ public struct FieldEditQueue: Sendable {
         unverified = []
         document.caret = snapshot.caret
         return .diverged
+    }
+
+    /// Whether two replays leave the same field, spans and pending edits (versions aside).
+    private static func sameOutcome(_ a: FieldEditQueue, _ b: FieldEditQueue) -> Bool {
+        byteEqual(a.document.window, b.document.window) && a.document.caret == b.document.caret
+            && a.document.owned == b.document.owned && a.document.tainted == b.document.tainted
+            && a.pending == b.pending
     }
 
     /// This queue as if only the issued writes marked in `landed` reached the field; nil when a replayed write
