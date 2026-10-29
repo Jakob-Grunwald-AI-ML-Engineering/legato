@@ -11,6 +11,11 @@ import Foundation
 /// - a Live revision: marked skipped (never retried, as when the user edited the run's text);
 /// - the Replace swap: marked not replaced (the app falls back to the clipboard).
 /// A cursor that moved on by other means (a new run, a sent boundary) keeps its progress; only those flags apply.
+///
+/// The rewind keeps what landed: a write on top of the failed one that only took the tentative text out (the
+/// user-lane write before a key, `prepareForTyping`) and landed, before or after the failure, keeps its change
+/// in the rewound cursor. A later chunk that landed while the one under it failed leaves a hole the cursor
+/// cannot say; it is rewound with it, as before.
 public struct HostWriteLedger: Sendable, Equatable {
     public struct Failure: Sendable, Equatable {
         /// The cursor to take.
@@ -28,28 +33,55 @@ public struct HostWriteLedger: Sendable, Equatable {
         var id: UUID
         var previous: AppliedCursor?
         var planned: AppliedCursor?
+        /// It landed while a write before it is still unresolved.
+        var landed = false
     }
 
     private var entries: [Entry] = []
+    /// Writes that ran on top of a failed one, not resolved yet: what they change still holds if they land.
+    private var orphans: [UUID: Entry] = [:]
 
     public init() {}
 
-    public var isEmpty: Bool { entries.isEmpty }
+    public var isEmpty: Bool { entries.isEmpty && orphans.isEmpty }
 
     /// A write submitted, planned from `previous` to `planned`.
     public mutating func record(_ id: UUID, previous: AppliedCursor?, planned: AppliedCursor?) {
         entries.append(Entry(id: id, previous: previous, planned: planned))
     }
 
-    /// Confirmed, unconfirmed (it may have landed) or withdrawn: it never rewinds the cursor.
+    /// Confirmed or unconfirmed (it may have landed): it never rewinds the cursor.
     public mutating func landed(_ id: UUID) {
+        _ = landed(id, cursor: nil)
+    }
+
+    /// ``landed(_:)``, with the cursor now: the cursor to take instead when the write ran on top of one that
+    /// failed and was rewound (what it changed holds), else nil.
+    public mutating func landed(_ id: UUID, cursor: AppliedCursor?) -> AppliedCursor? {
+        if let index = entries.firstIndex(where: { $0.id == id }) {
+            entries[index].landed = true
+            while entries.first?.landed == true { entries.removeFirst() }
+            return nil
+        }
+        guard let orphan = orphans.removeValue(forKey: id), let cursor,
+            let kept = Self.keeping(orphan, on: cursor), kept != cursor
+        else { return nil }
+        return kept
+    }
+
+    /// Withdrawn while it waited: never written, nothing of it holds.
+    public mutating func withdrawn(_ id: UUID) {
         entries.removeAll { $0.id == id }
+        orphans[id] = nil
     }
 
     /// The write `id` failed with the cursor at `cursor`; nil when it is not recorded (landed, or already handed
     /// back: a write rewinds the cursor once).
     public mutating func failed(_ id: UUID, cursor: AppliedCursor?) -> Failure? {
-        guard let index = entries.firstIndex(where: { $0.id == id }) else { return nil }
+        guard let index = entries.firstIndex(where: { $0.id == id }) else {
+            orphans[id] = nil
+            return nil
+        }
         let entry = entries[index]
         let chain = entries[index...]
         entries.removeSubrange(index...)
@@ -67,6 +99,30 @@ public struct HostWriteLedger: Sendable, Equatable {
             }
             reverted = flagged
         }
-        return Failure(cursor: reverted, withdraw: chain.dropFirst().map(\.id))
+        let later = chain.dropFirst()
+        if onChain {
+            for landed in later where landed.landed {
+                if let current = reverted, let kept = Self.keeping(landed, on: current) { reverted = kept }
+            }
+        }
+        for open in later where !open.landed { orphans[open.id] = open }
+        return Failure(cursor: reverted, withdraw: later.filter { !$0.landed }.map(\.id))
+    }
+
+    /// `cursor` with what `write` changed, when it only took the tentative text out (its volatile text, the
+    /// separator and the final flag) on the same run; nil for any other write.
+    private static func keeping(_ write: Entry, on cursor: AppliedCursor) -> AppliedCursor? {
+        guard let from = write.previous, let to = write.planned, from.runID == cursor.runID, to.runID == from.runID
+        else { return nil }
+        var tentativeOnly = to
+        tentativeOnly.volatile = from.volatile
+        tentativeOnly.needsSeparator = from.needsSeparator
+        tentativeOnly.finalApplied = from.finalApplied
+        guard tentativeOnly == from else { return nil }
+        var kept = cursor
+        if from.volatile != to.volatile { kept.volatile = to.volatile }
+        if from.needsSeparator != to.needsSeparator { kept.needsSeparator = to.needsSeparator }
+        if from.finalApplied != to.finalApplied { kept.finalApplied = to.finalApplied }
+        return kept
     }
 }

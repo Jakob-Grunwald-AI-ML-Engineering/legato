@@ -1696,21 +1696,35 @@ scenario_fe() {
   assert_no_log "no queued write was refused" "kbd.fieldedit result=refused"
 
   # Latency: how long a key press, a word-row tap or ↶ takes until it returns, queue off then on: median, p95 and
-  # max each within off + 16 ms (one frame).
-  local off on kind stat a b
+  # max each within off + 16 ms (one frame). Then keys over the lagging document while the host sends and clears
+  # the field after each Return before it reports it (a read none of the queue's states is): the keys after it
+  # are in the field when their press returns, within the same bound.
+  local off on offsend onsend kind stat a b
   SCENARIO="fe. field edits: latency off vs on"
   relaunch -LegatoKeyboardHarness YES -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
   wait_log "e2e harness ready" 10
   trigger harness-fe-lag
   wait_log "e2e fe.lag on=0" 15
   off="$(last_line "fe.lag on=0")"
+  wait_log "e2e fe.lagsend on=0" 30
+  offsend="$(last_line "fe.lagsend on=0")"
   relaunch -LegatoKeyboardHarness YES -LegatoFieldEdits YES -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
   wait_log "e2e harness ready" 10
   trigger harness-fe-lag
   wait_log "e2e fe.lag on=1" 15
   on="$(last_line "fe.lag on=1")"
+  wait_log "e2e fe.lagsend on=1" 30
+  onsend="$(last_line "fe.lagsend on=1")"
   echo "fe latency off: ${off#*fe.lag }"
   echo "fe latency on:  ${on#*fe.lag }"
+  echo "fe send-clear latency off: ${offsend#*fe.lagsend }"
+  echo "fe send-clear latency on:  ${onsend#*fe.lagsend }"
+  assert_no_log "no lag step timed out" "fe.timeout"
+  assert_log "the host's clear contradicted the prediction" "harness fe.settle final=0 outcome=notYet"
+  assert_log "keys typed while it was contradicted went straight to the field" "harness fe.key direct=1"
+  assert_eq "the keys typed after the clear are in the field at once" "ok" "$(log_field "fe.step name=send-cleared " doc)"
+  assert_eq "after the reads caught up: field" "ok" "$(log_field "fe.step name=sent " doc)"
+  assert_eq "same field with the queue on as off (send-clear)" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$offsend")" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$onsend")"
   assert_eq "same field with the queue on as off" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$off")" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$on")"
   for kind in key tap undo; do
     for stat in Ms P95Ms MaxMs; do
@@ -1719,6 +1733,12 @@ scenario_fe() {
         record PASS "$kind$stat on ($b) <= off ($a) + 16 ms"
       else record FAIL "$kind$stat on <= off + 16 ms" "off <$a> on <$b>"; fi
     done
+  done
+  for stat in Ms P95Ms MaxMs; do
+    a="$(sed -n "s/.* key$stat=\([0-9.]*\).*/\1/p" <<< "$offsend")"; b="$(sed -n "s/.* key$stat=\([0-9.]*\).*/\1/p" <<< "$onsend")"
+    if [ -n "$a" ] && [ -n "$b" ] && python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[2]) <= float(sys.argv[1]) + 16 else 1)' "$a" "$b"; then
+      record PASS "send-clear key$stat on ($b) <= off ($a) + 16 ms"
+    else record FAIL "send-clear key$stat on <= off + 16 ms" "off <$a> on <$b>"; fi
   done
 }
 

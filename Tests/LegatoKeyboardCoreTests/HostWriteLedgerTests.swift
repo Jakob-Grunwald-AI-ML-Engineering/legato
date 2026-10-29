@@ -75,6 +75,61 @@ struct HostWriteLedgerTests {
         #expect(ledger.isEmpty)
     }
 
+    /// The tentative text taken out before a key (`prepareForTyping`): the volatile part goes, the separator
+    /// is due, the final text is not confirmed.
+    func prepared(_ cursor: AppliedCursor) -> AppliedCursor {
+        var prepared = cursor
+        prepared.volatile = ""
+        prepared.needsSeparator = true
+        prepared.finalApplied = false
+        return prepared
+    }
+
+    func chunk(_ committed: Int, volatile: String) -> AppliedCursor {
+        var c = cursor(committed)
+        c.volatile = volatile
+        c.finalApplied = true
+        return c
+    }
+
+    /// A chunk awaits its read; the user-lane write taking out the tentative text runs on top of it. The chunk
+    /// fails first, then the prepare write lands: the cursor rewinds the chunk and keeps what the prepare did.
+    @Test func prepareWriteLandingAfterTheChunkUnderItFailedKeepsItsChange() {
+        var ledger = HostWriteLedger()
+        let a = UUID(), p = UUID()
+        let before = chunk(3, volatile: " fo"), planned = chunk(7, volatile: " ba")
+        ledger.record(a, previous: before, planned: planned)
+        ledger.record(p, previous: planned, planned: prepared(planned))
+        let failure = ledger.failed(a, cursor: prepared(planned))
+        #expect(failure?.cursor == before)
+        #expect(ledger.landed(p, cursor: before) == prepared(before))
+        #expect(ledger.isEmpty)
+    }
+
+    /// The prepare write lands first, then the chunk under it fails: the rewind keeps what the prepare did.
+    @Test func chunkFailingUnderALandedPrepareWriteRewindsOnlyTheChunk() {
+        var ledger = HostWriteLedger()
+        let a = UUID(), p = UUID()
+        let before = chunk(3, volatile: " fo"), planned = chunk(7, volatile: " ba")
+        ledger.record(a, previous: before, planned: planned)
+        ledger.record(p, previous: planned, planned: prepared(planned))
+        #expect(ledger.landed(p, cursor: prepared(planned)) == nil)  // nothing to change yet
+        #expect(ledger.failed(a, cursor: prepared(planned)) == HostWriteLedger.Failure(cursor: prepared(before), withdraw: []))
+        #expect(ledger.isEmpty)
+    }
+
+    /// A write on top of a failed one that fails itself, or is withdrawn, changes nothing more.
+    @Test func writeOnTopOfAFailedOneThatFailsTooLeavesTheRewind() {
+        var ledger = HostWriteLedger()
+        let a = UUID(), p = UUID()
+        let before = chunk(3, volatile: " fo"), planned = chunk(7, volatile: " ba")
+        ledger.record(a, previous: before, planned: planned)
+        ledger.record(p, previous: planned, planned: prepared(planned))
+        #expect(ledger.failed(a, cursor: prepared(planned))?.cursor == before)
+        #expect(ledger.failed(p, cursor: before) == nil)
+        #expect(ledger.isEmpty)
+    }
+
     @Test func cursorMovedOnByAnotherRunKeepsItsProgress() {
         var ledger = HostWriteLedger()
         let a = UUID()

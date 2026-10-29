@@ -104,6 +104,28 @@ public final class FieldEditCoordinator {
     /// The echo the newest read showed (the host may report it again before the next).
     private var lastEcho: FieldSnapshot?
 
+    /// An owned automatic write's calls and the field they ran on (see ``Ghost``).
+    private struct Ghost {
+        var window: String
+        var caret: Int
+        var calls: [ProxyCall]
+        /// The field after them.
+        var end: FieldSnapshot
+    }
+    /// The owned automatic writes that ran and await their read.
+    private var ran: [UUID: Ghost] = [:]
+    /// Writes that ran, then failed for want of a read that may still come (the host lags past both waits),
+    /// oldest first. The next write that would run the same calls on the same field is that write again (its
+    /// source typing it once more): it is issued without running them, and its read settles both. A read showing
+    /// one while nothing is issued is that write landing late: it is held back from the queue for the retype.
+    private var ghosts: [Ghost] = []
+    /// Retypes issued without their calls, by the ghost they stand for. When their own waits pass and the field
+    /// still shows the field before them, the ghost was lost after all: the retype runs its calls then.
+    private var adopted: [UUID: Ghost] = [:]
+    /// A ghost whose retype ran its calls (or failed back to its source): if the ghost lands after all, the text
+    /// is there twice. Only logged (`fe.duplicate`): the copies cannot be told apart from the user's text.
+    private var spent: Ghost?
+
     public init(
         document: any FieldEditDocument, settleTimeout: Duration = .milliseconds(250),
         schedule: @escaping Schedule = FieldEditCoordinator.taskSchedule
@@ -153,6 +175,24 @@ public final class FieldEditCoordinator {
         lastEcho = nil
     }
 
+    private func forgetGhosts() {
+        ghosts = []
+        adopted = [:]
+        spent = nil
+    }
+
+    /// The newest read is one of our own states with the text as predicted but the caret elsewhere: the host has
+    /// not shown our closing caret move yet, or the user put the caret there; no read tells which. A patch planned
+    /// on the predicted caret may then be planned on the wrong text.
+    private var caretUncertain: Bool {
+        guard let lastEcho, !echoes.isEmpty else { return false }
+        let predicted = split
+        return lastEcho.window.utf16.elementsEqual(predicted.window.utf16) && lastEcho.caret != predicted.caret
+    }
+
+    /// Whether the predicted field may not be the field: user patches planned on it are refused.
+    private var predictionUncertain: Bool { queue.needsFinalSettle || caretUncertain }
+
     private static func same(_ a: FieldSnapshot, _ b: FieldSnapshot) -> Bool {
         a.before.utf16.elementsEqual(b.before.utf16) && a.after.utf16.elementsEqual(b.after.utf16)
     }
@@ -190,12 +230,20 @@ public final class FieldEditCoordinator {
     public func sync() {
         guard !executing, !closed else { return }
         let snapshot = read()
+        if let spent, Self.same(Self.states(of: spent.calls, window: split.window, caret: queue.document.caret).last ?? split, snapshot) {
+            trace?("fe.duplicate calls=\(spent.calls.count)")  // a write whose retype was typed landed late
+            self.spent = nil
+        }
         if document.documentID != documentID {
             documentID = document.documentID
             forgetEchoes()
+            forgetGhosts()
             queue.reset(snapshot, reason: .focusChanged)
         } else if isEcho(snapshot) {
             trace?("fe.echo")  // the host is catching up with our own calls
+            return
+        } else if issued.isEmpty, lateGhost(snapshot) {
+            trace?("fe.echo late=1")  // a failed write landing after all: its retype is not typed again
             return
         } else if issued.isEmpty {
             queue.observe(snapshot)
@@ -227,6 +275,7 @@ public final class FieldEditCoordinator {
         }
         closed = true
         forgetEchoes()
+        forgetGhosts()
         queue.reset(snapshot, reason: .focusChanged)
         dispatch()
         handlers = [:]
@@ -265,27 +314,53 @@ public final class FieldEditCoordinator {
         return true
     }
 
-    /// A keystroke: `text` at the caret, in the user lane.
+    /// A keystroke: `text` at the caret, in the user lane. Always typed in this call, never held: while the
+    /// prediction is contradicted (a read nothing explains, e.g. the host sent and cleared the field before
+    /// reporting our Return) the key goes straight to the field (`insertText` types at the real caret,
+    /// whatever the prediction says), and the next read records it as the user's typing.
     public func type(_ text: String) -> Result {
         sync()
+        if queue.needsFinalSettle { return typeDirectly([.insert(text)]) }
         let step = EditStep.insert(text, at: queue.document.caret)
-        return submit(EditTransaction(origin: .keystroke, base: queue.document.version, steps: [step]), lane: .user)
+        return keystroke([step], or: [.insert(text)])
     }
 
-    /// The delete key: the Character before the caret. `.unchanged` when the window shows none.
+    /// The delete key: the Character before the caret. `.unchanged` when the window shows none. Never held,
+    /// as ``type(_:)``.
     public func deleteBackward() -> Result {
         sync()
+        if queue.needsFinalSettle { return typeDirectly([.deleteBackward(1)]) }
         guard let last = predictedBefore.last else { return .unchanged }
         let caret = queue.document.caret, length = String(last).utf16.count
         let step = EditStep(span: Span(location: caret - length, length: length), text: "", expect: String(last))
-        return submit(EditTransaction(origin: .keystroke, base: queue.document.version, steps: [step]), lane: .user)
+        return keystroke([step], or: [.deleteBackward(1)])
+    }
+
+    /// Submits a keystroke; one the queue would hold is withdrawn and typed straight away instead.
+    private func keystroke(_ steps: [EditStep], or calls: [ProxyCall]) -> Result {
+        let transaction = EditTransaction(origin: .keystroke, base: queue.document.version, steps: steps)
+        let result = submit(transaction, lane: .user)
+        guard result == .waiting, withdraw(transaction.id) else { return result }
+        return typeDirectly(calls)
+    }
+
+    /// A key the queue cannot issue now, run on the field as the user pressed it (caret-relative calls only).
+    private func typeDirectly(_ calls: [ProxyCall]) -> Result {
+        executing = true
+        document.execute(calls)
+        executing = false
+        trace?("fe.key direct=1")
+        return .done
     }
 
     /// A word-row edit or an undo/redo step at the caret (`WordEdit`, in Characters), as its smallest patch; the
     /// caret ends after the inserted text, as the edit's own moves would leave it. Refused (`outOfWindow`) when
-    /// the window does not show all the text the edit crosses or deletes: a shorter delete would leave residue.
+    /// the window does not show all the text the edit crosses or deletes (a shorter delete would leave residue),
+    /// or while the predicted field may not be the field (a contradicting read, or a read that is our own state
+    /// with the caret elsewhere: the user may have put it there): the edit is never planned on the wrong text.
     public func apply(_ edit: WordEdit, origin: EditOrigin) -> Result {
         sync()
+        if predictionUncertain { return refuseUncertain(origin) }
         let before = predictedBefore, after = predictedAfter, caret = queue.document.caret
         let crossed = String(after.prefix(max(edit.forward, 0)))
         let removed = String((before + crossed).suffix(edit.deleteCount))
@@ -307,16 +382,23 @@ public final class FieldEditCoordinator {
     }
 
     /// Submits a planner edit. `keepsCaret`: the user's caret stays where it is (moved with the text; host text),
-    /// otherwise it ends where the ops leave it (a version swap).
+    /// otherwise it ends where the ops leave it (a version swap). A user-lane edit is refused (`outOfWindow`) while
+    /// the predicted field may not be the field, as in ``apply(_:origin:)``.
     @discardableResult
     public func write(
         _ edit: CaretOpsStep.Edit, id: UUID = UUID(), origin: EditOrigin, owner: String? = nil, lane: Lane? = nil,
         keepsCaret: Bool, onOutcome: ((Outcome) -> Void)? = nil
     ) -> Result {
+        if (lane ?? origin.lane) == .user, predictionUncertain { return refuseUncertain(origin) }
         let transaction = EditTransaction(
             id: id, origin: origin, owner: owner, base: queue.document.version, steps: [edit.step],
             caret: keepsCaret ? nil : edit.caret)
         return submit(transaction, lane: lane, onOutcome: onOutcome)
+    }
+
+    private func refuseUncertain(_ origin: EditOrigin) -> Result {
+        trace?("fe.refused origin=\(origin.rawValue) reason=uncertain caret=\(caretUncertain ? 1 : 0)")
+        return .refused(Conflict(.outOfWindow))
     }
 
     // MARK: Executing
@@ -353,13 +435,29 @@ public final class FieldEditCoordinator {
             queue.abort(write.id, requeue: false, reason: .expectMismatch)
             return true
         }
-        if echoes.isEmpty { echoes = [FieldSnapshot(window: window, caret: caret)] }
-        echoes += Self.states(of: calls, window: window, caret: caret)
-        executing = true
-        document.execute(calls)
-        executing = false
+        let states = Self.states(of: calls, window: window, caret: caret)
+        let start = FieldSnapshot(window: window, caret: caret)
+        let ghost = ghosts.first { Self.same(FieldSnapshot(window: $0.window, caret: $0.caret), start) && $0.calls == calls }
+        ghosts = []  // the field moves on: no other ghost fits it any more
+        if let ghost {
+            // The same write again: the failed one's calls already ran on this field and its read is late.
+            adopted[write.id] = ghost
+            if !Self.endsWith(echoes, states) {
+                if echoes.isEmpty { echoes = [start] }
+                echoes += states
+            }
+        } else {
+            if echoes.isEmpty { echoes = [start] }
+            echoes += states
+            executing = true
+            document.execute(calls)
+            executing = false
+            if write.owner != nil, !write.origin.isUser, let end = states.last {
+                ran[write.id] = Ghost(window: window, caret: caret, calls: calls, end: end)
+            }
+        }
         issued.insert(write.id)
-        trace?("fe.write origin=\(write.origin.rawValue) lane=\(write.lane) " + Self.summary(calls, caret: write.caret, window: queue.document.window))
+        trace?("fe.write origin=\(write.origin.rawValue) lane=\(write.lane) " + Self.summary(calls, caret: write.caret, window: queue.document.window) + (ghost != nil ? " adopted=1" : ""))
         handlers[write.id]?(.executed)
         restartSettleTimer()
         return true
@@ -390,6 +488,21 @@ public final class FieldEditCoordinator {
             armSettleTimer()
             return
         }
+        if extended, let id = issued.first, issued.count == 1, let ghost = adopted[id],
+            Self.same(FieldSnapshot(window: ghost.window, caret: ghost.caret), snapshot)
+        {
+            // Both waits passed and the field still shows nothing of it: the failed write was lost after all, and
+            // its retype runs its calls now (once; should the lost one land even later, `fe.duplicate` says so).
+            adopted[id] = nil
+            spent = ghost
+            ran[id] = ghost
+            executing = true
+            document.execute(ghost.calls)
+            executing = false
+            trace?("fe.write adopted=0 calls=\(ghost.calls.count)")
+            restartSettleTimer()
+            return
+        }
         let outcome = queue.settle(snapshot, final: true, tolerateStale: !extended)
         trace?("fe.settle final=1 outcome=\(outcome) extended=\(extended ? 1 : 0)")
         dispatch()
@@ -405,6 +518,26 @@ public final class FieldEditCoordinator {
         cancelTimer = nil
         guard issued.isEmpty else { return }
         forgetEchoes()
+        // A late write no retype claimed: the field shows it, and the queue reads it as it is.
+        if !ghosts.isEmpty {
+            ghosts = []
+            sync()
+        }
+    }
+
+    /// Whether `snapshot` is a failed write landing late (``ghosts``) on the field the queue still predicts.
+    private func lateGhost(_ snapshot: FieldSnapshot) -> Bool {
+        let predicted = split
+        guard ghosts.contains(where: {
+            Self.same($0.end, snapshot) && Self.same(FieldSnapshot(window: $0.window, caret: $0.caret), predicted)
+        }) else { return false }
+        cancelTimer?()
+        cancelTimer = schedule(settleTimeout) { [weak self] in self?.expireEchoes() }
+        return true
+    }
+
+    private static func endsWith(_ states: [FieldSnapshot], _ suffix: [FieldSnapshot]) -> Bool {
+        states.count >= suffix.count && zip(states.suffix(suffix.count), suffix).allSatisfy { same($0, $1) }
     }
 
     /// Hands the queue's events to their sources (a handler may withdraw or submit: their events go out too).
@@ -434,6 +567,15 @@ public final class FieldEditCoordinator {
     private func finish(_ id: UUID, _ outcome: Outcome) {
         issued.remove(id)
         origins[id] = nil
+        let ranGhost = ran.removeValue(forKey: id), adoptedGhost = adopted.removeValue(forKey: id)
+        if case .conflict(let conflict) = outcome, conflict.reason == .verifyFailed {
+            // Before the handler runs: its source may type the write again right away.
+            if let ranGhost { ghosts.append(ranGhost) }
+            if let adoptedGhost {
+                spent = adoptedGhost
+                trace?("fe.adopted failed=1")
+            }
+        }
         handlers.removeValue(forKey: id)?(outcome)
     }
 

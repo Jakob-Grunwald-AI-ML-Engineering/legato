@@ -641,13 +641,18 @@ final class KeyboardController {
     private func hostWrite(_ id: UUID, _ outcome: FieldEditCoordinator.Outcome) {
         switch outcome {
         case .applied, .unconfirmed:
-            hostWrites.landed(id)
+            // A write that ran on top of a failed, rewound one keeps what it changed.
+            if let kept = hostWrites.landed(id, cursor: cursor) {
+                trace?("fe.mapped kept=1")
+                cursor = kept
+                link.writeApplied(kept)
+            }
             return
         case .executed:
             guard pendingHostWrite == id else { return }
             pendingHostWrite = nil
         case .withdrawn:
-            hostWrites.landed(id)
+            hostWrites.withdrawn(id)
             if pendingHostWrite == id { pendingHostWrite = nil }
         case .conflict, .superseded:
             if pendingHostWrite == id { pendingHostWrite = nil }

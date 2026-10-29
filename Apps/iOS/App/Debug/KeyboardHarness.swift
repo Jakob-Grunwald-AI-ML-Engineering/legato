@@ -40,7 +40,10 @@ import UIKit
 /// word row, undo and redo, a version swap, typing while a revision waits for a read that lags past the settle
 /// timeout, deleting into the word a waiting revision rewrites, a write the field never shows);
 /// `harness-fe-lag` measures how long a key press, a word-row tap and ↶ take until the action returns
-/// (`fe.lag`), with the queue on or off. Both register their own Darwin observers.
+/// (`fe.lag`), with the queue on or off, then how long keys take over the lagging document while the host sends
+/// and clears the field after each Return before it reports it (`fe.lagsend`: a read none of our states is, so
+/// the queue's prediction is contradicted until a read decides; `fe.step name=send-cleared` after the first
+/// round's keys). Both register their own Darwin observers.
 @MainActor
 final class HarnessDocument: TextDocument {
     let textView = UITextView()
@@ -107,6 +110,17 @@ final class HarnessDocument: TextDocument {
     func reset() {
         textView.text = ""
         if lag != nil { reported = ("", "") }
+    }
+
+    /// The host empties the field (a chat app sending the message) and reports that at once, ahead of the states
+    /// of our calls it has not reported yet (they went with the text): a read that is none of our states.
+    func hostClears() {
+        textView.text = ""
+        if lag != nil {
+            unreported = []
+            reported = ("", "")
+        }
+        onChange?()
     }
 
     /// The user puts the caret at `location`; the host reports it after everything before it.
@@ -507,12 +521,6 @@ final class KeyboardHarnessModel {
     func measureLag() async {
         clearField()
         var keys: [Double] = [], taps: [Double] = [], undos: [Double] = []
-        func measure(_ action: () -> Void) -> Double {
-            let start = ContinuousClock.now
-            action()
-            let parts = start.duration(to: .now).components
-            return Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15
-        }
         let typing = controller.typing!
         for round in 0..<20 {
             for ch in "ab" { keys.append(measure { _ = typing.press(keyID: "char:\(ch)") }) }
@@ -522,13 +530,43 @@ final class KeyboardHarnessModel {
             try? await Task.sleep(for: .milliseconds(30))
         }
         for ch in "lagprobe" { keys.append(measure { _ = typing.press(keyID: "char:\(ch)") }) }
-        func stats(_ name: String, _ values: [Double]) -> String {
-            guard !values.isEmpty else { return "\(name)Ms=- \(name)P95Ms=- \(name)MaxMs=-" }
-            let sorted = values.sorted()
-            let p95 = sorted[min(sorted.count - 1, Int((Double(sorted.count) * 0.95).rounded(.up)) - 1)]
-            return String(format: "\(name)Ms=%.3f \(name)P95Ms=%.3f \(name)MaxMs=%.3f", sorted[sorted.count / 2], p95, sorted.last!)
+        let on = KeyboardPreferences.forcedFieldEdits ? 1 : 0
+        E2E.log("fe.lag on=\(on) keys=\(keys.count) taps=\(taps.count) undos=\(undos.count) \(Self.stats("key", keys)) \(Self.stats("tap", taps)) \(Self.stats("undo", undos)) doc=\(E2E.quote(document.text))")
+
+        // The lagging document (60 ms), and a host that sends and clears the field after each Return before it
+        // reports it: the keys after it are typed in the call they arrive, none waits and none is lost.
+        clearField()
+        document.lag = .milliseconds(60)
+        var sent: [Double] = []
+        for round in 0..<10 {
+            for ch in "hi" { sent.append(measure { _ = typing.press(keyID: "char:\(ch)") }) }
+            await settled("lagsend-typed")
+            sent.append(measure { _ = typing.press(keyID: "return") })
+            document.hostClears()
+            for ch in "ok" { sent.append(measure { _ = typing.press(keyID: "char:\(ch)") }) }
+            if round == 0 { step("send-cleared") }
+            try? await Task.sleep(for: .milliseconds(30))
         }
-        E2E.log("fe.lag on=\(KeyboardPreferences.forcedFieldEdits ? 1 : 0) keys=\(keys.count) taps=\(taps.count) undos=\(undos.count) \(stats("key", keys)) \(stats("tap", taps)) \(stats("undo", undos)) doc=\(E2E.quote(document.text))")
+        await settled("lagsend-settled")
+        step("sent")
+        document.lag = nil
+        E2E.log("fe.lagsend on=\(on) keys=\(sent.count) \(Self.stats("key", sent)) doc=\(E2E.quote(document.text))")
+    }
+
+    /// How long `action` takes, in milliseconds.
+    private func measure(_ action: () -> Void) -> Double {
+        let start = ContinuousClock.now
+        action()
+        let parts = start.duration(to: .now).components
+        return Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15
+    }
+
+    /// `<name>Ms=<median> <name>P95Ms=<p95> <name>MaxMs=<max>`.
+    private static func stats(_ name: String, _ values: [Double]) -> String {
+        guard !values.isEmpty else { return "\(name)Ms=- \(name)P95Ms=- \(name)MaxMs=-" }
+        let sorted = values.sorted()
+        let p95 = sorted[min(sorted.count - 1, Int((Double(sorted.count) * 0.95).rounded(.up)) - 1)]
+        return String(format: "\(name)Ms=%.3f \(name)P95Ms=%.3f \(name)MaxMs=%.3f", sorted[sorted.count / 2], p95, sorted.last!)
     }
 }
 
