@@ -315,6 +315,9 @@ final class AppController {
         #if DEBUG
         E2E.applyLaunchSettings()
         #endif
+        #if LEGATO_INTERNAL
+        DebugBridge.start()
+        #endif
         // Publish the resolution task before a cold-launch URL can reserve microphone admission.
         let initialResolution = beginEngineResolution(releasingKeptMicrophone: false)
         Task { await finishEngineRefresh(initialResolution) }
