@@ -50,9 +50,16 @@ final class FakeTextTarget: TextTarget {
         selection = UTF16Range(location: location, length: 0)
     }
 
-    /// The user selects text in the field.
+    /// Runs inside `select`, after the selection moved: the user types between the writer's select and replace.
+    var onSelect: (() -> Void)?
+    /// Every selection set through `select` (the user's or the writer's), in order.
+    private(set) var selections: [UTF16Range] = []
+
+    /// The user selects text in the field; also what the writer's `TextTarget.select` does.
     func select(_ range: UTF16Range) {
         selection = range
+        selections.append(range)
+        onSelect?()
     }
 
     /// Like a real field, clamps the range to the text instead of trapping.
@@ -67,6 +74,11 @@ final class FakeTextTarget: TextTarget {
     func selectedRange() throws -> UTF16Range {
         if failSelection { throw Failure() }
         return selection
+    }
+
+    func length() throws -> Int {
+        if failReads { throw Failure() }
+        return units.count
     }
 
     func text(in range: UTF16Range) throws -> String {
