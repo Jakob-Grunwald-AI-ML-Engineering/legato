@@ -70,13 +70,19 @@ public struct FieldEditQueue: Sendable {
             guard let mapped = rebase(transaction, through: landed) else { return }
             transaction = mapped
         }
+        if let key = transaction.coalesce {
+            for item in pending where item.transaction.coalesce == key {
+                events.append(.superseded(item.transaction.id, by: transaction.id))
+            }
+            pending.removeAll { $0.transaction.coalesce == key }
+        }
         pending.append(Pending(transaction: transaction, lane: lane ?? transaction.origin.lane))
     }
 
     // MARK: Writing
 
     /// The next write to run: the oldest edit of the highest lane whose guards hold. Edits failing a guard are
-    /// handed back on the way.
+    /// handed back on the way. While issued writes await a host read only the user lane runs; the rest wait.
     public mutating func next() -> FieldWrite? {
         while let index = nextIndex() {
             let item = pending.remove(at: index)
@@ -90,8 +96,9 @@ public struct FieldEditQueue: Sendable {
     }
 
     private func nextIndex() -> Int? {
-        guard let top = pending.map(\.lane).max() else { return nil }
-        return pending.firstIndex { $0.lane == top }
+        let eligible = pending.indices.filter { unverified.isEmpty || pending[$0].lane == .user }
+        guard let top = eligible.map({ pending[$0].lane }).max() else { return nil }
+        return eligible.first { pending[$0].lane == top }
     }
 
     /// Why `transaction` must not be written now, if anything.
