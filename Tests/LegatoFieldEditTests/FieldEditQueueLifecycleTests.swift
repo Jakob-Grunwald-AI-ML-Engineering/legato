@@ -136,6 +136,98 @@ import LegatoFieldEdit
         #expect(queue.takeEvents() == [.conflict(late.id, Conflict(.outOfWindow))])
     }
 
+    // Text typed after a requeued write's text stays after it when the write replays.
+
+    @Test func aKeystrokeTypedAfterARequeuedKeystrokeStaysAfterIt() {
+        var field = "ab"
+        var queue = macQueue(field)
+        let x = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("x", at: 2)])
+        queue.submit(x)
+        _ = queue.next()
+        queue.submit(EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("y", at: 3)]))
+        queue.abort(x.id, requeue: true, reason: .writeFailed)
+        queue.drain(&field)
+        #expect(field == "abxy")
+    }
+
+    @Test func anAgentEditAfterARequeuedAgentWriteStaysAfterIt() {
+        var field = "hello"
+        var queue = macQueue(field)
+        let world = EditTransaction(origin: .agent, owner: "agent", base: v0, steps: [.insert(" world", at: 5)])
+        queue.submit(world)
+        _ = queue.next()
+        queue.submit(EditTransaction(origin: .agent, owner: "other", base: queue.document.version, steps: [.insert("!", at: 11)]))
+        queue.abort(world.id, requeue: true, reason: .unreadable)
+        queue.drain(&field)
+        #expect(field == "hello world!")
+    }
+
+    @Test func abortingTheMiddleOfThreeWritesKeepsTheirOrder() {
+        var field = "ab ab"
+        var queue = macQueue(field)
+        queue.submit(EditTransaction(origin: .liveCleanup, owner: "c", base: v0, steps: [.insert("!", at: 2)]))
+        let k1 = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("x", at: 5)])
+        queue.submit(k1)
+        _ = queue.next()
+        let k2 = EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("y", at: 6)])
+        queue.submit(k2)
+        _ = queue.next()
+        queue.submit(EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("z", at: 7)]))
+        _ = queue.next()
+        field = "ab abx"
+        queue.abort(k2.id, requeue: true, reason: .writeFailed)
+        queue.settle(FieldSnapshot(window: field, caret: 6, windowBase: 0))
+        queue.drain(&field)
+        #expect(field == "ab! abxyz")
+    }
+
+    /// ASR binds after foreign text at its insertion point, but text in front of a requeued write stays in front.
+    @Test func anASRInsertBeforeARequeuedReplacementStaysBeforeIt() {
+        var field = "ab cd"
+        var queue = macQueue(field)
+        let fix = EditTransaction(origin: .agent, owner: "agent", base: v0, steps: [replace(3, "cd", with: "CD!")])
+        queue.submit(fix)
+        _ = queue.next()
+        queue.submit(EditTransaction(origin: .asr, owner: "run", base: queue.document.version, steps: [.insert("<", at: 3)]))
+        queue.submit(EditTransaction(origin: .asr, owner: "run2", base: queue.document.version, steps: [.insert(">", at: 6)]))
+        queue.abort(fix.id, requeue: true, reason: .writeFailed)
+        queue.drain(&field)
+        #expect(field == "ab <CD!>")
+    }
+
+    /// A keystroke preempts the requeued ASR write it was typed after; it still ends up after the ASR text.
+    @Test func aKeystrokeRunningBeforeTheRequeuedWriteItFollowsStaysAfterIt() {
+        var field = "hello"
+        var queue = macQueue(field)
+        let asr = EditTransaction(origin: .asr, owner: "run", base: v0, steps: [.insert(" world", at: 5)])
+        queue.submit(asr)
+        _ = queue.next()
+        let key = EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("!", at: 11)])
+        queue.submit(key)
+        queue.abort(asr.id, requeue: true, reason: .writeFailed)
+        let writes = queue.drain(&field)
+        #expect(writes.map(\.id) == [key.id, asr.id])
+        #expect(field == "hello world!")
+    }
+
+    /// A conflict of one queued edit never blocks or drops the others.
+    @Test func aPendingEditWhoseNeighbourConflictsIsStillIssued() {
+        var field = "one two three"
+        var queue = macQueue(field)
+        let stale = EditTransaction(origin: .agent, owner: "a", base: v0, steps: [replace(4, "tw0", with: "TWO")])
+        let first = EditTransaction(origin: .agent, owner: "b", base: v0, steps: [replace(0, "one", with: "One")])
+        let last = EditTransaction(origin: .agent, owner: "c", base: v0, steps: [replace(8, "three", with: "Three")])
+        queue.submit(first)
+        queue.submit(stale)
+        queue.submit(last)
+        queue.submit(EditTransaction(origin: .keystroke, base: v0, steps: [replace(0, "one", with: "uno")]))
+        queue.drain(&field)
+        #expect(field == "uno two Three")
+        let events = queue.takeEvents()
+        #expect(events.contains(.conflict(first.id, Conflict(.overlap, intervening: replace(0, "one", with: "uno"), byUser: true))))
+        #expect(events.contains(.conflict(stale.id, Conflict(.expectMismatch))))
+    }
+
     // MARK: B6 queue identity
 
     @Test func editsFromAnotherQueueOrAnUnknownVersionAreOutOfWindow() throws {

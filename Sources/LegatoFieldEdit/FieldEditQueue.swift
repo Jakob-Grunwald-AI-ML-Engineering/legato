@@ -73,6 +73,32 @@ public struct FieldEditQueue: Sendable {
         var transaction: UUID?
         var owner: String?
         var byUser: Bool
+        /// Which step of `transaction` this is (index into its steps sorted by location).
+        var step: StepKey? = nil
+    }
+
+    /// One step of a transaction: its index in the transaction's steps, sorted by location.
+    private struct StepKey: Sendable, Hashable {
+        var transaction: UUID
+        var index: Int
+    }
+
+    /// An insertion point of a pending edit: one of its zero-length steps, or its caret.
+    private enum Target: Sendable, Hashable {
+        case step(Int)
+        case caret
+    }
+
+    /// A pending insertion point that sat at an edge of a requeued step's text when that step was rolled back.
+    /// The rollback collapses both edges onto one position; this keeps the point on its `side` of the step's text
+    /// when the step replays (or the step on the other side when the point lands first), and moves the point with
+    /// the step through anything landing there in between. Dropped once either lands or leaves the queue.
+    private struct Affinity: Sendable {
+        var anchor: StepKey
+        var follower: UUID
+        var target: Target
+        var side: Bias
+        var anchorBias: Bias
     }
 
     private struct Unverified: Sendable {
@@ -98,6 +124,7 @@ public struct FieldEditQueue: Sendable {
     /// The newest version number handed out.
     private var lastVersion: Int
     private var events: [QueueEvent] = []
+    private var affinities: [Affinity] = []
 
     public init(_ snapshot: FieldSnapshot, version: FieldVersion = FieldVersion(0), session: UUID = UUID()) {
         document = ShadowDocument(
@@ -209,10 +236,13 @@ public struct FieldEditQueue: Sendable {
         let caretBias: Bias = transaction.origin.isUser || transaction.origin == .asr ? .after : .before
         let ordered = Array(transaction.steps.reversed())
         var caret = document.caret
-        for step in ordered {
+        for (offset, step) in ordered.enumerated() {
             caret = StepMap(step).map(position: caret, bias: caretBias)
-            land(step, transaction: transaction.id, owner: transaction.owner, byUser: transaction.origin.isUser)
+            land(
+                step, transaction: transaction.id, owner: transaction.owner, byUser: transaction.origin.isUser,
+                key: StepKey(transaction: transaction.id, index: ordered.count - 1 - offset))
         }
+        dropAffinities(of: transaction.id)
         if let anchor = item.caret { caret = Self.resolve(anchor, steps: transaction.steps) }
         document.caret = caret
         let write = FieldWrite(
@@ -243,6 +273,16 @@ public struct FieldEditQueue: Sendable {
     /// timeout) they fail with `verifyFailed` and are rolled back by inverting their steps; without it, a read
     /// that only lags (shows the oldest writes or none, with no foreign change) returns `notYet` and they wait.
     /// A read consistent with no prediction fails them all and is then observed against the confirmed field.
+    ///
+    /// Ambiguous reads (iOS): the queue never guesses where its offsets went. An edge shift only counts as an
+    /// alternative with text before the caret in both the prediction and the read.
+    /// - A read byte-identical to an older prediction that is also a newer one with a moved edge (a lagging read,
+    ///   or a landed write plus an edge shift) confirms the writes up to the older one and returns `notYet`; with
+    ///   `final` the rest fail (`verifyFailed`) and the queue resets (`unaligned`; pending edits `outOfWindow`).
+    /// - A read byte-identical to the newest prediction confirms every write, whatever older predictions fit.
+    /// - Otherwise, a read that two explanations fit (typing and an edge shift, or edge shifts at two predictions)
+    ///   confirms the writes that landed under both and resets: a wrong edge shift would move owned and pending
+    ///   spans onto the user's text untainted, wrong typing would leave them on other text.
     @discardableResult
     public mutating func settle(_ snapshot: FieldSnapshot, final: Bool = true) -> SettleOutcome {
         guard !unverified.isEmpty else {
@@ -262,34 +302,47 @@ public struct FieldEditQueue: Sendable {
             written.append(spans)
         }
 
-        var choice: (k: Int, alignment: Alignment?)?
+        // Every way the read follows from a prediction; the first is the preferred one.
+        var explanations: [(k: Int, alignment: Alignment?)] = []
         let indices = Array(predictions.indices.reversed())
         if !windowBaseMoved(snapshot) {
             if let k = indices.first(where: { byteEqual(predictions[$0].window, snapshot.window) }) {
-                choice = (k, nil)
+                explanations = [(k, nil)]
+                for newer in indices where newer > k && plausibleEdge(predictions[newer], snapshot) {
+                    if let edges = alignments(predictions[newer], snapshot).edges { explanations.append((newer, edges)) }
+                }
             } else if !snapshot.window.isEmpty {
                 let candidates = indices.map { (k: $0, alignments: alignments(predictions[$0], snapshot)) }
-                if let edge = candidates.first(where: { $0.alignments.edges != nil }) {
-                    choice = (edge.k, edge.alignments.edges)
-                } else if let typed = candidates.first(where: { candidate in
-                    guard let step = candidate.alignments.typing?.step else { return false }
-                    return !written[candidate.k].contains { touches(step.span, $0) }
-                }) {
-                    choice = (typed.k, typed.alignments.typing)
+                let edges = candidates.compactMap { candidate in
+                    candidate.alignments.edges.map { (k: candidate.k, alignment: Optional($0)) }
                 }
+                let typed = candidates.compactMap { candidate -> (k: Int, alignment: Alignment?)? in
+                    guard let typing = candidate.alignments.typing, let step = typing.step,
+                        !written[candidate.k].contains(where: { touches(step.span, $0) })
+                    else { return nil }
+                    return (candidate.k, typing)
+                }
+                // The newest typing explanation stands for typing: an older one means the user typed our text.
+                explanations = edges.filter { plausibleEdge(predictions[$0.k], snapshot) } + typed.prefix(1)
+                if explanations.isEmpty, let edge = edges.first { explanations = [edge] }
             }
         }
 
-        guard let choice else {
+        guard let choice = explanations.first else {
             rollBack(from: 0, requeueFirst: false, requeueRest: false, reason: .verifyFailed)
             observe(snapshot)
             return .diverged
         }
-        for item in unverified[..<choice.k] {
-            events.append(.applied(item.write.id, version: item.write.version))
-            feed.append(.applied(item.write.id, origin: item.write.origin, steps: item.write.steps, version: item.write.version))
+        if explanations.count > 1 {
+            // Ambiguous: confirm only what landed under every explanation; wait while every one only lags or
+            // moves an edge, otherwise start over from the read.
+            confirm(explanations.map(\.k).min() ?? 0)
+            if !final, !unverified.isEmpty, explanations.allSatisfy({ $0.alignment?.step == nil }) { return .notYet }
+            let all = unverified.isEmpty
+            reset(snapshot, reason: .unaligned)
+            return all ? .confirmed : .diverged
         }
-        unverified.removeFirst(choice.k)
+        confirm(choice.k)
         if !unverified.isEmpty {
             if !final, choice.alignment?.step == nil { return .notYet }
             rollBack(from: 0, requeueFirst: false, requeueRest: false, reason: .verifyFailed)
@@ -298,13 +351,24 @@ public struct FieldEditQueue: Sendable {
         return choice.k == predictions.count - 1 ? .confirmed : .diverged
     }
 
+    /// Confirms the oldest `count` issued writes (`applied`).
+    private mutating func confirm(_ count: Int) {
+        for item in unverified[..<count] {
+            events.append(.applied(item.write.id, version: item.write.version))
+            feed.append(.applied(item.write.id, origin: item.write.origin, steps: item.write.steps, version: item.write.version))
+        }
+        unverified.removeFirst(count)
+    }
+
     /// A host update the queue did not write. The same window is a caret-only move (offsets re-based exactly, no
     /// text search). Otherwise the read is aligned at the caret: on the Mac (absolute window) any change becomes
     /// one foreign `byUser` step, its common prefix capped at the lower caret; on iOS a change at the caret
     /// (typing, deleting, pasting: the text before the caret changed at its end, the text after it only at its far
     /// edge) is a foreign step, and a read that only moved the window's edges is a re-base that taints nothing.
-    /// Anything else is not alignable and resets; so does an emptied field. While writes await verification this
-    /// settles them first (`final`).
+    /// Anything else is not alignable and resets; so does an emptied field. A change that is both (e.g. "aa" → "a":
+    /// a delete at the caret or the left edge moving by one, with text before the caret on both sides) resets
+    /// too: either guess puts pending edits before the caret one place off when wrong. While writes await
+    /// verification this settles them first (`final`).
     public mutating func observe(_ snapshot: FieldSnapshot) {
         if !unverified.isEmpty {
             settle(snapshot)
@@ -317,6 +381,9 @@ public struct FieldEditQueue: Sendable {
         }
         if snapshot.window.isEmpty { return reset(snapshot, reason: .cleared) }
         let candidates = alignments(document, snapshot)
+        if candidates.typing != nil, candidates.edges != nil, plausibleEdge(document, snapshot) {
+            return reset(snapshot, reason: .unaligned)
+        }
         guard let alignment = candidates.typing ?? candidates.edges else { return reset(snapshot, reason: .unaligned) }
         apply(alignment, snapshot)
     }
@@ -331,6 +398,7 @@ public struct FieldEditQueue: Sendable {
         unverified = []
         pending = []
         history = []
+        affinities = []
         floor = nextVersion()
         document = ShadowDocument(
             window: snapshot.window, windowBase: snapshot.windowBase, caret: snapshot.caret, version: floor)
@@ -342,6 +410,12 @@ public struct FieldEditQueue: Sendable {
     private func windowBaseMoved(_ snapshot: FieldSnapshot) -> Bool {
         guard let base = document.windowBase, let read = snapshot.windowBase else { return false }
         return base != read
+    }
+
+    /// Whether a moved left edge is a real alternative to typing: only with text before the caret on both sides
+    /// (an empty before-context is the field's start, which no edge hides).
+    private func plausibleEdge(_ document: ShadowDocument, _ read: FieldSnapshot) -> Bool {
+        document.windowBase == nil && document.caret > 0 && read.caret > 0
     }
 
     /// How `read` can follow from `document`: `typing`, a foreign change at the caret; `edges`, the same text
@@ -394,12 +468,15 @@ public struct FieldEditQueue: Sendable {
     }
 
     /// Applies one landed step (own or foreign) to the shadow document and moves everything through it.
-    private mutating func land(_ step: EditStep, transaction: UUID?, owner: String?, byUser: Bool) {
+    private mutating func land(
+        _ step: EditStep, transaction: UUID?, owner: String?, byUser: Bool, key: StepKey? = nil
+    ) {
         let map = StepMap(step)
         document.window = document.window.replacing(step.span, with: step.text)
         document.version = nextVersion()
         let landed = Landed(
-            version: document.version, change: .step(step), transaction: transaction, owner: owner, byUser: byUser)
+            version: document.version, change: .step(step), transaction: transaction, owner: owner, byUser: byUser,
+            step: key)
         history.append(landed)
 
         let written = Span(location: step.span.location, length: map.insertedLength)
@@ -448,6 +525,10 @@ public struct FieldEditQueue: Sendable {
     /// Undoes `unverified[index...]` by inverting their steps in reverse order: the document returns to what it
     /// was before the first of them, their changes leave the history (their versions are dead) and pending edits
     /// are mapped back through the inverted steps.
+    ///
+    /// Inverting a step collapses both edges of its text onto one position. For a step that is requeued, a
+    /// pending insertion point at the start of its text stays before it and one at the end stays after it when
+    /// it replays (``Affinity``): text typed after a requeued write is never written in front of it.
     private mutating func rollBack(from index: Int, requeueFirst: Bool, requeueRest: Bool, reason: Conflict.Reason) {
         let undone = Array(unverified[index...])
         guard let first = undone.first else { return }
@@ -457,38 +538,95 @@ public struct FieldEditQueue: Sendable {
             conflict(item.write.id, Conflict(reason))
         }
         for (offset, item) in undone.enumerated().reversed() {
-            for step in item.write.steps.reversed() {
+            let requeued = requeues(offset)
+            let anchorBias = item.item.transaction.origin.insertBias
+            for (stepIndex, step) in item.write.steps.reversed().enumerated() {
+                let start = step.span.location, end = start + step.text.utf16.count
                 let inverse = EditStep(
-                    span: Span(location: step.span.location, length: step.text.utf16.count), text: step.expect,
-                    expect: step.text)
+                    span: Span(location: start, length: end - start), text: step.expect, expect: step.text)
+                let anchor = StepKey(transaction: item.write.id, index: stepIndex)
                 pending = pending.compactMap { waiting in
-                    if let moved = mapped(waiting, through: .step(inverse)) { return moved }
+                    var sides: [Target: Bias] = [:]
+                    if requeued, end > start {
+                        for target in Self.insertionPoints(of: waiting) {
+                            if target.position == start { sides[target.target] = .before }
+                            if target.position == end { sides[target.target] = .after }
+                        }
+                        for (target, side) in sides {
+                            affinities.removeAll { $0.anchor == anchor && $0.follower == waiting.transaction.id && $0.target == target }
+                            affinities.append(
+                                Affinity(anchor: anchor, follower: waiting.transaction.id, target: target, side: side,
+                                    anchorBias: anchorBias))
+                        }
+                    }
+                    if let moved = mapped(waiting, through: .step(inverse), bias: { sides[$0] }) { return moved }
                     conflict(waiting.transaction.id, Conflict(reason))
                     return nil
                 }
             }
-            if requeues(offset) { pending.insert(item.item, at: 0) }
+            if requeued { pending.insert(item.item, at: 0) }
         }
         document = first.before
         history.removeAll { $0.version > first.before.version }
     }
 
-    /// `item` moved through `change`, or nil when a step's range is gone.
-    private func mapped(_ item: Pending, through change: Change) -> Pending? {
+    /// `item` moved through `change`, or nil when a step's range is gone. An insertion point takes the side
+    /// `bias` names for it, else its origin's.
+    private func mapped(_ item: Pending, through change: Change, bias: (Target) -> Bias? = { _ in nil }) -> Pending? {
         var item = item
-        let bias = item.transaction.origin.insertBias
+        let origin = item.transaction.origin.insertBias
         for index in item.transaction.steps.indices {
-            guard let span = change.map(item.transaction.steps[index].span, bias: bias) else { return nil }
+            let side = bias(.step(index)) ?? origin
+            guard let span = change.map(item.transaction.steps[index].span, bias: side) else { return nil }
             item.transaction.steps[index].span = span
         }
-        if case .position(let p) = item.caret { item.caret = .position(change.map(position: p, bias: bias)) }
+        if case .position(let p) = item.caret {
+            item.caret = .position(change.map(position: p, bias: bias(.caret) ?? origin))
+        }
         return item
+    }
+
+    /// The zero-length steps and the position caret of `item`, where they are.
+    private static func insertionPoints(of item: Pending) -> [(target: Target, position: Int)] {
+        var points = item.transaction.steps.indices.compactMap { index -> (target: Target, position: Int)? in
+            let span = item.transaction.steps[index].span
+            return span.isEmpty ? (.step(index), span.location) : nil
+        }
+        if case .position(let p) = item.caret { points.append((.caret, p)) }
+        return points
+    }
+
+    /// The side an insertion point of `item` takes at `landed` from the affinities (nil: its origin's): its
+    /// recorded side of the anchor step landing; for an anchor step, the other side of a follower landing first;
+    /// through anything else, the anchor's own bias, so the two stay together.
+    private func affinityBias(_ item: Pending, _ target: Target, at landed: Landed) -> Bias? {
+        let id = item.transaction.id
+        if let key = landed.step {
+            if let a = affinities.first(where: { $0.anchor == key && $0.follower == id && $0.target == target }) {
+                return a.side
+            }
+            if case .step(let index) = target,
+                let a = affinities.first(where: {
+                    $0.anchor == StepKey(transaction: id, index: index) && $0.follower == key.transaction
+                        && $0.target == .step(key.index)
+                })
+            {
+                return a.side == .after ? .before : .after
+            }
+        }
+        return affinities.first(where: { $0.follower == id && $0.target == target })?.anchorBias
+    }
+
+    private mutating func dropAffinities(of id: UUID) {
+        affinities.removeAll { $0.anchor.transaction == id || $0.follower == id }
     }
 
     /// `item` moved through `landed`, or nil after handing it back: superseded by the same owner's own automatic
     /// edit, out of window past a window edge, otherwise an overlap conflict (with a note when the user caused it).
     private mutating func rebase(_ item: Pending, through landed: Landed) -> Pending? {
-        if let moved = mapped(item, through: landed.change) { return moved }
+        if let moved = mapped(item, through: landed.change, bias: { affinityBias(item, $0, at: landed) }) {
+            return moved
+        }
         let id = item.transaction.id
         switch landed.change {
         case .edges:
@@ -504,11 +642,13 @@ public struct FieldEditQueue: Sendable {
     }
 
     private mutating func conflict(_ id: UUID, _ conflict: Conflict) {
+        dropAffinities(of: id)
         events.append(.conflict(id, conflict))
         feed.append(.conflict(id, conflict))
     }
 
     private mutating func supersede(_ id: UUID, by newer: UUID) {
+        dropAffinities(of: id)
         events.append(.superseded(id, by: newer))
         feed.append(.superseded(id, by: newer))
     }
