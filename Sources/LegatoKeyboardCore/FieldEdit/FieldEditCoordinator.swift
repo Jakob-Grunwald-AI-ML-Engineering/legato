@@ -24,12 +24,15 @@ public protocol FieldEditDocument: AnyObject {
 ///   sequence (move, delete, insert, move back; `ProxyOpCompiler`) in this main-thread turn, so a keystroke
 ///   never lands between our caret move and our move back. User-lane edits (keys, the word row, undo and redo,
 ///   versions) run in the call that submits them; the ASR and cleanup lanes wait while a write awaits its read.
+///   Keys run so even while a read contradicts the prediction (the queue issues the user lane then too); other
+///   user edits are refused then, as they would be planned on a field that may not be the field.
 /// - Verification: every read before the timeout is settled with `final: false` (right after a write, and on
 ///   every host update: `sync`). Such a read never fails a write and never records our own text as the user's:
 ///   a read nothing explains (an intermediate or partial proxy state) waits (`notYet`). `settleTimeout` after the
 ///   newest write the read is settled with `final: true, tolerateStale: true`; a read still showing the field from
-///   before a write (`stale`: the host has not caught up) waits once more, and only that second final read may
-///   fail what it does not show. A failed write is handed back once.
+///   before a write (`stale`: the host has not caught up), or one that still contradicts the prediction (nothing
+///   explains it, e.g. a transient empty context), waits once more, and only that second final read may fail
+///   what it does not show. A failed write is handed back once.
 /// - Echoes: the coordinator knows every state its own calls take the field through (the field before them,
 ///   then after each move, each deleted Character, each insert). A read that is one of those states, other
 ///   than the last, is the host catching up with our calls, not news: it is not handed to the queue (matched in
@@ -314,43 +317,28 @@ public final class FieldEditCoordinator {
         return true
     }
 
-    /// A keystroke: `text` at the caret, in the user lane. Always typed in this call, never held: while the
+    /// A keystroke: `text` at the caret, in the user lane, typed in this call. Never held: also while the
     /// prediction is contradicted (a read nothing explains, e.g. the host sent and cleared the field before
-    /// reporting our Return) the key goes straight to the field (`insertText` types at the real caret,
-    /// whatever the prediction says), and the next read records it as the user's typing.
+    /// reporting our Return) the queue issues it on the prediction, as one more unverified write, so the reads
+    /// after it are settled against it (an old read does not make the queue forget it, a later one does not take
+    /// it for the user's typing). Its call (`insertText`) types at the real caret, whatever the prediction says.
     public func type(_ text: String) -> Result {
         sync()
-        if queue.needsFinalSettle { return typeDirectly([.insert(text)]) }
-        let step = EditStep.insert(text, at: queue.document.caret)
-        return keystroke([step], or: [.insert(text)])
+        return keystroke([.insert(text, at: queue.document.caret)])
     }
 
-    /// The delete key: the Character before the caret. `.unchanged` when the window shows none. Never held,
-    /// as ``type(_:)``.
+    /// The delete key: the Character before the caret, as ``type(_:)``. `.unchanged` when the prediction shows
+    /// none (its source then deletes on the field itself, as without the queue).
     public func deleteBackward() -> Result {
         sync()
-        if queue.needsFinalSettle { return typeDirectly([.deleteBackward(1)]) }
         guard let last = predictedBefore.last else { return .unchanged }
         let caret = queue.document.caret, length = String(last).utf16.count
-        let step = EditStep(span: Span(location: caret - length, length: length), text: "", expect: String(last))
-        return keystroke([step], or: [.deleteBackward(1)])
+        return keystroke([EditStep(span: Span(location: caret - length, length: length), text: "", expect: String(last))])
     }
 
-    /// Submits a keystroke; one the queue would hold is withdrawn and typed straight away instead.
-    private func keystroke(_ steps: [EditStep], or calls: [ProxyCall]) -> Result {
-        let transaction = EditTransaction(origin: .keystroke, base: queue.document.version, steps: steps)
-        let result = submit(transaction, lane: .user)
-        guard result == .waiting, withdraw(transaction.id) else { return result }
-        return typeDirectly(calls)
-    }
-
-    /// A key the queue cannot issue now, run on the field as the user pressed it (caret-relative calls only).
-    private func typeDirectly(_ calls: [ProxyCall]) -> Result {
-        executing = true
-        document.execute(calls)
-        executing = false
-        trace?("fe.key direct=1")
-        return .done
+    private func keystroke(_ steps: [EditStep]) -> Result {
+        if queue.needsFinalSettle { trace?("fe.key contradicted=1") }
+        return submit(EditTransaction(origin: .keystroke, base: queue.document.version, steps: steps), lane: .user)
     }
 
     /// A word-row edit or an undo/redo step at the caret (`WordEdit`, in Characters), as its smallest patch; the
@@ -477,13 +465,14 @@ public final class FieldEditCoordinator {
         }
     }
 
-    /// The timeout passed: a final read decides; a stale one or an echo (the host has not caught up) waits once
-    /// more.
+    /// The timeout passed: a final read decides; a stale one, an echo (the host has not caught up) or a read
+    /// that still contradicts the prediction (e.g. a transient empty context) waits once more.
     private func settleFinal() {
         guard !issued.isEmpty, !closed, !executing else { return }
         let snapshot = read()
-        if isEcho(snapshot), !extended {
-            trace?("fe.settle final=1 outcome=lagging extended=0")
+        let echo = isEcho(snapshot)
+        if !extended, echo || queue.needsFinalSettle {
+            trace?("fe.settle final=1 outcome=\(echo ? "lagging" : "contradicted") extended=0")
             extended = true
             armSettleTimer()
             return
