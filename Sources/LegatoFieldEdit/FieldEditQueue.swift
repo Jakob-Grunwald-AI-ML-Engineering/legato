@@ -1,21 +1,28 @@
 import Foundation
 
-/// What a host read did to the issued writes (``FieldEditQueue/settle(_:final:)``).
+/// What a host read did to the issued writes (``FieldEditQueue/settle(_:final:tolerateStale:)``).
 public enum SettleOutcome: Sendable, Hashable {
     /// Every issued write shows in the field.
     case confirmed
-    /// At least one write did not land: it and every write after it failed (`verifyFailed`) and were rolled back.
+    /// At least one write (or one step of a multi-step write) did not land: only what is missing failed
+    /// (`verifyFailed`) and was rolled back; what landed is confirmed.
     case diverged
-    /// The read shows only the oldest writes, or none yet (only with `final: false`): those it shows are confirmed
-    /// and the rest wait for the next read.
+    /// Only with `final: false`: the read shows only the oldest writes, a write still in progress (an
+    /// intermediate state of its op sequence) or nothing any prediction explains. Writes it fully shows are
+    /// confirmed; nothing else changed, the rest wait for the next read.
     case notYet
+    /// Only with `final` and `tolerateStale`: the read is identical to the field before some issued writes (the
+    /// host may not have caught up). Writes it shows are confirmed; the rest neither failed nor rolled back.
+    case stale
 }
 
 /// The serial, position-mapped edit queue over one field (pure value type; the owner drives it on one thread).
 ///
-/// Sources ``submit(_:lane:)`` transactions; the executor takes one ``FieldWrite`` at a time from ``next()``,
-/// runs it and hands the next host read to ``settle(_:final:)`` (or ``abort(_:requeue:reason:)`` when it did not
-/// run it); host updates the queue did not cause go to ``observe(_:)``. Every landed step moves the pending edits
+/// Sources ``submit(_:lane:)`` transactions (and may ``withdraw(_:)`` them while pending); the executor takes one
+/// ``FieldWrite`` at a time from ``next()`` (``next(lanes:)`` to hold lanes, ``next(for:)`` for one transaction,
+/// ``peek(lanes:)`` to look first), runs it and hands the next host read to ``settle(_:final:tolerateStale:)``
+/// (or ``abort(_:requeue:reason:)`` when it did not run it); host updates the queue did not cause go to
+/// ``observe(_:)``. Every landed step moves the pending edits
 /// (before it: unchanged; after it: shifted; inside it: conflict). Outcomes come out of ``takeEvents()`` and, for
 /// the field's readers, the seq-numbered ``feed``.
 ///
@@ -43,7 +50,7 @@ public struct FieldEditQueue: Sendable {
     }
 
     /// A change positions are mapped through.
-    private enum Change: Sendable {
+    private enum Change: Sendable, Equatable {
         case step(EditStep)
         /// The caret-relative window's edges moved: offset `p` is now `p + shift`, visible in `0...count`.
         case edges(shift: Int, count: Int)
@@ -116,7 +123,9 @@ public struct FieldEditQueue: Sendable {
     }
 
     private var pending: [Pending] = []
-    private var unverified: [Unverified] = []
+    private var unverified: [Unverified] = [] {
+        didSet { if unverified.isEmpty { contradicted = false } }  // nothing left to contradict
+    }
     /// Every change landed since `floor`, own or foreign, for mapping stale submissions.
     private var history: [Landed] = []
     /// The oldest version edits may be based on (the last reset or pruning point).
@@ -125,6 +134,8 @@ public struct FieldEditQueue: Sendable {
     private var lastVersion: Int
     private var events: [QueueEvent] = []
     private var affinities: [Affinity] = []
+    /// The last settle left the prediction contradicted (``needsFinalSettle``).
+    private var contradicted = false
 
     public init(_ snapshot: FieldSnapshot, version: FieldVersion = FieldVersion(0), session: UUID = UUID()) {
         document = ShadowDocument(
@@ -137,6 +148,11 @@ public struct FieldEditQueue: Sendable {
 
     /// Whether any edit is waiting to be written.
     public var hasPending: Bool { !pending.isEmpty }
+
+    /// Whether the last host read contradicted the prediction without deciding (a non-final read nothing
+    /// explains, or one two outcomes fit): nothing is issued, in any lane and by ``next(for:)``, until a settle
+    /// resolves it. The executor settles again: the next host read, or a `final` one at its timeout.
+    public var needsFinalSettle: Bool { contradicted && !unverified.isEmpty }
 
     /// Records recognized text streamed into the run (Mac), in order with the field's own events.
     public mutating func appendASR(_ delta: String) { feed.append(.asrDelta(delta)) }
@@ -194,8 +210,13 @@ public struct FieldEditQueue: Sendable {
 
     /// The next write to run: the oldest edit of the highest lane whose guards hold. Edits failing a guard are
     /// handed back on the way. While issued writes await a host read only the user lane runs; the rest wait.
-    public mutating func next() -> FieldWrite? {
-        while let index = nextIndex() {
+    /// Nothing runs while ``needsFinalSettle``.
+    public mutating func next() -> FieldWrite? { next(lanes: Set(Lane.allCases)) }
+
+    /// ``next()`` among `lanes` only: edits in the other lanes are held (neither issued nor checked, so no version
+    /// is used and nothing conflicts), e.g. the cleanup lane while the user is typing.
+    public mutating func next(lanes: Set<Lane>) -> FieldWrite? {
+        while let index = nextIndex(lanes: lanes) {
             let item = pending.remove(at: index)
             if let reason = check(item.transaction) {
                 conflict(item.transaction.id, Conflict(reason, byUser: reason == .ownerTainted))
@@ -206,8 +227,44 @@ public struct FieldEditQueue: Sendable {
         return nil
     }
 
-    private func nextIndex() -> Int? {
-        let eligible = pending.indices.filter { unverified.isEmpty || pending[$0].lane == .user }
+    /// What ``next(lanes:)`` would issue now, without issuing it: the queue is unchanged. Edits that would fail a
+    /// guard on the way are skipped here and handed back by the next ``next(lanes:)``.
+    public func peek(lanes: Set<Lane> = Set(Lane.allCases)) -> FieldWrite? {
+        var copy = self
+        return copy.next(lanes: lanes)
+    }
+
+    /// Issues the pending transaction `id` now, whatever its lane, ahead of every other edit and even while other
+    /// writes await a host read (one read settles them all); the other edits stay queued untouched. Nil when `id`
+    /// is not pending, while ``needsFinalSettle``, or when it fails a guard (then it is handed back).
+    public mutating func next(for id: UUID) -> FieldWrite? {
+        guard !needsFinalSettle, let index = pending.firstIndex(where: { $0.transaction.id == id }) else { return nil }
+        let item = pending.remove(at: index)
+        if let reason = check(item.transaction) {
+            conflict(id, Conflict(reason, byUser: reason == .ownerTainted))
+            return nil
+        }
+        return issue(item)
+    }
+
+    /// Cancels the pending transaction `id`: it is never written, and its source gets `withdrawn` (event and
+    /// feed). False when `id` is not pending (unknown, already handed back, or issued: an issued write is the
+    /// executor's to ``abort(_:requeue:reason:)``).
+    @discardableResult
+    public mutating func withdraw(_ id: UUID) -> Bool {
+        guard let index = pending.firstIndex(where: { $0.transaction.id == id }) else { return false }
+        pending.remove(at: index)
+        dropAffinities(of: id)
+        events.append(.withdrawn(id))
+        feed.append(.withdrawn(id))
+        return true
+    }
+
+    private func nextIndex(lanes: Set<Lane>) -> Int? {
+        guard !needsFinalSettle else { return nil }
+        let eligible = pending.indices.filter {
+            lanes.contains(pending[$0].lane) && (unverified.isEmpty || pending[$0].lane == .user)
+        }
         guard let top = eligible.map({ pending[$0].lane }).max() else { return nil }
         return eligible.first { pending[$0].lane == top }
     }
@@ -269,11 +326,30 @@ public struct FieldEditQueue: Sendable {
     /// alone (the user typed on after the write). Every write up to that prediction is confirmed (`applied`);
     /// a foreign remainder lands as a `byUser` step, an edge move as a re-base.
     ///
-    /// Writes the read does not show: a read that is exactly a subset of them (one in the middle missing) fails
-    /// only the missing ones (see `settleBySubset`). Otherwise, with `final` (the Mac's synchronous readback, or the last read before a
+    /// Writes the read does not show: a read that is exactly a subset of them (one in the middle missing, or
+    /// some steps of a multi-step write) confirms what landed and fails only what is missing (see
+    /// `settleBySubset`; a write landed in part is split: `applied` with its landed steps, then `verifyFailed`
+    /// for the rest). Otherwise, with `final` (the Mac's synchronous readback, or the last read before a
     /// timeout) they fail with `verifyFailed` and are rolled back by inverting their steps; without it, a read
     /// that only lags (shows the oldest writes or none, with no foreign change) returns `notYet` and they wait.
-    /// A read consistent with no prediction fails them all and is then observed against the confirmed field.
+    /// A final read consistent with no prediction fails them all and is then observed against the confirmed field.
+    ///
+    /// Reads before the final one (`final: false`; the iOS proxy updates its context asynchronously and may show
+    /// any state between the ops of a write): a read byte-identical to an intermediate state of an issued write's
+    /// op sequence (see `inProgress`) confirms the writes before it and returns `notYet`, never a foreign change;
+    /// one that matches an intermediate state only with the window's edges moved confirms nothing and returns
+    /// `notYet`. A read a prediction plus a foreign change explains is settled as a final one would be (writes
+    /// shown confirmed, the foreign change recorded). A read nothing explains returns `notYet`, changes nothing
+    /// and holds issuing (``needsFinalSettle``) until a settle resolves it.
+    ///
+    /// Liveness: a non-final read never fails a write it does not explain. Executors MUST settle with `final`
+    /// at their timeout; until then unexplained writes stay unverified and, after an unexplained read, nothing
+    /// is issued.
+    ///
+    /// Stale reads (`tolerateStale`, with `final`): a read identical to the field before some issued writes
+    /// confirms the writes it shows and returns `stale`; the rest neither fail nor roll back. Recommended
+    /// executor policy: on the first `stale`, extend the wait once (one more host update, or the timeout once
+    /// more) and settle that read with `tolerateStale: false`; a read that is still stale then fails as usual.
     ///
     /// Ambiguous reads (iOS): the queue never guesses where its offsets went. An edge shift only counts as an
     /// alternative with text before the caret in both the prediction and the read.
@@ -285,7 +361,15 @@ public struct FieldEditQueue: Sendable {
     ///   confirms the writes that landed under both and resets: a wrong edge shift would move owned and pending
     ///   spans onto the user's text untainted, wrong typing would leave them on other text.
     @discardableResult
-    public mutating func settle(_ snapshot: FieldSnapshot, final: Bool = true) -> SettleOutcome {
+    public mutating func settle(_ snapshot: FieldSnapshot, final: Bool = true, tolerateStale: Bool = false) -> SettleOutcome {
+        let stale = final && tolerateStale && !windowBaseMoved(snapshot) && !byteEqual(document.window, snapshot.window)
+            && unverified.contains { byteEqual($0.before.window, snapshot.window) }
+        let outcome = settleRead(snapshot, final: final && !stale)
+        return stale && outcome == .notYet ? .stale : outcome
+    }
+
+    private mutating func settleRead(_ snapshot: FieldSnapshot, final: Bool) -> SettleOutcome {
+        contradicted = false
         guard !unverified.isEmpty else {
             observe(snapshot)
             return .confirmed
@@ -329,11 +413,30 @@ public struct FieldEditQueue: Sendable {
             }
         }
 
+        // A write in progress: a byte-identical intermediate state shows the writes before it and confirms them.
+        // An edge-shifted one (only where nothing else explains the read) hides part of the field: it waits,
+        // confirming nothing.
+        if !final, !explanations.contains(where: { $0.alignment == nil }) {
+            if let j = inProgress(snapshot, edges: false) {
+                confirm(min(j, explanations.map(\.k).min() ?? j))  // only what every explanation shows
+                return .notYet
+            }
+            if explanations.isEmpty, inProgress(snapshot, edges: true) != nil { return .notYet }
+        }
+
         let full = explanations.first.map { $0.k == predictions.count - 1 && $0.alignment == nil } ?? false
-        if !full, !windowBaseMoved(snapshot), let outcome = settleBySubset(snapshot, prefixes: explanations, final: final) {
+        var notes = SubsetNotes()
+        if !full, !windowBaseMoved(snapshot),
+            let outcome = settleBySubset(snapshot, prefixes: explanations, final: final, notes: &notes)
+        {
+            if outcome == .notYet { contradicted = true }
             return outcome
         }
         guard let choice = explanations.first else {
+            if !final {
+                contradicted = true
+                return .notYet
+            }
             rollBack(from: 0, requeueFirst: false, requeueRest: false, reason: .verifyFailed)
             observe(snapshot)
             return .diverged
@@ -353,45 +456,92 @@ public struct FieldEditQueue: Sendable {
             rollBack(from: 0, requeueFirst: false, requeueRest: false, reason: .verifyFailed)
         }
         apply(choice.alignment, snapshot)
+        if notes.typingLooksWritten, let step = choice.alignment?.step {
+            // The user's text could also be a write's: it is theirs, and no automatic edit touches it.
+            document.tainted.append(Span(location: step.span.location, length: step.text.utf16.count))
+        }
+        if notes.guessedHistory { forgetHistory() }
         return choice.k == predictions.count - 1 ? .confirmed : .diverged
     }
 
+    /// What ``settleBySubset(_:prefixes:final:notes:)`` found when it left the decision to the prefix explanations.
+    private struct SubsetNotes {
+        /// A subset of the writes' steps also explains the read, as the same text a typing explanation adds.
+        var typingLooksWritten = false
+        /// Tied explanations leave the same field through different steps: the history is a guess.
+        var guessedHistory = false
+    }
+
+    /// Drops the history up to the confirmed field: edits based before it are out of window, never mapped
+    /// through steps the queue only guessed.
+    private mutating func forgetHistory() {
+        guard unverified.isEmpty else { return }
+        history = []
+        floor = document.version
+    }
+
     /// Per-write attribution: one write that did not land never fails the writes after it. The read is matched
-    /// byte for byte against every non-prefix subset of the issued writes (the others rolled back by inversion,
-    /// the later ones replayed through that). The largest subset that matches wins if it is larger than every
-    /// prefix explanation without a foreign change: its writes are confirmed (replayed with new versions), only
-    /// the others fail (`verifyFailed`). Tied subsets (or a tied prefix) that leave the same field and the same
-    /// pending edits are one outcome, and the earliest writes are confirmed (a doubled letter: either copy failed);
-    /// a real tie waits (`notYet`), or resets when `final`. A lagging read before the final one (a prefix
-    /// explains it) waits without searching. Nil: no subset beats the prefix explanations. Pending edits inside
-    /// a rolled-back write's text are handed back on the way.
+    /// byte for byte against every non-prefix subset of the issued writes' steps (one bit per step while there are
+    /// at most 8, else per write: the others rolled back by inversion, the later ones replayed through that). The
+    /// largest subset (in steps) that matches wins if it is larger than every prefix explanation without a
+    /// foreign change: its writes are confirmed (replayed with new versions), only the others fail
+    /// (`verifyFailed`); a write landed in part is confirmed with its landed steps and then fails for the rest.
+    /// Tied subsets (or a tied prefix) that leave the same field and the same pending edits are one outcome, and
+    /// the earliest writes (and lowest steps) are confirmed (a doubled letter: either copy failed); a real tie
+    /// waits (`notYet`), or resets when `final`. Before the final read, the writes after the last one the read
+    /// shows are not failed: they are reissued against the confirmed field and wait. Tied outcomes reached through different steps leave a guessed
+    /// history: it is dropped (``SubsetNotes/guessedHistory``), so edits based before the read come back
+    /// `outOfWindow` instead of being mapped through a step that may not have landed. A subset in which an owned
+    /// automatic write wrote the text a typing explanation adds at the read's caret never wins: the typing
+    /// explanation stands and its text is tainted (``SubsetNotes/typingLooksWritten``). A lagging read before
+    /// the final one (a prefix explains it) waits without searching. Nil: no subset beats the prefix
+    /// explanations. Pending edits inside a rolled-back write's text are handed back on the way.
     private mutating func settleBySubset(
-        _ snapshot: FieldSnapshot, prefixes: [(k: Int, alignment: Alignment?)], final: Bool
+        _ snapshot: FieldSnapshot, prefixes: [(k: Int, alignment: Alignment?)], final: Bool, notes: inout SubsetNotes
     ) -> SettleOutcome? {
-        let count = unverified.count
-        guard count > 1, count <= 8 else { return nil }
+        let sizes = unverified.map(\.write.steps.count)
+        let units = sizes.reduce(0, +)
+        // Each bit lands these steps (indices into a write's steps sorted by location).
+        let groups: [(write: Int, steps: [Int])]
+        if units > 1, units <= 8 {
+            groups = sizes.indices.flatMap { w in (0..<sizes[w]).map { (write: w, steps: [$0]) } }
+        } else if sizes.count > 1, sizes.count <= 8 {
+            groups = sizes.indices.map { (write: $0, steps: Array(0..<sizes[$0])) }
+        } else {
+            return nil
+        }
         let prefix = prefixes.filter { $0.alignment?.step == nil }.map(\.k).max() ?? -1
         if !final, prefix >= 0 { return nil }
-        var best: [(landed: [Bool], queue: FieldEditQueue)] = []
+        let prefixSize = prefix < 0 ? -1 : sizes[..<prefix].reduce(0, +)
+        var best: [(landed: [[Bool]], queue: FieldEditQueue)] = []
         var bestSize = 0
-        for bits in 1..<(1 << count) {
-            let landed = (0..<count).map { bits & (1 << $0) != 0 }
-            guard let gap = landed.firstIndex(of: false), landed[gap...].contains(true) else { continue }  // a prefix
-            let size = landed.filter { $0 }.count
-            guard size >= bestSize, let replayed = simulate(landed),
+        for bits in 1..<(1 << groups.count) {
+            var landed = sizes.map { [Bool](repeating: false, count: $0) }
+            for (bit, group) in groups.enumerated() where bits & (1 << bit) != 0 {
+                for step in group.steps { landed[group.write][step] = true }
+            }
+            guard !Self.isPrefix(landed) else { continue }
+            let size = landed.joined().filter { $0 }.count
+            // Before the final read, the writes after the last one shown may not have run yet: they wait.
+            let hold = final ? nil : (landed.lastIndex { $0.contains(true) } ?? -1) + 1
+            guard size >= bestSize, let replayed = simulate(landed, holdFrom: hold),
                 byteEqual(replayed.document.window, snapshot.window)
             else { continue }
             if size > bestSize { (best, bestSize) = ([], size) }
             best.append((landed, replayed))
         }
-        guard !best.isEmpty, prefix <= bestSize else { return nil }
-        // Earliest writes first: [true, false, true] before [false, true, true].
-        best.sort { a, b in
-            zip(a.landed, b.landed).first(where: { $0 != $1 }).map { $0.0 } ?? false
+        guard !best.isEmpty, prefixSize <= bestSize else { return nil }
+        if best.contains(where: { claimsTyping($0.queue, prefixes, snapshot) }) {
+            notes.typingLooksWritten = true
+            return nil
         }
-        if prefix == bestSize {
-            let landed = (0..<count).map { $0 < prefix }
-            guard let replayed = simulate(landed) else { return nil }
+        // Earliest writes and steps first: [true, false, true] before [false, true, true].
+        best.sort { a, b in
+            zip(a.landed.joined(), b.landed.joined()).first(where: { $0 != $1 }).map { $0.0 } ?? false
+        }
+        if prefixSize == bestSize {
+            let landed = sizes.indices.map { [Bool](repeating: $0 < prefix, count: sizes[$0]) }
+            guard let replayed = simulate(landed, holdFrom: nil) else { return nil }
             best.insert((landed, replayed), at: 0)
         }
         let winner = best[0]
@@ -400,20 +550,71 @@ public struct FieldEditQueue: Sendable {
             reset(snapshot, reason: .unaligned)
             return .diverged
         }
-        if prefix == bestSize { return nil }  // the prefix explanation stands
+        notes.guessedHistory = best.dropFirst().contains { $0.queue.history.map(\.change) != winner.queue.history.map(\.change) }
+        if prefixSize == bestSize { return nil }  // the prefix explanation stands
         let issued = unverified
+        let held = final ? issued.count : (winner.landed.lastIndex { $0.contains(true) } ?? -1) + 1
         self = winner.queue
-        for (index, item) in issued.enumerated() {
-            guard winner.landed[index], let write = unverified.first(where: { $0.write.id == item.write.id })?.write else {
+        for (index, item) in issued.enumerated() where index < held {
+            let mask = winner.landed[index]
+            guard mask.contains(true), let write = unverified.first(where: { $0.write.id == item.write.id })?.write else {
                 conflict(item.write.id, Conflict(.verifyFailed))
                 continue
             }
             events.append(.applied(write.id, version: write.version))
             feed.append(.applied(write.id, origin: write.origin, steps: write.steps, version: write.version))
+            if mask.contains(false) { conflict(write.id, Conflict(.verifyFailed)) }
         }
         unverified = []
         document.caret = snapshot.caret
+        if notes.guessedHistory { forgetHistory() }
+        for item in issued[held...] {
+            guard let index = pending.firstIndex(where: { $0.transaction.id == item.write.id }) else { continue }
+            let waiting = pending.remove(at: index)
+            if let reason = check(waiting.transaction) {
+                conflict(waiting.transaction.id, Conflict(reason, byUser: reason == .ownerTainted))
+                continue
+            }
+            _ = issue(waiting)
+        }
         return .diverged
+    }
+
+    /// Whether `replayed` (a subset replay) has an automatic, owned write claim text a typing explanation in
+    /// `prefixes` adds: the typed text ends at the read's caret (where typing leaves it) and lies inside what
+    /// a write at or after that explanation's prediction wrote. Then the text may be the user's.
+    private func claimsTyping(
+        _ replayed: FieldEditQueue, _ prefixes: [(k: Int, alignment: Alignment?)], _ snapshot: FieldSnapshot
+    ) -> Bool {
+        let written = replayed.writtenSpans().filter { $0.write.owner != nil && !$0.write.origin.isUser }
+        return prefixes.contains { k, alignment in
+            guard let step = alignment?.step else { return false }
+            let typed = Span(location: step.span.location, length: step.text.utf16.count)
+            guard typed.end == snapshot.caret else { return false }
+            let later = Set(unverified[k...].map(\.write.id))
+            return written.contains { entry in
+                later.contains(entry.write.id) && entry.span.location <= typed.location && typed.end <= entry.span.end
+            }
+        }
+    }
+
+    /// The text each issued write wrote, in the document's offsets.
+    private func writtenSpans() -> [(write: FieldWrite, span: Span)] {
+        var spans: [(write: FieldWrite, span: Span)] = []
+        for item in unverified {
+            for step in item.write.steps {
+                let map = StepMap(step)
+                spans = spans.compactMap { entry in map.adjust(entry.span).map { (entry.write, $0) } }
+                spans.append((item.write, Span(location: step.span.location, length: map.insertedLength)))
+            }
+        }
+        return spans
+    }
+
+    /// Whether `landed` (per issued write, per step) is the oldest writes landed whole and the rest not at all.
+    private static func isPrefix(_ landed: [[Bool]]) -> Bool {
+        guard let gap = landed.firstIndex(where: { $0.contains(false) }) else { return true }
+        return landed[gap...].allSatisfy { !$0.contains(true) }
     }
 
     /// Whether two replays leave the same field, spans and pending edits (versions aside).
@@ -423,24 +624,68 @@ public struct FieldEditQueue: Sendable {
             && a.pending == b.pending
     }
 
-    /// This queue as if only the issued writes marked in `landed` reached the field; nil when a replayed write
-    /// no longer fits (its range is gone or a guard fails).
-    private func simulate(_ landed: [Bool]) -> FieldEditQueue? {
+    /// This queue as if only the issued steps marked in `landed` (per write, per step sorted by location) reached
+    /// the field; a write landed in part replays as its landed steps. Nil when a replayed write no longer fits
+    /// (its range is gone or a guard fails).
+    /// With `holdFrom`, the writes from that index on that landed nothing stay queued (front of their lane) instead
+    /// of failing.
+    private func simulate(_ landed: [[Bool]], holdFrom: Int?) -> FieldEditQueue? {
         var copy = self
-        guard let first = landed.firstIndex(of: false) else { return copy }
+        guard let first = landed.firstIndex(where: { $0.contains(false) }) else { return copy }
         let ids = copy.unverified[first...].map(\.write.id)
         copy.rollBack(from: first, requeueFirst: true, requeueRest: true, reason: .verifyFailed)
         for (offset, id) in ids.enumerated() {
+            let mask = landed[first + offset]
+            if let holdFrom, first + offset >= holdFrom { continue }
             guard let index = copy.pending.firstIndex(where: { $0.transaction.id == id }) else { return nil }
-            let item = copy.pending.remove(at: index)
-            if landed[first + offset] {
-                guard copy.check(item.transaction) == nil else { return nil }
-                _ = copy.issue(item)
-            } else {
+            var item = copy.pending.remove(at: index)
+            guard mask.contains(true) else {
                 copy.dropAffinities(of: id)
+                continue
             }
+            if mask.contains(false) {
+                item.transaction.steps = zip(item.transaction.steps, mask).filter(\.1).map(\.0)
+                item.caret = nil
+            }
+            guard copy.check(item.transaction) == nil else { return nil }
+            _ = copy.issue(item)
         }
         return copy
+    }
+
+    /// The oldest issued write the read shows in progress: an intermediate state of its op sequence as the iOS
+    /// proxy runs it, step by step in application order (the caret moved to the step's end, its text deleted
+    /// Character by Character, the new text inserted), excluding the host reads before and after the write. The
+    /// writes before it are fully shown. Matched byte for byte or, with `edges`, with the caret-relative
+    /// window's edges moved.
+    private func inProgress(_ snapshot: FieldSnapshot, edges: Bool) -> Int? {
+        for (j, item) in unverified.enumerated() {
+            let start = item.before
+            let end = j + 1 < unverified.count ? unverified[j + 1].before : document
+            var window = start.window
+            var states: [(window: String, caret: Int)] = []
+            for step in item.write.steps {
+                states.append((window, step.span.end))
+                var kept = step.expect
+                while !kept.isEmpty {
+                    kept.removeLast()
+                    states.append((window.replacing(step.span, with: kept), step.span.location + kept.utf16.count))
+                }
+                window = window.replacing(step.span, with: step.text)
+                states.append((window, step.span.location + step.text.utf16.count))
+            }
+            for state in states {
+                let isBoundary = [start, end].contains { byteEqual($0.window, state.window) && $0.caret == state.caret }
+                guard !isBoundary else { continue }
+                if edges {
+                    let shadow = ShadowDocument(window: state.window, windowBase: start.windowBase, caret: state.caret)
+                    if plausibleEdge(shadow, snapshot), alignments(shadow, snapshot).edges != nil { return j }
+                } else if byteEqual(state.window, snapshot.window) {
+                    return j
+                }
+            }
+        }
+        return nil
     }
 
     /// Confirms the oldest `count` issued writes (`applied`).

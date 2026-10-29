@@ -24,7 +24,7 @@ public enum EditOrigin: String, Sendable, Hashable, Codable, CaseIterable {
 }
 
 /// Queue priority: the user lane preempts everything queued, then ASR, then cleanup and the agent.
-public enum Lane: Int, Sendable, Hashable, Codable, Comparable {
+public enum Lane: Int, Sendable, Hashable, Codable, Comparable, CaseIterable {
     case cleanup, asr, user
 
     public static func < (a: Lane, b: Lane) -> Bool { a.rawValue < b.rawValue }
@@ -70,7 +70,7 @@ public struct EditTransaction: Sendable, Hashable, Identifiable, Codable {
 
 /// The one write the executor runs next: `steps` in application order (highest location first, so each span is
 /// valid when it runs), then the caret to `caret`. `version` is the field version once it has landed. The
-/// executor reports it with ``FieldEditQueue/settle(_:final:)`` after running it, or
+/// executor reports it with ``FieldEditQueue/settle(_:final:tolerateStale:)`` after running it, or
 /// ``FieldEditQueue/abort(_:requeue:reason:)`` when it did not run it.
 public struct FieldWrite: Sendable, Hashable {
     public var id: UUID
