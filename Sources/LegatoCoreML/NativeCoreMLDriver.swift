@@ -6,7 +6,7 @@ import LegatoCore
 /// Native objects are confined to CoreMLBackend's lease, including cancellation and preparation.
 final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
     let contextLength: Int
-    private let promptFamily: CoreMLPromptFamily
+    let promptFamily: CoreMLPromptFamily
     private let tokenizer: LegatoANEMLL.Tokenizer
     private let manager: InferenceManager
     private let cancellation: CoreMLCancellation
@@ -47,10 +47,20 @@ final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
         guard tokens == canonical else { throw LLMError.failed("The installed checkpoint chat template differs from the supported \(promptFamily.rawValue) format.") }
         return tokens
     }
-    func generate(tokens: [Int], outputLimit: Int) async throws -> CoreMLGeneration {
-        let cancellation = cancellation
-        let result = try await manager.generateResponse(initialTokens: tokens, temperature: 0, maxTokens: outputLimit, eosTokens: tokenizer.eosTokenIds, tokenizer: tokenizer, onToken: nil, onWindowShift: { cancellation.cancel() })
+    func encode(_ text: String) async throws -> [Int] {
         try cancellation.check()
-        return .init(text: tokenizer.decode(tokens: result.0, skipSpecialTokens: true), stopReason: result.2)
+        return tokenizer.rawTokens(text)
+    }
+    func generate(tokens: [Int], outputLimit: Int) async throws -> CoreMLGeneration {
+        try await generate(tokens: tokens, reusingPrefix: 0, outputLimit: outputLimit)
+    }
+    /// `reusingPrefix` is the backend's promise about `manager`'s state (see the vendored
+    /// `InferenceManager.generateResponse(reusingPrefix:)`); 0 always starts from a fresh state.
+    func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration {
+        let cancellation = cancellation
+        let result = try await manager.generateResponse(initialTokens: tokens, temperature: 0, maxTokens: outputLimit, eosTokens: tokenizer.eosTokenIds, tokenizer: tokenizer, onToken: nil, onWindowShift: { cancellation.cancel() }, reusingPrefix: reusingPrefix)
+        try cancellation.check()
+        return .init(text: tokenizer.decode(tokens: result.0, skipSpecialTokens: true), stopReason: result.2,
+                     tokens: result.0, prefilled: tokens.count - reusingPrefix, prefillSeconds: result.1)
     }
 }

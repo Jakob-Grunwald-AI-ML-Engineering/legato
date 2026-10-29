@@ -1617,6 +1617,7 @@ private typealias Float16 = Float
     public func runPrefill(
         on contextTokens: inout [Int],
         contextPos: Int,
+        startPos: Int = 0,  // Legato: positions below startPos are already in `state` (session reuse).
         tokenizer: Tokenizer? = nil
     ) async throws -> Int {
         if debugLevel >= 1 {
@@ -1632,9 +1633,9 @@ private typealias Float16 = Float
 
         // For monolithic models, use the monolithic prefill path
         if isMonolithic {
-            return try await runMonolithicPrefill(on: &contextTokens, contextPos: contextPos, tokenizer: tokenizer)
+            return try await runMonolithicPrefill(on: &contextTokens, contextPos: contextPos, startPos: startPos, tokenizer: tokenizer)
         }
-        var batchPos = 0
+        var batchPos = startPos  // Legato: was 0; see `reusingPrefix` in generateResponse.
 
         // Process FULL batches only with prefill model (to avoid padding issues that corrupt KV cache)
         while batchPos + batchSize <= contextPos {
@@ -1840,6 +1841,7 @@ private typealias Float16 = Float
     private func runMonolithicPrefill(
         on contextTokens: inout [Int],
         contextPos: Int,
+        startPos: Int = 0,  // Legato: session reuse, as in runPrefill.
         tokenizer: Tokenizer? = nil
     ) async throws -> Int {
         if debugLevel >= 1 {
@@ -1849,7 +1851,7 @@ private typealias Float16 = Float
             print("Has update_mask:", hasUpdateMask)
         }
 
-        var batchPos = 0
+        var batchPos = startPos  // Legato: was 0.
 
         // Match Python tests/chat.py monolithic behavior:
         // only update_mask enables partial-batch prefill.
@@ -3205,9 +3207,16 @@ private typealias Float16 = Float
         eosTokens: [Int],  // Changed to array to support multiple EOS tokens
         tokenizer: Tokenizer,
         onToken: ((Int) -> Void)? = nil,
-        onWindowShift: (() -> Void)? = nil
+        onWindowShift: (() -> Void)? = nil,
+        reusingPrefix: Int = 0
     ) async throws -> ([Int], TimeInterval, String) {
-        
+        // Legato (persistent sessions, epic #80): `reusingPrefix` > 0 promises that `state` already holds
+        // the KV entries of `initialTokens[0..<reusingPrefix]` from the previous call on this manager (the
+        // caller tracks that prefix and passes 0 after any mismatch, trim, error or other caller). Then the
+        // state is kept and only the new tokens are prefilled. Entries past the prefix are masked by the
+        // causal mask and overwritten. 0 keeps upstream's behaviour: a fresh state and a full prefill.
+        let reuse = reusingPrefix > 0 && reusingPrefix < initialTokens.count && !disablePrefill ? reusingPrefix : 0
+
         var generatedTokens: [Int] = []
         let startTime = CFAbsoluteTimeGetCurrent()
         var stopReason = "max_tokens"
@@ -3232,7 +3241,7 @@ private typealias Float16 = Float
         // Reset KV cache state for new conversation turn
         // This ensures each generateResponse call starts fresh, which is required
         // when the full conversation is re-tokenized for each turn
-        if let chunks = ffnChunks, !chunks.isEmpty {
+        if reuse == 0, let chunks = ffnChunks, !chunks.isEmpty {  // Legato: kept when reusing a prefix.
             // For monolithic models, create state from inferModel (matching initState behavior)
             // This ensures state compatibility when switching between prefill and infer functions
             if isMonolithic {
@@ -3285,7 +3294,7 @@ private typealias Float16 = Float
                 prefillTime = 0
             } else {
                 // Run prefill with mutable copy
-                currentPos = try await runPrefill(on: &contextTokens, contextPos: contextTokens.count, tokenizer: tokenizer)
+                currentPos = try await runPrefill(on: &contextTokens, contextPos: contextTokens.count, startPos: reuse, tokenizer: tokenizer)  // Legato: startPos.
                 prefillTime = CFAbsoluteTimeGetCurrent() - startTime
             }
             
