@@ -50,6 +50,9 @@ public struct FieldEditQueue: Sendable {
     /// Whether any edit is waiting to be written.
     public var hasPending: Bool { !pending.isEmpty }
 
+    /// Records recognized text streamed into the run (Mac), in order with the field's own events.
+    public mutating func appendASR(_ delta: String) { feed.append(.asrDelta(delta)) }
+
     /// The events since the last call, oldest first.
     public mutating func takeEvents() -> [QueueEvent] {
         defer { events = [] }

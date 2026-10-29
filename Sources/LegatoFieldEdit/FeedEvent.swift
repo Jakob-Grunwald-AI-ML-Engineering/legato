@@ -14,6 +14,7 @@ public enum ResetReason: String, Sendable, Hashable, Codable {
 public enum FeedEvent: Sendable, Hashable, Codable {
     /// Recognized text streamed in (Mac only; on iOS the app owns ASR text).
     case asrDelta(String)
+    /// A confirmed write; `steps` in application order, as in ``FieldWrite``.
     case applied(UUID, origin: EditOrigin, steps: [EditStep], version: FieldVersion)
     /// A change the queue did not write.
     case foreign(EditStep, byUser: Bool, version: FieldVersion)
