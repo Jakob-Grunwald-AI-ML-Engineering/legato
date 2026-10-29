@@ -79,6 +79,9 @@ find "$TMPDIR/legato-gate.OLD1" "$TMPDIR/legato-xcodegen-1" "$TMPDIR/unrelated-o
 mkdir -p "$LEGATO_CACHE_DIR/phone-derived/Build" "$LEGATO_TESTS_CACHE/Models/m" "$LEGATO_TESTS_CACHE/leftover"
 : > "$LEGATO_CACHE_DIR/phone-derived/Build/f"; : > "$LEGATO_TESTS_CACHE/Models/m/f"; : > "$LEGATO_TESTS_CACHE/leftover/f"
 find "$LEGATO_CACHE_DIR/phone-derived" "$LEGATO_TESTS_CACHE" -exec touch -t $OLD {} +
+# A symlinked session dir must not lead the pruner outside the scratch root.
+OUTSIDE="$T/outside-root"; dd_fixture "$OUTSIDE/scratchpad/DerivedData" $OLD
+ln -s "$OUTSIDE" "$LEGATO_SCRATCH_ROOT/-Users-x-Documents-legato/linked-sess"
 
 "$ROOT/scripts/dev/prune-build-caches.sh" > "$T/udry.log"
 if [ -d "$PRJ/xcb-old" ] && [ -d "$TMPDIR/legato-gate.OLD1" ] && [ -d "$LEGATO_CACHE_DIR/phone-derived" ] && [ -d "$LEGATO_TESTS_CACHE/leftover" ]; then
@@ -93,6 +96,7 @@ grep -q "expired: .*$PRJ/xcb-old$" "$T/udry.log" && ucheck 'dry run lists old sc
 [ -d "$PRJ/xcb-locked" ] && ucheck 'old DerivedData with a kernel-held claim is kept' ok || ucheck 'old DerivedData with a kernel-held claim is kept' 'removed'
 release_cache_claim "$PRJ/xcb-locked"
 [ -d "$OTHER/xcb-old" ] && ucheck 'other project scratchpad is never touched' ok || ucheck 'other project scratchpad is never touched' 'removed'
+[ -d "$OUTSIDE/scratchpad/DerivedData" ] && ucheck 'symlinked session dir is never followed out of the scratch root' ok || ucheck 'symlinked session dir is never followed out of the scratch root' 'removed'
 [ -f "$PRJ/notes/keep.txt" ] && ucheck 'non-build files in a legato scratchpad are kept' ok || ucheck 'non-build files in a legato scratchpad are kept' 'removed'
 [ ! -d "$TMPDIR/legato-gate.OLD1" ] && ucheck 'old TMPDIR legato-gate dir is pruned' ok || ucheck 'old TMPDIR legato-gate dir is pruned' 'retained'
 [ -d "$TMPDIR/legato-mac.NEW1" ] && [ -d "$TMPDIR/legato-xcodegen-1" ] && [ -d "$TMPDIR/unrelated-old" ] && ucheck 'recent legato-*, xcodegen tool cache and non-legato TMPDIR dirs are kept' ok || ucheck 'recent legato-*, xcodegen tool cache and non-legato TMPDIR dirs are kept' 'removed'

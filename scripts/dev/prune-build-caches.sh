@@ -54,7 +54,7 @@ scratchpad_roots() {
   for p in "$root"/$glob; do   # unquoted on purpose: the glob selects the legato project dirs
     [ -d "$p" ] && [ ! -L "$p" ] || continue
     for sp in "$p"/*/scratchpad; do
-      if [ -d "$sp" ] && [ ! -L "$sp" ]; then echo "$sp"; fi
+      if [ -d "$sp" ] && [ ! -L "$sp" ] && [ ! -L "${sp%/scratchpad}" ]; then echo "$sp"; fi
     done
   done
 }
