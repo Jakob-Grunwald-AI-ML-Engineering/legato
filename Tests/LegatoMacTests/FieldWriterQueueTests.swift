@@ -1,4 +1,5 @@
 import Foundation
+import LegatoCore
 import LegatoFieldEdit
 import Testing
 @testable import LegatoMac
@@ -246,6 +247,9 @@ import Testing
     @Test func p12UnreadableFieldBlocksWithoutWritingAndConflictsThePendingEdit() throws {
         let (field, executor, _) = try faultFixture()
         field.failReads = true
+        for _ in 1..<AXFieldExecutor.maxUnreadableReads {
+            guard case .unreadable = executor.drain() else { Issue.record("expected a retry"); return }
+        }
         #expect(executor.drain() == .blocked(.unreadable))
         #expect(field.writes.isEmpty)
         #expect(conflicts(executor.takeEvents()) == [.unreadable])
@@ -259,6 +263,9 @@ import Testing
         let local = AXFieldExecutor(target: flaky)!
         let step = try #require(ContiguousPatch.between("send teh report suffix", "send the report suffix", at: start))
         local.submit(transaction(local, [step]))
+        for _ in 1..<AXFieldExecutor.maxUnreadableReads {
+            guard case .unreadable = local.drain() else { Issue.record("expected a retry"); return }
+        }
         #expect(local.drain() == .blocked(.unreadable))
         #expect(conflicts(local.takeEvents()).contains(.unreadable))
     }
@@ -356,7 +363,10 @@ import Testing
 
     private final class Source: FieldActivitySource {
         var handler: (@MainActor () -> Void)?
-        func start(_ handler: @escaping @MainActor () -> Void) { self.handler = handler }
+        func start(_ handler: @escaping @MainActor () -> Void) -> Bool {
+            self.handler = handler
+            return true
+        }
         func stop() { handler = nil }
     }
 
@@ -434,6 +444,265 @@ import Testing
         #expect(queued.string.isEmpty)
         #expect(writer.finish(finalText: "hello") == .paste("hello"))
     }
+
+    // MARK: The user's selection comes back on every path that does not write
+
+    @Test func changedSpanUnderTheSelectGivesTheUserTheirCaretBack() throws {
+        let (field, executor, start) = fixture(old: "send teh report")
+        let before = field.selection
+        let step = try #require(ContiguousPatch.between("send teh report", "send the report", at: start))
+        executor.submit(transaction(executor, [step]))
+        var fired = false
+        field.onSelect = {
+            guard !fired else { return }
+            fired = true
+            field.externalEdit(UTF16Range(location: step.span.location, length: 1), with: "X")
+        }
+        executor.drain()
+        #expect(field.writes.isEmpty)
+        #expect(field.selection == before)
+    }
+
+    @Test func unreadableSpanUnderTheSelectGivesTheUserTheirCaretBack() throws {
+        let (field, _, start) = fixture(old: "send teh report")
+        let before = field.selection
+        let flaky = FlakyTarget(field)
+        flaky.failReadsWhileSpanSelected = true
+        let local = AXFieldExecutor(target: flaky)!
+        let step = try #require(ContiguousPatch.between("send teh report", "send the report", at: start))
+        local.submit(transaction(local, [step]))
+        for _ in 0..<AXFieldExecutor.maxAttempts + 2 { local.drain() }
+        #expect(field.writes.isEmpty)
+        #expect(field.selection == before)
+        #expect(conflicts(local.takeEvents()) == [.unreadable])
+    }
+
+    @Test func rangedUserSelectionSurvivesAnAgentWriteBeforeIt() throws {
+        let start = Self.prefix.utf16.count
+        let field = FakeTextTarget(Self.prefix + "teh cat sat" + Self.outside)
+        let sat = UTF16Range(location: start + 8, length: 3)
+        field.select(sat)
+        let executor = AXFieldExecutor(target: field)!
+        executor.submit(transaction(executor, [EditStep(span: Span(location: start, length: 3), text: "the old", expect: "teh")]))
+        #expect(executor.drain() == .idle)
+        #expect(field.string == Self.prefix + "the old cat sat" + Self.outside)
+        #expect(field.selection == UTF16Range(location: sat.location + 4, length: 3))
+        #expect(appliedCount(executor.takeEvents()) == 1)
+    }
+
+    // MARK: Insertion points are guarded too
+
+    @Test func typingBeforeAnInsertionPointBetweenSelectAndReplaceRemapsIt() throws {
+        let (field, executor, start) = fixture(old: "send report")
+        executor.submit(transaction(executor, [EditStep.insert("the ", at: start + 5)]))
+        var fired = false
+        field.onSelect = {
+            guard !fired else { return }
+            fired = true
+            field.externalEdit(UTF16Range(location: 0, length: 0), with: "Hi! ")
+        }
+        executor.drain()
+        #expect(field.string == "Hi! " + Self.prefix + "send the report" + Self.outside)
+        #expect(conflicts(executor.takeEvents()).isEmpty)
+    }
+
+    // MARK: A field that cannot be read keeps the edits for a retry
+
+    @Test func unreadableFieldKeepsThePendingEditsAndRetries() throws {
+        let (field, executor, _) = try faultFixture()
+        field.failReads = true
+        guard case .unreadable(let wait) = executor.drain() else { Issue.record("expected a retry"); return }
+        #expect(wait > 0)
+        #expect(executor.takeEvents().isEmpty)
+        #expect(executor.queue.hasPending)
+        field.failReads = false
+        #expect(executor.drain() == .idle)
+        #expect(field.string == Self.prefix + "send the report suffix" + Self.outside)
+        #expect(appliedCount(executor.takeEvents()) == 1)
+    }
+
+    @Test func readbackFailureKeepsTheWriteUnverifiedUntilTheFieldReadsAgain() throws {
+        let (field, _, step) = try faultFixture()
+        let flaky = FlakyTarget(field)
+        flaky.failReadsAfterReplace = true
+        let local = AXFieldExecutor(target: flaky)!
+        local.submit(transaction(local, [step]))
+        guard case .unreadable = local.drain() else { Issue.record("expected a retry"); return }
+        #expect(local.takeEvents().isEmpty)
+        flaky.failReadsAfterReplace = false
+        #expect(local.drain() == .idle)
+        #expect(field.writes.count == 1)
+        #expect(field.string == Self.prefix + "send the report suffix" + Self.outside)
+        #expect(appliedCount(local.takeEvents()) == 1)
+    }
+
+    // MARK: A write that lands only in part is taken back
+
+    @Test func partlyLandedWriteIsRolledBackWhenItsSecondStepThrows() throws {
+        let (field, executor, start) = fixture(old: "teh cat sat on teh mat")
+        let before = field.selection
+        let steps = [
+            EditStep(span: Span(location: start, length: 3), text: "the", expect: "teh"),
+            EditStep(span: Span(location: start + 15, length: 3), text: "a", expect: "teh"),
+        ]
+        executor.submit(transaction(executor, steps))
+        field.failWritesAfter = 1 // the second step's replace throws ...
+        var selects = 0
+        field.onSelect = { // ... and the field takes writes again for the rollback
+            selects += 1
+            if selects == 3 { field.failWritesAfter = nil }
+        }
+        executor.drain()
+        #expect(field.string == Self.prefix + "teh cat sat on teh mat" + Self.outside)
+        #expect(field.selection == before)
+        #expect(conflicts(executor.takeEvents()) == [.writeFailed])
+    }
+
+    @Test func partlyLandedWriteThatCannotBeTakenBackIsSettledAsTheFieldShowsIt() throws {
+        let (field, executor, start) = fixture(old: "teh cat sat on teh mat")
+        let steps = [
+            EditStep(span: Span(location: start, length: 3), text: "the", expect: "teh"),
+            EditStep(span: Span(location: start + 15, length: 3), text: "a", expect: "teh"),
+        ]
+        executor.submit(transaction(executor, steps))
+        field.failWritesAfter = 1 // every write after the first throws, the rollback's too
+        executor.drain()
+        #expect(field.string == Self.prefix + "teh cat sat on a mat" + Self.outside)
+        #expect(conflicts(executor.takeEvents()) == [.verifyFailed])
+        #expect(executor.queue.document.window == field.string)
+    }
+
+    @Test func partlyLandedWriteUnderTypingIsRolledBackAndTriedAgain() throws {
+        let (field, executor, start) = fixture(old: "teh cat sat on teh mat")
+        let steps = [
+            EditStep(span: Span(location: start, length: 3), text: "the", expect: "teh"),
+            EditStep(span: Span(location: start + 15, length: 3), text: "a", expect: "teh"),
+        ]
+        executor.submit(transaction(executor, steps))
+        var selects = 0
+        field.onSelect = {
+            selects += 1
+            if selects == 2 { field.externalEdit(UTF16Range(location: 0, length: 0), with: "Hi! ") }
+        }
+        executor.drain()
+        #expect(field.string == "Hi! " + Self.prefix + "the cat sat on a mat" + Self.outside)
+        let events = executor.takeEvents()
+        #expect(conflicts(events).isEmpty)
+        #expect(appliedCount(events) == 1)
+    }
+
+    // MARK: The field is read by its length
+
+    @Test func fieldIsReadByItsLengthNotByAnOversizedRange() throws {
+        let field = FakeTextTarget("short field")
+        let flaky = FlakyTarget(field)
+        flaky.strictRanges = true
+        let local = try #require(AXFieldExecutor(target: flaky))
+        #expect(local.queue.document.window == "short field")
+    }
+
+    // MARK: The typing guard holds without issuing
+
+    @Test func heldEditIsNotIssuedSoNoVersionIsBurnt() throws {
+        let start = Self.prefix.utf16.count
+        let field = FakeTextTarget(Self.prefix + "teh cat" + Self.outside, selection: UTF16Range(location: start, length: 0))
+        let source = Source()
+        let clock = Clock()
+        let guardian = TypingGuard(source: source, now: { clock.now })
+        let executor = AXFieldExecutor(target: field, typingGuard: guardian)!
+        let fix = transaction(executor, [EditStep(span: Span(location: start, length: 3), text: "the", expect: "teh")])
+        executor.submit(fix)
+        guardian.noteUserActivity()
+        guard case .held = executor.drain() else { Issue.record("expected held"); return }
+        let seen = executor.queue.document.version
+        clock.now += 0.31
+        #expect(executor.drain() == .idle)
+        #expect(executor.takeEvents() == [.applied(fix.id, version: seen.next)])
+    }
+
+    // MARK: The channel writes only its own transaction
+
+    @Test func channelWriteLeavesAHeldAgentEditQueuedAndDeliversItsEvents() throws {
+        let field = FakeTextTarget("Hi ")
+        let source = Source()
+        let clock = Clock()
+        let guardian = TypingGuard(source: source, now: { clock.now })
+        let executor = AXFieldExecutor(target: field, typingGuard: guardian)!
+        let agent = transaction(executor, [EditStep(span: Span(location: 0, length: 2), text: "Hey", expect: "Hi")])
+        executor.submit(agent)
+        guardian.noteUserActivity() // the user is typing: the agent edit waits
+        let writer = FieldWriter(target: field, channel: QueuedFieldWriteChannel(executor: executor, owner: "run"))
+        writer.apply(.commit(delta: "hello"))
+        #expect(writer.degradeReason == nil)
+        #expect(field.string == "Hi hello")
+        #expect(executor.queue.hasPending)
+        clock.now += 0.31
+        #expect(executor.drain() == .idle)
+        #expect(field.string == "Hey hello")
+        let events = executor.takeEvents()
+        #expect(events.contains { if case .applied(agent.id, _) = $0 { true } else { false } })
+    }
+
+    @Test func channelDoesNotSwallowAnotherEditsConflict() throws {
+        let field = FakeTextTarget("Hi helo")
+        let source = Source()
+        let clock = Clock()
+        let guardian = TypingGuard(source: source, now: { clock.now })
+        let executor = AXFieldExecutor(target: field, typingGuard: guardian)!
+        // An agent fix of the run's text, held while the user types; the run's own write replaces that text.
+        let agent = EditTransaction(
+            origin: .agent, owner: "agent", base: executor.queue.document.version,
+            steps: [EditStep(span: Span(location: 3, length: 4), text: "hello", expect: "helo")])
+        executor.submit(agent)
+        guardian.noteUserActivity()
+        guard case .held = executor.drain() else { Issue.record("expected held"); return }
+        try QueuedFieldWriteChannel(executor: executor, owner: "run")
+            .replace(UTF16Range(location: 3, length: 4), with: "help", expect: "helo", origin: .asr)
+        #expect(field.string == "Hi help")
+        let events = executor.takeEvents()
+        #expect(events.contains { if case .conflict(agent.id, _) = $0 { true } else { false } })
+    }
+
+    // MARK: The channel's edits are planned against the field the writer just checked
+
+    @Test func channelWriteAfterAnUnseenUserEditLandsWhereTheWriterPutIt() throws {
+        let field = FakeTextTarget("Hi ")
+        let executor = AXFieldExecutor(target: field)!
+        let channel = QueuedFieldWriteChannel(executor: executor, owner: "run")
+        try channel.replace(UTF16Range(location: 3, length: 0), with: "hello", expect: "", origin: .asr)
+        field.externalEdit(UTF16Range(location: 0, length: 0), with: "Note: ") // the queue has not read it yet
+        try channel.replace(UTF16Range(location: 14, length: 0), with: " world", expect: "", origin: .asr)
+        #expect(field.string == "Note: Hi hello world")
+    }
+
+    @Test func channelExpectsWhatTheWriterBelievesNotWhatTheFieldShows() throws {
+        let field = FakeTextTarget("Hi hellx")
+        let executor = AXFieldExecutor(target: field)!
+        let channel = QueuedFieldWriteChannel(executor: executor, owner: "run")
+        #expect(throws: QueuedFieldWriteChannel.Rejected(reason: .expectMismatch)) {
+            try channel.replace(UTF16Range(location: 3, length: 5), with: "world", expect: "hello", origin: .asr)
+        }
+        #expect(field.string == "Hi hellx")
+        #expect(field.writes.isEmpty)
+        #expect(!executor.queue.hasPending)
+    }
+
+    // MARK: Cleanup swaps through the channel keep their origin
+
+    @Test func liveRevisionAndFinalSwapGoThroughTheQueueAsCleanupEdits() throws {
+        let field = FakeTextTarget("")
+        let executor = AXFieldExecutor(target: field)!
+        let writer = FieldWriter(target: field, channel: QueuedFieldWriteChannel(executor: executor, owner: "run"))
+        writer.apply(.commit(delta: "meet on friday "))
+        writer.apply(.revise(TranscriptRevision(n: 1, start: 0, raw: "meet on friday ", text: "Meet on Friday. ")))
+        #expect(field.string == "Meet on Friday. ")
+        #expect(writer.swapWritten(for: "Meet on Friday!") == .swapped)
+        #expect(field.string == "Meet on Friday! ")
+        let origins = executor.queue.feed.entries.compactMap { entry -> EditOrigin? in
+            if case .applied(_, let origin, _, _) = entry.event { origin } else { nil }
+        }
+        #expect(origins == [.asr, .liveCleanup, .finalSwap])
+    }
 }
 
 /// Forwards to a `FakeTextTarget` with faults a fake cannot express (a select that throws, reads that die after a write).
@@ -442,17 +711,29 @@ private final class FlakyTarget: TextTarget {
     let base: FakeTextTarget
     var failSelect = false
     var failReadsAfterReplace = false
+    /// Reads throw while a span (not a caret) is selected: the field cannot be checked under the writer's select.
+    var failReadsWhileSpanSelected = false
+    /// `text(in:)` throws for a range past the end of the field instead of coming back short.
+    var strictRanges = false
     private var replaced = false
     struct Failure: Error {}
 
     init(_ base: FakeTextTarget) { self.base = base }
+    private var readFails: Bool {
+        (replaced && failReadsAfterReplace) || (failReadsWhileSpanSelected && base.selection.length > 0)
+    }
     func isFocused() -> Bool { base.isFocused() }
     func selectedRange() throws -> UTF16Range {
         if replaced && failReadsAfterReplace { throw Failure() }
         return try base.selectedRange()
     }
+    func length() throws -> Int {
+        if readFails { throw Failure() }
+        return try base.length()
+    }
     func text(in range: UTF16Range) throws -> String {
-        if replaced && failReadsAfterReplace { throw Failure() }
+        if readFails { throw Failure() }
+        if strictRanges, range.location < 0 || range.end > base.units.count { throw Failure() }
         return try base.text(in: range)
     }
     func replace(_ range: UTF16Range, with text: String) throws {

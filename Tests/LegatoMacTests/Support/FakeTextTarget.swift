@@ -76,6 +76,11 @@ final class FakeTextTarget: TextTarget {
         return selection
     }
 
+    func length() throws -> Int {
+        if failReads { throw Failure() }
+        return units.count
+    }
+
     func text(in range: UTF16Range) throws -> String {
         if failReads { throw Failure() }
         let lower = min(max(range.location, 0), units.count)

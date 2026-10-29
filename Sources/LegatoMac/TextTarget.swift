@@ -22,6 +22,8 @@ public protocol TextTarget: AnyObject {
     func isFocused() -> Bool
     /// The current selection of the element; a caret is a range of length 0.
     func selectedRange() throws -> UTF16Range
+    /// The field's length in UTF-16 units (Accessibility: `kAXNumberOfCharactersAttribute`).
+    func length() throws -> Int
     /// The text in `range`; may be shorter than requested near the end of the field.
     func text(in range: UTF16Range) throws -> String
     /// Replaces `range` with `text`, leaving the caret after the inserted text.

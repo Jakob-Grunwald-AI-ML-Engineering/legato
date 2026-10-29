@@ -6,7 +6,9 @@ import LegatoFieldEdit
 /// ``TypingGuard/isEcho``.
 @MainActor
 public protocol FieldActivitySource: AnyObject {
-    func start(_ handler: @escaping @MainActor () -> Void)
+    /// Starts reporting to `handler`; false when it could not (the guard then sees no typing and holds nothing).
+    @discardableResult
+    func start(_ handler: @escaping @MainActor () -> Void) -> Bool
     func stop()
 }
 
@@ -21,6 +23,11 @@ public final class TypingGuard {
     private let quiet: TimeInterval
     private let now: @MainActor () -> TimeInterval
     private var lastActivity: TimeInterval?
+    private var stopped = false
+
+    /// Whether the source reports activity. False when it failed to start (the guard fails open: non-user
+    /// writes are never held, every write is still checked by readback) or after ``stop()``.
+    public private(set) var isWatching = false
 
     /// Whether the change just reported is only our own write showing up (the field reads as the queue left
     /// it). Echoes are not user activity. Set by the executor; nil counts every notification.
@@ -33,7 +40,7 @@ public final class TypingGuard {
         self.source = source
         self.quiet = quiet
         self.now = now
-        source?.start { [weak self] in self?.fieldChanged() }
+        isWatching = source?.start { [weak self] in self?.fieldChanged() } ?? false
     }
 
     /// Marks user activity now.
@@ -45,10 +52,15 @@ public final class TypingGuard {
         return max(0, quiet - (now() - lastActivity))
     }
 
-    public func stop() { source?.stop() }
+    /// Detaches from the source; a notification still on its way after this is ignored.
+    public func stop() {
+        stopped = true
+        isWatching = false
+        source?.stop()
+    }
 
     private func fieldChanged() {
-        if isEcho?() == true { return }
+        if stopped || isEcho?() == true { return }
         noteUserActivity()
     }
 }

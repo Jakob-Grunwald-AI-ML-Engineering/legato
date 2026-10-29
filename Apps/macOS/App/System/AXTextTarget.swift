@@ -103,6 +103,13 @@ final class AXTextTarget: TextTarget {
         return try Self.range(from: value)
     }
 
+    func length() throws -> Int {
+        guard let value = try Self.copyAttribute(element, kAXNumberOfCharactersAttribute) as? NSNumber else {
+            throw AXTargetError.unexpectedValue
+        }
+        return value.intValue
+    }
+
     func text(in range: UTF16Range) throws -> String {
         let parameter = try Self.axValue(for: range)
         var result: CFTypeRef?

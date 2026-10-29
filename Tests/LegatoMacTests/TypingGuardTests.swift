@@ -7,8 +7,13 @@ import Testing
 private final class FakeActivitySource: FieldActivitySource {
     var handler: (@MainActor () -> Void)?
     private(set) var stopped = false
-    func start(_ handler: @escaping @MainActor () -> Void) { self.handler = handler }
-    func stop() { stopped = true; handler = nil }
+    var startSucceeds = true
+    func start(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        self.handler = handler
+        return startSucceeds
+    }
+    /// Keeps the handler: a notification already on its way still arrives after `stop` (AX delivers late).
+    func stop() { stopped = true }
     func fire() { handler?() }
 }
 
@@ -49,6 +54,7 @@ private final class Clock {
     @Test func everyNonUserOriginIsHeld() {
         let (guardian, source, _) = makeGuard()
         source.fire()
+        #expect(EditOrigin.allCases.filter { !$0.isUser }.count == 6)
         for origin in EditOrigin.allCases where !origin.isUser {
             #expect(guardian.delay(for: origin) > 0, "\(origin)")
         }
@@ -57,6 +63,7 @@ private final class Clock {
     @Test func userCommandsAreNeverHeld() {
         let (guardian, source, _) = makeGuard()
         source.fire()
+        #expect(EditOrigin.allCases.filter(\.isUser).count == 4)
         for origin in EditOrigin.allCases where origin.isUser {
             #expect(guardian.delay(for: origin) == 0, "\(origin)")
         }
@@ -89,5 +96,16 @@ private final class Clock {
         #expect(source.stopped)
         source.fire()
         #expect(guardian.delay(for: .agent) == 0)
+    }
+
+    @Test func aSourceThatFailsToStartLeavesTheGuardVisiblyNotWatching() {
+        let source = FakeActivitySource()
+        source.startSucceeds = false
+        let guardian = TypingGuard(source: source, now: { 0 })
+        #expect(!guardian.isWatching)
+        let (watching, _, _) = makeGuard()
+        #expect(watching.isWatching)
+        watching.stop()
+        #expect(!watching.isWatching)
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import LegatoCore
+import LegatoFieldEdit
 
 /// What to do with the dictated text once the run is over.
 public enum FinishAction: Sendable, Equatable {
@@ -164,7 +165,7 @@ public final class FieldWriter {
         } else {
             return .leftInPlace
         }
-        do { try send(range, with: restore) } catch { return .leftInPlace }
+        do { try send(range, with: restore, expect: shown, origin: .asr) } catch { return .leftInPlace }
         guard let after = try? target.text(in: range), after != shown else { return .leftInPlace }
         written = ""
         tentative = ""
@@ -235,8 +236,9 @@ public final class FieldWriter {
         let span = UTF16Range(
             location: start + shared.utf16.count, length: shown.utf16.count - shared.utf16.count)
         let replacement = String(desired.dropFirst(shared.count)) + tentative
+        let replaced = String(decoding: Array(shown.utf16).dropFirst(shared.utf16.count), as: UTF16.self)
         do {
-            try send(span, with: replacement)
+            try send(span, with: replacement, expect: replaced, origin: .liveCleanup)
         } catch {
             return degrade(.writeFailed)
         }
@@ -286,9 +288,10 @@ public final class FieldWriter {
     /// Swaps the text this writer put into the field for `text`, in one write verified by readback: for the
     /// cleaned text at the end of a run, and afterwards for its versions (raw, refined). Only while the
     /// focused field still ends with our text exactly as written and the caret sits right after it; any
-    /// trailing whitespace the field got stays after the new text.
+    /// trailing whitespace the field got stays after the new text. `origin` is what the swap is to the field
+    /// edit queue: the cleaned text at the end of a run (`.finalSwap`) or a version the user picked (`.versions`).
     @discardableResult
-    public func swapWritten(for text: String) -> SwapResult {
+    public func swapWritten(for text: String, origin: EditOrigin = .finalSwap) -> SwapResult {
         guard !closed, let target, let start = spanStart, tentative.isEmpty else { return .nothingWritten }
         let body = String(written.reversed().drop(while: \.isWhitespace).reversed())
         guard !body.isEmpty else { return .nothingWritten }
@@ -300,7 +303,7 @@ public final class FieldWriter {
         if text == body { return .swapped }
         let replacement = text + written.dropFirst(body.count)
         do {
-            try send(span, with: replacement)
+            try send(span, with: replacement, expect: written, origin: origin)
         } catch {
             degrade(.writeFailed)
             return .leftInPlace
@@ -340,6 +343,8 @@ public final class FieldWriter {
         // First write only: the text around the insertion before it, to tell "ignored" from "altered".
         var probe: (window: UTF16Range, before: String)?
         var replaced: String??
+        // What the writer believes the range holds: its tentative text, or the user's selection it just read.
+        let believed: String?
         if let spanStart {
             start = spanStart
             // Our text must be exactly where we left it before we change it.
@@ -351,6 +356,7 @@ public final class FieldWriter {
                 return degrade(.unreadable)
             }
             range = UTF16Range(location: start + written.utf16.count, length: tentative.utf16.count)
+            believed = tentative
         } else {
             do {
                 range = try target.selectedRange() // the first write replaces the selection
@@ -361,10 +367,11 @@ public final class FieldWriter {
             let window = UTF16Range(location: start, length: range.length + insertion.utf16.count)
             if let before = try? target.text(in: window) { probe = (window, before) }
             replaced = .some(range.length == 0 ? "" : try? target.text(in: range))
+            believed = replaced ?? nil
         }
 
         do {
-            try send(range, with: insertion)
+            try send(range, with: insertion, expect: believed, origin: mode == .insertOnStop ? .hold : .asr)
         } catch {
             return degrade(.writeFailed)
         }
@@ -397,9 +404,9 @@ public final class FieldWriter {
 
     private struct NoChannel: Error {}
 
-    private func send(_ range: UTF16Range, with text: String) throws {
+    private func send(_ range: UTF16Range, with text: String, expect: String?, origin: EditOrigin) throws {
         guard let channel else { throw NoChannel() }
-        try channel.replace(range, with: text)
+        try channel.replace(range, with: text, expect: expect, origin: origin)
     }
 
     private func degrade(_ reason: DegradeReason) {

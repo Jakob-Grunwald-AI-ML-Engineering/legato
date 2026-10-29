@@ -18,6 +18,7 @@ import EvaluationSupport
     }
     func isFocused() -> Bool { focused }
     func selectedRange() throws -> UTF16Range { if readFault { throw Failure.unreadable }; return selection }
+    func length() throws -> Int { if readFault { throw Failure.unreadable }; return value.utf16.count }
     func text(in range: UTF16Range) throws -> String {
         if readFault { throw Failure.unreadable }
         guard range.location >= 0, range.location <= value.utf16.count else { throw Failure.unreadable }
