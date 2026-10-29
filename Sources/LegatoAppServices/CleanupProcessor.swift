@@ -286,3 +286,64 @@ final class LiveRunTally: Sendable {
         merged(Optional(run), Optional(next), separator: separator) ?? run
     }
 }
+
+extension CleanupRunLease {
+    /// Gives the admitted backend back.
+    public func end() async { await release() }
+}
+
+/// One cleanup pass outside a session's run (the stateless final pass of a run whose cleanup agent was absent): it
+/// takes the same lease a run takes at its start, so the pass runs on the admitted backend (the Foundation Models
+/// bridge while a Core ML load is still warming) and neither contends with that load nor has it retired mid-pass.
+public enum LeasedCleanup {
+    /// Runs `pass` with the resolution of a lease acquired by `acquire`, then releases the lease. Nil when no lease
+    /// came within `limit` (a late one is released as soon as it arrives) or `acquire` failed: the caller keeps its
+    /// text. Only the acquisition is bounded; the pass has its own time limit.
+    public static func run(
+        acquire: @escaping @Sendable () async throws -> CleanupRunLease?, within limit: Duration,
+        pass: @Sendable (CleanupRegistry.Resolution?) async -> String?
+    ) async -> String? {
+        let race = LeaseRace()
+        let acquired: Acquired = await withCheckedContinuation { continuation in
+            race.continuation = continuation
+            Task {
+                do {
+                    let lease = try await acquire()
+                    if !race.settle(.lease(lease)) { await lease?.end() }
+                } catch {
+                    _ = race.settle(.unavailable)
+                }
+            }
+            Task {
+                try? await Task.sleep(for: limit)
+                _ = race.settle(.unavailable)
+            }
+        }
+        guard case .lease(let lease) = acquired else { return nil }
+        let out = await pass(lease?.resolution)
+        await lease?.end()
+        return out
+    }
+
+    private enum Acquired: Sendable {
+        case lease(CleanupRunLease?)
+        case unavailable
+    }
+
+    /// Settles once, from whichever side answers first.
+    private final class LeaseRace: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        var continuation: CheckedContinuation<Acquired, Never>?
+
+        /// Whether this answer was the first.
+        func settle(_ value: Acquired) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !done else { return false }
+            done = true
+            continuation?.resume(returning: value)
+            return true
+        }
+    }
+}

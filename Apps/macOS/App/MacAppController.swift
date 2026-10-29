@@ -850,7 +850,15 @@ final class MacAppController {
             let outcome = await fieldEdit.finish()
             if outcome.agentAbsent, let raw = entry?.text {
                 // No agent (no rolling session, or still warming): today's stateless final pass, written as patches.
-                action = await fieldEdit.deliverWithoutAgent(raw: raw, clean: { await self.statelessFinalPass($0) })
+                var cleaned: String?
+                action = await fieldEdit.deliverWithoutAgent(raw: raw, clean: {
+                    cleaned = await self.statelessFinalPass($0)
+                    return cleaned
+                })
+                // Whatever way the cleaned text reached the user (patches, clipboard, paste), history holds it.
+                if action != .done, let text = cleaned?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    agentText = text
+                }
             } else {
                 action = run.writer.finish(finalText: nil)
             }
@@ -917,11 +925,17 @@ final class MacAppController {
         guard options.enabled else { return nil }
         let reports = cleanupReports
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
-        return await CleanupProcessor.run(
-            raw, locale: locale, style: options.style, refine: false, timeout: .seconds(options.timeoutSeconds),
-            settings: settings.cleanupStore, registry: models.cleanup,
-            report: { report in await reports.record(report) }, vocabulary: vocabulary,
-            resolution: await models.cleanup.resolve(preference: options.backend.preference), options: options)
+        let models = models, vocabulary = vocabulary, store = settings.cleanupStore
+        // The backend a run takes at its start (the bridge while a Core ML load is warming), leased for the pass.
+        return await LeasedCleanup.run(
+            acquire: { try await models.acquireDictationCleanup(options: options, inBackground: false) },
+            within: .seconds(options.timeoutSeconds)
+        ) { resolution in
+            await CleanupProcessor.run(
+                raw, locale: locale, style: options.style, refine: false, timeout: .seconds(options.timeoutSeconds),
+                settings: store, registry: models.cleanup, report: { report in await reports.record(report) },
+                vocabulary: vocabulary, resolution: resolution, options: options)
+        }
     }
 
     /// Errors are logged by type and code only: their descriptions could echo dictated text.
