@@ -16,6 +16,25 @@ extension CoreMLPrompt {
 }
 
 extension CoreMLPrompt {
+    /// The start of a user turn, up to where its text begins.
+    static func userOpening(family: CoreMLPromptFamily) -> String {
+        switch family {
+        case .qwen3: "<|im_start|>user\n"
+        case .gemma3: "<start_of_turn>user\n"
+        }
+    }
+
+    /// ``continuation(user:family:)`` up to the end of `user`: what follows a reply to open the next turn with
+    /// its text so far, not yet closed.
+    static func continuationOpening(user: String, family: CoreMLPromptFamily) -> String {
+        switch family {
+        case .qwen3: "<|im_end|>\n<|im_start|>user\n\(user)"
+        case .gemma3: "<end_of_turn>\n<start_of_turn>user\n\(user.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+    }
+}
+
+extension CoreMLPrompt {
     /// The rendering of the instructions and examples alone: what every first turn starts with.
     static func head(instructions: String, examples: [LLMExample], family: CoreMLPromptFamily) -> String {
         let sentinel = "\u{1}legato-head\u{1}"
@@ -44,7 +63,7 @@ struct CoreMLTurnStats: Sendable, Equatable {
 /// head). Another caller on the backend or an error leaves a fresh state; unloading ends the session.
 ///
 /// Turns, counts and trims run one at a time (``LLMTurnGate``); appends do not wait.
-actor CoreMLSession: LLMSessionMetrics {
+actor CoreMLSession: LLMSessionMetrics, LLMSessionPrefillAhead {
     nonisolated let tokenBudget: Int
     private let backend: CoreMLBackend
     let id: UUID
@@ -111,6 +130,26 @@ actor CoreMLSession: LLMSessionMetrics {
             let head = CoreMLPrompt.head(instructions: transcript.instructions, examples: transcript.examples, family: family)
             guard !head.isEmpty else { return }
             lastWarm = try await backend.sessionPrefill(id) { try await $0.encode(head) }
+        }
+    }
+
+    /// Prefills `text` as the start of the next user turn, without closing it: the tokens up to the user text
+    /// (the committed conversation, or the head on a first turn) plus the text, so the turn that follows reuses
+    /// that prefix in the native state and only processes what came after. Tokens at the cut may be re-encoded.
+    func prefillAhead(_ text: String) async throws -> (tokens: Int, seconds: Double)? {
+        try await exclusive {
+            let partial = transcript.message(for: text)
+            let committed = committed, family = family
+            let instructions = transcript.instructions, examples = transcript.examples, turns = transcript.turns
+            let prefill = try await backend.sessionPrefill(id) { runtime in
+                if let committed { return committed + (try await runtime.encode(CoreMLPrompt.continuationOpening(user: partial, family: family))) }
+                guard turns.isEmpty else {
+                    throw LLMError.unavailable(reason: "Prefill ahead after a trim is not supported on Core ML; the transcript is rebuilt on the next turn.")
+                }
+                let head = CoreMLPrompt.head(instructions: instructions, examples: examples, family: family)
+                return try await runtime.encode(head + CoreMLPrompt.userOpening(family: family) + partial)
+            }
+            return (prefill.prefilled, prefill.seconds)
         }
     }
 

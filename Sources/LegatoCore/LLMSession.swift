@@ -74,6 +74,14 @@ public protocol LLMSession: AnyObject, Sendable {
     func close() async
 }
 
+/// A session that can take the start of its next user turn into its state before the turn is sent (prefill
+/// ahead, #95): appended text is never lost, the next turn only processes what the state does not hold.
+public protocol LLMSessionPrefillAhead: LLMSession {
+    /// Prefills `text` as the start of the next user turn (pending text first), without a reply. The tokens
+    /// fed and the seconds it took.
+    func prefillAhead(_ text: String) async throws -> (tokens: Int, seconds: Double)?
+}
+
 // MARK: - Transcript bookkeeping shared by the backends
 
 /// A session's transcript as plain values: what every backend renders, counts and trims.

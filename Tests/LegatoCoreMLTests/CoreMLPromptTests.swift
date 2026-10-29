@@ -36,3 +36,13 @@ struct CoreMLPromptTests {
         #expect(throws: LLMError.contextTooLong) { try CoreMLPrompt.validate(input: 10, outputLimit: 0, context: 2_048) }
     }
 }
+
+@Suite("Core ML turn openings (prefill ahead)")
+struct CoreMLTurnOpeningTests {
+    @Test(arguments: [CoreMLPromptFamily.qwen3, .gemma3])
+    func theOpeningIsAPrefixOfTheContinuation(family: CoreMLPromptFamily) {
+        let opening = CoreMLPrompt.continuationOpening(user: "hello wrld", family: family)
+        #expect(CoreMLPrompt.continuation(user: "hello wrld", family: family).hasPrefix(opening))
+        #expect(CoreMLPrompt.continuation(user: "hello wrld", family: family).hasPrefix(opening.replacingOccurrences(of: "hello wrld", with: "")))
+    }
+}
