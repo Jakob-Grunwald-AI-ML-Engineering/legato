@@ -248,6 +248,11 @@ final class KeyboardLinkHost: TranscriptSink {
             if let report = linked.stopReport { trace.linkedStop(report) }
             #endif
             if let cleaned = stop.cleaned { await correctHistory(text, cleaned) }
+            // Part of the cleanup is on the clipboard: the keyboard says so where the user looks.
+            if let notice = linked.notice, visible {
+                link.publishNotice(notice)
+                linkTrace?("link.notice partial=1")
+            }
             if !visible {
                 #if LEGATO_INTERNAL
                 trace.runEnded(applied: nil, confirmed: false)

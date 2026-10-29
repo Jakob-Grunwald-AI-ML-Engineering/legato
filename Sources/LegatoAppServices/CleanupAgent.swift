@@ -197,7 +197,8 @@ public actor CleanupAgent: FieldAgent {
     private func reanchored(in text: String) -> (runs: [Span], touched: [Span]) {
         let old = window as NSString, new = text as NSString
         var kept: [Span] = [], inside: [Span] = []
-        for run in runs where run.length > 0 && run.end <= old.length {
+        // A span part of which left the window (iOS: negative offsets) has no known text to look for.
+        for run in runs where run.length > 0 && run.location >= 0 && run.end <= old.length {
             let known = old.substring(with: NSRange(location: run.location, length: run.length))
             var found: [Int] = []
             var from = 0
@@ -323,15 +324,21 @@ public actor CleanupAgent: FieldAgent {
     private func plan(final: Bool) -> Plan? {
         guard let sessionID, !runs.isEmpty else { return nil }
         let text = window as NSString
-        var found: [(location: Int, text: String)] = []
+        var found: [(location: Int, text: String, cut: Bool)] = []
         for (index, run) in runs.enumerated() {
             // The newest span ends in the tentative text, if any.
             let cut = index == runs.count - 1 ? min(tentativeTail, run.length) : 0
-            let region = NSIntersectionRange(NSRange(location: run.location, length: run.length - cut), NSRange(location: 0, length: text.length))
-            guard region.length > 0 else { continue }
+            // Clipped to the window by hand: `NSIntersectionRange` takes a negative location (iOS: the span's start
+            // left the caret-relative window) as a huge one and returns nothing, which hid the whole run.
+            let start = max(run.location, 0), end = min(run.end - cut, text.length)
+            guard end > start else { continue }
+            let region = NSRange(location: start, length: end - start)
+            // iOS: the span's start left the caret-relative window: its first visible sentence may be cut there.
+            var first = run.location < 0
             text.enumerateSubstrings(in: region, options: .bySentences) { _, range, _, _ in
                 let body = Self.trimmed(range, in: text)
-                if body.length > 0 { found.append((body.location, text.substring(with: body))) }
+                if body.length > 0 { found.append((body.location, text.substring(with: body), first)) }
+                first = false
             }
         }
         guard !found.isEmpty else { return nil }
@@ -351,7 +358,7 @@ public actor CleanupAgent: FieldAgent {
             let role: CleanupPrompt.Agent.Role
             if touched.contains(where: { Self.touches($0, span) }) {
                 role = .locked
-            } else if (!final && sentence.text.contains(where: \.isNewline)) || reviewed.contains(sentence.text)
+            } else if sentence.cut || (!final && sentence.text.contains(where: \.isNewline)) || reviewed.contains(sentence.text)
                 || (!final && skipped.contains(sentence.text))
                 || (!final && isLast && !Self.endsSentence(sentence.text))
             {

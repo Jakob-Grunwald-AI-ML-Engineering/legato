@@ -94,6 +94,7 @@ final class LiveTrace {
             "run": runID, "mode": report.mode.rawValue, "branch": report.branch.rawValue, "waitMs": report.waitMs,
             "sent": report.sent, "acked": report.acked, "steps": report.steps, "copied": report.copied,
             "landed": report.landed, "ms": elapsedMs,
+            "patched": "\(report.patched)/\(report.patches)", "outOfWindow": report.outOfWindow,
         ]
         if let reason = report.reason { fields["reason"] = reason }
         AudioDiagnostics.log("linked.stop", fields)

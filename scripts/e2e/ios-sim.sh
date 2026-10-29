@@ -1891,9 +1891,9 @@ scenario_fa() {
   assert_no_log "the stop made no second pass" "kind=stateless"
   assert_no_log "and no agent call" "cleanup.call backend=E2EFakeAgentSession"
 
-  # The device defect (iPhone, WhatsApp): the host's before-context loses the run's head as the text grows, so the
-  # field cannot show the run's text is still all there. Its patches are not written (a step outside the window
-  # never is), the session's cleaned text goes to the clipboard with today's notice, and the stop says why.
+  # The device defect (iPhone, WhatsApp): the host's before-context loses the run's head as the text grows. The
+  # patches inside the window are written, the one in the head is not (a step outside the window never is): the
+  # session's whole cleaned text goes to the clipboard, the keyboard shows the partial notice, the stop says why.
   SCENARIO="fa. Replace: the run's head out of the host's window"
   relaunch "${common[@]}" -LegatoCleanupDelivery replace -LegatoHarnessContextLimit 12 || return
   wait_log "e2e harness visible value=1" 10
@@ -1904,10 +1904,14 @@ scenario_fa() {
   fa_stop 2
   wait_log "link linked.stop mode=replace" 20
   sleep 0.5
-  assert_log "the patch was not made: out of the window" "link final.patch result=notShown reason=outOfWindow"
-  assert_log "the stop says why" "link linked.stop mode=replace branch=notShown reason=outOfWindow"
-  assert_eq "field: the raw stream, typed once" "teh cat sat. A dgo ran. " "$(harness_doc)"
-  assert_eq "clipboard: the cleaned text" "the cat sat. A dog ran." "$(pasteboard)"
+  assert_log "the visible patch was sent, the head's was not" "link final.patch steps=1 outOfWindow=1"
+  assert_log "the visible patch landed" "harness fe.link outcome origin=finalSwap result=applied"
+  assert_log "the stop says why" "link linked.stop mode=replace branch=partial reason=outOfWindow"
+  assert_log "and how much landed" "patched=1/2 outOfWindow=1"
+  assert_eq "field: the visible part cleaned, the head raw, typed once" "teh cat sat. A dog ran. " "$(harness_doc)"
+  assert_eq "clipboard: the whole cleaned text" "the cat sat. A dog ran." "$(pasteboard)"
+  assert_log "the app published the partial notice" "link link.notice partial=1"
+  assert_log "the keyboard showed it" "harness notice shown"
   assert_eq "history: the cleaned text (the clipboard's), its raw version kept" "the cat sat. A dog ran." "$(history_texts | tail -1)"
   assert_no_log "nothing was typed twice" "fe.duplicate"
   xcrun simctl pbcopy "$UDID" <<< "sentinel"  # the next scenario expects the clipboard as the first one left it

@@ -87,6 +87,7 @@ public final class HostLink {
         state.finalText = nil
         state.insertAt = nil
         state.revision = nil
+        state.notice = nil
         reportedSentBase = 0
         reportedSentCount = 0
         reportedSent = nil
@@ -135,6 +136,7 @@ public final class HostLink {
         state.delivery = nil // an insert is typed as it is: no cleanup swap, no hold
         state.finalText = nil
         state.revision = nil
+        state.notice = nil
         state.insertAt = now()
         publish()
         scheduleScrub()
@@ -170,6 +172,14 @@ public final class HostLink {
         if !holdingScrub { scheduleScrub() }
     }
 
+    /// The finished run's stop has `notice` for the user: published with its final state. Nothing while a run is
+    /// going on (it is the next run's state then).
+    public func publishNotice(_ notice: String) {
+        guard state.runID != nil, !isRunning, state.notice != notice else { return }
+        state.notice = notice
+        publish()
+    }
+
     /// The held stop of the run that ended last is done: its retention window starts now. Nothing when a newer
     /// run (or insert) took the link meanwhile.
     public func releaseScrub() {
@@ -200,6 +210,7 @@ public final class HostLink {
         state.fieldEdits = nil
         state.insertAt = nil
         state.revision = nil
+        state.notice = nil
         publish()
     }
 

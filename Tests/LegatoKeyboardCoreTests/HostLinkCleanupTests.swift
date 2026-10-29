@@ -51,6 +51,24 @@ private struct LinkRig {
 @Suite struct HostLinkCleanupTests {
     // MARK: delivery and final text
 
+    /// A stop that put part of the cleanup on the clipboard tells the keyboard (its notice, on the run's final
+    /// state); the next run starts without it. Absent from the JSON unless set.
+    @Test func aStopNoticeGoesWithTheRunsFinalStateUntilTheNextRun() throws {
+        let r = LinkRig()
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .replace)
+        r.link.update(committed: "teh cat", volatile: "")
+        r.link.publishNotice("Part of it is on the clipboard.")
+        #expect(r.host?.notice == nil)  // not while the run goes on
+        r.link.runEnded(committed: "teh cat", finalText: "The cat.")
+        r.link.publishNotice("Part of it is on the clipboard.")
+        #expect(r.host?.notice == "Part of it is on the clipboard.")
+        #expect(r.host?.runID == "run-1" && r.host?.phase == .idle && r.host?.finalText == "The cat.")
+        r.link.runStarted(id: "run-2", target: .keyboard)
+        #expect(r.host?.notice == nil)
+        let json = String(decoding: try JSONEncoder().encode(try #require(r.host)), as: UTF8.self)
+        #expect(!json.contains("notice"))
+    }
+
     @Test func theRunsDeliveryIsPublishedWithItsStart() {
         let r = LinkRig()
         r.link.runStarted(id: "run-1", target: .keyboard, delivery: .hold)

@@ -109,6 +109,9 @@ public struct HostState: Codable, Sendable, Equatable {
     /// The experimental edit queue and cleanup agent are on for this run (frozen when it starts). Optional so
     /// states written by an older host decode, and absent from the JSON unless set.
     public var fieldEdits: Bool?
+    /// On a finished run's state: what its stop has to tell the user (part of the cleanup is on the clipboard),
+    /// for a keyboard that followed the run to show once. Absent from the JSON unless set.
+    public var notice: String?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,

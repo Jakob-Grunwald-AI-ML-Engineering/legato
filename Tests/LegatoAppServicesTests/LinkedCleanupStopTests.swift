@@ -105,9 +105,9 @@ private func edit(_ sentence: Int, _ text: String) -> String { #"[{"sentence":\#
 struct LinkedCleanupStopTests {
     // MARK: Replace on the device (iPhone, WhatsApp): the run's head scrolled out of the window
 
-    /// The device's Replace run: the host's before-context lost the run's head mid-run, so the field cannot show
-    /// that the run's text is still there. The patches are not written (a step outside the window is never
-    /// written), the session's cleaned text goes to the clipboard, and the stop says why.
+    /// The device's Replace run: the host's before-context lost the run's head mid-run. The patches inside the
+    /// window are written; the one in the head is not (a step outside the window never is): the session's whole
+    /// cleaned text goes to the clipboard with the partial notice, and the stop says how much landed and why.
     @Test func replaceWithTheRunsHeadOutOfTheWindowFallsBackAndSaysWhy() async {
         let keyboard = WindowedKeyboard()
         let run = LinkedCleanupRun(owner: "run", agent: nil, transport: keyboard.transport, finalWait: .milliseconds(300))
@@ -121,11 +121,13 @@ struct LinkedCleanupStopTests {
             .replace, committed: raw, text: "The cat sat on the mat. A dog ran.", finalText: "The cat sat on the mat. A dog ran.",
             applied: { true }, statelessPass: { _ in Issue.record("Replace makes no second pass"); return nil },
             copy: { _ in true })
-        #expect(stop.landed == false)  // the session copies its cleaned text, with today's notice
-        #expect(keyboard.field == raw)
-        #expect(run.stopReport?.branch == .notShown)
+        #expect(stop.landed == false)  // the session copies its whole cleaned text
+        #expect(run.notice == LinkedCleanupRun.partialNotice)
+        #expect(keyboard.field == "teh cat sat on the mat. A dog ran.")
+        #expect(run.stopReport?.branch == .partial)
         #expect(run.stopReport?.reason == "outOfWindow")
-        #expect(run.stopReport?.line.hasPrefix("linked.stop mode=replace branch=notShown reason=outOfWindow") == true)
+        #expect(run.stopReport?.line.hasPrefix("linked.stop mode=replace branch=partial reason=outOfWindow") == true)
+        #expect(run.stopReport?.line.hasSuffix(" patched=2/3 outOfWindow=1") == true, "\(run.stopReport?.line ?? "-")")
     }
 
     /// Replace with the run's text in the window: the patches land, and the stop says they were sent and acked.
@@ -231,5 +233,142 @@ struct LinkedCleanupStopTests {
         #expect(run.stopReport?.branch == .agentAbsent)
         #expect(run.stopReport?.reason == "outOfWindow")
         #expect(run.stopReport?.copied == true)
+    }
+
+    // MARK: Option A: patch what the window shows, the rest via the clipboard (#80)
+
+    /// The run's head left the window, but the feed said exactly how far (its edge shifts): the mirror keeps the
+    /// text that scrolled out, so the run's text is still all known (the history records the field as it is).
+    @Test func theMirrorKeepsTheRunsHeadThatLeftTheWindow() {
+        let keyboard = WindowedKeyboard()
+        var mirror = FeedMirror()
+        mirror.fold(keyboard.publish().first!)
+        keyboard.asr("teh cat sat on the mat. ")
+        keyboard.hideHead(13)
+        keyboard.asr("a dgo ran.")
+        for batch in keyboard.publish() { mirror.fold(batch) }
+        #expect(mirror.runText == "teh cat sat on the mat. a dgo ran.")
+        let plan = mirror.patches(from: "teh cat sat on the mat. a dgo ran.", to: "The cat sat on the mat. A dog ran.", owner: "run")
+        #expect(plan?.patches == 3 && plan?.outOfWindow == 1)
+        #expect(plan?.transaction?.steps.allSatisfy { $0.span.location >= 0 } == true)
+    }
+
+    /// Only the run's tail is known (the head's text was not kept): its place comes from the run's offsets the
+    /// feed shifted, the visible text is a guard (the raw text must end with it), never a search.
+    @Test func withOnlyTheTailKnownThePatchesAreMappedByTheRunsOffsets() throws {
+        let keyboard = WindowedKeyboard()
+        var mirror = FeedMirror(headLimit: 0)
+        mirror.fold(keyboard.publish().first!)
+        keyboard.asr("teh cat sat on the mat. ")
+        keyboard.hideHead(13)
+        keyboard.asr("a dgo ran.")
+        for batch in keyboard.publish() { mirror.fold(batch) }
+        #expect(mirror.runText == nil)  // not all of it is known
+        let raw = "teh cat sat on the mat. a dgo ran."
+        let plan = try #require(mirror.patches(from: raw, to: "The cat sat on the mat. A dog ran.", owner: "run"))
+        #expect(plan.patches == 3 && plan.outOfWindow == 1)
+        let transaction = try #require(plan.transaction)
+        #expect(transaction.steps.map(\.span.location) == [11, 14])
+        keyboard.receive([transaction])
+        #expect(keyboard.field == "teh cat sat on the mat. A dog ran.")
+        // The visible text is the guard: a raw text that does not end with it, or that is longer than the run's
+        // known extent, has no patches.
+        #expect(mirror.patches(from: "teh cat sat on the mat. a cat ran.", to: "The cat sat on the mat. A cat ran.", owner: "run") == nil)
+        #expect(mirror.unpatchable(raw: "teh cat sat on the mat. a cat ran.") == .textDiffers)
+        #expect(mirror.patches(from: "So, teh cat sat on the mat. a dgo ran.", to: "So, the cat sat on the mat. A dog ran.", owner: "run") == nil)
+    }
+
+    /// A reset after the head left the window (the run's offsets are negative then) re-anchors without reading
+    /// outside the text (no crash), for the mirror and for the agent.
+    @Test func aResetAfterTheHeadLeftTheWindowIsSafe() async {
+        let keyboard = WindowedKeyboard()
+        var mirror = FeedMirror()
+        let agent = CleanupAgent(session: WatchedSession([]), options: .init(owner: "run"))
+        func feed() async {
+            for batch in keyboard.publish() {
+                mirror.fold(batch)
+                _ = await agent.consume(batch)
+            }
+        }
+        await feed()
+        keyboard.asr("teh cat sat on the mat. ")
+        keyboard.hideHead(13)
+        keyboard.asr("a dgo ran.")
+        await feed()
+        keyboard.queue.reset(FieldSnapshot(window: keyboard.window, caret: keyboard.caret), reason: .unaligned)
+        await feed()
+        #expect(mirror.runText == nil)
+        #expect(mirror.unpatchable(raw: "teh cat sat on the mat. a dgo ran.") == .outOfWindow)
+    }
+
+    /// Live: the agent's edits target the newest sentences, which are in the window: they land although the run's
+    /// head is out of it. The sentence cut by the window's edge is only context (its start is not visible). At
+    /// the stop the history gets the run's whole text as the field holds it, not only the visible tail.
+    @Test func liveEditsLandWithTheRunsHeadOutOfTheWindow() async {
+        let keyboard = WindowedKeyboard()
+        let session = WatchedSession([(.zero, "[]"), (.zero, #"[{"sentence":1,"text":"N the mat."},{"sentence":2,"text":"A dog ran."}]"#)])
+        let run = LinkedCleanupRun(
+            owner: "run", agent: { CleanupAgent(session: session, options: .init(owner: "run", timeout: .seconds(5))) },
+            transport: keyboard.transport, agentWait: .milliseconds(300), finalWait: .milliseconds(300))
+        run.feedChanged()
+        keyboard.asr("teh cat sat on the mat. ")
+        run.feedChanged()
+        var asked = false
+        for _ in 0..<200 where !asked {
+            asked = await session.requests.count == 1
+            if !asked { try? await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(asked)
+        keyboard.hideHead(13)
+        keyboard.asr("A dgo ran.")  // a new sentence: a capital after the period
+        run.feedChanged()
+        var landed = false
+        for _ in 0..<200 where !landed {
+            landed = keyboard.field.hasSuffix("A dog ran.")
+            if !landed { try? await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(landed, "\(keyboard.field)")
+        #expect(keyboard.field == "teh cat sat on the mat. A dog ran.")  // the cut sentence was not edited
+        let stop = await run.stop(
+            .live, committed: "teh cat sat on the mat. A dgo ran.", text: "teh cat sat on the mat. A dgo ran.",
+            finalText: nil, applied: { true }, statelessPass: { _ in nil }, copy: { _ in true })
+        #expect(stop == .init(landed: true, cleaned: "teh cat sat on the mat. A dog ran."))
+        #expect(run.stopReport?.branch == .applied)
+    }
+
+    /// Live without an agent, the head out of the window: the stateless pass's visible patches land, the rest
+    /// goes to the clipboard as the whole cleaned text, with the partial notice.
+    @Test func anAbsentAgentsPassPatchesTheVisiblePart() async {
+        let keyboard = WindowedKeyboard()
+        let run = LinkedCleanupRun(
+            owner: "run", agent: { nil }, transport: keyboard.transport, agentWait: .milliseconds(100),
+            finalWait: .milliseconds(200))
+        run.feedChanged()
+        keyboard.asr("teh cat sat on the mat. ")
+        run.feedChanged()
+        keyboard.hideHead(13)
+        keyboard.asr("a dgo ran.")
+        var copied: [String] = []
+        let stop = await run.stop(
+            .live, committed: "teh cat sat on the mat. a dgo ran.", text: "teh cat sat on the mat. a dgo ran.",
+            finalText: nil, applied: { true }, statelessPass: { _ in "The cat sat on the mat. A dog ran." },
+            copy: { copied.append($0); return true })
+        #expect(keyboard.field == "teh cat sat on the mat. A dog ran.")
+        #expect(copied == ["The cat sat on the mat. A dog ran."])
+        #expect(run.notice == LinkedCleanupRun.partialNotice)
+        #expect(run.stopReport?.line.hasSuffix(" patched=2/3 outOfWindow=1") == true, "\(run.stopReport?.line ?? "-")")
+    }
+
+    /// Everything the stop sent landed: the report says all patches did, and no notice is given.
+    @Test func aStopThatLandsReportsAllPatchesAndNoNotice() async {
+        let keyboard = WindowedKeyboard("Hi")
+        let run = LinkedCleanupRun(owner: "run", agent: nil, transport: keyboard.transport, finalWait: .milliseconds(300))
+        run.feedChanged()
+        keyboard.asr(" teh cat sat. a dgo ran.")
+        let stop = await run.stop(
+            .replace, committed: "teh cat sat. a dgo ran.", text: "the cat sat. a dog ran.", finalText: "the cat sat. a dog ran.",
+            applied: { true }, statelessPass: { _ in nil }, copy: { _ in true })
+        #expect(run.notice == nil)
+        #expect(run.stopReport?.line.hasSuffix(" patched=2/2 outOfWindow=0") == true, "\(run.stopReport?.line ?? "-")")
     }
 }
