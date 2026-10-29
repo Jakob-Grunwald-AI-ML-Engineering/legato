@@ -718,7 +718,8 @@ scenario_p() {
   trigger result-insert
   wait_log "e2e result-insert.done" 10
   wait_log "e2e kbd.apply final=1" 10   # the typewriter reveal has finished
-  assert_log "typed through TypewriterReveal ticks" "kbd.reveal tick"
+  local ticks; ticks="$(grep -c -F -- "kbd.reveal tick" "$LOG")"
+  if [ "$ticks" -ge 2 ]; then record PASS "typed progressively through TypewriterReveal ticks"; else record FAIL "typed progressively through TypewriterReveal ticks" "$ticks tick lines, expected >= 2"; fi
   assert_eq "keyboard field == script" "$TEXT" "$(log_field_last "kbd.apply final=1" doc)"
   assert_eq "explicit insert publishes exactly the transcript" "$TEXT" "$(log_field_last "link.host phase=idle final=1" committed)"
   assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
@@ -726,6 +727,18 @@ scenario_p() {
   assert_eq "activity ended (inserted) with the text" "$TEXT" "$(log_field "activity.end phase=inserted" tail)"
   assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
   assert_log "session released (no keep-alive)" "session.deactivate"
+}
+
+scenario_p2() {
+  begin "p2. keyboard hidden during the reveal flushes the text" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
+  trigger kbd-visible
+  wait_log "e2e kbd.visible value=1" 10
+  run_once 1
+  trigger result-insert
+  trigger kbd-hidden
+  wait_log "e2e kbd.visible value=0" 10
+  wait_log "e2e result-insert.done" 10
+  assert_eq "hiding flushed the whole text into the field" "$TEXT" "$(log_field_last "kbd.apply final=1" doc)"
 }
 
 scenario_j() {
@@ -1608,7 +1621,7 @@ scenario_z() {
 
 t_run=$SECONDS
 wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
-for s in a b c d e f g h i p j o k l m n n2 n3 n4 n5 q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
+for s in a b c d e f g h i p p2 j o k l m n n2 n3 n4 n5 q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
 if wanted v; then
   scenario_v "retry succeeds" duckOthers 1 2 yes
   scenario_v "default fails twice" duckOthers 9 2 no

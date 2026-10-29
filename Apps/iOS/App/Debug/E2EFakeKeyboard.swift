@@ -47,6 +47,9 @@ final class E2EFakeKeyboard {
     // MARK: Presence
 
     private func setVisible(_ value: Bool) {
+        // Like `KeyboardController.disappeared`: text still to be revealed goes in now, then the ticker stops.
+        if !value, reveal.needsTicks { applyHost(flush: true) }
+        if !value { stopTicker() }
         visible = value
         presenceTask?.cancel()
         presenceTask = nil
@@ -143,14 +146,17 @@ final class E2EFakeKeyboard {
 
     /// Mirrors `KeyboardController.applyHost`: a host update moves the reveal's target, the ticker (with
     /// `elapsedMs`, the time since its last tick) reveals it.
-    private func applyHost(elapsedMs: Double = 0) {
-        guard visible, applies, let store,
-              let state = store.read(HostState.self, forKey: LinkChannel.Key.host)
+    /// Gated by `HostApplyDecision` as in production. The controller's clear-watch hold has no counterpart here:
+    /// the fake field is never emptied by anyone but the reveal.
+    private func applyHost(elapsedMs: Double = 0, flush: Bool = false) {
+        guard applies, let store, let state = store.read(HostState.self, forKey: LinkChannel.Key.host),
+              case .apply = HostApplyDecision.decide(
+                  host: state, cursor: cursor, visible: visible, documentID: documentID, now: Date())
         else { return stopTicker() }
         let before = cursor
         let plan = reveal.plan(
             state: state, cursor: cursor, contextBefore: document, documentID: documentID,
-            animated: true, elapsedMs: elapsedMs)
+            animated: !flush, elapsedMs: elapsedMs)
         for op in plan.ops {
             switch op {
             case .deleteBackward(let count): document.removeLast(min(count, document.count))
@@ -162,8 +168,9 @@ final class E2EFakeKeyboard {
         if elapsedMs > 0, !plan.ops.isEmpty { E2E.log("kbd.reveal tick") }
         guard plan.cursor != before || !plan.ops.isEmpty, let applied = plan.cursor,
               !plan.ops.isEmpty || applied.finalApplied else { return }
+        // Tick writes keep the cursor exact but only the last one wakes the app.
         store.write(applied, forKey: LinkChannel.Key.applied)
-        DarwinObserver.post(LinkChannel.Note.applied)
+        if elapsedMs == 0 || applied.finalApplied { DarwinObserver.post(LinkChannel.Note.applied) }
         E2E.log("kbd.apply final=\(applied.finalApplied ? 1 : 0) doc=\(E2E.quote(document))")
     }
 
