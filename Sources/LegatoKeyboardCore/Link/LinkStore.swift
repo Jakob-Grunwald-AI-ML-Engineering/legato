@@ -46,11 +46,18 @@ public struct LinkStore: Sendable {
     }
 
     public func write<T: Encodable>(_ value: T, forKey key: String) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        guard let data = try? encoder.encode(value) else { return }
+        guard let data = encoded(value) else { return }
         backing.set(data, forKey: key)
     }
+
+    /// The JSON `write` would store, so a caller can bound its size first.
+    public func encoded<T: Encodable>(_ value: T) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        return try? encoder.encode(value)
+    }
+
+    public func write(encoded data: Data, forKey key: String) { backing.set(data, forKey: key) }
 
     /// nil when nothing is stored or the stored value doesn't decode (e.g. a newer version wrote it).
     public func read<T: Decodable>(_ type: T.Type, forKey key: String) -> T? {

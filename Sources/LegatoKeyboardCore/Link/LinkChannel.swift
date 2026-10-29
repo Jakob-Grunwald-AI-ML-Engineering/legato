@@ -48,6 +48,8 @@ public enum LinkChannel {
 
     /// How many feed batches (and unacknowledged edits) the App Group keeps; a reader further behind resyncs.
     public static let feedCapacity = 256
+    /// The feed ring's encoded size stays under this; older batches are dropped first.
+    public static let feedMaxBytes = 64 * 1024
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.
     public static let beatInterval: TimeInterval = 1

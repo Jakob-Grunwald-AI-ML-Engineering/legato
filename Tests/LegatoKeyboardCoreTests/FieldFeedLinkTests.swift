@@ -4,9 +4,10 @@ import Testing
 @testable import LegatoKeyboardCore
 
 private func link(
-    _ backing: MemoryLinkStore = MemoryLinkStore(), capacity: Int = 256, notes: NoteLog = NoteLog()
+    _ backing: MemoryLinkStore = MemoryLinkStore(), capacity: Int = 256, maxBytes: Int = 64 * 1024,
+    notes: NoteLog = NoteLog()
 ) -> FieldFeedLink {
-    FieldFeedLink(store: LinkStore(backing), post: { notes.add($0) }, capacity: capacity)
+    FieldFeedLink(store: LinkStore(backing), post: { notes.add($0) }, capacity: capacity, maxBytes: maxBytes)
 }
 
 private final class NoteLog: @unchecked Sendable {
@@ -129,6 +130,63 @@ private func allEvents() -> [FeedEvent] {
         #expect(link().readFeed(after: nil) == nil)
     }
 
+    @Test func theRingIsBoundedInBytesToo() throws {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing, maxBytes: 4_000)
+        let big = String(repeating: "x", count: 900)
+        for index in 1...10 { keyboard.append(batch([.asrDelta(big)], from: index), window: "w") }
+        let data = try #require(backing.data(forKey: LinkChannel.Key.feed))
+        #expect(data.count <= 4_000)
+        let ring = try #require(LinkStore(backing).read(FeedRing.self, forKey: LinkChannel.Key.feed))
+        #expect(ring.slots.count < 10 && ring.slots.last?.seq == 10 && ring.lastSeq == 10)
+        // A reader at seq 1 fell off the front and resyncs.
+        let read = try #require(keyboard.readFeed(after: FeedCursor(writer: ring.writer, seq: 1)))
+        #expect(read.batches.first?.resync == true)
+    }
+
+    @Test func aSingleOversizedBatchBecomesAResyncMarker() throws {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing, maxBytes: 2_000)
+        keyboard.append(batch([.asrDelta("a")], from: 1), window: "w")
+        let start = try #require(keyboard.readFeed(after: nil)).cursor
+        keyboard.append(batch([.asrDelta(String(repeating: "y", count: 5_000))], from: 2, version: 7), window: "w2")
+        let data = try #require(backing.data(forKey: LinkChannel.Key.feed))
+        #expect(data.count <= 2_000)
+        let read = try #require(keyboard.readFeed(after: start))
+        #expect(read.batches.count == 1 && read.batches[0].resync)
+        #expect(read.batches[0].window == "w2" && read.batches[0].version == FieldVersion(7))
+        #expect(read.cursor.seq == 2)
+    }
+
+    @Test func concurrentAppendsKeepEverySeqOnce() throws {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing)
+        DispatchQueue.concurrentPerform(iterations: 8) { worker in
+            for index in 0..<20 { keyboard.append(batch([.asrDelta("w\(worker)-\(index)")]), window: "") }
+        }
+        let ring = try #require(LinkStore(backing).read(FeedRing.self, forKey: LinkChannel.Key.feed))
+        #expect(ring.lastSeq == 160)
+        #expect(ring.slots.map(\.seq) == Array(1...160))
+    }
+
+    @Test func aNewRunResetsTheRing() throws {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing)
+        keyboard.follow(runID: "r1")
+        keyboard.append(batch([.asrDelta("old")]), window: "old window")
+        let app = link(backing)
+        let old = try #require(app.readFeed(after: nil, forRun: "r1"))
+        #expect(app.readFeed(after: nil, forRun: "r2") == nil)  // r1's ring is not r2's
+
+        keyboard.follow(runID: "r2")
+        #expect(app.readFeed(after: nil, forRun: "r2") == nil)  // nothing yet, and no stale resync
+        keyboard.follow(runID: "r2")  // following the same run again keeps what is there
+        keyboard.append(batch([.asrDelta("new")], version: 4), window: "new window")
+        let read = try #require(app.readFeed(after: old.cursor, forRun: "r2"))
+        #expect(read.batches.count == 1 && read.batches[0].resync && read.batches[0].window == "new window")
+        #expect(read.cursor.writer != old.cursor.writer && read.cursor.seq == 1)
+    }
+
     // MARK: edits
 
     private func transaction(_ text: String) -> EditTransaction {
@@ -137,44 +195,81 @@ private func allEvents() -> [FeedEvent] {
             caret: 2, coalesce: "k", session: session)
     }
 
-    @Test func editsTravelToTheKeyboardOnceAndAreAcknowledged() throws {
+    @Test func editsAreRedeliveredUntilAcknowledged() throws {
         let backing = MemoryLinkStore()
         let notes = NoteLog()
         let app = link(backing, notes: notes)
         let keyboard = link(backing)
+        app.beginRun("r")
         let a = transaction("a"), b = transaction("b")
-        app.sendEdits([a, b])
+        #expect(app.sendEdits([a, b]) == 0)
         #expect(notes.all == [LinkChannel.Note.edits])
 
-        #expect(keyboard.takeEdits() == [a, b])
-        #expect(keyboard.takeEdits().isEmpty)  // acknowledged
+        let first = keyboard.takeEdits(forRun: "r")
+        #expect(first.transactions == [a, b] && first.through == 2 && first.missed == 0)
+        // The keyboard died before applying them: they come again.
+        #expect(keyboard.takeEdits(forRun: "r").transactions == [a, b])
+
+        keyboard.ack(through: first.through, writer: first.writer)
+        #expect(keyboard.takeEdits(forRun: "r").transactions.isEmpty)
+        keyboard.ack(through: 1, writer: first.writer)  // never moves back
+        #expect(keyboard.takeEdits(forRun: "r").transactions.isEmpty)
 
         let c = transaction("c")
         app.sendEdits([c])  // the app prunes what was acknowledged
         let stored = try #require(LinkStore(backing).read(EditsBox.self, forKey: LinkChannel.Key.edits))
         #expect(stored.edits.map(\.transaction) == [c])
-        #expect(keyboard.takeEdits() == [c])
+        #expect(keyboard.takeEdits(forRun: "r").transactions == [c])
     }
 
     @Test func aRestartedAppSenderIsNotMistakenForAcknowledged() {
         let backing = MemoryLinkStore()
         let keyboard = link(backing)
         let first = link(backing)
+        first.beginRun("r")
         first.sendEdits([transaction("a")])
-        #expect(keyboard.takeEdits().count == 1)
+        let read = keyboard.takeEdits(forRun: "r")
+        keyboard.ack(through: read.through, writer: read.writer)
 
         let restarted = link(backing)  // numbering starts over under a new writer
+        restarted.beginRun("r")
         let b = transaction("b")
         restarted.sendEdits([b])
-        #expect(keyboard.takeEdits() == [b])
+        #expect(keyboard.takeEdits(forRun: "r").transactions == [b])
     }
 
-    @Test func unacknowledgedEditsAreBounded() throws {
+    @Test func editsOfAnotherRunAreNotDelivered() {
+        let backing = MemoryLinkStore()
+        let app = link(backing)
+        let keyboard = link(backing)
+        app.beginRun("r1")
+        app.sendEdits([transaction("a")])
+        #expect(keyboard.takeEdits(forRun: "r2").transactions.isEmpty)
+        app.beginRun("r2")  // a new run drops what was queued for the old one
+        #expect(keyboard.takeEdits(forRun: "r1").transactions.isEmpty)
+        #expect(keyboard.takeEdits(forRun: "r2").transactions.isEmpty)
+    }
+
+    @Test func overflowOfUnacknowledgedEditsIsReported() {
         let backing = MemoryLinkStore()
         let app = link(backing, capacity: 4)
-        app.sendEdits((1...6).map { transaction("t\($0)") })
-        let kept = link(backing).takeEdits()
-        #expect(kept.map { $0.steps[0].text } == ["t3", "t4", "t5", "t6"])
+        app.beginRun("r")
+        let dropped = app.sendEdits((1...6).map { transaction("t\($0)") })
+        #expect(dropped == 2)
+        let read = link(backing).takeEdits(forRun: "r")
+        #expect(read.transactions.map { $0.steps[0].text } == ["t3", "t4", "t5", "t6"])
+        #expect(read.missed == 2)
+    }
+
+    @Test func concurrentAcksOnlyMoveForward() throws {
+        let backing = MemoryLinkStore()
+        let app = link(backing)
+        let keyboard = link(backing)
+        app.beginRun("r")
+        app.sendEdits((1...50).map { transaction("t\($0)") })
+        let writer = keyboard.takeEdits(forRun: "r").writer
+        DispatchQueue.concurrentPerform(iterations: 50) { keyboard.ack(through: $0 + 1, writer: writer) }
+        #expect(keyboard.takeEdits(forRun: "r").transactions.isEmpty)
     }
 }
 
