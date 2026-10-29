@@ -17,8 +17,44 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
     /// audio session, no run, no history entry), which keeps the app running in the background as during a
     /// real dictation's cleanup. The lease ends with the probe.
     case backgroundAudio = "background-audio"
+    /// The continuous cleanup agent (spike #95): one Core ML or MLX CPU model, a 2–3 min stream of chunks at
+    /// speech pace into one warm session; see ``SessionProbe/runContinuous(models:)``. Configured by the
+    /// `LEGATO_PROBE_*` environment, never by the other modes' backends.
+    case continuous
 }
 
+/// ## Running
+///
+/// Continuous cleanup agent (spike #95, mode `continuous`, ContinuousProbe.swift): one backend × model per
+/// launch, Foundation Models never. Install a Debug device build first (this branch has no
+/// `scripts/device/ctl.sh`; use main's, or `xcodebuild build -project Apps/iOS/Legato.xcodeproj -scheme Legato
+/// -configuration Debug -destination id=$D -allowProvisioningUpdates` after `xcodegen generate` in Apps/iOS,
+/// then `xcrun devicectl device install app --device $D <Legato.app>`). For MLX CPU numbers add
+/// `GCC_OPTIMIZATION_LEVEL=3 SWIFT_OPTIMIZATION_LEVEL=-O` to that xcodebuild: Debug compiles MLX's C++ CPU
+/// kernels at -O0 (Core ML runs on the Neural Engine and is unaffected). A launch downloads a missing model in
+/// the foreground (logged), loads it, arms the microphone, waits up to 3 min for the background (press Home)
+/// and replays ~150 s of speech. Set the keep-ready linger in Settings to at least 5 min. devicectl parses
+/// dash-prefixed arguments as its own, so the configuration goes in the environment:
+///
+///     D=00008150-000E60360245401C
+///     xcrun devicectl device process launch --device $D --terminate-existing --environment-variables '{"LEGATO_SESSION_PROBE":"continuous","LEGATO_PROBE_BACKEND":"coreml","LEGATO_PROBE_MODEL":"qwen3-1.7b","LEGATO_PROBE_BG":"audio"}' de.gruenwald.legato
+///     xcrun devicectl device process launch --device $D --terminate-existing --environment-variables '{"LEGATO_SESSION_PROBE":"continuous","LEGATO_PROBE_BACKEND":"mlx-cpu","LEGATO_PROBE_MODEL":"qwen3-1.7b","LEGATO_PROBE_BG":"audio"}' de.gruenwald.legato
+///     xcrun devicectl device process launch --device $D --terminate-existing --environment-variables '{"LEGATO_SESSION_PROBE":"continuous","LEGATO_PROBE_BACKEND":"coreml","LEGATO_PROBE_MODEL":"qwen3-0.6b","LEGATO_PROBE_BG":"audio"}' de.gruenwald.legato
+///     xcrun devicectl device process launch --device $D --terminate-existing --environment-variables '{"LEGATO_SESSION_PROBE":"continuous","LEGATO_PROBE_BACKEND":"mlx-cpu","LEGATO_PROBE_MODEL":"qwen3-0.6b","LEGATO_PROBE_BG":"audio"}' de.gruenwald.legato
+///
+/// `LEGATO_PROBE_BG`: `audio` (microphone lease + background task: the measured case), `none` (background task
+/// only; iOS suspends after ~30 s), `foreground` (no wait, no lease). Optional: `LEGATO_PROBE_WPS` (2.5),
+/// `LEGATO_PROBE_SECONDS` (150), `LEGATO_PROBE_SEED` (95), `LEGATO_PROBE_WINDOW` (1000 context tokens, the same
+/// for every backend). Results go to `Library/Caches/continuous-probe.jsonl` (append-only) and audio-diag.jsonl
+/// (restarts at 1 MB):
+///
+///     xcrun devicectl device copy from --device $D --domain-type appDataContainer --domain-identifier de.gruenwald.legato \
+///       --source Library/Caches/continuous-probe.jsonl --destination ./continuous-probe.jsonl
+///
+/// Events `session.probe.continuous.<x>`: `start`, `download`, `load`, `arm`, `background`, `warm`, `turn` (one
+/// per chunk), `trim`, `thermal`, `memoryWarning`, `stop`, `summary`, `memory`, `done`. Every line carries
+/// `backend`, `model`, `bg`, `appState`.
+///
 /// Device measurement of persistent LLM sessions (epic #80), internal builds only. For Foundation Models and
 /// the selected Core ML cleanup model: turn 1 (instructions + ~800 tokens of text), turn 2 (+~40 tokens) on
 /// the same session, the same turn 2 on a fresh session (history given as an example turn), and a warm
@@ -39,11 +75,11 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
 ///
 /// One entry point (``run(mode:delay:models:)``) for every trigger.
 @MainActor enum SessionProbe {
-    private static var running = false
-    private static var mode = SessionProbeMode.foreground
+    static var running = false
+    static var mode = SessionProbeMode.foreground
     private static let kickstartGap = Duration.seconds(2)
     /// Memory warnings seen during this run (the load summaries report how many arrived during a load).
-    private static var warnings = 0
+    static var warnings = 0
 
     /// Where each step is announced to the person holding the phone (the debug overlay's status banner in
     /// builds with the device bridge); nil text clears it. Unset, steps only reach the diagnostics log.
@@ -61,9 +97,9 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         return true
     }
 
-    private static func say(_ text: String) { announce?("Session probe (\(mode.rawValue)): \(text)") }
+    static func say(_ text: String) { announce?("Session probe (\(mode.rawValue)): \(text)") }
 
-    private static func brief(_ error: any Error) -> String { String((error as NSError).localizedDescription.prefix(120)) }
+    static func brief(_ error: any Error) -> String { String((error as NSError).localizedDescription.prefix(120)) }
 
     /// Starts a probe when the launch arguments (`-LegatoSessionProbe <mode>`) or the environment
     /// (`LEGATO_SESSION_PROBE=<mode>`) ask for one.
@@ -83,6 +119,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
     /// to measure whether the Core ML load survives the warning.
     static func run(mode: SessionProbeMode, delay: Duration = .zero, ignoreMemoryWarnings: Bool = false, models: ModelServices) async {
         guard !running else { return }
+        if mode == .continuous { await runContinuous(models: models); return }
         running = true; warnings = 0
         self.mode = mode
         block?(true)
@@ -203,7 +240,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
     }
 
     /// A probe-only keep-alive. Its expiry ends the task (iOS terminates an app that lets one run out).
-    @MainActor private final class BackgroundTask {
+    @MainActor final class BackgroundTask {
         private var id = UIBackgroundTaskIdentifier.invalid
         init(mode: SessionProbeMode) {
             id = UIApplication.shared.beginBackgroundTask(withName: "session.probe") { [weak self] in
@@ -242,7 +279,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
 
     /// One `session.probe.memory` line: `phase`, footprint and available memory, plus `fields`.
     @discardableResult
-    private static func logMemory(_ phase: String, _ fields: [String: Any] = [:]) -> Memory {
+    static func logMemory(_ phase: String, _ fields: [String: Any] = [:]) -> Memory {
         let memory = Memory.now()
         var line = memory.fields.merging(fields) { $1 }
         line["phase"] = phase; line["mode"] = mode.rawValue; line["appState"] = appState
@@ -294,7 +331,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         }
     }
 
-    private static var appState: String {
+    static var appState: String {
         switch UIApplication.shared.applicationState {
         case .active: "active"
         case .inactive: "inactive"
@@ -396,11 +433,11 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         return fields
     }
 
-    private static func ms(_ duration: Duration) -> Int {
+    static func ms(_ duration: Duration) -> Int {
         Int(duration.components.seconds * 1_000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }
 
-    private static func log(backend: String, turn: String, _ fields: [String: Any] = [:]) {
+    static func log(backend: String, turn: String, _ fields: [String: Any] = [:]) {
         var fields = fields.merging(["mode": mode.rawValue, "backend": backend, "turn": turn, "appState": appState]) { $1 }
         if UIApplication.shared.applicationState == .background {
             fields["backgroundTimeRemainingS"] = Int(min(UIApplication.shared.backgroundTimeRemaining, 9_999))

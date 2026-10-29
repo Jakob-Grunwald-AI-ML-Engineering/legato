@@ -68,6 +68,10 @@ targets:
         product: LegatoPostProcessing
       - package: LegatoKit
         product: LegatoAppServices
+      # Spike #95: the session probe's continuous mode runs MLX on the CPU (internal builds only; nothing else
+      # calls MLX). XcodeGen cannot link a package product per configuration, so every build links it.
+      - package: LegatoKit
+        product: LegatoMLX
       # Meetings: the session, the store and the summaries; Claude is the opt-in summary backend.
       - package: LegatoKit
         product: LegatoMeetings

@@ -110,6 +110,8 @@ actor MLXSession: LLMSessionMetrics {
     private var closed = false
     private var gate = LLMTurnGate()
     private(set) var lastTurn: MLXTurnStats?
+    /// Seconds from the start of the last turn's generation to its first text chunk (session probe, #95).
+    private(set) var lastFirstChunkSeconds: Double?
 
     init(backend: MLXBackend, tokenBudget: Int) { self.backend = backend; self.tokenBudget = tokenBudget }
 
@@ -186,9 +188,16 @@ actor MLXSession: LLMSessionMetrics {
             try Task.checkCancellation()
             let device = await backend.currentDevice()
             var reply = ""
+            let started = ContinuousClock.now
+            lastFirstChunkSeconds = nil
             for try await event in chat.stream(message, device: device) {
                 switch event {
-                case .chunk(let text): reply += text
+                case .chunk(let text):
+                    if lastFirstChunkSeconds == nil {
+                        let elapsed = ContinuousClock.now - started
+                        lastFirstChunkSeconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                    }
+                    reply += text
                 case .info(let stats): lastTurn = stats
                 }
                 try Task.checkCancellation()
