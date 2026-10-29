@@ -24,6 +24,12 @@ public enum LinkChannel {
         public static let refined = "link.refined"
         /// keyboard -> app: one `ChoiceRecord` per key, `link.choice.<uuid>` (the app removes each once read).
         public static let choicePrefix = "link.choice."
+        /// keyboard -> app: the field-event ring (`FeedRing`), only for runs with `HostState.fieldEdits`.
+        public static let feed = "link.feed"
+        /// app -> keyboard: pending `EditTransaction`s (`EditsBox`).
+        public static let edits = "link.edits"
+        /// keyboard -> app: how far the keyboard has taken `edits` (`EditsAck`).
+        public static let editsAck = "link.edits.ack"
     }
 
     /// Darwin notification names, one per key.
@@ -36,7 +42,12 @@ public enum LinkChannel {
         public static let refine = "\(RuntimeIdentity.current.notificationNamespace).link.refine"
         public static let refined = "\(RuntimeIdentity.current.notificationNamespace).link.refined"
         public static let choice = "\(RuntimeIdentity.current.notificationNamespace).link.choice"
+        public static let feed = "\(RuntimeIdentity.current.notificationNamespace).link.feed"
+        public static let edits = "\(RuntimeIdentity.current.notificationNamespace).link.edits"
     }
+
+    /// How many feed batches (and unacknowledged edits) the App Group keeps; a reader further behind resyncs.
+    public static let feedCapacity = 256
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.
     public static let beatInterval: TimeInterval = 1

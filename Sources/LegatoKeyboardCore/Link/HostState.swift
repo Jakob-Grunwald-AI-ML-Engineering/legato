@@ -106,6 +106,9 @@ public struct HostState: Codable, Sendable, Equatable {
     public var preparingRequestID: String?
     /// Retained after preparation clears, so a keyboard need not observe a fleeting pending state.
     public var startCompletion: HostStartCompletion?
+    /// The experimental edit queue and cleanup agent are on for this run (frozen when it starts). Optional so
+    /// states written by an older host decode, and absent from the JSON unless set.
+    public var fieldEdits: Bool?
 
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,

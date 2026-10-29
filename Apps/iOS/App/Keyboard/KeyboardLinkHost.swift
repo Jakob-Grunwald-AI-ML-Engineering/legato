@@ -29,9 +29,13 @@ final class KeyboardLinkHost: TranscriptSink {
     var onChoices: (@MainActor ([ChoiceRecord]) -> Void)?
     /// How a run that starts now delivers its cleaned text (nil with cleanup off); asked once per run.
     var deliveryForRun: @MainActor () -> HostDelivery? = { nil }
+    /// Whether the experimental edit queue is on; read once per run, like `deliveryForRun`.
+    var fieldEditsForRun: @MainActor () -> Bool = { false }
 
     /// The current run's delivery, fixed when it started (a settings change mid-run applies to the next).
     private var runDelivery: HostDelivery?
+    /// The current run's edit-queue flag, fixed when it started.
+    private var runFieldEdits = false
 
     private var observers: [DarwinObserver] = []
     #if LEGATO_INTERNAL
@@ -136,7 +140,10 @@ final class KeyboardLinkHost: TranscriptSink {
         // Cleanup delivery is about the keyboard's field: a run for the app's own screen or the activity's
         // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
         runDelivery = run.target == .keyboard ? deliveryForRun() : nil
-        link.runStarted(id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery)
+        runFieldEdits = run.target == .keyboard && fieldEditsForRun()
+        link.runStarted(
+            id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery,
+            fieldEdits: runFieldEdits ? true : nil)
         onRunActivity?(true)
         #if LEGATO_INTERNAL
         trace.runStarted(run, delivery: runDelivery)
