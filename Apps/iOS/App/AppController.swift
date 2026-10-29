@@ -93,11 +93,11 @@ final class AppController {
     @ObservationIgnored private var engineResolution: Task<Void, Never>?
     @ObservationIgnored private var resourcePreparation: Task<Void, Never>?
     private enum PreparationError: Error { case needsForeground }
-    /// Selected-model preparations in flight; a memory warning never cancels one (`MemoryWarningPolicy`).
-    @ObservationIgnored private var loadsInFlight = 0
+    /// A memory warning never cancels a load the warmup is running, whoever started it (`MemoryWarningPolicy`).
+    /// `os_proc_available_memory()` is 0 on the simulator and Designed-for-iPad, where every warning releases (the old behaviour).
     @ObservationIgnored private lazy var memoryWarnings = MemoryWarningPolicy(
         availableMemory: { UInt64(os_proc_available_memory()) },
-        isLoading: { [weak self] in (self?.loadsInFlight ?? 0) > 0 },
+        isLoading: { [weak self] in await self?.models.hasLoadsInFlight() ?? false },
         release: { [weak self] in await self?.releaseModelsForMemoryPressure() },
         log: { message in Self.log.info("\(message, privacy: .public)") })
     #if LEGATO_INTERNAL
@@ -380,6 +380,9 @@ final class AppController {
     func meetingSettingsChanged() {
         Task { [weak self] in
             guard let self else { return }
+            #if LEGATO_INTERNAL
+            if probeHoldsModels { return }
+            #endif
             await models.reconcileSelectedModels(options: Settings.cleanupStore.options, inBackground: startEnvironment.current().inBackground)
             if !(startEnvironment.current().inBackground) { meetings.resumeProcessing() }
         }
@@ -412,6 +415,9 @@ final class AppController {
         #if DEBUG
         if E2E.fakeEngine != nil { return }
         #endif
+        #if LEGATO_INTERNAL
+        if probeHoldsModels { return }  // the probe's hold keeps the app's own models out of memory
+        #endif
         let revision = modelRevision
         await models.reconcileSelectedModels(options: Settings.cleanupStore.options,
             inBackground: startEnvironment.current().inBackground)
@@ -421,11 +427,6 @@ final class AppController {
     }
 
     private func prepareSelectedResources() async throws {
-        loadsInFlight += 1
-        defer {
-            loadsInFlight -= 1
-            if loadsInFlight == 0 { Task { @MainActor [weak self] in await self?.memoryWarnings.loadFinished() } }
-        }
         let revision = modelRevision
         #if DEBUG
         if E2E.fakeEngine != nil {
@@ -1063,6 +1064,9 @@ final class AppController {
         let center = NotificationCenter.default
 
         #if !ANE_CLEANUP_SPIKE
+        Task { @MainActor [weak self] in
+            await self?.models.onLoadsSettled { Task { @MainActor in await AppController.shared.memoryWarnings.loadFinished() } }
+        }
         center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 #if LEGATO_INTERNAL

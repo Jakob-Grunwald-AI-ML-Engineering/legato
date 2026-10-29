@@ -8,13 +8,13 @@ import Foundation
     public static let floorBytes: UInt64 = 400 * 1_048_576
 
     private let availableMemory: () -> UInt64
-    private let isLoading: () -> Bool
-    private let release: () async -> Void
+    private let isLoading: @MainActor () async -> Bool
+    private let release: @MainActor () async -> Void
     private let log: (String) -> Void
     private var releasePending = false
 
-    public init(availableMemory: @escaping () -> UInt64, isLoading: @escaping () -> Bool,
-                release: @escaping () async -> Void, log: @escaping (String) -> Void) {
+    public init(availableMemory: @escaping () -> UInt64, isLoading: @escaping @MainActor () async -> Bool,
+                release: @escaping @MainActor () async -> Void, log: @escaping (String) -> Void) {
         self.availableMemory = availableMemory
         self.isLoading = isLoading
         self.release = release
@@ -24,7 +24,7 @@ import Foundation
     public func handleWarning() async {
         let available = availableMemory()
         guard available < Self.floorBytes else { record(available, released: false); return }
-        if isLoading() {
+        if await isLoading() {
             releasePending = true
             log("memory.warning available=\(available / 1_048_576) action=deferred")
             return
@@ -35,7 +35,7 @@ import Foundation
 
     /// Call when a load ends; completes a release deferred by a warning if memory is still below the floor.
     public func loadFinished() async {
-        guard releasePending, !isLoading() else { return }
+        guard releasePending, !(await isLoading()) else { return }
         releasePending = false
         let available = availableMemory()
         guard available < Self.floorBytes else { record(available, released: false); return }

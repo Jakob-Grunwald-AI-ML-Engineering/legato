@@ -126,6 +126,11 @@ public final class ModelServices {
         })
     }
 
+    /// Whether any selected-model load is running, whoever started it.
+    public func hasLoadsInFlight() async -> Bool { await warmup.hasLoadsInFlight }
+    /// Called when the last running load ends (see `MemoryWarningPolicy.loadFinished`).
+    public func onLoadsSettled(_ handler: @escaping @Sendable () -> Void) async { await warmup.onLoadsSettled(handler) }
+
     /// Reconciles retention for every selected consumer without waiting for their union.
     public func reconcileSelectedModels(options: CleanupOptions, inBackground: Bool) async {
         let requests = await selectedResourceRequests(options: options)

@@ -57,7 +57,14 @@ public actor SelectedModelWarmup {
     private var pressureRelease: Task<Void, Never>?
     private var epoch = 0
 
+    private var loadsSettled: (@Sendable () -> Void)?
+
     public init() {}
+    /// Whether any current resource has a load running (started by any caller, awaited or not).
+    public var hasLoadsInFlight: Bool { entries.values.contains { $0.task != nil } }
+    /// Called whenever a load ends and no other load is running.
+    public func onLoadsSettled(_ handler: @escaping @Sendable () -> Void) { loadsSettled = handler }
+    private func loadEnded() { if !hasLoadsInFlight { loadsSettled?() } }
     public func state(for key: String) -> State {
         guard let entry = entries[key] else { return .idle }
         if entry.ready { return .ready }
@@ -166,11 +173,13 @@ public actor SelectedModelWarmup {
                 } else {
                     await session?.close()
                 }
+                self.loadEnded()
             } catch {
                 if self.entries[key]?.token == token {
                     self.entries[key]?.task = nil
                     if !(error is CancellationError) { self.entries[key]?.failure = error }
                 }
+                self.loadEnded()
                 throw error
             }
         }
