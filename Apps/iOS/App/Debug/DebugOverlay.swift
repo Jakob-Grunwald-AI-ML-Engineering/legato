@@ -26,6 +26,14 @@ final class DebugMessages {
 
     var current: Item? { queue.first }
 
+    /// Frames (window coordinates) of the banner and the card: the only places the overlay takes touches.
+    @ObservationIgnored private(set) var interactiveRects: [String: CGRect] = [:]
+    func setRect(_ key: String, _ rect: CGRect?) { interactiveRects[key] = rect }
+
+    /// Window-level check for `overlay-selftest`: does a touch at `point` reach the overlay?
+    func overlayHit(at point: CGPoint) -> Bool { window?.hitTest(point, with: nil) != nil }
+    var firstRect: CGRect? { interactiveRects["card"] ?? interactiveRects["status"] }
+
     /// Parsed `ask`/`say` arguments: the text, the choices, `--timeout <s>` and `--sound`.
     struct Parsed: Equatable {
         var text: String
@@ -141,11 +149,13 @@ final class DebugMessages {
     }
 }
 
-/// Passes touches through everywhere except the overlay's own controls.
+/// Passes touches through everywhere except the banner and the card.
 final class DebugOverlayWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        let hit = super.hitTest(point, with: event)
-        return hit === rootViewController?.view ? nil : hit
+        // SwiftUI's hosting view is the hit view even over its buttons, so the hit view cannot tell controls from
+        // empty space: decide by the frames the overlay reports, then let super route the touch.
+        guard DebugMessages.shared.interactiveRects.values.contains(where: { $0.contains(point) }) else { return nil }
+        return super.hitTest(point, with: event)
     }
 }
 
@@ -175,6 +185,7 @@ struct DebugOverlayView: View {
                 .background(Color.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Debug status: \(status)")
+                .reportFrame("status", to: messages)
             }
             if let item = messages.current {
                 VStack(alignment: .leading, spacing: 12) {
@@ -200,11 +211,20 @@ struct DebugOverlayView: View {
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.orange, lineWidth: 3))
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Debug message: \(item.text)")
+                .reportFrame("card", to: messages)
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
+    }
+}
+
+private extension View {
+    /// Publishes this view's frame in window coordinates so the window can tell its controls from empty space.
+    func reportFrame(_ key: String, to messages: DebugMessages) -> some View {
+        onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { messages.setRect(key, $0) }
+            .onDisappear { messages.setRect(key, nil) }
     }
 }
 #endif

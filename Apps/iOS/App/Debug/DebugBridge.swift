@@ -188,6 +188,19 @@ enum DebugBridge {
             DebugMessages.shared.setStatus(text)
             return nil
         }
+        register("overlay-selftest") { command in
+            // Shows a card, then checks where touches land: on the card they must reach the overlay, elsewhere not.
+            let messages = DebugMessages.shared
+            messages.ask(id: command.id + "-selftest", text: "Overlay self-test", choices: ["OK"], timeout: nil, sound: false)
+            try? await Task.sleep(for: .milliseconds(800))
+            defer { messages.reply(id: command.id + "-selftest", choice: "selftest") }
+            guard let rect = messages.firstRect else { throw BridgeError.usage("no overlay frame reported") }
+            let onCard = messages.overlayHit(at: CGPoint(x: rect.midX, y: rect.midY))
+            let outside = messages.overlayHit(at: CGPoint(x: rect.midX, y: rect.maxY + 200))
+            let result: [String: Any] = ["onCardHits": onCard, "outsideHits": outside]
+            guard onCard, !outside else { throw BridgeError.usage("overlay hit test wrong: \(result)") }
+            return result
+        }
         register("clear") { _ in DebugMessages.shared.clear(); return nil }
         register("set-setting") { command in
             guard command.args.count == 2 else { throw BridgeError.usage("set-setting <key> <value>") }
