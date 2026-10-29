@@ -17,7 +17,9 @@ extension CoreMLPrompt {
 
 /// What a Core ML session turn cost, for probes and logs.
 struct CoreMLTurnStats: Sendable, Equatable {
-    var promptTokens: Int
+    /// The turn's full token sequence (what a fresh state would have to prefill).
+    var prompt: [Int]
+    var promptTokens: Int { prompt.count }
     var prefilled: Int
     var prefillSeconds: Double
 }
@@ -30,7 +32,7 @@ struct CoreMLTurnStats: Sendable, Equatable {
 actor CoreMLSession: LLMSession {
     nonisolated let tokenBudget: Int
     private let backend: CoreMLBackend
-    private let id: UUID
+    let id: UUID
     private let family: CoreMLPromptFamily
     private var transcript = LLMTranscript()
     /// The conversation's tokens through the last reply (its generated tokens, no end marker), or `nil`
@@ -60,7 +62,7 @@ actor CoreMLSession: LLMSession {
         let tokens = try await turnTokens(user: message)
         let generated = try await backend.sessionTurn(id, tokens: tokens)
         guard !generated.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw LLMError.emptyResponse }
-        lastTurn = CoreMLTurnStats(promptTokens: tokens.count, prefilled: generated.prefilled, prefillSeconds: generated.prefillSeconds)
+        lastTurn = CoreMLTurnStats(prompt: tokens, prefilled: generated.prefilled, prefillSeconds: generated.prefillSeconds)
         committed = tokens + generated.tokens
         transcript.record(user: message, assistant: generated.text)
         return generated.text

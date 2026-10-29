@@ -186,3 +186,57 @@ struct CoreMLSessionTests {
             == "<end_of_turn>\n<start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\n")
     }
 }
+
+// MARK: - Real-model probe
+
+private let probeEnvironment = ProcessInfo.processInfo.environment
+private let probeEnabled = probeEnvironment["LEGATO_SESSION_PROBE"] == "1"
+private let probeRoot: URL = probeEnvironment["LEGATO_TEST_MODEL_ROOT"].map { URL(fileURLWithPath: $0) }
+    ?? URL.applicationSupportDirectory.appending(path: "Legato/Models", directoryHint: .isDirectory)
+
+/// Numbered sentences, long enough that a full prefill is clearly measurable.
+func probeContext(sentences: Int) -> String {
+    (1...sentences).map { "\($0): The harbour master logged boat number \($0) arriving with a cargo of timber and rope." }
+        .joined(separator: "\n")
+}
+
+@Suite(.serialized) struct CoreMLSessionProbe {
+    /// Turn 2 reuses the state: it prefills only its new tokens, and it answers exactly what a fresh state
+    /// given the same token sequence answers (greedy).
+    @Test(.enabled(if: probeEnabled, "set LEGATO_SESSION_PROBE=1 (real ANEMLL, installed Core ML model)"))
+    func turnTwoReusesTheNativeState() async throws {
+        let spec = try #require(CoreMLModels.spec(id: CoreMLModels.qwen3_1_7bID))
+        let folder = spec.folder(root: probeRoot)
+        let backend = CoreMLBackend(spec: spec, folder: folder, outputTokenLimit: 128)
+        try await backend.prepare()
+        let session = try #require(try await backend.makeSession() as? CoreMLSession)
+        try await session.append(.instructions("You answer questions about the log in at most eight words."))
+        try await session.append(.text(probeContext(sentences: 40)))
+        let clock = ContinuousClock()
+        var start = clock.now
+        let reply1 = try await session.respond(to: "Which cargo did boat 3 bring?")
+        let wall1 = clock.now - start
+        let turn1 = try #require(await session.lastTurn)
+        try await session.append(.text("41: The ferry to the island leaves at noon."))
+        start = clock.now
+        let reply2 = try await session.respond(to: "When does the ferry leave?")
+        let wall2 = clock.now - start
+        let turn2 = try #require(await session.lastTurn)
+
+        let fresh = try #require(try await backend.makeSession() as? CoreMLSession)
+        start = clock.now
+        let replay = try await backend.sessionTurn(fresh.id, tokens: turn2.prompt)
+        let wallFresh = clock.now - start
+        print("""
+            COREML-PROBE turn1: prompt \(turn1.promptTokens) prefilled \(turn1.prefilled) prefill \(turn1.prefillSeconds)s wall \(wall1) reply \(reply1.debugDescription)
+            COREML-PROBE turn2: prompt \(turn2.promptTokens) prefilled \(turn2.prefilled) prefill \(turn2.prefillSeconds)s wall \(wall2) reply \(reply2.debugDescription)
+            COREML-PROBE fresh: prompt \(turn2.promptTokens) prefilled \(replay.prefilled) prefill \(replay.prefillSeconds)s wall \(wallFresh) reply \(replay.text.debugDescription)
+            """)
+        #expect(turn2.prefilled < turn1.prefilled / 5)
+        #expect(turn2.prefillSeconds < turn1.prefillSeconds / 3)
+        #expect(replay.prefilled == turn2.promptTokens)
+        #expect(replay.text == reply2)
+        await session.close(); await fresh.close()
+        await backend.unload()
+    }
+}

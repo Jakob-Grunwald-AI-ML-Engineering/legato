@@ -128,3 +128,61 @@ struct MLXSessionTests {
         #expect(session.tokenBudget == MLXBackend.sessionWindow - MLXBackend.replyLimit)
     }
 }
+
+// MARK: - Real-model probe
+
+private let probeEnvironment = ProcessInfo.processInfo.environment
+private let probeEnabled = probeEnvironment["LEGATO_SESSION_PROBE"] == "1"
+private let probeRoot: URL = probeEnvironment["LEGATO_TEST_MODEL_ROOT"].map { URL(fileURLWithPath: $0) }
+    ?? URL.applicationSupportDirectory.appending(path: "Legato/Models", directoryHint: .isDirectory)
+
+/// Needs the real MLX and its Metal shaders (an Xcode build):
+///   TEST_RUNNER_LEGATO_SESSION_PROBE=1 xcodebuild test -scheme LegatoKit-Package -destination 'platform=macOS' \
+///     -only-testing:LegatoMLXTests/MLXSessionProbe
+@Suite(.serialized) struct MLXSessionProbe {
+    @Test(.enabled(if: probeEnabled, "set LEGATO_SESSION_PROBE=1 (real MLX, installed MLX model)"))
+    func turnTwoReusesTheKVCache() async throws {
+        let folder = qwen.folder(root: probeRoot)
+        let backend = MLXBackend(spec: qwen, folder: folder, device: .gpu, canUseGPU: { true })
+        let session = try #require(try await backend.makeSession() as? MLXSession)
+        let instructions = "You answer questions about the log in at most eight words."
+        let context = (1...40).map { "\($0): The harbour master logged boat number \($0) arriving with a cargo of timber and rope." }
+            .joined(separator: "\n")
+        try await session.append(.instructions(instructions))
+        try await session.append(.text(context))
+        let clock = ContinuousClock()
+        var start = clock.now
+        let message1 = context + "\n\nWhich cargo did boat 3 bring?"
+        let reply1 = try await session.respond(to: "Which cargo did boat 3 bring?")
+        let wall1 = clock.now - start
+        let turn1 = try #require(await session.lastTurn)
+        try await session.append(.text("41: The ferry to the island leaves at noon."))
+        let message2 = "41: The ferry to the island leaves at noon.\n\nWhen does the ferry leave?"
+        start = clock.now
+        let reply2 = try await session.respond(to: "When does the ferry leave?")
+        let wall2 = clock.now - start
+        let turn2 = try #require(await session.lastTurn)
+
+        // A fresh chat restored from the same transcript, answering the same turn 2.
+        let fresh = try await MLXChatGenerator().makeChat(spec: qwen, folder: folder, instructions: instructions,
+                                                          history: [.user(message1), .assistant(reply1)])
+        start = clock.now
+        var replay = ""
+        var freshStats: MLXTurnStats?
+        for try await event in fresh.stream(message2, device: .gpu) {
+            switch event { case .chunk(let text): replay += text; case .info(let stats): freshStats = stats }
+        }
+        let wallFresh = clock.now - start
+        let freshTurn = try #require(freshStats)
+        print("""
+            MLX-PROBE turn1: prefilled \(turn1.prefilled) cached \(turn1.cached) prefill \(turn1.prefillSeconds)s wall \(wall1) reply \(reply1.debugDescription)
+            MLX-PROBE turn2: prefilled \(turn2.prefilled) cached \(turn2.cached) prefill \(turn2.prefillSeconds)s wall \(wall2) reply \(reply2.debugDescription)
+            MLX-PROBE fresh: prefilled \(freshTurn.prefilled) cached \(freshTurn.cached) prefill \(freshTurn.prefillSeconds)s wall \(wallFresh) reply \(replay.debugDescription)
+            """)
+        #expect(turn2.cached > 0)
+        #expect(turn2.prefilled < turn1.prefilled / 5)
+        #expect(replay == reply2)
+        await session.close()
+        await backend.releaseWarmResources()
+    }
+}

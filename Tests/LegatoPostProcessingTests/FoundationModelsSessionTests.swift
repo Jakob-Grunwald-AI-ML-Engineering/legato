@@ -114,3 +114,59 @@ struct FoundationModelsSessionTests {
     }
 }
 #endif
+
+#if canImport(FoundationModels)
+private let probeEnabled = ProcessInfo.processInfo.environment["LEGATO_SESSION_PROBE"] == "1"
+    && SystemLanguageModel.default.availability == .available
+
+@Suite(.serialized) struct FoundationModelsSessionProbe {
+    /// Foundation Models reports no prefill counts, so the probe compares turn latency of the reused session
+    /// with a fresh system session given the same transcript, alternating over several rounds (the system
+    /// model is shared with other processes, so single timings are noisy). Short replies keep generation small.
+    @Test(.enabled(if: probeEnabled, "set LEGATO_SESSION_PROBE=1 on a Mac with Apple Intelligence"))
+    func laterTurnsReuseTheSystemSession() async throws {
+        let instructions = "You answer questions about the log in at most eight words."
+        let context = (1...40).map { "\($0): The harbour master logged boat number \($0) arriving with a cargo of timber and rope." }
+            .joined(separator: "\n")
+        let session = try await FoundationModelsBackend().makeSession()
+        var transcript = LLMTranscript()
+        try await session.append(.instructions(instructions)); try transcript.append(.instructions(instructions))
+        let clock = ContinuousClock()
+        var reused: [Duration] = [], fresh: [Duration] = []
+        for round in 0..<8 {
+            let text = round == 0 ? context : "\n\(40 + round): The ferry to island \(round) leaves at \(round + 8) o'clock."
+            let request = round == 0 ? "Which cargo did boat 3 bring?" : "When does the ferry to island \(round) leave?"
+            try await session.append(.text(text)); try transcript.append(.text(text))
+            let message = transcript.message(for: request)
+            // A fresh system session from the same transcript, timed first so the reused one cannot warm it.
+            var replay: String?
+            var freshWall: Duration?
+            func runFresh() async throws {
+                guard round > 0 else { return }
+                let turns = SystemModelTurns(transcript: FoundationModelsSession.transcript(transcript))
+                let start = clock.now
+                replay = try await turns.respond(to: message)
+                freshWall = clock.now - start
+            }
+            // Alternate which goes first, so throttling or warming does not favour one side.
+            if round % 2 == 1 { try await runFresh() }
+            let start = clock.now
+            let reply = try await session.respond(to: request)
+            let wall = clock.now - start
+            if round % 2 == 0 { try await runFresh() }
+            transcript.record(user: message, assistant: reply)
+            let tokens = try await session.usage().total
+            print("FM-PROBE round \(round): transcript \(tokens) tokens; reused \(wall) \(reply.debugDescription)"
+                  + (freshWall.map { "; fresh \($0) \(replay!.debugDescription)" } ?? " (turn 1, full prefill)"))
+            if let replay, let freshWall {
+                #expect(replay == reply)
+                reused.append(wall); fresh.append(freshWall)
+            }
+        }
+        let median = { (values: [Duration]) in values.sorted()[values.count / 2] }
+        print("FM-PROBE later turns: reused median \(median(reused)) min \(reused.min()!) vs fresh median \(median(fresh)) min \(fresh.min()!)")
+        #expect(median(reused) < median(fresh))
+        await session.close()
+    }
+}
+#endif
