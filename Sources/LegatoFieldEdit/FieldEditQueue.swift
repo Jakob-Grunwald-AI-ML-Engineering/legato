@@ -150,8 +150,9 @@ public struct FieldEditQueue: Sendable {
     public var hasPending: Bool { !pending.isEmpty }
 
     /// Whether the last host read contradicted the prediction without deciding (a non-final read nothing
-    /// explains, or one two outcomes fit): nothing is issued, in any lane and by ``next(for:)``, until a settle
-    /// resolves it. The executor settles again: the next host read, or a `final` one at its timeout.
+    /// explains, or one two outcomes fit): only the user lane is issued (keystrokes are never held), on the
+    /// prediction, as more unverified writes the next read is settled against; the other lanes wait until a
+    /// settle resolves it. The executor settles again: the next host read, or a `final` one at its timeout.
     public var needsFinalSettle: Bool { contradicted && !unverified.isEmpty }
 
     /// Records recognized text streamed into the run (Mac), in order with the field's own events.
@@ -209,8 +210,8 @@ public struct FieldEditQueue: Sendable {
     // MARK: Writing
 
     /// The next write to run: the oldest edit of the highest lane whose guards hold. Edits failing a guard are
-    /// handed back on the way. While issued writes await a host read only the user lane runs; the rest wait.
-    /// Nothing runs while ``needsFinalSettle``.
+    /// handed back on the way. While issued writes await a host read (also while ``needsFinalSettle``) only the
+    /// user lane runs; the rest wait.
     public mutating func next() -> FieldWrite? { next(lanes: Set(Lane.allCases)) }
 
     /// ``next()`` among `lanes` only: edits in the other lanes are held (neither issued nor checked, so no version
@@ -236,9 +237,12 @@ public struct FieldEditQueue: Sendable {
 
     /// Issues the pending transaction `id` now, whatever its lane, ahead of every other edit and even while other
     /// writes await a host read (one read settles them all); the other edits stay queued untouched. Nil when `id`
-    /// is not pending, while ``needsFinalSettle``, or when it fails a guard (then it is handed back).
+    /// is not pending, while ``needsFinalSettle`` unless it is in the user lane, or when it fails a guard (then
+    /// it is handed back).
     public mutating func next(for id: UUID) -> FieldWrite? {
-        guard !needsFinalSettle, let index = pending.firstIndex(where: { $0.transaction.id == id }) else { return nil }
+        guard let index = pending.firstIndex(where: { $0.transaction.id == id }),
+            !needsFinalSettle || pending[index].lane == .user
+        else { return nil }
         let item = pending.remove(at: index)
         if let reason = check(item.transaction) {
             conflict(id, Conflict(reason, byUser: reason == .ownerTainted))
@@ -261,7 +265,7 @@ public struct FieldEditQueue: Sendable {
     }
 
     private func nextIndex(lanes: Set<Lane>) -> Int? {
-        guard !needsFinalSettle else { return nil }
+        // Unverified writes (always there while `needsFinalSettle`) hold every lane but the user's.
         let eligible = pending.indices.filter {
             lanes.contains(pending[$0].lane) && (unverified.isEmpty || pending[$0].lane == .user)
         }
@@ -340,11 +344,11 @@ public struct FieldEditQueue: Sendable {
     /// one that matches an intermediate state only with the window's edges moved confirms nothing and returns
     /// `notYet`. A read a prediction plus a foreign change explains is settled as a final one would be (writes
     /// shown confirmed, the foreign change recorded). A read nothing explains returns `notYet`, changes nothing
-    /// and holds issuing (``needsFinalSettle``) until a settle resolves it.
+    /// and holds issuing outside the user lane (``needsFinalSettle``) until a settle resolves it.
     ///
     /// Liveness: a non-final read never fails a write it does not explain. Executors MUST settle with `final`
-    /// at their timeout; until then unexplained writes stay unverified and, after an unexplained read, nothing
-    /// is issued.
+    /// at their timeout; until then unexplained writes stay unverified and, after an unexplained read, only the
+    /// user lane is issued.
     ///
     /// Stale reads (`tolerateStale`, with `final`): a read identical to the field before some issued writes
     /// confirms the writes it shows and returns `stale`; the rest neither fail nor roll back. Recommended
