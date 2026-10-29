@@ -12,9 +12,11 @@ private final class SessionDriver: CoreMLDriving, Sendable {
     private struct State { var calls: [Call] = []; var state: [Int] = []; var replies: [String] }
     private let value: Mutex<State>
     let contextLength: Int
+    let batchSize: Int
     var promptFamily: CoreMLPromptFamily { .qwen3 }
-    init(contextLength: Int = 2_048, replies: [String] = ["Reply one", "Reply two", "Reply three", "Reply four"]) {
+    init(contextLength: Int = 2_048, batchSize: Int = 1, replies: [String] = ["Reply one", "Reply two", "Reply three", "Reply four"]) {
         self.contextLength = contextLength
+        self.batchSize = batchSize
         value = Mutex(State(replies: replies))
     }
     var calls: [Call] { value.withLock { $0.calls } }
@@ -77,6 +79,22 @@ struct CoreMLSessionTests {
         #expect(Array(calls[1].tokens.prefix(state.count)) == state)
         let suffix = String(String.UnicodeScalarView(calls[1].tokens.dropFirst(state.count).compactMap(Unicode.Scalar.init)))
         #expect(suffix == CoreMLPrompt.continuation(user: "second words\n\nAgain.", family: .qwen3))
+    }
+
+    @Test func reusedPrefixIsAlignedSoNewTokensPrefillInFullBatches() async throws {
+        let driver = SessionDriver(batchSize: 8)
+        let backend = try await preparedBackend(driver)
+        let session = try await backend.makeSession()
+        try await session.append(.instructions("Clean the text carefully."))
+        _ = try await session.respond(to: "First request with enough words.")
+        _ = try await session.respond(to: "Second.")
+        let calls = driver.calls
+        let held = calls[0].tokens.count + SessionDriver.scalars("Reply one").count
+        let reused = calls[1].reused
+        // Starts no later than what the state holds, re-prefills at most one batch of held tokens, and leaves
+        // a whole number of batches to prefill.
+        #expect(reused > 0 && reused <= held && held - reused < 8)
+        #expect((calls[1].tokens.count - reused) % 8 == 0)
     }
 
     @Test func aStatelessCallInBetweenResetsTheSessionState() async throws {

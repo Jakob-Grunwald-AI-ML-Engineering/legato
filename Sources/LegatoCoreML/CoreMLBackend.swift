@@ -14,6 +14,8 @@ struct CoreMLGeneration: Sendable {
 }
 protocol CoreMLDriving: Sendable {
     var contextLength: Int { get }
+    /// Tokens per batched prefill call; a remainder below it is prefilled one token per call.
+    var batchSize: Int { get }
     /// The checkpoint's chat format, for session continuations.
     var promptFamily: CoreMLPromptFamily { get }
     func tokens(instructions: String, examples: [LLMExample], prompt: String) async throws -> [Int]
@@ -25,6 +27,7 @@ protocol CoreMLDriving: Sendable {
     func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration
 }
 extension CoreMLDriving {
+    var batchSize: Int { 1 }
     var promptFamily: CoreMLPromptFamily { .qwen3 }
     func encode(_ text: String) async throws -> [Int] { throw LLMError.unavailable(reason: "This Core ML driver cannot keep a session.") }
     func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration {
@@ -206,7 +209,12 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
         defer { cancellation.settle() }
         let reuse: Int
         if let kv, kv.session == id, kv.tokens.count < tokens.count, tokens.starts(with: kv.tokens) {
-            reuse = kv.tokens.count
+            // ANEMLL prefills full batches and the remainder one token per call, which costs far more per
+            // token. Start up to a batch earlier, re-prefilling held positions with the same tokens, so the
+            // new tokens fill whole batches.
+            let batch = max(1, runtime.batchSize)
+            let aligned = kv.tokens.count - (batch - (tokens.count - kv.tokens.count) % batch) % batch
+            reuse = max(0, aligned)
         } else {
             reuse = 0  // Prefix mismatch, other owner or no state: a fresh native state.
         }
