@@ -100,3 +100,11 @@ final class ManualTimers {
         now = end
     }
 }
+
+extension LaggingProxy {
+    /// The host empties the field (a chat app sends it); like every change, its report lags.
+    func hostClears() {
+        field = CaretProxy("")
+        undelivered.append(field)
+    }
+}

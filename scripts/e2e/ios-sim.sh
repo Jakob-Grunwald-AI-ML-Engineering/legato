@@ -1835,6 +1835,25 @@ scenario_fa() {
   assert_no_log "nothing written into the cleared field was typed again" "fe.mapped rewound=1"
   assert_eq "clipboard untouched (the run was sent)" "sentinel" "$(pasteboard)"
 
+  # The device defect (review L6 #8): the chat app sends while the agent's edit is still on its way, and the
+  # next run starts at once. The next run's stream is never refused as the user's.
+  SCENARIO="fa. agent: Send mid-run, then the next run at once"
+  relaunch "${common[@]}" -LegatoCleanupDelivery live -LegatoFakeAgentDelayMs 2500 || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  fa_start 2
+  trigger harness-host-send
+  wait_log "fe.step name=host-sent" 20
+  fa_stop 2
+  fa_start 3
+  sleep 2
+  fa_stop 3
+  wait_log_n "link agent.finish" 2 20
+  sleep 0.5
+  doc="$(harness_doc)"
+  assert_no_log "no stream chunk was refused as the user's" "reason=ownerTainted"
+  assert_eq "the next run's text is in the field" "1" "$(grep -o 'sat\.' <<< "$doc" | wc -l | tr -d ' ')"
+
   SCENARIO="fa. agent absent: stateless pass as patches"
   relaunch "${common[@]}" -LegatoCleanupDelivery live -LegatoFakeAgent NO || return
   wait_log "e2e harness visible value=1" 10

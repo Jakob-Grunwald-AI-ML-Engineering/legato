@@ -502,7 +502,12 @@ public final class FieldEditCoordinator {
 
     private func leave() {
         depth -= 1
-        if depth == 0 { publishPending() }
+        guard depth == 0 else { return }
+        // Why owned text became the user's (a later automatic edit there is refused as `ownerTainted`).
+        for taint in queue.takeTaints() {
+            trace?("fe.taint source=\(taint.source.rawValue) at=\(taint.span.location) len=\(taint.span.length)")
+        }
+        publishPending()
     }
 
     private func publishPending(force: Bool = false) {
