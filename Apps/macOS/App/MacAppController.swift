@@ -73,6 +73,8 @@ final class MacAppController {
     @ObservationIgnored private var engine: any DictationEngine
     @ObservationIgnored private var sessionIsStale = false
     @ObservationIgnored private let cleanup: CleanupProcessor
+    /// The session's post-processor: `cleanup`, kept out of a run the cleanup agent works on.
+    @ObservationIgnored private let agentGate: AgentGatedPostProcessor
     @ObservationIgnored private let history: any HistoryStore
     /// The personal vocabulary: hints the engines and the cleanup step, and learns from dictations.
     @ObservationIgnored let vocabulary: VocabularyService
@@ -110,6 +112,8 @@ final class MacAppController {
     private final class Run {
         let id = UUID()
         let writer: FieldWriter
+        /// The edit queue's wiring for this run; nil with the setting off (and in Clipboard delivery).
+        let fieldEdit: FieldEditRun?
         let targetPID: pid_t?
         let startedAt = Date()
         /// The field was (or could not be ruled out as) a secure one: never typed or pasted into.
@@ -125,11 +129,12 @@ final class MacAppController {
         var committed: String { transcript.committed }
 
         init(
-            writer: FieldWriter, targetPID: pid_t?, secureField: Bool, delivery: CleanupDelivery?,
-            editQueueEnabled: Bool
+            writer: FieldWriter, fieldEdit: FieldEditRun?, targetPID: pid_t?, secureField: Bool,
+            delivery: CleanupDelivery?, editQueueEnabled: Bool
         ) {
             self.editQueueEnabled = editQueueEnabled
             self.writer = writer
+            self.fieldEdit = fieldEdit
             self.targetPID = targetPID
             self.secureField = secureField
             self.delivery = delivery
@@ -169,13 +174,15 @@ final class MacAppController {
             acquireRunWithOptions: { options in try await models.acquireDictationCleanup(options: options, inBackground: true) },
             report: { report in await reports.record(report) })
         self.cleanup = cleanup
+        let gate = AgentGatedPostProcessor(cleanup)
+        agentGate = gate
         let engine = AppleSpeechEngine(vocabulary: vocabulary)
         self.engine = engine
-        session = Self.makeSession(engine: engine, history: history, postProcessor: cleanup)
+        session = Self.makeSession(engine: engine, history: history, postProcessor: gate)
     }
 
     private static func makeSession(
-        engine: any DictationEngine, history: any HistoryStore, postProcessor: CleanupProcessor
+        engine: any DictationEngine, history: any HistoryStore, postProcessor: any TranscriptPostProcessor
     ) -> DictationSession {
         DictationSession(
             engine: engine,
@@ -204,7 +211,7 @@ final class MacAppController {
     private func rebuildSessionIfStale() {
         guard sessionIsStale, activeRun == nil else { return }
         sessionIsStale = false
-        session = Self.makeSession(engine: engine, history: history, postProcessor: cleanup)
+        session = Self.makeSession(engine: engine, history: history, postProcessor: agentGate)
         attachSession()
     }
 
@@ -701,18 +708,29 @@ final class MacAppController {
         let delivery = settings.cleanupEnabled ? settings.cleanupDelivery : nil
         // Hold: nothing streams into the field; the HUD shows the live text and the cleaned text goes in at the end.
         let mode = delivery?.streamsIntoField == false ? .insertOnStop : settings.insertionMode
+        let editQueueEnabled = settings.experimentalEditQueue
+        let fieldEdit = editQueueEnabled && delivery != .clipboard
+            ? await makeFieldEditRun(target: target, delivery: delivery) : nil
+        let writer = FieldWriter(target: target, mode: mode, channel: fieldEdit?.channel)
+        fieldEdit?.attach(writer: writer)
         let run = Run(
-            writer: FieldWriter(target: target, mode: mode),
+            writer: writer,
+            fieldEdit: fieldEdit,
             targetPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             secureField: secureField,
             delivery: delivery,
-            editQueueEnabled: settings.experimentalEditQueue)
+            editQueueEnabled: editQueueEnabled)
         activeRun = run
         phase = .preparing
         hud.beginRun()
+        agentGate.agentRuns = fieldEdit?.agentRuns ?? false
         do {
+            // The agent knows the field before the run's first text lands.
+            await fieldEdit?.start()
             try await session.start()
         } catch {
+            agentGate.agentRuns = false
+            fieldEdit?.cancel()
             activeRun = nil
             phase = .idle
             gesture.runEnded()
@@ -732,6 +750,25 @@ final class MacAppController {
         hud.setPhase(.listening)
     }
 
+    /// The run's edit queue for the focused field ("Experimental: edit queue and cleanup agent" on). In Live
+    /// delivery it also gets the cleanup agent on the warm rolling session, so the session runs no cleanup of its
+    /// own; no rolling session ready keeps today's live passes (written through the queue). Nil when there is no
+    /// field to write into or it cannot be read: the run writes as it does with the setting off.
+    private func makeFieldEditRun(target: AXTextTarget?, delivery: CleanupDelivery?) async -> FieldEditRun? {
+        guard let target else { return nil }
+        let owner = UUID().uuidString
+        var runAgent: FieldRunAgent?
+        if delivery == .live, settings.cleanupEnabled {
+            let options = settings.cleanupStore.options
+            if let rolling = await models.rollingDictationSession(options: options) {
+                let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
+                let agent = CleanupAgent(session: rolling, options: .init(options, owner: owner, locale: locale))
+                runAgent = FieldRunAgent(agent, replan: { await agent.replan() }, finish: { await agent.finish() })
+            }
+        }
+        return FieldEditRun(target: target, owner: owner, agent: runAgent, activity: target.activitySource())
+    }
+
     /// Ends the run. `discard` is the chord cancel: nothing is delivered and nothing is saved.
     private func finishRun(discard: Bool) async {
         guard let run = activeRun, phase == .listening || phase == .preparing else { return }
@@ -747,6 +784,7 @@ final class MacAppController {
         }
 
         if discard {
+            run.fieldEdit?.cancel() // the agent stops before the writer takes its text back
             if let entry { try? await history.delete(id: entry.id) }
             // Cancelled with no text kept: take back what was typed, if it is provably still ours.
             let toast = run.writer.revert() == .leftInPlace
@@ -790,12 +828,28 @@ final class MacAppController {
         _ run: Run, finalText: String?, cleanedFrom raw: String? = nil, salvage: Bool = false, notice: String? = nil,
         entry: DictationEntry? = nil
     ) async {
-        let action: FinishAction
+        var action: FinishAction
         var delivery: CleanupDelivery?
-        if let raw, let cleaned = finalText {
+        if let fieldEdit = run.fieldEdit, fieldEdit.agentRuns {
+            // The cleanup agent cleaned this run: its final pass, then what the field holds is the result. An
+            // edit that did not land keeps its cleaned text for the clipboard.
+            delivery = .live
+            let outcome = await fieldEdit.finish()
+            action = run.writer.finish(finalText: nil)
+            if !outcome.unapplied.isEmpty, action == .done {
+                action = .copy(FieldEditRun.fallbackText(shown: run.writer.shownText, unapplied: outcome.unapplied))
+            }
+        } else if let raw, let cleaned = finalText {
             let chosen = run.delivery ?? settings.cleanupDelivery
             delivery = chosen
-            action = run.writer.finish(rawText: raw, cleanedText: cleaned, delivery: chosen)
+            if let fieldEdit = run.fieldEdit {
+                // A final swap held back by typing waits for a pause (a little) before it gives up.
+                action = await run.writer.finish(
+                    rawText: raw, cleanedText: cleaned, delivery: chosen, retryingFor: FieldEditRun.finalHoldBudget,
+                    wait: { await fieldEdit.wait($0) })
+            } else {
+                action = run.writer.finish(rawText: raw, cleanedText: cleaned, delivery: chosen)
+            }
         } else {
             action = run.writer.finish(finalText: finalText)
         }
@@ -836,6 +890,8 @@ final class MacAppController {
     }
 
     private func conclude(_ run: Run, toast: String?) {
+        run.fieldEdit?.cancel()
+        agentGate.agentRuns = false
         activeRun = nil
         phase = .idle
         hud.endRun(toast: toast)
@@ -861,6 +917,7 @@ final class MacAppController {
         appliedEdits += 1
         guard let run = activeRun else { return }
         run.writer.apply(edit)
+        run.fieldEdit?.textChanged()
         run.transcript.apply(edit)
         switch edit {
         case .commit, .revise:
