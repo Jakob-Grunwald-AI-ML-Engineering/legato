@@ -14,6 +14,7 @@ final class MacSettings {
         static let gestureMode = "gestureMode"
         static let insertionMode = "insertionMode"
         static let restoreClipboard = "restoreClipboard"
+        static let experimentalEditQueue = "experimentalEditQueue"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -53,6 +54,11 @@ final class MacSettings {
     /// Put the previous clipboard back after a paste.
     var restoreClipboard: Bool {
         didSet { defaults.set(restoreClipboard, forKey: Key.restoreClipboard) }
+    }
+
+    /// "Experimental: edit queue and cleanup agent". Off by default; a run freezes it when it starts.
+    var experimentalEditQueue: Bool {
+        didSet { defaults.set(experimentalEditQueue, forKey: Key.experimentalEditQueue) }
     }
 
     // MARK: Cleanup (mirrors `cleanupStore`, observable for the UI)
@@ -110,6 +116,7 @@ final class MacSettings {
         gestureMode = defaults.string(forKey: Key.gestureMode).flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
         insertionMode = defaults.string(forKey: Key.insertionMode).flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         restoreClipboard = defaults.object(forKey: Key.restoreClipboard) as? Bool ?? true
+        experimentalEditQueue = defaults.bool(forKey: Key.experimentalEditQueue)
     }
 }
 
