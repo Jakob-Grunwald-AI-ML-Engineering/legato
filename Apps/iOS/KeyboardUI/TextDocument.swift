@@ -1,3 +1,4 @@
+import LegatoKeyboardCore
 import UIKit
 
 /// The text field the keyboard types into. The keyboard extension backs it with `textDocumentProxy`
@@ -30,4 +31,17 @@ protocol TextDocument: AnyObject {
     /// Moves the insertion point by `offset` UTF-16 units (negative: back), as `adjustTextPosition(byCharacterOffset:)`
     /// counts them despite its name (`WordEdit.utf16Forward(contextAfter:)` converts from characters).
     func adjustTextPosition(byCharacterOffset offset: Int)
+}
+
+extension TextDocument {
+    /// Runs the edit queue's proxy calls (``ProxyOpCompiler``) in order, in this main-thread turn.
+    func execute(_ calls: [ProxyCall]) {
+        for call in calls {
+            switch call {
+            case .moveCaret(let units): adjustTextPosition(byCharacterOffset: units)
+            case .deleteBackward(let count): for _ in 0..<count { deleteBackward() }
+            case .insert(let text): insert(text)
+            }
+        }
+    }
 }

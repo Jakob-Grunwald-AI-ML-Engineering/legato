@@ -34,6 +34,11 @@ import UIKit
 /// Commands (Darwin notifications): `harness-mic`, `harness-mic-hop` (a tap on the mic key in open-app
 /// mode, plus the URL its Link would open), `harness-type` (the scripted typing cases below),
 /// `harness-numbers` (tap the 123 key).
+///
+/// The field edit queue (`-LegatoFieldEdits YES` forces it on): `harness-fieldedits` runs the scripted edits
+/// of scenario fe (a Live run streamed by a scripted host, the word row, undo and redo, a version swap, typing
+/// while a revision waits for a lagging read); `harness-fe-lag` measures tap- and keystroke-to-first-proxy-call
+/// latency (`fe.lag`), with the queue on or off. Both register their own Darwin observers.
 @MainActor
 final class HarnessDocument: TextDocument {
     let textView = UITextView()
@@ -57,16 +62,41 @@ final class HarnessDocument: TextDocument {
 
     var text: String { textView.text ?? "" }
 
-    var contextBefore: String {
+    /// A lagging proxy: while set, the context reads return what they read when it was set (the field itself
+    /// changes as usual).
+    var frozenContext: (before: String, after: String)?
+
+    func freezeContext() { frozenContext = (liveBefore, liveAfter) }
+
+    /// When the first proxy call after `armLag()` arrived (the lag probe).
+    private(set) var firstCallAt: ContinuousClock.Instant?
+    private var lagArmed = false
+    func armLag() {
+        lagArmed = true
+        firstCallAt = nil
+    }
+    private func called() {
+        guard lagArmed, firstCallAt == nil else { return }
+        firstCallAt = .now
+        lagArmed = false
+    }
+
+    var contextBefore: String { frozenContext?.before ?? liveBefore }
+    var contextAfter: String { frozenContext?.after ?? liveAfter }
+
+    private var liveBefore: String {
         let ns = text as NSString
         return ns.substring(to: min(textView.selectedRange.location, ns.length))
     }
 
-    var contextAfter: String {
+    private var liveAfter: String {
         let ns = text as NSString
         let end = min(textView.selectedRange.location + textView.selectedRange.length, ns.length)
         return ns.substring(from: end)
     }
+
+    /// The caret in UTF-16 units.
+    var caret: Int { textView.selectedRange.location }
 
     var selectedText: String? {
         let range = textView.selectedRange
@@ -113,10 +143,17 @@ final class HarnessDocument: TextDocument {
         }
     }
 
-    func insert(_ text: String) { textView.insertText(text) }
-    func deleteBackward() { textView.deleteBackward() }
+    func insert(_ text: String) {
+        called()
+        textView.insertText(text)
+    }
+    func deleteBackward() {
+        called()
+        textView.deleteBackward()
+    }
 
     func adjustTextPosition(byCharacterOffset offset: Int) {
+        called()
         // The proxy counts UTF-16 units, as UITextView's NSRange does.
         let current = textView.selectedRange
         let length = (text as NSString).length
@@ -171,7 +208,22 @@ final class KeyboardHarnessModel {
         controller.trace = { message in E2E.log("harness \(message) doc=\(E2E.quote(document.text))") }
         controller.beforeStartWatch = { await E2E.waitForStartWatch() }
         document.onChange = { [weak controller] in controller?.documentDidChange() }
+        let namespace = "\(RuntimeIdentity.current.notificationNamespace).e2e."
+        fieldEditObservers = ["harness-fieldedits", "harness-fe-lag"].map { command in
+            DarwinObserver(name: namespace + command) {
+                Task { @MainActor in
+                    E2E.log("command \(command)")
+                    if command == "harness-fieldedits" {
+                        await KeyboardHarnessModel.shared.runFieldEdits()
+                    } else {
+                        await KeyboardHarnessModel.shared.measureLag()
+                    }
+                }
+            }
+        }
     }
+
+    private var fieldEditObservers: [DarwinObserver] = []
 
     func appeared() {
         controller.showsGlobe = ["YES", "TRUE", "1"].contains(UserDefaults.standard.string(forKey: "LegatoHarnessGlobe")?.uppercased() ?? "")
@@ -227,6 +279,150 @@ final class KeyboardHarnessModel {
             }
             E2E.log("harness typing case=\(name) text=\(E2E.quote(document.text)) shift=\(typing.shift.mode)")
         }
+    }
+
+    // MARK: Field edit queue (scenario fe)
+
+    private let linkStore = UserDefaultsLinkStore().map(LinkStore.init)
+    private var hostSeq = 10_000
+
+    /// What the app would publish for a scripted Live run (fresh beat), followed by its Darwin note.
+    private func publish(
+        run: String, phase: HostPhase = .listening, committed: String, finalText: String? = nil,
+        revision: HostRevision? = nil
+    ) {
+        hostSeq += 1
+        let state = HostState(
+            runID: run, phase: phase, target: .keyboard, committed: committed, volatile: "", seq: hostSeq,
+            beatAt: Date(), leaseUntil: nil, acceptsRemoteStart: false, delivery: .live, finalText: finalText,
+            revision: revision)
+        linkStore?.write(state, forKey: LinkChannel.Key.host)
+        DarwinObserver.post(LinkChannel.Note.host)
+    }
+
+    @discardableResult
+    private func waitUntil(_ what: String, timeout: Double = 3, _ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .milliseconds(Int(timeout * 1000))
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                E2E.log("fe.timeout what=\(what) doc=\(E2E.quote(document.text))")
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+
+    private func step(_ name: String) {
+        E2E.log("fe.step name=\(name) doc=\(E2E.quote(document.text)) caret=\(document.caret) end=\((document.text as NSString).length)")
+    }
+
+    private func press(_ keys: String) {
+        let typing = controller.typing!
+        for token in keys.split(separator: " ") {
+            let token = String(token)
+            if ["shift", "space", "delete", "return"].contains(token) { typing.press(keyID: token) }
+            else { for ch in token { typing.press(keyID: "char:\(ch)") } }
+        }
+    }
+
+    /// The pinned words again: a new field's first change clears the row, pinned words included.
+    private func repin() {
+        if let list = UserDefaults.standard.string(forKey: "LegatoHarnessSuggestions") {
+            controller.pinSuggestions(list.split(separator: ",").map(String.init))
+        }
+    }
+
+    private func clearField() {
+        document.frozenContext = nil
+        document.textView.text = ""
+        controller.typing.reset()
+        controller.documentDidChange()
+    }
+
+    /// Scenario fe: every source of the keyboard through the queue, step by step; the script checks the logs.
+    func runFieldEdits() async {
+        E2E.log("fe.begin on=\(KeyboardPreferences.forcedFieldEdits ? 1 : 0)")
+        clearField()
+
+        // 1. A Live run streams (ASR lane) and its revision lands as a patch (cleanup lane) while the reveal rushes.
+        let run1 = "fe-run-1"
+        publish(run: run1, committed: "teh")
+        await waitUntil("stream-1") { document.text == "teh" }
+        publish(run: run1, committed: "teh cat sat")
+        await waitUntil("stream-2") { document.text == "teh cat sat" }
+        let revision1 = HostRevision(n: 1, start: 0, raw: "teh cat sat", text: "the cat sat")
+        publish(run: run1, committed: "teh cat sat on", revision: revision1)
+        await waitUntil("revision") { document.text == "the cat sat on" }
+        publish(run: run1, phase: .idle, committed: "teh cat sat on", finalText: "the cat sat on", revision: revision1)
+        await waitUntil("versions") { controller.shownVersionIndex != nil }
+        step("stream")
+
+        // 2. The word row: the pinned word completes the word at the caret.
+        repin()
+        controller.suggestionTapped(rank: 0)
+        step("row")
+
+        // 3. Undo and redo: the completion, then the version swap (cleaned -> raw), and back.
+        controller.undo()
+        step("undo-row")
+        controller.undo()
+        step("undo-version")
+        controller.redo()
+        step("redo-version")
+        controller.redo()
+        step("redo-row")
+
+        // 4. Typing mid-word while a revision waits: the field's reads lag (frozen) after revision 1 landed, so
+        //    revision 2 waits in the queue; the keys run at once and the waiting revision is mapped past them.
+        let run2 = "fe-run-2"
+        publish(run: run2, committed: "a dgo ran")
+        await waitUntil("run2-stream") { document.text.hasSuffix("a dgo ran") }
+        document.freezeContext()
+        publish(run: run2, committed: "a dgo ran", revision: HostRevision(n: 1, start: 0, raw: "a dgo ran", text: "a dog ran"))
+        await waitUntil("run2-revision1") { document.text.hasSuffix("a dog ran") }
+        publish(run: run2, committed: "a dgo ran", revision: HostRevision(n: 2, start: 0, raw: "a dgo ran", text: "A dog ran"))
+        await waitUntil("run2-revision2-waits") { controller.fieldEditsHostWaiting }
+        E2E.log("fe.pending waiting=\(controller.fieldEditsHostWaiting ? 1 : 0)")
+        press("space i s")
+        step("typed-while-pending")
+        document.frozenContext = nil
+        controller.documentDidChange() // the field's read catches up
+        await waitUntil("run2-revision2") { document.text.hasSuffix("A dog ran is") }
+        publish(run: run2, phase: .idle, committed: "a dgo ran", finalText: "A dog ran",
+                revision: HostRevision(n: 2, start: 0, raw: "a dgo ran", text: "A dog ran"))
+        try? await Task.sleep(for: .milliseconds(300))
+        step("pending")
+        E2E.log("fe.done")
+    }
+
+    /// Scenario fe's lag probe: the time from a key press, a word-row tap or ↶ to the first proxy call.
+    func measureLag() async {
+        clearField()
+        var keys: [Double] = [], taps: [Double] = [], undos: [Double] = []
+        func measure(_ action: () -> Void) -> Double? {
+            document.armLag()
+            let start = ContinuousClock.now
+            action()
+            guard let at = document.firstCallAt else { return nil }
+            let parts = start.duration(to: at).components
+            return Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15
+        }
+        let typing = controller.typing!
+        for round in 0..<6 {
+            for ch in "ab" { if let ms = measure({ _ = typing.press(keyID: "char:\(ch)") }) { keys.append(ms) } }
+            repin()
+            if let ms = measure({ controller.suggestionTapped(rank: 0) }) { taps.append(ms) }
+            if round % 2 == 0, let ms = measure({ controller.undo() }) { undos.append(ms) }
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        for ch in "lagprobe" { if let ms = measure({ _ = typing.press(keyID: "char:\(ch)") }) { keys.append(ms) } }
+        func median(_ values: [Double]) -> String {
+            guard !values.isEmpty else { return "-" }
+            let sorted = values.sorted()
+            return String(format: "%.3f", sorted[sorted.count / 2])
+        }
+        E2E.log("fe.lag on=\(KeyboardPreferences.forcedFieldEdits ? 1 : 0) keys=\(keys.count) taps=\(taps.count) undos=\(undos.count) keyMs=\(median(keys)) tapMs=\(median(taps)) undoMs=\(median(undos)) keyMaxMs=\(String(format: "%.3f", keys.max() ?? 0)) doc=\(E2E.quote(document.text))")
     }
 }
 
