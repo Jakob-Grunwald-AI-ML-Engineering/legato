@@ -57,7 +57,15 @@ public final class HostLink {
         store.remove(forKey: LinkChannel.Key.applied)
         store.remove(forKey: LinkChannel.Key.refine)
         store.remove(forKey: LinkChannel.Key.refined)
+        removeFieldEditKeys()
         post(LinkChannel.Note.host)
+    }
+
+    /// The edit queue's keys carry the field's text too (`link.feed`'s window, `link.edits`' patches): they go with it.
+    private func removeFieldEditKeys() {
+        store.remove(forKey: LinkChannel.Key.feed)
+        store.remove(forKey: LinkChannel.Key.edits)
+        store.remove(forKey: LinkChannel.Key.editsAck)
     }
 
     // MARK: Publishing
@@ -164,6 +172,7 @@ public final class HostLink {
         store.remove(forKey: LinkChannel.Key.applied)
         store.remove(forKey: LinkChannel.Key.refine)
         store.remove(forKey: LinkChannel.Key.refined)
+        removeFieldEditKeys()
         guard state.runID != nil || !state.committed.isEmpty || !state.volatile.isEmpty || state.finalText != nil
         else { return }
         state.runID = nil

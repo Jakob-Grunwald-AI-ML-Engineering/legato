@@ -361,3 +361,39 @@ private func allEvents() -> [FeedEvent] {
         #expect(LinkChannel.feedCapacity == 256)
     }
 }
+
+/// The app's first read of a run (L6): every batch since the keyboard began following it, while the ring holds them.
+@Suite struct FieldFeedLinkFromStartTests {
+    @Test func aFirstReadGetsEveryBatchOfTheRunFromItsStart() throws {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing)
+        keyboard.follow(runID: "run")
+        let first = FeedBatch(entries: [], version: FieldVersion(0), session: session, resync: true, window: "")
+        let typed = batch([.applied(UUID(), origin: .asr, steps: [EditStep.insert("hi", at: 0)], version: FieldVersion(1))])
+        keyboard.append(first, window: "")
+        keyboard.append(typed, window: "hi")
+        let app = link(backing)
+        let read = try #require(app.readFeedFromStart(forRun: "run"))
+        #expect(read.batches == [first, typed])
+        #expect(read.cursor.seq == 2)
+        // Then it follows from there.
+        #expect(app.readFeed(after: read.cursor, forRun: "run")?.batches == [])
+    }
+
+    @Test func aRingThatDroppedItsStartGivesAResync() throws {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing, capacity: 2)
+        keyboard.follow(runID: "run")
+        for n in 1...3 { keyboard.append(batch([.asrDelta("\(n)")], from: n, version: n), window: "w\(n)") }
+        let read = try #require(link(backing).readFeedFromStart(forRun: "run"))
+        #expect(read.batches.count == 1 && read.batches[0].resync && read.batches[0].window == "w3")
+    }
+
+    @Test func anotherRunsRingIsNotRead() {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing)
+        keyboard.follow(runID: "old")
+        keyboard.append(batch([.asrDelta("x")]), window: "x")
+        #expect(link(backing).readFeedFromStart(forRun: "run") == nil)
+    }
+}

@@ -165,6 +165,16 @@ public final class FieldFeedLink: Sendable {
         return FeedRead(batches: ring.slots.filter { $0.seq > cursor.seq }.map(\.batch), cursor: now)
     }
 
+    /// App: the first read of a run, by a reader with no cursor yet. While the ring still holds its first batch
+    /// (nothing was dropped) every batch since the keyboard began following `runID` is returned, so the reader
+    /// learns who wrote which text (the run's own text is told from the user's only by its `applied` events);
+    /// otherwise, as ``readFeed(after:forRun:)`` with no cursor, a `resync`. Nil while nothing was written for it.
+    public func readFeedFromStart(forRun runID: String) -> FeedRead? {
+        guard let ring = store.read(FeedRing.self, forKey: LinkChannel.Key.feed), ring.runID == runID else { return nil }
+        guard ring.slots.first?.seq == 1 else { return readFeed(after: nil, forRun: runID) }
+        return FeedRead(batches: ring.slots.map(\.batch), cursor: FeedCursor(writer: ring.writer, seq: ring.lastSeq))
+    }
+
     // MARK: Edits (app writes, keyboard reads and acknowledges)
 
     /// App: starts sending edits for `runID`; what was queued for an earlier run is dropped.

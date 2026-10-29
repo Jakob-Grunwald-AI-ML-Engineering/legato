@@ -84,6 +84,20 @@ private struct LinkRig {
         #expect(r.host?.finalText == nil && r.host?.committed == "")
     }
 
+    /// The edit queue's keys carry the field's text: the scrub removes them with the rest (L6).
+    @Test func theScrubRemovesTheFieldEditKeys() {
+        let r = LinkRig()
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live, fieldEdits: true)
+        for key in [LinkChannel.Key.feed, LinkChannel.Key.edits, LinkChannel.Key.editsAck] {
+            r.store.write(["text"], forKey: key)
+        }
+        r.link.runEnded(committed: "a ", finalText: nil)
+        r.link.scrubText()
+        for key in [LinkChannel.Key.feed, LinkChannel.Key.edits, LinkChannel.Key.editsAck] {
+            #expect(r.store.read([String].self, forKey: key) == nil)
+        }
+    }
+
     @Test func anOldStateWithoutTheNewFieldsStillDecodes() throws {
         let json = #"{"v":1,"runID":"r","phase":"idle","target":"keyboard","committed":"a","volatile":"","seq":3,"beatAt":1000,"acceptsRemoteStart":false}"#
         let decoder = JSONDecoder()

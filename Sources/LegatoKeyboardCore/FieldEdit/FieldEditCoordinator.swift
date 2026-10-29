@@ -42,6 +42,13 @@ public protocol FieldEditDocument: AnyObject {
 ///   our own intermediate text is never recorded as the user's.
 /// - Outcomes go back to each source's handler: `.executed` once its ops ran, then `.applied`, `.conflict`,
 ///   `.superseded`, `.withdrawn`, or `.unconfirmed` when the keyboard went away before a read decided.
+/// - A contradicted prediction is decided in bounded time: while a read contradicts it, the deadline its first
+///   write set stands (keys arriving meanwhile do not push the final read back), so the unverified writes and the
+///   settle stay bounded and the ASR and cleanup lanes are held for two timeouts at most.
+/// - The feed (``publishFeed(to:)``, the app's cleanup agent on iOS): once per host update (and per call from a
+///   source) the feed entries since the last batch go out as one `FeedBatch` with the confirmed window; the first
+///   is a resync. While it publishes, the history the queue maps old bases through is kept for the last
+///   ``linkedVersions`` batches, so an edit based on a batch the app read a moment ago still lands.
 @MainActor
 public final class FieldEditCoordinator {
     public enum Outcome: Equatable, Sendable {
@@ -128,6 +135,19 @@ public final class FieldEditCoordinator {
     /// A ghost whose retype ran its calls (or failed back to its source): if the ghost lands after all, the text
     /// is there twice. Only logged (`fe.duplicate`): the copies cannot be told apart from the user's text.
     private var spent: Ghost?
+    /// The settle deadline stands while the prediction is contradicted (see the notes).
+    private var contradictionDeadline = false
+
+    /// Where the feed goes (``publishFeed(to:)``); nil: nobody reads it, it is kept short.
+    private var feedSink: ((FeedBatch, String) -> Void)?
+    /// The last feed entry published (nil: the next batch is a resync).
+    private var publishedThrough: Int?
+    /// The versions of the newest published batches, oldest first: the bases the app's edits may name.
+    private var publishedVersions: [FieldVersion] = []
+    /// How many published batches' versions stay mappable.
+    public static let linkedVersions = 64
+    /// Nested entry points: the feed goes out when the outermost returns.
+    private var depth = 0
 
     public init(
         document: any FieldEditDocument, settleTimeout: Duration = .milliseconds(250),
@@ -232,6 +252,8 @@ public final class FieldEditCoordinator {
     /// field starts over.
     public func sync() {
         guard !executing, !closed else { return }
+        enter()
+        defer { leave() }
         let snapshot = read()
         if let spent, Self.same(Self.states(of: spent.calls, window: split.window, caret: queue.document.caret).last ?? split, snapshot) {
             trace?("fe.duplicate calls=\(spent.calls.count)")  // a write whose retype was typed landed late
@@ -262,6 +284,11 @@ public final class FieldEditCoordinator {
     /// land (the read is stale) are `unconfirmed`, and edits still waiting are handed back.
     public func close() {
         guard !closed else { return }
+        enter()
+        defer {
+            leave()
+            feedSink = nil
+        }
         cancelTimer?()
         cancelTimer = nil
         let snapshot = read()
@@ -290,6 +317,8 @@ public final class FieldEditCoordinator {
     @discardableResult
     public func submit(_ transaction: EditTransaction, lane: Lane? = nil, onOutcome: ((Outcome) -> Void)? = nil) -> Result {
         guard !closed else { return .refused(Conflict(.focusLost)) }
+        enter()
+        defer { leave() }
         var first: Outcome?
         handlers[transaction.id] = { outcome in
             if first == nil { first = outcome }
@@ -312,6 +341,8 @@ public final class FieldEditCoordinator {
     /// Cancels the waiting edit `id` (its handler gets `.withdrawn`); false when it is not waiting.
     @discardableResult
     public func withdraw(_ id: UUID) -> Bool {
+        enter()
+        defer { leave() }
         guard queue.withdraw(id) else { return false }
         dispatch()
         return true
@@ -323,6 +354,8 @@ public final class FieldEditCoordinator {
     /// after it are settled against it (an old read does not make the queue forget it, a later one does not take
     /// it for the user's typing). Its call (`insertText`) types at the real caret, whatever the prediction says.
     public func type(_ text: String) -> Result {
+        enter()
+        defer { leave() }
         sync()
         return keystroke([.insert(text, at: queue.document.caret)])
     }
@@ -330,6 +363,8 @@ public final class FieldEditCoordinator {
     /// The delete key: the Character before the caret, as ``type(_:)``. `.unchanged` when the prediction shows
     /// none (its source then deletes on the field itself, as without the queue).
     public func deleteBackward() -> Result {
+        enter()
+        defer { leave() }
         sync()
         guard let last = predictedBefore.last else { return .unchanged }
         let caret = queue.document.caret, length = String(last).utf16.count
@@ -347,6 +382,8 @@ public final class FieldEditCoordinator {
     /// or while the predicted field may not be the field (a contradicting read, or a read that is our own state
     /// with the caret elsewhere: the user may have put it there): the edit is never planned on the wrong text.
     public func apply(_ edit: WordEdit, origin: EditOrigin) -> Result {
+        enter()
+        defer { leave() }
         sync()
         if predictionUncertain { return refuseUncertain(origin) }
         let before = predictedBefore, after = predictedAfter, caret = queue.document.caret
@@ -387,6 +424,65 @@ public final class FieldEditCoordinator {
     private func refuseUncertain(_ origin: EditOrigin) -> Result {
         trace?("fe.refused origin=\(origin.rawValue) reason=uncertain caret=\(caretUncertain ? 1 : 0)")
         return .refused(Conflict(.outOfWindow))
+    }
+
+    // MARK: Feed
+
+    /// Publishes the change feed to `sink` (the app's cleanup agent, through `link.feed`): a resync batch with the
+    /// window now, then the entries since the last batch, once per host update or source call, each with the
+    /// confirmed window after it.
+    public func publishFeed(to sink: @escaping (FeedBatch, String) -> Void) {
+        guard !closed else { return }
+        feedSink = sink
+        publishedThrough = nil
+        publishedVersions = []
+        flushFeed()
+    }
+
+    /// Stops publishing; the feed is kept short again.
+    public func stopPublishing() {
+        feedSink = nil
+        publishedThrough = nil
+        publishedVersions = []
+    }
+
+    /// Whether the feed is being published.
+    public var publishesFeed: Bool { feedSink != nil }
+
+    /// The host emptied the field (a send, `ClearWatch`): a run boundary. The queue starts over from the field as
+    /// it reads now (`reset(cleared)`, which closes the agent's context before it); writes that await a read are
+    /// handed back with the field empty (their sources take that as the boundary, not a failed write) and
+    /// edits based before it are out of window. Nothing when the prediction is empty already.
+    public func fieldCleared() {
+        guard !closed, !executing, !queue.document.window.isEmpty else { return }
+        enter()
+        defer { leave() }
+        cancelTimer?()
+        cancelTimer = nil
+        contradictionDeadline = false
+        forgetEchoes()
+        forgetGhosts()
+        queue.reset(read(), reason: .cleared)
+        trace?("fe.reset reason=cleared")
+        dispatch()
+        drive()
+    }
+
+    private func enter() { depth += 1 }
+
+    private func leave() {
+        depth -= 1
+        if depth == 0 { flushFeed() }
+    }
+
+    private func flushFeed() {
+        guard let feedSink else { return }
+        let batch = queue.feed.since(publishedThrough)
+        guard batch.resync || !batch.entries.isEmpty else { return }
+        publishedThrough = batch.lastSeq
+        publishedVersions.append(batch.version)
+        if publishedVersions.count > Self.linkedVersions { publishedVersions.removeFirst(publishedVersions.count - Self.linkedVersions) }
+        feedSink(batch, queue.feed.window)
     }
 
     // MARK: Executing
@@ -452,6 +548,13 @@ public final class FieldEditCoordinator {
     }
 
     private func restartSettleTimer() {
+        if queue.needsFinalSettle {
+            // The deadline the contradiction's first write set stands: later keys do not push the final read back.
+            if contradictionDeadline, cancelTimer != nil { return }
+            contradictionDeadline = true
+        } else {
+            contradictionDeadline = false
+        }
         cancelTimer?()
         extended = false
         armSettleTimer()
@@ -469,6 +572,8 @@ public final class FieldEditCoordinator {
     /// that still contradicts the prediction (e.g. a transient empty context) waits once more.
     private func settleFinal() {
         guard !issued.isEmpty, !closed, !executing else { return }
+        enter()
+        defer { leave() }
         let snapshot = read()
         let echo = isEcho(snapshot)
         if !extended, echo || queue.needsFinalSettle {
@@ -494,6 +599,7 @@ public final class FieldEditCoordinator {
         }
         let outcome = queue.settle(snapshot, final: true, tolerateStale: !extended)
         trace?("fe.settle final=1 outcome=\(outcome) extended=\(extended ? 1 : 0)")
+        contradictionDeadline = false
         dispatch()
         if outcome == .stale, !issued.isEmpty {
             extended = true
@@ -506,6 +612,8 @@ public final class FieldEditCoordinator {
     private func expireEchoes() {
         cancelTimer = nil
         guard issued.isEmpty else { return }
+        enter()
+        defer { leave() }
         forgetEchoes()
         // A late write no retype claimed: the field shows it, and the queue reads it as it is.
         if !ghosts.isEmpty {
@@ -547,9 +655,15 @@ public final class FieldEditCoordinator {
             }
         }
         if issued.isEmpty, !queue.hasPending {
-            // Nothing waits on older versions: keep the history and the feed short (no reader yet on iOS).
-            queue.pruneHistory(before: queue.document.version)
-            if let last = queue.feed.entries.last?.seq { queue.trimFeed(through: last) }
+            if feedSink != nil {
+                // The app's edits name the version of a batch it read: keep those mappable, and the unpublished feed.
+                queue.pruneHistory(before: publishedVersions.first ?? queue.feed.version)
+                if let published = publishedThrough { queue.trimFeed(through: published) }
+            } else {
+                // Nothing waits on older versions: keep the history and the feed short.
+                queue.pruneHistory(before: queue.document.version)
+                if let last = queue.feed.entries.last?.seq { queue.trimFeed(through: last) }
+            }
         }
     }
 
