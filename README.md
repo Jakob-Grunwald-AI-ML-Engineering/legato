@@ -26,4 +26,4 @@ id=$(scripts/device/ctl.sh send state) && scripts/device/ctl.sh wait "$id"
 scripts/device/ctl.sh background; scripts/device/ctl.sh send toggle
 ```
 
-Commands: `ping`, `commands`, `state`, `set-setting <key> <value>`, and in Debug builds every simulator e2e command (`E2E.commands`), routed through the same `runE2E`. Other code adds commands with `DebugBridge.register(_:handler:)`. Limits: the phone must be unlocked for launch and file copies; the real keyboard extension and locking the phone cannot be driven.
+Commands: `ping`, `commands`, `state`, `set-setting <key> <value>` (the app's own settings keys only; values are never logged), and in Debug builds every simulator e2e command (`E2E.commands`), routed through the same `runE2E`. Other code adds commands with `DebugBridge.register(_:handler:)`. Limits: the phone must be unlocked for launch and file copies; the real keyboard extension and locking the phone cannot be driven.

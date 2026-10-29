@@ -1,5 +1,6 @@
 #if LEGATO_INTERNAL
 import Foundation
+import LegatoKeyboardCore
 import UIKit
 import os
 
@@ -31,9 +32,11 @@ struct BridgeCommand: Decodable, Equatable {
 ///
 /// The host copies one JSON file per command into `Library/Caches/debug-bridge/inbox/` of the app's data
 /// container (`xcrun devicectl device copy to`). The bridge polls that folder every 0.5 s while the process
-/// is alive (foreground or background), runs each command on the main actor, deletes the file and appends
-/// `{ts, id, event, ...}` lines to `Library/Caches/debug-bridge/log.jsonl`. Dictated text is never logged
-/// unless a command asks for it explicitly.
+/// is alive (iOS suspends a backgrounded process that holds no audio session or other background mode, and
+/// polling pauses then), runs each command on the main actor, deletes the file and appends
+/// `{ts, id, event, ...}` lines to `Library/Caches/debug-bridge/log.jsonl` (trimmed to the last lines at
+/// start). The bridge never logs dictated text or setting values; `state` reports lengths and flags only.
+/// At start it drops any commands left in the inbox (logged as `dropped`).
 ///
 /// Debug builds start it at launch. Other `LEGATO_INTERNAL` (TestFlight) builds start it only with the
 /// launch argument `-LegatoDebugBridge YES`.
@@ -74,15 +77,27 @@ enum DebugBridge {
 
     static func start() {
         guard task == nil, isEnabled else { return }
-        try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: inbox, withIntermediateDirectories: true)
+        let stale = (try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? []
+        for file in stale { try? fm.removeItem(at: file) }
+        trimLog()
         registerBuiltins()
-        emit(id: "-", event: "started", ["pid": ProcessInfo.processInfo.processIdentifier, "commands": handlers.keys.sorted()])
+        emit(id: "-", event: "started", ["dropped": stale.count, "pid": ProcessInfo.processInfo.processIdentifier, "commands": handlers.keys.sorted()])
         task = Task { @MainActor in
             while !Task.isCancelled {
                 await drain()
                 try? await Task.sleep(for: pollInterval)
             }
         }
+    }
+
+    /// Keeps the last `keepLines` lines once the log passes twice that.
+    private static func trimLog(keepLines: Int = 1000) {
+        guard let text = try? String(contentsOf: logURL, encoding: .utf8) else { return }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        guard lines.count > keepLines * 2 else { return }
+        try? (lines.suffix(keepLines).joined(separator: "\n") + "\n").write(to: logURL, atomically: true, encoding: .utf8)
     }
 
     static func stop() {
@@ -95,6 +110,7 @@ enum DebugBridge {
         let files = ((try? FileManager.default.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        badFiles = badFiles.filter { name, _ in files.contains { $0.lastPathComponent == name } }
         for file in files {
             guard let data = try? Data(contentsOf: file), let command = BridgeCommand.decode(data) else {
                 // A copy may still be in flight: give it three polls before calling it garbage.
@@ -155,10 +171,9 @@ enum DebugBridge {
         register("set-setting") { command in
             guard command.args.count == 2 else { throw BridgeError.usage("set-setting <key> <value>") }
             let key = command.args[0]
-            let old = AppGroup.defaults.object(forKey: key)
-            let value = parse(command.args[1])
-            AppGroup.defaults.set(value, forKey: key)
-            return ["key": key, "old": old.map { "\($0)" } ?? NSNull(), "new": "\(value)"]
+            guard settingKeys.contains(key) else { throw BridgeError.usage("key not allowed; one of \(settingKeys.sorted())") }
+            AppGroup.defaults.set(parse(command.args[1]), forKey: key)
+            return ["key": key]
         }
         #if DEBUG
         for name in E2E.commands {
@@ -174,6 +189,14 @@ enum DebugBridge {
         register("result-copy") { _ in await AppController.shared.copyResult(); return nil }
         #endif
     }
+
+    /// The app's own settings keys; `set-setting` refuses anything else (the App Group also holds link state).
+    static let settingKeys: Set<String> = [
+        "audioPolicy", "keepAliveSeconds", "keepAliveChoicesVersion", "keepSessionActiveBetweenRuns",
+        "debugShowPauseOthers", "debugForceTapToCopy",
+        KeyboardPreferences.hapticsKey, KeyboardPreferences.clicksKey, KeyboardPreferences.stripKey,
+        KeyboardPreferences.stripHeightKey, AutoFillHandoff.preferenceKey,
+    ]
 
     /// `true`/`false` become Bool, whole numbers Int, other numbers Double, the rest String.
     static func parse(_ text: String) -> Any {

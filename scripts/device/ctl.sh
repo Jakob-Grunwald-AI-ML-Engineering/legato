@@ -27,9 +27,10 @@
 # cannot be driven from here.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")"
+# lib.sh changes to the repo root itself.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../ci/lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/../ci/lib.sh"
+source "$HERE/../ci/lib.sh"
 
 DEVICE="${LEGATO_DEVICE:-00008150-000E60360245401C}"
 TEAM="${LEGATO_DEVICE_TEAM:-XWSGN23W75}"
@@ -60,8 +61,12 @@ dc() {
 }
 
 # 0 if the target device is listed as available.
+# The State column is the text after "(UDID)"; "unavailable" must not match.
 device_available() {
-  xcrun devicectl list devices 2> /dev/null | grep -F "$DEVICE" | grep -qiE 'available|connected'
+  local listing state
+  listing="$(xcrun devicectl list devices 2> /dev/null || true)"
+  state="$(awk -v d="$DEVICE" 'index($0, d) { sub(/.*\(UDID\) +/, ""); print; exit }' <<< "$listing")"
+  case "$state" in available* | connected*) return 0 ;; *) return 1 ;; esac
 }
 
 require_device() {
@@ -121,10 +126,18 @@ cmd_launch() {
 cmd_send() {
   [ $# -ge 1 ] || die "usage: send <command> [args...]"
   require_device
-  local id="c$(date +%s)-$RANDOM" file
+  # Ids sort in send order (the bridge runs the oldest name first): epoch seconds, then a persistent counter.
+  local n=0 id file args=[]
+  [ -f "$STATE/seq" ] && n="$(cat "$STATE/seq")"
+  n=$((n + 1))
+  echo "$n" > "$STATE/seq"
+  id="$(printf 'c%010d-%08d' "$(date +%s)" "$n")"
   file="$STATE/$id.json"
-  jq -nc --arg id "$id" --arg command "$1" '{id: $id, command: $command, args: $ARGS.positional}' --args "${@:2}" > "$file"
-  copy_to "$file" "$BRIDGE/inbox/$id.json"
+  # NUL-separated so values starting with "-" or holding newlines survive.
+  [ $# -le 1 ] || args="$(printf '%s\0' "${@:2}" | jq -Rs 'split("\u0000")[:-1]')"
+  jq -nc --arg id "$id" --arg command "$1" --argjson args "$args" '{id: $id, command: $command, args: $args}' > "$file"
+  copy_to "$file" "$BRIDGE/inbox/$id.json" || { rm -f "$file"; return 1; }
+  rm -f "$file"
   echo "$id"
 }
 
@@ -170,8 +183,9 @@ cmd_foreground() { require_device; dc device process launch --device "$DEVICE" "
 
 cmd_terminate() {
   require_device
-  local pid
-  pid="$(xcrun devicectl device info processes --device "$DEVICE" 2> /dev/null | awk -v b="/Legato.app/Legato" 'index($0, b) {print $1; exit}')"
+  local pid procs
+  procs="$(xcrun devicectl device info processes --device "$DEVICE" 2> /dev/null || true)"
+  pid="$(awk -v b="/Legato.app/Legato" 'index($0, b) {print $1; exit}' <<< "$procs")"
   [ -n "$pid" ] || { echo "Legato is not running"; return 0; }
   dc device process terminate --device "$DEVICE" --pid "$pid"
 }
@@ -180,6 +194,7 @@ cmd_pull() {
   local group=""
   [ "${1:-}" = "--group" ] && { group=group; shift; }
   [ $# -eq 1 ] || die "usage: pull [--group] <path>"
+  case "/$1/" in */../*) die "pull: '..' is not allowed in $1" ;; esac
   require_device
   local dest="$STATE/pulled/$(basename "$1")"
   mkdir -p "$STATE/pulled"
