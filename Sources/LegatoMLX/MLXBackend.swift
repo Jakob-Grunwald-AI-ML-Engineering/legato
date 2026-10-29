@@ -102,6 +102,9 @@ protocol MLXGenerating: Sendable {
         spec: MLXModelSpec, folder: URL, instructions: String, examples: [LLMExample], prompt: String,
         device: ComputeDevice
     ) async throws -> AsyncThrowingStream<String, any Error>
+    /// A persistent chat over the loaded model, starting from `instructions` and `history` (see
+    /// ``MLXSession``). The default refuses.
+    func makeChat(spec: MLXModelSpec, folder: URL, instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning
 }
 
 /// The real generator: mlx-swift-lm's `ChatSession` over the cached container.
@@ -160,23 +163,12 @@ struct MLXChatGenerator: MLXGenerating {
     }
 }
 
-/// The first MLX error raised during a generation, thrown at the next chunk.
-private final class MLXErrorRecorder: Sendable {
-    private let first = Mutex<String?>(nil)
-
-    var record: @Sendable (String) -> Void {
-        { [self] message in self.first.withLock { if $0 == nil { $0 = message } } }
-    }
-
-    func check() throws {
-        if let message = first.withLock({ $0 }) { throw LLMError.failed("MLX: \(message)") }
-    }
-}
 
 /// An installed MLX model as a cleanup (or later summary) backend.
 ///
-/// Runs greedy decoding with Qwen3's thinking mode off. Each call uses a fresh chat session, so nothing
-/// carries over between calls. MLX array work needs the Metal shaders that only an Xcode build produces.
+/// Runs greedy decoding with Qwen3's thinking mode off. Each `respond` call uses a fresh chat session, so
+/// nothing carries over between calls; ``makeSession()`` keeps one chat session (and its KV cache) across
+/// turns. MLX array work needs the Metal shaders that only an Xcode build produces.
 ///
 /// On ``ComputeDevice/cpu`` the load and the generation run with the CPU as the task's default device, so
 /// no GPU work is submitted (the phone's background). The loaded model is shared with the GPU backend: MLX
@@ -194,6 +186,13 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
     /// Instructions, prompt and reply together, in characters; small models drift on long input.
     public let maxPromptCharacters: Int? = 4_000
 
+    /// The context a session keeps (tokens, reply included): the small-model window, not the checkpoint's.
+    static let sessionWindow = 4_096
+    /// Tokens a reply may take.
+    static let replyLimit = 1_024
+    /// Sessions handed out; releasing the model ends them.
+    private let sessions = LLMSessionSet()
+
     public func prewarmResources() async throws {
         try Task.checkCancellation()
         guard MLXInstaller.isComplete(folder: folder) else {
@@ -207,9 +206,27 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
     }
 
     public func releaseWarmResources() async {
+        await sessions.closeAll()
         // Dropping the cache's reference does not join or destroy a native generation worker.
         await MLXModelCache.shared.evict(folder: folder)
     }
+
+    /// A persistent session: one `ChatSession` and its KV cache across turns. Releasing the model ends it.
+    public func makeSession() async throws -> any LLMSession {
+        guard MLXInstaller.isComplete(folder: folder) else {
+            throw LLMError.unavailable(reason: "\(spec.displayName) is not downloaded.")
+        }
+        let session = MLXSession(backend: self, tokenBudget: Self.sessionWindow - Self.replyLimit)
+        await sessions.insert(session)
+        return session
+    }
+
+    func makeChat(instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning {
+        try await generator.load(spec: spec, folder: folder, device: await currentDevice())
+        return try await generator.makeChat(spec: spec, folder: folder, instructions: instructions, history: history)
+    }
+
+    func gpuUsable() async -> Bool { await canUseGPU() }
 
     /// - Parameters:
     ///   - device: where the model runs while the GPU is usable; ``ComputeDevice/cpu`` always runs on the CPU.
@@ -277,7 +294,7 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
 
     /// The conversation after the system instructions: each example as a user turn and the answer to it,
     /// then the prompt.
-    static func chatMessages(examples: [LLMExample], prompt: String) -> [Chat.Message] {
-        examples.flatMap { [Chat.Message.user($0.user), Chat.Message.assistant($0.assistant)] } + [.user(prompt)]
+    static func chatMessages(examples: [LLMExample], prompt: String?) -> [Chat.Message] {
+        examples.flatMap { [Chat.Message.user($0.user), Chat.Message.assistant($0.assistant)] } + (prompt.map { [.user($0)] } ?? [])
     }
 }
