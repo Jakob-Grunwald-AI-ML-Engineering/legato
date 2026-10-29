@@ -152,6 +152,12 @@ final class AppController {
             acquireRunWithOptions: { options in try await models.acquireDictationCleanup(options: options, inBackground: true) },
             report: { report in await reports.record(report) })
         #endif
+        // While the cleanup agent cleans a run (the edit queue setting, Live), the session's own cleanup stays out.
+        #if DEBUG
+        let agentGate = AgentGatedPostProcessor(E2E.fakeCleanup ?? cleanup)
+        #else
+        let agentGate = AgentGatedPostProcessor(cleanup)
+        #endif
         self.history = history
         let meetingRoot = directory.appending(path: "Meetings", directoryHint: .isDirectory)
         #if DEBUG
@@ -183,7 +189,7 @@ final class AppController {
             history: history,
             makeSession: { policy, linger in
                 #if DEBUG
-                if let fake = E2E.makeFakeSession(history: history, postProcessor: cleanup, policy: policy, linger: linger) {
+                if let fake = E2E.makeFakeSession(history: history, postProcessor: agentGate, policy: policy, linger: linger) {
                     return fake
                 }
                 #endif
@@ -203,7 +209,7 @@ final class AppController {
                     source: source,
                     sessionControl: sessionControl,
                     history: history,
-                    postProcessor: cleanup,
+                    postProcessor: agentGate,
                     policy: policy,
                     linger: linger)
             })
@@ -253,6 +259,20 @@ final class AppController {
             keyboardLink.link.onRefine = { [weak self] text in await self?.refine(text) }
             keyboardLink.deliveryForRun = { Settings.hostDelivery }
             keyboardLink.fieldEditsForRun = { Settings.fieldEdits }
+            keyboardLink.agentGate = agentGate
+            keyboardLink.makeAgent = { runID in Self.makeAgent(runID: runID, models: models, vocabulary: vocabulary) }
+            keyboardLink.agentWait = { .seconds(Settings.cleanupStore.options.timeoutSeconds) }
+            keyboardLink.statelessFinalPass = { [weak self] raw in await self?.statelessFinalPass(raw) }
+            keyboardLink.copyFallback = { [pasteboard] text in pasteboard.write(text) }
+            keyboardLink.correctHistory = { raw, cleaned in
+                // The session saved the engine's text; the run's entry is the newest one with that text.
+                guard let entry = (try? await history.recent(limit: 5))?.first(where: { $0.text == raw && $0.rawText == nil })
+                else { return }
+                _ = await AgentRunHistory.replace(entry, cleaned: cleaned, in: history)
+            }
+            #if DEBUG
+            keyboardLink.linkTrace = { E2E.log("link \($0)") }
+            #endif
             // The keyboard's field was cleared mid-run (a chat app sent it): later cleanup covers only what follows.
             keyboardLink.link.onSent = { [weak self] runID, boundary, shownRevision in
                 self?.coordinator.liveTextSent(runID: runID, upTo: boundary, shownRevision: shownRevision)
@@ -506,6 +526,48 @@ final class AppController {
     }
 
     /// Refines `text` in the selected mode (Voice uses Message), or returns nil when unchanged.
+    /// The cleanup agent of a Live run with the edit queue on, made in the background on the warm rolling session
+    /// of the backend the run leased (nil there: no agent, the run's stop takes the stateless pass).
+    private static func makeAgent(
+        runID: String, models: ModelServices, vocabulary: VocabularyService
+    ) -> (@Sendable () async -> CleanupAgent?)? {
+        let options = Settings.cleanupStore.options
+        guard options.enabled else { return nil }
+        let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
+        #if DEBUG
+        if let fake = E2E.makeFakeAgentSession() {
+            return { fake.session.map { CleanupAgent(session: $0, options: .init(options, owner: runID, locale: locale)) } }
+        }
+        #endif
+        return {
+            guard let rolling = await models.rollingDictationSession(options: options) else { return nil }
+            let terms = await vocabulary.cleanupTerms(for: "")  // the run's pinned terms; its text is not known yet
+            return CleanupAgent(session: rolling, options: .init(options, owner: runID, locale: locale, vocabulary: terms))
+        }
+    }
+
+    /// Today's stateless final cleanup pass (the one the agent gate suppresses), for a Live run whose agent was
+    /// absent at its stop: on the backend a run takes at its start, leased for the pass.
+    private func statelessFinalPass(_ raw: String) async -> String? {
+        #if DEBUG
+        if let fake = E2E.fakeCleanup { return try? await fake.process(raw, locale: Locale.current) }
+        #endif
+        let options = Settings.cleanupStore.options
+        guard options.enabled else { return nil }
+        let models = models, vocabulary = vocabulary, store = Settings.cleanupStore, reports = cleanupReports
+        let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
+        let inBackground = startEnvironment.current().inBackground
+        return await LeasedCleanup.run(
+            acquire: { try await models.acquireDictationCleanup(options: options, inBackground: inBackground) },
+            within: .seconds(options.timeoutSeconds)
+        ) { resolution in
+            await CleanupProcessor.run(
+                raw, locale: locale, style: options.style, refine: false, timeout: .seconds(options.timeoutSeconds),
+                settings: store, registry: models.cleanup, report: { report in await reports.record(report) },
+                vocabulary: vocabulary, resolution: resolution, options: options)
+        }
+    }
+
     func refine(_ text: String) async -> String? {
         #if ANE_CLEANUP_SPIKE
         return await spike.refine(text, locale: ModelServices.singleLocale(models.engineSettings) ?? Locale.current)

@@ -36,7 +36,8 @@ public final class LinkedCleanupRun {
     }
 
     public struct Outcome: Sendable, Equatable {
-        /// Edits of the run that did not land by the end of the wait (conflicted, or no outcome yet).
+        /// Edits still without an outcome at the stop (the final pass's included) that did not land by the end of
+        /// the wait: conflicted then, or no outcome yet.
         public var unapplied: [EditTransaction]
         /// There was no agent (no rolling session, or still warming past ``agentWait``).
         public var agentAbsent = false
@@ -199,7 +200,9 @@ public final class LinkedCleanupRun {
         }
         let finals = await agent.finish()
         send(finals, final: true)
-        let awaited = Set(sent.keys)
+        // Every edit of the run without an outcome yet: the final pass's, and rolling ones still on their way. One
+        // handed back earlier was re-planned by the agent already.
+        let awaited = Set(outstanding.keys)
         await waitForOutcomes(of: awaited)
         closed = true
         let unapplied = awaited.compactMap { id -> EditTransaction? in

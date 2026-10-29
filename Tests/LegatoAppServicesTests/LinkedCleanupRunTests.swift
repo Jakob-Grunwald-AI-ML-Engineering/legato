@@ -60,7 +60,11 @@ private final class Keyboard {
         return [batch]
     }
 
+    /// The keyboard takes no edits (it went away): they never get an outcome.
+    var deaf = false
+
     func receive(_ transactions: [EditTransaction]) {
+        guard !deaf else { return }
         for transaction in transactions { queue.submit(transaction) }
         drain()
     }
@@ -214,8 +218,23 @@ struct LinkedCleanupRunTests {
         #expect(notes.contains { $0.contains(Conflict.userNote) })
         let requests = await session.requests
         #expect(requests.count == 2 && requests[1].contains("Locked: 1"))
-        #expect(outcome.unapplied.count == 1)  // the conflicted one
+        #expect(outcome.unapplied.isEmpty)  // the conflicted one was re-planned during the run
         #expect(keyboard.field == "texh cat sat. A dog ran.")
+    }
+
+    /// The final pass's edit gets no outcome within the wait: it is unapplied, and the fallback text carries it.
+    @Test func aFinalEditThatDoesNotLandIsLeftForTheClipboard() async {
+        let keyboard = Keyboard()
+        let session = ScriptedSession([(.zero, edit(1, "I saw the dog"))])
+        let run = run(keyboard, session: session)
+        run.feedChanged()
+        keyboard.asr("I saw teh dog")  // unfinished: only the final pass reviews it
+        run.feedChanged()
+        keyboard.deaf = true
+        let outcome = await run.finish()
+        #expect(outcome.unapplied.count == 1)
+        #expect(run.fallbackText(unapplied: outcome.unapplied) == "I saw the dog")
+        #expect(keyboard.field == "I saw teh dog")
     }
 
     /// No rolling session: the agent is absent; the stop's stateless pass goes in as patches.

@@ -224,6 +224,7 @@ enum E2E {
             Settings.debugShowPauseOthers = false
             Settings.audioPolicy = .default
         }
+        applyCleanupLaunchSettings()
         installTriggers()
         log("launch keepAliveSeconds=\(Settings.keepAliveSeconds) fakeEngine=\(fakeEngine != nil) fakeReadiness=\(String(describing: fakeReadiness)) forceTapToCopy=\(Settings.debugForceTapToCopy) fakeBackground=\(String(describing: fakeInBackground)) fakeOtherAudio=\(String(describing: fakeOtherAudioPlaying))")
     }

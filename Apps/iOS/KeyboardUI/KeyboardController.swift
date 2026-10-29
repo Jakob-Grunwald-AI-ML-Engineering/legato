@@ -91,6 +91,11 @@ final class KeyboardController {
     @ObservationIgnored private var hostHeld = false
     /// Host-text writes in the queue not landed yet, for where the cursor goes when one fails.
     @ObservationIgnored private var hostWrites = HostWriteLedger()
+    /// The run whose field events go to the app (`link.feed`) and whose edits come back (`link.edits`): a run the
+    /// app froze with the edit queue on (`HostState.fieldEdits`). Nil: none.
+    @ObservationIgnored private var linkedRun: String?
+    /// The app's edits already taken into the queue (the link delivers at least once).
+    @ObservationIgnored private var linkedSeen: Set<UUID> = []
     @ObservationIgnored private var isTornDown = false
     private var forcedOpenAppUntil: Date?
     private var remoteRequestID: String?
@@ -114,6 +119,7 @@ final class KeyboardController {
         cursor = link.readApplied()
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
+        link.observeEdits { [weak self] in self?.pullLinkedEdits() }
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
     }
@@ -313,6 +319,8 @@ final class KeyboardController {
         if clearWatch.hostEmptiedField {
             history.clear()
             keptVersions = nil
+            // A run boundary for the queue (and the app's agent): writes awaiting a read are not typed again.
+            fieldEdits?.fieldCleared()
         }
         syncHistory()
         guard let sent else { return .none }
@@ -418,6 +426,13 @@ final class KeyboardController {
             #endif
             return
         }
+        if host.fieldEdits == true {
+            followLinkedRun(host)
+        } else if linkedRun != nil, host.runID != linkedRun {
+            // A run without the link: the feed is nobody's any more.
+            fieldEdits?.stopPublishing()
+            linkedRun = nil
+        }
         if fieldEdits != nil { return applyHostQueued(host, elapsedMs: elapsedMs, flush: flush) }
         let before = cursor
         let plan = reveal.plan(
@@ -445,13 +460,18 @@ final class KeyboardController {
     /// `applyHost` through the field edit queue: planned against the predicted field (every write that ran), one
     /// host write in the queue at a time (a tick that finds one waiting is held until it ran). A Live revision the
     /// reveal reaches is planned after the tick's stream text, so each is its own patch.
-    private func applyHostQueued(_ host: HostState, elapsedMs: Double, flush: Bool) {
+    private func applyHostQueued(_ state: HostState, elapsedMs: Double, flush: Bool) {
         guard let fieldEdits else { return }
         fieldEdits.sync()
+        if elapsedMs == 0 { pullLinkedEdits() }
         guard pendingHostWrite == nil else {
             hostHeld = true
             return
         }
+        // A Replace run on the link: the app writes the cleaned text as patches (`link.edits`); the stream is all
+        // the keyboard types, and its final state is confirmed once the stream landed.
+        var host = state
+        if host.fieldEdits == true, host.delivery == .replace, linkedRun == host.runID { host.finalText = nil }
         let before = cursor
         var states = [host]
         if let revision = host.revision, let current = cursor, current.runID == host.runID,
@@ -468,7 +488,7 @@ final class KeyboardController {
             let plan = reveal.plan(
                 state: state, cursor: previous, contextBefore: fieldEdits.predictedBefore, documentID: document.documentID,
                 animated: animated, elapsedMs: index == 0 ? elapsedMs : 0, rush: rushes(host))
-            guard performHost(plan, previous: previous, runID: host.runID) else { break } // its handler set the cursor
+            guard performHost(plan, previous: previous, runID: host.runID, delivery: host.delivery) else { break } // its handler set the cursor
             typed = typed || !plan.ops.isEmpty
             if let updated = plan.cursor { cursor = updated }
             if pendingHostWrite != nil {
@@ -483,7 +503,7 @@ final class KeyboardController {
                 trace?("apply final=\(updated.finalApplied ? 1 : 0) replaced=\(updated.finalReplaced.map { $0 ? "1" : "0" } ?? "-")")
             }
         }
-        updateVersions(host)
+        updateVersions(state)
     }
 
     /// A new run drops the last dictation's versions; a run that landed here offers its own.
@@ -560,9 +580,9 @@ final class KeyboardController {
     // MARK: Field edit queue
 
     /// Starts the queue for this appearance when the setting is on (frozen until the keyboard goes away).
-    private func startFieldEdits() {
+    private func startFieldEdits(force: Bool = false) {
         stopFieldEdits()
-        guard preferences().fieldEdits else { return }
+        guard force || preferences().fieldEdits else { return }
         hostWrites = HostWriteLedger()
         let coordinator = FieldEditCoordinator(document: document)
         coordinator.trace = { [weak self] message in self?.trace?(message) }
@@ -574,6 +594,8 @@ final class KeyboardController {
     private func stopFieldEdits() {
         fieldEdits?.close()
         fieldEdits = nil
+        linkedRun = nil
+        linkedSeen = []
         pendingHostWrite = nil
         hostHeld = false
         hostWrites = HostWriteLedger()
@@ -601,17 +623,19 @@ final class KeyboardController {
         guard let current = cursor, current.runID == host.runID else { return false }
         if let revision = host.revision, revision.n > current.revisionHandled, !current.revisionSkipped { return true }
         return host.isFinal && host.delivery == .replace && host.finalText != nil && current.finalReplaced == nil
+            && linkedRun != host.runID
     }
 
     /// The host's text as one patch through the queue: the ASR lane for text at the caret (stream appends; the
     /// caret follows it), the cleanup lane for a Live revision or the Replace swap before it (the caret stays).
     /// False when the queue refused it at once: the plan's cursor is not taken.
-    private func performHost(_ plan: ProxyPlan, previous: AppliedCursor?, runID: String?) -> Bool {
+    private func performHost(_ plan: ProxyPlan, previous: AppliedCursor?, runID: String?, delivery: HostDelivery?) -> Bool {
         guard let fieldEdits, !plan.ops.isEmpty, let edit = fieldEdits.caretEdit(for: plan.ops) else { return true }
         let atCaret = edit.step.span.isEmpty && edit.step.span.location == fieldEdits.predicted.caret
-        let origin = atCaret ? .asr : Self.hostOrigin(planned: plan.cursor, previous: previous)
+        // Hold's one end-of-run insert is its own origin (the ASR lane, like the stream).
+        let origin: EditOrigin = atCaret ? (delivery == .hold ? .hold : .asr) : Self.hostOrigin(planned: plan.cursor, previous: previous)
         let id = UUID()
-        hostWrites.record(id, previous: previous, planned: plan.cursor)
+        hostWrites.record(id, previous: previous, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore))
         beginOwnEdit()
         let result = fieldEdits.write(edit, id: id, origin: origin, owner: runID, keepsCaret: true) { [weak self] outcome in
             self?.hostWrite(id, outcome)
@@ -656,7 +680,13 @@ final class KeyboardController {
             if pendingHostWrite == id { pendingHostWrite = nil }
         case .conflict, .superseded:
             if pendingHostWrite == id { pendingHostWrite = nil }
-            guard let failure = hostWrites.failed(id, cursor: cursor) else { break }
+            // Never typed twice: not into a field a read shows empty (cleared or sent: a run boundary), not while the
+            // field shows the write's text, not a second time (`HostWriteLedger`).
+            let read = (before: document.contextBefore, after: document.contextAfter)
+            guard let failure = hostWrites.failed(
+                id, cursor: cursor, contextBefore: read.before, fieldEmpty: read.before.isEmpty && read.after.isEmpty)
+            else { break }
+            if let kept = failure.kept { trace?("fe.mapped kept=\(kept.rawValue)") }
             for later in failure.withdraw { fieldEdits?.withdraw(later) }
             let reverted = failure.cursor
             trace?("fe.mapped rewound=\(reverted != cursor ? 1 : 0) withdrawn=\(failure.withdraw.count) skipped=\(reverted?.revisionSkipped == true ? 1 : 0) replaced=\(reverted?.finalReplaced.map { $0 ? "1" : "0" } ?? "-")")
@@ -669,6 +699,68 @@ final class KeyboardController {
         guard hostHeld else { return }
         hostHeld = false
         Task { @MainActor [weak self] in self?.applyHost() }
+    }
+
+    // MARK: Linked run (the app's cleanup agent)
+
+    /// A run the app froze with the edit queue on: the queue starts if this appearance has none, its feed goes to
+    /// `link.feed` (a resync of the field first, before any of the run's text is typed, so the app's agent can tell
+    /// the run's text from what was there), and the app's edits are taken from `link.edits`.
+    private func followLinkedRun(_ host: HostState) {
+        guard let runID = host.runID, host.target == .keyboard, host.insertAt == nil, linkedRun != runID,
+            let feed = link.fieldFeed
+        else { return }
+        if fieldEdits == nil { startFieldEdits(force: true) }
+        guard let fieldEdits else { return }
+        linkedRun = runID
+        linkedSeen = []
+        feed.follow(runID: runID)
+        fieldEdits.publishFeed { batch, window in feed.append(batch, window: window) }
+        trace?("fe.link follow")
+    }
+
+    /// Takes the app's new edits into the queue (cleanup lane) and acknowledges them; each is done once (the link
+    /// delivers at least once). Their outcomes reach the app through the feed.
+    private func pullLinkedEdits() {
+        guard let fieldEdits, let runID = linkedRun, let feed = link.fieldFeed else { return }
+        let read = feed.takeEdits(forRun: runID)
+        guard !read.transactions.isEmpty else { return }
+        if read.missed > 0 { trace?("fe.link missed=\(read.missed)") }
+        for transaction in read.transactions where linkedSeen.insert(transaction.id).inserted {
+            beginOwnEdit()
+            let result = fieldEdits.submit(transaction) { [weak self] outcome in self?.linkedOutcome(transaction, outcome) }
+            typing.hostEdited()
+            trace?("fe.link edit origin=\(transaction.origin.rawValue) steps=\(transaction.steps.count) result=\(Self.describe(result))")
+        }
+        feed.ack(through: read.through, writer: read.writer)
+    }
+
+    private func linkedOutcome(_ transaction: EditTransaction, _ outcome: FieldEditCoordinator.Outcome) {
+        guard outcome != .executed else { return }
+        let landed = outcome == .applied || outcome == .unconfirmed
+        trace?("fe.link outcome origin=\(transaction.origin.rawValue) result=\(landed ? "applied" : "\(outcome)")")
+        guard transaction.origin == .finalSwap, var current = cursor, current.runID == linkedRun else { return }
+        // Replace on the link: the app's patches are the swap; the versions follow what the field shows.
+        current.finalReplaced = landed
+        cursor = current
+        link.writeApplied(current)
+        guard landed, var shown = versions ?? keptVersions, shown.runID == current.runID, shown.texts.count > 1,
+            shown.current == 0
+        else { return }
+        shown.show(shown.texts.count - 1)
+        versions = versions == nil ? nil : shown
+        keptVersions = shown
+        history.recordVersion(from: 0, to: shown.current, at: Date())
+        syncHistory()
+    }
+
+    private static func describe(_ result: FieldEditCoordinator.Result) -> String {
+        switch result {
+        case .done: "done"
+        case .waiting: "waiting"
+        case .unchanged: "unchanged"
+        case .refused(let conflict): "refused reason=\(conflict.reason.rawValue)"
+        }
     }
 
     // MARK: Typing
@@ -881,7 +973,8 @@ final class KeyboardController {
             let plan = ProxyEditPlanner.prepareForTyping(cursor: current, contextBefore: fieldEdits.predictedBefore)
             if !plan.ops.isEmpty, let edit = fieldEdits.caretEdit(for: plan.ops) {
                 let id = UUID()
-                hostWrites.record(id, previous: current, planned: plan.cursor)
+                hostWrites.record(
+                    id, previous: current, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore))
                 beginOwnEdit()
                 let result = fieldEdits.write(edit, id: id, origin: .asr, owner: host.runID, lane: .user, keepsCaret: true) {
                     [weak self] outcome in self?.hostWrite(id, outcome)

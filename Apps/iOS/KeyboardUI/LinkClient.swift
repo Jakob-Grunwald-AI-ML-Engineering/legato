@@ -25,8 +25,18 @@ final class LinkClient {
         })
     }
 
-    /// Stops the `link.host` observation; the handlers never run again.
+    /// Calls `handler` on the main actor for every `link.edits` note (the app sent field edits).
+    func observeEdits(_ handler: @escaping @MainActor () -> Void) {
+        observers.append(DarwinObserver(name: LinkChannel.Note.edits) {
+            Task { @MainActor in handler() }
+        })
+    }
+
+    /// Stops the `link.host` and `link.edits` observations; the handlers never run again.
     func stopObserving() { observers.removeAll() }
+
+    /// The edit queue's transport (`link.feed` out, `link.edits` in); nil without the App Group.
+    private(set) lazy var fieldFeed: FieldFeedLink? = store.map { FieldFeedLink(store: $0) }
 
     func readHost() -> HostState? {
         #if DEBUG
