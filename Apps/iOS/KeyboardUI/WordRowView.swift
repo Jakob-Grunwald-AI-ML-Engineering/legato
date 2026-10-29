@@ -80,13 +80,11 @@ private struct SuggestionSlot<Swipe: Gesture>: View {
     let highlighted: Bool
     let swipe: Swipe
     let onPressChange: (Bool) -> Void
-    @State private var touch: SuggestionTap?
+    @State private var press = SuggestionPress()
 
     var body: some View {
         Button {
-            // Accessibility activation has no touch-down; it uses the currently announced proposal.
-            if let tap = touch ?? controller.suggestionTap(rank: rank) { controller.suggestionTapped(tap) }
-            touch = nil
+            if let tap = press.activate(current: nil) { controller.suggestionTapped(tap) }
         } label: {
             MorphingWord(text: word ?? "", fontSize: fontSize)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -94,7 +92,7 @@ private struct SuggestionSlot<Swipe: Gesture>: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(WordSlotStyle(highlighted: highlighted, onPressChange: { isPressed in
-            if isPressed { touch = controller.suggestionTap(rank: rank) }
+            if isPressed { press.began(controller.suggestionTap(rank: rank)) }
             onPressChange(isPressed)
         }))
         .disabled(word == nil)
@@ -103,6 +101,13 @@ private struct SuggestionSlot<Swipe: Gesture>: View {
         .accessibilityLabel(word ?? "")
         .accessibilityHint(highlighted ? "Spelling correction. Tap to replace the word being typed." : "Tap to insert suggestion.")
         .accessibilityIdentifier("keyboard.word.\(rank)")
+        .accessibilityAction {
+            // A canceled touch can leave its token behind. VoiceOver activates the announced row,
+            // independently of that touch; ordinary Button actions always keep their frozen token.
+            if let tap = press.activate(current: controller.suggestionTap(rank: rank), accessibility: true) {
+                controller.suggestionTapped(tap)
+            }
+        }
     }
 }
 

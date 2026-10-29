@@ -10,6 +10,21 @@ import Testing
         body(suite, defaults)
     }
 
+    @Test func retainedKeyboardsRefreshTheLatestGlobalChoiceOnAppearance() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
+            var retained = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            first.toggle()
+            retained.setStripEnabled(true)
+            #expect(retained.mode == .full)
+            retained.setStripEnabled(true)
+            #expect(retained.mode == .full)
+            retained.toggle()
+            first.setStripEnabled(true)
+            #expect(first.mode == .strip)
+        }
+    }
+
     @Test func expandedChoiceSurvivesRecreatingTheKeyboardAndDefaults() {
         withDefaults { suite, defaults in
             var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))

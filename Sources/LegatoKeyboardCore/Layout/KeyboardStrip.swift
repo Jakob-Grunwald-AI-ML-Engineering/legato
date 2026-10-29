@@ -73,9 +73,12 @@ public struct KeyboardExpansion: Sendable, Equatable {
     }
 
     /// The setting as the app last stored it. A change starts a new session (collapsed); the same value
-    /// keeps the state, so a keyboard that appears again in the same session does not collapse under the user.
+    /// reloads the global last choice, including choices made by another retained keyboard controller.
     public mutating func setStripEnabled(_ enabled: Bool) {
-        guard enabled != stripEnabled else { return }
+        guard enabled != stripEnabled else {
+            if enabled, let persistence { expanded = persistence.expanded }
+            return
+        }
         stripEnabled = enabled
         expanded = false
         persistence?.expanded = false

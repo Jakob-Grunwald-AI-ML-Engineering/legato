@@ -133,11 +133,12 @@ final class KeyboardController {
             typing?.closeEmojiPanel()
         }
         let changed = expansion.stripEnabled != current.strip
+        let previousMode = expansion.mode
         expansion.setStripEnabled(current.strip)
-        guard changed else { return }
+        if changed { stripHeight = current.stripHeight }
+        guard changed || previousMode != expansion.mode else { return }
         typing?.closeEmojiPanel()
-        stripHeight = current.stripHeight
-        onLayoutChange?("setting")
+        onLayoutChange?(changed ? "setting" : "restored")
     }
 
     /// The chevron: strip to full keyboard and back.

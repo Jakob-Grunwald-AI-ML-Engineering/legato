@@ -82,12 +82,18 @@ def measure(path: Path) -> Measurements:
         if len(faces) != expected_keys:
             raise ValueError(f"{path}: unexpected key count in row {row_index + 1}")
         for left, right in faces:
-            ink = [(x, y) for x in range(left + round(3 * scale), right - round(3 * scale))
-                   for y in range(top + round(5 * scale), bottom - round(4 * scale))
+            # Include dots and ascenders throughout the face interior. A glyph at the
+            # ROI edge cannot establish its full extent and must never silently pass.
+            ink_left, ink_right = left + round(3 * scale), right - round(3 * scale)
+            ink_top, ink_bottom = top + round(scale), bottom - round(scale)
+            ink = [(x, y) for x in range(ink_left, ink_right)
+                   for y in range(ink_top, ink_bottom)
                    if max(pixels[x, y]) < 100]
             if not ink:
                 raise ValueError(f"{path}: missing dark letter ink")
             xs, ys = zip(*ink, strict=True)
+            if min(xs) == ink_left or max(xs) == ink_right - 1 or min(ys) == ink_top or max(ys) == ink_bottom - 1:
+                raise ValueError(f"{path}: clipped letter ink at scan boundary in row {row_index + 1}")
             glyphs.append(((min(ys) - top) / scale, (max(ys) + 1 - top) / scale,
                            (max(xs) + 1 - min(xs)) / scale))
     return {

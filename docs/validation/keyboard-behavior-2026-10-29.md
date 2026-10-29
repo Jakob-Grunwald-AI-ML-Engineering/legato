@@ -26,13 +26,13 @@ LEGATO_STUB_DEPS=1 xcodebuild build -project Apps/iOS/Legato.xcodeproj -scheme L
 
 Generate the project first with the pinned XcodeGen. The retained scratch build used `/tmp/legato-4-geometry/source` and `/tmp/legato-4-geometry/derived`; the source snapshot also carries the documented DEBUG-only rotation host. For keyboard switching, launch with `-LegatoKeyboardHarness YES -LegatoHarnessSystemField YES -LegatoHarnessAutocap NO -LegatoHarnessSingleField YES -LegatoHarnessUnpinKeyboard YES`. A forced input-mode pin prevents a realistic switch/history check. Use actual software-key taps; hardware text injection can change simulator keyboard mode.
 
-Final affected package command passed **553 tests in 59 suites**:
+Final affected package command passed **556 tests in 59 suites**:
 
 ```sh
 LEGATO_STUB_DEPS=1 swift test --filter 'LegatoVocabularyTests|LegatoKeyboardCoreTests'
 ```
 
-This includes real-defaults layout/preference recreation, suggestion kinds and bilingual/vocabulary exclusions, frozen proposal identity, Unicode palette and field policies. Stale touch identity is covered by unit checks; a live asynchronous row-replacement-during-touch drive remains unproven. Broad suites and both app builds remain the merge-queue gate. The [geometry report](keyboard-geometry-2026-10-29.md) records native comparisons, cold full/compact restoration and remaining font/device gaps. The [suggestion research](../research/ios-keyboard-suggestions.md) records native correction emphasis and local-model findings; it does not claim a production context-model upgrade.
+This includes real-defaults layout/preference recreation, suggestion kinds and bilingual/vocabulary exclusions, frozen proposal identity, Unicode palette and field policies. The reviewed signed build also passed a fresh software-key `teh` → suggestion tap → `the ` check. Retained-controller layout refresh and canceled-touch/accessibility activation policies have regression coverage. Actual VoiceOver activation remains unverified. Stale touch identity is covered by unit checks; a live asynchronous row-replacement-during-touch drive remains unproven. Broad suites and both app builds remain the merge-queue gate. The [geometry report](keyboard-geometry-2026-10-29.md) records native comparisons, cold full/compact restoration and remaining font/device gaps. The [suggestion research](../research/ios-keyboard-suggestions.md) records native correction emphasis and local-model findings; it does not claim a production context-model upgrade.
 
 | Correction proposal | Local emoji panel | Native option |
 | --- | --- | --- |

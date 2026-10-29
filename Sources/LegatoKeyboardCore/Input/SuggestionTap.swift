@@ -21,3 +21,17 @@ public struct SuggestionTap: Sendable, Equatable {
             && words.indices.contains(rank) && words[rank] == word
     }
 }
+
+/// A slot's frozen touch identity and its separate accessibility activation.
+public struct SuggestionPress: Sendable {
+    private var touch: SuggestionTap?
+
+    public init() {}
+
+    public mutating func began(_ tap: SuggestionTap?) { touch = tap }
+
+    public mutating func activate(current: SuggestionTap?, accessibility: Bool = false) -> SuggestionTap? {
+        defer { touch = nil }
+        return accessibility ? current : touch
+    }
+}
