@@ -135,6 +135,23 @@ protocol MLXGenerating: Sendable {
     func makeChat(spec: MLXModelSpec, folder: URL, instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning
     /// A token counter over the model if it is already loaded, else nil. Never loads. The default: nil.
     func residentTokenCounter(spec: MLXModelSpec, folder: URL) async -> (@Sendable (String) async -> Int)?
+    /// A chat that owns its KV cache (prefill ahead, prompt lookup; spike #95). The default refuses.
+    func makeIncrementalChat(spec: MLXModelSpec, folder: URL, options: MLXIncrementalChat.Options) async throws -> MLXIncrementalChat
+}
+
+extension MLXGenerating {
+    func makeIncrementalChat(spec: MLXModelSpec, folder: URL, options: MLXIncrementalChat.Options) async throws -> MLXIncrementalChat {
+        throw LLMError.unavailable(reason: "This MLX generator has no incremental chat.")
+    }
+}
+
+/// How an MLX session runs its turns.
+public enum MLXEngine: Sendable, Equatable {
+    /// mlx-swift-lm's `ChatSession`.
+    case chatSession
+    /// ``MLXIncrementalChat``: its own KV cache, so text can be prefilled ahead of the request
+    /// (``MLXProbeSupport/prefillAhead(_:text:)``); `draft` decodes with prompt lookup.
+    case incremental(draft: Bool)
 }
 
 /// The real generator: mlx-swift-lm's `ChatSession` over the cached container.
@@ -142,6 +159,15 @@ protocol MLXGenerating: Sendable {
 /// MLX errors are caught with a scoped handler and thrown, instead of the default handler that ends the
 /// process (an error raised on Metal's own completion threads is outside any task and still cannot be caught).
 struct MLXChatGenerator: MLXGenerating {
+    func makeIncrementalChat(spec: MLXModelSpec, folder: URL, options: MLXIncrementalChat.Options) async throws -> MLXIncrementalChat {
+        #if canImport(Cmlx)
+            let container = try await MLXModelCache.shared.container(for: spec, folder: folder)
+            return await MLXIncrementalChat.make(container: container, spec: spec, options: options)
+        #else
+            throw LLMError.unavailable(reason: "MLX is not built in.")
+        #endif
+    }
+
     func load(spec: MLXModelSpec, folder: URL, device: ComputeDevice) async throws {
         MLXCompile.prepare(for: device)
         try await MLX.withError {
@@ -212,6 +238,7 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
     public let spec: MLXModelSpec
     public let folder: URL
     public let device: ComputeDevice
+    public let engine: MLXEngine
     private let canUseGPU: @Sendable () async -> Bool
     private let generator: any MLXGenerating
 
@@ -257,6 +284,17 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
         return session
     }
 
+    func makeIncrementalChat(_ options: MLXIncrementalChat.Options) async throws -> MLXIncrementalChat {
+        try await generator.load(spec: spec, folder: folder, device: await currentDevice())
+        return try await generator.makeIncrementalChat(spec: spec, folder: folder, options: options)
+    }
+
+    /// The incremental chat's options when the sessions use one.
+    var incrementalOptions: MLXIncrementalChat.Options? {
+        guard case .incremental(let draft) = engine else { return nil }
+        return MLXIncrementalChat.Options(draft: draft)
+    }
+
     func makeChat(instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning {
         try await generator.load(spec: spec, folder: folder, device: await currentDevice())
         return try await generator.makeChat(spec: spec, folder: folder, instructions: instructions, history: history)
@@ -273,18 +311,19 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
     ///   - canUseGPU: whether GPU work may be submitted now (`false`: the phone app is in the background).
     public convenience init(
         spec: MLXModelSpec, folder: URL, device: ComputeDevice = .gpu,
-        canUseGPU: @escaping @Sendable () async -> Bool = CleanupRegistry.defaultCanUseGPU
+        canUseGPU: @escaping @Sendable () async -> Bool = CleanupRegistry.defaultCanUseGPU, engine: MLXEngine = .chatSession
     ) {
-        self.init(spec: spec, folder: folder, device: device, canUseGPU: canUseGPU, generator: MLXChatGenerator())
+        self.init(spec: spec, folder: folder, device: device, canUseGPU: canUseGPU, generator: MLXChatGenerator(), engine: engine)
     }
 
     init(
         spec: MLXModelSpec, folder: URL, device: ComputeDevice, canUseGPU: @escaping @Sendable () async -> Bool,
-        generator: any MLXGenerating
+        generator: any MLXGenerating, engine: MLXEngine = .chatSession
     ) {
         self.spec = spec
         self.folder = folder
         self.device = device
+        self.engine = engine
         self.canUseGPU = canUseGPU
         self.generator = generator
     }

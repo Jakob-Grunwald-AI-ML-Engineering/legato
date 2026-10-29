@@ -103,7 +103,7 @@ final class MLXChat: MLXChatTurning, @unchecked Sendable {
 /// it uses the resident model's tokenizer, or an estimate when the model is not resident.
 ///
 /// Turns, counts and trims run one at a time (``LLMTurnGate``); appends do not wait.
-actor MLXSession: LLMSessionMetrics {
+actor MLXSession: LLMSessionMetrics, LLMSessionPrefillAhead {
     nonisolated let tokenBudget: Int
     private let backend: MLXBackend
     private var transcript = LLMTranscript()
@@ -113,6 +113,10 @@ actor MLXSession: LLMSessionMetrics {
     private(set) var lastTurn: MLXTurnStats?
     /// Seconds from the start of the last turn's generation to its first text chunk (session probe, #95).
     private(set) var lastFirstChunkSeconds: Double?
+    /// With ``MLXEngine/incremental(draft:)``: the chat, kept across rebuilds so its cache is reused.
+    private var engine: MLXIncrementalChat?
+    /// The last turn's prompt-lookup figures (incremental engine).
+    private(set) var lastDraft: MLXDraftStats?
 
     init(backend: MLXBackend, tokenBudget: Int) { self.backend = backend; self.tokenBudget = tokenBudget }
 
@@ -164,7 +168,19 @@ actor MLXSession: LLMSessionMetrics {
         try await exclusive { _ = try await chat() }
     }
 
-    func close() async { closed = true; live = nil }
+    func close() async { closed = true; live = nil; engine = nil }
+
+    /// Prefills `text` as the start of the next user turn (pending text first), without a reply: only with the
+    /// incremental engine, else nil. Returns the tokens fed and the seconds it took.
+    func prefillAhead(_ text: String) async throws -> (tokens: Int, seconds: Double)? {
+        try await exclusive {
+            guard backend.incrementalOptions != nil, let chat = try await chat() as? MLXIncrementalChat else { return nil }
+            let started = ContinuousClock.now
+            let tokens = try await chat.prefill(partial: transcript.message(for: text), device: await backend.currentDevice())
+            let elapsed = ContinuousClock.now - started
+            return (tokens, Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18)
+        }
+    }
 
     func lastTurnMetrics() -> LLMTurnMetrics? {
         lastTurn.map { LLMTurnMetrics(promptTokens: $0.prefilled + $0.cached, prefilledTokens: $0.prefilled, prefillSeconds: $0.prefillSeconds) }
@@ -207,6 +223,7 @@ actor MLXSession: LLMSessionMetrics {
                 }
             }
             try checkOpen()
+            lastDraft = (chat as? MLXIncrementalChat)?.lastDraft
             guard !reply.allSatisfy(\.isWhitespace) else { throw LLMError.emptyResponse }
             transcript.record(user: message, assistant: reply, consumed: consumed)
             return reply
@@ -228,6 +245,13 @@ actor MLXSession: LLMSessionMetrics {
         let history = MLXBackend.chatMessages(
             examples: transcript.examples + transcript.turns.map { LLMExample(user: $0.user, assistant: $0.assistant) },
             prompt: nil)
+        if let options = backend.incrementalOptions {
+            let chat: MLXIncrementalChat
+            if let engine { chat = engine } else { chat = try await backend.makeIncrementalChat(options) }
+            chat.setHistory(instructions: transcript.instructions, history: history)
+            engine = chat; live = chat
+            return chat
+        }
         let chat = try await backend.makeChat(instructions: transcript.instructions, history: history)
         live = chat
         return chat
