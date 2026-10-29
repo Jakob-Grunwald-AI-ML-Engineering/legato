@@ -158,21 +158,48 @@ public struct FieldEditQueue: Sendable {
         document.caret = snapshot.caret
     }
 
-    /// A host update the queue did not write: a caret move, a foreign change, or a window it cannot align.
+    /// A host update the queue did not write. The same window is a caret-only move (offsets re-based exactly, no
+    /// text search). A changed window becomes one foreign `byUser` step that every pending edit is mapped
+    /// through: anywhere in an absolute window (both reads carry the same `windowBase`), and in a caret-relative
+    /// window only when the change touches the old caret and leaves the caret right after its text (typing,
+    /// deleting, pasting). Anything else is not alignable and resets; so does an emptied field. While writes await
+    /// verification this settles them first.
     public mutating func observe(_ snapshot: FieldSnapshot) {
         if !unverified.isEmpty { return settle(snapshot) }
-        if byteEqual(snapshot.window, document.window) {
+        if let base = document.windowBase, let read = snapshot.windowBase, base != read {
+            return reset(snapshot, reason: .unaligned)
+        }
+        guard let step = ContiguousPatch.between(document.window, snapshot.window, at: 0) else {
             document.caret = snapshot.caret
             return
         }
-        guard let step = ContiguousPatch.between(document.window, snapshot.window, at: 0) else { return }
+        if snapshot.window.isEmpty { return reset(snapshot, reason: .cleared) }
+        let absolute = document.windowBase != nil && snapshot.windowBase != nil
+        let atCaret = step.span.location <= document.caret && document.caret <= step.span.end
+            && snapshot.caret == step.span.location + step.text.utf16.count
+        guard absolute || atCaret else { return reset(snapshot, reason: .unaligned) }
         land(step, transaction: nil, owner: nil, byUser: true)
         confirmedWindow = document.window
         document.caret = snapshot.caret
         feed.append(.foreign(step, byUser: true, version: document.version))
     }
 
-    public mutating func reset(_ snapshot: FieldSnapshot, reason: ResetReason) {}
+    /// Drops the shadow document for a fresh read: issued writes fail (`verifyFailed`, or `focusLost` on a focus
+    /// change), pending edits are handed back (`outOfWindow` / `focusLost`) and edits based before the reset are
+    /// out of window. Owned and tainted spans start over.
+    public mutating func reset(_ snapshot: FieldSnapshot, reason: ResetReason) {
+        let focus = reason == .focusChanged
+        for item in unverified { conflict(item.write.id, Conflict(focus ? .focusLost : .verifyFailed)) }
+        for item in pending { conflict(item.transaction.id, Conflict(focus ? .focusLost : .outOfWindow)) }
+        unverified = []
+        pending = []
+        history = []
+        epoch = document.version.next
+        document = ShadowDocument(
+            window: snapshot.window, windowBase: snapshot.windowBase, caret: snapshot.caret, version: epoch)
+        confirmedWindow = snapshot.window
+        feed.append(.reset(reason, window: snapshot.window, version: epoch))
+    }
 
     // MARK: Landing
 
