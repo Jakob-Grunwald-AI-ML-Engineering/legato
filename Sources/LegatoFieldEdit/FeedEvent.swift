@@ -23,6 +23,8 @@ public enum FeedEvent: Sendable, Hashable, Codable {
     /// An edit was overtaken by the same owner's newer edit `by` (a landed overlap or a coalesced tick); its
     /// source re-plans from the feed.
     case superseded(UUID, by: UUID)
+    /// A pending edit was cancelled before it was written (``FieldEditQueue/withdraw(_:)``); it never lands.
+    case withdrawn(UUID)
     /// The caret-relative window's edges moved (iOS: the proxy's context is length-limited) without the text
     /// changing: the window now reads `window`, and a still-visible old offset `p` is now `p + shift`.
     case rebased(window: String, shift: Int, version: FieldVersion)
@@ -34,7 +36,7 @@ public enum FeedEvent: Sendable, Hashable, Codable {
         case .applied(_, _, _, let version), .foreign(_, _, let version), .rebased(_, _, let version),
             .reset(_, _, let version):
             version
-        case .asrDelta, .conflict, .superseded: nil
+        case .asrDelta, .conflict, .superseded, .withdrawn: nil
         }
     }
 }
@@ -107,7 +109,7 @@ public struct FeedLog: Sendable, Hashable {
         case .applied(_, _, let steps, _): for step in steps { fold(step) }
         case .foreign(let step, _, _): fold(step)
         case .rebased(let window, _, _), .reset(_, let window, _): self.window = window
-        case .asrDelta, .conflict, .superseded: break
+        case .asrDelta, .conflict, .superseded, .withdrawn: break
         }
     }
 
