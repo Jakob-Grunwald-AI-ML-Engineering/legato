@@ -69,6 +69,28 @@ public final class DictationCoordinator {
     /// A mic lease is held between runs (keep-alive), ready for the next start.
     public var holdsLease: Bool { held != nil }
 
+    /// Ownership captured when a system microphone event arrives, before it is queued for handling.
+    public struct SystemEventToken: Sendable {
+        fileprivate let generation: Int
+    }
+
+    private var microphoneGeneration = 0
+
+    public func captureSystemEvent() -> SystemEventToken {
+        SystemEventToken(generation: microphoneGeneration)
+    }
+
+    /// A caller accepted a start/arm request and is preparing its models before coordinator entry.
+    /// Call synchronously when admission is reserved, never for a rejected duplicate request.
+    public func microphonePreparationBegan() {
+        microphoneGeneration += 1
+    }
+
+    /// Recheck after every suspension before releasing or stopping microphone state.
+    public func isCurrent(_ event: SystemEventToken) -> Bool {
+        event.generation == microphoneGeneration
+    }
+
     /// Fires when a start is retried: a refused background start under the default audio policy, or a
     /// foreground start whose mic had no input yet (same policy first, then the default). Gives the
     /// policy that failed, the one tried next (equal for a same-policy retry) and the error. For diagnostics.
@@ -300,6 +322,7 @@ public final class DictationCoordinator {
     public func arm(keepAlive: Linger) async -> ArmOutcome {
         guard !Task.isCancelled else { return .failed("Preparation cancelled") }
         guard phase == .idle else { return .busy }
+        microphoneGeneration += 1
         phase = .arming
         defer { phase = .idle }
         if let release = pendingRelease { await release.value }
@@ -320,6 +343,7 @@ public final class DictationCoordinator {
         while true {
             if Task.isCancelled { return .failed("Preparation cancelled") }
             let epoch = sessionEpoch
+            microphoneGeneration += 1
             let s = makeSession(policy, linger)
             do {
                 try await s.armLease()
@@ -358,6 +382,8 @@ public final class DictationCoordinator {
     // MARK: Start
 
     private func start(_ options: StartOptions) async -> Outcome {
+        // A new run owns even a reused source; old queued events must not cancel this admission.
+        microphoneGeneration += 1
         phase = .starting
         cancelRequested = false
         abortTask = nil
@@ -510,6 +536,8 @@ public final class DictationCoordinator {
             await release(lease)
         }
         let epoch = sessionEpoch
+        // A retry can replace the source without replacing the run.
+        microphoneGeneration += 1
         let s = makeSession(policy, options.keepAlive)
         return (s, startFeed(of: s), epoch)
     }

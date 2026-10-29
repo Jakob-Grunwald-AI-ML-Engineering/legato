@@ -130,6 +130,55 @@ private actor BridgeSpeechPreparation {
     func prepare() async { preparations += 1; await entered.signal(); await gate.wait() }
 }
 @MainActor @Suite(.timeLimit(.minutes(1))) struct StartupCleanupBridgeTests {
+    @Test(arguments: [false, true])
+    func systemEventsRespectOwnershipDuringColdMicrophonePreparation(currentEvent: Bool) async {
+        let admission = ModelAdmission(), preparation = BridgeSpeechPreparation()
+        let source = BridgeSource(), engine = BridgeEngine(id: "selected-speech")
+        let history = BridgeHistory()
+        let coordinator = DictationCoordinator(activity: BridgeActivity(), clipboard: BridgeClipboard(),
+            readiness: BridgeReadiness(), history: history, makeSession: { policy, linger in
+                DictationSession(engine: engine, source: source, sessionControl: BridgeControl(),
+                    history: history, policy: policy, linger: linger)
+            })
+        let oldEvent = coordinator.captureSystemEvent()
+        var cancelled = false
+        let arming = Task {
+            do {
+                let outcome = try await admission.admit(isIdle: { coordinator.isIdle },
+                    onAdmitted: { coordinator.microphonePreparationBegan() },
+                    prepare: { await preparation.prepare() },
+                    operation: { await coordinator.arm(keepAlive: .indefinite) })
+                #expect(outcome == .armed)
+            } catch is CancellationError { cancelled = true }
+            catch { Issue.record("Unexpected admission failure: \(error)") }
+        }
+        await preparation.entered.wait()
+        let current = coordinator.captureSystemEvent()
+        var rejectedAdmissions = 0
+        do {
+            try await admission.admit(isIdle: { coordinator.isIdle }, onAdmitted: {
+                rejectedAdmissions += 1
+                coordinator.microphonePreparationBegan()
+            }, prepare: {}, operation: {})
+            Issue.record("Concurrent preparation was accepted")
+        } catch ModelAdmission.AdmissionError.busy {}
+        catch { Issue.record("Unexpected duplicate failure: \(error)") }
+        #expect(rejectedAdmissions == 0)
+        #expect(coordinator.isCurrent(current))
+
+        let event = currentEvent ? current : oldEvent
+        if coordinator.isCurrent(event) {
+            admission.cancel() // AppController.endKeepAlive cancels preparation before releasing its mic.
+            await coordinator.endKeepAlive()
+        }
+        await preparation.gate.signal()
+        await arming.value
+        #expect(cancelled == currentEvent)
+        #expect(await source.starts == (currentEvent ? 0 : 1))
+        #expect(coordinator.holdsLease == !currentEvent)
+        await coordinator.endKeepAlive()
+    }
+
     private func rig(local: BridgeBackend, foundation: BridgeBackend = BridgeBackend("foundation"), installed: Bool = true,
                      speech: SelectedModelWarmup.Resource? = nil, speechID: String? = nil)
         throws -> (ModelServices, CleanupSettingsStore) {
