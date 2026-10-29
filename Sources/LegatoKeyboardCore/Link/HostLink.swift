@@ -64,7 +64,7 @@ public final class HostLink {
 
     /// `delivery`: how the run's cleaned text reaches the field (nil without cleanup); the keyboard needs
     /// it from the start, because `.hold` keeps the field free while listening.
-    public func runStarted(id: String, target: HostTarget, delivery: HostDelivery? = nil) {
+    public func runStarted(id: String, target: HostTarget, delivery: HostDelivery? = nil, fieldEdits: Bool? = nil) {
         cancelScrub()
         state.preparingRequestID = nil
         state.runID = id
@@ -73,6 +73,7 @@ public final class HostLink {
         state.committed = ""
         state.volatile = ""
         state.delivery = delivery
+        state.fieldEdits = fieldEdits
         state.finalText = nil
         state.insertAt = nil
         state.revision = nil
@@ -120,6 +121,7 @@ public final class HostLink {
         state.phase = .idle
         state.committed = text
         state.volatile = ""
+        state.fieldEdits = nil
         state.delivery = nil // an insert is typed as it is: no cleanup swap, no hold
         state.finalText = nil
         state.revision = nil
@@ -170,6 +172,7 @@ public final class HostLink {
         state.volatile = ""
         state.finalText = nil
         state.delivery = nil
+        state.fieldEdits = nil
         state.insertAt = nil
         state.revision = nil
         publish()
