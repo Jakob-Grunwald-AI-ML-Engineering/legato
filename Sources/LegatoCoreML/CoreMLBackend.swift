@@ -25,6 +25,13 @@ protocol CoreMLDriving: Sendable {
     /// Like ``generate(tokens:outputLimit:)``; `reusingPrefix` > 0 promises the native state already holds
     /// `tokens[0..<reusingPrefix]` from this driver's previous generation, so only the rest is prefilled.
     func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration
+    /// Prefills `tokens` into the native state without generating (a session's head), on the same promise.
+    func prefill(tokens: [Int], reusingPrefix: Int) async throws -> CoreMLPrefill
+}
+/// What a prefill-only call did.
+struct CoreMLPrefill: Sendable, Equatable {
+    var prefilled: Int
+    var seconds: Double
 }
 extension CoreMLDriving {
     var batchSize: Int { 1 }
@@ -33,6 +40,45 @@ extension CoreMLDriving {
     func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration {
         guard reusingPrefix == 0 else { throw LLMError.unavailable(reason: "This Core ML driver cannot keep a session.") }
         return try await generate(tokens: tokens, outputLimit: outputLimit)
+    }
+    func prefill(tokens: [Int], reusingPrefix: Int) async throws -> CoreMLPrefill {
+        throw LLMError.unavailable(reason: "This Core ML driver cannot keep a session.")
+    }
+}
+
+/// Where a session turn may start prefilling, given what the native state holds.
+///
+/// ANEMLL prefills full batches from position 0 and the remainder one token per call, and picks, per batch,
+/// the sliding-window "rotate" function when the batch starts at or past the window. A reused prefix moves
+/// those batch starts, so it is only allowed where that is known to be safe:
+/// - the probed checkpoint (Qwen3 1.7B), or one without a sliding window and with dynamic-slice prefill:
+///   start up to a batch early so the new tokens fill whole batches;
+/// - any other checkpoint: start on upstream's own batch grid (a multiple of the batch size), so every prefill
+///   call is one upstream itself makes; with a sliding window only while the held state and this whole turn
+///   stay below the window (no rotation ever meets a reused state), else a full prefill.
+struct CoreMLReusePolicy: Sendable, Equatable {
+    var alignsToNewTokens: Bool
+    var slidingWindow: Int?
+
+    init(spec: CoreMLModelSpec) {
+        let config = spec.runtimeConfiguration
+        let probed = spec.id == CoreMLModels.qwen3_1_7bID
+        alignsToNewTokens = probed || (config.slidingWindow == nil && config.prefillDynamicSlice)
+        slidingWindow = config.slidingWindow
+    }
+
+    /// The reuse start for `next` over a state holding exactly `held`; 0 = a fresh state and a full prefill.
+    static func start(held: [Int], next: [Int], batch: Int, policy: CoreMLReusePolicy) -> Int {
+        let common = zip(held, next).prefix { $0 == $1 }.count
+        guard common > 0, common < next.count else { return 0 }
+        let batch = max(1, batch)
+        if policy.alignsToNewTokens {
+            return max(0, common - (batch - (next.count - common) % batch) % batch)
+        }
+        if let window = policy.slidingWindow {
+            guard window % batch == 0, held.count <= window, next.count <= window else { return 0 }
+        }
+        return common / batch * batch
     }
 }
 
@@ -201,34 +247,53 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
         return runtime
     }
 
-    /// One session turn over the full turn `tokens`, under the same single-worker guard as ``respond``.
-    func sessionTurn(_ id: UUID, tokens: [Int]) async throws -> CoreMLGeneration {
+    /// One session turn under the same single-worker guard as ``respond``. `build` renders the turn's full
+    /// token sequence inside the worker, after the guard is claimed (claiming clears an earlier operation's
+    /// cancellation, which tokenizing outside would trip over).
+    func sessionTurn(_ id: UUID, build: @Sendable (any CoreMLDriving) async throws -> [Int]) async throws -> (tokens: [Int], generation: CoreMLGeneration) {
         let runtime = try sessionRuntime(id)
-        try CoreMLPrompt.validate(input: tokens.count, outputLimit: outputLimit, context: runtime.contextLength)
         try cancellation.begin()
         defer { cancellation.settle() }
-        let reuse: Int
-        if let kv, kv.session == id, kv.tokens.count < tokens.count, tokens.starts(with: kv.tokens) {
-            // ANEMLL prefills full batches and the remainder one token per call, which costs far more per
-            // token. Start up to a batch earlier, re-prefilling held positions with the same tokens, so the
-            // new tokens fill whole batches.
-            let batch = max(1, runtime.batchSize)
-            let aligned = kv.tokens.count - (batch - (tokens.count - kv.tokens.count) % batch) % batch
-            reuse = max(0, aligned)
-        } else {
-            reuse = 0  // Prefix mismatch, other owner or no state: a fresh native state.
-        }
-        kv = nil  // Until this generation settles successfully, the state is unknown.
         let limit = outputLimit
-        let generated = try await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation(); try cancellation.check()
+            let tokens = try await build(runtime)
+            try CoreMLPrompt.validate(input: tokens.count, outputLimit: limit, context: runtime.contextLength)
+            let reuse = reuseStart(id, tokens, runtime)
+            kv = nil  // Until this generation settles successfully, the state is unknown.
             try Task.checkCancellation(); try cancellation.check()
             let generated = try await runtime.generate(tokens: tokens, reusingPrefix: reuse, outputLimit: limit)
             try Task.checkCancellation(); try cancellation.check()
-            return generated
+            guard generated.stopReason == "eos_token" else { throw LLMError.failed("Core ML output was incomplete.") }
+            if openSessions.contains(id) { kv = (id, tokens + generated.tokens) }
+            return (tokens, generated)
         } onCancel: { [cancellation] in cancellation.cancel() }
-        guard generated.stopReason == "eos_token" else { throw LLMError.failed("Core ML output was incomplete.") }
-        if openSessions.contains(id) { kv = (id, tokens + generated.tokens) }
-        return generated
+    }
+
+    /// Prefills a session's head without a reply, under the single-worker guard.
+    func sessionPrefill(_ id: UUID, build: @Sendable (any CoreMLDriving) async throws -> [Int]) async throws -> CoreMLPrefill {
+        let runtime = try sessionRuntime(id)
+        try cancellation.begin()
+        defer { cancellation.settle() }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation(); try cancellation.check()
+            let tokens = try await build(runtime)
+            guard !tokens.isEmpty else { return CoreMLPrefill(prefilled: 0, seconds: 0) }
+            try CoreMLPrompt.validate(input: tokens.count, outputLimit: outputLimit, context: runtime.contextLength)
+            let reuse = reuseStart(id, tokens, runtime)
+            kv = nil
+            let result = try await runtime.prefill(tokens: tokens, reusingPrefix: reuse)
+            try Task.checkCancellation(); try cancellation.check()
+            if openSessions.contains(id) { kv = (id, tokens) }
+            return result
+        } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
+    /// The prefix of `tokens` the native state can keep: the common prefix with what it holds for this
+    /// session (another owner, a stateless call or an error left nothing), placed by the spec's policy.
+    private func reuseStart(_ id: UUID, _ tokens: [Int], _ runtime: any CoreMLDriving) -> Int {
+        guard let kv, kv.session == id else { return 0 }
+        return CoreMLReusePolicy.start(held: kv.tokens, next: tokens, batch: runtime.batchSize, policy: CoreMLReusePolicy(spec: spec))
     }
 
     func resetSession(_ id: UUID) { if kv?.session == id { kv = nil } }

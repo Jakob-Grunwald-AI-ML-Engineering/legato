@@ -3200,6 +3200,37 @@ private typealias Float16 = Float
         return busy;
     }
     
+    /// Legato (persistent sessions, epic #80): the prefix `generateResponse` and `prefillOnly` really keep
+    /// for a `reusingPrefix` promise; anything they cannot use falls back to 0 (a fresh state).
+    public func effectiveReuse(_ reusingPrefix: Int, of count: Int) -> Int {
+        reusingPrefix > 0 && reusingPrefix < count && !disablePrefill ? reusingPrefix : 0
+    }
+
+    /// Legato (persistent sessions, epic #80): prefills `initialTokens` into `state` without generating (a
+    /// session's instructions, ahead of its first turn), on the same `reusingPrefix` promise as
+    /// `generateResponse`. Returns the prefill time.
+    public func prefillOnly(initialTokens: [Int], reusingPrefix: Int) async throws -> TimeInterval {
+        guard !initialTokens.isEmpty else { return 0 }
+        guard !busy else { throw InferenceError.inferenceError("Inference is busy") }
+        let reuse = effectiveReuse(reusingPrefix, of: initialTokens.count)
+        let startTime = CFAbsoluteTimeGetCurrent()
+        busy = true
+        defer { busy = false }
+        if reuse == 0, let chunks = ffnChunks, !chunks.isEmpty {
+            state = isMonolithic ? chunks[0].inferModel.makeState() : chunks[0].prefillModel.makeState()
+            lastArgmaxPosition = -1
+        }
+        var contextTokens = initialTokens
+        if disablePrefill {
+            for pos in 0..<contextTokens.count {
+                _ = try await generateNextToken(for: contextTokens[pos], currentPos: pos + 1, temperature: 0, tokenizer: nil)
+            }
+        } else {
+            _ = try await runPrefill(on: &contextTokens, contextPos: contextTokens.count, startPos: reuse)
+        }
+        return CFAbsoluteTimeGetCurrent() - startTime
+    }
+
     public func generateResponse(
         initialTokens: [Int],
         temperature: Float,
@@ -3215,7 +3246,7 @@ private typealias Float16 = Float
         // caller tracks that prefix and passes 0 after any mismatch, trim, error or other caller). Then the
         // state is kept and only the new tokens are prefilled. Entries past the prefix are masked by the
         // causal mask and overwritten. 0 keeps upstream's behaviour: a fresh state and a full prefill.
-        let reuse = reusingPrefix > 0 && reusingPrefix < initialTokens.count && !disablePrefill ? reusingPrefix : 0
+        let reuse = effectiveReuse(reusingPrefix, of: initialTokens.count)
 
         var generatedTokens: [Int] = []
         let startTime = CFAbsoluteTimeGetCurrent()

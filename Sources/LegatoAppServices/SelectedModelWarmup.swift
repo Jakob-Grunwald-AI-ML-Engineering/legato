@@ -9,9 +9,23 @@ public actor SelectedModelWarmup {
     public struct Resource: Sendable {
         public let key: String
         public let lifecycle: any ModelResourceLifecycle
-        public init(key: String, lifecycle: any ModelResourceLifecycle) { self.key = key; self.lifecycle = lifecycle }
-        public init(key: String, prewarm: @escaping @Sendable () async throws -> Void, release: @escaping @Sendable () async -> Void) {
-            self.init(key: key, lifecycle: Operations(prewarm: prewarm, release: release))
+        /// The resource's rolling language-model session, if it has one (see ``rollingSession(key:)``).
+        public let session: SessionSource?
+        public init(key: String, lifecycle: any ModelResourceLifecycle, session: SessionSource? = nil) {
+            self.key = key; self.lifecycle = lifecycle; self.session = session
+        }
+        public init(key: String, prewarm: @escaping @Sendable () async throws -> Void, release: @escaping @Sendable () async -> Void,
+                    session: SessionSource? = nil) {
+            self.init(key: key, lifecycle: Operations(prewarm: prewarm, release: release), session: session)
+        }
+    }
+    /// How a prepared resource opens its rolling session: `make` over the prepared model (never loading it),
+    /// then the `head` (instructions and examples) appended and prefilled.
+    public struct SessionSource: Sendable {
+        public let head: @Sendable () async -> [LLMSessionChunk]
+        public let make: @Sendable () async throws -> any LLMSession
+        public init(head: @escaping @Sendable () async -> [LLMSessionChunk], make: @escaping @Sendable () async throws -> any LLMSession) {
+            self.head = head; self.make = make
         }
     }
     public enum Role: Sendable, Hashable { case dictation, refine, meetingSummary, legacy }
@@ -33,6 +47,8 @@ public actor SelectedModelWarmup {
         var ready = false
         var task: Task<Void, any Error>?
         var failure: (any Error)?
+        /// Opens the rolling session once the resource is ready; its value is the session (nil: none).
+        var session: Task<(any LLMSession)?, Never>?
     }
     private var entries: [String: Entry] = [:]
     private var requests: [Role: Set<String>] = [:]
@@ -142,6 +158,7 @@ public actor SelectedModelWarmup {
                 if self.entries[key]?.token == token {
                     self.entries[key]?.ready = true
                     self.entries[key]?.task = nil
+                    self.openSession(key)
                 }
             } catch {
                 if self.entries[key]?.token == token {
@@ -152,6 +169,39 @@ public actor SelectedModelWarmup {
             }
         }
     }
+    // MARK: Rolling session
+
+    /// The one rolling session of a prepared resource, warm (its head prefilled) and kept for the app's
+    /// lifetime: every run appends to it and it scrolls by ``LLMSession/trim(keepingSuffix:)`` at the budget.
+    /// Runs neither open nor close it; the entry owns it, so it ends only when the resource is released
+    /// (memory pressure, a model change or deletion, teardown) and a later preparation opens a new one.
+    /// Nil when the resource is not ready, has no session, or opening it failed (the next call retries).
+    public func rollingSession(key: String) async -> (any LLMSession)? {
+        guard let entry = entries[key], entry.ready, entry.resource.session != nil else { return nil }
+        if entry.session == nil { openSession(key) }
+        guard let task = entries[key]?.session else { return nil }
+        let token = entry.token
+        let session = await task.value
+        guard entries[key]?.token == token else { return nil }  // released meanwhile
+        if session == nil, entries[key]?.session == task { entries[key]?.session = nil }  // retry next time
+        return session
+    }
+
+    private func openSession(_ key: String) {
+        guard let entry = entries[key], entry.ready, entry.session == nil, let source = entry.resource.session else { return }
+        entries[key]?.session = Task {
+            guard let session = try? await source.make() else { return nil }
+            do {
+                for chunk in await source.head() { try await session.append(chunk) }
+                try await session.warm()
+                return session
+            } catch {
+                await session.close()
+                return nil
+            }
+        }
+    }
+
     private func retireUnused() {
         let retained = requests.values.reduce(into: Set<String>()) { $0.formUnion($1) }
             .union(leases.values.reduce(into: Set<String>()) { $0.formUnion($1) })
@@ -166,6 +216,7 @@ public actor SelectedModelWarmup {
         releases[key] = Task {
             await previous?.value
             _ = await entry.task?.result
+            await entry.session?.value?.close()
             await entry.resource.lifecycle.releaseWarmResources()
         }
     }

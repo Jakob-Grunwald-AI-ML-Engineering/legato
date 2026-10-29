@@ -36,8 +36,9 @@ private final class ChatFactory: MLXGenerating, @unchecked Sendable {
     let made = Mutex<[Made]>([])
     let chats = Mutex<[FakeChat]>([])
     let replies: [String]
+    let loads = Mutex(0)
     init(replies: [String] = ["One.", "Two.", "Three.", "Four."]) { self.replies = replies }
-    func load(spec: MLXModelSpec, folder: URL, device: ComputeDevice) async throws {}
+    func load(spec: MLXModelSpec, folder: URL, device: ComputeDevice) async throws { loads.withLock { $0 += 1 } }
     func stream(spec: MLXModelSpec, folder: URL, instructions: String, examples: [LLMExample], prompt: String,
                 device: ComputeDevice) async throws -> AsyncThrowingStream<String, any Error> {
         AsyncThrowingStream { $0.finish() }
@@ -122,6 +123,40 @@ struct MLXSessionTests {
         _ = try await session.respond(to: "x")
         await mlx.releaseWarmResources()
         await #expect(throws: LLMSessionError.closed) { _ = try await session.respond(to: "y") }
+    }
+
+    @Test func countingAndTrimmingNeverLoadTheModel() async throws {
+        let factory = ChatFactory()
+        let session = try await backend(factory).makeSession()
+        try await session.append(.instructions("Clean."))
+        try await session.append(.text("some pending words to count"))
+        _ = try await session.usage()
+        try await session.trim(keepingSuffix: 1)
+        #expect(factory.loads.withLock { $0 } == 0)
+        #expect(factory.made.withLock { $0.isEmpty })
+    }
+
+    @Test func aFailedStructuredReplyLeavesNoTraceInTheTranscript() async throws {
+        let factory = ChatFactory(replies: ["Not JSON at all", "Fine."])
+        let session = try await backend(factory).makeSession()
+        try await session.append(.text("1: hi"))
+        await #expect(throws: LLMSessionError.self) { _ = try await session.respondStructured([SentenceEdit].self, to: "Edit.") }
+        _ = try await session.respond(to: "Plain.")
+        let made = factory.made.withLock { $0 }
+        // The chat that saw the bad reply is replaced by one restored without it, and the turn's text is sent again.
+        #expect(made.count == 2)
+        #expect(!made[1].history.contains("Not JSON at all"))
+        #expect(factory.chats.withLock { $0[1].messages.withLock { $0 } } == ["1: hi\n\nPlain."])
+    }
+
+    @Test func warmOpensTheChatOnTheHead() async throws {
+        let factory = ChatFactory()
+        let session = try await backend(factory).makeSession()
+        try await session.append(.instructions("Clean."))
+        try await session.warm()
+        _ = try await session.respond(to: "Go.")
+        let made = factory.made.withLock { $0 }
+        #expect(made.count == 1 && made[0].instructions == "Clean." && made[0].history.isEmpty)
     }
 
     @Test func budgetIsTheEdgeWindowLessTheReply() async throws {

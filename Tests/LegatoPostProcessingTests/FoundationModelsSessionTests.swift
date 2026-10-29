@@ -8,7 +8,7 @@ import Testing
 
 /// Records which transcript each underlying session started from and what each turn sent.
 private final class TurnLog: Sendable {
-    struct State { var created: [Transcript] = []; var prompts: [String] = []; var replies: [String] }
+    struct State { var created: [Transcript] = []; var prompts: [String] = []; var replies: [String]; var prewarmed = 0 }
     let value: Mutex<State>
     init(replies: [String]) { value = Mutex(State(replies: replies)) }
 }
@@ -21,17 +21,20 @@ private final class FakeTurns: FoundationModelsTurning, @unchecked Sendable {
     }
     func respond(to prompt: String) async throws -> String { next(prompt) }
     func respondJSON(to prompt: String, schema: GenerationSchema) async throws -> String { next(prompt) }
+    func prewarm() { log.value.withLock { $0.prewarmed += 1 } }
 }
 
 private let words: @Sendable (String) async throws -> Int = { $0.split(whereSeparator: \.isWhitespace).count }
 
-private func fakeSession(_ log: TurnLog, budget: Int = 3_000) -> FoundationModelsSession {
-    FoundationModelsSession(tokenBudget: budget, count: words, makeTurns: { transcript in
+private func fakeSession(_ log: TurnLog, budget: Int = 3_000,
+                         count: @escaping @Sendable (String) async throws -> Int = words) -> FoundationModelsSession {
+    FoundationModelsSession(tokenBudget: budget, count: count, makeTurns: { transcript in
         log.value.withLock { $0.created.append(transcript) }
         return FakeTurns(log: log)
     })
 }
 
+private let systemModelAvailable = SystemLanguageModel.default.availability == .available
 private let realEnabled = ProcessInfo.processInfo.environment["LEGATO_REAL_ENGINE"] == "1"
     && SystemLanguageModel.default.availability == .available
 
@@ -83,20 +86,48 @@ struct FoundationModelsSessionTests {
         _ = try FoundationModelsSession.generationSchema(for: [SentenceEdit].llmSchema)
     }
 
-    @Test func closeAndBackendReleaseEndTheSession() async throws {
+    @Test func closeEndsTheSession() async throws {
         let session = fakeSession(TurnLog(replies: []))
         await session.close()
         await #expect(throws: LLMSessionError.closed) { _ = try await session.respond(to: "x") }
+    }
 
+    @Test(.enabled(if: systemModelAvailable, "needs the Apple on-device model"))
+    func backendReleaseEndsTheSession() async throws {
         let backend = FoundationModelsBackend()
-        guard SystemLanguageModel.default.availability == .available else { return }
         let real = try await backend.makeSession()
         await backend.releaseWarmResources()
         await #expect(throws: LLMSessionError.closed) { try await real.append(.text("x")) }
     }
 
-    @Test func budgetIsTheWindowLessTheReplyReserve() async throws {
-        guard SystemLanguageModel.default.availability == .available else { return }
+    @Test func warmOpensTheSystemSessionOnTheHeadAheadOfTheFirstTurn() async throws {
+        let log = TurnLog(replies: ["One."])
+        let session = fakeSession(log)
+        try await session.append(.instructions("Clean."))
+        try await session.warm()
+        try await session.append(.text("run text"))
+        _ = try await session.respond(to: "Go.")
+        let state = log.value.withLock { $0 }
+        #expect(state.prewarmed == 1)
+        #expect(state.created.count == 1)
+        #expect(state.created[0].count == 1)  // the instructions only
+    }
+
+    @Test func theSchemaInThePromptCountsAgainstTheBudget() async throws {
+        let characters: @Sendable (String) async throws -> Int = { $0.count }
+        let log = TurnLog(replies: [#"[{"sentence": 1, "text": "Hi."}]"#])
+        let session = fakeSession(log, count: characters)
+        let before = try await session.usage()
+        _ = try await session.respondStructured([SentenceEdit].self, to: "1: hi")
+        let after = try await session.usage()
+        let schema = LLMStructuredDecoding.jsonSchema([SentenceEdit].llmSchema).count
+        let turn = "1: hi".count + #"[{"sentence": 1, "text": "Hi."}]"#.count + LLMTranscript.turnOverhead
+        #expect(after.history == turn + schema)  // the schema the turn sent
+        #expect(after.head == before.head + schema)  // room for the next structured turn's schema
+    }
+
+    @Test(.enabled(if: systemModelAvailable, "needs the Apple on-device model"))
+    func budgetIsTheWindowLessTheReplyReserve() async throws {
         let session = try await FoundationModelsBackend().makeSession()
         #expect(session.tokenBudget == SystemLanguageModel.default.contextSize - FoundationModelsBackend.replyReserve)
         await session.close()

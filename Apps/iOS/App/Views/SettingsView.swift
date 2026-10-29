@@ -111,10 +111,14 @@ struct SettingsView: View {
                 Toggle("Keep audio session active", isOn: $keepSessionActive)
                 Toggle("Offer experimental audio options", isOn: $showPauseOthers)
                 Toggle("Force tap-to-copy", isOn: $forceTapToCopy)
+                Button("Session probe") { Task { await SessionProbe.run(mode: .foreground, models: controller.models) } }
+                Button("Session probe in 10 s") {
+                    Task { await SessionProbe.run(mode: .foreground, delay: .seconds(10), models: controller.models) }
+                }
             } header: {
                 Text("Debug")
             } footer: {
-                Text("Keep audio session active: a stop leaves the session on, so the session, and any lowering or pausing of music from its last start, stays in place between dictations, and the Audio setting does not apply until an interruption or this switch ends it. Diagnostics: Library/Caches/audio-diag.jsonl in the app container.")
+                Text("Keep audio session active: a stop leaves the session on, so the session, and any lowering or pausing of music from its last start, stays in place between dictations, and the Audio setting does not apply until an interruption or this switch ends it. Session probe: times persistent LLM sessions (Foundation Models and the selected Core ML model); \"in 10 s\" leaves time to lock the phone or leave the app. Diagnostics: Library/Caches/audio-diag.jsonl in the app container.")
             }
             #endif
         }

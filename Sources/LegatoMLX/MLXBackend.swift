@@ -105,6 +105,8 @@ protocol MLXGenerating: Sendable {
     /// A persistent chat over the loaded model, starting from `instructions` and `history` (see
     /// ``MLXSession``). The default refuses.
     func makeChat(spec: MLXModelSpec, folder: URL, instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning
+    /// A token counter over the model if it is already loaded, else nil. Never loads. The default: nil.
+    func residentTokenCounter(spec: MLXModelSpec, folder: URL) async -> (@Sendable (String) async -> Int)?
 }
 
 /// The real generator: mlx-swift-lm's `ChatSession` over the cached container.
@@ -227,6 +229,10 @@ public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
     }
 
     func gpuUsable() async -> Bool { await canUseGPU() }
+
+    func residentTokenCounter() async -> (@Sendable (String) async -> Int)? {
+        await generator.residentTokenCounter(spec: spec, folder: folder)
+    }
 
     /// - Parameters:
     ///   - device: where the model runs while the GPU is usable; ``ComputeDevice/cpu`` always runs on the CPU.

@@ -9,6 +9,8 @@ protocol FoundationModelsTurning: AnyObject, Sendable {
     func respond(to prompt: String) async throws -> String
     /// Guided generation: the reply is generated against `schema` and returned as its JSON.
     func respondJSON(to prompt: String, schema: GenerationSchema) async throws -> String
+    /// Loads the model and processes the session's transcript ahead of the first prompt.
+    func prewarm()
 }
 
 /// A `LanguageModelSession`, confined to the owning ``FoundationModelsSession`` actor.
@@ -22,12 +24,16 @@ final class SystemModelTurns: FoundationModelsTurning, @unchecked Sendable {
         try await session.respond(to: prompt, schema: schema, includeSchemaInPrompt: true,
                                   options: GenerationOptions(sampling: .greedy)).content.jsonString
     }
+    func prewarm() { session.prewarm() }
 }
 
 /// A persistent Foundation Models conversation: one `LanguageModelSession` serves every turn (the system
 /// keeps its transcript and cached state), until a trim or an error replaces it with a fresh session built
 /// from the kept transcript. Structured replies use guided generation against the schema, then the same
-/// strict decoder as every backend.
+/// strict decoder as every backend. The schema goes into the prompt (`includeSchemaInPrompt`), so it is
+/// counted: with each structured turn in the history, and once more in the head as room for the next one.
+///
+/// Turns, counts and trims run one at a time (``LLMTurnGate``); appends do not wait.
 actor FoundationModelsSession: LLMSession {
     nonisolated let tokenBudget: Int
     private let count: @Sendable (String) async throws -> Int
@@ -35,6 +41,9 @@ actor FoundationModelsSession: LLMSession {
     private var transcript = LLMTranscript()
     private var live: (any FoundationModelsTurning)?
     private var closed = false
+    private var gate = LLMTurnGate()
+    /// The schema text of the latest structured turn: reserved in the head for the next one.
+    private var schemaReserve = ""
 
     init(tokenBudget: Int, count: @escaping @Sendable (String) async throws -> Int,
          makeTurns: @escaping @Sendable (Transcript) -> any FoundationModelsTurning) {
@@ -42,8 +51,7 @@ actor FoundationModelsSession: LLMSession {
     }
 
     func usage() async throws -> LLMTokenUsage {
-        try checkOpen()
-        return try await transcript.usage(count: count)
+        try await exclusive { try await currentUsage() }
     }
 
     func append(_ chunk: LLMSessionChunk) async throws {
@@ -52,29 +60,61 @@ actor FoundationModelsSession: LLMSession {
     }
 
     func respond(to request: String) async throws -> String {
-        try await turn(request) { try await $0.respond(to: $1) }
+        try await exclusive { try await turn(request, counted: "") { try await $0.respond(to: $1) } }
     }
 
     func respondStructured<Output: LLMStructuredOutput>(_ type: Output.Type, to request: String) async throws -> Output {
-        let schema = try Self.generationSchema(for: Output.llmSchema)
-        let json = try await turn(request) { try await $0.respondJSON(to: $1, schema: schema) }
-        return try LLMStructuredDecoding.decode(Output.self, from: json)
+        try await exclusive {
+            let schema = try Self.generationSchema(for: Output.llmSchema)
+            let schemaText = LLMStructuredDecoding.jsonSchema(Output.llmSchema)
+            schemaReserve = schemaText
+            let json = try await turn(request, counted: schemaText) { try await $0.respondJSON(to: $1, schema: schema) }
+            return try LLMStructuredDecoding.decode(Output.self, from: json)
+        }
     }
 
     func trim(keepingSuffix tokens: Int) async throws {
-        try checkOpen()
-        var trimmed = transcript  // One caller at a time (the contract), so no append interleaves here.
-        guard try await trimmed.trim(keepingSuffix: tokens, count: count) else { return }
-        transcript = trimmed
-        live = nil
+        try await exclusive {
+            let original = transcript
+            var trimmed = original
+            guard try await trimmed.trim(keepingSuffix: tokens, count: count) else { return }
+            try trimmed.carryAppends(from: transcript, since: original)
+            transcript = trimmed
+            live = nil
+        }
+    }
+
+    /// Opens the system session on the transcript so far (the head) and prewarms it.
+    func warm() async throws {
+        try await exclusive {
+            guard live == nil else { return }
+            let turns = makeTurns(Self.transcript(transcript))
+            turns.prewarm()
+            live = turns
+        }
     }
 
     func close() async { closed = true; live = nil }
 
     private func checkOpen() throws { if closed { throw LLMSessionError.closed } }
 
-    private func turn(_ request: String, _ send: (any FoundationModelsTurning, String) async throws -> String) async throws -> String {
+    private func exclusive<T: Sendable>(_ body: () async throws -> T) async throws -> T {
         try checkOpen()
+        if !gate.enter() { await withCheckedContinuation { gate.wait($0) } }
+        defer { gate.leave() }
+        try checkOpen()
+        return try await body()
+    }
+
+    private func currentUsage() async throws -> LLMTokenUsage {
+        var usage = try await transcript.usage(count: count)
+        if !schemaReserve.isEmpty { usage.head += try await count(schemaReserve) }
+        return usage
+    }
+
+    private func turn(_ request: String, counted: String,
+                      _ send: (any FoundationModelsTurning, String) async throws -> String) async throws -> String {
+        let consumed = transcript.pending
         let message = transcript.message(for: request)
         let turns: any FoundationModelsTurning
         if let live { turns = live } else {
@@ -84,7 +124,7 @@ actor FoundationModelsSession: LLMSession {
         do {
             let reply = try await send(turns, message)
             try checkOpen()
-            transcript.record(user: message, assistant: reply)
+            transcript.record(user: message, assistant: reply, consumed: consumed, counted: counted)
             return reply
         } catch let error as LanguageModelSession.GenerationError {
             live = nil  // The system session's transcript is unknown now; the next turn rebuilds it.

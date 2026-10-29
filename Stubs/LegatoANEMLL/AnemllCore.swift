@@ -29,4 +29,6 @@ public final class InferenceManager: @unchecked Sendable {
     public init(models: LoadedModels, contextLength: Int, batchSize: Int, splitLMHead: Int, debugLevel: Int, v110: Bool, argmaxInModel: Bool, slidingWindow: Int?, updateMaskPrefill: Bool, prefillDynamicSlice: Bool, modelPrefix: String, vocabSize: Int?, lmHeadChunkSizes: [Int]?) throws { throw StubError.unavailable }
     public func setSamplingConfig(_ config: SamplingConfig) {}
     public func generateResponse(initialTokens: [Int], temperature: Float, maxTokens: Int, eosTokens: [Int], tokenizer: Tokenizer, onToken: ((Int) -> Void)?, onWindowShift: (() -> Void)?, reusingPrefix: Int = 0) async throws -> ([Int], TimeInterval, String) { throw StubError.unavailable }
+    public func effectiveReuse(_ reusingPrefix: Int, of count: Int) -> Int { 0 }
+    public func prefillOnly(initialTokens: [Int], reusingPrefix: Int) async throws -> TimeInterval { throw StubError.unavailable }
 }

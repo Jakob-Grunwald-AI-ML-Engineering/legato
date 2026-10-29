@@ -30,9 +30,17 @@ extension MLXGenerating {
     func makeChat(spec: MLXModelSpec, folder: URL, instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning {
         throw LLMError.unavailable(reason: "This MLX generator cannot keep a session.")
     }
+    func residentTokenCounter(spec: MLXModelSpec, folder: URL) async -> (@Sendable (String) async -> Int)? { nil }
 }
 
 extension MLXChatGenerator {
+    /// The tokenizer of the model when it is already loaded; never loads it.
+    func residentTokenCounter(spec: MLXModelSpec, folder: URL) async -> (@Sendable (String) async -> Int)? {
+        guard await MLXModelCache.shared.residentFolders.contains(folder.standardizedFileURL.path),
+              let container = try? await MLXModelCache.shared.container(for: spec, folder: folder) else { return nil }
+        return { await container.tokenizer.encode(text: $0, addSpecialTokens: false).count }
+    }
+
     func makeChat(spec: MLXModelSpec, folder: URL, instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning {
         let container = try await MLXModelCache.shared.container(for: spec, folder: folder)
         return MLXChat(container: container, session: ChatSession(
@@ -90,21 +98,26 @@ final class MLXChat: MLXChatTurning, @unchecked Sendable {
 
 /// A persistent MLX conversation: one `ChatSession` (and its KV cache) serves every turn until a trim or an
 /// error replaces it with a fresh one restored from the kept transcript. Devices are decided per turn as in
-/// ``MLXBackend/respond(instructions:examples:prompt:)``.
-actor MLXSession: LLMSession {
+/// ``MLXBackend/respond(instructions:examples:prompt:)``. Counting never loads the model: without a live chat
+/// it uses the resident model's tokenizer, or an estimate when the model is not resident.
+///
+/// Turns, counts and trims run one at a time (``LLMTurnGate``); appends do not wait.
+actor MLXSession: LLMSessionMetrics {
     nonisolated let tokenBudget: Int
     private let backend: MLXBackend
     private var transcript = LLMTranscript()
     private var live: (any MLXChatTurning)?
     private var closed = false
+    private var gate = LLMTurnGate()
     private(set) var lastTurn: MLXTurnStats?
 
     init(backend: MLXBackend, tokenBudget: Int) { self.backend = backend; self.tokenBudget = tokenBudget }
 
     func usage() async throws -> LLMTokenUsage {
-        try checkOpen()
-        let chat = try await chat()
-        return await transcript.usage { await chat.tokenCount($0) }
+        try await exclusive {
+            let count = await counter()
+            return await transcript.usage { await count($0) }
+        }
     }
 
     func append(_ chunk: LLMSessionChunk) async throws {
@@ -113,7 +126,60 @@ actor MLXSession: LLMSession {
     }
 
     func respond(to request: String) async throws -> String {
+        try await exclusive { try await turn(request) }
+    }
+
+    func respondStructured<Output: LLMStructuredOutput>(_ type: Output.Type, to request: String) async throws -> Output {
+        try await exclusive {
+            let schema = LLMStructuredDecoding.instruction(for: Output.llmSchema)
+            let reply = try await turn(request.isEmpty ? schema : request + "\n\n" + schema)
+            do { return try LLMStructuredDecoding.decode(Output.self, from: reply) } catch {
+                // Not an answer: the transcript forgets it (its text is pending again) and the chat, whose
+                // cache holds it, is rebuilt from the transcript next turn.
+                transcript.revertLastTurn()
+                live = nil
+                throw error
+            }
+        }
+    }
+
+    func trim(keepingSuffix tokens: Int) async throws {
+        try await exclusive {
+            let count = await counter()
+            let original = transcript
+            var trimmed = original
+            guard await trimmed.trim(keepingSuffix: tokens, count: { await count($0) }) else { return }
+            try trimmed.carryAppends(from: transcript, since: original)
+            transcript = trimmed
+            live = nil
+        }
+    }
+
+    /// Opens the chat on the transcript so far (the head). mlx-swift-lm prefills only with a generation, so
+    /// the head is processed with the first turn; this loads nothing that is not resident already.
+    func warm() async throws {
+        try await exclusive { _ = try await chat() }
+    }
+
+    func close() async { closed = true; live = nil }
+
+    func lastTurnMetrics() -> LLMTurnMetrics? {
+        lastTurn.map { LLMTurnMetrics(promptTokens: $0.prefilled + $0.cached, prefilledTokens: $0.prefilled, prefillSeconds: $0.prefillSeconds) }
+    }
+    func lastWarmMetrics() -> LLMTurnMetrics? { nil }
+
+    private func checkOpen() throws { if closed { throw LLMSessionError.closed } }
+
+    private func exclusive<T: Sendable>(_ body: () async throws -> T) async throws -> T {
         try checkOpen()
+        if !gate.enter() { await withCheckedContinuation { gate.wait($0) } }
+        defer { gate.leave() }
+        try checkOpen()
+        return try await body()
+    }
+
+    private func turn(_ request: String) async throws -> String {
+        let consumed = transcript.pending
         let message = transcript.message(for: request)
         let chat = try await chat()
         do {
@@ -132,7 +198,7 @@ actor MLXSession: LLMSession {
             }
             try checkOpen()
             guard !reply.allSatisfy(\.isWhitespace) else { throw LLMError.emptyResponse }
-            transcript.record(user: message, assistant: reply)
+            transcript.record(user: message, assistant: reply, consumed: consumed)
             return reply
         } catch {
             live = nil  // The chat's cache may hold a partial turn; the next turn restores from the transcript.
@@ -140,24 +206,12 @@ actor MLXSession: LLMSession {
         }
     }
 
-    func respondStructured<Output: LLMStructuredOutput>(_ type: Output.Type, to request: String) async throws -> Output {
-        let schema = LLMStructuredDecoding.instruction(for: Output.llmSchema)
-        let reply = try await respond(to: request.isEmpty ? schema : request + "\n\n" + schema)
-        return try LLMStructuredDecoding.decode(Output.self, from: reply)
+    /// The live chat's tokenizer, else the resident model's, else about three characters per token.
+    private func counter() async -> @Sendable (String) async -> Int {
+        if let live { return { await live.tokenCount($0) } }
+        if let resident = await backend.residentTokenCounter() { return resident }
+        return { ($0.utf8.count + 2) / 3 }
     }
-
-    func trim(keepingSuffix tokens: Int) async throws {
-        try checkOpen()
-        let chat = try await chat()
-        var trimmed = transcript  // One caller at a time (the contract), so no append interleaves here.
-        guard await trimmed.trim(keepingSuffix: tokens, count: { await chat.tokenCount($0) }) else { return }
-        transcript = trimmed
-        live = nil
-    }
-
-    func close() async { closed = true; live = nil }
-
-    private func checkOpen() throws { if closed { throw LLMSessionError.closed } }
 
     private func chat() async throws -> any MLXChatTurning {
         if let live { return live }

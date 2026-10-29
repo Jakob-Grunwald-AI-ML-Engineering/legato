@@ -38,8 +38,8 @@ public struct LLMTokenUsage: Sendable, Hashable {
 /// processes what is new. Created by ``LLMBackend/makeSession()``; one caller at a time.
 ///
 /// Context is scrolled, not grown without end: compare ``usage()`` with ``tokenBudget`` and
-/// ``trim(keepingSuffix:)`` the history. Trimming resets the backend's state; the next turn processes the
-/// kept transcript again.
+/// ``trim(keepingSuffix:)`` the history. After a trim the next turn processes the kept transcript again,
+/// reusing at most what the backend's state still shares with it (at least the head where it can).
 public protocol LLMSession: AnyObject, Sendable {
     /// Tokens the whole transcript may hold (instructions, examples, turns, pending text), with the room for
     /// a reply already taken off the model's context window.
@@ -61,8 +61,13 @@ public protocol LLMSession: AnyObject, Sendable {
     func respondStructured<Output: LLMStructuredOutput>(_ type: Output.Type, to request: String) async throws -> Output
 
     /// Drops the oldest history until it is at most `tokens` tokens, keeping the instructions and examples:
-    /// whole turns first, then the front of the pending text. Resets the backend's state if anything changed.
+    /// whole turns first, then the front of the pending text.
     func trim(keepingSuffix tokens: Int) async throws
+
+    /// Processes the transcript so far (normally the head: instructions and examples) into the backend's
+    /// state without a reply, so the next turn only processes what follows. A warm session stays warm until
+    /// a trim, an error or a release resets it. Best effort where the backend cannot prefill on its own.
+    func warm() async throws
 
     /// Ends the session and releases its state and any lease it holds. Later calls throw
     /// ``LLMSessionError/closed``.
@@ -77,7 +82,12 @@ public struct LLMTranscript: Sendable, Hashable {
     public struct Turn: Sendable, Hashable {
         public var user: String
         public var assistant: String
-        public init(user: String, assistant: String) { self.user = user; self.assistant = assistant }
+        /// Text the model saw with this turn beyond `user` (a schema the backend put in the prompt): counted,
+        /// never rendered.
+        public var counted: String
+        public init(user: String, assistant: String, counted: String = "") {
+            self.user = user; self.assistant = assistant; self.counted = counted
+        }
     }
 
     /// Template tokens a turn costs beyond its text (role markers, separators), for counting.
@@ -89,6 +99,7 @@ public struct LLMTranscript: Sendable, Hashable {
     /// Text appended since the last turn.
     public private(set) var pending = ""
     private var hasInstructions = false
+    private var lastConsumed = ""
 
     public init() {}
 
@@ -118,15 +129,44 @@ public struct LLMTranscript: Sendable, Hashable {
 
     /// Records a finished turn and clears the pending text it carried.
     public mutating func record(user: String, assistant: String) {
-        turns.append(Turn(user: user, assistant: assistant))
-        pending = ""
+        record(user: user, assistant: assistant, consumed: pending)
+    }
+
+    /// Records a finished turn that sent `consumed` (the pending text when the turn began). Only that prefix
+    /// leaves the pending text: text appended while the turn ran stays for the next one.
+    public mutating func record(user: String, assistant: String, consumed: String, counted: String = "") {
+        turns.append(Turn(user: user, assistant: assistant, counted: counted))
+        let scalars = pending.unicodeScalars
+        if scalars.starts(with: consumed.unicodeScalars) {
+            pending = String(String.UnicodeScalarView(scalars.dropFirst(consumed.unicodeScalars.count)))
+        } else {
+            pending = ""  // Not this turn's text any more (cannot happen with one caller at a time).
+        }
+        lastConsumed = consumed
+    }
+
+    /// After a trim of a copy taken before an `await`: adds the text appended to `live` since `original` was
+    /// copied (appends do not wait for a count), so the trimmed transcript loses nothing streamed in meanwhile.
+    public mutating func carryAppends(from live: LLMTranscript, since original: LLMTranscript) throws {
+        let now = live.pending.unicodeScalars, before = original.pending.unicodeScalars
+        guard now.count > before.count, now.starts(with: before) else { return }
+        try append(.text(String(String.UnicodeScalarView(now.dropFirst(before.count)))))
+    }
+
+    /// Takes back the last recorded turn (a reply that failed its schema): its pending text is pending again,
+    /// before anything appended since.
+    public mutating func revertLastTurn() {
+        guard !turns.isEmpty else { return }
+        turns.removeLast()
+        pending = lastConsumed + pending
+        lastConsumed = ""
     }
 
     public func usage(count: (String) async throws -> Int) async rethrows -> LLMTokenUsage {
         var head = try await count(instructions)
-        for example in examples { head += try await Self.cost(example.user, example.assistant, count) }
+        for example in examples { head += try await Self.cost(Turn(user: example.user, assistant: example.assistant), count) }
         var history = try await count(pending)
-        for turn in turns { history += try await Self.cost(turn.user, turn.assistant, count) }
+        for turn in turns { history += try await Self.cost(turn, count) }
         return LLMTokenUsage(head: head, history: history)
     }
 
@@ -135,7 +175,7 @@ public struct LLMTranscript: Sendable, Hashable {
     public mutating func trim(keepingSuffix tokens: Int, count: (String) async throws -> Int) async rethrows -> Bool {
         let limit = max(0, tokens)
         var costs: [Int] = []
-        for turn in turns { costs.append(try await Self.cost(turn.user, turn.assistant, count)) }
+        for turn in turns { costs.append(try await Self.cost(turn, count)) }
         let pendingCost = try await count(pending)
         var total = costs.reduce(pendingCost, +)
         guard total > limit else { return false }
@@ -146,8 +186,9 @@ public struct LLMTranscript: Sendable, Hashable {
         return true
     }
 
-    private static func cost(_ user: String, _ assistant: String, _ count: (String) async throws -> Int) async rethrows -> Int {
-        try await count(user) + count(assistant) + turnOverhead
+    private static func cost(_ turn: Turn, _ count: (String) async throws -> Int) async rethrows -> Int {
+        let counted = turn.counted.isEmpty ? 0 : try await count(turn.counted)
+        return try await count(turn.user) + count(turn.assistant) + counted + turnOverhead
     }
 
     /// The longest suffix of `text` that counts at most `limit` tokens.
@@ -308,4 +349,42 @@ public actor LLMSessionSet {
         entries = [:]
         for session in open { await session.close() }
     }
+}
+
+/// Serializes a session actor's turns, counts and trims (an actor alone interleaves them at every `await`),
+/// while ``LLMSession/append(_:)`` stays open: text streamed in during a turn waits for the next one.
+public struct LLMTurnGate: Sendable {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    public init() {}
+    /// Takes the gate if it is free.
+    public mutating func enter() -> Bool {
+        if busy { return false }
+        busy = true
+        return true
+    }
+    /// Queues `waiter`; it resumes holding the gate.
+    public mutating func wait(_ waiter: CheckedContinuation<Void, Never>) { waiters.append(waiter) }
+    /// Hands the gate to the next waiter, or frees it.
+    public mutating func leave() {
+        if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() }
+    }
+}
+
+/// What a backend measured for a session's last turn or warm-up, where it can tell (probes and logs).
+public struct LLMTurnMetrics: Sendable, Hashable {
+    /// The turn's full prompt, in tokens.
+    public var promptTokens: Int?
+    /// Prompt tokens actually prefilled (the rest came from the kept state).
+    public var prefilledTokens: Int?
+    public var prefillSeconds: Double?
+    public init(promptTokens: Int? = nil, prefilledTokens: Int? = nil, prefillSeconds: Double? = nil) {
+        self.promptTokens = promptTokens; self.prefilledTokens = prefilledTokens; self.prefillSeconds = prefillSeconds
+    }
+}
+
+/// A session that reports ``LLMTurnMetrics``.
+public protocol LLMSessionMetrics: LLMSession {
+    func lastTurnMetrics() async -> LLMTurnMetrics?
+    func lastWarmMetrics() async -> LLMTurnMetrics?
 }

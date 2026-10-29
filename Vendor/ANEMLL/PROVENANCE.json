@@ -19,11 +19,12 @@
   },
   "legatoModifications": [
     "Suppress upstream print diagnostics in production",
-    "Synchronize parallel argmax result publication using Mutex"
+    "Synchronize parallel argmax result publication using Mutex",
+    "Keep the KV state across calls for persistent sessions: generateResponse(reusingPrefix:), runPrefill(startPos:), prefillOnly and effectiveReuse (epic #80)"
   ],
   "finalSourceSHA256": {
     "FFNChunk.swift": "a2b7ee6d52641cee3af2bf9bbd882cf3bed3b3f863548a285729a6cdf0b5d750",
-    "InferenceManager.swift": "c46055976f84a332490e305b59e900578af3ebe90f7b4316fd26251bf6b3143d",
+    "InferenceManager.swift": "b9893b59172d5395f9819e9c49a0fd38766d53dcafce70010c0ff6334d03565b",
     "MetalArgmax.swift": "2fc4fed2f1de0b838367c8f65dc3a18ab261940ec2a3aa56d037d39a24e39971",
     "ModelLoader.swift": "ab7f1c4015323909b9eb01e8186bed97f208940553163a5d1efd6d64d433733b",
     "SamplingConfig.swift": "132006c29a4203d746ad38043e4cfdce04c17a265410023712f5eb952ef9a7ff",

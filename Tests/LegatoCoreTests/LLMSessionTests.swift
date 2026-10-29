@@ -53,6 +53,36 @@ struct LLMSessionTests {
         #expect(transcript.message(for: "") == "only text")
     }
 
+    @Test func recordDropsOnlyThePendingTextTheTurnSent() throws {
+        var transcript = LLMTranscript()
+        try transcript.append(.text("sent"))
+        let consumed = transcript.pending
+        let message = transcript.message(for: "Go.")
+        try transcript.append(.text(" arrived mid-turn"))  // streamed in while the turn ran
+        transcript.record(user: message, assistant: "Done.", consumed: consumed)
+        #expect(transcript.pending == " arrived mid-turn")
+    }
+
+    @Test func revertingAFailedTurnRestoresItsPendingTextBeforeNewerText() throws {
+        var transcript = LLMTranscript()
+        try transcript.append(.text("first"))
+        let consumed = transcript.pending
+        try transcript.append(.text(" later"))
+        transcript.record(user: transcript.message(for: "Go."), assistant: "bad", consumed: consumed)
+        transcript.revertLastTurn()
+        #expect(transcript.turns.isEmpty)
+        #expect(transcript.pending == "first later")
+    }
+
+    @Test func textAModelSawWithATurnIsCountedAndTrimmedWithIt() async throws {
+        var transcript = LLMTranscript()
+        transcript.record(user: "a", assistant: "b", consumed: "", counted: "schema with four words")
+        let usage = try await transcript.usage(count: words)
+        #expect(usage.history == 1 + 1 + 4 + LLMTranscript.turnOverhead)
+        _ = try await transcript.trim(keepingSuffix: 0, count: words)
+        #expect(try await transcript.usage(count: words).history == 0)
+    }
+
     @Test func trimKeepsTheNewestSuffixWithinTheBudgetAndTheHead() async throws {
         var transcript = LLMTranscript()
         try transcript.append(.instructions("keep these instructions"))
@@ -76,6 +106,24 @@ struct LLMSessionTests {
         #expect(!transcript.turns.isEmpty)
         #expect(transcript.turns.count < original.count)
         #expect(Array(original.suffix(transcript.turns.count)) == transcript.turns)
+    }
+
+    @Test func aBudgetTrimAcrossRunsKeepsTheHeadAndTheNewestRun() async throws {
+        var transcript = LLMTranscript()
+        try transcript.append(.instructions("agent head instructions"))
+        for run in 1...4 {
+            try transcript.append(.text("[run \(run) starts] dictated words of run \(run)"))
+            transcript.record(user: transcript.message(for: "Edit."), assistant: "[]")
+        }
+        try transcript.append(.text("[run 5 starts] live words"))
+        let head = try await transcript.usage(count: words).head
+        _ = try await transcript.trim(keepingSuffix: 30, count: words)
+        let after = try await transcript.usage(count: words)
+        #expect(after.head == head && transcript.instructions == "agent head instructions")
+        #expect(after.history <= 30)
+        #expect(transcript.pending == "[run 5 starts] live words")
+        #expect(transcript.turns.last?.user.contains("[run 4 starts]") == true)
+        #expect(!transcript.turns.contains { $0.user.contains("[run 1 starts]") })
     }
 
     @Test func trimCutsOverlongPendingTextFromTheFront() async throws {
