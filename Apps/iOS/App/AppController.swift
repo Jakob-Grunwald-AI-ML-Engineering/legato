@@ -385,6 +385,9 @@ final class AppController {
 
     private func warmSelectedResources() async {
         #if !ANE_CLEANUP_SPIKE
+        #if LEGATO_INTERNAL
+        guard !probeHoldsModels else { return }
+        #endif
         guard !resolvingEngine, !modelAdmission.isResetting, !startEnvironment.current().inBackground else { return }
         let revision = modelRevision
         do { try await prepareSelectedResources(); meetings.resumeProcessing() }
@@ -442,10 +445,33 @@ final class AppController {
         #endif
     }
 
+    #if LEGATO_INTERNAL
+    /// Session probe (epic #80): while set, the app does not warm its selected models, so a probe's own load
+    /// is the only Legato model in memory.
+    private(set) var probeHoldsModels = false
+    /// Session probe: a memory warning is logged but releases nothing (measures whether the warning matters).
+    var probeIgnoresMemoryWarnings = false
+
+    /// Session probe: ends the keep-ready microphone and releases the app's warm speech and cleanup models
+    /// (the memory-pressure path), then holds them released until ``endProbeHold()``.
+    func releaseModelsForProbe() async {
+        probeHoldsModels = true
+        await endKeepAlive()
+        await releaseModelsForMemoryPressure(cause: "session probe")
+    }
+
+    /// Session probe: lifts the hold and prepares the selected models again per settings.
+    func endProbeHold() async {
+        probeHoldsModels = false
+        probeIgnoresMemoryWarnings = false
+        await refreshEngine(releasingKeptMicrophone: false)
+    }
+    #endif
+
     /// Revoke held readiness before relinquishing model ownership; active runs keep their own resources.
-    private func releaseModelsForMemoryPressure() async {
+    private func releaseModelsForMemoryPressure(cause: String = "memory pressure") async {
         #if LEGATO_INTERNAL
-        AudioDiagnostics.log("microphone.invalidation-request", ["cause": "memory pressure", "leaseHeld": micReadyUntil != nil])
+        AudioDiagnostics.log("microphone.invalidation-request", ["cause": cause, "leaseHeld": micReadyUntil != nil])
         #endif
         modelRevision += 1
         readiness.selectedResourcesReady = false
@@ -1026,7 +1052,15 @@ final class AppController {
 
         #if !ANE_CLEANUP_SPIKE
         center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in await self?.releaseModelsForMemoryPressure() }
+            Task { @MainActor in
+                #if LEGATO_INTERNAL
+                if self?.probeIgnoresMemoryWarnings == true {
+                    AudioDiagnostics.log("microphone.invalidation-request", ["cause": "memory pressure", "ignoredBy": "session probe"])
+                    return
+                }
+                #endif
+                await self?.releaseModelsForMemoryPressure()
+            }
         }
         #endif
 

@@ -5,6 +5,7 @@ import LegatoCore
 import LegatoCoreML
 import LegatoPostProcessing
 import UIKit
+import os
 
 enum SessionProbeMode: String, Sendable, CaseIterable {
     /// Runs now, in whatever state the app is in.
@@ -45,13 +46,16 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
     /// Where each step is announced to the person holding the phone (the debug overlay's status banner in
     /// builds with the device bridge); nil text clears it. Unset, steps only reach the diagnostics log.
     static var announce: (@MainActor (String?) -> Void)?
+    /// Turned on while the probe runs and off when it ends: the debug overlay blocks taps on the app below,
+    /// so a stray tap cannot start a dictation mid-measurement.
+    static var block: (@MainActor (Bool) -> Void)?
 
     /// Starts a probe without waiting for it (a bridge command must return while the probe runs).
     /// False when a probe is already running.
     @discardableResult
-    static func start(mode: SessionProbeMode, models: ModelServices) -> Bool {
+    static func start(mode: SessionProbeMode, ignoreMemoryWarnings: Bool = false, models: ModelServices) -> Bool {
         guard !running else { return false }
-        Task { await run(mode: mode, models: models) }
+        Task { await run(mode: mode, ignoreMemoryWarnings: ignoreMemoryWarnings, models: models) }
         return true
     }
 
@@ -73,21 +77,41 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         Task { await run(mode: mode, models: models) }
     }
 
-    static func run(mode: SessionProbeMode, delay: Duration = .zero, models: ModelServices) async {
+    /// `ignoreMemoryWarnings`: for this run, a memory warning releases nothing in the app (it is only logged),
+    /// to measure whether the Core ML load survives the warning.
+    static func run(mode: SessionProbeMode, delay: Duration = .zero, ignoreMemoryWarnings: Bool = false, models: ModelServices) async {
         guard !running else { return }
         running = true
         self.mode = mode
-        defer { running = false }
+        block?(true)
+        defer { running = false; block?(false) }
         // A background run holds its background task from the start, before any suspension: iOS suspends an
         // app soon after it leaves the foreground, before a task begun on noticing the background would run.
         let keepAlive = mode == .foreground ? nil : BackgroundTask(mode: mode)
         defer { keepAlive?.end() }
         let memory = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { log(backend: "app", turn: "memoryWarning"); say("memory warning received") } }
+        ) { _ in MainActor.assumeIsolated { logMemory("memoryWarning"); say("memory warning received") } }
         defer { NotificationCenter.default.removeObserver(memory) }
-        AudioDiagnostics.log("session.probe.start", ["mode": mode.rawValue, "delayS": delay.components.seconds, "appState": appState])
-        say("started; preparing models")
+        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        pressure.setEventHandler {
+            let event = pressure.data
+            MainActor.assumeIsolated { logMemory("pressure", ["level": event.contains(.critical) ? "critical" : "warning"]) }
+        }
+        pressure.activate()
+        defer { pressure.cancel() }
+        AudioDiagnostics.log("session.probe.start", ["mode": mode.rawValue, "delayS": delay.components.seconds,
+                                                     "ignoreMemoryWarnings": ignoreMemoryWarnings, "appState": appState])
+
+        // Only the probe's models in memory: the keep-ready microphone ends and the app's warm speech and
+        // cleanup models are released (and kept released) until the probe ends; then they prepare again.
+        say("releasing the app's own models")
+        let beforeRelease = logMemory("beforeRelease")
+        await AppController.shared.releaseModelsForProbe()
+        AppController.shared.probeIgnoresMemoryWarnings = ignoreMemoryWarnings
+        try? await Task.sleep(for: .seconds(1))
+        let afterRelease = logMemory("afterRelease", ["freedMB": beforeRelease.footprintMB - Memory.now().footprintMB])
+        say("app models released (\(Int(beforeRelease.footprintMB - afterRelease.footprintMB)) MB freed); preparing models\(ignoreMemoryWarnings ? ", ignoring memory warnings" : "")")
 
         // Prepare in the foreground: a background start may not load models.
         var backends: [(name: String, backend: any LLMBackend)] = []
@@ -126,6 +150,8 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
             }
         }
         AudioDiagnostics.log("session.probe.done", ["mode": mode.rawValue, "ok": failures == 0, "backends": backends.map(\.name), "appState": appState])
+        logMemory("end")
+        await AppController.shared.endProbeHold()
         say("done (\(failures == 0 ? "ok" : "\(failures) failed"); measured: \(backends.map(\.name).joined(separator: ", ")))")
         if mode == .backgroundAudio { await AppController.shared.endKeepAlive() }
     }
@@ -139,14 +165,22 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
             let start = ContinuousClock.now
             say("preparing \(name) (attempt \(attempt) of 3)")
             let coreML = await CoreMLModelStore.shared.backend(for: spec, root: ModelServices.phoneModelsRoot)
+            logMemory("beforeLoad", ["attempt": attempt])
+            let sampler = LoadSampler()
+            sampler.start()
+            defer { sampler.stop() }
             do {
                 try await coreML.prepare()
+                sampler.stop()
+                logMemory("afterLoad", sampler.summary.merging(["attempt": attempt, "completed": true]) { $1 })
                 // The app's own rolling session warms on the same single native worker; let it finish first.
                 let rolling = await models.rollingCleanupSession(for: .coreML)
                 log(backend: name, turn: "prepared", ["attempt": attempt, "wallMs": ms(ContinuousClock.now - start), "rollingSession": rolling != nil])
                 say("\(name) prepared in \(ms(ContinuousClock.now - start)) ms")
                 return coreML
             } catch {
+                sampler.stop()
+                logMemory("afterLoad", sampler.summary.merging(["attempt": attempt, "completed": false]) { $1 })
                 log(backend: name, turn: attempt < 3 ? "prepare.retry" : "skipped", [
                     "reason": "prepare failed", "attempt": attempt, "error": AudioDiagnostics.describe(error),
                     "errorType": String(describing: type(of: error)), "wallMs": ms(ContinuousClock.now - start),
@@ -175,6 +209,70 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
             guard id != .invalid else { return }
             UIApplication.shared.endBackgroundTask(id)
             id = .invalid
+        }
+    }
+
+    // MARK: Memory
+
+    /// The process footprint (what jetsam counts) and what iOS says is left before the limit.
+    struct Memory {
+        var footprintMB: Double
+        var availableMB: Double
+        static func now() -> Memory {
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let status = withUnsafeMutablePointer(to: &info) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+                }
+            }
+            let footprint = status == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : -1
+            return Memory(footprintMB: footprint, availableMB: Double(os_proc_available_memory()) / 1_048_576)
+        }
+        var fields: [String: Any] { ["footprintMB": Int(footprintMB), "availableMB": Int(availableMB)] }
+    }
+
+    /// One `session.probe.memory` line: `phase`, footprint and available memory, plus `fields`.
+    @discardableResult
+    private static func logMemory(_ phase: String, _ fields: [String: Any] = [:]) -> Memory {
+        let memory = Memory.now()
+        var line = memory.fields.merging(fields) { $1 }
+        line["phase"] = phase; line["mode"] = mode.rawValue; line["appState"] = appState
+        AudioDiagnostics.log("session.probe.memory", line)
+        return memory
+    }
+
+    /// Samples memory every 250 ms during a Core ML load (logged as phase `load`), keeping the peak footprint
+    /// and the least available memory seen.
+    @MainActor private final class LoadSampler {
+        private var task: Task<Void, Never>?
+        private var peakFootprint = 0.0
+        private var minAvailable = Double.greatestFiniteMagnitude
+        private var samples = 0
+        private let started = ContinuousClock.now
+
+        func start() {
+            task = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    self?.sample()
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
+        }
+        private func sample() {
+            let memory = SessionProbe.logMemory("load", ["elapsedMs": SessionProbe.ms(ContinuousClock.now - started)])
+            peakFootprint = max(peakFootprint, memory.footprintMB)
+            minAvailable = min(minAvailable, memory.availableMB)
+            samples += 1
+        }
+        func stop() {
+            guard let task else { return }
+            task.cancel(); self.task = nil
+            sample()
+        }
+        var summary: [String: Any] {
+            ["peakFootprintMB": Int(peakFootprint), "minAvailableMB": Int(minAvailable), "samples": samples,
+             "loadMs": SessionProbe.ms(ContinuousClock.now - started)]
         }
     }
 
@@ -222,6 +320,9 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
             try await fresh.respond(to: request2)
         } extra: { ["replyEqual": $0 == reply2] }
         _ = replay
+
+        // Foundation Models loads fast; only slow-loading models need a kickstart measurement (Jakob, epic #80).
+        guard !(backend is FoundationModelsBackend) else { return }
 
         // Warm kickstart: the head (instructions + ~400 tokens) prefilled ahead, then a new run's first turn.
         let head = instructions + "\n" + sentences(1...20)
