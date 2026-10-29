@@ -194,7 +194,10 @@ public final class ModelServices {
             try Task.checkCancellation()
             guard options.backend != .coreML || selected(.cleanup) == selectedID else { throw CancellationError() }
             cleanupPreparation.usingFoundationModels = backend == .foundationModels && options.backend == .coreML
-            return CleanupRunLease(resolution: resolution, release: { [weak self] in
+            // Persistent sessions made during the run hold their own lease and end with the run.
+            let sessions = LLMSessionSet()
+            return CleanupRunLease(resolution: resolution.closingSessions(with: sessions), release: { [weak self] in
+                await sessions.closeAll()
                 await lease.release()
                 await self?.dictationCleanupEnded()
             })
