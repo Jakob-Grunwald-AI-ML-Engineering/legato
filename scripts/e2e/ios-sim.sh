@@ -1600,9 +1600,152 @@ scenario_z() {
   else record FAIL "the transcript so far survived" "segments.jsonl has ${segs:-0} lines"; fi
 }
 
+# ------------------------------------------------------------------------ field edit queue (keyboard executor)
+
+# The value of key=<value> (no spaces) on the first / last line matching a fixed string.
+log_kv_first() { grep -F -- "$1" "$LOG" | head -1 | sed -n "s/.* $2=\\([^ ]*\\).*/\\1/p"; }
+# fe_write_ok <description> <write marker> <del> <ins> <step>: the last write matching the marker deleted and
+# inserted that many Characters, and the field's real caret (UITextView.selectedRange, logged by the step) is at
+# the end of the field, where every step of the script types.
+fe_write_ok() {
+  local line step; line="$(grep -F -- "$2" "$LOG" | tail -1)"; step="$(grep -F -- "fe.step name=$5 " "$LOG" | head -1)"
+  [ -n "$line" ] || { record FAIL "$1" "no line <$2>"; return; }
+  [ -n "$step" ] || { record FAIL "$1" "no step <$5>"; return; }
+  local del ins caret end
+  del="$(sed -n 's/.* del=\([0-9]*\).*/\1/p' <<< "$line")"; ins="$(sed -n 's/.* ins=\([0-9]*\).*/\1/p' <<< "$line")"
+  caret="$(sed -n 's/.* caret=\([0-9]*\).*/\1/p' <<< "$step")"; end="$(sed -n 's/.* end=\([0-9]*\).*/\1/p' <<< "$step")"
+  if [ "$del/$ins" = "$3/$4" ] && [ -n "$caret" ] && [ "$caret" = "$end" ]; then record PASS "$1"
+  else record FAIL "$1" "del/ins <$del/$ins> expected <$3/$4>, field caret <$caret> end <$end>"; fi
+}
+# assert_no_log_before <description> <marker> <forbidden>: no line before the first marker line contains it.
+assert_no_log_before() {
+  if awk -v marker="$2" 'index($0, marker) { exit } { print }' "$LOG" | grep -F -- "$3" > /dev/null; then
+    record FAIL "$1" "unexpected <$3> before <$2>"
+  else record PASS "$1"; fi
+}
+# assert_count_after <description> <marker> <fixed string> <n>: lines after the first marker line containing it.
+assert_count_after() {
+  local n; n="$(awk -v marker="$2" 'index($0, marker) { seen = 1 } seen' "$LOG" | grep -c -F -- "$3")"
+  if [ "$n" = "$4" ]; then record PASS "$1"; else record FAIL "$1" "<$3> logged $n times after <$2>, expected $4"; fi
+}
+
+scenario_fe() {
+  # The experimental field edit queue in the keyboard (forced on by -LegatoFieldEdits YES; the real setting is
+  # off by default): every edit goes through FieldEditQueue as a patch, verified against the field's later reads
+  # at the shipped 250 ms settle timeout. The harness document lags like a real textDocumentProxy: its reads and
+  # change callbacks trail the calls (60 ms, 400 ms on the revision steps: past the timeout), one state per call.
+  # The harness's scripted host streams a Live run; its revision, the word row, ↶ ↷ and a version swap each land
+  # as patch-sized proxy calls with the field's caret put back; keys typed while a revision waits run at once and
+  # the revision lands after them; deleting into the word a waiting revision rewrites hands it back as the
+  # user's; a write the field never shows fails once and is typed again once. Then the fake keyboard follows a
+  # real dictation through the queue, and the keystroke/tap latency is measured with the queue off and on.
+  begin "fe. field edits: harness sources through the queue" -LegatoKeyboardHarness YES -LegatoFieldEdits YES \
+    -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
+  wait_log "e2e harness ready" 10
+  assert_log "the queue is on for this appearance" "harness fe.on"
+  trigger harness-fieldedits
+  wait_log "e2e fe.done" 60
+  assert_no_log "no scripted step timed out" "fe.timeout"
+  assert_no_log_before "nothing was handed back before the same-word step" "fe.step name=before-same-word" "result=conflict"
+  assert_log "a read lagging past the timeout was waited for once more" "extended=0"
+  assert_log "reads showed our writes in progress (echoes), not news" "harness fe.echo"
+  assert_eq "stream + revision: field" "the cat sat on" "$(log_field "fe.step name=stream " doc)"
+  assert_log "the stream went through the ASR lane" "harness fe.write origin=asr lane=asr"
+  fe_write_ok "Live revision teh→the is a 2/2 patch, caret restored" "harness fe.write origin=liveCleanup lane=cleanup del=2 ins=2" 2 2 stream
+  assert_eq "word row: field" "the cat sat only " "$(log_field "fe.step name=row " doc)"
+  fe_write_ok "word-row completion is a 0/3 patch, caret after it" "harness fe.write origin=wordRow lane=user" 0 3 row
+  assert_eq "↶ completion: field" "the cat sat on" "$(log_field "fe.step name=undo-row " doc)"
+  fe_write_ok "↶ completion is a 3/0 patch, caret at the end" "harness fe.write origin=history lane=user del=3" 3 0 undo-row
+  assert_eq "↶ version swap: field shows the raw text" "teh cat sat on" "$(log_field "fe.step name=undo-version " doc)"
+  fe_write_ok "version swap is a 2/2 patch, caret at the end" "harness fe.write origin=versions lane=user" 2 2 undo-version
+  assert_eq "↷ version swap: field" "the cat sat on" "$(log_field "fe.step name=redo-version " doc)"
+  assert_eq "↷ completion: field" "the cat sat only " "$(log_field "fe.step name=redo-row " doc)"
+  assert_log "revision 2 waited in the cleanup lane behind an unverified write" "harness fe.queued origin=liveCleanup"
+  assert_log "the harness saw it waiting" "fe.pending waiting=1"
+  assert_eq "keys typed while it waited landed at the caret" "the cat sat only a dog ran is" "$(log_field "fe.step name=typed-while-pending " doc)"
+  assert_order "the keys ran while the revision waited" "harness fe.queued origin=liveCleanup" "harness fe.write origin=keystroke"
+  assert_order "the waiting revision ran after the keys" "fe.step name=typed-while-pending" "harness fe.write origin=liveCleanup lane=cleanup del=1 ins=1"
+  fe_write_ok "the waiting revision is a 1/1 patch, caret back after the keys" "harness fe.write origin=liveCleanup lane=cleanup del=1 ins=1" 1 1 pending
+  assert_eq "after it: field" "the cat sat only A dog ran is" "$(log_field "fe.step name=pending " doc)"
+  assert_eq "deleting into the waiting revision's word: the user's text" "the cat sat only A dog ran is The di" "$(log_field "fe.step name=typed-into-pending " doc)"
+  assert_count_after "the waiting revision was handed back once, as the user's" "fe.step name=before-same-word" "origin=liveCleanup result=conflict reason=overlap byUser=1" 1
+  assert_eq "after it: the user's text stays" "the cat sat only A dog ran is The di" "$(log_field "fe.step name=same-word " doc)"
+  assert_eq "after it: caret at the end" "$(log_kv_first "fe.step name=same-word " end)" "$(log_kv_first "fe.step name=same-word " caret)"
+  assert_log "a write was lost by the field" "harness fe.dropped"
+  assert_count_after "the lost write failed once, after the extended wait" "fe.step name=same-word" "result=conflict reason=verifyFailed" 1
+  assert_count_after "its chunk was rewound once" "fe.step name=same-word" "fe.mapped rewound=1" 1
+  assert_eq "the lost chunk was typed again, exactly once" "the cat sat only A dog ran is The di one two three" "$(log_field "fe.step name=dropped " doc)"
+  assert_eq "after it: caret at the end" "$(log_kv_first "fe.step name=dropped " end)" "$(log_kv_first "fe.step name=dropped " caret)"
+
+  SCENARIO="fe. field edits: fake keyboard follows a dictation"
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 -LegatoFieldEdits YES || return
+  trigger kbd-visible
+  wait_log "e2e kbd.visible value=1" 10
+  run_once 1
+  trigger result-insert
+  wait_log "e2e result-insert.done" 10
+  trigger kbd-request-start
+  wait_log_n "e2e outcome kind=started" 2 10
+  sleep 1.5
+  trigger kbd-request-stop
+  wait_log_n "e2e outcome kind=stopped" 2 10
+  sleep 0.5
+  assert_eq "keyboard field == script twice" "$TEXT $TEXT " "$(log_field_last "kbd.apply final=1" doc)"
+  assert_log "the stream went through the queue" "kbd.fieldedit del="
+  assert_no_log "every queued write was confirmed" "outcome=diverged"
+  assert_no_log "no queued write was refused" "kbd.fieldedit result=refused"
+
+  # Latency: how long a key press, a word-row tap or ↶ takes until it returns, queue off then on: median, p95 and
+  # max each within off + 16 ms (one frame). Then keys over the lagging document while the host sends and clears
+  # the field after each Return before it reports it (a read none of the queue's states is): the keys after it
+  # are in the field when their press returns, within the same bound.
+  local off on offsend onsend kind stat a b
+  SCENARIO="fe. field edits: latency off vs on"
+  relaunch -LegatoKeyboardHarness YES -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
+  wait_log "e2e harness ready" 10
+  trigger harness-fe-lag
+  wait_log "e2e fe.lag on=0" 15
+  off="$(last_line "fe.lag on=0")"
+  wait_log "e2e fe.lagsend on=0" 30
+  offsend="$(last_line "fe.lagsend on=0")"
+  relaunch -LegatoKeyboardHarness YES -LegatoFieldEdits YES -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
+  wait_log "e2e harness ready" 10
+  trigger harness-fe-lag
+  wait_log "e2e fe.lag on=1" 15
+  on="$(last_line "fe.lag on=1")"
+  wait_log "e2e fe.lagsend on=1" 30
+  onsend="$(last_line "fe.lagsend on=1")"
+  echo "fe latency off: ${off#*fe.lag }"
+  echo "fe latency on:  ${on#*fe.lag }"
+  echo "fe send-clear latency off: ${offsend#*fe.lagsend }"
+  echo "fe send-clear latency on:  ${onsend#*fe.lagsend }"
+  assert_no_log "no lag step timed out" "fe.timeout"
+  assert_log "the host's clear contradicted the prediction" "harness fe.settle final=0 outcome=notYet"
+  assert_log "keys typed while it was contradicted went through the queue (user lane)" "harness fe.key contradicted=1"
+  assert_no_log "no key went around the queue" "fe.key direct=1"
+  assert_eq "the keys typed after the clear are in the field at once" "ok" "$(log_field "fe.step name=send-cleared " doc)"
+  assert_eq "after the reads caught up: field" "ok" "$(log_field "fe.step name=sent " doc)"
+  assert_eq "same field with the queue on as off (send-clear)" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$offsend")" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$onsend")"
+  assert_eq "same field with the queue on as off" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$off")" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$on")"
+  for kind in key tap undo; do
+    for stat in Ms P95Ms MaxMs; do
+      a="$(sed -n "s/.* $kind$stat=\([0-9.]*\).*/\1/p" <<< "$off")"; b="$(sed -n "s/.* $kind$stat=\([0-9.]*\).*/\1/p" <<< "$on")"
+      if [ -n "$a" ] && [ -n "$b" ] && python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[2]) <= float(sys.argv[1]) + 16 else 1)' "$a" "$b"; then
+        record PASS "$kind$stat on ($b) <= off ($a) + 16 ms"
+      else record FAIL "$kind$stat on <= off + 16 ms" "off <$a> on <$b>"; fi
+    done
+  done
+  for stat in Ms P95Ms MaxMs; do
+    a="$(sed -n "s/.* key$stat=\([0-9.]*\).*/\1/p" <<< "$offsend")"; b="$(sed -n "s/.* key$stat=\([0-9.]*\).*/\1/p" <<< "$onsend")"
+    if [ -n "$a" ] && [ -n "$b" ] && python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[2]) <= float(sys.argv[1]) + 16 else 1)' "$a" "$b"; then
+      record PASS "send-clear key$stat on ($b) <= off ($a) + 16 ms"
+    else record FAIL "send-clear key$stat on <= off + 16 ms" "off <$a> on <$b>"; fi
+  done
+}
+
 t_run=$SECONDS
 wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
-for s in a b c d e f g h i p j o k l m n n2 n3 n4 n5 q t r s u x x2 y z; do if wanted "$s"; then "scenario_$s"; fi; done
+for s in a b c d e f g h i p j o k l m n n2 n3 n4 n5 q t r s u x x2 y z fe; do if wanted "$s"; then "scenario_$s"; fi; done
 if wanted v; then
   scenario_v "retry succeeds" duckOthers 1 2 yes
   scenario_v "default fails twice" duckOthers 9 2 no

@@ -26,9 +26,15 @@ import Foundation
 ///   ticks (`settleLimitMs` at most): a revision that finds the field changed is skipped for good. After a sent
 ///   boundary the reveal goes on from the boundary; tentative text sent with the message holds it until the
 ///   committed text shows where that text ends (`ProxyEditPlanner.awaitsSentTentative`, on the whole state).
+/// - Rush (`rush`, the field edit queue's path): while edits wait behind the reveal, it drains `rushFactor` times
+///   faster and is done at the latest `rushLimitMs` after it started rushing, so queued edits are not held up.
 public struct TypewriterReveal: Sendable, Equatable {
     /// How long a tick waits for the field's context to show the tentative text before giving up.
     public static let settleLimitMs = 250.0
+    /// How much faster a rushing reveal drains.
+    public static let rushFactor = 8.0
+    /// A rushing reveal has revealed everything at the latest this long after it started rushing.
+    public static let rushLimitMs = 150.0
 
     /// More ticks are needed: text is left to reveal, or a tick is waiting for the context.
     public private(set) var needsTicks = false
@@ -39,17 +45,20 @@ public struct TypewriterReveal: Sendable, Equatable {
     private var waitedMs = 0.0
     /// The cursor's `sentCount` last seen: a new sent boundary empties the field of the run.
     private var sentCount = 0
+    /// How long the reveal has been rushing (0 while it is not).
+    private var rushedMs = 0.0
 
     public init() {}
 
     /// The edits that bring the field closer to `state`. `elapsedMs` is the time since the last tick (0 for
     /// a host update: it follows the new text but reveals nothing more); `animated` false (Reduce Motion,
-    /// or a flush) reveals everything now.
+    /// or a flush) reveals everything now. `rush`: edits wait behind the reveal (see the type's notes).
     public mutating func plan(
         state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?, animated: Bool,
-        elapsedMs: Double = 0
+        elapsedMs: Double = 0, rush: Bool = false
     ) -> ProxyPlan {
         needsTicks = false
+        if !rush { rushedMs = 0 }
         guard let documentID, state.target == .keyboard, let runID = state.runID, state.delivery != .hold,
               cursor == nil || cursor?.runID != runID || cursor?.documentID == documentID
         else {
@@ -109,6 +118,10 @@ public struct TypewriterReveal: Sendable, Equatable {
 
         if !animated {
             revealed = total
+        } else if elapsedMs > 0, rush {
+            rushedMs += elapsedMs
+            revealed = rushedMs >= Self.rushLimitMs
+                ? total : TypewriterDrain.step(revealed: revealed, target: total, dtMs: elapsedMs * Self.rushFactor)
         } else if elapsedMs > 0 {
             revealed = TypewriterDrain.step(revealed: revealed, target: total, dtMs: elapsedMs)
         }

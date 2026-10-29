@@ -1,11 +1,13 @@
 #if DEBUG
 import Foundation
+import LegatoFieldEdit
 import LegatoKeyboardCore
 
 /// Stands in for the keyboard extension in the simulator end-to-end run, over the same App Group
 /// values and Darwin notes: it publishes presence, sends requests (and the URL the Link would open),
 /// and applies the streamed text to an in-memory document with the real `ProxyEditPlanner`,
-/// reporting `link.applied`. Debug builds only.
+/// reporting `link.applied`. With `-LegatoFieldEdits YES` the planner's ops go through the field edit queue
+/// (`CaretOpsStep` → `FieldEditQueue` → `ProxyOpCompiler`), each write verified against the field. Debug builds only.
 @MainActor
 final class E2EFakeKeyboard {
     static let shared = E2EFakeKeyboard()
@@ -22,6 +24,8 @@ final class E2EFakeKeyboard {
     private var presenceTask: Task<Void, Never>?
     private var observers: [DarwinObserver] = []
     private var requestCount = 0
+    private let queued = KeyboardPreferences.forcedFieldEdits
+    private var queue: FieldEditQueue?
 
     func run(_ command: String) async {
         installObservers()
@@ -139,10 +143,14 @@ final class E2EFakeKeyboard {
               let state = store.read(HostState.self, forKey: LinkChannel.Key.host)
         else { return }
         let plan = ProxyEditPlanner.plan(state: state, cursor: cursor, contextBefore: document, documentID: documentID)
-        for op in plan.ops {
-            switch op {
-            case .deleteBackward(let count): document.removeLast(min(count, document.count))
-            case .insert(let text): document += text
+        if queued {
+            guard applyQueued(plan.ops) else { return }
+        } else {
+            for op in plan.ops {
+                switch op {
+                case .deleteBackward(let count): document.removeLast(min(count, document.count))
+                case .insert(let text): document += text
+                }
             }
         }
         cursor = plan.cursor
@@ -150,6 +158,44 @@ final class E2EFakeKeyboard {
         store.write(applied, forKey: LinkChannel.Key.applied)
         DarwinObserver.post(LinkChannel.Note.applied)
         E2E.log("kbd.apply final=\(applied.finalApplied ? 1 : 0) doc=\(E2E.quote(document))")
+    }
+
+    /// The planner's ops as one queued patch, run as proxy calls on the field (caret at its end) and settled
+    /// against it; false when the queue handed the write back (nothing was written, the cursor stays).
+    private func applyQueued(_ ops: [ProxyOp]) -> Bool {
+        let read = FieldSnapshot(window: document, caret: document.utf16.count)
+        var queue = self.queue ?? FieldEditQueue(read)
+        defer { self.queue = queue }
+        queue.observe(read)
+        guard let edit = CaretOpsStep.edit(for: ops, before: document) else { return true }
+        queue.submit(EditTransaction(origin: .asr, owner: "fake-keyboard", base: queue.document.version, steps: [edit.step]))
+        let window = queue.document.window, from = queue.document.caret
+        guard let write = queue.next(), let calls = ProxyOpCompiler.compile(write, window: window, caret: from) else {
+            E2E.log("kbd.fieldedit result=refused events=\(queue.takeEvents().count)")
+            return false
+        }
+        var units = Array(document.utf16), caret = from
+        var deleted = 0, inserted = 0
+        for call in calls {
+            switch call {
+            case .moveCaret(let offset): caret = min(max(caret + offset, 0), units.count)
+            case .deleteBackward(let count):
+                var head = String(decoding: units[..<caret], as: UTF16.self)
+                head.removeLast(min(count, head.count))
+                units = Array(head.utf16) + units[caret...]
+                caret = head.utf16.count
+                deleted += count
+            case .insert(let text):
+                units.insert(contentsOf: text.utf16, at: caret)
+                caret += text.utf16.count
+                inserted += text.count
+            }
+        }
+        document = String(decoding: units, as: UTF16.self)
+        let outcome = queue.settle(FieldSnapshot(window: document, caret: caret), final: true)
+        _ = queue.takeEvents()
+        E2E.log("kbd.fieldedit del=\(deleted) ins=\(inserted) calls=\(calls.count) caret=\(caret == units.count ? "end" : "\(caret)") outcome=\(outcome)")
+        return outcome == .confirmed
     }
 }
 #endif

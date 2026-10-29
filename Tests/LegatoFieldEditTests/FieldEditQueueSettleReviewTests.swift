@@ -89,8 +89,8 @@ import LegatoFieldEdit
 
     // MARK: No writes against a contradicted prediction
 
-    /// A non-final read nothing explains holds every lane (also ``FieldEditQueue/next(for:)``) until a settle
-    /// resolves it.
+    /// A non-final read nothing explains holds every lane but the user's (also ``FieldEditQueue/next(for:)``)
+    /// until a settle resolves it: a keystroke is issued on the prediction.
     @Test func anUnexplainedNonFinalReadHoldsIssuingUntilTheNextSettle() {
         var queue = FieldEditQueue(FieldSnapshot(before: "teh cat", after: ""))
         let fix = EditTransaction(origin: .liveCleanup, owner: "run", base: v0, steps: [replace(0, "teh", with: "the")])
@@ -101,13 +101,13 @@ import LegatoFieldEdit
         #expect(queue.needsFinalSettle)
         let key = EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("s", at: 7)])
         queue.submit(key)
-        #expect(queue.peek() == nil)
-        #expect(queue.next() == nil)
+        #expect(queue.peek()?.steps == [.insert("s", at: 7)])
+        #expect(queue.next()?.steps == [.insert("s", at: 7)])
         #expect(queue.next(for: key.id) == nil)
         #expect(queue.takeEvents().isEmpty)
         #expect(queue.settle(queue.predicted) == .confirmed)
         #expect(!queue.needsFinalSettle)
-        #expect(queue.next()?.steps == [.insert("s", at: 7)])
+        #expect(queue.next() == nil)
     }
 
     /// A non-final read that a foreign change explains is not a contradiction: the prediction follows the read
