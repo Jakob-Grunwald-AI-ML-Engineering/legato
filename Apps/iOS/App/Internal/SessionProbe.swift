@@ -42,6 +42,8 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
     private static var running = false
     private static var mode = SessionProbeMode.foreground
     private static let kickstartGap = Duration.seconds(2)
+    /// Memory warnings seen during this run (the load summaries report how many arrived during a load).
+    private static var warnings = 0
 
     /// Where each step is announced to the person holding the phone (the debug overlay's status banner in
     /// builds with the device bridge); nil text clears it. Unset, steps only reach the diagnostics log.
@@ -81,7 +83,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
     /// to measure whether the Core ML load survives the warning.
     static func run(mode: SessionProbeMode, delay: Duration = .zero, ignoreMemoryWarnings: Bool = false, models: ModelServices) async {
         guard !running else { return }
-        running = true
+        running = true; warnings = 0
         self.mode = mode
         block?(true)
         defer { running = false; block?(false) }
@@ -91,7 +93,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         defer { keepAlive?.end() }
         let memory = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { _ = logMemory("memoryWarning"); say("memory warning received") } }
+        ) { _ in MainActor.assumeIsolated { warnings += 1; _ = logMemory("memoryWarning"); say("memory warning received") } }
         defer { NotificationCenter.default.removeObserver(memory) }
         let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         pressure.setEventHandler {
@@ -257,6 +259,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         private var samples = 0
         private let started = ContinuousClock.now
         private let phase: String
+        private let warningsAtStart = SessionProbe.warnings
         init(phase: String = "load") { self.phase = phase }
 
         func start() {
@@ -267,8 +270,14 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
                 }
             }
         }
-        private func sample() {
-            let memory = SessionProbe.logMemory(phase, ["elapsedMs": SessionProbe.ms(ContinuousClock.now - started)])
+        /// Samples every 250 ms; logs every 8th (2 s), since the diagnostics file restarts at 1 MB.
+        private func sample(force: Bool = false) {
+            let memory: Memory
+            if force || samples % 8 == 0 {
+                memory = SessionProbe.logMemory(phase, ["elapsedMs": SessionProbe.ms(ContinuousClock.now - started)])
+            } else {
+                memory = Memory.now()
+            }
             peakFootprint = max(peakFootprint, memory.footprintMB)
             minAvailable = min(minAvailable, memory.availableMB)
             samples += 1
@@ -276,10 +285,11 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         func stop() {
             guard let task else { return }
             task.cancel(); self.task = nil
-            sample()
+            sample(force: true)
         }
         var summary: [String: Any] {
             ["peakFootprintMB": Int(peakFootprint), "minAvailableMB": Int(minAvailable), "samples": samples,
+             "memoryWarnings": SessionProbe.warnings - warningsAtStart,
              "loadMs": SessionProbe.ms(ContinuousClock.now - started)]
         }
     }
