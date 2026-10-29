@@ -4,12 +4,12 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// What the debug bridge shows Jakob: messages from the agent, questions with buttons, a status banner.
-/// Internal builds only. The text is whatever the agent sent; dictated text appears only if the agent's
+/// What the debug bridge shows Jakob: messages from whoever runs ctl.sh, questions with buttons, a status banner.
+/// Internal builds only. The text is whatever the operator sent; dictated text appears only if the operator's
 /// message contains it.
 @MainActor @Observable
-final class AgentMessages {
-    static let shared = AgentMessages()
+final class DebugMessages {
+    static let shared = DebugMessages()
 
     struct Item: Identifiable, Equatable {
         let id: String
@@ -22,7 +22,7 @@ final class AgentMessages {
     private(set) var status: String?
     @ObservationIgnored private var timeouts: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var limits: [String: Double] = [:]
-    @ObservationIgnored private var window: AgentOverlayWindow?
+    @ObservationIgnored private var window: DebugOverlayWindow?
 
     var current: Item? { queue.first }
 
@@ -115,7 +115,7 @@ final class AgentMessages {
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
             let content = UNMutableNotificationContent()
-            content.title = "Agent needs an answer"
+            content.title = "Debug: an answer is needed"
             content.body = text
             content.sound = .default
             content.interruptionLevel = .timeSensitive
@@ -129,10 +129,10 @@ final class AgentMessages {
            let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
                .first(where: { $0.activationState == .foregroundActive }) ??
                UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
-            let w = AgentOverlayWindow(windowScene: scene)
+            let w = DebugOverlayWindow(windowScene: scene)
             w.windowLevel = .alert + 1
             w.backgroundColor = .clear
-            let host = UIHostingController(rootView: AgentOverlayView(messages: self))
+            let host = UIHostingController(rootView: DebugOverlayView(messages: self))
             host.view.backgroundColor = .clear
             w.rootViewController = host
             window = w
@@ -142,16 +142,16 @@ final class AgentMessages {
 }
 
 /// Passes touches through everywhere except the overlay's own controls.
-final class AgentOverlayWindow: UIWindow {
+final class DebugOverlayWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
         return hit === rootViewController?.view ? nil : hit
     }
 }
 
-private struct AgentBadge: View {
+private struct DebugBadge: View {
     var body: some View {
-        Text("AGENT")
+        Text("DEBUG")
             .font(.caption.weight(.heavy))
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(Color.orange, in: Capsule())
@@ -160,26 +160,26 @@ private struct AgentBadge: View {
     }
 }
 
-struct AgentOverlayView: View {
-    var messages: AgentMessages
+struct DebugOverlayView: View {
+    var messages: DebugMessages
 
     var body: some View {
         VStack(spacing: 8) {
             if let status = messages.status {
                 HStack(spacing: 8) {
-                    AgentBadge()
+                    DebugBadge()
                     Text(status).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(10)
                 .background(Color.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Agent status: \(status)")
+                .accessibilityLabel("Debug status: \(status)")
             }
             if let item = messages.current {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        AgentBadge()
+                        DebugBadge()
                         if messages.queue.count > 1 {
                             Text("1 of \(messages.queue.count)").font(.caption).foregroundStyle(.secondary)
                         }
@@ -190,7 +190,7 @@ struct AgentOverlayView: View {
                             Button(choice) { messages.reply(id: item.id, choice: choice) }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.large)
-                                .accessibilityLabel(item.choices.isEmpty ? "Dismiss agent message" : "Answer: \(choice)")
+                                .accessibilityLabel(item.choices.isEmpty ? "Dismiss debug message" : "Answer: \(choice)")
                         }
                     }
                 }
@@ -199,7 +199,7 @@ struct AgentOverlayView: View {
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.orange, lineWidth: 3))
                 .accessibilityElement(children: .contain)
-                .accessibilityLabel("Message from the agent: \(item.text)")
+                .accessibilityLabel("Debug message: \(item.text)")
             }
             Spacer(minLength: 0)
         }
