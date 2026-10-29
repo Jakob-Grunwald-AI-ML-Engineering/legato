@@ -2,7 +2,8 @@ import Foundation
 
 /// A source that reads the change feed and proposes edits (the cleanup agent, later tools and the voice agent).
 public protocol FieldAgent: Sendable {
-    /// Takes in a feed batch and returns the edits it wants made, based on `batch.version`.
+    /// Takes in a feed batch and returns the edits it wants made, based on `batch.version` with
+    /// `session: batch.session`. On a `resync` batch it drops its copy of the field and starts from `batch.window`.
     func consume(_ batch: FeedBatch) async -> [EditTransaction]
     /// One of its edits was handed back.
     func conflicted(_ conflict: Conflict, for transaction: UUID) async

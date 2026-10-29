@@ -6,17 +6,30 @@ public enum ContiguousPatch {
     /// the two are byte-equal. The common prefix and suffix are found at Character boundaries but compared
     /// byte for byte, so canonically equivalent spellings (a decomposed é) count as different and are kept.
     public static func between(_ old: String, _ new: String, at location: Int) -> EditStep? {
+        between(old, new, at: location, prefixLimit: .max)
+    }
+
+    /// The same with the common prefix capped at `prefixLimit` UTF-16 units (a host change anchored at the
+    /// caret: the prefix never runs past the lower of the two carets) and, with `suffix` false, no common suffix
+    /// (the change reaches the end of `old`, as on the text before an iOS caret).
+    static func between(
+        _ old: String, _ new: String, at location: Int, prefixLimit: Int, suffix: Bool = true
+    ) -> EditStep? {
         let a = Array(old), b = Array(new)
-        var prefix = 0
-        while prefix < min(a.count, b.count), byteEqual(a[prefix], b[prefix]) { prefix += 1 }
+        var prefix = 0, prefixUnits = 0
+        while prefix < min(a.count, b.count), byteEqual(a[prefix], b[prefix]),
+            prefixUnits + a[prefix].utf16.count <= prefixLimit
+        {
+            prefixUnits += a[prefix].utf16.count
+            prefix += 1
+        }
         var tail = 0
-        while tail < min(a.count, b.count) - prefix, byteEqual(a[a.count - 1 - tail], b[b.count - 1 - tail]) {
+        while suffix, tail < min(a.count, b.count) - prefix, byteEqual(a[a.count - 1 - tail], b[b.count - 1 - tail]) {
             tail += 1
         }
         let removed = String(a[prefix..<(a.count - tail)])
         let inserted = String(b[prefix..<(b.count - tail)])
         guard !removed.isEmpty || !inserted.isEmpty else { return nil }
-        let start = location + String(a[..<prefix]).utf16.count
-        return EditStep(span: Span(location: start, length: removed.utf16.count), text: inserted, expect: removed)
+        return EditStep(span: Span(location: location + prefixUnits, length: removed.utf16.count), text: inserted, expect: removed)
     }
 }

@@ -13,8 +13,13 @@ public struct Conflict: Sendable, Hashable, Codable {
         case verifyFailed
         /// The field lost focus or was replaced.
         case focusLost
-        /// The edit's range is not in the current window.
+        /// The edit's range is not in the current window, or its base is not a version this queue can map from
+        /// (another queue instance, pruned history, a write that was rolled back, a version not reached yet).
         case outOfWindow
+        /// The executor could not write (Mac AX fault); the write was aborted before it ran.
+        case writeFailed
+        /// The executor could not read the field to check or verify the write.
+        case unreadable
     }
 
     public var reason: Reason

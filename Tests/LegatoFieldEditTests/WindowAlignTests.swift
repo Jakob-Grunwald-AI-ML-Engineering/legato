@@ -34,7 +34,6 @@ import LegatoFieldEdit
 
     @Test(arguments: [
         ("the caret jumped elsewhere", FieldSnapshot(before: "another paragraph ", after: "entirely")),
-        ("the window shifted", FieldSnapshot(before: "llo wo", after: "rld, teh end, and more")),
     ])
     func anUnalignableWindowResets(_ name: String, _ snapshot: FieldSnapshot) {
         var (queue, fix) = queueWithPendingFix()
@@ -84,5 +83,74 @@ import LegatoFieldEdit
         queue.reset(FieldSnapshot(window: "xyz", caret: 0, windowBase: 0), reason: .focusChanged)
         #expect(queue.document.owned.isEmpty)
         #expect(queue.document.windowBase == 0)
+    }
+
+    // MARK: Length-limited windows (B1)
+
+    /// The proxy's context is length-limited, so the window's edges move with the caret's text: an edge shift
+    /// re-bases offsets and taints nothing (this case used to be asserted as a reset).
+    @Test func aShiftedWindowEdgeRebasesWithoutTaint() {
+        var (queue, fix) = queueWithPendingFix()
+        let snapshot = FieldSnapshot(before: "llo wo", after: "rld, teh end, and more")
+        queue.observe(snapshot)
+        #expect(queue.takeEvents().isEmpty)
+        #expect(queue.feed.entries.map(\.event) == [.rebased(window: snapshot.window, shift: -2, version: FieldVersion(1))])
+        #expect(queue.document.window == snapshot.window)
+        #expect(queue.document.caret == 6)
+        #expect(queue.document.tainted.isEmpty)
+        let write = queue.next()
+        #expect(write?.id == fix.id)
+        #expect(write?.steps == [replace(11, "teh", with: "the")])
+    }
+
+    @Test func aSnapshotCarriesTheTextBeforeAndAfterTheCaret() {
+        let snapshot = FieldSnapshot(window: "hello world", caret: 5, windowBase: 0)
+        #expect(snapshot.before == "hello")
+        #expect(snapshot.after == " world")
+        #expect(FieldSnapshot(before: "ab", after: "c").caret == 2)
+    }
+
+    @Test func ourWriteThatShiftsTheWindowEdgeIsConfirmed() {
+        var queue = FieldEditQueue(FieldSnapshot(before: "0123456789", after: ""))
+        let fix = EditTransaction(origin: .agent, owner: "run", base: v0, steps: [replace(4, "4", with: "four")])
+        let key = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("ab", at: 10)])
+        queue.submit(fix)
+        queue.submit(key)
+        #expect(queue.next()?.id == key.id)
+        #expect(queue.settle(FieldSnapshot(before: "23456789ab", after: "")) == .confirmed)
+        #expect(queue.takeEvents() == [.applied(key.id, version: FieldVersion(1))])
+        #expect(queue.document.window == "23456789ab")
+        #expect(queue.document.caret == 10)
+        #expect(queue.document.tainted.isEmpty)
+        #expect(queue.next()?.steps == [replace(2, "4", with: "four")])
+    }
+
+    @Test func aHostUpdateNotShowingEveryWriteYetWaitsForTheNext() {
+        var queue = FieldEditQueue(FieldSnapshot(before: "one two", after: ""))
+        let key1 = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("!", at: 7)])
+        queue.submit(key1)
+        _ = queue.next()
+        let key2 = EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("?", at: 8)])
+        queue.submit(key2)
+        _ = queue.next()
+
+        #expect(queue.settle(FieldSnapshot(before: "one two", after: ""), final: false) == .notYet)
+        #expect(queue.takeEvents().isEmpty)
+        #expect(queue.settle(FieldSnapshot(before: "one two!", after: ""), final: false) == .notYet)
+        #expect(queue.takeEvents() == [.applied(key1.id, version: FieldVersion(1))])
+        #expect(queue.settle(FieldSnapshot(before: "one two!?", after: ""), final: false) == .confirmed)
+        #expect(queue.takeEvents() == [.applied(key2.id, version: FieldVersion(2))])
+        #expect(queue.document.window == "one two!?")
+    }
+
+    @Test func aHostUpdateThatContradictsTheWritesDivergesEvenWhileWaiting() {
+        var queue = FieldEditQueue(FieldSnapshot(before: "one two", after: ""))
+        let key = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("!", at: 7)])
+        queue.submit(key)
+        _ = queue.next()
+        #expect(queue.settle(FieldSnapshot(before: "one tw", after: ""), final: false) == .diverged)
+        #expect(queue.takeEvents() == [.conflict(key.id, Conflict(.verifyFailed))])
+        #expect(queue.document.window == "one tw")
+        #expect(queue.feed.entries.last?.event == .foreign(replace(6, "o", with: ""), byUser: true, version: queue.document.version))
     }
 }

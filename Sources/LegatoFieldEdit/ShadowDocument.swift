@@ -52,20 +52,31 @@ public struct ShadowDocument: Sendable, Hashable {
     }
 }
 
-/// One read of the host field: the window and the caret in it (UTF-16).
+/// One read of the host field, split at the caret (UTF-16). On iOS `before` and `after` are the proxy's
+/// `documentContextBefore/AfterInput`: length-limited, so their outer edges move with the caret and with every
+/// write; only the caret between them is a fixed point (`windowBase` nil). On the Mac they are the whole field
+/// split at the selection (`windowBase` 0, absolute positions).
 public struct FieldSnapshot: Sendable, Hashable {
-    public var window: String
-    public var caret: Int
+    public var before: String
+    public var after: String
     public var windowBase: Int?
 
-    public init(window: String, caret: Int, windowBase: Int? = nil) {
-        self.window = window
-        self.caret = caret
+    /// The iOS text proxy's view: the text before and after the caret.
+    public init(before: String, after: String, windowBase: Int? = nil) {
+        self.before = before
+        self.after = after
         self.windowBase = windowBase
     }
 
-    /// The iOS text proxy's view: the text before and after the caret.
-    public init(before: String, after: String) {
-        self.init(window: before + after, caret: before.utf16.count)
+    /// A whole window with the caret at UTF-16 offset `caret` (clamped to the window).
+    public init(window: String, caret: Int, windowBase: Int? = nil) {
+        let units = Array(window.utf16)
+        let split = min(max(caret, 0), units.count)
+        self.init(
+            before: String(decoding: units[..<split], as: UTF16.self),
+            after: String(decoding: units[split...], as: UTF16.self), windowBase: windowBase)
     }
+
+    public var window: String { before + after }
+    public var caret: Int { before.utf16.count }
 }
