@@ -17,6 +17,12 @@ struct KeyboardPreferences: Equatable {
     var strip = false
     var stripHeight = StripHeight.standard
 
+    /// The extension owns its last layout. Local defaults work with or without Full Access.
+    /// Only a boolean is retained, never document text.
+    static func expansionPersistence() -> KeyboardExpansionPersistence {
+        KeyboardExpansionPersistence(defaults: .standard)
+    }
+
     static func load() -> KeyboardPreferences {
         guard let defaults = UserDefaults(suiteName: LinkChannel.appGroupID) else { return KeyboardPreferences() }
         var stored: Double?

@@ -16,14 +16,37 @@ public enum ExpansionControl: Sendable, Equatable {
     case collapse
 }
 
-/// Whether a keyboard session is collapsed to the strip or expanded to the full keyboard. A session
-/// with the strip setting on starts collapsed; with it off the keyboard is always full and has no control.
+/// Stores only the last keyboard layout. UserDefaults is thread-safe.
+public final class KeyboardExpansionPersistence: @unchecked Sendable {
+    private let defaults: UserDefaults
+    private let key = "keyboardExpanded"
+
+    public init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    fileprivate var expanded: Bool {
+        get { defaults.bool(forKey: key) }
+        set { defaults.set(newValue, forKey: key) }
+    }
+}
+
+/// Whether the keyboard is collapsed to the strip or expanded. With the strip setting on, restores
+/// the last choice (initially collapsed); with it off the keyboard is always full and has no control.
 public struct KeyboardExpansion: Sendable, Equatable {
     public private(set) var stripEnabled: Bool
     private var expanded = false
+    private let persistence: KeyboardExpansionPersistence?
 
-    public init(stripEnabled: Bool) {
+    public init(stripEnabled: Bool, persistence: KeyboardExpansionPersistence? = nil) {
         self.stripEnabled = stripEnabled
+        self.persistence = persistence
+        expanded = stripEnabled && (persistence?.expanded ?? false)
+        if !stripEnabled { persistence?.expanded = false }
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.stripEnabled == rhs.stripEnabled && lhs.expanded == rhs.expanded
     }
 
     public var mode: KeyboardMode { stripEnabled && !expanded ? .strip : .full }
@@ -36,6 +59,7 @@ public struct KeyboardExpansion: Sendable, Equatable {
     public mutating func toggle() {
         guard stripEnabled else { return }
         expanded.toggle()
+        persistence?.expanded = expanded
     }
 
     /// The least vertical travel, in points, that counts as a swipe.
@@ -54,6 +78,7 @@ public struct KeyboardExpansion: Sendable, Equatable {
         guard enabled != stripEnabled else { return }
         stripEnabled = enabled
         expanded = false
+        persistence?.expanded = false
     }
 }
 

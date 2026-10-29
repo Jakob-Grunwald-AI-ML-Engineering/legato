@@ -65,7 +65,7 @@ final class KeyboardController {
     /// Fills the word row (completions, predictions, alternatives) and learns from typing.
     @ObservationIgnored private(set) var wordRow: SuggestionController!
 
-    /// Strip or full keyboard, and the chevron that switches (`KeyboardExpansion`, per keyboard session).
+    /// Strip or full keyboard, and the chevron that switches; restores the last user choice.
     private(set) var expansion = KeyboardExpansion(stripEnabled: false)
     /// The strip's height in points; the debug long press steps it through `StripHeight.candidates`.
     private(set) var stripHeight = StripHeight.standard
@@ -94,13 +94,18 @@ final class KeyboardController {
 
     init(
         document: any TextDocument, link: LinkClient, hasFullAccess: @escaping @MainActor () -> Bool,
-        preferences: @escaping () -> KeyboardPreferences = { .load() }
+        preferences: @escaping () -> KeyboardPreferences = { .load() },
+        expansionPersistence: KeyboardExpansionPersistence? = nil
     ) {
         self.document = document
         self.link = link
         self.hasFullAccess = hasFullAccess
         self.preferences = preferences
-        refreshPreferences()
+        let current = preferences()
+        expansion = KeyboardExpansion(
+            stripEnabled: current.strip,
+            persistence: expansionPersistence ?? KeyboardPreferences.expansionPersistence())
+        stripHeight = current.stripHeight
         cursor = link.readApplied()
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
