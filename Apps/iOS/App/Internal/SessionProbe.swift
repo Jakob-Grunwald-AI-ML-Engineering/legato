@@ -91,7 +91,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         defer { keepAlive?.end() }
         let memory = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { logMemory("memoryWarning"); say("memory warning received") } }
+        ) { _ in MainActor.assumeIsolated { _ = logMemory("memoryWarning"); say("memory warning received") } }
         defer { NotificationCenter.default.removeObserver(memory) }
         let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         pressure.setEventHandler {
@@ -151,7 +151,13 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         }
         AudioDiagnostics.log("session.probe.done", ["mode": mode.rawValue, "ok": failures == 0, "backends": backends.map(\.name), "appState": appState])
         logMemory("end")
+        // The app prepares its own models again (speech and cleanup together): sample that load as well.
+        say("restoring the app's own models")
+        let restore = LoadSampler(phase: "restore")
+        restore.start()
         await AppController.shared.endProbeHold()
+        restore.stop()
+        logMemory("afterRestore", restore.summary.merging(["ready": AppController.shared.status.isReady, "recognitionPreparing": AppController.shared.recognitionPreparing]) { $1 })
         say("done (\(failures == 0 ? "ok" : "\(failures) failed"); measured: \(backends.map(\.name).joined(separator: ", ")))")
         if mode == .backgroundAudio { await AppController.shared.endKeepAlive() }
     }
@@ -250,6 +256,8 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         private var minAvailable = Double.greatestFiniteMagnitude
         private var samples = 0
         private let started = ContinuousClock.now
+        private let phase: String
+        init(phase: String = "load") { self.phase = phase }
 
         func start() {
             task = Task { @MainActor [weak self] in
@@ -260,7 +268,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
             }
         }
         private func sample() {
-            let memory = SessionProbe.logMemory("load", ["elapsedMs": SessionProbe.ms(ContinuousClock.now - started)])
+            let memory = SessionProbe.logMemory(phase, ["elapsedMs": SessionProbe.ms(ContinuousClock.now - started)])
             peakFootprint = max(peakFootprint, memory.footprintMB)
             minAvailable = min(minAvailable, memory.availableMB)
             samples += 1
