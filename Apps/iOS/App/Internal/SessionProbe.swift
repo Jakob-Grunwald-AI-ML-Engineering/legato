@@ -42,6 +42,23 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
     private static var mode = SessionProbeMode.foreground
     private static let kickstartGap = Duration.seconds(2)
 
+    /// Where each step is announced to the person holding the phone (the debug overlay's status banner in
+    /// builds with the device bridge); nil text clears it. Unset, steps only reach the diagnostics log.
+    static var announce: (@MainActor (String?) -> Void)?
+
+    /// Starts a probe without waiting for it (a bridge command must return while the probe runs).
+    /// False when a probe is already running.
+    @discardableResult
+    static func start(mode: SessionProbeMode, models: ModelServices) -> Bool {
+        guard !running else { return false }
+        Task { await run(mode: mode, models: models) }
+        return true
+    }
+
+    private static func say(_ text: String) { announce?("Session probe (\(mode.rawValue)): \(text)") }
+
+    private static func brief(_ error: any Error) -> String { String((error as NSError).localizedDescription.prefix(120)) }
+
     /// Starts a probe when the launch arguments (`-LegatoSessionProbe <mode>`) or the environment
     /// (`LEGATO_SESSION_PROBE=<mode>`) ask for one.
     static func runIfRequested(models: ModelServices) {
@@ -67,9 +84,10 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         defer { keepAlive?.end() }
         let memory = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { log(backend: "app", turn: "memoryWarning") } }
+        ) { _ in MainActor.assumeIsolated { log(backend: "app", turn: "memoryWarning"); say("memory warning received") } }
         defer { NotificationCenter.default.removeObserver(memory) }
         AudioDiagnostics.log("session.probe.start", ["mode": mode.rawValue, "delayS": delay.components.seconds, "appState": appState])
+        say("started; preparing models")
 
         // Prepare in the foreground: a background start may not load models.
         var backends: [(name: String, backend: any LLMBackend)] = []
@@ -79,8 +97,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
             log(backend: "foundation-models", turn: "skipped", ["reason": "unavailable"])
         }
         if let id = models.selected(.cleanup), let spec = CoreMLModels.spec(id: id) {
-            let coreML = await CoreMLModelStore.shared.backend(for: spec, root: ModelServices.phoneModelsRoot)
-            if await prepare(coreML, name: "coreml:\(id)", models: models) { backends.append(("coreml:\(id)", coreML)) }
+            if let coreML = await prepare(spec, name: "coreml:\(id)", models: models) { backends.append(("coreml:\(id)", coreML)) }
         } else {
             log(backend: "coreml", turn: "skipped", ["reason": "no Core ML cleanup model selected"])
         }
@@ -91,6 +108,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         }
         if delay > .zero { try? await Task.sleep(for: delay) }
         if mode != .foreground {
+            say("models ready; waiting for the app to go to the background")
             let deadline = ContinuousClock.now + .seconds(180)
             while UIApplication.shared.applicationState != .background, ContinuousClock.now < deadline {
                 try? await Task.sleep(for: .milliseconds(250))
@@ -100,27 +118,34 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
 
         var failures = 0
         for (name, backend) in backends {
+            say("measuring \(name)")
             do { try await measure(backend, name: name) } catch {
                 failures += 1
                 log(backend: name, turn: "failed", ["error": AudioDiagnostics.describe(error)])
+                say("\(name) failed: \(brief(error))")
             }
         }
         AudioDiagnostics.log("session.probe.done", ["mode": mode.rawValue, "ok": failures == 0, "backends": backends.map(\.name), "appState": appState])
+        say("done (\(failures == 0 ? "ok" : "\(failures) failed"); measured: \(backends.map(\.name).joined(separator: ", ")))")
         if mode == .backgroundAudio { await AppController.shared.endKeepAlive() }
     }
 
     /// Prepares the Core ML backend the app's own warmup shares. A launch-time release (memory pressure, a
     /// selection change) cancels a preparation in flight with `CancellationError`; the probe logs what the
-    /// app's preparation status was and tries again, up to three times.
-    private static func prepare(_ coreML: CoreMLBackend, name: String, models: ModelServices) async -> Bool {
+    /// app's preparation status was and tries again, up to three times. Each attempt asks the store for the
+    /// backend again: a release retires the old owner, and preparing that one would load a second copy.
+    private static func prepare(_ spec: CoreMLModelSpec, name: String, models: ModelServices) async -> CoreMLBackend? {
         for attempt in 1...3 {
             let start = ContinuousClock.now
+            say("preparing \(name) (attempt \(attempt) of 3)")
+            let coreML = await CoreMLModelStore.shared.backend(for: spec, root: ModelServices.phoneModelsRoot)
             do {
                 try await coreML.prepare()
                 // The app's own rolling session warms on the same single native worker; let it finish first.
                 let rolling = await models.rollingCleanupSession(for: .coreML)
                 log(backend: name, turn: "prepared", ["attempt": attempt, "wallMs": ms(ContinuousClock.now - start), "rollingSession": rolling != nil])
-                return true
+                say("\(name) prepared in \(ms(ContinuousClock.now - start)) ms")
+                return coreML
             } catch {
                 log(backend: name, turn: attempt < 3 ? "prepare.retry" : "skipped", [
                     "reason": "prepare failed", "attempt": attempt, "error": AudioDiagnostics.describe(error),
@@ -128,10 +153,11 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
                     "appPreparation": String(describing: models.cleanupPreparation.state),
                     "prepared": await coreML.isPrepared(),
                 ])
+                say("\(name) prepare attempt \(attempt) failed: \(brief(error))")
                 if attempt < 3 { try? await Task.sleep(for: .seconds(2)) }
             }
         }
-        return false
+        return nil
     }
 
     /// A probe-only keep-alive. Its expiry ends the task (iOS terminates an app that lets one run out).
@@ -239,6 +265,7 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
         fields["wallMs"] = ms(wall)
         fields.merge(extra(reply)) { $1 }
         log(backend: name, turn: turn, fields)
+        say("\(name) turn \(turn): \(ms(wall)) ms")
         return reply
     }
 
