@@ -1,0 +1,13 @@
+# Local build caches
+
+Local `scripts/ci/test.sh` app builds and `scripts/ci/release.sh mac-build` reuse `<LEGATO_CACHE_DIR>/build-derived/{gate,mac}-<checkout-path-hash>` and `<LEGATO_CACHE_DIR>/SourcePackages`. The default root is `~/Library/Caches/legato`. Simulator builds continue to reuse `e2e-derived/<checkout-path-hash>`. Participating builds hold their DerivedData lock and the shared package lock through the entire build, serializing local package users. Explicit `LEGATO_E2E_DERIVED` directories are excluded from management.
+
+Gate, mac-build and simulator entry/exit automatically prune only entries bearing the `v1` management marker and an explicit last-use stamp. The defaults are 48 hours since last use and a combined 10 GiB cap, evicting oldest inactive entries first. `LEGATO_CACHE_MAX_AGE_SECONDS` and `LEGATO_CACHE_MAX_KB` override these limits. An active or ambiguous lock always retains its entry, so this is a soft cap; a single active build can exceed it. Pruning never steals stale locks. Build entry points recover dead-owner locks when that cache is next used.
+
+Preview with `scripts/dev/prune-build-caches.sh --managed-only`. Add `--delete` to remove candidates. Dry runs acquire short-lived maintenance locks but do not remove cache entries. Symlink entries and unmarked legacy/custom paths are excluded. The default prune command also previews the older deleted-checkout DerivedData and stale temporary-log cleanup; `--managed-only` omits those legacy rules. Legacy Xcode DerivedData, checkout `.build`, XcodeGen downloads and kept logs are outside the managed budget. Existing caches become managed when a participating build uses them; unmanaged legacy disk use needs a separate review.
+
+CI gate/mac builds use unique temporary directories and remove them on exit. They do not reuse the local cache or add an Actions cache. These rules bound reusable inactive outputs; fixture checks do not establish a day-long disk-use budget or a real-dependency build time.
+
+Run `scripts/e2e/tests/build-cache-test.sh` for private cache fixtures and a fake-Xcode drive through the real mac-build entry point. `scripts/e2e/tests/cleanup-test.sh` checks simulator work-directory signal cleanup without compiling Swift.
+
+Cache users and pruning share a macOS `lockf` descriptor lock on a persistent sibling `.guard` file. The descriptor remains open for the entire lease; `.lock` owner directories provide compatibility with older running scripts. Stale owner recovery happens under the same OS lock, and pruning skips any preexisting owner directory. Guard files remain after use to preserve one lock inode across waiters; do not remove them while cache users may be running.

@@ -19,6 +19,98 @@ import Testing
         #expect(await r.coordinator.toggle() == .stopped("hello world"))
     }
 
+    // MARK: delayed system microphone events
+
+    @Test func aQueuedSystemEventCannotStopANewerRunOnTheSameMicrophone() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        let event = r.coordinator.captureSystemEvent()
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        #expect(r.built.all.count == 1) // a new run, with the same source
+
+        if r.coordinator.isCurrent(event) {
+            await r.coordinator.endKeepAlive()
+            _ = await r.coordinator.stopIfRunning(releasingLease: true)
+        }
+
+        #expect(!r.coordinator.isCurrent(event))
+        #expect(!r.coordinator.isIdle)
+        #expect(r.log.count("source.stop") == 0)
+        #expect(await r.coordinator.toggle() == .stopped("hello world"))
+        await r.coordinator.endKeepAlive()
+    }
+
+    @Test func aSystemEventRechecksOwnershipAfterReleasingAnIdleLease() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        await runOnce(r, Self.keyboard)
+        let event = r.coordinator.captureSystemEvent()
+        r.source.holdStop(true)
+        let ending = Task {
+            guard r.coordinator.isCurrent(event) else { return }
+            await r.coordinator.endKeepAlive()
+            guard r.coordinator.isCurrent(event) else { return }
+            _ = await r.coordinator.stopIfRunning(releasingLease: true)
+        }
+        #expect(await eventually { r.log.count("source.stop") == 1 })
+        let entered = Done()
+        let starting = Task {
+            entered.value = true
+            return await r.coordinator.toggle(Self.keyboard)
+        }
+        #expect(await eventually { entered.value }) // admitted, waiting for old deactivation
+        #expect(!r.coordinator.isCurrent(event))
+        r.source.holdStop(false)
+        await ending.value
+        #expect(await starting.value == .started)
+        #expect(!r.coordinator.isIdle)
+        #expect(r.log.count("deactivate") == 1)
+        _ = await r.coordinator.toggle()
+        await r.coordinator.endKeepAlive()
+    }
+
+    @Test func aQueuedIdleSystemEventCannotReleaseANewlyArmedMicrophone() async throws {
+        let r = CoordinatorRig()
+        let event = r.coordinator.captureSystemEvent()
+        #expect(await r.coordinator.arm(keepAlive: .seconds(30)) == .armed)
+        if r.coordinator.isCurrent(event) { await r.coordinator.endKeepAlive() }
+        #expect(!r.coordinator.isCurrent(event))
+        #expect(r.coordinator.holdsLease)
+        #expect(r.log.count("source.stop") == 0)
+        await r.coordinator.endKeepAlive()
+    }
+
+    @Test func aCurrentSystemEventStillStopsAndReleasesTheRunningMicrophone() async throws {
+        let r = CoordinatorRig(script: [.init(text: "hello world", isFinal: true)])
+        #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        let event = r.coordinator.captureSystemEvent()
+        await r.coordinator.endKeepAlive()
+        #expect(r.coordinator.isCurrent(event))
+        #expect(await r.coordinator.stopIfRunning(releasingLease: true) == .stopped("hello world"))
+        #expect(r.coordinator.isIdle && !r.coordinator.holdsLease)
+        #expect(r.log.count("source.stop") == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func aRetryReplacingTheSourceInvalidatesItsQueuedEvent(arming: Bool) async throws {
+        let r = CoordinatorRig()
+        r.environment.context = foreground
+        r.source.failNextStarts(1, with: notReady)
+        var event: DictationCoordinator.SystemEventToken?
+        r.coordinator.onStartFallback = { _, _, _ in
+            event = r.coordinator.captureSystemEvent()
+        }
+        if arming {
+            #expect(await r.coordinator.arm(keepAlive: .seconds(30)) == .armed)
+        } else {
+            #expect(await r.coordinator.toggle(Self.keyboard) == .started)
+        }
+        #expect(r.built.all.count == 2)
+        #expect(!r.coordinator.isCurrent(try #require(event)))
+        if !arming { _ = await r.coordinator.toggle() }
+        await r.coordinator.endKeepAlive()
+    }
+
     // MARK: cancel during a refused start's teardown
 
     @Test func aCancelWhileARefusedStartIsTornDownStopsInsteadOfHopping() async throws {

@@ -34,12 +34,13 @@
 #
 # Build caches (all under LEGATO_CACHE_DIR, so deleting worktrees does not strand gigabytes):
 #   SourcePackages/      cloned SwiftPM packages, shared by every checkout and run (-clonedSourcePackagesDirPath;
-#                        SwiftPM locks it itself).
+#                        participating builds hold its lock through resolution and every build read).
 #   e2e-derived/<hash>/  DerivedData, one per checkout, reused between runs. Not shared across checkouts: DerivedData
 #                        is keyed by source paths, so another checkout would rebuild everything anyway, and concurrent
 #                        xcodebuilds on one DerivedData are unsafe. Runs on the same checkout are serialized by a
-#                        mkdir lock (stale locks of dead PIDs are taken over).
-# scripts/dev/prune-build-caches.sh removes the caches of deleted checkouts (dry run by default).
+#                        OS-backed guard and owner marker (dead legacy owners are recovered under the guard).
+# Marked inactive caches are pruned automatically (48-hour last-use TTL, 10 GiB soft cap).
+# scripts/dev/prune-build-caches.sh previews managed and legacy cleanup by default.
 set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=../ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../ci/lib.sh"   # also cd's to the repo root
@@ -57,13 +58,14 @@ tag_work_dir "$WORK"
 CACHE="$(legato_cache_dir)"
 PKGS="$CACHE/SourcePackages"
 DERIVED_LOCKED=""
+PKGS_LOCKED=""
 if [ -n "${LEGATO_E2E_DERIVED:-}" ]; then
   DERIVED="$LEGATO_E2E_DERIVED"
 else
   DERIVED="$CACHE/e2e-derived/$(pwd -P | shasum | cut -c1-12)"
 fi
 mkdir -p "$PKGS" "$DERIVED"
-[ -n "${LEGATO_E2E_DERIVED:-}" ] || pwd -P > "$DERIVED/legato-checkout"   # lets prune-build-caches.sh tell when the checkout is gone
+
 UDID=""
 BOOTED_BY_US=0
 LOGPID=""
@@ -72,7 +74,15 @@ CHILD=""
 cleanup() {
   if declare -F stop_log > /dev/null; then stop_log; fi
   if [ "$BOOTED_BY_US" = 1 ] && [ -n "$UDID" ]; then xcrun simctl shutdown "$UDID" > /dev/null 2>&1; fi
-  [ -z "$DERIVED_LOCKED" ] || unlock_dir "$DERIVED"
+  if [ -n "$PKGS_LOCKED" ]; then
+    touch "$PKGS/legato-last-used"
+    unlock_dir "$PKGS"
+  fi
+  if [ -n "$DERIVED_LOCKED" ]; then
+    [ ! -f "$DERIVED/legato-managed" ] || touch "$DERIVED/legato-last-used"
+    unlock_dir "$DERIVED"
+  fi
+  [ -n "${LEGATO_E2E_TEST_STUB:-}" ] || bash scripts/dev/prune-build-caches.sh --managed-only --delete
   if [ "${LEGATO_E2E_KEEP:-0}" = 1 ]; then touch "$WORK/keep"; echo "Work directory kept: $WORK"; else rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
@@ -105,9 +115,20 @@ trap 'on_signal 143' TERM
 
 lock_dir "$DERIVED" || exit 2
 DERIVED_LOCKED=1
+mkdir -p "$DERIVED" || exit 2
+[ -n "${LEGATO_E2E_DERIVED:-}" ] || pwd -P > "$DERIVED/legato-checkout"
 
 # Test seam (scripts/e2e/tests/cleanup-test.sh): run a stub instead of the real work, so the trap and sweep are testable.
 if [ -n "${LEGATO_E2E_TEST_STUB:-}" ]; then run_fg "$LEGATO_E2E_TEST_STUB" "$WORK"; exit $?; fi
+
+# Hold the shared clones through every build read, so pruning and another resolver cannot race it.
+bash scripts/dev/prune-build-caches.sh --managed-only --delete || exit 2
+lock_dir "$PKGS" || exit 2
+PKGS_LOCKED=1
+mkdir -p "$PKGS" || exit 2
+mark_build_cache "$PKGS"
+[ -n "${LEGATO_E2E_DERIVED:-}" ] || mark_build_cache "$DERIVED"
+
 
 select_xcode
 ensure_xcodegen || exit 2
@@ -166,16 +187,13 @@ for devs in json.load(sys.stdin)["devices"].values():
 
 # ---------------------------------------------------------------------------------------------- build
 
-# Resolve packages into the shared clone dir under a lock: two xcodebuilds cloning into it for the first time
-# race ("already exists unexpectedly"). Builds then run with automatic resolution off and only read it.
+# Resolve under the shared-clone lock held for this entire run. Builds disable automatic resolution.
 PKGS_RESOLVED=""
 resolve_packages() {
   [ -z "$PKGS_RESOLVED" ] || return 0
-  lock_dir "$PKGS" || exit 2
   run_fg xcodebuild -resolvePackageDependencies -project Apps/iOS/Legato.xcodeproj -scheme Legato \
     -clonedSourcePackagesDirPath "$PKGS" > "$WORK/resolve.log" 2>&1
   local rc=$?
-  unlock_dir "$PKGS"
   [ "$rc" = 0 ] || { tail -30 "$WORK/resolve.log"; echo "Package resolution failed ($WORK/resolve.log)"; LEGATO_E2E_KEEP=1; exit 2; }
   PKGS_RESOLVED=1
 }

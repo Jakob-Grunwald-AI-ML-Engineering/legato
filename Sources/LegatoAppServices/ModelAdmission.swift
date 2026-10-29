@@ -20,9 +20,11 @@ import Foundation
         defer { isResetting = false }
         await operation()
     }
+    /// `onAdmitted` runs synchronously after reservation, before resolution or preparation can suspend.
     public func admit<Value: Sendable>(
         isIdle: @escaping @MainActor () -> Bool,
         canStart: @escaping @MainActor () -> Bool = { true },
+        onAdmitted: @MainActor () -> Void = {},
         resolve: @escaping @MainActor () async throws -> Void = {},
         prepare: @escaping @MainActor () async throws -> Void,
         operation: @escaping @MainActor () async -> Value
@@ -30,6 +32,7 @@ import Foundation
         guard pendingID == nil, !isResetting, isIdle() else { throw AdmissionError.busy }
         let id = UUID()
         pendingID = id
+        onAdmitted()
         let task = Task { @MainActor in
             try await resolve()
             try Task.checkCancellation()

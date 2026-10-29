@@ -21,8 +21,11 @@ case "$mode" in
     has_mac_app || { echo "::notice::No macOS app yet — nothing to build."; exit 0; }
     select_xcode
     ensure_xcodegen
+    trap finish_build_cache EXIT
+    prepare_build_cache mac
     (cd Apps/macOS && "$XCODEGEN" generate)
-    xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato -configuration Debug \
+    run_build_command xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato -configuration Debug \
+      -derivedDataPath "$BUILD_WORK" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" \
       -destination 'generic/platform=macOS' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
     ;;
   real-deps)
