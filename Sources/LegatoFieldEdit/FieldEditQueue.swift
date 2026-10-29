@@ -50,7 +50,7 @@ public struct FieldEditQueue: Sendable {
     }
 
     /// A change positions are mapped through.
-    private enum Change: Sendable {
+    private enum Change: Sendable, Equatable {
         case step(EditStep)
         /// The caret-relative window's edges moved: offset `p` is now `p + shift`, visible in `0...count`.
         case edges(shift: Int, count: Int)
@@ -132,6 +132,8 @@ public struct FieldEditQueue: Sendable {
     private var lastVersion: Int
     private var events: [QueueEvent] = []
     private var affinities: [Affinity] = []
+    /// The last settle left the prediction contradicted (``needsFinalSettle``).
+    private var contradicted = false
 
     public init(_ snapshot: FieldSnapshot, version: FieldVersion = FieldVersion(0), session: UUID = UUID()) {
         document = ShadowDocument(
@@ -144,6 +146,11 @@ public struct FieldEditQueue: Sendable {
 
     /// Whether any edit is waiting to be written.
     public var hasPending: Bool { !pending.isEmpty }
+
+    /// Whether the last host read contradicted the prediction without deciding (a non-final read nothing
+    /// explains, or one two outcomes fit): nothing is issued, in any lane and by ``next(for:)``, until a settle
+    /// resolves it. The executor settles again: the next host read, or a `final` one at its timeout.
+    public var needsFinalSettle: Bool { contradicted && !unverified.isEmpty }
 
     /// Records recognized text streamed into the run (Mac), in order with the field's own events.
     public mutating func appendASR(_ delta: String) { feed.append(.asrDelta(delta)) }
@@ -201,6 +208,7 @@ public struct FieldEditQueue: Sendable {
 
     /// The next write to run: the oldest edit of the highest lane whose guards hold. Edits failing a guard are
     /// handed back on the way. While issued writes await a host read only the user lane runs; the rest wait.
+    /// Nothing runs while ``needsFinalSettle``.
     public mutating func next() -> FieldWrite? { next(lanes: Set(Lane.allCases)) }
 
     /// ``next()`` among `lanes` only: edits in the other lanes are held (neither issued nor checked, so no version
@@ -226,9 +234,9 @@ public struct FieldEditQueue: Sendable {
 
     /// Issues the pending transaction `id` now, whatever its lane, ahead of every other edit and even while other
     /// writes await a host read (one read settles them all); the other edits stay queued untouched. Nil when `id`
-    /// is not pending, or when it fails a guard (then it is handed back).
+    /// is not pending, while ``needsFinalSettle``, or when it fails a guard (then it is handed back).
     public mutating func next(for id: UUID) -> FieldWrite? {
-        guard let index = pending.firstIndex(where: { $0.transaction.id == id }) else { return nil }
+        guard !needsFinalSettle, let index = pending.firstIndex(where: { $0.transaction.id == id }) else { return nil }
         let item = pending.remove(at: index)
         if let reason = check(item.transaction) {
             conflict(id, Conflict(reason, byUser: reason == .ownerTainted))
@@ -251,6 +259,7 @@ public struct FieldEditQueue: Sendable {
     }
 
     private func nextIndex(lanes: Set<Lane>) -> Int? {
+        guard !needsFinalSettle else { return nil }
         let eligible = pending.indices.filter {
             lanes.contains(pending[$0].lane) && (unverified.isEmpty || pending[$0].lane == .user)
         }
@@ -324,9 +333,16 @@ public struct FieldEditQueue: Sendable {
     /// A final read consistent with no prediction fails them all and is then observed against the confirmed field.
     ///
     /// Reads before the final one (`final: false`; the iOS proxy updates its context asynchronously and may show
-    /// any state between the ops of a write): a read that is an intermediate state of an issued write's op
-    /// sequence (see `inProgress`) confirms the writes before it and returns `notYet`, never a foreign change;
-    /// a read nothing explains returns `notYet` and changes nothing. Only the final read decides.
+    /// any state between the ops of a write): a read byte-identical to an intermediate state of an issued write's
+    /// op sequence (see `inProgress`) confirms the writes before it and returns `notYet`, never a foreign change;
+    /// one that matches an intermediate state only with the window's edges moved confirms nothing and returns
+    /// `notYet`. A read a prediction plus a foreign change explains is settled as a final one would be (writes
+    /// shown confirmed, the foreign change recorded). A read nothing explains returns `notYet`, changes nothing
+    /// and holds issuing (``needsFinalSettle``) until a settle resolves it.
+    ///
+    /// Liveness: a non-final read never fails a write it does not explain. Executors MUST settle with `final`
+    /// at their timeout; until then unexplained writes stay unverified and, after an unexplained read, nothing
+    /// is issued.
     ///
     /// Stale reads (`tolerateStale`, with `final`): a read identical to the field before some issued writes
     /// confirms the writes it shows and returns `stale`; the rest neither fail nor roll back. Recommended
@@ -351,6 +367,7 @@ public struct FieldEditQueue: Sendable {
     }
 
     private mutating func settleRead(_ snapshot: FieldSnapshot, final: Bool) -> SettleOutcome {
+        contradicted = false
         guard !unverified.isEmpty else {
             observe(snapshot)
             return .confirmed
@@ -394,22 +411,30 @@ public struct FieldEditQueue: Sendable {
             }
         }
 
-        // A write in progress: byte-identical intermediate states first, edge-shifted ones only where no prediction
-        // explains the read without a foreign change.
-        if !final, !explanations.contains(where: { $0.alignment == nil }),
-            let j = inProgress(snapshot, edges: false)
-                ?? (explanations.contains { $0.alignment?.step == nil } ? nil : inProgress(snapshot, edges: true))
-        {
-            confirm(j)
-            return .notYet
+        // A write in progress: a byte-identical intermediate state shows the writes before it and confirms them.
+        // An edge-shifted one (only where nothing else explains the read) hides part of the field: it waits,
+        // confirming nothing.
+        if !final, !explanations.contains(where: { $0.alignment == nil }) {
+            if let j = inProgress(snapshot, edges: false) {
+                confirm(j)
+                return .notYet
+            }
+            if explanations.isEmpty, inProgress(snapshot, edges: true) != nil { return .notYet }
         }
 
         let full = explanations.first.map { $0.k == predictions.count - 1 && $0.alignment == nil } ?? false
-        if !full, !windowBaseMoved(snapshot), let outcome = settleBySubset(snapshot, prefixes: explanations, final: final) {
+        var notes = SubsetNotes()
+        if !full, !windowBaseMoved(snapshot),
+            let outcome = settleBySubset(snapshot, prefixes: explanations, final: final, notes: &notes)
+        {
+            if outcome == .notYet { contradicted = true }
             return outcome
         }
         guard let choice = explanations.first else {
-            if !final { return .notYet }
+            if !final {
+                contradicted = true
+                return .notYet
+            }
             rollBack(from: 0, requeueFirst: false, requeueRest: false, reason: .verifyFailed)
             observe(snapshot)
             return .diverged
@@ -429,7 +454,28 @@ public struct FieldEditQueue: Sendable {
             rollBack(from: 0, requeueFirst: false, requeueRest: false, reason: .verifyFailed)
         }
         apply(choice.alignment, snapshot)
+        if notes.typingLooksWritten, let step = choice.alignment?.step {
+            // The user's text could also be a write's: it is theirs, and no automatic edit touches it.
+            document.tainted.append(Span(location: step.span.location, length: step.text.utf16.count))
+        }
+        if notes.guessedHistory { forgetHistory() }
         return choice.k == predictions.count - 1 ? .confirmed : .diverged
+    }
+
+    /// What ``settleBySubset(_:prefixes:final:notes:)`` found when it left the decision to the prefix explanations.
+    private struct SubsetNotes {
+        /// A subset of the writes' steps also explains the read, as the same text a typing explanation adds.
+        var typingLooksWritten = false
+        /// Tied explanations leave the same field through different steps: the history is a guess.
+        var guessedHistory = false
+    }
+
+    /// Drops the history up to the confirmed field: edits based before it are out of window, never mapped
+    /// through steps the queue only guessed.
+    private mutating func forgetHistory() {
+        guard unverified.isEmpty else { return }
+        history = []
+        floor = document.version
     }
 
     /// Per-write attribution: one write that did not land never fails the writes after it. The read is matched
@@ -440,11 +486,15 @@ public struct FieldEditQueue: Sendable {
     /// (`verifyFailed`); a write landed in part is confirmed with its landed steps and then fails for the rest.
     /// Tied subsets (or a tied prefix) that leave the same field and the same pending edits are one outcome, and
     /// the earliest writes (and lowest steps) are confirmed (a doubled letter: either copy failed); a real tie
-    /// waits (`notYet`), or resets when `final`. A lagging read before the final one (a prefix explains it) waits
-    /// without searching. Nil: no subset beats the prefix explanations. Pending edits inside a rolled-back
-    /// write's text are handed back on the way.
+    /// waits (`notYet`), or resets when `final`. Tied outcomes reached through different steps leave a guessed
+    /// history: it is dropped (``SubsetNotes/guessedHistory``), so edits based before the read come back
+    /// `outOfWindow` instead of being mapped through a step that may not have landed. A subset in which an owned
+    /// automatic write wrote the text a typing explanation adds at the read's caret never wins: the typing
+    /// explanation stands and its text is tainted (``SubsetNotes/typingLooksWritten``). A lagging read before
+    /// the final one (a prefix explains it) waits without searching. Nil: no subset beats the prefix
+    /// explanations. Pending edits inside a rolled-back write's text are handed back on the way.
     private mutating func settleBySubset(
-        _ snapshot: FieldSnapshot, prefixes: [(k: Int, alignment: Alignment?)], final: Bool
+        _ snapshot: FieldSnapshot, prefixes: [(k: Int, alignment: Alignment?)], final: Bool, notes: inout SubsetNotes
     ) -> SettleOutcome? {
         let sizes = unverified.map(\.write.steps.count)
         let units = sizes.reduce(0, +)
@@ -476,6 +526,10 @@ public struct FieldEditQueue: Sendable {
             best.append((landed, replayed))
         }
         guard !best.isEmpty, prefixSize <= bestSize else { return nil }
+        if best.contains(where: { claimsTyping($0.queue, prefixes, snapshot) }) {
+            notes.typingLooksWritten = true
+            return nil
+        }
         // Earliest writes and steps first: [true, false, true] before [false, true, true].
         best.sort { a, b in
             zip(a.landed.joined(), b.landed.joined()).first(where: { $0 != $1 }).map { $0.0 } ?? false
@@ -491,6 +545,7 @@ public struct FieldEditQueue: Sendable {
             reset(snapshot, reason: .unaligned)
             return .diverged
         }
+        notes.guessedHistory = best.dropFirst().contains { $0.queue.history.map(\.change) != winner.queue.history.map(\.change) }
         if prefixSize == bestSize { return nil }  // the prefix explanation stands
         let issued = unverified
         self = winner.queue
@@ -506,7 +561,39 @@ public struct FieldEditQueue: Sendable {
         }
         unverified = []
         document.caret = snapshot.caret
+        if notes.guessedHistory { forgetHistory() }
         return .diverged
+    }
+
+    /// Whether `replayed` (a subset replay) has an automatic, owned write claim text a typing explanation in
+    /// `prefixes` adds: the typed text ends at the read's caret (where typing leaves it) and lies inside what
+    /// a write at or after that explanation's prediction wrote. Then the text may be the user's.
+    private func claimsTyping(
+        _ replayed: FieldEditQueue, _ prefixes: [(k: Int, alignment: Alignment?)], _ snapshot: FieldSnapshot
+    ) -> Bool {
+        let written = replayed.writtenSpans().filter { $0.write.owner != nil && !$0.write.origin.isUser }
+        return prefixes.contains { k, alignment in
+            guard let step = alignment?.step else { return false }
+            let typed = Span(location: step.span.location, length: step.text.utf16.count)
+            guard typed.end == snapshot.caret else { return false }
+            let later = Set(unverified[k...].map(\.write.id))
+            return written.contains { entry in
+                later.contains(entry.write.id) && entry.span.location <= typed.location && typed.end <= entry.span.end
+            }
+        }
+    }
+
+    /// The text each issued write wrote, in the document's offsets.
+    private func writtenSpans() -> [(write: FieldWrite, span: Span)] {
+        var spans: [(write: FieldWrite, span: Span)] = []
+        for item in unverified {
+            for step in item.write.steps {
+                let map = StepMap(step)
+                spans = spans.compactMap { entry in map.adjust(entry.span).map { (entry.write, $0) } }
+                spans.append((item.write, Span(location: step.span.location, length: map.insertedLength)))
+            }
+        }
+        return spans
     }
 
     /// Whether `landed` (per issued write, per step) is the oldest writes landed whole and the rest not at all.
@@ -574,7 +661,7 @@ public struct FieldEditQueue: Sendable {
                 guard !isBoundary else { continue }
                 if edges {
                     let shadow = ShadowDocument(window: state.window, windowBase: start.windowBase, caret: state.caret)
-                    if alignments(shadow, snapshot).edges != nil { return j }
+                    if plausibleEdge(shadow, snapshot), alignments(shadow, snapshot).edges != nil { return j }
                 } else if byteEqual(state.window, snapshot.window) {
                     return j
                 }

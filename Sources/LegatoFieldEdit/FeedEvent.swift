@@ -12,6 +12,11 @@ public enum ResetReason: String, Sendable, Hashable, Codable {
 
 /// One entry of the change feed: what the field did, in landing order. Positions are UTF-16 offsets into the
 /// window as it stood right before the event.
+///
+/// Wire format: the synthesized `Codable` coding, frozen per build. Writer and reader (app and keyboard
+/// extension) ship in one bundle and update together, so a case added here needs no migration; decoding is
+/// not tolerant, and a reader of another build fails on an unknown case (a `DecodingError`) rather than
+/// misreading it. A transport that may cross builds must treat that failure as a resync.
 public enum FeedEvent: Sendable, Hashable, Codable {
     /// Recognized text streamed in (Mac only; on iOS the app owns ASR text).
     case asrDelta(String)
