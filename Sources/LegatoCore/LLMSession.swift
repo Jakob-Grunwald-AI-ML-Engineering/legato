@@ -282,3 +282,30 @@ public enum LLMStructuredDecoding {
         }
     }
 }
+
+// MARK: - Session ownership
+
+/// The sessions a resource owner handed out, so releasing the resources (memory pressure, a model change,
+/// the end of a run) ends every session still open on them. Holds sessions weakly.
+public actor LLMSessionSet {
+    private struct Entry { weak var session: (any LLMSession)? }
+    private var entries: [ObjectIdentifier: Entry] = [:]
+
+    public init() {}
+
+    public func insert(_ session: any LLMSession) {
+        entries = entries.filter { $0.value.session != nil }
+        entries[ObjectIdentifier(session)] = Entry(session: session)
+    }
+
+    public func remove(_ session: any LLMSession) { entries[ObjectIdentifier(session)] = nil }
+
+    public var count: Int { entries.values.filter { $0.session != nil }.count }
+
+    /// Closes every open session and forgets them.
+    public func closeAll() async {
+        let open = entries.values.compactMap(\.session)
+        entries = [:]
+        for session in open { await session.close() }
+    }
+}
