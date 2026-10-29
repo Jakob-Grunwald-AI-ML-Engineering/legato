@@ -30,4 +30,24 @@ import Testing
         #expect(!instructions.contains("numbered sentences"))
         #expect(CleanupPrompt.standard.userMessage("x", Locale(identifier: "en"), []) == "<text>\nx\n</text>")
     }
+
+    @Test func theSessionHeadLeavesTheReplyFormatToEachRequest() {
+        let head = CleanupPrompt.Agent.sessionHead(locale: Locale(identifier: "en"))
+        #expect(!head.contains("<text>"))
+        #expect(head.contains("Every request states the reply format"))
+        #expect(CleanupPrompt.sessionRequest("<text>\nx\n</text>").hasSuffix("Reply only in <text></text>, nothing else."))
+    }
+
+    @Test func requestCarriesStyleEmojiAndNumberSettings() {
+        let en = Locale(identifier: "en")
+        let one = [CleanupPrompt.Agent.Sentence(number: 1, text: "Hi.", role: .review)]
+        let markdown = CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: [], style: .markdown)
+        #expect(markdown.contains("Markdown"))
+        let message = CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: [], style: .message, emoji: .expressive)
+        #expect(message.contains("ready-to-send"))
+        #expect(message.contains("expressive emoji"))
+        let digits = CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: [], itn: true)
+        #expect(digits.contains("as digits"))
+        #expect(!CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: []).contains("as digits"))
+    }
 }

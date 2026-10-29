@@ -19,6 +19,13 @@ import LegatoPostProcessing
 ///   text stays.
 ///
 /// One agent per run: its options are frozen when it is made. Call ``finish()`` at stop for the final pass.
+///
+/// Which text is the run's. Only text the agent can prove is the run's is ever edited: the span that the feed
+/// attributes to a non-user origin (ASR). A resync batch and a reset carry no attribution, so the run is
+/// re-anchored conservatively: its last known text must occur exactly once in the new window, else nothing is
+/// the run's until new ASR text lands. The whole window is never taken as the run's. **Integration (L6)
+/// requirement:** make the first `consume` before the run's first text reaches the field (an empty sync); text
+/// already in the field at the first sync cannot be attributed from a resync (no events) and is never edited.
 public actor CleanupAgent: FieldAgent {
     /// What a run freezes at its start.
     public struct Options: Sendable, Equatable {
@@ -29,17 +36,29 @@ public actor CleanupAgent: FieldAgent {
         public var vocabulary: [String]
         /// The most one model pass may take; a pass past it keeps the raw text.
         public var timeout: Duration
+        /// The writing style, automatic-emoji setting and number normalization the run was started with.
+        public var style: CleanupStyle
+        public var emoji: MessageEmojiStyle
+        public var itn: Bool
 
-        public init(owner: String, locale: Locale = Locale(identifier: "en"), vocabulary: [String] = [], timeout: Duration = .seconds(5)) {
+        public init(
+            owner: String, locale: Locale = Locale(identifier: "en"), vocabulary: [String] = [], timeout: Duration = .seconds(5),
+            style: CleanupStyle = .verbatim, emoji: MessageEmojiStyle = .off, itn: Bool = false
+        ) {
             self.owner = owner
             self.locale = locale
             self.vocabulary = vocabulary
             self.timeout = timeout
+            self.style = style
+            self.emoji = emoji
+            self.itn = itn
         }
 
         /// The run's cleanup settings, frozen: the setting's per-stage limit is the pass timeout.
         public init(_ cleanup: CleanupOptions, owner: String, locale: Locale, vocabulary: [String] = []) {
-            self.init(owner: owner, locale: locale, vocabulary: vocabulary, timeout: .seconds(cleanup.timeoutSeconds))
+            self.init(
+                owner: owner, locale: locale, vocabulary: vocabulary, timeout: .seconds(cleanup.timeoutSeconds),
+                style: cleanup.style, emoji: cleanup.emoji, itn: cleanup.itn)
         }
     }
 
@@ -90,6 +109,7 @@ public actor CleanupAgent: FieldAgent {
     private var skipped: Set<String> = []
     private var attempts: [String: Int] = [:]
     private var busy = false
+    private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(session: any LLMSession, options: Options) {
         self.session = session
@@ -104,8 +124,9 @@ public actor CleanupAgent: FieldAgent {
         var context = ""
         if batch.resync || batch.session != sessionID {
             guard batch.resync, let text = batch.window else { return [] }  // Another queue, no window: wait for a resync.
+            if sessionID == nil { context = "\n[new dictation run]\n" }  // One run's text apart from the last run's.
             adopt(text, batch)
-            context = "\n[field synced]\n"
+            context += "\n[field synced]\n"
         } else {
             for entry in batch.entries where entry.seq > lastSeq {
                 lastSeq = entry.seq
@@ -118,11 +139,11 @@ public actor CleanupAgent: FieldAgent {
     }
 
     public func conflicted(_ conflict: Conflict, for transaction: UUID) async {
-        await append(handBack(transaction, conflict: conflict))
+        await append(handBack(transaction, conflict: conflict, counts: true))
     }
 
     public func superseded(_ transaction: UUID, by landed: UUID) async {
-        _ = handBack(transaction, conflict: nil)
+        _ = handBack(transaction, conflict: nil, counts: false)
     }
 
     // MARK: Entry points beyond the protocol
@@ -141,22 +162,45 @@ public actor CleanupAgent: FieldAgent {
     /// The final pass at stop: every sentence not yet checked, the unfinished last one included, with the same
     /// timeout (the raw text stays when it runs out). Sentences a rolling pass gave up on are tried once more.
     public func finish() async -> [EditTransaction] {
-        await pass(final: true)
+        while busy { await withCheckedContinuation { idleWaiters.append($0) } }  // A rolling pass in flight finishes first.
+        return await pass(final: true)
     }
 
     // MARK: Feed
 
     private func adopt(_ text: String, _ batch: FeedBatch) {
-        let hadRun = run != nil
+        let anchored = reanchored(in: text)
         sessionID = batch.session
         version = batch.version
         window = text
         lastSeq = batch.lastSeq ?? 0
-        touched = []
         pending = [:]
-        // The first sync of a run: nothing in the field is the run's yet. A resync mid-run lost track of which
-        // part is: the whole window is taken as the run's text.
-        run = hadRun && !text.isEmpty ? Span(location: 0, length: text.utf16.count) : nil
+        run = anchored?.run
+        touched = anchored?.touched ?? []
+    }
+
+    /// The run and the user-touched spans inside it, found again in `text` after a resync or reset: only when
+    /// the run's last known text occurs exactly once there. Nil: nothing is provably the run's.
+    private func reanchored(in text: String) -> (run: Span, touched: [Span])? {
+        let old = window as NSString
+        guard let run, run.length > 0, run.end <= old.length else { return nil }
+        let known = old.substring(with: NSRange(location: run.location, length: run.length))
+        let new = text as NSString
+        var found: [Int] = []
+        var from = 0
+        while from < new.length, found.count < 2 {
+            let hit = new.range(of: known, options: [.literal], range: NSRange(location: from, length: new.length - from))
+            guard hit.location != NSNotFound else { break }
+            found.append(hit.location)
+            from = hit.location + 1
+        }
+        guard found.count == 1, let location = found.first else { return nil }
+        let shift = location - run.location
+        let inside = touched.compactMap { span -> Span? in
+            let start = max(span.location, run.location), end = min(span.end, run.end)
+            return start <= end ? Span(location: start + shift, length: end - start) : nil
+        }
+        return (Span(location: location, length: run.length), inside)
     }
 
     private func apply(_ event: FeedEvent) -> String {
@@ -176,28 +220,30 @@ public actor CleanupAgent: FieldAgent {
             fold(step, as: byUser ? .user : .other)
             return byUser ? "\n[user] \(step.expect) -> \(step.text)\n" : ""
         case .conflict(let id, let conflict):
-            return handBack(id, conflict: conflict)
+            return handBack(id, conflict: conflict, counts: true)
         case .superseded(let id, _), .withdrawn(let id):
-            return handBack(id, conflict: nil)
+            return handBack(id, conflict: nil, counts: false)
         case .rebased(let text, let shift, _):
             window = text
             run = run.map { Span(location: $0.location + shift, length: $0.length) }
             touched = touched.map { Span(location: $0.location + shift, length: $0.length) }
             return ""
         case .reset(let reason, let text, _):
+            let anchored = reason == .cleared ? nil : reanchored(in: text)
             window = text
-            touched = []
             pending = [:]
-            run = reason == .unaligned && !text.isEmpty ? Span(location: 0, length: text.utf16.count) : nil
+            run = anchored?.run
+            touched = anchored?.touched ?? []
             return "\n[field reset: \(reason.rawValue)]\n"
         }
     }
 
-    /// A planned edit that did not land. Returns the session note for it.
-    private func handBack(_ id: UUID, conflict: Conflict?) -> String {
+    /// A planned edit that did not land. Returns the session note for it. Only a real conflict (`counts`) goes
+    /// toward giving the sentence up; a superseded or withdrawn edit is planned again at no cost.
+    private func handBack(_ id: UUID, conflict: Conflict?, counts: Bool) -> String {
         guard let planned = pending.removeValue(forKey: id) else { return "" }
         reviewed.remove(planned.new)
-        let tries = attempts[planned.old, default: 0] + 1
+        let tries = attempts[planned.old, default: 0] + (counts ? 1 : 0)
         attempts[planned.old] = tries
         if tries >= 2 {
             reviewed.insert(planned.old)  // Gave up on this sentence: it stays as it is.
@@ -267,7 +313,7 @@ public actor CleanupAgent: FieldAgent {
             let role: CleanupPrompt.Agent.Role
             if touched.contains(where: { Self.touches($0, span) }) {
                 role = .locked
-            } else if sentence.text.contains(where: \.isNewline) || reviewed.contains(sentence.text)
+            } else if (!final && sentence.text.contains(where: \.isNewline)) || reviewed.contains(sentence.text)
                 || (!final && skipped.contains(sentence.text))
                 || (!final && isLast && !Self.endsSentence(sentence.text))
             {
@@ -280,18 +326,28 @@ public actor CleanupAgent: FieldAgent {
         guard sentences.contains(where: { $0.role == .review }) else { return nil }
         let request = CleanupPrompt.Agent.request(
             sentences: sentences.map { .init(number: $0.number, text: $0.text, role: $0.role) },
-            locale: options.locale, vocabulary: options.vocabulary)
+            locale: options.locale, vocabulary: options.vocabulary,
+            style: options.style, emoji: options.emoji, itn: options.itn)
         return Plan(version: version, session: sessionID, sentences: sentences, request: request)
     }
 
     private func pass(final: Bool) async -> [EditTransaction] {
         guard !busy, let plan = plan(final: final) else { return [] }
         busy = true
-        defer { busy = false }
+        defer {
+            busy = false
+            let waiting = idleWaiters
+            idleWaiters = []
+            for waiter in waiting { waiter.resume() }
+        }
 
         guard await makeRoom(for: plan.request) else { return fail(plan) }
         let reply = await ask(plan.request)
         if Task.isCancelled { return [] }
+        if case .timedOut = reply {
+            // The turn may still complete and stay in the session's history: say its answer was thrown away.
+            await append("\n[discarded] The previous request timed out; its answer was not applied and the text is unchanged.\n")
+        }
         guard case .edits(let answer) = reply else { return fail(plan) }
 
         // Off-schema in meaning: a sentence the window does not have, or one named twice. Nothing is guessed.

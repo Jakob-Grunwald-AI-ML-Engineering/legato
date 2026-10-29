@@ -1,6 +1,7 @@
 import Foundation
 import LegatoCore
 import LegatoFieldEdit
+import LegatoPostProcessing
 import Testing
 @testable import LegatoAppServices
 
@@ -8,6 +9,7 @@ import Testing
 private actor FakeSession: LLMSession {
     enum Script {
         case json(String)
+        case slow(Duration, String)
         case hang
     }
 
@@ -42,6 +44,9 @@ private actor FakeSession: LLMSession {
         let script = scripts.isEmpty ? Script.json("[]") : scripts.removeFirst()
         switch script {
         case .json(let text): return try LLMStructuredDecoding.decode(Output.self, from: text)
+        case .slow(let delay, let text):
+            try await Task.sleep(for: delay)
+            return try LLMStructuredDecoding.decode(Output.self, from: text)
         case .hang:
             try await Task.sleep(for: .seconds(60))
             return try LLMStructuredDecoding.decode(Output.self, from: "[]")
@@ -64,19 +69,23 @@ private func edits(_ pairs: (Int, String)...) -> FakeSession.Script {
 
 /// An in-memory Mac-style field edit queue driven the way the integration does: feed batches to the agent,
 /// submit what it returns, run the writes.
-private final class Rig {
+private final class Rig: @unchecked Sendable {
     var queue: FieldEditQueue
     var field: String
     let session: FakeSession
     let agent: CleanupAgent
     private var seq: Int?
 
-    init(existing: String = "", scripts: [FakeSession.Script] = [], budget: Int = 4_000, timeout: Duration = .seconds(5)) async {
+    init(
+        existing: String = "", scripts: [FakeSession.Script] = [], budget: Int = 4_000, timeout: Duration = .seconds(5),
+        style: CleanupStyle = .verbatim, emoji: MessageEmojiStyle = .off, itn: Bool = false
+    ) async {
         field = existing
         queue = FieldEditQueue(FieldSnapshot(window: existing, caret: existing.utf16.count, windowBase: 0))
         session = FakeSession(budget: budget, scripts: scripts)
         agent = CleanupAgent(
-            session: session, options: .init(owner: "run", locale: Locale(identifier: "en"), timeout: timeout))
+            session: session, options: .init(
+                owner: "run", locale: Locale(identifier: "en"), timeout: timeout, style: style, emoji: emoji, itn: itn))
         _ = await feed()  // The first batch is a resync of the empty run.
     }
 
@@ -105,6 +114,10 @@ private final class Rig {
     func dictate(_ text: String) async -> [EditTransaction] {
         write(text)
         return await feed()
+    }
+
+    func reset(_ reason: ResetReason = .unaligned) {
+        queue.reset(FieldSnapshot(window: field, caret: field.utf16.count, windowBase: 0), reason: reason)
     }
 
     func user(_ text: String) {
@@ -228,17 +241,19 @@ struct CleanupAgentTests {
     }
 
     @Test func aResyncBatchRestartsFromItsWindowAndVersion() async throws {
-        let rig = await Rig(scripts: [.json("[]"), edits((1, "Fix the text."))])
+        let rig = await Rig(scripts: [.json("not an answer"), edits((1, "The one."))])
         _ = await rig.dictate("Teh one. Two.")
         let session = UUID()
+        // The run's text, found once in the new window; the text before it is not the run's.
         let batch = FeedBatch(
-            entries: [], version: FieldVersion(5), session: session, resync: true, window: "Fix teh text. More.")
-        let transactions = await rig.agent.consume(batch)
+            entries: [], version: FieldVersion(5), session: session, resync: true, window: "Fix teh text. Teh one. Two.")
+        #expect(await rig.agent.consume(batch).isEmpty)
+        let transactions = await rig.agent.finish()
 
         let transaction = try #require(transactions.first)
         #expect(transaction.base == FieldVersion(5))
         #expect(transaction.session == session)
-        #expect(transaction.steps == [EditStep(span: Span(location: 5, length: 2), text: "he", expect: "eh")])
+        #expect(transaction.steps == [EditStep(span: Span(location: 15, length: 2), text: "he", expect: "eh")])
     }
 
     @Test func aSupersededEditIsPlannedAgainFromTheFeed() async throws {
@@ -272,5 +287,148 @@ struct CleanupAgentTests {
         let final = await rig.agent.finish()
         let step = try #require(final.first?.steps.first)
         #expect(step == EditStep(span: .at("Hello wrold. Bye bye".utf16.count), text: ".", expect: ""))
+    }
+
+    // MARK: Run ownership across a reset or resync
+
+    @Test func aResetKeepsTheTextBeforeTheRunOutOfReach() async throws {
+        let rig = await Rig(existing: "Mine teh text. ", scripts: [.json("[]"), edits((1, "Mine the text."))])
+        #expect(await rig.dictate("Hello world.").isEmpty)
+        rig.reset(.unaligned)
+        let transactions = await rig.feed()
+        #expect(transactions.isEmpty)
+        #expect(await rig.session.requests.count == 1)  // The text before the run was never offered to the model.
+    }
+
+    @Test func afterAResetNewRecognizedTextIsStillCleanedAndOnlyThat() async throws {
+        let rig = await Rig(existing: "Mine teh text. ", scripts: [.json("[]"), edits((1, "Mine the text."), (2, "Next the one."))])
+        _ = await rig.dictate("Hello world.")
+        rig.reset(.unaligned)
+        _ = await rig.feed()
+        let transactions = await rig.dictate(" Next teh one.")
+        let request = try #require(await rig.session.requests.last)
+        #expect(request.contains("Review: 2."))
+        #expect(request.contains("1. Hello world.\n2. Next teh one."))
+        let location = try #require(transactions.first?.steps.first?.span.location)
+        #expect(location >= "Mine teh text. Hello world.".utf16.count)
+        #expect(transactions.count == 1)
+    }
+
+    @Test func aResyncThatFindsTheRunTextOnceKeepsEditingOnlyTheRun() async throws {
+        let rig = await Rig(existing: "Mine teh text. ", scripts: [.json("[]"), edits((1, "Mine the text."), (2, "Next the one."))])
+        _ = await rig.dictate("Hello world. Teh end")
+        let batch = FeedBatch(
+            entries: [], version: FieldVersion(9), session: UUID(), resync: true, window: "Mine teh text. Hello world. Teh end.")
+        let transactions = await rig.agent.consume(batch)
+        let request = try #require(await rig.session.requests.last)
+        #expect(!request.contains("Mine"))
+        // The run's last sentence got its full stop outside the run text we knew: the run is not found, so nothing is the run's.
+        #expect(transactions.isEmpty)
+    }
+
+    @Test func aRunTextFoundTwiceIsNotTheRunsUntilNewRecognizedTextArrives() async throws {
+        let rig = await Rig(existing: "Hello world. ", scripts: [.json("[]"), edits((1, "Hello world!"))])
+        _ = await rig.dictate("Hello world.")
+        rig.reset(.unaligned)  // "Hello world." now occurs twice: which one is the run's is unknown.
+        #expect(await rig.feed().isEmpty)
+        #expect(await rig.session.requests.count == 1)
+        #expect(await rig.agent.finish().isEmpty)
+        #expect(await rig.session.requests.count == 1)
+    }
+
+    @Test func aClearedFieldLeavesNoRun() async throws {
+        let rig = await Rig(scripts: [.json("[]")])
+        _ = await rig.dictate("Hello world.")
+        rig.user("")
+        _ = await rig.feed()
+        #expect(await rig.agent.finish().isEmpty)
+    }
+
+    // MARK: finish, rejected edits, offsets
+
+    @Test func finishDuringARollingPassWaitsAndThenRunsTheFinalPass() async throws {
+        let rig = await Rig(scripts: [.slow(.milliseconds(300), "[]"), edits((2, "Bye bye."))])
+        rig.write("Hello world. Bye bye")
+        async let rolling = rig.feed()
+        try await Task.sleep(for: .milliseconds(100))
+        let final = await rig.agent.finish()
+        #expect(await rolling.isEmpty)
+        let step = try #require(final.first?.steps.first)
+        #expect(step == EditStep(span: .at("Hello world. Bye bye".utf16.count), text: ".", expect: ""))
+    }
+
+    @Test func anEditForASentenceTheModelWasNotToReviewIsRejected() async throws {
+        let rig = await Rig(scripts: [edits((2, "Bye bye."))])
+        let transactions = await rig.dictate("Hello world. Bye bye")  // Sentence 2 is unfinished: context only.
+        #expect(transactions.isEmpty)
+        #expect(rig.field == "Hello world. Bye bye")
+    }
+
+    @Test func severalLengthChangingEditsInOnePassAllLand() async throws {
+        let rig = await Rig(scripts: [edits((1, "We saw it."), (2, "There was a cat."), (3, "Fine."))])
+        let transactions = await rig.dictate("Wee saw it. Ther wass a catt. Finee.")
+        #expect(transactions.count == 3)
+        rig.submit(transactions)
+        rig.drain()
+        #expect(rig.field == "We saw it. There was a cat. Fine.")
+    }
+
+    @Test func anEmojiBeforeAnEditDoesNotShiftIt() async throws {
+        let rig = await Rig(existing: "\u{1F600} ", scripts: [edits((1, "I saw the dog."))])
+        let transactions = await rig.dictate("I saw teh \u{1F44D}dog. Done.")
+        _ = transactions
+        let rig2 = await Rig(existing: "\u{1F600} ", scripts: [edits((1, "I saw the \u{1F44D}dog."))])
+        let second = await rig2.dictate("I saw teh \u{1F44D}dog. Done.")
+        rig2.submit(second)
+        rig2.drain()
+        #expect(rig2.field == "\u{1F600} I saw the \u{1F44D}dog. Done.")
+    }
+
+    // MARK: Re-planning, frozen options, session notes
+
+    @Test func supersededAndWithdrawnEditsAreReplannedWithoutLimit() async throws {
+        let rig = await Rig(scripts: Array(repeating: edits((1, "I saw the dog.")), count: 5))
+        var transactions = await rig.dictate("I saw teh dog. It ran away.")
+        for _ in 0..<4 {
+            let id = try #require(transactions.first?.id)
+            if transactions.count == 1 { await rig.agent.superseded(id, by: UUID()) }
+            transactions = await rig.agent.replan()
+            #expect(transactions.count == 1)
+        }
+        #expect(await rig.session.requests.count == 5)
+    }
+
+    @Test func conflictsStillGiveUpAfterTwoTries() async throws {
+        let rig = await Rig(scripts: Array(repeating: edits((1, "I saw the dog.")), count: 5))
+        var transactions = await rig.dictate("I saw teh dog. It ran away.")
+        await rig.agent.conflicted(Conflict(.expectMismatch), for: try #require(transactions.first?.id))
+        transactions = await rig.agent.replan()
+        #expect(transactions.count == 1)
+        await rig.agent.conflicted(Conflict(.expectMismatch), for: try #require(transactions.first?.id))
+        #expect(await rig.agent.replan().isEmpty)
+    }
+
+    @Test func theRunsStyleEmojiAndNumberSettingsReachTheRequest() async throws {
+        let rig = await Rig(scripts: [.json("[]")], style: .markdown, emoji: .subtle, itn: true)
+        _ = await rig.dictate("I saw teh dog. It ran away.")
+        let request = try #require(await rig.session.requests.first)
+        #expect(request.contains("Markdown"))
+        let messageRig = await Rig(scripts: [.json("[]")], style: .message, emoji: .subtle)
+        _ = await messageRig.dictate("I saw teh dog. It ran away.")
+        #expect(try #require(await messageRig.session.requests.first).contains("apt emoji"))
+        let verbatimRig = await Rig(scripts: [.json("[]")], itn: true)
+        _ = await verbatimRig.dictate("I saw teh dog. It ran away.")
+        #expect(try #require(await verbatimRig.session.requests.first).contains("as digits"))
+    }
+
+    @Test func aRunStartsWithABoundaryMarkerInTheSession() async throws {
+        let rig = await Rig()
+        #expect(await rig.session.appended.joined().contains("[new dictation run]"))
+    }
+
+    @Test func aTurnThatTimedOutIsMarkedDiscardedInTheSession() async throws {
+        let rig = await Rig(scripts: [.hang], timeout: .milliseconds(100))
+        _ = await rig.dictate("I saw teh dog. It ran away.")
+        #expect(await rig.session.appended.joined().contains("[discarded]"))
     }
 }
