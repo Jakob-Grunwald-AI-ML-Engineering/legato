@@ -243,7 +243,7 @@ struct CleanupAgentTests {
     @Test func aResyncBatchRestartsFromItsWindowAndVersion() async throws {
         let rig = await Rig(scripts: [.json("not an answer"), edits((1, "The one."))])
         _ = await rig.dictate("Teh one. Two.")
-        let session = UUID()
+        let session = rig.queue.session  // A resync of the same queue; another queue's window drops the run.
         // The run's text, found once in the new window; the text before it is not the run's.
         let batch = FeedBatch(
             entries: [], version: FieldVersion(5), session: session, resync: true, window: "Fix teh text. Teh one. Two.")
@@ -430,5 +430,39 @@ struct CleanupAgentTests {
         let rig = await Rig(scripts: [.hang], timeout: .milliseconds(100))
         _ = await rig.dictate("I saw teh dog. It ran away.")
         #expect(await rig.session.appended.joined().contains("[discarded]"))
+    }
+
+    @Test func aNewRecognizedSpanAfterAReanchorDoesNotSwallowTheTextBetween() async throws {
+        let rig = await Rig(existing: "Mine teh text. ", scripts: [.json("[]"), edits((2, "Next the one."))])
+        _ = await rig.dictate("Hello world.")
+        rig.field = "Hello world. Mine teh text."  // The host reordered the field; the queue lost alignment.
+        rig.reset(.unaligned)
+        _ = await rig.feed()
+        let transactions = await rig.dictate(" Next teh one.")
+        let request = try #require(await rig.session.requests.last)
+        #expect(!request.contains("Mine"))
+        #expect(request.contains("Review: 2."))
+        let step = try #require(transactions.first?.steps.first)
+        #expect(step.span.location > "Hello world. Mine teh text.".utf16.count)
+    }
+
+    @Test func aResyncFromAnotherQueueDropsTheRun() async throws {
+        let rig = await Rig(scripts: [.json("not an answer"), edits((1, "Okay."))])
+        _ = await rig.dictate("OK.")
+        let batch = FeedBatch(entries: [], version: FieldVersion(3), session: UUID(), resync: true, window: "Dear Bob, OK. Thanks.")
+        #expect(await rig.agent.consume(batch).isEmpty)
+        #expect(await rig.agent.finish().isEmpty)
+        #expect(await rig.session.requests.count == 1)
+    }
+
+    @Test func aUserDeletionJustBeforeTheRunDoesNotLockItsFirstSentence() async throws {
+        let rig = await Rig(existing: "Mine teh text. ", scripts: [.json("not an answer"), edits((1, "The one."))])
+        _ = await rig.dictate("Teh one.")
+        rig.user("Mine teh text.Teh one.")  // The user deleted the space right before the run.
+        _ = await rig.feed()
+        rig.reset(.unaligned)
+        _ = await rig.feed()
+        let final = await rig.agent.finish()
+        #expect(final.count == 1)
     }
 }

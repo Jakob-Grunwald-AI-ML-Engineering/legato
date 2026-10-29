@@ -97,8 +97,9 @@ public actor CleanupAgent: FieldAgent {
     private var version = FieldVersion(0)
     private var window = ""
     private var lastSeq = 0
-    /// The span of the run's own text (everything the queue wrote for non-user origins), if any.
-    private var run: Span?
+    /// The run's own text: the spans the queue wrote for non-user origins, sorted, never touching each other.
+    /// Text between spans is never the run's.
+    private var runs: [Span] = []
     /// What the user wrote or changed; the sentences touching it are locked.
     private var touched: [Span] = []
 
@@ -169,38 +170,60 @@ public actor CleanupAgent: FieldAgent {
     // MARK: Feed
 
     private func adopt(_ text: String, _ batch: FeedBatch) {
-        let anchored = reanchored(in: text)
+        // Another queue instance may be another field: its window is no place to look for this run's text.
+        let sameQueue = sessionID == batch.session
+        let anchored = sameQueue ? reanchored(in: text) : nil
         sessionID = batch.session
         version = batch.version
         window = text
         lastSeq = batch.lastSeq ?? 0
         pending = [:]
-        run = anchored?.run
+        runs = anchored?.runs ?? []
         touched = anchored?.touched ?? []
     }
 
-    /// The run and the user-touched spans inside it, found again in `text` after a resync or reset: only when
-    /// the run's last known text occurs exactly once there. Nil: nothing is provably the run's.
-    private func reanchored(in text: String) -> (run: Span, touched: [Span])? {
-        let old = window as NSString
-        guard let run, run.length > 0, run.end <= old.length else { return nil }
-        let known = old.substring(with: NSRange(location: run.location, length: run.length))
-        let new = text as NSString
-        var found: [Int] = []
-        var from = 0
-        while from < new.length, found.count < 2 {
-            let hit = new.range(of: known, options: [.literal], range: NSRange(location: from, length: new.length - from))
-            guard hit.location != NSNotFound else { break }
-            found.append(hit.location)
-            from = hit.location + 1
+    /// Each run span and the user-touched spans inside it, found again in `text` after a resync or reset: a
+    /// span only when its last known text occurs exactly once there; the others are dropped.
+    private func reanchored(in text: String) -> (runs: [Span], touched: [Span]) {
+        let old = window as NSString, new = text as NSString
+        var kept: [Span] = [], inside: [Span] = []
+        for run in runs where run.length > 0 && run.end <= old.length {
+            let known = old.substring(with: NSRange(location: run.location, length: run.length))
+            var found: [Int] = []
+            var from = 0
+            while from < new.length, found.count < 2 {
+                let hit = new.range(of: known, options: [.literal], range: NSRange(location: from, length: new.length - from))
+                guard hit.location != NSNotFound else { break }
+                found.append(hit.location)
+                from = hit.location + 1
+            }
+            guard found.count == 1, let location = found.first else { continue }
+            let shift = location - run.location
+            kept.append(Span(location: location, length: run.length))
+            for span in touched {
+                // A deletion at the run's edge is outside it.
+                if span.length == 0 {
+                    if span.location > run.location && span.location < run.end { inside.append(Span(location: span.location + shift, length: 0)) }
+                    continue
+                }
+                let start = max(span.location, run.location), end = min(span.end, run.end)
+                if start < end { inside.append(Span(location: start + shift, length: end - start)) }
+            }
         }
-        guard found.count == 1, let location = found.first else { return nil }
-        let shift = location - run.location
-        let inside = touched.compactMap { span -> Span? in
-            let start = max(span.location, run.location), end = min(span.end, run.end)
-            return start <= end ? Span(location: start + shift, length: end - start) : nil
+        return (Self.merged(kept), inside)
+    }
+
+    /// Spans sorted, with overlapping or touching ones joined.
+    private static func merged(_ spans: [Span]) -> [Span] {
+        var out: [Span] = []
+        for span in spans.sorted(by: { $0.location < $1.location }) {
+            if let last = out.last, span.location <= last.end {
+                out[out.count - 1] = Span(location: last.location, length: max(last.end, span.end) - last.location)
+            } else {
+                out.append(span)
+            }
         }
-        return (Span(location: location, length: run.length), inside)
+        return out
     }
 
     private func apply(_ event: FeedEvent) -> String {
@@ -225,14 +248,14 @@ public actor CleanupAgent: FieldAgent {
             return handBack(id, conflict: nil, counts: false)
         case .rebased(let text, let shift, _):
             window = text
-            run = run.map { Span(location: $0.location + shift, length: $0.length) }
+            runs = runs.map { Span(location: $0.location + shift, length: $0.length) }
             touched = touched.map { Span(location: $0.location + shift, length: $0.length) }
             return ""
         case .reset(let reason, let text, _):
             let anchored = reason == .cleared ? nil : reanchored(in: text)
             window = text
             pending = [:]
-            run = anchored?.run
+            runs = anchored?.runs ?? []
             touched = anchored?.touched ?? []
             return "\n[field reset: \(reason.rawValue)]\n"
         }
@@ -259,17 +282,13 @@ public actor CleanupAgent: FieldAgent {
         guard step.span.location >= 0, step.span.length >= 0, step.span.end <= units.count else { return }
         units.replaceSubrange(step.span.location..<step.span.end, with: step.text.utf16)
         window = String(decoding: units, as: UTF16.self)
-        run = run.map { Self.mapped($0, through: step) }
+        runs = runs.map { Self.mapped($0, through: step) }
         touched = touched.map { Self.mapped($0, through: step) }
         let result = Span(location: step.span.location, length: step.text.utf16.count)
         switch writer {
         case .runText:
-            if let current = run {
-                let start = min(current.location, result.location), end = max(current.end, result.end)
-                run = Span(location: start, length: end - start)
-            } else {
-                run = result
-            }
+            // A new run write joins a span it touches; otherwise it is a span of its own.
+            if result.length > 0 { runs = Self.merged(runs + [result]) }
         case .user: touched.append(result)
         case .other: break
         }
@@ -287,16 +306,18 @@ public actor CleanupAgent: FieldAgent {
     // MARK: Planning
 
     private func plan(final: Bool) -> Plan? {
-        guard let sessionID, let run else { return nil }
+        guard let sessionID, !runs.isEmpty else { return nil }
         let text = window as NSString
-        let region = NSIntersectionRange(NSRange(location: run.location, length: run.length), NSRange(location: 0, length: text.length))
-        guard region.length > 0 else { return nil }
-
         var found: [(location: Int, text: String)] = []
-        text.enumerateSubstrings(in: region, options: .bySentences) { _, range, _, _ in
-            let body = Self.trimmed(range, in: text)
-            if body.length > 0 { found.append((body.location, text.substring(with: body))) }
+        for run in runs {
+            let region = NSIntersectionRange(NSRange(location: run.location, length: run.length), NSRange(location: 0, length: text.length))
+            guard region.length > 0 else { continue }
+            text.enumerateSubstrings(in: region, options: .bySentences) { _, range, _, _ in
+                let body = Self.trimmed(range, in: text)
+                if body.length > 0 { found.append((body.location, text.substring(with: body))) }
+            }
         }
+        guard !found.isEmpty else { return nil }
         // The newest sentences that fit the window the context can afford.
         var kept = 0, characters = 0
         for sentence in found.reversed() {
