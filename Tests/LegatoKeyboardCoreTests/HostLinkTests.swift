@@ -352,6 +352,36 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         r.report(cursor(runID: "run-1", committedCount: 13, volatile: "", finalApplied: true))
     }
 
+    /// A run whose stop goes on after its final state (the edit queue's linked run: the applied wait, the agent's
+    /// catch-up and final pass, their outcomes) holds the scrub: the keyboard keeps the run (and its feed) until
+    /// the stop is done, and the retention window starts only then.
+    @Test func aHeldStopIsScrubbedOnlyAfterItsRelease() async {
+        let r = Rig()
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live, fieldEdits: true)
+        r.link.update(committed: "secret words ", volatile: "")
+        r.link.runEnded(committed: "secret words ", holdingScrub: true)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(r.env.retention.pendingCount == 0)  // no retention window runs while the stop goes on
+        #expect(r.host?.runID == "run-1" && r.host?.committed == "secret words ")
+        r.link.releaseScrub()
+        #expect(await eventually { r.env.retention.pendingCount == 1 })
+        r.env.retention.tick()
+        #expect(await eventually { r.host?.runID == nil && r.host?.committed == "" })
+    }
+
+    /// A release that comes after the next run began does not scrub that run.
+    @Test func aLateReleaseLeavesTheNextRunAlone() async {
+        let r = Rig()
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live, fieldEdits: true)
+        r.link.runEnded(committed: "a ", holdingScrub: true)
+        r.link.runStarted(id: "run-2", target: .keyboard)
+        r.link.update(committed: "second ", volatile: "")
+        r.link.releaseScrub()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(r.env.retention.pendingCount == 0)
+        #expect(r.host?.runID == "run-2")
+    }
+
     @Test func theFinalTextIsKeptForTheKeyboardThenScrubbedFromHostAndApplied() async {
         let r = Rig()
         finishedRun(r)

@@ -1,5 +1,7 @@
 import Foundation
+import LegatoAppServices
 import LegatoCore
+import LegatoFieldEdit
 import LegatoKeyboardCore
 import os
 
@@ -32,6 +34,26 @@ final class KeyboardLinkHost: TranscriptSink {
     /// Whether the experimental edit queue is on; read once per run, like `deliveryForRun`.
     var fieldEditsForRun: @MainActor () -> Bool = { false }
 
+    // The experimental edit queue's side of a run (the setting on, a keyboard run, Live or Replace).
+    /// The session's own cleanup; switched off while the cleanup agent cleans the run (Live).
+    var agentGate: AgentGatedPostProcessor?
+    /// Makes the run's agent on the warm rolling session (nil: none); called in the background, never awaited by the run.
+    var makeAgent: @MainActor (_ runID: String) -> (@Sendable () async -> CleanupAgent?)? = { _ in nil }
+    /// How long a stop waits for an agent that is still warming (the run's cleanup time limit).
+    var agentWait: @MainActor () -> Duration = { .seconds(2) }
+    /// Today's stateless final cleanup pass, for a Live run whose agent was absent at its stop.
+    var statelessFinalPass: @MainActor (String) async -> String? = { _ in nil }
+    /// Puts a fallback text on the clipboard; false when the clipboard did not change.
+    var copyFallback: @MainActor (String) -> Bool = { _ in false }
+    /// The session saved the engine's text; the history then holds what the field got (`AgentRunHistory`).
+    var correctHistory: @MainActor (_ raw: String, _ cleaned: String) async -> Void = { _, _ in }
+    /// Diagnostics of the linked run (DEBUG e2e); no user text.
+    var linkTrace: (@MainActor (String) -> Void)?
+
+    private var feedLink: FieldFeedLink?
+    /// The current run's side of the edit queue; nil with the setting off (today's paths).
+    private var linked: LinkedCleanupRun?
+
     /// The current run's delivery, fixed when it started (a settings change mid-run applies to the next).
     private var runDelivery: HostDelivery?
     /// The current run's edit-queue flag, fixed when it started.
@@ -48,7 +70,9 @@ final class KeyboardLinkHost: TranscriptSink {
             Self.log.error("App Group defaults unavailable; keyboard link is off")
             return nil
         }
-        link = HostLink(store: LinkStore(backing))
+        let store = LinkStore(backing)
+        link = HostLink(store: store)
+        feedLink = FieldFeedLink(store: store)
         #if DEBUG || LEGATO_INTERNAL
         #if LEGATO_INTERNAL
         var wasPreparing = false
@@ -88,6 +112,9 @@ final class KeyboardLinkHost: TranscriptSink {
             },
             DarwinObserver(name: LinkChannel.Note.choice) { [weak self] in
                 Task { @MainActor in self?.drainChoices() }
+            },
+            DarwinObserver(name: LinkChannel.Note.feed) { [weak self] in
+                Task { @MainActor in self?.linked?.feedChanged() }
             },
         ]
         drainChoices() // choices made while the app was away
@@ -141,6 +168,7 @@ final class KeyboardLinkHost: TranscriptSink {
         // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
         runDelivery = run.target == .keyboard ? deliveryForRun() : nil
         runFieldEdits = run.target == .keyboard && fieldEditsForRun()
+        startLinkedRun(run.id.uuidString)
         link.runStarted(
             id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery,
             fieldEdits: runFieldEdits ? true : nil)
@@ -156,6 +184,7 @@ final class KeyboardLinkHost: TranscriptSink {
 
     func update(committed: String, volatile: String) {
         link.update(committed: committed, volatile: volatile)
+        linked?.heard(committed: committed, volatile: volatile)
         onTranscript?(committed, volatile)
         #if LEGATO_INTERNAL
         trace.update(committed: committed)
@@ -185,13 +214,52 @@ final class KeyboardLinkHost: TranscriptSink {
     /// With cleanup, `text` is the cleaned text: the keyboard swaps it in (`.replace`), keeps the streamed
     /// text (`.clipboard`: never confirmed, so the cleaned text goes to the clipboard) or inserts it (`.hold`).
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
+        let linked = self.linked
+        self.linked = nil
+        defer { agentGate?.agentRuns = false }  // the session's stop (its final pass) is behind us
         let raw = committed.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalText = text.flatMap { $0 != raw ? $0 : nil }
-        link.runEnded(committed: committed, finalText: finalText)
+        // A linked run's stop goes on after its final state (the agent's catch-up and final pass, their outcomes):
+        // the link's text stays, and the keyboard keeps following, until it is done.
+        link.runEnded(committed: committed, finalText: finalText, holdingScrub: linked != nil)
+        defer {
+            if linked != nil {
+                feedLink?.endRun()
+                link.releaseScrub()
+            }
+        }
         onTranscript?(text ?? committed, "")
         onRunActivity?(false)
         // Only a run streamed into a visible keyboard has anything to confirm.
-        guard run.target == .keyboard, text != nil, link.keyboardIsVisible() else {
+        let visible = run.target == .keyboard && text != nil && link.keyboardIsVisible()
+        if let linked, let text, let mode = linkedMode {
+            let runID = run.id.uuidString
+            var applied: (@MainActor () async -> Bool)?
+            if visible {
+                let link = link
+                applied = { await link.awaitFinalApplied(runID: runID, timeout: Self.appliedTimeout) }
+            }
+            let statelessPass = statelessFinalPass, copy = copyFallback
+            let stop = await linked.stop(
+                mode, committed: committed, text: text, finalText: finalText, applied: applied,
+                statelessPass: { await statelessPass($0) }, copy: { copy($0) })
+            if let cleaned = stop.cleaned { await correctHistory(text, cleaned) }
+            if !visible {
+                #if LEGATO_INTERNAL
+                trace.runEnded(applied: nil, confirmed: false)
+                #endif
+                onDelivery?(runID, false)
+                return stop.landed  // the cleaned text on the clipboard: the session's raw text must not replace it
+            }
+            onDelivery?(runID, stop.landed)
+            #if LEGATO_INTERNAL
+            trace.runEnded(applied: link.appliedCursor(), confirmed: stop.landed)
+            #endif
+            if runDelivery == .clipboard, finalText != nil { return false }
+            return stop.landed
+        }
+        linked?.cancel()
+        guard visible else {
             #if LEGATO_INTERNAL
             trace.runEnded(applied: nil, confirmed: false)
             #endif
@@ -207,8 +275,62 @@ final class KeyboardLinkHost: TranscriptSink {
         return applied
     }
 
+    // MARK: Edit queue (the setting on)
+
+    /// Starts the run's side of the edit queue: for a keyboard run with the setting on, in Live (the cleanup agent
+    /// on the warm rolling session, so the session's own cleanup stays out) or Replace (the final pass as patches).
+    private func startLinkedRun(_ runID: String) {
+        linked?.cancel()
+        linked = nil
+        agentGate?.agentRuns = false
+        guard runFieldEdits, runDelivery == .live || runDelivery == .replace, let feedLink else { return }
+        feedLink.beginRun(runID)
+        let reader = FeedReader(link: feedLink, runID: runID)
+        let transport = LinkedCleanupRun.Transport(
+            read: { reader.read() }, send: { [weak self] transactions in
+                let dropped = feedLink.sendEdits(transactions)
+                if dropped > 0 { self?.linkTrace?("link.edits dropped=\(dropped)") }
+            })
+        let agent = runDelivery == .live ? makeAgent(runID) : nil
+        let run = LinkedCleanupRun(owner: runID, agent: agent, transport: transport, agentWait: agentWait())
+        run.trace = linkTrace
+        linked = run
+        // The agent cleans a Live run; the session runs no rolling passes and no final pass of its own.
+        agentGate?.agentRuns = run.hasAgent
+        linkTrace?("link.run delivery=\(runDelivery?.rawValue ?? "-") agent=\(run.hasAgent ? 1 : 0)")
+    }
+
+    /// The current run's mode on the link (`LinkedCleanupRun.stop`); nil when it has none.
+    private var linkedMode: LinkedCleanupRun.Mode? {
+        switch runDelivery {
+        case .live: .live
+        case .replace: .replace
+        default: nil
+        }
+    }
+
     func leaseChanged(until: Date?) {
         link.leaseChanged(until: until)
         onLease?(until)
+    }
+}
+
+/// The app's reading position in the run's `link.feed`: the first read takes the run from its start.
+@MainActor
+private final class FeedReader {
+    private let link: FieldFeedLink
+    private let runID: String
+    private var cursor: FeedCursor?
+
+    init(link: FieldFeedLink, runID: String) {
+        self.link = link
+        self.runID = runID
+    }
+
+    func read() -> [FeedBatch] {
+        let read = cursor == nil ? link.readFeedFromStart(forRun: runID) : link.readFeed(after: cursor, forRun: runID)
+        guard let read else { return [] }
+        cursor = read.cursor
+        return read.batches
     }
 }

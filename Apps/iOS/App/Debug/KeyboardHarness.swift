@@ -273,14 +273,15 @@ final class KeyboardHarnessModel {
         controller.beforeStartWatch = { await E2E.waitForStartWatch() }
         document.onChange = { [weak controller] in controller?.documentDidChange() }
         let namespace = "\(RuntimeIdentity.current.notificationNamespace).e2e."
-        fieldEditObservers = ["harness-fieldedits", "harness-fe-lag"].map { command in
+        fieldEditObservers = ["harness-fieldedits", "harness-fe-lag", "harness-agent-edit", "harness-host-send"].map { command in
             DarwinObserver(name: namespace + command) {
                 Task { @MainActor in
                     E2E.log("command \(command)")
-                    if command == "harness-fieldedits" {
-                        await KeyboardHarnessModel.shared.runFieldEdits()
-                    } else {
-                        await KeyboardHarnessModel.shared.measureLag()
+                    switch command {
+                    case "harness-fieldedits": await KeyboardHarnessModel.shared.runFieldEdits()
+                    case "harness-agent-edit": await KeyboardHarnessModel.shared.typeIntoRunWhileTheAgentThinks()
+                    case "harness-host-send": await KeyboardHarnessModel.shared.hostSendsMidRun()
+                    default: await KeyboardHarnessModel.shared.measureLag()
                     }
                 }
             }
@@ -514,6 +515,34 @@ final class KeyboardHarnessModel {
         step("dropped")
         document.lag = nil
         E2E.log("fe.done")
+    }
+
+    // MARK: The app's cleanup agent (scenario fa)
+
+    /// The script's words as the stream leaves them (the fake engine's text).
+    private var scriptText: String { UserDefaults.standard.string(forKey: "LegatoFakeEngine") ?? "" }
+
+    /// Scenario fa: once the stream committed the whole script and the agent's first turn is in flight, the user taps
+    /// into the first word (after its second letter), types "x" and taps the end again: the agent's pending edit of
+    /// that sentence comes back as the user's (conflict, with the note), and the agent goes on with the next one.
+    func typeIntoRunWhileTheAgentThinks() async {
+        let script = scriptText
+        await waitUntil("agent-ask", timeout: 15) {
+            // All of it committed (the engine's final words end in a space): nothing of the run is still to be typed.
+            E2E.agentAsksInFlight.withLock { $0 } > 0 && document.text == script + " "
+        }
+        document.userMoveCaret(to: 2)
+        controller.typing.press(keyID: "char:x")
+        document.userMoveCaret(to: (document.text as NSString).length)
+        step("agent-user-edit")
+    }
+
+    /// Scenario fa: once the stream typed the first sentence, the host sends and empties the field (a chat app's
+    /// Send); the rest of the run streams into the empty field.
+    func hostSendsMidRun() async {
+        await waitUntil("first-sentence", timeout: 15) { document.text.contains(".") }
+        document.hostClears()
+        step("host-sent")
     }
 
     /// Scenario fe's lag probe: how long a key press, a word-row tap or ↶ takes, from the call until it returns

@@ -228,7 +228,9 @@ if [ "$mode" = release-check ]; then
     LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
     harness-mic-hop-retry foreign-engine-change E2EFakeMeetingMic meeting-start meeting-stop meeting-mute meeting-unmute meeting-pause meeting-resume meeting-discard meeting-export meeting-route-change interrupt-end
     "meeting.started" "meeting.refused" "meeting.pipeline.done" "meeting.export" "meeting.session.activate" "meeting.mic.restart"
-    "meeting.discarded" "meeting.list count" "meeting.bgtask")
+    "meeting.discarded" "meeting.list count" "meeting.bgtask"
+    E2EFakeCleanup E2EFakeAgentSession LegatoFakeCleanup LegatoFakeAgentDelayMs LegatoCleanupDelivery LegatoFieldEditsSetting
+    harness-agent-edit harness-host-send)
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
   }
@@ -347,6 +349,10 @@ begin() {
 }
 
 # relaunch [launch args...]: new process on the current install, log capture restarted.
+# `simctl launch` on an app that is already running only brings that copy forward and drops the arguments (same
+# pid, none of the scenario's flags: no harness, no fake engine). A copy can appear between the terminate and the
+# launch (the system launching the app in the background, another run on the same simulator), so the launch
+# terminates any running copy itself, and the scenario only starts once the launched pid has logged its launch.
 relaunch() {
   stop_log
   xcrun simctl terminate "$UDID" "$BID" > /dev/null 2>&1
@@ -356,9 +362,14 @@ relaunch() {
     --predicate 'subsystem == "de.gruenwald.legato" AND category == "e2e"' > "$LOG" 2>&1 &
   LOGPID=$!
   sleep 1.5
-  xcrun simctl launch "$UDID" "$BID" "$@" > "$WORK/launch.out" 2>&1
-  wait_log "e2e launch " 10 && return 0
-  record FAIL "app launches and logs" "no 'e2e launch' line ($(cat "$WORK/launch.out"))"
+  xcrun simctl launch --terminate-running-process "$UDID" "$BID" "$@" > "$WORK/launch.out" 2>&1
+  local pid deadline=$((SECONDS + 10))
+  pid="$(sed -n "s/^$BID: \([0-9][0-9]*\)$/\1/p" "$WORK/launch.out")"
+  while [ -n "$pid" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    grep -F -- "Legato[$pid:" "$LOG" | grep -q -F -- "e2e launch " && return 0
+    sleep 0.2
+  done
+  record FAIL "app launches and logs" "no 'e2e launch' line from the launched process ($(cat "$WORK/launch.out"))"
   return 1
 }
 LOGSEQ=0
@@ -1721,7 +1732,9 @@ scenario_fe() {
   echo "fe send-clear latency on:  ${onsend#*fe.lagsend }"
   assert_no_log "no lag step timed out" "fe.timeout"
   assert_log "the host's clear contradicted the prediction" "harness fe.settle final=0 outcome=notYet"
-  assert_log "keys typed while it was contradicted went through the queue (user lane)" "harness fe.key contradicted=1"
+  # The edit queue takes the host's clear as a run boundary (ClearWatch: `fieldCleared`, a `reset(cleared)`): the
+  # contradiction ends at the clear, so the keys after it are plain user-lane keys, not contradicted ones.
+  assert_log "the host's clear reset the queue as a run boundary" "harness fe.reset reason=cleared"
   assert_no_log "no key went around the queue" "fe.key direct=1"
   assert_eq "the keys typed after the clear are in the field at once" "ok" "$(log_field "fe.step name=send-cleared " doc)"
   assert_eq "after the reads caught up: field" "ok" "$(log_field "fe.step name=sent " doc)"
@@ -1743,9 +1756,155 @@ scenario_fe() {
   done
 }
 
+# ------------------------------------------------------------------- edit queue + cleanup agent on the link (L6)
+
+AGENT_TEXT="teh cat sat. A dgo ran."
+# The harness document's text, as `harness status=` reports it.
+harness_doc() {
+  local n; n="$(grep -c -F -- "e2e harness status=" "$LOG")"
+  trigger harness-status
+  wait_log_n "e2e harness status=" $((n + 1)) 5
+  log_field_last "harness status=" doc
+}
+# fa_run <started/stopped count>: the mic key starts a run into the harness field (the lease is held), waits
+# <seconds>, and stops it.
+fa_start() { trigger harness-mic; wait_log_n "e2e outcome kind=started" "$1" 10; }
+fa_stop() { trigger harness-mic; wait_log_n "e2e outcome kind=stopped" "$1" 30; }
+
+scenario_fa() {
+  # The setting "Experimental: edit queue and cleanup agent" on, end to end over the link: the real app dictates
+  # (fake engine) into the harness keyboard (the real KeyboardController, its queue on through the App Group
+  # setting). The keyboard publishes its field events to link.feed; the app's side (LinkedCleanupRun) folds them,
+  # runs the cleanup agent on a scripted rolling session (teh→the, dgo→dog, sentence by sentence) and sends its
+  # edits over link.edits, which the keyboard executes through its queue. The session's own cleanup is the same
+  # scripted rules (the stateless pass). A Live run with a user edit mid-run, a field the host clears mid-run, a
+  # Live run without a rolling session, Replace and Hold.
+  local common=(-LegatoFakeEngine "$AGENT_TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 -LegatoKeyboardHarness YES
+    -LegatoHarnessAutocap NO -LegatoFakeCleanup "teh=the,dgo=dog" -LegatoFieldEditsSetting YES)
+  local doc
+
+  begin "fa. agent: Live, user edits mid-run" "${common[@]}" -LegatoCleanupDelivery live -LegatoFakeAgentDelayMs 2500 || return
+  xcrun simctl pbcopy "$UDID" <<< "sentinel"
+  wait_log "e2e harness visible value=1" 10
+  run_once 1   # arms the lease (an Action Button run, its own result)
+  fa_start 2
+  trigger harness-agent-edit
+  wait_log "fe.step name=agent-user-edit" 20
+  wait_log "link agent.outcome result=applied" 20
+  sleep 0.5
+  fa_stop 2
+  wait_log "link agent.finish" 20
+  sleep 0.5
+  assert_log "the setting reached the keyboard: its queue is on" "harness fe.on"
+  assert_log "the run is on the link, with the agent" "link link.run delivery=live agent=1"
+  assert_log "the keyboard follows the run on the link" "harness fe.link follow"
+  assert_count "the session ran no cleanup of its own for it (only the Action Button run's)" "cleanup.pass" 1
+  assert_eq "the user's key landed in the first word" "texh cat sat. A dgo ran. " "$(log_field "fe.step name=agent-user-edit " doc)"
+  assert_log "the agent's edit of that sentence came back as the user's, with the note" "link agent.outcome result=conflict reason=overlap byUser=1 note=1"
+  assert_log "the agent's session got the user's note" "agent.note conflict=1 user=1"
+  assert_order "the agent went on after the conflict: its next edit landed" "link agent.outcome result=conflict" "link agent.outcome result=applied"
+  assert_count "it never wrote into the user's sentence again" "harness fe.write origin=agent" 1
+  assert_log "its fix of the next sentence is a 2/2 patch in the cleanup lane" "harness fe.write origin=agent lane=cleanup del=2 ins=2"
+  assert_log "it reached the keyboard over link.edits" "harness fe.link edit origin=agent steps=1"
+  doc="$(harness_doc)"
+  assert_eq "field: the user's text kept, the agent's fix in" "texh cat sat. A dog ran. " "$doc"
+  assert_log "the stop took the agent's final pass" "link agent.finish edits=0 unapplied=0"
+  assert_eq "clipboard untouched (the cleaned text is in the field)" "sentinel" "$(pasteboard)"
+  assert_eq "history holds what the field got" "texh cat sat. A dog ran." "$(history_texts | tail -1)"
+  assert_no_log "nothing was typed twice" "fe.duplicate"
+  assert_no_log "no chunk was typed again" "fe.mapped rewound=1"
+  wait_log "harness fe.link stop scrubbed=1" 15
+  assert_order "the keyboard followed the run until its stop was done (scrubbed after the agent's finish)" "link agent.finish" "harness fe.link stop scrubbed=1"
+
+  SCENARIO="fa. agent: the host clears the field mid-run"
+  relaunch "${common[@]}" -LegatoCleanupDelivery live || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  fa_start 2
+  trigger harness-host-send
+  wait_log "fe.step name=host-sent" 20
+  sleep 2
+  fa_stop 2
+  wait_log "link agent.finish" 20
+  sleep 0.5
+  assert_eq "the host emptied the field" "" "$(log_field "fe.step name=host-sent " doc)"
+  assert_log "the agent's context was closed at the clear (reset cleared)" "agent.note reset=cleared"
+  doc="$(harness_doc)"
+  assert_eq "the sent sentence is not typed again" "" "$(grep -o 'sat\.' <<< "$doc")"
+  assert_eq "the rest of the run is in the field once" "1" "$(grep -o 'ran\.' <<< "$doc" | wc -l | tr -d ' ')"
+  assert_no_log "nothing written into the cleared field was typed again" "fe.mapped rewound=1"
+  assert_eq "clipboard untouched (the run was sent)" "sentinel" "$(pasteboard)"
+
+  # The device defect (review L6 #8): the chat app sends while the agent's edit is still on its way, and the
+  # next run starts at once. The next run's stream is never refused as the user's.
+  SCENARIO="fa. agent: Send mid-run, then the next run at once"
+  relaunch "${common[@]}" -LegatoCleanupDelivery live -LegatoFakeAgentDelayMs 2500 || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  fa_start 2
+  trigger harness-host-send
+  wait_log "fe.step name=host-sent" 20
+  fa_stop 2
+  fa_start 3
+  sleep 2
+  fa_stop 3
+  wait_log_n "link agent.finish" 2 20
+  sleep 0.5
+  doc="$(harness_doc)"
+  assert_no_log "no stream chunk was refused as the user's" "reason=ownerTainted"
+  assert_eq "the next run's text is in the field" "1" "$(grep -o 'sat\.' <<< "$doc" | wc -l | tr -d ' ')"
+
+  SCENARIO="fa. agent absent: stateless pass as patches"
+  relaunch "${common[@]}" -LegatoCleanupDelivery live -LegatoFakeAgent NO || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  fa_start 2
+  sleep 2
+  fa_stop 2
+  wait_log "link final.patch result=" 20
+  sleep 0.5
+  assert_log "no rolling session: the agent is absent at the stop" "link agent.absent"
+  assert_log "the stateless pass ran at the stop" "cleanup.pass changed=1"
+  assert_log "its text went over the link as two patches" "link final.patch steps=2"
+  assert_log "they landed" "link final.patch result=applied"
+  assert_eq "field: cleaned" "the cat sat. A dog ran. " "$(harness_doc)"
+  assert_eq "history holds the cleaned text" "the cat sat. A dog ran." "$(history_texts | tail -1)"
+
+  SCENARIO="fa. Replace: stateless final pass as patches"
+  relaunch "${common[@]}" -LegatoCleanupDelivery replace || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  fa_start 2
+  sleep 2
+  fa_stop 2
+  wait_log "link final.patch result=" 20
+  sleep 0.5
+  assert_log "the run is on the link, without an agent" "link link.run delivery=replace agent=0"
+  assert_log "its patches went over the link: two steps" "link final.patch steps=2"
+  assert_log "they landed" "link final.patch result=applied"
+  assert_log "the keyboard wrote them in the cleanup lane, 4 letters out, 4 in" "harness fe.write origin=finalSwap lane=cleanup del=4 ins=4"
+  assert_log "and confirmed them as the swap" "harness fe.link outcome origin=finalSwap result=applied"
+  assert_eq "field: cleaned" "the cat sat. A dog ran. " "$(harness_doc)"
+  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+
+  SCENARIO="fa. Hold: the end-of-run insert through the queue"
+  relaunch "${common[@]}" -LegatoCleanupDelivery hold || return
+  wait_log "e2e harness visible value=1" 10
+  run_once 1
+  fa_start 2
+  sleep 2
+  fa_stop 2
+  sleep 1
+  assert_no_log "Hold is not on the link" "link link.run"
+  assert_no_log "the keyboard publishes no feed for Hold" "harness fe.link follow"
+  assert_log "the insert went through the queue (Hold, ASR lane)" "harness fe.write origin=hold lane=asr"
+  assert_eq "field: the cleaned text" "the cat sat. A dog ran." "$(harness_doc)"
+  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
+}
+
 t_run=$SECONDS
 wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
-for s in a b c d e f g h i p j o k l m n n2 n3 n4 n5 q t r s u x x2 y z fe; do if wanted "$s"; then "scenario_$s"; fi; done
+for s in a b c d e f g h i p j o k l m n n2 n3 n4 n5 q t r s u x x2 y z fe fa; do if wanted "$s"; then "scenario_$s"; fi; done
 if wanted v; then
   scenario_v "retry succeeds" duckOthers 1 2 yes
   scenario_v "default fails twice" duckOthers 9 2 no

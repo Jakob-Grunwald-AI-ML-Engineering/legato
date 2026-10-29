@@ -434,6 +434,18 @@ struct CleanupAgentTests {
         #expect(await rig.agent.replan().isEmpty)
     }
 
+    /// An edit the queue could not map from its base (`outOfWindow`: the field moved on under a long pass) is no
+    /// user conflict: it is planned again however often it happens, never given up.
+    @Test func outOfWindowHandBacksAreReplannedWithoutGivingUp() async throws {
+        let rig = await Rig(scripts: Array(repeating: edits((1, "I saw the dog.")), count: 5))
+        var transactions = await rig.dictate("I saw teh dog. It ran away.")
+        for _ in 0..<3 {
+            await rig.agent.conflicted(Conflict(.outOfWindow), for: try #require(transactions.first?.id))
+            transactions = await rig.agent.replan()
+            #expect(transactions.count == 1)
+        }
+    }
+
     @Test func theRunsStyleEmojiAndNumberSettingsReachTheRequest() async throws {
         let rig = await Rig(scripts: [.json("[]")], style: .markdown, emoji: .subtle, itn: true)
         _ = await rig.dictate("I saw teh dog. It ran away.")

@@ -85,6 +85,10 @@ public final class FieldFeedLink: Sendable {
         var sentThrough = 0
         var outbox: [NumberedEdit] = []
         var editsRun: String?
+        /// The keyboard stopped following (the app scrubbed the link): batches are not written until the next run.
+        var stopped = false
+        /// The encoded size of each kept slot, in ring order: the ring is encoded once per append.
+        var slotBytes: [Int] = []
     }
 
     private let store: LinkStore
@@ -109,12 +113,26 @@ public final class FieldFeedLink: Sendable {
     /// id, so every reader resyncs) and the previous run's edit acknowledgement.
     public func follow(runID: String) {
         state.withLock { state in
+            state.stopped = false
             guard state.runID != runID else { return }
             state.runID = runID
             state.writer = UUID()
             state.ring = nil
+            state.slotBytes = []
             store.remove(forKey: LinkChannel.Key.feed)
             store.remove(forKey: LinkChannel.Key.editsAck)
+        }
+    }
+
+    /// Keyboard: the run's link is gone (the app scrubbed it): the ring is dropped and nothing is written again
+    /// until ``follow(runID:)``, so a batch still on its way does not bring the field's text back.
+    public func stopFollowing() {
+        state.withLock { state in
+            state.stopped = true
+            state.runID = nil
+            state.ring = nil
+            state.slotBytes = []
+            store.remove(forKey: LinkChannel.Key.feed)
         }
     }
 
@@ -122,15 +140,31 @@ public final class FieldFeedLink: Sendable {
     /// batches are dropped beyond the capacity and the byte budget; a single batch over the budget is kept as a
     /// `resync` marker (readers rebuild from `window`).
     public func append(_ batch: FeedBatch, window: String) {
-        state.withLock { state in
+        let written = state.withLock { state -> Bool in
+            guard !state.stopped else { return false }
             var ring = state.ring ?? FeedRing(writer: state.writer, runID: state.runID, lastSeq: 0, window: window, slots: [])
+            if state.ring == nil { state.slotBytes = [] }
             ring.lastSeq += 1
             ring.window = window
-            ring.slots.append(FeedSlot(seq: ring.lastSeq, batch: batch))
-            if ring.slots.count > capacity { ring.slots.removeFirst(ring.slots.count - capacity) }
+            let slot = FeedSlot(seq: ring.lastSeq, batch: batch)
+            ring.slots.append(slot)
+            state.slotBytes.append(store.encoded(slot)?.count ?? 0)
+            if ring.slots.count > capacity {
+                ring.slots.removeFirst(ring.slots.count - capacity)
+                state.slotBytes.removeFirst(state.slotBytes.count - ring.slots.count)
+            }
+            // The oldest slots go by their known sizes (the ring is encoded once, not once per dropped slot): the
+            // slots, a comma between each, and the rest of the ring (its window, at most twice its UTF-8 when escaped).
+            let overhead = 256 + 2 * window.utf8.count
+            var total = state.slotBytes.reduce(0, +) + state.slotBytes.count + overhead
+            while total > maxBytes, ring.slots.count > 1 {
+                ring.slots.removeFirst()
+                total -= state.slotBytes.removeFirst() + 1
+            }
             var data = store.encoded(ring)
             while let size = data?.count, size > maxBytes, ring.slots.count > 1 {
                 ring.slots.removeFirst()
+                state.slotBytes.removeFirst()
                 data = store.encoded(ring)
             }
             if let size = data?.count, size > maxBytes, let only = ring.slots.first {
@@ -141,8 +175,9 @@ public final class FieldFeedLink: Sendable {
             }
             state.ring = ring
             if let data { store.write(encoded: data, forKey: LinkChannel.Key.feed) }
+            return true
         }
-        post(LinkChannel.Note.feed)
+        if written { post(LinkChannel.Note.feed) }
     }
 
     /// App: the batches after `cursor`. Nil when the keyboard has written nothing (for `runID`, when given: a
@@ -165,6 +200,16 @@ public final class FieldFeedLink: Sendable {
         return FeedRead(batches: ring.slots.filter { $0.seq > cursor.seq }.map(\.batch), cursor: now)
     }
 
+    /// App: the first read of a run, by a reader with no cursor yet. While the ring still holds its first batch
+    /// (nothing was dropped) every batch since the keyboard began following `runID` is returned, so the reader
+    /// learns who wrote which text (the run's own text is told from the user's only by its `applied` events);
+    /// otherwise, as ``readFeed(after:forRun:)`` with no cursor, a `resync`. Nil while nothing was written for it.
+    public func readFeedFromStart(forRun runID: String) -> FeedRead? {
+        guard let ring = store.read(FeedRing.self, forKey: LinkChannel.Key.feed), ring.runID == runID else { return nil }
+        guard ring.slots.first?.seq == 1 else { return readFeed(after: nil, forRun: runID) }
+        return FeedRead(batches: ring.slots.map(\.batch), cursor: FeedCursor(writer: ring.writer, seq: ring.lastSeq))
+    }
+
     // MARK: Edits (app writes, keyboard reads and acknowledges)
 
     /// App: starts sending edits for `runID`; what was queued for an earlier run is dropped.
@@ -178,13 +223,22 @@ public final class FieldFeedLink: Sendable {
         }
     }
 
+    /// App: the run's stop is over: nothing more is sent for it (its link is about to be scrubbed).
+    public func endRun() {
+        state.withLock { state in
+            state.editsRun = nil
+            state.outbox = []
+        }
+    }
+
     /// App: queues transactions for the keyboard (of the run given to `beginRun`); what the keyboard
     /// acknowledged is dropped. Returns how many unacknowledged edits fell off the front because more than the
     /// capacity were pending (the keyboard sees them as `EditsRead.missed`).
     @discardableResult
     public func sendEdits(_ transactions: [EditTransaction]) -> Int {
         guard !transactions.isEmpty else { return 0 }
-        let dropped = state.withLock { state -> Int in
+        let dropped = state.withLock { state -> Int? in
+            guard state.editsRun != nil else { return nil }
             let ack = store.read(EditsAck.self, forKey: LinkChannel.Key.editsAck)
             if ack?.writer == state.writer { state.outbox.removeAll { $0.n <= ack?.through ?? 0 } }
             for transaction in transactions {
@@ -196,6 +250,7 @@ public final class FieldFeedLink: Sendable {
             store.write(EditsBox(writer: state.writer, runID: state.editsRun, edits: state.outbox), forKey: LinkChannel.Key.edits)
             return dropped
         }
+        guard let dropped else { return 0 }
         post(LinkChannel.Note.edits)
         return dropped
     }

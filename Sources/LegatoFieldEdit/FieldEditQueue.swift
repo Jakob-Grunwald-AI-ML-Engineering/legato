@@ -133,6 +133,8 @@ public struct FieldEditQueue: Sendable {
     /// The newest version number handed out.
     private var lastVersion: Int
     private var events: [QueueEvent] = []
+    /// Taints set since the last ``takeTaints()``.
+    private var taints: [TaintNote] = []
     private var affinities: [Affinity] = []
     /// The last settle left the prediction contradicted (``needsFinalSettle``).
     private var contradicted = false
@@ -157,6 +159,12 @@ public struct FieldEditQueue: Sendable {
 
     /// Records recognized text streamed into the run (Mac), in order with the field's own events.
     public mutating func appendASR(_ delta: String) { feed.append(.asrDelta(delta)) }
+
+    /// The taints since the last call, oldest first, with why each was set (diagnostics).
+    public mutating func takeTaints() -> [TaintNote] {
+        defer { taints = [] }
+        return taints
+    }
 
     /// The events since the last call, oldest first.
     public mutating func takeEvents() -> [QueueEvent] {
@@ -284,11 +292,22 @@ public struct FieldEditQueue: Sendable {
             guard boundaries.contains(step.span.location), boundaries.contains(step.span.end) else {
                 return .expectMismatch
             }
-            if !transaction.origin.isUser, document.tainted.contains(where: { touches(step.span, $0) }) {
+            if !transaction.origin.isUser, document.tainted.contains(where: { Self.blocks(step, of: transaction.origin, $0) }) {
                 return .ownerTainted
             }
         }
         return nil
+    }
+
+    /// Whether tainted text refuses an automatic step. The run's own stream (ASR, Hold) only when the step rewrites
+    /// text the user wrote or changed: an insertion, or a change next to where the user deleted (a zero-length
+    /// taint), takes nothing of theirs, and refusing it would refuse every later chunk at the caret. Other origins
+    /// (cleanup, the agent) stay off everything the user touched, its edges included.
+    private static func blocks(_ step: EditStep, of origin: EditOrigin, _ taint: Span) -> Bool {
+        guard origin == .asr || origin == .hold else { return touches(step.span, taint) }
+        guard !step.span.isEmpty else { return false }
+        if taint.isEmpty { return step.span.location < taint.location && taint.location < step.span.end }
+        return step.span.location < taint.end && taint.location < step.span.end
     }
 
     private mutating func issue(_ item: Pending) -> FieldWrite {
@@ -462,7 +481,9 @@ public struct FieldEditQueue: Sendable {
         apply(choice.alignment, snapshot)
         if notes.typingLooksWritten, let step = choice.alignment?.step {
             // The user's text could also be a write's: it is theirs, and no automatic edit touches it.
-            document.tainted.append(Span(location: step.span.location, length: step.text.utf16.count))
+            let span = Span(location: step.span.location, length: step.text.utf16.count)
+            document.tainted.append(span)
+            taints.append(TaintNote(source: .typingLooksWritten, span: span))
         }
         if notes.guessedHistory { forgetHistory() }
         return choice.k == predictions.count - 1 ? .confirmed : .diverged
@@ -830,6 +851,7 @@ public struct FieldEditQueue: Sendable {
             }
             // The user changed owned text: their text stays inside the owner's span, and is tainted.
             tainted.append(written)
+            taints.append(TaintNote(source: .userEdit, span: written))
             let kept = map.adjust(span.span) ?? written
             let start = min(kept.location, written.location), end = max(kept.end, written.end)
             owned.append(OwnedSpan(owner: span.owner, span: Span(location: start, length: end - start)))
@@ -1027,5 +1049,21 @@ func touches(_ span: Span, _ other: Span) -> Bool {
     case (true, false): other.location < span.location && span.location < other.end
     case (false, true): span.location <= other.location && other.location <= span.end
     case (true, true): span.location == other.location
+    }
+}
+
+/// Why owned text was tainted (``FieldEditQueue/takeTaints()``).
+public struct TaintNote: Sendable, Hashable {
+    public enum Source: String, Sendable, Hashable {
+        /// A user (`byUser`) step changed owned text.
+        case userEdit
+        /// A read that a write of ours or the user's typing explains: taken as the user's typing.
+        case typingLooksWritten
+    }
+    public var source: Source
+    public var span: Span
+    public init(source: Source, span: Span) {
+        self.source = source
+        self.span = span
     }
 }
