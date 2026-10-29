@@ -29,7 +29,7 @@ struct ContinuousProbeOptions: Sendable {
         guard let b = Backend(rawValue: backend) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_BACKEND \(backend) (coreml, mlx-cpu)")) }
         guard let m = Model(rawValue: model) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_MODEL \(model) (qwen3-1.7b, qwen3-0.6b)")) }
         guard let k = Keep(rawValue: keep) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_BG \(keep) (audio, none, foreground)")) }
-        return .success(ContinuousProbeOptions(backend: b, model: m, keep: k, config: ProbeConfig(environment: environment)))
+        return .success(ContinuousProbeOptions(backend: b, model: m, keep: k, config: ProbeConfig(environment: environment, defaultRepeats: 2, defaultWarm: false)))
     }
 
     var coreMLSpec: CoreMLModelSpec {
@@ -99,7 +99,9 @@ extension SessionProbe {
         defer { NotificationCenter.default.removeObserver(thermalObserver) }
         emit("session.probe.continuous.start", [
             "thermal": thermalStart, "batteryLevel": Double(batteryStart), "batteryState": UIDevice.current.batteryState.rawValue,
-            "wps": options.config.wordsPerSecond, "targetSeconds": options.config.targetSeconds, "seed": Int(options.config.seed),
+            "wps": options.config.wordsPerSecond, "repeats": options.config.repeats, "warm": options.config.warmContinuation,
+            "seed": Int(options.config.seed), "streamSeconds": Int(options.config.streamSeconds()),
+            "corpusWords": ProbeCorpus.wordCount, "corpusMistakes": ProbeCorpus.mistakeCount,
             "window": options.config.window, "linger": String(describing: Settings.keepAliveLinger),
             "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled,
         ])
@@ -189,14 +191,13 @@ extension SessionProbe {
             onTurn: { record in await line("session.probe.continuous.turn", record.fields, base) },
             onEvent: { name, fields in await line("session.probe.continuous.\(name)", fields, base) })
         var fields: [String: any Sendable] = ["modelMB": modelMB]
-        var ok = true
-        do {
-            let result = try await ContinuousAgentProbe.run(backend: backend, config: options.config, hooks: hooks)
-            fields.merge(result.summary.fields) { $1 }
-        } catch {
-            ok = false
-            fields["error"] = describe(error)
+        let results = await ContinuousAgentProbe.runAll(backend: backend, config: options.config, hooks: hooks)
+        let ok = !results.isEmpty
+        fields.merge(ProbeReport.pooled(results)) { $1 }
+        if results.contains(where: { $0.phase == "warm" }) {
+            emit("session.probe.continuous.summary.warm", ProbeReport.pooled(results, phase: "warm"))
         }
+        for (_, group) in ProbeReport.breakdown(results) { emit("session.probe.continuous.breakdown", group) }
         peak.stop()
         fields.merge([
             "ok": ok, "peakFootprintMB": Int(peak.peakFootprintMB), "minAvailableMB": Int(peak.minAvailableMB),

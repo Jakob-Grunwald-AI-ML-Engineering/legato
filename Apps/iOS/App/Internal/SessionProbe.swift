@@ -33,8 +33,11 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
 /// `GCC_OPTIMIZATION_LEVEL=3 SWIFT_OPTIMIZATION_LEVEL=-O` to that xcodebuild: Debug compiles MLX's C++ CPU
 /// kernels at -O0 (Core ML runs on the Neural Engine and is unaffected). A launch downloads a missing model in
 /// the foreground (logged), loads it, arms the microphone, waits up to 3 min for the background (press Home)
-/// and replays ~150 s of speech. Set the keep-ready linger in Settings to at least 5 min. devicectl parses
-/// dash-prefixed arguments as its own, so the configuration goes in the environment:
+/// and replays the annotated corpus (ContinuousAgentCorpus.swift: 562 words, 70 mistakes, ~225 s at 2.5 words/s)
+/// twice on fresh sessions: one launch takes about 9 min plus the load (`LEGATO_PROBE_REPEATS=3` and
+/// `LEGATO_PROBE_WARM=1`, a further pass on the last session, add ~3.75 min each). Set the keep-ready linger in
+/// Settings to at least 15 min. devicectl parses dash-prefixed arguments as its own, so the configuration goes
+/// in the environment:
 ///
 ///     D=00008150-000E60360245401C
 ///     xcrun devicectl device process launch --device $D --terminate-existing --environment-variables '{"LEGATO_SESSION_PROBE":"continuous","LEGATO_PROBE_BACKEND":"coreml","LEGATO_PROBE_MODEL":"qwen3-1.7b","LEGATO_PROBE_BG":"audio"}' de.gruenwald.legato
@@ -44,16 +47,19 @@ enum SessionProbeMode: String, Sendable, CaseIterable {
 ///
 /// `LEGATO_PROBE_BG`: `audio` (microphone lease + background task: the measured case), `none` (background task
 /// only; iOS suspends after ~30 s), `foreground` (no wait, no lease). Optional: `LEGATO_PROBE_WPS` (2.5),
-/// `LEGATO_PROBE_SECONDS` (150), `LEGATO_PROBE_SEED` (95), `LEGATO_PROBE_WINDOW` (1000 context tokens, the same
-/// for every backend). Results go to `Library/Caches/continuous-probe.jsonl` (append-only) and audio-diag.jsonl
-/// (restarts at 1 MB):
+/// `LEGATO_PROBE_REPEATS` (2), `LEGATO_PROBE_WARM` (0), `LEGATO_PROBE_SEED` (95; run r uses seed + r - 1),
+/// `LEGATO_PROBE_WINDOW` (1000 context tokens, the same for every backend). Results go to
+/// `Library/Caches/continuous-probe.jsonl` (append-only) and audio-diag.jsonl (restarts at 1 MB):
 ///
 ///     xcrun devicectl device copy from --device $D --domain-type appDataContainer --domain-identifier de.gruenwald.legato \
 ///       --source Library/Caches/continuous-probe.jsonl --destination ./continuous-probe.jsonl
 ///
 /// Events `session.probe.continuous.<x>`: `start`, `download`, `load`, `arm`, `background`, `warm`, `turn` (one
-/// per chunk), `trim`, `thermal`, `memoryWarning`, `stop`, `summary`, `memory`, `done`. Every line carries
-/// `backend`, `model`, `bg`, `appState`.
+/// per chunk: compute ms, prefill/ttft/decode, keptUp, reply, fixed mistakes, wrong edits), `trim`, `mistake`
+/// (one per annotated mistake and run: kind, type, tags, appearChunk, fixedChunk, latencyMs), `run` (per-run
+/// figures), `summary` (fresh runs pooled: local/sentence latency mean/median/p95/sd, fixed k/n, wrong edits k/n,
+/// turn ms, keep-up, peak memory, thermal, battery), `summary.warm`, `breakdown` (per tag, type, passage),
+/// `thermal`, `memoryWarning`, `stop`, `memory`, `done`. Every line carries `backend`, `model`, `bg`, `appState`.
 ///
 /// Device measurement of persistent LLM sessions (epic #80), internal builds only. For Foundation Models and
 /// the selected Core ML cleanup model: turn 1 (instructions + ~800 tokens of text), turn 2 (+~40 tokens) on
