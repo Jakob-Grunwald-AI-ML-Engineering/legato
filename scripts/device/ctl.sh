@@ -114,7 +114,8 @@ cmd_install() {
 
 cmd_launch() {
   require_device
-  dc device process launch --device "$DEVICE" --terminate-existing "$BID" "$@"
+  # `--` keeps app arguments such as -LegatoDebugBridge from being parsed as devicectl options.
+  dc device process launch --device "$DEVICE" --terminate-existing -- "$BID" "$@"
 }
 
 cmd_send() {
