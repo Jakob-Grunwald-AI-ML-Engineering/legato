@@ -64,6 +64,7 @@ final class MLXChat: MLXChatTurning, @unchecked Sendable {
     func stream(_ message: String, device: ComputeDevice) -> AsyncThrowingStream<MLXTurnEvent, any Error> {
         let errors = MLXErrorRecorder()
         let session = session
+        MLXCompile.prepare(for: device)
         // The generation task starts inside `streamDetails` and inherits the default device and the error
         // handler from here (as in `MLXChatGenerator.stream`).
         let upstream = MLX.withErrorHandler(errors.record) {

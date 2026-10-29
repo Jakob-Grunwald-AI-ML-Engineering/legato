@@ -16,10 +16,14 @@ struct Arguments {
     var root = URL.applicationSupportDirectory.appending(path: "Legato/Models", directoryHint: .isDirectory)
     var out = URL(fileURLWithPath: "continuous-agent-\(Int(Date().timeIntervalSince1970)).jsonl")
     var config = ProbeConfig(environment: ProcessInfo.processInfo.environment)
+    /// Only the first n corpus sentences (a quick check); nil: the whole corpus.
+    var sentences: Int?
+    var corpus: [ProbeSentence] { sentences.map { Array(ProbeCorpus.sentences.prefix(max(1, $0))) } ?? ProbeCorpus.sentences }
 
     static let usage = """
         usage: continuous-agent [--backend coreml|mlx-gpu|mlx-cpu|all] [--model qwen3-1.7b|qwen3-0.6b|all]
                                 [--wps 2.5] [--repeats 3] [--warm 1|0] [--seed 95] [--window 1000] [--root <models>] [--out <file.jsonl>]
+                                [--cpu-compile on|off] [--sentences n]
         """
 
     static func parse(_ argv: [String]) throws -> Arguments {
@@ -46,6 +50,11 @@ struct Arguments {
             case "--warm": args.config.warmContinuation = try value(flag) != "0"
             case "--seed": args.config.seed = UInt64(try value(flag)) ?? args.config.seed
             case "--window": args.config.window = Int(try value(flag)) ?? args.config.window
+            case "--cpu-compile":
+                let v = try value(flag)
+                guard v == "on" || v == "off" else { throw Failure("--cpu-compile is on or off") }
+                MLXCompile.allowedOnCPU = v == "on"
+            case "--sentences": args.sentences = Int(try value(flag))
             case "--root": args.root = URL(fileURLWithPath: try value(flag), isDirectory: true)
             case "--out": args.out = URL(fileURLWithPath: try value(flag))
             case "-h", "--help": print(usage); exit(0)
@@ -132,9 +141,10 @@ func runOne(_ backend: Backend, _ model: Model, _ args: Arguments, _ sink: Sink)
     let mlxSpec = MLXModels.spec(id: model == .qwen3_1_7b ? MLXModels.qwen3_1_7bID : MLXModels.qwen3_0_6bID)!
     let installer: any ModelInstaller = backend == .coreml ? CoreMLInstaller(spec: coreMLSpec) : MLXInstaller(spec: mlxSpec)
     let folder = backend == .coreml ? coreMLSpec.folder(root: args.root) : mlxSpec.folder(root: args.root)
-    emit("start", ["thermal": thermal(), "footprintMB": footprintMB(), "folder": folder.path, "wps": args.config.wordsPerSecond,
-                   "repeats": args.config.repeats, "warm": args.config.warmContinuation, "streamSeconds": Int(args.config.streamSeconds()),
-                   "corpusWords": ProbeCorpus.wordCount, "corpusMistakes": ProbeCorpus.mistakeCount, "seed": Int(args.config.seed), "window": args.config.window])
+    if backend == .mlxCPU { MLXCompile.prepare(for: .cpu) }
+    emit("start", ["compile": MLXCompile.label, "thermal": thermal(), "footprintMB": footprintMB(), "folder": folder.path, "wps": args.config.wordsPerSecond,
+                   "repeats": args.config.repeats, "warm": args.config.warmContinuation, "streamSeconds": Int(args.config.streamSeconds(args.corpus)),
+                   "corpusWords": ProbeCorpus.wordCount, "corpusMistakes": ProbeCorpus.mistakeCount, "corpusSentences": args.corpus.count, "seed": Int(args.config.seed), "window": args.config.window])
 
     if await !installer.isInstalled(root: args.root) {
         let start = ContinuousClock.now
@@ -177,7 +187,7 @@ func runOne(_ backend: Backend, _ model: Model, _ args: Arguments, _ sink: Sink)
         onTurn: { record in sink.line("turn", record.fields.merging(base) { $1 }) },
         onEvent: { name, fields in sink.line(name, fields.merging(base) { $1 }) })
     let replayStart = ContinuousClock.now
-    let results = await ContinuousAgentProbe.runAll(backend: llm, config: args.config, hooks: hooks)
+    let results = await ContinuousAgentProbe.runAll(backend: llm, config: args.config, hooks: hooks, corpus: args.corpus)
     let peakMB = await peak.stop()
     var report = ComboReport()
     for result in results { report.rows.append(base.merging(ProbeReport.run(result)) { $1 }.merging(["row": "\(result.phase) \(result.rep)"]) { $1 }) }

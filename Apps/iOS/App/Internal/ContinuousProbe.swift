@@ -97,7 +97,10 @@ extension SessionProbe {
             forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main
         ) { _ in MainActor.assumeIsolated { line("session.probe.continuous.thermal", ["thermal": thermalName], base) } }
         defer { NotificationCenter.default.removeObserver(thermalObserver) }
+        // MLX on the phone's CPU runs with compile off (no JIT compiler on iOS); the start line says which.
+        if options.backend == .mlxCPU { MLXCompile.prepare(for: .cpu) }
         emit("session.probe.continuous.start", [
+            "compile": MLXCompile.label,
             "thermal": thermalStart, "batteryLevel": Double(batteryStart), "batteryState": UIDevice.current.batteryState.rawValue,
             "wps": options.config.wordsPerSecond, "repeats": options.config.repeats, "warm": options.config.warmContinuation,
             "seed": Int(options.config.seed), "streamSeconds": Int(options.config.streamSeconds()),

@@ -26,6 +26,34 @@ actor MLXModelCache {
 
     func evict(folder: URL) async {
         await cache.evict(folder: folder)
+        halfPrecision.removeAll()
+    }
+
+    /// Containers whose bfloat16 parameters were already cast to float32 (see ``containerForCPU(spec:folder:)``).
+    private var halfPrecision: Set<ObjectIdentifier> = []
+
+    /// The model of `folder` for CPU work: its bfloat16 parameters (quantization scales and biases, norms) cast
+    /// once to float32. MLX's CPU kernels have no SIMD path for bfloat16, so a bfloat16 quantized matmul runs
+    /// one scalar multiply-add at a time (Qwen3 1.7B 4-bit never finished its first prefill in 11 minutes on a
+    /// Mac); float32 takes the vectorised path (about 4 tokens a second, prefill and decode alike, one core).
+    /// Not float16: Qwen3's activations overflow it and the reply is noise. The packed 4-bit weights stay as
+    /// they are; scales and biases double (about +110 MB for the 1.7B) and so does the KV cache. Call it with
+    /// the CPU as the task's default device. The cast copy is the one resident copy, so GPU work on it runs in
+    /// float32 too.
+    func containerForCPU(spec: MLXModelSpec, folder: URL) async throws -> ModelContainer {
+        let container = try await container(for: spec, folder: folder)
+        let id = ObjectIdentifier(container)
+        guard !halfPrecision.contains(id) else { return container }
+        #if canImport(Cmlx)  // the real MLX; the CI stub has no arrays
+            await container.perform { (context: ModelContext) in
+                let model = context.model
+                let cast = model.parameters().mapValues { $0.dtype == .bfloat16 ? $0.asType(.float32) : $0 }
+                model.update(parameters: cast)
+                eval(model)
+            }
+        #endif
+        halfPrecision.insert(id)
+        return container
     }
 
     var residentFolders: [String] { get async { await cache.residentFolders } }
@@ -115,12 +143,13 @@ protocol MLXGenerating: Sendable {
 /// process (an error raised on Metal's own completion threads is outside any task and still cannot be caught).
 struct MLXChatGenerator: MLXGenerating {
     func load(spec: MLXModelSpec, folder: URL, device: ComputeDevice) async throws {
+        MLXCompile.prepare(for: device)
         try await MLX.withError {
             switch device {
             case .gpu: _ = try await MLXModelCache.shared.container(for: spec, folder: folder)
             case .cpu:
                 _ = try await Device.withDefaultDevice(.cpu) {
-                    try await MLXModelCache.shared.container(for: spec, folder: folder)
+                    try await MLXModelCache.shared.containerForCPU(spec: spec, folder: folder)
                 }
             }
         }
@@ -137,6 +166,7 @@ struct MLXChatGenerator: MLXGenerating {
             generateParameters: GenerateParameters(maxTokens: 1_024, temperature: 0),
             additionalContext: ["enable_thinking": false])
         let messages = MLXBackend.chatMessages(examples: examples, prompt: prompt)
+        MLXCompile.prepare(for: device)
         let errors = MLXErrorRecorder()
         // The generation task starts inside `streamResponse` and inherits the default device and the error
         // handler from here.
@@ -173,7 +203,9 @@ struct MLXChatGenerator: MLXGenerating {
 /// turns. MLX array work needs the Metal shaders that only an Xcode build produces.
 ///
 /// On ``ComputeDevice/cpu`` the load and the generation run with the CPU as the task's default device, so
-/// no GPU work is submitted (the phone's background). The loaded model is shared with the GPU backend: MLX
+/// no GPU work is submitted (the phone's background), and with MLX compile off where the CPU cannot run
+/// compiled kernels (iOS, see ``MLXCompile``), on a float32 copy of the model's bfloat16 parameters (see
+/// ``MLXModelCache/containerForCPU(spec:folder:)``). The loaded model is shared with the GPU backend: MLX
 /// arrays live in unified memory and any device computes on them, and the weights load on the CPU stream
 /// either way, so one resident copy serves both and a device switch reloads nothing.
 public final class MLXBackend: LLMBackend, ModelResourceLifecycle {
