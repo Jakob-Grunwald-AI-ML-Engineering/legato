@@ -305,7 +305,8 @@ public struct FieldEditQueue: Sendable {
     /// (cleanup, the agent) stay off everything the user touched, its edges included.
     private static func blocks(_ step: EditStep, of origin: EditOrigin, _ taint: Span) -> Bool {
         guard origin == .asr || origin == .hold else { return touches(step.span, taint) }
-        guard !step.span.isEmpty, !taint.isEmpty else { return false }
+        guard !step.span.isEmpty else { return false }
+        if taint.isEmpty { return step.span.location < taint.location && taint.location < step.span.end }
         return step.span.location < taint.end && taint.location < step.span.end
     }
 

@@ -56,6 +56,23 @@ struct FieldEditQueueStreamTaintTests {
         #expect(queue.takeEvents().first == .conflict(step.id, Conflict(.ownerTainted, byUser: true)))
     }
 
+    /// A deletion strictly inside the step's span: rewriting the run would undo it, so the step is refused.
+    @Test func aStreamRewriteSpanningTheUsersDeletionIsRefused() {
+        var field = ""
+        var queue = macQueue(field)
+        queue.submit(EditTransaction(origin: .asr, owner: "run", base: v0, steps: [.insert("hello big world", at: 0)]))
+        queue.drain(&field)
+        queue.hostEdit(&field, to: "hello world")
+        _ = queue.takeEvents()
+        let step = EditTransaction(
+            origin: .asr, owner: "run", base: queue.document.version,
+            steps: [replace(0, "hello world", with: "hello big world.")])
+        queue.submit(step)
+        #expect(queue.drain(&field).isEmpty)
+        #expect(field == "hello world")
+        #expect(queue.takeEvents().first == .conflict(step.id, Conflict(.ownerTainted, byUser: true)))
+    }
+
     /// Every taint is reported with its source, for the keyboard's trace.
     @Test func taintsAreReportedWithTheirSource() {
         var field = ""
