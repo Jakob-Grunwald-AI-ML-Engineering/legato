@@ -389,6 +389,19 @@ public struct ProbeTurnRecord: Sendable {
     /// The drift guard turned the reply down; its drift score.
     public var rejected: Bool?
     public var drift: Double?
+    /// From the endpoint (the chunk that ended the sentence or passage) to the first token, and to the edit.
+    public var endpointToFirstMs: Int?
+    public var endpointToEditMs: Int?
+    /// Prefill ahead: tokens fed before the request, their time and the finalized segments they came in.
+    public var aheadTokens: Int?
+    public var aheadMs: Int?
+    public var aheadSegments: Int?
+    /// Prompt lookup: draft tokens proposed and accepted, and forward passes for the reply.
+    public var draftProposed: Int?
+    public var draftAccepted: Int?
+    public var forwards: Int?
+    /// Final mode: sentences whose patches the drift guard turned down.
+    public var rejectedSentences: Int?
 
     public init(rep: Int, phase: String, chunk: Int, words: Int, speechMs: Int, lagMs: Int) {
         self.rep = rep; self.phase = phase; self.chunk = chunk; self.words = words; self.speechMs = speechMs; self.lagMs = lagMs
@@ -419,6 +432,15 @@ public struct ProbeTurnRecord: Sendable {
         if let historyDropped { fields["historyDropped"] = historyDropped }
         if let rejected { fields["rejected"] = rejected }
         if let drift { fields["drift"] = drift }
+        if let endpointToFirstMs { fields["endpointToFirstMs"] = endpointToFirstMs }
+        if let endpointToEditMs { fields["endpointToEditMs"] = endpointToEditMs }
+        if let aheadTokens { fields["aheadTokens"] = aheadTokens }
+        if let aheadMs { fields["aheadMs"] = aheadMs }
+        if let aheadSegments { fields["aheadSegments"] = aheadSegments }
+        if let draftProposed { fields["draftProposed"] = draftProposed }
+        if let draftAccepted { fields["draftAccepted"] = draftAccepted }
+        if let forwards { fields["forwards"] = forwards }
+        if let rejectedSentences { fields["rejectedSentences"] = rejectedSentences }
         return fields
     }
 }
@@ -531,13 +553,27 @@ public enum ProbeReport {
         fields["maxLagMs"] = records.map(\.lagMs).max() ?? 0
         fields["parseOk"] = ProbeStats.ratio(records.filter(\.parseOK).count, records.count)
         fields["trims"] = records.filter(\.trimmed).count
-        if records.contains(where: { $0.endpoint != nil }) {  // rewrite mode
+        if records.contains(where: { $0.endpoint != nil }) {  // rewrite and final mode
             fields["rejects"] = ProbeStats.ratio(ok.filter { $0.rejected == true }.count, ok.count)
             fields.merge(ProbeStats.describe(records.compactMap { $0.endpointDelayMs.map(Double.init) }, "endpointDelayMs")) { $1 }
             fields.merge(ProbeStats.describe(records.compactMap { $0.ctxTokens.map(Double.init) }, "ctxTokens")) { $1 }
             if let most = records.compactMap(\.ctxTokens).max() { fields["ctxTokensMax"] = most }
             if let budget = records.compactMap(\.ctxBudget).first { fields["ctxBudget"] = budget }
             if let window = records.compactMap(\.ctxWindow).first { fields["ctxWindow"] = window }
+            fields.merge(ProbeStats.describe(ok.compactMap { $0.endpointToFirstMs.map(Double.init) }, "endpointToFirstMs")) { $1 }
+            fields.merge(ProbeStats.describe(ok.compactMap { $0.endpointToEditMs.map(Double.init) }, "endpointToEditMs")) { $1 }
+            let aheads = ok.compactMap(\.aheadTokens)
+            if !aheads.isEmpty {
+                fields["aheadTokens"] = aheads.reduce(0, +)
+                fields["atEndpointTokens"] = ok.compactMap(\.prefillTokens).reduce(0, +)
+            }
+            let proposed = ok.compactMap(\.draftProposed).reduce(0, +), accepted = ok.compactMap(\.draftAccepted).reduce(0, +)
+            if proposed > 0 { fields["draftAcceptPct"] = (Double(accepted) * 1_000 / Double(proposed)).rounded() / 10 }
+            let forwards = ok.compactMap(\.forwards).reduce(0, +)
+            let decoded = ok.filter { $0.forwards != nil }.compactMap(\.decodeTokens).reduce(0, +)
+            if forwards > 0 { fields["tokensPerForward"] = (Double(decoded) * 100 / Double(forwards)).rounded() / 100 }
+            let rejectedSentences = ok.compactMap(\.rejectedSentences)
+            if !rejectedSentences.isEmpty { fields["rejectedSentences"] = rejectedSentences.reduce(0, +) }
         }
         return fields
     }
@@ -611,6 +647,14 @@ public struct ProbeConfig: Sendable {
     public var endpoint = ProbeEndpointer.Config()
     /// Rewrite mode: the prompt variant.
     public var prompt: ProbeRewritePrompt = .v2
+    /// Rewrite (turns layout) and final mode: prefill the finalized ASR stretches ahead (MLX incremental engine).
+    public var prefill: ProbePrefill = .off
+    /// The ASR finalizes a stretch every this many words (the stream has no pauses).
+    public var finalWords = 10
+    /// Decode with prompt lookup (MLX incremental engine).
+    public var draft = false
+    /// Whether an MLX backend should use the incremental engine for these settings.
+    public var wantsIncrementalEngine: Bool { mode != .edits && (prefill != .off || draft) }
 
     public init(wordsPerSecond: Double = 2.5, repeats: Int = 3, warmContinuation: Bool = true, seed: UInt64 = 95, window: Int = 1_000) {
         self.wordsPerSecond = wordsPerSecond; self.repeats = repeats; self.warmContinuation = warmContinuation
@@ -620,7 +664,8 @@ public struct ProbeConfig: Sendable {
     /// From `LEGATO_PROBE_WPS`, `LEGATO_PROBE_REPEATS`, `LEGATO_PROBE_WARM` (1/0), `LEGATO_PROBE_SEED`,
     /// `LEGATO_PROBE_WINDOW`; rewrite mode: `LEGATO_PROBE_MODE` (edits, rewrite), `LEGATO_PROBE_LAYOUT` (onepass,
     /// turns), `LEGATO_PROBE_CTX_PCT` (25), `LEGATO_PROBE_PAUSE_MS` (700), `LEGATO_PROBE_MAX_WORDS` (30),
-    /// `LEGATO_PROBE_PROMPT` (v0, v1, v2, v3).
+    /// `LEGATO_PROBE_PROMPT` (v0, v1, v2, v3), `LEGATO_PROBE_PREFILL` (off, final), `LEGATO_PROBE_FINAL_WORDS` (10),
+    /// `LEGATO_PROBE_DRAFT` (on, off); `LEGATO_PROBE_MODE=final` rewrites each passage once at its end.
     public init(environment: [String: String], defaultRepeats: Int = 3, defaultWarm: Bool = true) {
         let defaults = ProbeConfig(repeats: defaultRepeats, warmContinuation: defaultWarm)
         self.init(wordsPerSecond: environment["LEGATO_PROBE_WPS"].flatMap(Double.init) ?? defaults.wordsPerSecond,
@@ -634,15 +679,18 @@ public struct ProbeConfig: Sendable {
         if let pause = environment["LEGATO_PROBE_PAUSE_MS"].flatMap(Double.init) { endpoint.pauseSeconds = pause / 1_000 }
         if let words = environment["LEGATO_PROBE_MAX_WORDS"].flatMap(Int.init) { endpoint.maxWords = max(1, words) }
         if let variant = environment["LEGATO_PROBE_PROMPT"].flatMap(ProbeRewritePrompt.init(rawValue:)) { prompt = variant }
+        if let value = environment["LEGATO_PROBE_PREFILL"].flatMap(ProbePrefill.init(rawValue:)) { prefill = value }
+        if let words = environment["LEGATO_PROBE_FINAL_WORDS"].flatMap(Int.init) { finalWords = max(1, words) }
+        draft = environment["LEGATO_PROBE_DRAFT"] == "on"
     }
 
     /// The rewrite settings, for the start line (`mode` always; the rest in rewrite mode).
     public var modeFields: [String: any Sendable] {
-        guard mode == .rewrite else { return ["mode": mode.rawValue] }
+        guard mode != .edits else { return ["mode": mode.rawValue] }
         // `window` is the edits mode's fixed context; in rewrite mode the share is of the model's own window.
         return ["mode": mode.rawValue, "layout": layout.rawValue, "ctxPct": contextPercent, "ctxWindow": contextWindow ?? 0,
-                "window": contextWindow ?? 0, "prompt": prompt.rawValue,
-                "pauseMs": Int(endpoint.pauseSeconds * 1_000), "maxSentenceWords": endpoint.maxWords, "draft": "off"]
+                "window": contextWindow ?? 0, "prompt": prompt.rawValue, "prefill": prefill.rawValue, "finalWords": finalWords,
+                "pauseMs": Int(endpoint.pauseSeconds * 1_000), "maxSentenceWords": endpoint.maxWords, "draft": draft ? "on" : "off"]
     }
 
     /// Stream seconds of one pass at this pace.
@@ -675,7 +723,7 @@ public enum ContinuousAgentProbe {
             do {
                 let session = try await open(backend, config: config, hooks: hooks, rep: rep)
                 let seed = config.seed &+ UInt64(rep - 1)
-                let (result, context) = config.mode == .rewrite
+                let (result, context) = config.mode != .edits
                     ? (await replayRewrite(session: session, corpus: corpus, config: config, rep: rep, phase: "fresh", seed: seed, hooks: hooks), nil)
                     : await replay(session: session, corpus: corpus, config: config, rep: rep, phase: "fresh",
                                    seed: seed, numberOffset: 0, context: nil, hooks: hooks)
@@ -688,7 +736,7 @@ public enum ContinuousAgentProbe {
         }
         if let kept {
             let rep = config.repeats + 1
-            let result = config.mode == .rewrite
+            let result = config.mode != .edits
                 ? await replayRewrite(session: kept.session, corpus: corpus, config: config, rep: rep, phase: "warm",
                                       seed: config.seed &+ UInt64(config.repeats), hooks: hooks)
                 : await replay(session: kept.session, corpus: corpus, config: config, rep: rep, phase: "warm",
@@ -706,6 +754,9 @@ public enum ContinuousAgentProbe {
         if config.mode == .rewrite {
             try await session.append(.instructions(ProbeRewriteInstructions.head(layout: config.layout, prompt: config.prompt)))
             for example in ProbeRewriteInstructions.examples(prompt: config.prompt) { try await session.append(.example(example)) }
+        } else if config.mode == .final {
+            try await session.append(.instructions(ProbeFinalInstructions.head()))
+            for example in ProbeFinalInstructions.examples() { try await session.append(.example(example)) }
         } else {
             try await session.append(.instructions(ProbeInstructions.head()))
         }
@@ -841,6 +892,19 @@ public enum ContinuousAgentProbe {
 }
 
 public enum MLXProbeSupport {
+    /// Prefills `text` as the start of `session`'s next user turn, without a reply, when it is a Core ML session
+    /// or an MLX session on the incremental engine; nil otherwise. The tokens fed and the seconds.
+    public static func prefillAhead(_ session: any LLMSession, text: String) async throws -> (tokens: Int, seconds: Double)? {
+        guard let session = session as? any LLMSessionPrefillAhead else { return nil }
+        return try await session.prefillAhead(text)
+    }
+
+    /// The last turn's prompt lookup: drafts proposed, accepted, forward passes (incremental engine only).
+    public static func draftStats(_ session: any LLMSession) async -> (proposed: Int, accepted: Int, forwards: Int)? {
+        guard let session = session as? MLXSession, let stats = await session.lastDraft else { return nil }
+        return (stats.proposed, stats.accepted, stats.forwards)
+    }
+
     /// Seconds to the first generated text of `session`'s last turn, when it is an MLX session.
     public static func firstChunkSeconds(_ session: any LLMSession) async -> Double? {
         guard let session = session as? MLXSession else { return nil }

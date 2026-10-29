@@ -17,7 +17,9 @@
 // --out (JSON lines; both tables go to the same name .txt), --cpu-compile off (MLX CPU runs with compile off, as
 // on the phone; it then stays off for the process), --sentences n (only the first n corpus sentences), --mode
 // edits|rewrite, --layout onepass|turns, --ctx-pct 25 (rewrite: the share of the model's window per request),
-// --pause-ms 700 and --max-sentence-words 30 (rewrite: the endpointer). One pass is 562 words, about 225 s at 2.5 words/s, so
+// --pause-ms 700 and --max-sentence-words 30 (rewrite: the endpointer), --prompt v0..v3, --mode final (one rewrite
+// per passage), --prefill final (MLX: prefill finalized ASR stretches ahead), --final-words 10, --draft on (MLX
+// prompt lookup). One pass is 562 words, about 225 s at 2.5 words/s, so
 // one combination takes about 4 × 3.75 min plus load; the whole matrix about 90 min.
 import PackageDescription
 

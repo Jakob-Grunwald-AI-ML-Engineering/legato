@@ -30,6 +30,9 @@ struct ContinuousProbeOptions: Sendable {
         guard let m = Model(rawValue: model) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_MODEL \(model) (qwen3-1.7b, qwen3-0.6b)")) }
         guard let k = Keep(rawValue: keep) else { return .failure(Invalid(reason: "unknown LEGATO_PROBE_BG \(keep) (audio, none, foreground)")) }
         var options = ContinuousProbeOptions(backend: b, model: m, keep: k, config: ProbeConfig(environment: environment, defaultRepeats: 2, defaultWarm: false))
+        if b == .coreml, options.config.draft {
+            return .failure(Invalid(reason: "LEGATO_PROBE_DRAFT=on needs an MLX backend (prompt lookup is not implemented for Core ML)"))
+        }
         // Rewrite mode sizes its context share from the model's real window.
         options.config.contextWindow = b == .coreml ? options.coreMLSpec.runtimeConfiguration.contextLength : MLXBackend.contextWindow
         return .success(options)
@@ -42,7 +45,8 @@ struct ContinuousProbeOptions: Sendable {
         MLXModels.spec(id: model == .qwen3_1_7b ? MLXModels.qwen3_1_7bID : MLXModels.qwen3_0_6bID)!
     }
     var label: String {
-        let mode = config.mode == .rewrite ? "rewrite-\(config.layout.rawValue)-\(config.contextPercent)" : config.mode.rawValue
+        let mode = config.mode == .edits ? config.mode.rawValue
+            : "\(config.mode.rawValue)-\(config.mode == .final ? "passage" : config.layout.rawValue)-\(config.contextPercent)-prefill-\(config.prefill.rawValue)"
         return "\(backend.rawValue)/\(model.rawValue)/\(keep.rawValue)/\(mode)"
     }
     /// The Core ML reply reserve: rewrite replies are one sentence, so the session may hold more of the window.
@@ -92,7 +96,8 @@ extension SessionProbe {
         defer { keepAlive?.end() }
         var baseFields: [String: any Sendable] = ["backend": options.backend.rawValue, "model": options.model.rawValue, "bg": options.keep.rawValue,
                                               "mode": options.config.mode.rawValue]
-        if options.config.mode == .rewrite {
+        if options.config.mode != .edits {
+            baseFields["prefill"] = options.config.prefill.rawValue; baseFields["draft"] = options.config.draft ? "on" : "off"
             baseFields["layout"] = options.config.layout.rawValue; baseFields["ctxPct"] = options.config.contextPercent
             baseFields["prompt"] = options.config.prompt.rawValue
         }
@@ -163,14 +168,15 @@ extension SessionProbe {
         do {
             switch options.backend {
             case .coreml:
-                let coreML = options.config.mode == .rewrite
+                let coreML = options.config.mode != .edits
                     ? CoreMLBackend(spec: options.coreMLSpec, folder: folder, outputTokenLimit: ContinuousProbeOptions.rewriteOutputLimit)
                     : await CoreMLModelStore.shared.backend(for: options.coreMLSpec, root: root)
                 try await coreML.prepare()
                 backend = coreML
                 release = { await coreML.releaseWarmResources(); await CoreMLModelStore.shared.release(folder: folder) }
             case .mlxCPU:
-                let mlx = MLXBackend(spec: options.mlxSpec, folder: folder, device: .cpu)
+                let mlx = MLXBackend(spec: options.mlxSpec, folder: folder, device: .cpu,
+                                     engine: options.config.wantsIncrementalEngine ? .incremental(draft: options.config.draft) : .chatSession)
                 try await mlx.prewarmResources()
                 backend = mlx
                 release = { await mlx.releaseWarmResources() }

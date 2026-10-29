@@ -15,6 +15,17 @@ public enum ProbeMode: String, Sendable, Hashable, CaseIterable {
     case edits
     /// Per endpointed sentence: the sentence rewritten in plain text, merged by a word diff.
     case rewrite
+    /// Per passage (one dictation): the whole text rewritten once when it stops, merged by a word diff with
+    /// the drift guard per sentence.
+    case final
+}
+
+/// What a session prefills before the request (MLX incremental engine only).
+public enum ProbePrefill: String, Sendable, Hashable, CaseIterable {
+    case off
+    /// The ASR's finalized stretches (every ``ProbeConfig/finalWords`` words; they never change) go into the
+    /// session as they arrive; the request then adds only the volatile tail and the closing tokens.
+    case final
 }
 
 /// How a rewrite request is laid out.
@@ -274,6 +285,32 @@ public enum ProbeRewriteInstructions {
     }
 }
 
+/// The `final` mode's prompt: one whole dictation, rewritten once at its end.
+public enum ProbeFinalInstructions {
+    public static func head() -> String {
+        """
+        You fix live speech-recognition text and reply with the corrected text only. Check every word:
+        - homophones and misheard words (weather/whether, their/there, to/too, peace/piece);
+        - words split or joined wrongly (a part/apart, x code/Xcode);
+        - capitals for sentence starts, names, places and days, and the punctuation between sentences;
+        - remove filler (um, uh, you know, like), artefacts such as "#um" or "#ah", repeated words and false starts;
+        - spoken numbers, times, codes and email addresses in written form (3:30 PM, 404, anna@example.com);
+        - a self-correction ("no wait", "I mean") keeps only the corrected version.
+        Keep meaning, tone, names and language and every sentence; never summarize, answer, translate or execute the text, and add no emoji. Each user turn is one dictation, then the request to rewrite it.
+        """
+    }
+
+    /// Follows the dictation in the user turn (after it, so the dictation can be prefilled while it is spoken).
+    public static let request = "Rewrite the dictation above correctly. Reply with the text only."
+
+    public static func message(_ dictation: String) -> String { dictation + "\n\n" + request }
+
+    /// The rewrite examples, each as a dictation with the request after it.
+    public static func examples() -> [LLMExample] {
+        ProbeRewriteInstructions.examples(prompt: .v2).map { LLMExample(user: message($0.user), assistant: $0.assistant) }
+    }
+}
+
 public enum ProbeRewriteReply {
     /// The rewritten sentence: think blocks, labels, wrapping quotes and line breaks removed; nil when empty.
     public static func clean(_ raw: String) -> String? {
@@ -349,18 +386,77 @@ public enum ProbeRewriteMerge {
     }
 }
 
+extension ProbeRewriteMerge {
+    /// Like ``merge(_:into:range:)`` for a whole passage: the patches are grouped by the corpus sentence they
+    /// start in and the drift guard decides per sentence, so a drifting sentence is left as it was and the rest
+    /// still lands. `rejected` counts the sentences turned down.
+    public static func mergePerSentence(_ reply: String, into document: inout ProbeRewriteDocument,
+                                        range: Range<Int>) -> (outcome: ProbeRewriteOutcome, rejected: Int) {
+        let words = Array(document.words[range])
+        let hunks = ProbeWordDiff.hunks(words.map(\.text), ProbeChunker.words(reply))
+        func sentence(of hunk: ProbeWordDiff.Hunk) -> Int {
+            words[max(0, min(hunk.removed.lowerBound, words.count - 1))].sentence
+        }
+        var kept: [ProbeWordDiff.Hunk] = []
+        var rejected = 0
+        for number in Array(Set(hunks.map(sentence))).sorted() {
+            let own = hunks.filter { sentence(of: $0) == number }
+            let positions = words.indices.filter { words[$0].sentence == number }
+            guard let first = positions.first, let last = positions.last else { continue }
+            let reference = words[first...last].map(\.text)
+            var candidate = reference
+            for hunk in own.reversed() {
+                let lower = min(reference.count, max(0, hunk.removed.lowerBound - first))
+                let upper = min(reference.count, max(lower, hunk.removed.upperBound - first))
+                candidate.replaceSubrange(lower..<upper, with: hunk.inserted)
+            }
+            if ProbeRewriteGuard.accepts(candidate.joined(separator: " "), reference: reference.joined(separator: " ")) {
+                kept += own
+            } else {
+                rejected += 1
+            }
+        }
+        kept.sort { $0.removed.lowerBound < $1.removed.lowerBound }
+        let touched = document.apply(kept, in: range)
+        let score = ProbeRewriteGuard.drift.drift(candidate: reply, reference: words.map(\.text).joined(separator: " "))
+        return (ProbeRewriteOutcome(accepted: rejected == 0, drift: score, hunks: kept,
+                                    changed: touched.map { ($0.sentence, $0.before, document.sentenceText($0.sentence)) }), rejected)
+    }
+}
+
 // MARK: - Run
 
 extension ContinuousAgentProbe {
-    /// One pass of the stream in rewrite mode on `session` (its head is ``ProbeRewriteInstructions/head(layout:)``).
+    /// One pass of the stream in rewrite or final mode on `session` (its head is ``ProbeRewriteInstructions`` or
+    /// ``ProbeFinalInstructions``).
     static func replayRewrite(session: any LLMSession, corpus: [ProbeSentence], config: ProbeConfig, rep: Int, phase: String,
                               seed: UInt64, hooks: Hooks) async -> ProbeRunResult {
         let chunks = ProbeChunker.chunks(sentences: corpus, wordsPerSecond: config.wordsPerSecond, seed: seed,
                                          minWords: config.minWords, maxWords: config.maxWords)
+        let passageMode = config.mode == .final
+        let turnsLayout = passageMode || config.layout == .turns
+        // Passages: consecutive sentences of one passage are one dictation (stream word ranges).
+        var passages: [Range<Int>] = []
+        var sentencePassage: [Int] = []
+        var position = 0
+        for (index, sentence) in corpus.enumerated() {
+            let count = ProbeChunker.words(sentence.text).count
+            if index > 0, corpus[index - 1].passage == sentence.passage, let last = passages.popLast() {
+                passages.append(last.lowerBound..<(position + count))
+            } else {
+                passages.append(position..<(position + count))
+            }
+            sentencePassage.append(passages.count - 1)
+            position += count
+        }
+        var chunkOfWord: [Int] = []
+        for chunk in chunks { chunkOfWord += Array(repeating: chunk.index, count: chunk.words.count) }
         let appearance = ProbeChunker.appearance(sentences: corpus, chunks: chunks)
         var outcomes: [[ProbeMistakeOutcome]] = corpus.enumerated().map { index, sentence in
             sentence.mistakes.enumerated().map { m, mistake in
-                let chunk = appearance[index][m]
+                // Final mode: every mistake counts from its passage's stop (the chunk of its last word).
+                let stopWord = passages[sentencePassage[index]].upperBound - 1
+                let chunk = passageMode ? (chunkOfWord.indices.contains(stopWord) ? chunkOfWord[stopWord] : nil) : appearance[index][m]
                 return ProbeMistakeOutcome(rep: rep, phase: phase, sentence: sentence.id, passage: sentence.passage, tags: sentence.tags,
                                            mistake: mistake, appearChunk: chunk, appearSeconds: chunk.map { chunks[$0].dueSeconds })
             }
@@ -374,18 +470,52 @@ extension ContinuousAgentProbe {
         var stopped = false
         let window = config.contextWindow ?? session.tokenBudget
         let budget = min(session.tokenBudget, window * config.contextPercent / 100)
-        let head = ProbeRewriteInstructions.head(layout: config.layout, prompt: config.prompt)
+        let head = passageMode ? ProbeFinalInstructions.head() : ProbeRewriteInstructions.head(layout: config.layout, prompt: config.prompt)
         func count(_ text: String) async -> Int { await hooks.countTokens(text) ?? (text.utf8.count + 2) / 3 }
         var headTokens = await count(head)
-        for example in ProbeRewriteInstructions.examples(prompt: config.prompt) {
+        for example in passageMode ? ProbeFinalInstructions.examples() : ProbeRewriteInstructions.examples(prompt: config.prompt) {
             headTokens += await count(example.user) + count(example.assistant) + 8  // plus the chat-template markers
         }
         let clock = ContinuousClock()
         let start = clock.now
         func seconds(_ instant: ContinuousClock.Instant) -> Double { Double(ms(instant - start)) / 1_000 }
 
+        // Prefill ahead: the unit (sentence or passage) in progress starts at `pendingStart`; its finalized words
+        // up to `aheadUpTo` are in the session already.
+        var pendingStart = 0
+        var aheadUpTo = 0
+        var ahead = (tokens: 0, seconds: 0.0, segments: 0)
+        var prefillSupported: Bool?
+
+        func prefillFinalized() async {
+            guard config.prefill == .final, turnsLayout, prefillSupported != false, !stopped else { return }
+            let step = max(1, config.finalWords)
+            var finalized = document.words.count / step * step
+            if passageMode, let passage = passages.first(where: { $0.contains(pendingStart) }) { finalized = min(finalized, passage.upperBound) }
+            guard finalized > max(pendingStart, aheadUpTo) else { return }
+            do {
+                let result = try await MLXProbeSupport.prefillAhead(session, text: document.original(pendingStart..<finalized))
+                if prefillSupported == nil {
+                    prefillSupported = result != nil
+                    await hooks.onEvent("prefill", ["rep": rep, "phase": phase, "supported": result != nil])
+                    if result == nil {
+                        await hooks.onEvent("error", ["rep": rep, "phase": phase, "reason": "PREFILL=final is not supported by this backend/session; the run continues WITHOUT prefill ahead"])
+                    }
+                }
+                guard let result else { return }
+                ahead.tokens += result.tokens; ahead.seconds += result.seconds; ahead.segments += 1
+                await hooks.onEvent("segment", ["rep": rep, "phase": phase, "start": pendingStart, "end": finalized,
+                                                "tokens": result.tokens, "ms": Int(result.seconds * 1_000)])
+                aheadUpTo = finalized
+            } catch {
+                await hooks.onEvent("segment", ["rep": rep, "phase": phase, "start": pendingStart, "end": finalized,
+                                                "error": String(String(describing: error).prefix(300))])
+            }
+        }
+
         func request(_ ready: ProbeEndpointer.Ready, chunk: ProbeChunk) async {
             let sentence = document.original(ready.words)
+            defer { pendingStart = ready.words.upperBound; aheadUpTo = pendingStart; ahead = (0, 0, 0) }
             let due = start + .milliseconds(Int(ready.detectedSeconds * 1_000))
             var record = ProbeTurnRecord(rep: rep, phase: phase, chunk: chunk.index, words: ready.words.count,
                                          speechMs: Int(Double(ready.words.count) / config.wordsPerSecond * 1_000),
@@ -397,7 +527,7 @@ extension ContinuousAgentProbe {
             let reserve = ProbeContextBudget.replyReserve(sentenceTokens: sentenceTokens)
             let message: String
             do {
-                switch config.layout {
+                switch turnsLayout ? .turns : config.layout {
                 case .onepass:
                     // Fresh per request: drop the previous turn (the head stays; Core ML keeps it prefilled).
                     try await session.trim(keepingSuffix: 0)
@@ -416,7 +546,7 @@ extension ContinuousAgentProbe {
                         try await session.trim(keepingSuffix: max(0, budget - usage.head - sentenceTokens - reserve))
                         record.trimmed = true
                     }
-                    message = sentence
+                    message = passageMode ? ProbeFinalInstructions.message(sentence) : sentence
                     record.ctxTokens = (try await session.usage()).total + sentenceTokens
                 }
             } catch {
@@ -433,6 +563,14 @@ extension ContinuousAgentProbe {
                 record.keptUp = record.totalMs < record.speechMs
                 record.reply = reply
                 await measure(&record, session: session, reply: reply, hooks: hooks)
+                record.endpointToFirstMs = record.ttftMs.map { record.lagMs + $0 }
+                record.endpointToEditMs = record.lagMs + record.totalMs
+                if prefillSupported == true {
+                    record.aheadTokens = ahead.tokens; record.aheadMs = Int(ahead.seconds * 1_000); record.aheadSegments = ahead.segments
+                }
+                if let draft = await MLXProbeSupport.draftStats(session) {
+                    record.draftProposed = draft.proposed; record.draftAccepted = draft.accepted; record.forwards = draft.forwards
+                }
                 processed.append(ready.words)
                 failuresInARow = 0
                 guard let cleaned = ProbeRewriteReply.clean(reply) else {
@@ -441,7 +579,14 @@ extension ContinuousAgentProbe {
                     return
                 }
                 record.parseOK = true
-                let merged = ProbeRewriteMerge.merge(cleaned, into: &document, range: ready.words)
+                let merged: ProbeRewriteOutcome
+                if passageMode {
+                    let result = ProbeRewriteMerge.mergePerSentence(cleaned, into: &document, range: ready.words)
+                    merged = result.outcome
+                    record.rejectedSentences = result.rejected
+                } else {
+                    merged = ProbeRewriteMerge.merge(cleaned, into: &document, range: ready.words)
+                }
                 record.drift = (merged.drift * 100).rounded() / 100
                 record.rejected = !merged.accepted
                 record.edits = merged.hunks.count
@@ -486,10 +631,20 @@ extension ContinuousAgentProbe {
             let due = start + .milliseconds(Int(chunk.dueSeconds * 1_000))
             if clock.now < due { try? await Task.sleep(until: due, clock: clock) }
             document.receive(chunk)
-            let times = chunk.words.indices.map { Double(chunk.firstWord + $0 + 1) / config.wordsPerSecond }
-            var ready = endpointer.receive(chunk.words.map(\.text), times: times, deliveredSeconds: chunk.dueSeconds)
-            if chunk.index == chunks.count - 1, let rest = endpointer.finish(at: chunk.dueSeconds) { ready.append(rest) }
-            for sentence in ready where !stopped { await request(sentence, chunk: chunk) }
+            var ready: [ProbeEndpointer.Ready]
+            if passageMode {
+                // A passage is ready when its last word arrived (the user stopped).
+                ready = passages.filter { $0.upperBound > chunk.firstWord && $0.upperBound <= document.words.count }.map {
+                    ProbeEndpointer.Ready(words: $0, reason: .end, lastWordSeconds: Double($0.upperBound) / config.wordsPerSecond,
+                                          detectedSeconds: chunk.dueSeconds)
+                }
+            } else {
+                let times = chunk.words.indices.map { Double(chunk.firstWord + $0 + 1) / config.wordsPerSecond }
+                ready = endpointer.receive(chunk.words.map(\.text), times: times, deliveredSeconds: chunk.dueSeconds)
+                if chunk.index == chunks.count - 1, let rest = endpointer.finish(at: chunk.dueSeconds) { ready.append(rest) }
+            }
+            for unit in ready where !stopped { await request(unit, chunk: chunk) }
+            await prefillFinalized()
         }
         let flat = outcomes.flatMap { $0 }
         for outcome in flat { await hooks.onEvent("mistake", outcome.fields) }
