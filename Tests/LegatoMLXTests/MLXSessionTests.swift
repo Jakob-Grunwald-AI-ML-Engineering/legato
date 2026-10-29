@@ -32,7 +32,7 @@ private final class FakeChat: MLXChatTurning, @unchecked Sendable {
 }
 
 private final class ChatFactory: MLXGenerating, @unchecked Sendable {
-    struct Made { var instructions: String; var history: [Chat.Message] }
+    struct Made: Sendable { var instructions: String; var history: [String] }
     let made = Mutex<[Made]>([])
     let chats = Mutex<[FakeChat]>([])
     let replies: [String]
@@ -43,7 +43,8 @@ private final class ChatFactory: MLXGenerating, @unchecked Sendable {
         AsyncThrowingStream { $0.finish() }
     }
     func makeChat(spec: MLXModelSpec, folder: URL, instructions: String, history: [Chat.Message]) async throws -> any MLXChatTurning {
-        made.withLock { $0.append(Made(instructions: instructions, history: history)) }
+        let contents = history.map(\.content)
+        made.withLock { $0.append(Made(instructions: instructions, history: contents)) }
         let chat = FakeChat(replies: replies, history: history, instructions: instructions)
         chats.withLock { $0.append(chat) }
         return chat
@@ -76,7 +77,7 @@ struct MLXSessionTests {
         #expect(factory.made.withLock { $0.count } == 1)
         let made = try #require(factory.made.withLock { $0.first })
         #expect(made.instructions == "Clean.")
-        #expect(made.history.map(\.content) == ["um hi", "Hi."])
+        #expect(made.history == ["um hi", "Hi."])
         #expect(factory.chats.withLock { $0[0].messages.withLock { $0 } } == ["first\n\nGo.", "second\n\nGo."])
         let stats = try #require(await (session as? MLXSession)?.lastTurn)
         #expect(stats.cached > 0)
@@ -93,7 +94,7 @@ struct MLXSessionTests {
         _ = try await session.respond(to: "after")
         let made = factory.made.withLock { $0 }
         #expect(made.count == 2)
-        let history = made[1].history.map(\.content)
+        let history = made[1].history
         #expect(!history.contains("turn 1 with a few words"))
         #expect(history.contains("turn 3 with a few words"))
         #expect(history.count % 2 == 0)
