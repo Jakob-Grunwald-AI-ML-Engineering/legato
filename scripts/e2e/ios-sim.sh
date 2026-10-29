@@ -389,6 +389,19 @@ for line in open(sys.argv[1]):
         print(json.loads(line)["text"])' "$file"
 }
 
+# The other version (`rawText`) of every history entry, oldest first; an empty line where it has none.
+history_others() {
+  local group file
+  group="$(xcrun simctl get_app_container "$UDID" "$BID" groups | awk -F'\t' '$1 == "group.de.gruenwald.legato" {print $2}')"
+  file="$group/history.jsonl"
+  [ -n "$group" ] && [ -f "$file" ] || return 0
+  python3 -I -c '
+import json, sys
+for line in open(sys.argv[1]):
+    if line.strip():
+        print(json.loads(line).get("rawText") or "")' "$file"
+}
+
 # ---------------------------------------------------------------------------------------------- scenarios
 
 # The App Group container of the app on the simulator.
@@ -1912,7 +1925,8 @@ scenario_fa() {
   assert_eq "clipboard: the whole cleaned text" "the cat sat. A dog ran." "$(pasteboard)"
   assert_log "the app published the partial notice" "link link.notice partial=1"
   assert_log "the keyboard showed it" "harness notice shown"
-  assert_eq "history: the cleaned text (the clipboard's), its raw version kept" "the cat sat. A dog ran." "$(history_texts | tail -1)"
+  assert_eq "history: the text the field shows" "teh cat sat. A dog ran." "$(history_texts | tail -1)"
+  assert_eq "history: the cleaned text (the clipboard's) as its other version" "the cat sat. A dog ran." "$(history_others | tail -1)"
   assert_no_log "nothing was typed twice" "fe.duplicate"
   xcrun simctl pbcopy "$UDID" <<< "sentinel"  # the next scenario expects the clipboard as the first one left it
 

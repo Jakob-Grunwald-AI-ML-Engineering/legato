@@ -40,6 +40,25 @@ private actor MemoryHistory: HistoryStore {
         #expect(AgentRunHistory.corrected(entry("Fine."), cleaned: "  ") == nil)
     }
 
+    @Test func anEntryTheFieldDidNotFullyGetShowsTheFieldsTextWithTheCleanedTextAsItsOtherVersion() throws {
+        let saved = entry("The cat sat. A dog ran.", raw: "teh cat sat. a dgo ran.")  // a Replace run: the session's cleaned text
+        let shown = try #require(AgentRunHistory.shown(saved, field: "teh cat sat. A dog ran.", cleaned: "The cat sat. A dog ran."))
+        #expect(shown.text == "teh cat sat. A dog ran.")
+        #expect(shown.rawText == "The cat sat. A dog ran.")
+        #expect(shown.id == saved.id)
+        #expect(AgentRunHistory.shown(saved, field: "The cat sat. A dog ran.", cleaned: "The cat sat. A dog ran.") == nil)
+        #expect(AgentRunHistory.shown(shown, field: "teh cat sat. A dog ran.", cleaned: "The cat sat. A dog ran.") == nil)
+    }
+
+    @Test func replaceSwapsTheSavedEntryForTheFieldsVersion() async {
+        let history = MemoryHistory()
+        let saved = entry("Send the report.", raw: "Send teh report.")
+        try? await history.append(saved)
+        let result = await AgentRunHistory.replace(saved, field: "Send teh report.", cleaned: "Send the report.", in: history)
+        #expect(result.text == "Send teh report." && result.rawText == "Send the report.")
+        #expect(await history.entries == [result])
+    }
+
     @Test func replaceSwapsTheSavedEntryForTheCorrectedOne() async {
         let history = MemoryHistory()
         let saved = entry("Send teh report.")

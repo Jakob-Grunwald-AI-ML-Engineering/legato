@@ -35,7 +35,12 @@ public struct FeedMirror: Sendable, Equatable {
     public private(set) var wasCleared = false
     /// Some of the run's text left what is known since the run began (iOS: its head left the window past what
     /// ``head`` kept, or a reset the run's text could not be found again in): not all of it can be told.
-    public private(set) var lostRunText = false
+    public var lostRunText: Bool { lostByReset || lostByEdge }
+    private var lostByReset = false
+    /// The run's head is out of what is known because of the window's left edge (clears when the edge returns).
+    private var lostByEdge = false
+    /// A returning head did not match what was kept: what is before the window is not what it was.
+    private var headChanged = false
     /// The field's text just before the window (it ends at window offset 0) that left the window through its left
     /// edge, as last seen; only as far back as the oldest span that needs it, and ``headLimit`` units at most.
     public private(set) var head = ""
@@ -72,11 +77,13 @@ public struct FeedMirror: Sendable, Equatable {
             if batch.session != session || text != window {
                 // As the agent does: the same queue's window is searched for the run's text, another queue's is not.
                 let anchored = batch.session == session ? reanchored(in: text) : nil
-                if (anchored?.runs.count ?? 0) < runs.count { lostRunText = true }
+                if (anchored?.runs.count ?? 0) < runs.count { lostByReset = true }
                 runs = anchored?.runs ?? []
                 touched = anchored?.touched ?? []
                 changes = []
                 head = ""
+                lostByEdge = false
+                headChanged = false
             }
             session = batch.session
             window = text
@@ -113,9 +120,11 @@ public struct FeedMirror: Sendable, Equatable {
             changes.append((version, .shift(shift)))
         case .reset(let reason, let text, _):
             let anchored = reason == .cleared ? nil : reanchored(in: text)
-            if reason != .cleared, (anchored?.runs.count ?? 0) < runs.count { lostRunText = true }
+            if reason != .cleared, (anchored?.runs.count ?? 0) < runs.count { lostByReset = true }
             window = text
             head = ""
+            lostByEdge = false
+            headChanged = false
             runs = anchored?.runs ?? []
             touched = anchored?.touched ?? []
             changes = []
@@ -137,6 +146,7 @@ public struct FeedMirror: Sendable, Equatable {
                 headUnits.removeLast(shift)
             } else {
                 headUnits = []
+                headChanged = true
             }
         }
         window = text
@@ -146,7 +156,7 @@ public struct FeedMirror: Sendable, Equatable {
         let needed = max(0, -((runs + touched).map(\.location).min() ?? 0))
         let kept = min(needed, headLimit, headUnits.count)
         head = String(decoding: headUnits.suffix(kept), as: UTF16.self)
-        if runs.contains(where: { $0.location < -kept || $0.end > new.count }) { lostRunText = true }
+        lostByEdge = runs.contains(where: { $0.location < -kept || $0.end > new.count })
     }
 
     private mutating func fold(_ step: EditStep, run: Bool, user: Bool) {
@@ -227,6 +237,9 @@ public struct FeedMirror: Sendable, Equatable {
         return Self.trimmedText(Span(location: region.location + headLength, length: region.length), in: known).text
     }
 
+    /// Some of the run's text is before the window's left edge (its head scrolled out).
+    public var runLeftWindow: Bool { (runs.first?.location ?? 0) < 0 }
+
     /// The run's spans' extent in window offsets (negative where it left the window); nil when nothing is the
     /// run's, its end is past the window, or it ends before it.
     private var runRegion: Span? {
@@ -292,6 +305,8 @@ public struct FeedMirror: Sendable, Equatable {
         case userEdited
         /// The field shows other text as the run's than `raw`.
         case textDiffers
+        /// The text before the window that came back into it is not what scrolled out.
+        case headChanged
     }
 
     /// Why there are no patches for `raw` in the field as it is: see ``Unpatchable``.
@@ -305,6 +320,7 @@ public struct FeedMirror: Sendable, Equatable {
 
     /// Where `raw` (trimmed) starts in window offsets, as the run's text the field holds.
     private func locate(_ raw: String) -> Swift.Result<Int, Unpatchable> {
+        let differs: Unpatchable = headChanged ? .headChanged : .textDiffers
         guard session != nil else { return .failure(.noFeed) }
         guard let region = runRegion else {
             return .failure(wasCleared ? .cleared : lostRunText || !runs.isEmpty ? .outOfWindow : .noRunText)
@@ -314,7 +330,7 @@ public struct FeedMirror: Sendable, Equatable {
             // All of it is known: it must be exactly `raw`.
             let shown = Self.trimmedText(Span(location: region.location + headLength, length: region.length), in: known)
             guard shown.text == raw else {
-                return .failure(lostRunText || (raw.hasSuffix(shown.text) && !shown.text.isEmpty) ? .outOfWindow : .textDiffers)
+                return .failure(lostRunText || (raw.hasSuffix(shown.text) && !shown.text.isEmpty) ? .outOfWindow : differs)
             }
             return .success(shown.location - headLength)
         }
@@ -327,9 +343,9 @@ public struct FeedMirror: Sendable, Equatable {
             return .failure(.outOfWindow)
         }
         let rawUnits = Array(raw.utf16)
-        guard rawUnits.count >= tail.count, rawUnits.suffix(tail.count).elementsEqual(tail) else { return .failure(.textDiffers) }
+        guard rawUnits.count >= tail.count, rawUnits.suffix(tail.count).elementsEqual(tail) else { return .failure(differs) }
         let start = end - headLength - rawUnits.count
-        guard start >= region.location, start - region.location <= Self.leadingSlack else { return .failure(.textDiffers) }
+        guard start >= region.location, start - region.location <= Self.leadingSlack else { return .failure(differs) }
         return .success(start)
     }
 

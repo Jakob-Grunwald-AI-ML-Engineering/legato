@@ -264,11 +264,18 @@ final class AppController {
             keyboardLink.agentWait = { .seconds(Settings.cleanupStore.options.timeoutSeconds) }
             keyboardLink.statelessFinalPass = { [weak self] raw in await self?.statelessFinalPass(raw) }
             keyboardLink.copyFallback = { [pasteboard] text in pasteboard.write(text) }
-            keyboardLink.correctHistory = { raw, cleaned in
-                // The session saved the engine's text; the run's entry is the newest one with that text.
-                guard let entry = (try? await history.recent(limit: 5))?.first(where: { $0.text == raw && $0.rawText == nil })
-                else { return }
-                _ = await AgentRunHistory.replace(entry, cleaned: cleaned, in: history)
+            keyboardLink.correctHistory = { saved, cleaned, field in
+                // The session saved its own text (the engine's, or a Replace run's cleaned text); the run's entry is
+                // the newest one with that text.
+                let recent = (try? await history.recent(limit: 5)) ?? []
+                if let field {
+                    // The field did not get all of the cleaned text: its text is the entry's, the cleaned text its other version.
+                    guard let entry = recent.first(where: { $0.text == saved }) else { return }
+                    _ = await AgentRunHistory.replace(entry, field: field, cleaned: cleaned, in: history)
+                } else {
+                    guard let entry = recent.first(where: { $0.text == saved && $0.rawText == nil }) else { return }
+                    _ = await AgentRunHistory.replace(entry, cleaned: cleaned, in: history)
+                }
             }
             #if DEBUG
             keyboardLink.linkTrace = { E2E.log("link \($0)") }

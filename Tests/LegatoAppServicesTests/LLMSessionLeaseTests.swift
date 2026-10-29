@@ -221,17 +221,27 @@ struct LLMSessionLeaseTests {
     /// the same model at the same folder, so they share its one loaded instance (`CoreMLModelStore` keeps one
     /// backend per folder: `storeSharesWarmupAndResolutionUntilRelease`), never a second copy.
     @MainActor @Test func theRunsPassAndTheRollingSessionUseOneModelInstance() async throws {
-        let local = SessionModel(), foundation = SessionModel()
+        let foundation = SessionModel()
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let id = CoreMLModels.qwen3_1_7bID
         try InstallMarker.write(in: LeaseInstaller().installFolder(root: root), id: id, stage: .installed)
         let asked = Mutex<[String]>([])
+        // Like `CoreMLModelStore`: one instance per model folder, created on the first ask; every creation counts.
+        let instances = Mutex<[String: SessionModel]>([:])
+        let created = Mutex(0)
         let models = ModelServices(root: root, defaults: defaults, platform: .macOS, installers: [id: LeaseInstaller()],
             resources: ModelServiceResources(speech: .init(key: "speech:test", prewarm: {}, release: {}),
                                              foundation: foundation, coreML: { id, root in
-                                                 asked.withLock { $0.append(id + "@" + root.standardizedFileURL.path) }
-                                                 return local
+                                                 let key = id + "@" + root.standardizedFileURL.path
+                                                 asked.withLock { $0.append(key) }
+                                                 return instances.withLock { all in
+                                                     if let existing = all[key] { return existing }
+                                                     created.withLock { $0 += 1 }
+                                                     let model = SessionModel()
+                                                     all[key] = model
+                                                     return model
+                                                 }
                                              }))
         SelectionStore(defaults: defaults).set(id, for: .cleanup)
         let settings = CleanupSettingsStore(defaults: defaults)
@@ -244,6 +254,7 @@ struct LLMSessionLeaseTests {
         let requests = asked.withLock { $0 }
         #expect(requests.count >= 3)  // prepared, resolved for the run, the rolling session made
         #expect(Set(requests).count == 1, "\(Set(requests))")
+        #expect(created.withLock { $0 } == 1, "the model was created \(created.withLock { $0 }) times")
     }
 }
 

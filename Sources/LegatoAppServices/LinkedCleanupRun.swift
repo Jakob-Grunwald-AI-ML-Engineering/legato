@@ -97,6 +97,9 @@ public final class LinkedCleanupRun {
     public private(set) var notShownReason: String?
     /// How the last ``stop(_:committed:text:finalText:applied:statelessPass:copy:)`` went (counts, no text).
     public private(set) var stopReport: StopReport?
+    /// Why the last ``deliver(raw:cleaned:)`` was ``Delivery/partial``: outOfWindow, conflict (a patch handed back) or
+    /// timedOut (a patch without an outcome).
+    private var partialReason = "outOfWindow"
     /// What the last stop has to tell the user beyond the clipboard's "Copied" (nil: nothing).
     public private(set) var notice: String?
     /// The notice of a stop that wrote part of the cleanup and put the whole cleaned text on the clipboard.
@@ -245,12 +248,14 @@ public final class LinkedCleanupRun {
     /// The run is over (Live): see the type's notes.
     public func finish() async -> Outcome {
         guard let made, !closed else {
-            cancel()
+            await settle()
             return Outcome(unapplied: [], agentAbsent: true)
         }
         guard await Self.exists(made, within: agentWait) == true, let agent = await made.value else {
             trace?("agent.absent")
-            cancel()
+            // An agent still being made holds the model (loading, prefilling): cancelled and settled before the
+            // caller's stateless pass, which a single-worker runtime would refuse.
+            await settle()
             return Outcome(unapplied: [], agentAbsent: true)
         }
         // Catch up: every batch so far, then the final pass.
@@ -301,6 +306,7 @@ public final class LinkedCleanupRun {
         trace?("final.patch steps=\(plan.transactions.map(\.steps.count).reduce(0, +)) outOfWindow=\(plan.outOfWindow) edits=\(ids.count)")
         guard !plan.transactions.isEmpty else {
             trace?("final.patch result=partial")
+            partialReason = "outOfWindow"
             return .partial  // nothing of it is in the window
         }
         // One edit per patch: a guard that fails leaves only its patch out.
@@ -320,6 +326,13 @@ public final class LinkedCleanupRun {
             delivery = .applied
         } else if patched > 0 || plan.outOfWindow > 0 {
             delivery = .partial
+            let handedBack = plan.transactions.contains { transaction in
+                switch mirror.results[transaction.id] {
+                case .conflict, .superseded, .withdrawn: true
+                case .applied, nil: false
+                }
+            }
+            partialReason = plan.outOfWindow > 0 ? "outOfWindow" : handedBack ? "conflict" : "timedOut"
         } else {
             switch plan.transactions.lazy.compactMap({ self.mirror.results[$0.id] }).first {
             case .conflict(let conflict): delivery = .conflicted(conflict)
@@ -344,12 +357,17 @@ public final class LinkedCleanupRun {
         /// The final text is in the field, or the cleaned text is on the clipboard instead: the session's own text
         /// must not replace it there.
         public var landed: Bool
-        /// The text the run's history entry should hold instead of the engine's (nil: keep it).
+        /// The run's whole cleaned text (nil: the history keeps the engine's). It is the history entry's text when
+        /// the field got all of it; else (``field`` set) its other version.
         public var cleaned: String?
+        /// Set when the field did not receive all of ``cleaned`` (partial, not shown, out of the window, handed
+        /// back): the run's text as the field now holds it, which is what the history entry's text must be.
+        public var field: String?
 
-        public init(landed: Bool, cleaned: String? = nil) {
+        public init(landed: Bool, cleaned: String? = nil, field: String? = nil) {
             self.landed = landed
             self.cleaned = cleaned
+            self.field = field
         }
     }
 
@@ -450,14 +468,16 @@ public final class LinkedCleanupRun {
             case .unchanged: return done(Stop(landed: confirmed), .unchanged)  // the stream is the text
             // Today's fallback: the session copies its cleaned text (with its notice), and its history entry keeps
             // that text with the raw text as its other version, as for any clipboard delivery.
-            case .notShown: return done(Stop(landed: false), .notShown, reason: notShownReason)
-            case .conflicted(let conflict): return done(Stop(landed: false), .conflict, reason: conflict.reason.rawValue)
-            case .timedOut: return done(Stop(landed: false), .timedOut)
-            // The session copies its whole cleaned text; the field keeps what landed.
+            // The history shows the field, not the cleaned text it did not get (that is its other version).
+            case .notShown:
+                return done(Stop(landed: false, cleaned: finalText, field: fieldText(raw: committed)), .notShown, reason: notShownReason)
+            case .conflicted(let conflict):
+                return done(Stop(landed: false, cleaned: finalText, field: fieldText(raw: committed)), .conflict, reason: conflict.reason.rawValue)
+            case .timedOut: return done(Stop(landed: false, cleaned: finalText, field: fieldText(raw: committed)), .timedOut)
+            // The session copies its whole cleaned text; the field keeps what landed, and the notice says so.
             case .partial:
-                let outside = stats.outOfWindow > 0
-                if outside { notice = Self.partialNotice }
-                return done(Stop(landed: false), .partial, reason: outside ? "outOfWindow" : "conflict")
+                notice = Self.partialNotice
+                return done(Stop(landed: false, cleaned: finalText, field: fieldText(raw: committed)), .partial, reason: partialReason)
             }
         }
         let outcome = await finish()
@@ -465,16 +485,21 @@ public final class LinkedCleanupRun {
         var fallback: String?
         var branch = StopReport.Branch.applied
         var reason: String?
+        // Part of the cleaned text is only on the clipboard (the notice says so); the field does not show all of it.
+        var partial = false
+        var shownInField = false
         if outcome.agentAbsent {
             branch = .agentAbsent
             if let pass = await statelessPass(text) {
                 let delivery = await deliver(raw: committed, cleaned: pass)
-                reason = delivery == .notShown ? notShownReason : delivery == .partial && stats.outOfWindow > 0
-                    ? "outOfWindow" : Self.describe(delivery)
+                reason = delivery == .notShown ? notShownReason : delivery == .partial ? partialReason : Self.describe(delivery)
+                partial = delivery == .partial
                 switch delivery {
                 case .applied: cleaned = pass
                 case .unchanged: break
-                default: fallback = pass
+                default:
+                    fallback = pass
+                    shownInField = true
                 }
             } else {
                 reason = "noPass"
@@ -492,14 +517,31 @@ public final class LinkedCleanupRun {
             // The run's head left the window unkept: what the agent wrote in the window stays, the rest is pasted.
             if copied, mirror.lostRunText { notice = Self.partialNotice }
             return done(
-                Stop(landed: copied, cleaned: copied ? pass : nil), .spansUnknown,
+                Stop(landed: copied, cleaned: copied ? pass : nil, field: copied ? fieldText(raw: text) : nil), .spansUnknown,
                 reason: mirror.lostRunText ? "outOfWindow" : nil, copied: copied)
         } else if outcome.unapplied.isEmpty {
             cleaned = mirror.runText
+            // The agent edits only the window: a sentence of the run that scrolled out (or is cut by the window's
+            // edge) was never reviewed, or could not be written. As Replace does: when the stateless pass over the
+            // whole run still changes it, the whole cleaned text goes to the clipboard with the notice.
+            if mirror.runLeftWindow || mirror.lostRunText, let pass = await statelessPass(text),
+                Self.changes(pass, mirror.runText ?? text)
+            {
+                branch = .partial
+                reason = "outOfWindow"
+                fallback = pass
+                partial = true
+                shownInField = true
+                stats.outOfWindow = max(stats.outOfWindow, 1)
+                trace?("link.outOfWindow pass=1")
+            }
         } else {
             branch = .unapplied
             reason = "n=\(outcome.unapplied.count)"
             fallback = fallbackText(unapplied: outcome.unapplied)
+            shownInField = true
+            // Some of the agent's edits may have landed: the field is then partly cleaned.
+            if let shown = mirror.runText, shown != text.trimmingCharacters(in: .whitespacesAndNewlines) { partial = true }
         }
         var landed = confirmed
         var copied = false
@@ -508,12 +550,21 @@ public final class LinkedCleanupRun {
             copied = copy(clip)
             landed = copied
             trace?("link.fallback copied=\(copied ? 1 : 0)")
-            if copied, stats.outOfWindow > 0 { notice = Self.partialNotice }
+            if copied, partial || stats.outOfWindow > 0 { notice = Self.partialNotice }
             // A fallback text the clipboard refused is nowhere the user has it: the history keeps the session's.
             cleaned = copied || fallback == nil ? clip : nil
         }
         if !confirmed, reason == nil { reason = "unconfirmed" }
-        return done(Stop(landed: landed, cleaned: mirror.wasCleared ? nil : cleaned), branch, reason: reason, copied: copied)
+        let historyText = mirror.wasCleared ? nil : cleaned
+        // The history's text is the field's: only a full landing makes the cleaned text the entry's text.
+        return done(
+            Stop(landed: landed, cleaned: historyText, field: historyText != nil && shownInField ? fieldText(raw: committed) : nil),
+            branch, reason: reason, copied: copied)
+    }
+
+    /// The run's text as the field shows it (the mirror's view); the raw text where the mirror cannot tell.
+    private func fieldText(raw: String) -> String {
+        mirror.runText ?? raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The cleaned text for a clipboard fallback: the run's text as the field holds it, with each unapplied edit
@@ -528,6 +579,7 @@ public final class LinkedCleanupRun {
         work = []
         pumping?.cancel()
         pumping = nil
+        made?.cancel()  // an agent still being made stops loading
     }
 
     /// ``cancel()``, then waits (``finalWait`` at most) until an agent call in flight has given the model back.
@@ -536,6 +588,8 @@ public final class LinkedCleanupRun {
         let clock = ContinuousClock()
         let deadline = clock.now + finalWait
         while pumpRunning, clock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
+        // The agent still being made holds the model too, pumping or not.
+        if let made { _ = await Self.exists(made, within: max(.zero, clock.now.duration(to: deadline))) }
     }
 
     private func waitForOutcomes(of ids: Set<UUID>) async {

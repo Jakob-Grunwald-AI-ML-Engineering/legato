@@ -46,7 +46,7 @@ final class KeyboardLinkHost: TranscriptSink {
     /// Puts a fallback text on the clipboard; false when the clipboard did not change.
     var copyFallback: @MainActor (String) -> Bool = { _ in false }
     /// The session saved the engine's text; the history then holds what the field got (`AgentRunHistory`).
-    var correctHistory: @MainActor (_ raw: String, _ cleaned: String) async -> Void = { _, _ in }
+    var correctHistory: @MainActor (_ saved: String, _ cleaned: String, _ field: String?) async -> Void = { _, _, _ in }
     /// Diagnostics of the linked run (DEBUG e2e); no user text.
     var linkTrace: (@MainActor (String) -> Void)?
 
@@ -247,7 +247,7 @@ final class KeyboardLinkHost: TranscriptSink {
             #if LEGATO_INTERNAL
             if let report = linked.stopReport { trace.linkedStop(report) }
             #endif
-            if let cleaned = stop.cleaned { await correctHistory(text, cleaned) }
+            if let cleaned = stop.cleaned { await correctHistory(text, cleaned, stop.field) }
             // Part of the cleanup is on the clipboard: the keyboard says so where the user looks.
             if let notice = linked.notice, visible {
                 link.publishNotice(notice)
