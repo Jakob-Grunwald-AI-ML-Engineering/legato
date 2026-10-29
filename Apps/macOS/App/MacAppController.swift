@@ -116,13 +116,19 @@ final class MacAppController {
         let secureField: Bool
         /// How a cleaned text reaches the field: the setting when the run started, nil with cleanup off.
         let delivery: CleanupDelivery?
+        /// "Experimental: edit queue and cleanup agent" as it was when the run started (frozen for the run).
+        let editQueueEnabled: Bool
         /// The run's text as the edit pump saw it: raw committed (`committed`), with live cleanup's revisions
         /// applied for the HUD (`revisedCommitted`).
         var transcript = LiveTranscript()
         /// Everything the engine committed, as the edit pump saw it.
         var committed: String { transcript.committed }
 
-        init(writer: FieldWriter, targetPID: pid_t?, secureField: Bool, delivery: CleanupDelivery?) {
+        init(
+            writer: FieldWriter, targetPID: pid_t?, secureField: Bool, delivery: CleanupDelivery?,
+            editQueueEnabled: Bool
+        ) {
+            self.editQueueEnabled = editQueueEnabled
             self.writer = writer
             self.targetPID = targetPID
             self.secureField = secureField
@@ -699,7 +705,8 @@ final class MacAppController {
             writer: FieldWriter(target: target, mode: mode),
             targetPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             secureField: secureField,
-            delivery: delivery)
+            delivery: delivery,
+            editQueueEnabled: settings.experimentalEditQueue)
         activeRun = run
         phase = .preparing
         hud.beginRun()

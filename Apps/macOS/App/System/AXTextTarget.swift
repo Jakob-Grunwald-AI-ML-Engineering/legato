@@ -121,6 +121,19 @@ final class AXTextTarget: TextTarget {
         guard error == .success else { throw AXTargetError.attribute(error) }
     }
 
+    func select(_ range: UTF16Range) throws {
+        let error = AXUIElementSetAttributeValue(
+            element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
+        guard error == .success else { throw AXTargetError.attribute(error) }
+        // Some fields accept the call and clamp or ignore the range: read it back.
+        guard try selectedRange() == range else { throw AXTargetError.unexpectedValue }
+    }
+
+    /// Value and selection notifications of this element, for the typing guard.
+    func makeActivitySource() -> AXFieldActivitySource {
+        AXFieldActivitySource(element: element, appElement: appElement)
+    }
+
     // MARK: Helpers
 
     private static func copyAttribute(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {

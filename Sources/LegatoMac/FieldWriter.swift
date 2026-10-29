@@ -76,6 +76,8 @@ public final class FieldWriter {
     public private(set) var degradeReason: DegradeReason?
 
     private let target: (any TextTarget)?
+    /// Where replace operations go; reads stay on `target`.
+    private let channel: (any FieldWriteChannel)?
     /// Everything the engine committed, as received.
     private var rawCommitted = ""
     /// Live cleanup's newest revision (the collected text shows it).
@@ -108,8 +110,11 @@ public final class FieldWriter {
     private let startSelection: UTF16Range?
 
     /// Create the writer when the run starts: `.insertOnStop` remembers the selection then.
-    public init(target: (any TextTarget)?, mode: Mode = .streamCommitted) {
+    ///
+    /// `channel` is where the writes go; the default writes straight to `target`.
+    public init(target: (any TextTarget)?, mode: Mode = .streamCommitted, channel: (any FieldWriteChannel)? = nil) {
         self.target = target
+        self.channel = channel ?? target.map { DirectFieldWriteChannel(target: $0) }
         self.mode = mode
         startSelection = mode == .insertOnStop ? try? target?.selectedRange() : nil
     }
@@ -159,7 +164,7 @@ public final class FieldWriter {
         } else {
             return .leftInPlace
         }
-        do { try target.replace(range, with: restore) } catch { return .leftInPlace }
+        do { try send(range, with: restore) } catch { return .leftInPlace }
         guard let after = try? target.text(in: range), after != shown else { return .leftInPlace }
         written = ""
         tentative = ""
@@ -231,7 +236,7 @@ public final class FieldWriter {
             location: start + shared.utf16.count, length: shown.utf16.count - shared.utf16.count)
         let replacement = String(desired.dropFirst(shared.count)) + tentative
         do {
-            try target.replace(span, with: replacement)
+            try send(span, with: replacement)
         } catch {
             return degrade(.writeFailed)
         }
@@ -295,7 +300,7 @@ public final class FieldWriter {
         if text == body { return .swapped }
         let replacement = text + written.dropFirst(body.count)
         do {
-            try target.replace(span, with: replacement)
+            try send(span, with: replacement)
         } catch {
             degrade(.writeFailed)
             return .leftInPlace
@@ -359,7 +364,7 @@ public final class FieldWriter {
         }
 
         do {
-            try target.replace(range, with: insertion)
+            try send(range, with: insertion)
         } catch {
             return degrade(.writeFailed)
         }
@@ -388,6 +393,13 @@ public final class FieldWriter {
         written += delta
         writtenRaw += delta.count
         tentative = newTentative
+    }
+
+    private struct NoChannel: Error {}
+
+    private func send(_ range: UTF16Range, with text: String) throws {
+        guard let channel else { throw NoChannel() }
+        try channel.replace(range, with: text)
     }
 
     private func degrade(_ reason: DegradeReason) {

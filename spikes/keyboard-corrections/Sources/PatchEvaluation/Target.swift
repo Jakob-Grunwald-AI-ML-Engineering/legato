@@ -23,6 +23,10 @@ import EvaluationSupport
         guard range.location >= 0, range.location <= value.utf16.count else { throw Failure.unreadable }
         return (value as NSString).substring(with: NSRange(location: range.location, length: min(range.length, value.utf16.count-range.location)))
     }
+    func select(_ range: UTF16Range) throws {
+        if readFault { throw Failure.unreadable }
+        selection = range
+    }
     func replace(_ range: UTF16Range, with text: String) throws {
         let previous = try self.text(in: range)
         operations.append(["op":"replace", "locationUTF16":range.location, "lengthUTF16":range.length,"text":text])

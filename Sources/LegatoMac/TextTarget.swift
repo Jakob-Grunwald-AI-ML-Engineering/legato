@@ -26,4 +26,6 @@ public protocol TextTarget: AnyObject {
     func text(in range: UTF16Range) throws -> String
     /// Replaces `range` with `text`, leaving the caret after the inserted text.
     func replace(_ range: UTF16Range, with text: String) throws
+    /// Sets the selection (a caret when `range.length` is 0) and reads it back; throws when the field did not take it.
+    func select(_ range: UTF16Range) throws
 }
