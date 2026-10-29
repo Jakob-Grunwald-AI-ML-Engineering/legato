@@ -19,7 +19,7 @@ import UIKit
 ///  - Bottom row: "123" 44, emoji 43.33, space the rest, return 93 (numbers page: "ABC" 93.33, no
 ///    emoji). Email adds "@" and "." (43.33 each) around the space bar.
 ///  - Numpad: 3 columns 126.33 wide, margin 4.67, gap 6, key height 45.33.
-///  - Key corner radius 8.5 (25 px), no shadow, no outline. Letters: SF 25 pt, baseline 28 pt below the
+///  - Key corner radius 8.5 (25 px), no shadow, no outline. Letters: SF 25 pt lowercase / 22 pt capitals, baseline 28 pt below the
 ///    key top; "123"/"ABC": 18 pt, baseline 27.3. Symbols (shift, delete, return, emoji): 17-20 pt boxes.
 ///  - Key fill light #FFFFFF, dark white at 16.5% over the keyboard; pressed function key light
 ///    #C5C5C9, dark white at 44%; return key with an action: system blue.
@@ -28,19 +28,30 @@ import UIKit
 ///    bottom; glyph SF 38.3 pt, baseline 47 below the head top. Fill as the key (dark: white 26%).
 ///  - Alternates strip: cells 37.3 wide x 47.7 high, 11.5 pad, strip 66.7 high ending 5 above the key
 ///    top, radius 12; the highlighted cell is system blue (0,136,255) with white text.
-/// Landscape, 874 pt wide: side margin 79, gap 6, key height 25.33, pitch 35.33, row 1 at 51.
+/// Landscape, 874 pt screen: side margin 79 including system insets, gap 6, key height 27.33, pitch 35.33, row 1 at 51.
 ///
 /// Legato's top area (the vertical numbers are `KeyboardHeights`, tested in LegatoKeyboardCore): the mic
 /// pill 81 x 43.3 pt (portrait), 14.3 from the right edge and 15.7 above the first row, follows
 /// Superwhisper's iOS keyboard.
 ///  - Portrait: the word row (three slots, "2 | 1 | 3", 24 pt dividers) is 32 pt high across the top. Below
 ///    it, the hotkey bar (⌄ ↶ ↷ Refine) fills the space left of the pill. The pill's top is 32 pt down, so the
-///    first row sits at 91, not at the 86 it would without the word row: the keyboard is 306 pt high.
+///    first row sits at 91, not at the 86 it would without the word row: the keyboard is 299 pt high (3 pt below the last key face, above the system globe area).
 ///  - Landscape: one row, as high as the pill (34 pt): hotkeys, then the word slots, then the pill. The
-///    first row is at 51 and the keyboard 190 pt high, as before; below 70 pt a slot, only the best word shows.
-///  - Strip: the word row (30 pt) is a row of its own above the strip's row (`StripHeight.requested`).
+///    first row is at 51 and the keyboard about 188 pt high; below 70 pt a slot, only the best word shows.
+///  - Strip: the word row (40 pt) is a row of its own above the strip's row (`StripHeight.requested`).
 struct KeyGeometry {
     let size: CGSize
+    let landscapeScreenWidth: CGFloat?
+
+    init(size: CGSize, landscapeScreenWidth: CGFloat? = nil) {
+        self.size = size
+        self.landscapeScreenWidth = landscapeScreenWidth
+    }
+
+    @MainActor static func screenWidth(in window: UIWindow?) -> CGFloat? {
+        guard let bounds = window?.windowScene?.screen.bounds else { return nil }
+        return max(bounds.width, bounds.height)
+    }
 
     /// A phone is wider than 500 pt only in landscape. Never compare width with height: the keyboard is
     /// shorter than it is wide in both orientations.
@@ -55,11 +66,16 @@ struct KeyGeometry {
         return min(1, max(0.5, size.height / Self.height(landscape: landscape)))
     }
 
-    var marginX: CGFloat { landscape ? 79 : 6.33 }
+    /// iOS may already inset the extension window (75 pt per side on iPhone 17).
+    /// Subtract that inset while preserving the full-screen harness's 79 pt margin.
+    var marginX: CGFloat {
+        landscape ? CGFloat(KeyboardSideMargins.landscape(
+            contentWidth: Double(size.width), screenWidth: landscapeScreenWidth.map(Double.init))) : 6.33
+    }
     var gap: CGFloat { 6 }
     /// A letter key's width.
     var keyWidth: CGFloat { (size.width - 2 * marginX - 9 * gap) / 10 }
-    var keyHeight: CGFloat { (landscape ? 25.33 : 43) * vScale }
+    var keyHeight: CGFloat { (landscape ? 27.33 : 43) * vScale }
     var rowPitch: CGFloat { (landscape ? 35.33 : 54) * vScale }
     /// Distance from the top of the keyboard view to the first row.
     var firstRowTop: CGFloat { Self.firstRowTop(landscape: landscape) * vScale }
@@ -79,10 +95,14 @@ struct KeyGeometry {
     var numpadKeyHeight: CGFloat { landscape ? keyHeight : 45.33 * vScale }
 
     /// Letter and label baselines below the key top.
-    var letterBaseline: CGFloat { (landscape ? 18.3 : 28.0) * vScale }
+    var letterBaseline: CGFloat { (landscape ? 19.3 : 28.0) * vScale }
     var labelBaseline: CGFloat { (landscape ? 17.6 : 27.3) * vScale }
-    /// Landscape (measured): x-height 11.3 pt against 12.7 pt in portrait.
-    var letterSize: CGFloat { landscape ? 22.2 : 25 }
+    /// Native portrait capitals are smaller than lowercase letters, on the same baseline.
+    /// Symbols have no case and keep their original size.
+    func letterSize(for text: String) -> CGFloat {
+        let uppercaseLetter = text == text.uppercased() && text != text.lowercased()
+        return landscape ? 22.2 : (uppercaseLetter ? 22 : 25)
+    }
     var labelSize: CGFloat { landscape ? 16 : 18 }
 
     // MARK: Top bar

@@ -48,14 +48,20 @@ struct WordRowView<Swipe: Gesture>: View {
     private var row: some View {
         let ranks = WordRowLayout.ranks(visibleSlots: slots)
         let words = controller.suggestions
+        let highlighted = controller.highlightedSuggestionRank.flatMap { ranks.firstIndex(of: $0) }
         return HStack(spacing: 0) {
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
-                slot(rank < words.count ? words[rank] : nil, rank: rank, position: position)
+                SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
+                               rank: rank, fontSize: fontSize, highlighted: highlighted == position,
+                               swipe: swipe, onPressChange: { isPressed in
+                    if isPressed { pressed = position } else if pressed == position { pressed = nil }
+                })
                     .overlay(alignment: .trailing) {
                         // The system's bar drops the dividers beside the pressed pill, without animation.
                         if position < ranks.count - 1 {
                             Rectangle().fill(Color(uiColor: KeyColors.divider)).frame(width: 0.67, height: 24)
-                                .opacity(pressed == position || pressed == position + 1 ? 0 : 1)
+                                .opacity(pressed == position || pressed == position + 1
+                                         || highlighted == position || highlighted == position + 1 ? 0 : 1)
                                 .transaction { $0.animation = nil }
                         }
                     }
@@ -63,21 +69,39 @@ struct WordRowView<Swipe: Gesture>: View {
         }
     }
 
-    /// An empty slot keeps its button (disabled, hidden from accessibility) so its word can fade out in place.
-    private func slot(_ word: String?, rank: Int, position: Int) -> some View {
-        Button { controller.suggestionTapped(rank: rank) } label: {
+}
+
+/// Keeps the touch-down proposal while asynchronous results may update the same visual slot.
+private struct SuggestionSlot<Swipe: Gesture>: View {
+    let controller: KeyboardController
+    let word: String?
+    let rank: Int
+    let fontSize: CGFloat
+    let highlighted: Bool
+    let swipe: Swipe
+    let onPressChange: (Bool) -> Void
+    @State private var touch: SuggestionTap?
+
+    var body: some View {
+        Button {
+            // Accessibility activation has no touch-down; it uses the currently announced proposal.
+            if let tap = touch ?? controller.suggestionTap(rank: rank) { controller.suggestionTapped(tap) }
+            touch = nil
+        } label: {
             MorphingWord(text: word ?? "", fontSize: fontSize)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.001))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(WordSlotStyle(onPressChange: { isPressed in
-            if isPressed { pressed = position } else if pressed == position { pressed = nil }
+        .buttonStyle(WordSlotStyle(highlighted: highlighted, onPressChange: { isPressed in
+            if isPressed { touch = controller.suggestionTap(rank: rank) }
+            onPressChange(isPressed)
         }))
         .disabled(word == nil)
         .simultaneousGesture(swipe)
         .accessibilityHidden(word == nil)
         .accessibilityLabel(word ?? "")
+        .accessibilityHint(highlighted ? "Spelling correction. Tap to replace the word being typed." : "Tap to insert suggestion.")
         .accessibilityIdentifier("keyboard.word.\(rank)")
     }
 }
@@ -85,6 +109,7 @@ struct WordRowView<Swipe: Gesture>: View {
 /// A word slot's press: a capsule across the whole slot (a little shorter than it), white over the bar, which
 /// appears and disappears within one frame, as on the system's bar.
 private struct WordSlotStyle: ButtonStyle {
+    let highlighted: Bool
     let onPressChange: (Bool) -> Void
 
     /// The system's pill is white at about 30% over the light bar; in dark mode the same lift needs less.
@@ -96,7 +121,7 @@ private struct WordSlotStyle: ButtonStyle {
                 Capsule(style: .continuous)
                     .fill(Self.pill)
                     .padding(.vertical, 4)
-                    .opacity(configuration.isPressed ? 1 : 0)
+                    .opacity(configuration.isPressed || highlighted ? 1 : 0)
                     .transaction { $0.animation = nil }
             }
             .onChange(of: configuration.isPressed) { _, isPressed in onPressChange(isPressed) }

@@ -14,8 +14,9 @@ struct KeyboardRootView: View {
         let typing = controller.typing!
         let layout = typing.layout
         GeometryReader { geometry in
-            let g = KeyGeometry(size: geometry.size)
-            let frames = Dictionary(layout.frames(in: geometry.size).map { ($0.id, $0.cgRect) }, uniquingKeysWith: { a, _ in a })
+            let screenWidth = KeyGeometry.screenWidth(in: controller.inputModeTarget?.view.window)
+            let g = KeyGeometry(size: geometry.size, landscapeScreenWidth: screenWidth)
+            let frames = Dictionary(layout.frames(in: geometry.size, landscapeScreenWidth: screenWidth).map { ($0.id, $0.cgRect) }, uniquingKeysWith: { a, _ in a })
             ZStack(alignment: .topLeading) {
                 if controller.mode == .strip {
                     strip(typing: typing, size: geometry.size)
@@ -37,9 +38,18 @@ struct KeyboardRootView: View {
                     }
                     place(g.hotkeyFrame(buttons: buttons)) { HotkeyBar(controller: controller, swipe: swipe) }
                     place(g.pillFrame) { MicKey(controller: controller).simultaneousGesture(swipe) }
-                    KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance)
-                    if controller.showsGlobe, let frame = frames["globe"] {
-                        place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing) }
+                    if typing.showsEmojiPanel {
+                        place(CGRect(x: 0, y: g.firstRowTop, width: geometry.size.width, height: max(geometry.size.height - g.firstRowTop, 0))) {
+                            EmojiPickerView(typing: typing, controller: controller)
+                        }
+                    } else {
+                        KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance, emojiSystemSwitcher: controller.emojiSystemSwitcher)
+                        if controller.showsGlobe, let frame = frames["globe"] {
+                            place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing) }
+                        }
+                        if controller.emojiSystemSwitcher, let frame = frames["emoji"] {
+                            place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing, emoji: true) }
+                        }
                     }
                 }
             }

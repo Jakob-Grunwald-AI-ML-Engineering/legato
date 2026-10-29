@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 final class KeyGridView: UIView {
     static let holdDelay: Duration = .milliseconds(400)
-    private static let overlayKeys: Set<String> = ["globe"]
+    private var overlayKeys: Set<String> = ["globe"]
 
     weak var typing: TypingModel?
 
@@ -56,7 +56,9 @@ final class KeyGridView: UIView {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    private var geometry: KeyGeometry { KeyGeometry(size: bounds.size) }
+    private var geometry: KeyGeometry {
+        KeyGeometry(size: bounds.size, landscapeScreenWidth: KeyGeometry.screenWidth(in: window))
+    }
 
     /// The top bar (suggestions, mic pill) lies under this view; only the key rows take touches. A touch
     /// that began on a key keeps coming here wherever it moves (the popups reach into the bar).
@@ -64,12 +66,15 @@ final class KeyGridView: UIView {
         point.y >= geometry.firstRowTop - geometry.gap && super.point(inside: point, with: event)
     }
 
-    func apply(layout: TypingLayout, presentation: KeyPresentation) {
+    func apply(layout: TypingLayout, presentation: KeyPresentation, emojiSystemSwitcher: Bool) {
+        let overlays: Set<String> = emojiSystemSwitcher ? ["globe", "emoji"] : ["globe"]
+        let overlaysChanged = overlays != overlayKeys
+        overlayKeys = overlays
         let layoutChanged = layout != self.layout
-        guard layoutChanged || presentation != self.presentation else { return }
+        guard layoutChanged || overlaysChanged || presentation != self.presentation else { return }
         self.layout = layout
         self.presentation = presentation
-        if layoutChanged { rebuild() } else { rebuildAccessibility() }
+        if layoutChanged || overlaysChanged { rebuild() } else { rebuildAccessibility() }
         setNeedsDisplay()
     }
 
@@ -88,10 +93,10 @@ final class KeyGridView: UIView {
 
     private func rebuild() {
         builtFor = bounds.size
-        let all = layout.frames(in: bounds.size)
+        let all = layout.frames(in: bounds.size, landscapeScreenWidth: KeyGeometry.screenWidth(in: window))
         frames = Dictionary(all.map { ($0.id, $0.cgRect) }, uniquingKeysWith: { a, _ in a })
         keys = Dictionary(layout.rows.flatMap(\.keys).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        tester = KeyHitTester(frames: all.filter { !Self.overlayKeys.contains($0.id) })
+        tester = KeyHitTester(frames: all.filter { !overlayKeys.contains($0.id) })
         rebuildAccessibility()
         setNeedsDisplay()
     }
@@ -109,7 +114,7 @@ final class KeyGridView: UIView {
     private func rebuildAccessibility() {
         let typing = typing
         accessibilityElements = layout.rows.flatMap(\.keys).compactMap { key -> UIAccessibilityElement? in
-            guard !Self.overlayKeys.contains(key.id), let frame = frames[key.id] else { return nil }
+            guard !overlayKeys.contains(key.id), let frame = frames[key.id] else { return nil }
             let element = KeyElement(accessibilityContainer: self)
             element.accessibilityLabel = accessibilityName(key)
             element.accessibilityIdentifier = Self.identifier(key)
@@ -263,7 +268,7 @@ final class KeyGridView: UIView {
         let trait = traitCollection
         let held = Set(touchStates.values.compactMap { $0.current?.id })
         for key in layout.rows.flatMap(\.keys) {
-            guard !Self.overlayKeys.contains(key.id), let frame = frames[key.id] else { continue }
+            guard !overlayKeys.contains(key.id), let frame = frames[key.id] else { continue }
             drawKey(key, in: frame, pressed: held.contains(key.id), ctx: ctx, trait: trait)
         }
         for state in touchStates.values {
@@ -316,7 +321,7 @@ final class KeyGridView: UIView {
                 }
                 if key.id == "char:+" { drawText("+", centerX: frame.midX, baseline: frame.minY + 30, size: 30, weight: .regular, color: inkColor) }
             } else {
-                drawText(text, centerX: frame.midX, baseline: frame.minY + g.letterBaseline, size: g.letterSize, weight: .regular, color: inkColor)
+                drawText(text, centerX: frame.midX, baseline: frame.minY + g.letterBaseline, size: g.letterSize(for: text), weight: .regular, color: inkColor)
             }
         case .returnKey:
             if let symbol = KeyLabels.returnSymbol(for: p.returnLabel) {
@@ -438,6 +443,7 @@ struct KeyGrid: UIViewRepresentable {
     let layout: TypingLayout
     let presentation: KeyPresentation
     let appearance: UIUserInterfaceStyle
+    var emojiSystemSwitcher = false
 
     func makeUIView(context: Context) -> KeyGridView {
         let view = KeyGridView()
@@ -447,6 +453,6 @@ struct KeyGrid: UIViewRepresentable {
 
     func updateUIView(_ view: KeyGridView, context: Context) {
         view.overrideUserInterfaceStyle = appearance
-        view.apply(layout: layout, presentation: presentation)
+        view.apply(layout: layout, presentation: presentation, emojiSystemSwitcher: emojiSystemSwitcher)
     }
 }

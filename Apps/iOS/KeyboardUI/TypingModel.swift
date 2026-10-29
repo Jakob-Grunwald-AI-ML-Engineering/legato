@@ -29,6 +29,7 @@ final class TypingModel {
     @ObservationIgnored var now: () -> Date = { Date() }
 
     private(set) var page = KeyboardPage.letters
+    private(set) var showsEmojiPanel = false
     private(set) var shift = ShiftState()
 
     @ObservationIgnored private var lastField: KeyboardField?
@@ -45,6 +46,30 @@ final class TypingModel {
     // MARK: What to draw
 
     var field: KeyboardField { KeyboardField(controller?.keyboardType ?? .default) }
+
+    var allowsEmojiPanel: Bool {
+        EmojiKeyboardBehavior.offersLocalPanel(
+            numeric: field.isNumpad || controller?.keyboardType == .numbersAndPunctuation,
+            secure: controller?.document.isSecureTextEntry ?? false,
+            contentType: AutoFillContentType.semanticName(for: controller?.document.textContentType))
+    }
+
+    func openEmojiPanel() {
+        guard allowsEmojiPanel else { return }
+        endDelete()
+        showsEmojiPanel = true
+    }
+
+    func closeEmojiPanel() { showsEmojiPanel = false }
+
+    /// The same edit path as a typed key: owns the field before inserting and records undo normally.
+    func insertEmoji(_ emoji: String) {
+        guard showsEmojiPanel, allowsEmojiPanel else { return }
+        feedback.tick()
+        insert(emoji)
+        lastSpaceAt = nil
+        afterEdit()
+    }
 
     var layout: TypingLayout { .make(page: page, field: field, showsGlobe: controller?.showsGlobe ?? false) }
 
@@ -97,6 +122,7 @@ final class TypingModel {
     }
 
     func disappeared() {
+        closeEmojiPanel()
         endDelete()
         settleTask?.cancel()
     }
@@ -104,7 +130,9 @@ final class TypingModel {
     /// The field or its traits changed: a new field starts on its own page.
     func documentChanged() {
         let field = field
+        if !allowsEmojiPanel { closeEmojiPanel() }
         if field != lastField {
+            closeEmojiPanel()
             lastField = field
             page = controller?.keyboardType == .numbersAndPunctuation ? .numbers : .letters
         }
@@ -119,6 +147,7 @@ final class TypingModel {
 
     /// Back to the letters page with nothing typed (the DEBUG harness clears its field with this).
     func reset() {
+        closeEmojiPanel()
         endDelete()
         page = .letters
         shift = ShiftState()
@@ -186,6 +215,7 @@ final class TypingModel {
         case .shift:
             shift.tapShift(at: now())
         case .modeSwitch(let target):
+            closeEmojiPanel()
             page = target
             refreshAutoShift()
         case .emoji:

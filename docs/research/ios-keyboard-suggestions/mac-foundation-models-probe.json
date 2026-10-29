@@ -1,0 +1,256 @@
+{
+  "date": "2026-10-29",
+  "platform": "macOS 26.6.2 host",
+  "model": "SystemLanguageModel.default",
+  "availability": "available",
+  "networkFallback": false,
+  "audio": false,
+  "requestProcessLimitSeconds": 30,
+  "maximumResponseTokens": 128,
+  "sampling": "greedy",
+  "prewarm": false,
+  "measurementBoundary": "Fresh process and session per case; first observed request is not controlled model-cold. No service eviction, keyboard extension, memory or energy measurement.",
+  "plain": [
+    {
+      "context": "The sailor repaired the port ",
+      "id": "en-port-sailing",
+      "index": 0,
+      "language": "English",
+      "milliseconds": 4703.3816669999997,
+      "model": "SystemLanguageModel.default",
+      "outcome": "invalidJSON",
+      "prefix": "",
+      "prewarm": false,
+      "raw": "```json\n[\"port\", \"ship\", \"boat\"]\n```",
+      "valid": false,
+      "diagnosticWords": [
+        "port",
+        "ship",
+        "boat"
+      ]
+    },
+    {
+      "context": "The developer configured the port ",
+      "id": "en-port-software",
+      "index": 1,
+      "language": "English",
+      "milliseconds": 863.34562500000004,
+      "model": "SystemLanguageModel.default",
+      "outcome": "invalidJSON",
+      "prefix": "",
+      "prewarm": false,
+      "raw": "```json\n[\"configured\", \"port\", \"developer\"]\n```",
+      "valid": false,
+      "diagnosticWords": [
+        "configured",
+        "port",
+        "developer"
+      ]
+    },
+    {
+      "context": "At the bakery, she mixed flour and eggs to make a ba",
+      "id": "en-ba-bakery",
+      "index": 2,
+      "language": "English",
+      "milliseconds": 7441.6172079999997,
+      "model": "SystemLanguageModel.default",
+      "outcome": "invalidJSON",
+      "prefix": "ba",
+      "prewarm": false,
+      "raw": "```json\n[\n  \"bagel\",\n  \"bake\",\n  \"bakehouse\"\n]\n```",
+      "valid": false,
+      "diagnosticWords": [
+        "bagel",
+        "bake",
+        "bakehouse"
+      ]
+    },
+    {
+      "context": "In the cave, she heard wings and spotted a ba",
+      "id": "en-ba-cave",
+      "index": 3,
+      "language": "English",
+      "milliseconds": 969.09729200000004,
+      "model": "SystemLanguageModel.default",
+      "outcome": "invalidJSON",
+      "prefix": "ba",
+      "prewarm": false,
+      "raw": "```json\n[\n  \"bat\",\n  \"bathtub\",\n  \"bathtub\"\n]\n```",
+      "valid": false,
+      "diagnosticWords": [
+        "bat",
+        "bathtub",
+        "bathtub"
+      ]
+    },
+    {
+      "context": "Die Werkstatt repariert das Segelboot und bestellt einen neuen Mo",
+      "id": "de-mo-engine",
+      "index": 4,
+      "language": "German",
+      "milliseconds": 957.80620799999997,
+      "model": "SystemLanguageModel.default",
+      "outcome": "invalidJSON",
+      "prefix": "Mo",
+      "prewarm": false,
+      "raw": "```json\n[\n  \"Mooring\",\n  \"Moos\",\n  \"Mohn\"\n]\n```",
+      "valid": false,
+      "diagnosticWords": [
+        "Mooring",
+        "Moos",
+        "Mohn"
+      ]
+    },
+    {
+      "context": "Die Astronomin richtet ihr Teleskop aus und beobachtet einen neuen Mo",
+      "id": "de-mo-moon",
+      "index": 5,
+      "language": "German",
+      "milliseconds": 986.08183299999996,
+      "model": "SystemLanguageModel.default",
+      "outcome": "invalidJSON",
+      "prefix": "Mo",
+      "prewarm": false,
+      "raw": "```json\n[\n  \"Mond\",\n  \"Mondfinsternis\",\n  \"Mondlandschaft\"\n]\n```",
+      "valid": false,
+      "diagnosticWords": [
+        "Mond",
+        "Mondfinsternis",
+        "Mondlandschaft"
+      ]
+    }
+  ],
+  "structured": [
+    {
+      "context": "The sailor repaired the port ",
+      "id": "en-port-sailing",
+      "index": 0,
+      "language": "English",
+      "milliseconds": 7873.9615830000002,
+      "model": "SystemLanguageModel.default",
+      "outcome": "completed",
+      "prefix": "",
+      "prewarm": false,
+      "structured": true,
+      "valid": false,
+      "validatedWords": [
+        "sailor",
+        "port"
+      ],
+      "words": [
+        "",
+        "sailor",
+        "port"
+      ]
+    },
+    {
+      "context": "The developer configured the port ",
+      "id": "en-port-software",
+      "index": 1,
+      "language": "English",
+      "milliseconds": 689.74558300000001,
+      "model": "SystemLanguageModel.default",
+      "outcome": "completed",
+      "prefix": "",
+      "prewarm": false,
+      "structured": true,
+      "valid": true,
+      "validatedWords": [
+        "the",
+        "developer",
+        "configured"
+      ],
+      "words": [
+        "the",
+        "developer",
+        "configured"
+      ]
+    },
+    {
+      "context": "At the bakery, she mixed flour and eggs to make a ba",
+      "id": "en-ba-bakery",
+      "index": 2,
+      "language": "English",
+      "milliseconds": 674.99400000000003,
+      "model": "SystemLanguageModel.default",
+      "outcome": "completed",
+      "prefix": "ba",
+      "prewarm": false,
+      "structured": true,
+      "valid": false,
+      "validatedWords": [
+        "ba"
+      ],
+      "words": [
+        "ba",
+        "k",
+        "e"
+      ]
+    },
+    {
+      "context": "In the cave, she heard wings and spotted a ba",
+      "id": "en-ba-cave",
+      "index": 3,
+      "language": "English",
+      "milliseconds": 668.55120799999997,
+      "model": "SystemLanguageModel.default",
+      "outcome": "completed",
+      "prefix": "ba",
+      "prewarm": false,
+      "structured": true,
+      "valid": false,
+      "validatedWords": [
+        "ba",
+        "ba",
+        "ba"
+      ],
+      "words": [
+        "ba",
+        "ba",
+        "ba"
+      ]
+    },
+    {
+      "context": "Die Werkstatt repariert das Segelboot und bestellt einen neuen Mo",
+      "id": "de-mo-engine",
+      "index": 4,
+      "language": "German",
+      "milliseconds": 690.5095,
+      "model": "SystemLanguageModel.default",
+      "outcome": "completed",
+      "prefix": "Mo",
+      "prewarm": false,
+      "structured": true,
+      "valid": false,
+      "validatedWords": [
+        "Mo"
+      ],
+      "words": [
+        "Mo",
+        "o",
+        "ck"
+      ]
+    },
+    {
+      "context": "Die Astronomin richtet ihr Teleskop aus und beobachtet einen neuen Mo",
+      "id": "de-mo-moon",
+      "index": 5,
+      "language": "German",
+      "milliseconds": 678.59537499999999,
+      "model": "SystemLanguageModel.default",
+      "outcome": "completed",
+      "prefix": "Mo",
+      "prewarm": false,
+      "structured": true,
+      "valid": false,
+      "validatedWords": [
+        "Mo"
+      ],
+      "words": [
+        "Mo",
+        "on",
+        "ster"
+      ]
+    }
+  ]
+}

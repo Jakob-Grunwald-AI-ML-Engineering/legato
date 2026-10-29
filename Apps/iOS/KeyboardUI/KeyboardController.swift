@@ -29,6 +29,7 @@ final class KeyboardController {
     private(set) var isVisible = false
     private(set) var returnKeyType: UIReturnKeyType = .default
     private(set) var offersAutoFillSwitch = false
+    private(set) var emojiSystemSwitcher = false
     private(set) var keyboardType: UIKeyboardType = .default
     private(set) var autocapitalization: AutoCapitalizationType = .none
     private(set) var enablesReturnKeyAutomatically = false
@@ -40,6 +41,8 @@ final class KeyboardController {
     /// Up to three suggestions, best first; the word row shows them as "2 | 1 | 3" (``SuggestionSlots``).
     /// `SuggestionController` fills them.
     var suggestions: [String] = []
+    /// The first spelling proposal, if any; emphasis describes its kind, never model confidence.
+    var highlightedSuggestionRank: Int?
     /// Whether to show the globe key (`needsInputModeSwitchKey`); set by the extension.
     var showsGlobe = false
     /// The id of the request the mic key's Link carries (the Darwin request uses the same id).
@@ -106,6 +109,7 @@ final class KeyboardController {
             stripEnabled: current.strip,
             persistence: expansionPersistence ?? KeyboardPreferences.expansionPersistence())
         stripHeight = current.stripHeight
+        emojiSystemSwitcher = current.emojiSystemSwitcher
         cursor = link.readApplied()
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
@@ -124,9 +128,14 @@ final class KeyboardController {
     /// appearing again.
     func refreshPreferences() {
         let current = preferences()
+        if emojiSystemSwitcher != current.emojiSystemSwitcher {
+            emojiSystemSwitcher = current.emojiSystemSwitcher
+            typing?.closeEmojiPanel()
+        }
         let changed = expansion.stripEnabled != current.strip
         expansion.setStripEnabled(current.strip)
         guard changed else { return }
+        typing?.closeEmojiPanel()
         stripHeight = current.stripHeight
         onLayoutChange?("setting")
     }
@@ -134,6 +143,7 @@ final class KeyboardController {
     /// The chevron: strip to full keyboard and back.
     func toggleExpansion() {
         guard expansion.control != nil else { return }
+        typing.closeEmojiPanel()
         expansion.toggle()
         trace?("expansion mode=\(expansion.mode == .strip ? "strip" : "full")")
         onLayoutChange?("toggle")
@@ -175,6 +185,8 @@ final class KeyboardController {
 
     /// A slot of the word row was tapped (`rank` 0 is the best suggestion).
     func suggestionTapped(rank: Int) { wordRow.tapped(rank: rank) }
+    func suggestionTap(rank: Int) -> SuggestionTap? { wordRow.tapIdentity(rank: rank) }
+    func suggestionTapped(_ tap: SuggestionTap) { wordRow.tapped(tap) }
 
     /// While the app records a meeting dictation is blocked, and the keyboard says why instead of offering to
     /// dictate. Believed only while the app keeps beating: an app that died mid-meeting leaves the flag behind.
@@ -259,6 +271,7 @@ final class KeyboardController {
     private func trackContext() {
         let id = document.documentID
         if id != lastDocumentID {
+            typing.closeEmojiPanel()
             lastDocumentID = id
             history.clear()
             keptVersions = nil
@@ -900,9 +913,10 @@ final class KeyboardController {
         }
     }
 
-    /// The emoji key: the emoji panel lands later; for now it says so.
+    /// Local palette by default; the configured system control receives its own UIKit touches.
     func emojiTapped() {
-        show("Emoji is coming soon.")
+        guard !emojiSystemSwitcher else { return }
+        typing.openEmojiPanel()
     }
 
     private func show(_ text: String) {

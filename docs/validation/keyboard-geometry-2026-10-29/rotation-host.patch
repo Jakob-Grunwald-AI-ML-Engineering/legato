@@ -1,0 +1,25 @@
+--- a/Apps/iOS/project.yml
++++ b/Apps/iOS/project.yml
+@@ -91,7 +91,7 @@
+         CFBundleShortVersionString: $(MARKETING_VERSION)
+         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+         UILaunchScreen: {}
+-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
++        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+         UIBackgroundModes: [audio, processing]
+         BGTaskSchedulerPermittedIdentifiers: [de.gruenwald.legato.meeting-processing]
+         NSSupportsLiveActivities: true
+--- a/Apps/iOS/App/Debug/KeyboardHarness.swift
++++ b/Apps/iOS/App/Debug/KeyboardHarness.swift
+@@ -384,6 +384,11 @@
+         let modes = UITextInputMode.activeInputModes.map { ($0.value(forKey: "identifier") as? String) ?? "?" }
+         E2E.log("systemfield modes=\(E2E.quote(modes.joined(separator: ",")))")
+         field.becomeFirstResponder()
++        setNeedsUpdateOfSupportedInterfaceOrientations()
++        let orientations: UIInterfaceOrientationMask = UserDefaults.standard.bool(forKey: "LegatoHarnessRotateLandscape") ? .landscapeRight : .portrait
++        view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { error in
++            E2E.log("systemfield rotationError=\(E2E.quote(error.localizedDescription))")
++        }
+         if UserDefaults.standard.bool(forKey: "LegatoHarnessUnpinKeyboard") { field.pinsLegato = false }
+     }
+ }

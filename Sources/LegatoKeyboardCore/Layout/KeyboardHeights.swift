@@ -15,7 +15,9 @@ public enum WordRowHeight {
 public enum KeyboardHeights {
     /// Portrait first row top before the word row (the system's suggestion bar height).
     private static let baseFirstRowTop = 86.0
-    private static let rowsBelow = 3 * 54.0 + 43 + 10
+    // The real extension ends above iOS's globe/dictation area. A 3 pt bottom gap
+    // aligns the key faces with the native iOS 26.5 keyboard (402 pt portrait).
+    private static let rowsBelow = 3 * 54.0 + 43 + 3
 
     public static func pillHeight(landscape: Bool) -> Double { landscape ? 34 : 43.3 }
     public static func pillGapToRow(landscape: Bool) -> Double { landscape ? 9 : 15.7 }
@@ -32,6 +34,14 @@ public enum KeyboardHeights {
 
     /// The keyboard's requested height.
     public static func height(landscape: Bool) -> Double {
-        landscape ? 51 + 3 * 35.33 + 25.33 + 8 : firstRowTop(landscape: false) + rowsBelow
+        landscape ? 51 + 3 * 35.33 + 27.33 + 4 : firstRowTop(landscape: false) + rowsBelow
+    }
+}
+
+/// Horizontal inset still needed after iOS has inset the extension's content window.
+public enum KeyboardSideMargins {
+    public static func landscape(contentWidth: Double, screenWidth: Double?) -> Double {
+        let systemInset = max(0, ((screenWidth ?? contentWidth) - contentWidth) / 2)
+        return max(4, 79 - systemInset)
     }
 }

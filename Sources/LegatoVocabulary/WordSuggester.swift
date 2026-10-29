@@ -3,6 +3,55 @@ import Foundation
 /// The words for the keyboard's three slots while typing: completions of the word being typed and predictions
 /// of the next one.
 public enum WordSuggester {
+    public struct Candidate: Sendable, Equatable {
+        public enum Kind: Sendable { case completion, correction }
+        public let text: String
+        public let kind: Kind
+    }
+
+    /// Explicitly tappable proposals. A correction is a spelling proposal, never a confidence score.
+    public static func candidates(
+        prefix: String, previous: [String], snapshot: VocabularySnapshot?, pairs: WordPairModel?,
+        completer: (any WordCompleting)?, checker: any SpellChecking, languages: [String],
+        limit: Int = WordSuggester.limit, now: Date = Date()
+    ) async -> [Candidate] {
+        let typed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty, limit > 0 else { return [] }
+        let completed = await completions(
+            prefix: typed, previous: previous, snapshot: snapshot, pairs: pairs,
+            completer: completer, languages: languages, limit: limit, now: now)
+        let hidden = hiddenKeys(in: snapshot)
+        let personal = snapshot?.entries.contains {
+            !$0.blocked && !hidden.contains(VocabularyEntry.foldedKey(for: $0.text))
+                && VocabularyEntry.foldedKey(for: $0.text) == VocabularyEntry.foldedKey(for: typed)
+        } ?? false
+        let known = personal ? true : !(await checker.knownLanguagesFolding([typed], languages: languages)[typed] ?? []).isEmpty
+        var corrections: [String] = []
+        if !known {
+            var lists: [[String]] = []
+            for language in languages { lists.append(await checker.guesses(for: typed, language: language)) }
+            corrections = PlatformSpellChecker.interleave(lists)
+        }
+        var seen = Set<String>()
+        var out: [Candidate] = []
+        func add(_ text: String, kind: Candidate.Kind) {
+            let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard out.count < limit, !text.isEmpty, text.lowercased() != typed.lowercased(),
+                  !hidden.contains(VocabularyEntry.foldedKey(for: text)), seen.insert(text.lowercased()).inserted
+            else { return }
+            out.append(Candidate(text: text, kind: kind))
+        }
+        // Reserve the primary slot for an actual spelling proposal. Remaining slots still offer completions.
+        if let first = corrections.first(where: {
+            let text = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !text.isEmpty && text.lowercased() != typed.lowercased()
+                && !hidden.contains(VocabularyEntry.foldedKey(for: text))
+        }) { add(first, kind: .correction) }
+        completed.forEach { add($0, kind: .completion) }
+        corrections.forEach { add($0, kind: .correction) }
+        return out
+    }
+
     /// How many suggestions the keyboard has slots for.
     public static let limit = 3
 

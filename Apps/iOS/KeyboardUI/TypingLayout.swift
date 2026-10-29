@@ -84,8 +84,8 @@ struct TypingLayout: Equatable {
     }
 
     /// Key frames inside a keyboard view of `size`.
-    func frames(in size: CGSize) -> [KeyFrame] {
-        let g = KeyGeometry(size: size)
+    func frames(in size: CGSize, landscapeScreenWidth: CGFloat? = nil) -> [KeyFrame] {
+        let g = KeyGeometry(size: size, landscapeScreenWidth: landscapeScreenWidth)
         var out: [KeyFrame] = []
         func add(_ key: Key, row: Int, x: CGFloat, w: CGFloat, y: CGFloat, h: CGFloat) {
             out.append(KeyFrame(id: key.id, row: row, rect: KeyRect(x: x, y: y, width: w, height: h)))
