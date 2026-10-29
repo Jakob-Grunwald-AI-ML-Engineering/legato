@@ -477,7 +477,7 @@ final class MacAppController {
         switch lastWriter?.swapWritten(for: text) ?? .nothingWritten {
         case .swapped:
             hud.show(toast: "Swapped in the \(label).")
-        case .nothingWritten, .leftInPlace:
+        case .nothingWritten, .leftInPlace, .held:
             paster.copy(text)
             hud.show(toast: "Copied the \(label) — paste with ⌘V.")
         }

@@ -114,7 +114,8 @@ import Testing
         let writer = FieldWriter(target: r.field, channel: r.channel)
         writer.apply(.commit(delta: "meet on friday"))
         r.guardian.noteUserActivity()
-        #expect(writer.swapWritten(for: "Meet on Friday.") == .leftInPlace)
+        guard case .held(let wait) = writer.swapWritten(for: "Meet on Friday.") else { Issue.record("expected held"); return }
+        #expect(wait > 0 && wait <= 0.3)
         #expect(r.field.string == "meet on friday")
         #expect(writer.degradeReason == nil)
         r.clock.now += 0.31
@@ -203,6 +204,26 @@ import Testing
         }
         #expect(r.field.string == "ZHi hello")
         #expect(r.field.writes.isEmpty)
+    }
+
+    @Test func retriedChannelWriteLandsAfterTheUserTypedDuringTheSelect() throws {
+        let r = rig("Hi hello", caret: 8)
+        var fired = false
+        r.field.onSelect = {
+            guard !fired else { return }
+            fired = true
+            r.field.externalEdit(UTF16Range(location: 0, length: 0), with: "Z")
+        }
+        try r.channel.replace(UTF16Range(location: 8, length: 0), with: " world", expect: "", origin: .asr)
+        #expect(r.field.string == "ZHi hello world")
+    }
+
+    @Test func bothViewsMatchingTheAnchorPlansOnTheQueuesViewAndMapsThroughTheTyping() throws {
+        let r = rig("the", caret: 3)
+        r.field.externalEdit(UTF16Range(location: 0, length: 0), with: "the ")
+        try r.channel.replace(
+            UTF16Range(location: 3, length: 0), with: " world", expect: "", preceding: "the", origin: .asr)
+        #expect(r.field.string == "the the world")
     }
 
     @Test func writerInsertsAfterItsOwnTextWhenTheUserTypesBetweenItsCheckAndTheChannel() throws {

@@ -50,10 +50,10 @@ public final class DirectFieldWriteChannel: FieldWriteChannel {
 ///   spent) and the writer tries again with its next revision. The run's own text is never held.
 /// - The channel runs its own edit with `next(for:)` and withdraws it if the writer gives up.
 /// - The edit is planned on the field as the writer checked it, not as it is when the channel first looks: a fresh
-///   read is observed first; when the writer says what it saw before the range (`preceding`) and the fresh read
-///   no longer shows that there but the queue's last view did, the user typed in between and the edit is planned
-///   on that earlier version, so the queue maps it through the typing (a write is never landed off by the typed
-///   length). When neither view matches the edit is rejected as an `expectMismatch`.
+///   read is observed first; when the writer says what it saw before the range (`preceding`) and the queue's
+///   earlier view shows that there, the edit is planned on that earlier version, so the queue maps it through
+///   whatever the user typed since (a write is never landed off by the typed length). Only when that view does not
+///   match is the fresh one used, and when neither matches the edit is rejected as an `expectMismatch`.
 /// - Throws ``Rejected`` when the write did not run. A write that ran but whose readback disagrees or could
 ///   not be read returns normally: the writer's own readback decides what landed, as on the direct path.
 @MainActor
@@ -84,11 +84,15 @@ public final class QueuedFieldWriteChannel: FieldWriteChannel {
         guard executor.refresh() else { throw Rejected(reason: .unreadable) }
         let fresh = executor.queue.document
         var base = fresh.version
-        if let preceding, !Self.follows(preceding, at: range.location, in: fresh.window) {
-            guard Self.follows(preceding, at: range.location, in: known.window) else {
+        if let preceding {
+            // The queue's earlier view wins when it matches: the writer may have checked before the typing that the
+            // fresh read shows, and a fresh view that matches only by coincidence would misplace the edit. The
+            // queue then maps it through whatever changed since.
+            if Self.follows(preceding, at: range.location, in: known.window) {
+                base = known.version
+            } else if !Self.follows(preceding, at: range.location, in: fresh.window) {
                 throw Rejected(reason: .expectMismatch)
             }
-            base = known.version
         }
         let believed: String
         if let expect {

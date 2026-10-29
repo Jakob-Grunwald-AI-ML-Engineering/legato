@@ -207,6 +207,9 @@ public final class FieldWriter {
         /// The field no longer ends with our text (edited, typed after, caret or focus moved) or the write
         /// failed or could not be verified: the field was left as it was, as far as can be told.
         case leftInPlace
+        /// Not tried: the user is typing and a cleanup write waits for quiet. Nothing was written and the writer is
+        /// healthy; call ``swapWritten(for:origin:)`` again after `retryAfter` seconds.
+        case held(retryAfter: TimeInterval)
     }
 
     /// Applies a live cleanup revision: to the collected text always, to the field when it is safe.
@@ -282,7 +285,7 @@ public final class FieldWriter {
             switch swapWritten(for: cleaned) {
             case .swapped: return .done
             case .nothingWritten: return .paste(cleaned)
-            case .leftInPlace: return .copy(cleaned)
+            case .leftInPlace, .held: return .copy(cleaned)
             }
         }
     }
@@ -306,8 +309,8 @@ public final class FieldWriter {
         let replacement = text + written.dropFirst(body.count)
         do {
             try send(span, with: replacement, expect: written, origin: origin)
-        } catch is QueuedFieldWriteChannel.Held {
-            return .leftInPlace // the user is typing: the field is left as it is (nothing was written)
+        } catch let held as QueuedFieldWriteChannel.Held {
+            return .held(retryAfter: held.retryAfter) // the user is typing: nothing was written
         } catch {
             degrade(.writeFailed)
             return .leftInPlace

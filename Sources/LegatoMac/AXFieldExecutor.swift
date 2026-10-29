@@ -172,7 +172,6 @@ public final class AXFieldExecutor {
             run(write, before: before)
             collect()
             if isAwaitingReadback(write.id) { return unreadable() }
-            if write.id == priority { return .idle }
         }
     }
 
