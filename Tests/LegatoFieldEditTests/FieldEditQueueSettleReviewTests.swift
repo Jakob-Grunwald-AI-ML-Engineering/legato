@@ -125,6 +125,67 @@ import LegatoFieldEdit
         #expect(queue.next()?.steps == [.insert("!", at: 5)])
     }
 
+    /// After an unexplained read, aborting every issued write ends the contradiction: the reissued write and a
+    /// keystroke after it run.
+    @Test func abortingEveryIssuedWriteClearsTheHold() {
+        var queue = FieldEditQueue(FieldSnapshot(before: "teh cat", after: ""))
+        let fix = EditTransaction(origin: .liveCleanup, owner: "run", base: v0, steps: [replace(0, "teh", with: "the")])
+        queue.submit(fix)
+        _ = queue.next()
+        #expect(queue.settle(FieldSnapshot(before: "zz", after: "qq"), final: false) == .notYet)
+        #expect(queue.needsFinalSettle)
+        queue.abort(fix.id, requeue: true, reason: .verifyFailed)
+        #expect(!queue.needsFinalSettle)
+        #expect(queue.next()?.id == fix.id)
+        #expect(!queue.needsFinalSettle)
+        queue.submit(EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("s", at: 7)]))
+        #expect(queue.next()?.steps == [.insert("s", at: 7)])
+    }
+
+    /// "aa aa|": keystroke "a", then the cleanup "aa"→"b" on the last word. The read "aa a" is the cleanup's
+    /// fully deleted state, but also the field before the keystroke with one "a" deleted: nothing is confirmed.
+    @Test func anIntermediateStateConfirmsOnlyWhatEveryExplanationShows() {
+        var queue = FieldEditQueue(FieldSnapshot(before: "aa aa", after: ""))
+        let key = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("a", at: 5)])
+        queue.submit(key)
+        _ = queue.next()
+        let fix = EditTransaction(
+            origin: .liveCleanup, owner: "run", base: queue.document.version, steps: [replace(3, "aa", with: "b")])
+        queue.submit(fix)
+        _ = queue.next(for: fix.id)
+        let predicted = queue.document
+        #expect(queue.settle(FieldSnapshot(before: "aa a", after: ""), final: false) == .notYet)
+        #expect(queue.takeEvents().isEmpty)
+        #expect(queue.document == predicted)
+        #expect(queue.settle(queue.predicted) == .confirmed)
+        #expect(queue.takeEvents().count == 2)
+    }
+
+    /// Keystrokes "s" and "!", then the cleanup teh→the. The non-final read "teh cat!" shows "!" without "s":
+    /// "s" failed, "!" landed; the cleanup, after both, may not have run yet: it stays unverified.
+    @Test func aNonFinalSubsetReadLeavesTheWritesAfterItUnverified() {
+        var queue = FieldEditQueue(FieldSnapshot(before: "teh cat", after: ""))
+        let s = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("s", at: 7)])
+        queue.submit(s)
+        _ = queue.next()
+        let bang = EditTransaction(origin: .keystroke, base: queue.document.version, steps: [.insert("!", at: 8)])
+        queue.submit(bang)
+        _ = queue.next()
+        let fix = EditTransaction(
+            origin: .liveCleanup, owner: "run", base: queue.document.version, steps: [replace(0, "teh", with: "the")])
+        queue.submit(fix)
+        _ = queue.next(for: fix.id)
+        #expect(queue.settle(FieldSnapshot(before: "teh cat!", after: ""), final: false) == .diverged)
+        let events = queue.takeEvents()
+        #expect(events.contains(.conflict(s.id, Conflict(.verifyFailed))))
+        #expect(applied(events, bang.id))
+        #expect(!events.contains { if case .conflict(fix.id, _) = $0 { true } else { false } })
+        #expect(!applied(events, fix.id))
+        #expect(queue.document.window == "the cat!")
+        #expect(queue.settle(FieldSnapshot(before: "the cat!", after: "")) == .confirmed)
+        #expect(applied(queue.takeEvents(), fix.id))
+    }
+
     // MARK: Possibly-user text is never agent-owned
 
     /// Mac "u and u": the agent fixes both "u"s, nothing lands, the user types "yo" before the last "u". The

@@ -123,7 +123,9 @@ public struct FieldEditQueue: Sendable {
     }
 
     private var pending: [Pending] = []
-    private var unverified: [Unverified] = []
+    private var unverified: [Unverified] = [] {
+        didSet { if unverified.isEmpty { contradicted = false } }  // nothing left to contradict
+    }
     /// Every change landed since `floor`, own or foreign, for mapping stale submissions.
     private var history: [Landed] = []
     /// The oldest version edits may be based on (the last reset or pruning point).
@@ -416,7 +418,7 @@ public struct FieldEditQueue: Sendable {
         // confirming nothing.
         if !final, !explanations.contains(where: { $0.alignment == nil }) {
             if let j = inProgress(snapshot, edges: false) {
-                confirm(j)
+                confirm(min(j, explanations.map(\.k).min() ?? j))  // only what every explanation shows
                 return .notYet
             }
             if explanations.isEmpty, inProgress(snapshot, edges: true) != nil { return .notYet }
@@ -486,7 +488,8 @@ public struct FieldEditQueue: Sendable {
     /// (`verifyFailed`); a write landed in part is confirmed with its landed steps and then fails for the rest.
     /// Tied subsets (or a tied prefix) that leave the same field and the same pending edits are one outcome, and
     /// the earliest writes (and lowest steps) are confirmed (a doubled letter: either copy failed); a real tie
-    /// waits (`notYet`), or resets when `final`. Tied outcomes reached through different steps leave a guessed
+    /// waits (`notYet`), or resets when `final`. Before the final read, the writes after the last one the read
+    /// shows are not failed: they are reissued against the confirmed field and wait. Tied outcomes reached through different steps leave a guessed
     /// history: it is dropped (``SubsetNotes/guessedHistory``), so edits based before the read come back
     /// `outOfWindow` instead of being mapped through a step that may not have landed. A subset in which an owned
     /// automatic write wrote the text a typing explanation adds at the read's caret never wins: the typing
@@ -519,7 +522,9 @@ public struct FieldEditQueue: Sendable {
             }
             guard !Self.isPrefix(landed) else { continue }
             let size = landed.joined().filter { $0 }.count
-            guard size >= bestSize, let replayed = simulate(landed),
+            // Before the final read, the writes after the last one shown may not have run yet: they wait.
+            let hold = final ? nil : (landed.lastIndex { $0.contains(true) } ?? -1) + 1
+            guard size >= bestSize, let replayed = simulate(landed, holdFrom: hold),
                 byteEqual(replayed.document.window, snapshot.window)
             else { continue }
             if size > bestSize { (best, bestSize) = ([], size) }
@@ -536,7 +541,7 @@ public struct FieldEditQueue: Sendable {
         }
         if prefixSize == bestSize {
             let landed = sizes.indices.map { [Bool](repeating: $0 < prefix, count: sizes[$0]) }
-            guard let replayed = simulate(landed) else { return nil }
+            guard let replayed = simulate(landed, holdFrom: nil) else { return nil }
             best.insert((landed, replayed), at: 0)
         }
         let winner = best[0]
@@ -548,8 +553,9 @@ public struct FieldEditQueue: Sendable {
         notes.guessedHistory = best.dropFirst().contains { $0.queue.history.map(\.change) != winner.queue.history.map(\.change) }
         if prefixSize == bestSize { return nil }  // the prefix explanation stands
         let issued = unverified
+        let held = final ? issued.count : (winner.landed.lastIndex { $0.contains(true) } ?? -1) + 1
         self = winner.queue
-        for (index, item) in issued.enumerated() {
+        for (index, item) in issued.enumerated() where index < held {
             let mask = winner.landed[index]
             guard mask.contains(true), let write = unverified.first(where: { $0.write.id == item.write.id })?.write else {
                 conflict(item.write.id, Conflict(.verifyFailed))
@@ -562,6 +568,15 @@ public struct FieldEditQueue: Sendable {
         unverified = []
         document.caret = snapshot.caret
         if notes.guessedHistory { forgetHistory() }
+        for item in issued[held...] {
+            guard let index = pending.firstIndex(where: { $0.transaction.id == item.write.id }) else { continue }
+            let waiting = pending.remove(at: index)
+            if let reason = check(waiting.transaction) {
+                conflict(waiting.transaction.id, Conflict(reason, byUser: reason == .ownerTainted))
+                continue
+            }
+            _ = issue(waiting)
+        }
         return .diverged
     }
 
@@ -612,15 +627,18 @@ public struct FieldEditQueue: Sendable {
     /// This queue as if only the issued steps marked in `landed` (per write, per step sorted by location) reached
     /// the field; a write landed in part replays as its landed steps. Nil when a replayed write no longer fits
     /// (its range is gone or a guard fails).
-    private func simulate(_ landed: [[Bool]]) -> FieldEditQueue? {
+    /// With `holdFrom`, the writes from that index on that landed nothing stay queued (front of their lane) instead
+    /// of failing.
+    private func simulate(_ landed: [[Bool]], holdFrom: Int?) -> FieldEditQueue? {
         var copy = self
         guard let first = landed.firstIndex(where: { $0.contains(false) }) else { return copy }
         let ids = copy.unverified[first...].map(\.write.id)
         copy.rollBack(from: first, requeueFirst: true, requeueRest: true, reason: .verifyFailed)
         for (offset, id) in ids.enumerated() {
+            let mask = landed[first + offset]
+            if let holdFrom, first + offset >= holdFrom { continue }
             guard let index = copy.pending.firstIndex(where: { $0.transaction.id == id }) else { return nil }
             var item = copy.pending.remove(at: index)
-            let mask = landed[first + offset]
             guard mask.contains(true) else {
                 copy.dropAffinities(of: id)
                 continue

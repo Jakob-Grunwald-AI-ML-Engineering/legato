@@ -117,8 +117,9 @@ import LegatoFieldEdit
         #expect(queue.document.window == "the cat")
     }
 
-    /// The intermediate states of a later write: the earlier write is confirmed, the later one waits.
-    @Test func aReadDuringTheSecondWritesDeleteConfirmsTheFirst() {
+    /// The intermediate states of a later write wait. "| cats" is also the field before the keystroke with the
+    /// text before the caret deleted on the host, so not even the earlier write is confirmed yet.
+    @Test func aReadDuringTheSecondWritesDeleteWaitsWithoutConfirming() {
         var queue = FieldEditQueue(FieldSnapshot(before: "teh cat", after: ""))
         let key = EditTransaction(origin: .keystroke, base: v0, steps: [.insert("s", at: 7)])
         queue.submit(key)
@@ -127,8 +128,10 @@ import LegatoFieldEdit
         queue.submit(fix)
         _ = queue.next(for: fix.id)
         #expect(queue.settle(FieldSnapshot(before: "", after: " cats"), final: false) == .notYet)
-        #expect(queue.takeEvents() == [.applied(key.id, version: FieldVersion(1))])
+        #expect(queue.takeEvents().isEmpty)
         #expect(queue.document.window == "the cats")
+        #expect(queue.settle(queue.predicted) == .confirmed)
+        #expect(queue.takeEvents().first == .applied(key.id, version: FieldVersion(1)))
     }
 
     /// A non-final read no prediction or intermediate state explains changes nothing: the next read decides.
