@@ -9,3 +9,5 @@ Preview with `scripts/dev/prune-build-caches.sh --managed-only`. Add `--delete` 
 CI gate/mac builds use unique temporary directories and remove them on exit. They do not reuse the local cache or add an Actions cache. These rules bound reusable inactive outputs; fixture checks do not establish a day-long disk-use budget or a real-dependency build time.
 
 Run `scripts/e2e/tests/build-cache-test.sh` for private cache fixtures and a fake-Xcode drive through the real mac-build entry point. `scripts/e2e/tests/cleanup-test.sh` checks simulator work-directory signal cleanup without compiling Swift.
+
+Cache users and pruning share a macOS `lockf` descriptor lock on a persistent sibling `.guard` file. The descriptor remains open for the entire lease; `.lock` owner directories provide compatibility with older running scripts. Stale owner recovery happens under the same OS lock, and pruning skips any preexisting owner directory. Guard files remain after use to preserve one lock inode across waiters; do not remove them while cache users may be running.

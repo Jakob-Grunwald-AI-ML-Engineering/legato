@@ -38,7 +38,7 @@
 #   e2e-derived/<hash>/  DerivedData, one per checkout, reused between runs. Not shared across checkouts: DerivedData
 #                        is keyed by source paths, so another checkout would rebuild everything anyway, and concurrent
 #                        xcodebuilds on one DerivedData are unsafe. Runs on the same checkout are serialized by a
-#                        mkdir lock (stale locks of dead PIDs are taken over).
+#                        OS-backed guard and owner marker (dead legacy owners are recovered under the guard).
 # Marked inactive caches are pruned automatically (48-hour last-use TTL, 10 GiB soft cap).
 # scripts/dev/prune-build-caches.sh previews managed and legacy cleanup by default.
 set -uo pipefail
@@ -65,7 +65,7 @@ else
   DERIVED="$CACHE/e2e-derived/$(pwd -P | shasum | cut -c1-12)"
 fi
 mkdir -p "$PKGS" "$DERIVED"
-[ -n "${LEGATO_E2E_DERIVED:-}" ] || pwd -P > "$DERIVED/legato-checkout"   # lets prune-build-caches.sh tell when the checkout is gone
+
 UDID=""
 BOOTED_BY_US=0
 LOGPID=""
@@ -115,6 +115,8 @@ trap 'on_signal 143' TERM
 
 lock_dir "$DERIVED" || exit 2
 DERIVED_LOCKED=1
+mkdir -p "$DERIVED" || exit 2
+[ -n "${LEGATO_E2E_DERIVED:-}" ] || pwd -P > "$DERIVED/legato-checkout"
 
 # Test seam (scripts/e2e/tests/cleanup-test.sh): run a stub instead of the real work, so the trap and sweep are testable.
 if [ -n "${LEGATO_E2E_TEST_STUB:-}" ]; then run_fg "$LEGATO_E2E_TEST_STUB" "$WORK"; exit $?; fi

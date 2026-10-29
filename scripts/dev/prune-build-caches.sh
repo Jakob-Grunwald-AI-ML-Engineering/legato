@@ -61,11 +61,10 @@ prune_managed() {
     fi
     # Pruning never steals a preexisting lock, even a stale or partially-written one.
     # Build entry points reclaim stale locks; ambiguous ownership always retains data here.
-    if ! mkdir "$d.lock" 2>/dev/null; then
+    if ! try_lock_dir "$d" 2>/dev/null; then
       echo "KEEP active: $d"
       continue
     fi
-    proc_stamp "$$" > "$d.lock/owner"
     if [ -L "$d" ] || [ -L "$(dirname "$d")" ] || [ -L "$d/legato-managed" ] ||
        [ -L "$d/legato-last-used" ] || [ "$(cat "$d/legato-managed" 2>/dev/null)" != v1 ]; then
       unlock_dir "$d"
@@ -127,8 +126,7 @@ fi
 for d in "$(legato_cache_dir)"/e2e-derived/*/; do
   d="${d%/}"; [ -d "$d" ] && [ ! -L "$d" ] || continue
   [ ! -f "$d/legato-managed" ] || continue
-  mkdir "$d.lock" 2>/dev/null || continue
-  proc_stamp "$$" > "$d.lock/owner"
+  try_lock_dir "$d" || continue
   co="$(cat "$d/legato-checkout" 2> /dev/null)"
   if [ -z "$co" ] || [ ! -e "$co" ]; then prune "$d" "checkout gone: ${co:-unknown}"; fi
   unlock_dir "$d"

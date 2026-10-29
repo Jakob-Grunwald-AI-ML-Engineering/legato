@@ -22,6 +22,7 @@ xcodebuild -version
 
 scripts/e2e/tests/cleanup-test.sh
 scripts/e2e/tests/build-cache-test.sh
+scripts/e2e/tests/cache-lock-race-test.sh
 swift test
 
 # Both apps, unsigned, against the stubs. arm64 only: the simulator slice is what local and e2e runs use.
