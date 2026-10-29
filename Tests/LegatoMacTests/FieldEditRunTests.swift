@@ -111,6 +111,57 @@ private struct GatedAgent: FieldAgent {
         }
     }
 
+    // MARK: Agent absent at stop
+
+    @Test(.timeLimit(.minutes(1))) func aNeverArrivingAgentIsGivenUpAtTheCapAndTheStatelessPassCleansTheText() async {
+        let session = ScriptedSession(replies: [])
+        let gate = Gate()  // never opened: the model session stays cold
+        let target = FakeTextTarget()
+        let run = FieldEditRun(
+            target: target, owner: "run",
+            agent: FieldRunAgent(deferred: {
+                await gate.wait()
+                let cleanup = CleanupAgent(session: session, options: .init(owner: "run"))
+                return FieldRunAgent(cleanup, replan: { await cleanup.replan() }, finish: { await cleanup.finish() })
+            }), agentWait: 0.05)!
+        let writer = FieldWriter(target: target, channel: run.channel)
+        run.attach(writer: writer)
+        run.start()
+        writer.apply(.commit(delta: "Send teh report."))
+        run.textChanged()
+
+        let started = ContinuousClock.now
+        let outcome = await run.finish()
+        #expect(ContinuousClock.now - started < .seconds(5))
+        #expect(outcome.agentAbsent)
+        let action = await run.deliverWithoutAgent(raw: "Send teh report.", clean: { _ in "Send the report." })
+        #expect(action == .done)
+        #expect(target.string == "Send the report.")
+        #expect(writer.degradeReason == nil)
+
+        // The agent arrives after the stop: it does nothing.
+        await gate.open()
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(target.string == "Send the report.")
+        #expect(await session.requests.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func anAgentThatTurnsOutToBeMissingIsAbsentAtStop() async {
+        let target = FakeTextTarget()
+        let run = FieldEditRun(target: target, owner: "run", agent: FieldRunAgent(deferred: { nil }))!
+        let writer = FieldWriter(target: target, channel: run.channel)
+        run.attach(writer: writer)
+        run.start()
+        writer.apply(.commit(delta: "Send teh report."))
+        run.textChanged()
+        #expect(await run.finish().agentAbsent)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func anAgentThatIsThereIsNotAbsent() async {
+        let rig = await Rig.live(replies: [])
+        #expect(await rig.run.finish().agentAbsent == false)
+    }
+
     // MARK: Live
 
     @Test(.timeLimit(.minutes(1))) func aDeferredAgentCleansTextThatLandedBeforeItWasMade() async {

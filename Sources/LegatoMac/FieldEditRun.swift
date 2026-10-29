@@ -10,6 +10,8 @@ public struct FieldRunAgent: Sendable {
     var superseded: @Sendable (UUID, UUID) async -> Void
     var replan: @Sendable () async -> [EditTransaction]
     var finish: @Sendable () async -> [EditTransaction]
+    /// Whether there is an agent after all (a deferred one may turn out missing). Only asked once it was awaited.
+    var available: @Sendable () async -> Bool = { true }
 
     /// An agent that is made in the background (its model session may still be warming): every call waits for
     /// `make`, in the order the run makes them. When `make` returns nil there is no agent after all: the run's text
@@ -37,6 +39,7 @@ public struct FieldRunAgent: Sendable {
             guard let agent = await made.value else { return [] }
             return await agent.finish()
         }
+        available = { await made.value != nil }
     }
 
     public init(
@@ -82,6 +85,9 @@ public final class FieldEditRun {
     public struct Outcome: Sendable, Equatable {
         /// The agent's final-pass edits that did not land (conflicted, or still held when the budget ran out).
         public var unapplied: [EditTransaction]
+        /// There was no agent to take a final pass: none came (no rolling session) or it was still warming past
+        /// the run's cap. The caller cleans the run's text with the stateless pass (``deliverWithoutAgent(raw:clean:)``).
+        public var agentAbsent = false
     }
 
     public let executor: AXFieldExecutor
@@ -92,6 +98,8 @@ public final class FieldEditRun {
 
     private let agent: FieldRunAgent?
     private let pause: @MainActor @Sendable (TimeInterval) async -> Void
+    /// The longest a stop waits for an agent that is not ready yet (the run's cleanup time limit).
+    private let agentWait: TimeInterval
     private weak var writer: FieldWriter?
     private var wakes: AsyncStream<Void>.Continuation?
     private var consumer: Task<Void, Never>?
@@ -111,7 +119,7 @@ public final class FieldEditRun {
     /// setting off.
     public init?(
         target: any TextTarget, owner: String, agent: FieldRunAgent?, activity: (any FieldActivitySource)? = nil,
-        quiet: TimeInterval = TypingGuard.defaultQuiet,
+        quiet: TimeInterval = TypingGuard.defaultQuiet, agentWait: TimeInterval = 2,
         now: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         pause: @escaping @MainActor @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) }
     ) {
@@ -127,6 +135,7 @@ public final class FieldEditRun {
         channel = QueuedFieldWriteChannel(executor: executor, owner: owner)
         self.agent = agent
         self.pause = pause
+        self.agentWait = agentWait
         box.run = self
     }
 
@@ -188,9 +197,19 @@ public final class FieldEditRun {
             return Outcome(unapplied: [])
         }
         wakes?.finish()
-        await consumer?.value
+        if let consumer, !(await Self.completes(consumer, within: agentWait)) {
+            // Still warming: the agent is treated as absent. Whatever it does later changes nothing (closed).
+            consumer.cancel()
+            self.consumer = nil
+            close()
+            return Outcome(unapplied: [], agentAbsent: true)
+        }
         consumer = nil
         wakeQueued = false
+        guard await agent.available() else {
+            close()
+            return Outcome(unapplied: [], agentAbsent: true)
+        }
         await pump()
         let finals = await agent.finish()
         submit(finals)
@@ -217,6 +236,36 @@ public final class FieldEditRun {
         let unapplied = all.values.filter { !applied.contains($0.id) }
             .sorted { ($0.steps.first?.span.location ?? 0) < ($1.steps.first?.span.location ?? 0) }
         return Outcome(unapplied: unapplied)
+    }
+
+    /// Whether `task` ends within `seconds`. Neither side is waited for once the other has answered.
+    private static func completes(_ task: Task<Void, Never>, within seconds: TimeInterval) async -> Bool {
+        let once = Once()
+        return await withCheckedContinuation { continuation in
+            once.continuation = continuation
+            Task {
+                await task.value
+                once.resume(true)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                once.resume(false)
+            }
+        }
+    }
+
+    /// The stop of a run whose agent was absent: `clean` (today's stateless final cleanup pass) turns the run's
+    /// raw text into the cleaned one, which goes into the field as patches, as Replace does (a swap held back by
+    /// typing waits for a pause, a little). Without a cleaned text the raw text stays.
+    public func deliverWithoutAgent(raw: String, clean: (String) async -> String?) async -> FinishAction {
+        guard let writer else { return .done }
+        let cleaned = (await clean(raw))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !cleaned.isEmpty, cleaned != raw.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return writer.finish(finalText: nil)
+        }
+        return await writer.finish(
+            rawText: raw, cleanedText: cleaned, delivery: .replace, retryingFor: Self.finalHoldBudget,
+            wait: { [pause] in await pause($0) })
     }
 
     /// Ends the run without a final pass (cancelled): pending edits are taken back, the guard stops.
@@ -395,6 +444,21 @@ public final class FieldEditRun {
             self.retrying = false
             self.textChanged()
         }
+    }
+}
+
+/// Resumes its continuation once, from whichever side answers first.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    var continuation: CheckedContinuation<Bool, Never>?
+
+    func resume(_ value: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        continuation?.resume(returning: value)
     }
 }
 

@@ -759,8 +759,10 @@ final class MacAppController {
         guard let target else { return nil }
         let owner = UUID().uuidString
         var runAgent: FieldRunAgent?
+        var agentWait: TimeInterval = 2
         if delivery == .live, settings.cleanupEnabled {
             let options = settings.cleanupStore.options
+            agentWait = TimeInterval(options.timeoutSeconds)
             let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
             let models = models, vocabulary = vocabulary
             runAgent = FieldRunAgent(deferred: {
@@ -774,7 +776,7 @@ final class MacAppController {
                     finish: { await agent.finish() })
             })
         }
-        return FieldEditRun(target: target, owner: owner, agent: runAgent, activity: target.activitySource())
+        return FieldEditRun(target: target, owner: owner, agent: runAgent, activity: target.activitySource(), agentWait: agentWait)
     }
 
     /// Ends the run. `discard` is the chord cancel: nothing is delivered and nothing is saved.
@@ -846,7 +848,12 @@ final class MacAppController {
             // edit that did not land keeps its cleaned text for the clipboard.
             delivery = .live
             let outcome = await fieldEdit.finish()
-            action = run.writer.finish(finalText: nil)
+            if outcome.agentAbsent, let raw = entry?.text {
+                // No agent (no rolling session, or still warming): today's stateless final pass, written as patches.
+                action = await fieldEdit.deliverWithoutAgent(raw: raw, clean: { await self.statelessFinalPass($0) })
+            } else {
+                action = run.writer.finish(finalText: nil)
+            }
             if action == .done {
                 agentText = run.writer.shownText
                 if !outcome.unapplied.isEmpty {
@@ -901,6 +908,20 @@ final class MacAppController {
             lastWriter = run.writer
         }
         conclude(run, toast: toast)
+    }
+
+    /// The run's text cleaned by today's stateless final pass (the one the agent gate suppresses), for a run
+    /// whose agent was absent at stop.
+    private func statelessFinalPass(_ raw: String) async -> String? {
+        let options = settings.cleanupStore.options
+        guard options.enabled else { return nil }
+        let reports = cleanupReports
+        let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
+        return await CleanupProcessor.run(
+            raw, locale: locale, style: options.style, refine: false, timeout: .seconds(options.timeoutSeconds),
+            settings: settings.cleanupStore, registry: models.cleanup,
+            report: { report in await reports.record(report) }, vocabulary: vocabulary,
+            resolution: await models.cleanup.resolve(preference: options.backend.preference), options: options)
     }
 
     /// Errors are logged by type and code only: their descriptions could echo dictated text.
