@@ -103,6 +103,13 @@ final class AXTextTarget: TextTarget {
         return try Self.range(from: value)
     }
 
+    func length() throws -> Int {
+        guard let value = try Self.copyAttribute(element, kAXNumberOfCharactersAttribute) as? NSNumber else {
+            throw AXTargetError.unexpectedValue
+        }
+        return value.intValue
+    }
+
     func text(in range: UTF16Range) throws -> String {
         let parameter = try Self.axValue(for: range)
         var result: CFTypeRef?
@@ -114,11 +121,28 @@ final class AXTextTarget: TextTarget {
     }
 
     func replace(_ range: UTF16Range, with text: String) throws {
-        var error = AXUIElementSetAttributeValue(
+        // The edit queue's executor selects the span itself right before this call: selecting it again would only
+        // widen the window in which a keystroke can land on it.
+        if (try? selectedRange()) != range {
+            let error = AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
+            guard error == .success else { throw AXTargetError.attribute(error) }
+        }
+        let error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
+        guard error == .success else { throw AXTargetError.attribute(error) }
+    }
+
+    func select(_ range: UTF16Range) throws {
+        let error = AXUIElementSetAttributeValue(
             element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
         guard error == .success else { throw AXTargetError.attribute(error) }
-        error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
-        guard error == .success else { throw AXTargetError.attribute(error) }
+        // Some fields accept the call and clamp or ignore the range: read it back.
+        guard try selectedRange() == range else { throw AXTargetError.unexpectedValue }
+    }
+
+    /// Value and selection notifications of this element, for the typing guard.
+    func makeActivitySource() -> AXFieldActivitySource {
+        AXFieldActivitySource(element: element, appElement: appElement)
     }
 
     // MARK: Helpers
