@@ -4,7 +4,7 @@ import UIKit
 /// The text field the keyboard types into. The keyboard extension backs it with `textDocumentProxy`
 /// (`ProxyDocument`); the DEBUG harness in the app backs it with a `UITextView`.
 @MainActor
-protocol TextDocument: AnyObject {
+protocol TextDocument: FieldEditDocument {
     /// Stable for one field (`documentIdentifier`); a run's text goes only to the field it is bound to.
     /// Nil while no field is bound (the keyboard is appearing, or the host's field is gone): nothing is
     /// then applied.

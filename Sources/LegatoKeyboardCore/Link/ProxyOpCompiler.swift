@@ -6,7 +6,10 @@ import LegatoFieldEdit
 public enum ProxyCall: Sendable, Equatable {
     /// `adjustTextPosition(byCharacterOffset:)`: the proxy moves by UTF-16 units despite the name.
     case moveCaret(utf16: Int)
-    /// This many `deleteBackward()` calls, one Character (grapheme cluster) each.
+    /// This many `deleteBackward()` calls, counted one per Character (grapheme cluster), as ``ProxyEditPlanner``
+    /// counts them. UIKit deletes most clusters (emoji, ZWJ sequences, a letter with its accent) in one call, but
+    /// may take the combining marks of some scripts (Thai, several Indic scripts) one call at a time; there a write
+    /// deletes less than its step and the read that settles it fails it.
     case deleteBackward(Int)
     case insert(String)
 }
@@ -14,7 +17,7 @@ public enum ProxyCall: Sendable, Equatable {
 /// Turns one ``FieldWrite`` of the edit queue into text proxy calls: for each step (highest location first, so
 /// the lower spans stay valid) move to the span's end, delete its expected text backwards, insert its text;
 /// then move to the write's caret. Moves count UTF-16 units, deletes count the Characters the expected text has
-/// in the window (an emoji, a ZWJ sequence or a decomposed accent is one delete of several units).
+/// in the window (one call per Character; see ``ProxyCall/deleteBackward(_:)`` for where UIKit differs).
 public enum ProxyOpCompiler {
     /// The calls for `write`, issued against the caret-relative `window` with the caret at `caret` (UTF-16;
     /// the queue's ``ShadowDocument`` right before ``FieldEditQueue/next()``). Nil when a step does not hold its
