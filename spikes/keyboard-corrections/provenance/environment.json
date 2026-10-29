@@ -1,0 +1,10 @@
+{
+  "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0\n",
+  "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83\n",
+  "sdk": "27.0\n",
+  "evidence": "harness",
+  "native_host": false,
+  "physical_phone": false,
+  "sdk_probe": "Owned by main session; excluded from this evaluation"
+}

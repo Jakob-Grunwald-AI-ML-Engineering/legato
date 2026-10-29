@@ -1,0 +1,736 @@
+[
+  {
+    "id": "DE01",
+    "group": "DE",
+    "sentence": "Bitte an Müler senden.",
+    "tapped": "Müler",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 9,
+      "length": 5
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Known recipient Müller, preserve recipient identity",
+    "acceptable": [
+      "Müller"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "Müller",
+      "Meier"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "DE02",
+    "group": "DE",
+    "sentence": "Das läuft in Kubernetis.",
+    "tapped": "Kubernetis",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 13,
+      "length": 10
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Deployment platform Kubernetes",
+    "acceptable": [
+      "Kubernetes"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "Kubernetes",
+      "Docker",
+      "Swift"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "DE03",
+    "group": "DE",
+    "sentence": "Wir brauchen Meer Platz im Lager.",
+    "tapped": "Meer",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 13,
+      "length": 4
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Discussing a larger quantity, not an ocean",
+    "acceptable": [
+      "mehr"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [
+      "Wir brauchen Meer Platz im Lager.",
+      "Wir brauchen mehr Platz im Lager."
+    ],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "DE04",
+    "group": "DE",
+    "sentence": "Für die Gitarre bitte die Seite kaufen.",
+    "tapped": "Seite",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 26,
+      "length": 5
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Guitar context: buy a string",
+    "acceptable": [
+      "Saite",
+      "Gitarrensaite"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [
+      "Seiten"
+    ],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "DE05",
+    "group": "DE",
+    "sentence": "Das ist ein Hausboot.",
+    "tapped": "Hausboot",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 12,
+      "length": 8
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Already correct liveaboard vessel",
+    "acceptable": [
+      "Hausboot"
+    ],
+    "repairNeeded": false,
+    "ambiguous": false,
+    "vocabulary": [
+      "Hausboot",
+      "Hausbau"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "DE06",
+    "group": "DE",
+    "sentence": "Wir sollten das zusammen schreiben.",
+    "tapped": "zusammen",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 16,
+      "length": 8
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "One word zusammenschreiben intended; single tap cannot safely consume next token",
+    "acceptable": [
+      "zusammenschreiben"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "zusammenschreiben"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [
+      "zusammenschreiben"
+    ],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "DE07",
+    "group": "DE",
+    "sentence": "Die Bank ist neu.",
+    "tapped": "Bank",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 4,
+      "length": 4
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Bench versus finance ambiguous; require choice",
+    "acceptable": [],
+    "repairNeeded": false,
+    "ambiguous": true,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "DE08",
+    "group": "DE",
+    "sentence": "Heute Abend muss es raus: schicke das morgen ab.",
+    "tapped": "morgen",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 38,
+      "length": 6
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Context says this evening; valid word but wrong temporal intent",
+    "acceptable": [
+      "heute Abend",
+      "heute abend",
+      "am Abend"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [
+      "gestern"
+    ],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN01",
+    "group": "EN",
+    "sentence": "Please email Jon.",
+    "tapped": "Jon",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 13,
+      "length": 3
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Recipient is John, not Jon",
+    "acceptable": [
+      "John"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "John",
+      "Joan"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN02",
+    "group": "EN",
+    "sentence": "Deploy to Kubernetis.",
+    "tapped": "Kubernetis",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 10,
+      "length": 10
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Technical platform Kubernetes",
+    "acceptable": [
+      "Kubernetes"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "Kubernetes",
+      "Docker"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN03",
+    "group": "EN",
+    "sentence": "Put it over their.",
+    "tapped": "their",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 12,
+      "length": 5
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Location demonstrative there",
+    "acceptable": [
+      "there"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [
+      "Put it over their.",
+      "Put it over there."
+    ],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN04",
+    "group": "EN",
+    "sentence": "For baking bread, please buy flower.",
+    "tapped": "flower",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 29,
+      "length": 6
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Baking ingredient flour",
+    "acceptable": [
+      "flour"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [
+      "flowers"
+    ],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN05",
+    "group": "EN",
+    "sentence": "We sail tomorrow.",
+    "tapped": "sail",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 3,
+      "length": 4
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Already correct sailing verb",
+    "acceptable": [
+      "sail"
+    ],
+    "repairNeeded": false,
+    "ambiguous": false,
+    "vocabulary": [
+      "sail",
+      "sale"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN06",
+    "group": "EN",
+    "sentence": "The note book is blue.",
+    "tapped": "note",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 4,
+      "length": 4
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Notebook intended; cannot consume book through a one-word replacement",
+    "acceptable": [
+      "notebook"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "notebook"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [
+      "notebook"
+    ],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN07",
+    "group": "EN",
+    "sentence": "I saw a bat.",
+    "tapped": "bat",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 8,
+      "length": 3
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Animal or sports equipment unresolved",
+    "acceptable": [],
+    "repairNeeded": false,
+    "ambiguous": true,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "EN08",
+    "group": "EN",
+    "sentence": "Requests queue and CPU is at 100 percent: the server is cold.",
+    "tapped": "cold",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 56,
+      "length": 4
+    },
+    "languages": [
+      "en",
+      "de"
+    ],
+    "intent": "Incident context says overloaded, not temperature",
+    "acceptable": [
+      "overloaded",
+      "under heavy load",
+      "at capacity"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX01",
+    "group": "MX",
+    "sentence": "Bitte ping Müler on Slack.",
+    "tapped": "Müler",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 11,
+      "length": 5
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Known colleague Müller",
+    "acceptable": [
+      "Müller"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "Müller",
+      "Slack"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX02",
+    "group": "MX",
+    "sentence": "Das Deploy geht auf Kubernetis.",
+    "tapped": "Kubernetis",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 20,
+      "length": 10
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Kubernetes cluster",
+    "acceptable": [
+      "Kubernetes"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "Kubernetes",
+      "Deployment"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX03",
+    "group": "MX",
+    "sentence": "Kontakt ist Meier: please sende die Datei an mehr.",
+    "tapped": "mehr",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 45,
+      "length": 4
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Recipient surname Meier from context",
+    "acceptable": [
+      "Meier",
+      "Meyer"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [
+      "Meier",
+      "Meyer"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX04",
+    "group": "MX",
+    "sentence": "Das Meeting ist next weak.",
+    "tapped": "weak",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 21,
+      "length": 4
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Temporal next week",
+    "acceptable": [
+      "week"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [
+      "Das Meeting ist next weak.",
+      "Das Meeting ist next week."
+    ],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX05",
+    "group": "MX",
+    "sentence": "Bitte review den Pullrequest.",
+    "tapped": "Pullrequest",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 17,
+      "length": 11
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Two-word term Pull Request intended",
+    "acceptable": [
+      "Pull Request",
+      "pull request"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [
+      "Bitte review den Pullrequest.",
+      "Bitte review den Pull Request."
+    ],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX06",
+    "group": "MX",
+    "sentence": "Der Build ist green.",
+    "tapped": "green",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 14,
+      "length": 5
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Already correct mixed-language build status",
+    "acceptable": [
+      "green"
+    ],
+    "repairNeeded": false,
+    "ambiguous": false,
+    "vocabulary": [
+      "green",
+      "Greenland"
+    ],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX07",
+    "group": "MX",
+    "sentence": "Bitte check die Bank.",
+    "tapped": "Bank",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 16,
+      "length": 4
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "No context resolving bench or institution",
+    "acceptable": [],
+    "repairNeeded": false,
+    "ambiguous": true,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  },
+  {
+    "id": "MX08",
+    "group": "MX",
+    "sentence": "RAM ist voll: der Server needs more sheep.",
+    "tapped": "sheep",
+    "occurrence": 0,
+    "rangeUTF16": {
+      "location": 36,
+      "length": 5
+    },
+    "languages": [
+      "de",
+      "en"
+    ],
+    "intent": "Compute incident requires memory, not animals",
+    "acceptable": [
+      "memory",
+      "RAM",
+      "working memory"
+    ],
+    "repairNeeded": true,
+    "ambiguous": false,
+    "vocabulary": [],
+    "versions": [],
+    "versionsProvenance": "Authored contextual fixture versions; not captured recognizer hypotheses",
+    "harmful": [
+      "ships"
+    ],
+    "evidence": "authored-diagnostic-context",
+    "oracle": "Synthetic contextual intent with bounded human-authored acceptable outcomes; not real audio or real-world correctness",
+    "rankerContextLimit": "Only sentence/span/language order and fixture vocabulary/versions are provided; intent annotations are not sent to ranker"
+  }
+]

@@ -1,0 +1,57 @@
+{
+  "inputValidationBefore": {
+    "errors": [],
+    "sourceFilesOriginal": 828,
+    "sourceFilesPresent": 827,
+    "expectedLockfileDeletion": true,
+    "preservedLockSHA256": "2ced537b47986c89db9adf5d5289eac731b7a51c1abc82b8c8f7a76fafca489c",
+    "fixtureHashes": {
+      "Fixtures/patches.json": "0bb265aeefbb43d55d8608e22c00bc0346a48263b1c2909dca1b0f3771a63bb6",
+      "Fixtures/alternatives.json": "9478be9887a13f13265db8da223f80dd3a0db3d5132f32a17bd945ce33965b20"
+    }
+  },
+  "inputValidationAfter": {
+    "errors": [],
+    "sourceFilesOriginal": 828,
+    "sourceFilesPresent": 827,
+    "expectedLockfileDeletion": true,
+    "preservedLockSHA256": "2ced537b47986c89db9adf5d5289eac731b7a51c1abc82b8c8f7a76fafca489c",
+    "fixtureHashes": {
+      "Fixtures/patches.json": "0bb265aeefbb43d55d8608e22c00bc0346a48263b1c2909dca1b0f3771a63bb6",
+      "Fixtures/alternatives.json": "9478be9887a13f13265db8da223f80dd3a0db3d5132f32a17bd945ce33965b20"
+    }
+  },
+  "name": "patch-evaluation-05",
+  "command": [
+    "swift",
+    "run",
+    "--package-path",
+    "/private/tmp/legato-followup-evaluations",
+    "--scratch-path",
+    "/private/tmp/legato-followup-evaluations/build-harness",
+    "--cache-path",
+    "/private/tmp/legato-followup-evaluations/cache",
+    "--config-path",
+    "/private/tmp/legato-followup-evaluations/config",
+    "--security-path",
+    "/private/tmp/legato-followup-evaluations/security",
+    "--disable-sandbox",
+    "--jobs",
+    "4",
+    "PatchEvaluation",
+    "--fixtures",
+    "/tmp/legato-followup-evaluations/Fixtures/patches.json",
+    "--report",
+    "/tmp/legato-followup-evaluations/reports/patches.jsonl",
+    "--summary",
+    "/tmp/legato-followup-evaluations/reports/patch-summary.json"
+  ],
+  "environment": {
+    "LEGATO_STUB_DEPS": "1",
+    "CLANG_MODULE_CACHE_PATH": "/private/tmp/legato-followup-evaluations/module-cache",
+    "SWIFTPM_MODULECACHE_OVERRIDE": "/private/tmp/legato-followup-evaluations/module-cache",
+    "TMPDIR": "/private/tmp/legato-followup-evaluations/tmp"
+  },
+  "exit": 0,
+  "seconds": 2.3331351280212402
+}
