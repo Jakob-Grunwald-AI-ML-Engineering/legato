@@ -2,11 +2,84 @@ import Foundation
 import LegatoCore
 import Synchronization
 
-struct CoreMLGeneration: Sendable { let text: String; let stopReason: String }
+struct CoreMLGeneration: Sendable {
+    let text: String
+    let stopReason: String
+    /// The generated token ids (stop token excluded): what the native state holds after `text`.
+    var tokens: [Int] = []
+    /// Prompt tokens this call prefilled (all of them unless a prefix was reused).
+    var prefilled = 0
+    /// Seconds spent in prefill, as the runtime measured it.
+    var prefillSeconds: Double = 0
+}
 protocol CoreMLDriving: Sendable {
     var contextLength: Int { get }
+    /// Tokens per batched prefill call; a remainder below it is prefilled one token per call.
+    var batchSize: Int { get }
+    /// The checkpoint's chat format, for session continuations.
+    var promptFamily: CoreMLPromptFamily { get }
     func tokens(instructions: String, examples: [LLMExample], prompt: String) async throws -> [Int]
+    /// Raw tokens of already rendered text (no special tokens added).
+    func encode(_ text: String) async throws -> [Int]
     func generate(tokens: [Int], outputLimit: Int) async throws -> CoreMLGeneration
+    /// Like ``generate(tokens:outputLimit:)``; `reusingPrefix` > 0 promises the native state already holds
+    /// `tokens[0..<reusingPrefix]` from this driver's previous generation, so only the rest is prefilled.
+    func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration
+    /// Prefills `tokens` into the native state without generating (a session's head), on the same promise.
+    func prefill(tokens: [Int], reusingPrefix: Int) async throws -> CoreMLPrefill
+}
+/// What a prefill-only call did.
+struct CoreMLPrefill: Sendable, Equatable {
+    var prefilled: Int
+    var seconds: Double
+}
+extension CoreMLDriving {
+    var batchSize: Int { 1 }
+    var promptFamily: CoreMLPromptFamily { .qwen3 }
+    func encode(_ text: String) async throws -> [Int] { throw LLMError.unavailable(reason: "This Core ML driver cannot keep a session.") }
+    func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration {
+        guard reusingPrefix == 0 else { throw LLMError.unavailable(reason: "This Core ML driver cannot keep a session.") }
+        return try await generate(tokens: tokens, outputLimit: outputLimit)
+    }
+    func prefill(tokens: [Int], reusingPrefix: Int) async throws -> CoreMLPrefill {
+        throw LLMError.unavailable(reason: "This Core ML driver cannot keep a session.")
+    }
+}
+
+/// Where a session turn may start prefilling, given what the native state holds.
+///
+/// ANEMLL prefills full batches from position 0 and the remainder one token per call, and picks, per batch,
+/// the sliding-window "rotate" function when the batch starts at or past the window. A reused prefix moves
+/// those batch starts, so it is only allowed where that is known to be safe:
+/// - the probed checkpoint (Qwen3 1.7B), or one without a sliding window and with dynamic-slice prefill:
+///   start up to a batch early so the new tokens fill whole batches;
+/// - any other checkpoint: start on upstream's own batch grid (a multiple of the batch size), so every prefill
+///   call is one upstream itself makes; with a sliding window only while the held state and this whole turn
+///   stay below the window (no rotation ever meets a reused state), else a full prefill.
+struct CoreMLReusePolicy: Sendable, Equatable {
+    var alignsToNewTokens: Bool
+    var slidingWindow: Int?
+
+    init(spec: CoreMLModelSpec) {
+        let config = spec.runtimeConfiguration
+        let probed = spec.id == CoreMLModels.qwen3_1_7bID
+        alignsToNewTokens = probed || (config.slidingWindow == nil && config.prefillDynamicSlice)
+        slidingWindow = config.slidingWindow
+    }
+
+    /// The reuse start for `next` over a state holding exactly `held`; 0 = a fresh state and a full prefill.
+    static func start(held: [Int], next: [Int], batch: Int, policy: CoreMLReusePolicy) -> Int {
+        let common = zip(held, next).prefix { $0 == $1 }.count
+        guard common > 0, common < next.count else { return 0 }
+        let batch = max(1, batch)
+        if policy.alignsToNewTokens {
+            return max(0, common - (batch - (next.count - common) % batch) % batch)
+        }
+        if let window = policy.slidingWindow {
+            guard window % batch == 0, held.count <= window, next.count <= window else { return 0 }
+        }
+        return common / batch * batch
+    }
 }
 
 /// Owns native work through actual settlement; a cancellation request alone never permits a second worker.
@@ -57,6 +130,12 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
     private var epoch = 0
     private var loadSerial = 0
     private let outputLimit: Int
+    /// Who the native KV state belongs to and the exact tokens it holds. `nil` whenever anything else
+    /// (a stateless call, another session, an error, a trim) may have changed it: the next turn starts fresh.
+    private var kv: (session: UUID, tokens: [Int])?
+    /// Sessions that may still run turns. Unloading ends them all (session-length lease on the resources).
+    private var openSessions: Set<UUID> = []
+    nonisolated var cancellationForTesting: CoreMLCancellation { cancellation }
 
     public init(spec: CoreMLModelSpec, folder: URL, outputTokenLimit: Int = 1_024) {
         self.spec = spec; self.folder = folder; self.outputLimit = outputTokenLimit
@@ -123,6 +202,7 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
             await cancellation.waitUntilSettled()
         }
         releasing = task
+        openSessions.removeAll(); kv = nil
         await task.value
         if epoch == currentEpoch { runtime = nil; self.preparation = nil; releasing = nil }
     }
@@ -135,6 +215,7 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
         guard let runtime, releasing == nil else { throw LLMError.unavailable(reason: "Core ML resources are not prepared.") }
         try cancellation.begin()
         defer { cancellation.settle() }
+        kv = nil  // A stateless generation replaces the native state.
         return try await withTaskCancellationHandler {
             try Task.checkCancellation(); try cancellation.check()
             let tokens = try await runtime.tokens(instructions: instructions, examples: examples, prompt: prompt)
@@ -146,6 +227,80 @@ public actor CoreMLBackend: LLMBackend, ModelResourceLifecycle {
             guard !generated.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw LLMError.emptyResponse }
             return generated.text
         } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
+    // MARK: Sessions
+
+    /// A persistent session over the prepared model: turn N prefills only the tokens turn N-1 did not leave
+    /// in the native state. Never prepares or loads; unloading ends the session.
+    public func makeSession() async throws -> any LLMSession {
+        guard let runtime, releasing == nil else { throw LLMError.unavailable(reason: "Core ML resources are not prepared.") }
+        let id = UUID()
+        openSessions.insert(id)
+        return CoreMLSession(backend: self, id: id, family: runtime.promptFamily,
+                             tokenBudget: runtime.contextLength - outputLimit - 2)
+    }
+
+    func sessionRuntime(_ id: UUID) throws -> any CoreMLDriving {
+        guard openSessions.contains(id) else { throw LLMSessionError.closed }
+        guard let runtime, releasing == nil else { throw LLMError.unavailable(reason: "Core ML resources are not prepared.") }
+        return runtime
+    }
+
+    /// One session turn under the same single-worker guard as ``respond``. `build` renders the turn's full
+    /// token sequence inside the worker, after the guard is claimed (claiming clears an earlier operation's
+    /// cancellation, which tokenizing outside would trip over).
+    func sessionTurn(_ id: UUID, build: @Sendable (any CoreMLDriving) async throws -> [Int]) async throws -> (tokens: [Int], generation: CoreMLGeneration) {
+        let runtime = try sessionRuntime(id)
+        try cancellation.begin()
+        defer { cancellation.settle() }
+        let limit = outputLimit
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation(); try cancellation.check()
+            let tokens = try await build(runtime)
+            try CoreMLPrompt.validate(input: tokens.count, outputLimit: limit, context: runtime.contextLength)
+            let reuse = reuseStart(id, tokens, runtime)
+            kv = nil  // Until this generation settles successfully, the state is unknown.
+            try Task.checkCancellation(); try cancellation.check()
+            let generated = try await runtime.generate(tokens: tokens, reusingPrefix: reuse, outputLimit: limit)
+            try Task.checkCancellation(); try cancellation.check()
+            guard generated.stopReason == "eos_token" else { throw LLMError.failed("Core ML output was incomplete.") }
+            if openSessions.contains(id) { kv = (id, tokens + generated.tokens) }
+            return (tokens, generated)
+        } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
+    /// Prefills a session's head without a reply, under the single-worker guard.
+    func sessionPrefill(_ id: UUID, build: @Sendable (any CoreMLDriving) async throws -> [Int]) async throws -> CoreMLPrefill {
+        let runtime = try sessionRuntime(id)
+        try cancellation.begin()
+        defer { cancellation.settle() }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation(); try cancellation.check()
+            let tokens = try await build(runtime)
+            guard !tokens.isEmpty else { return CoreMLPrefill(prefilled: 0, seconds: 0) }
+            try CoreMLPrompt.validate(input: tokens.count, outputLimit: outputLimit, context: runtime.contextLength)
+            let reuse = reuseStart(id, tokens, runtime)
+            kv = nil
+            let result = try await runtime.prefill(tokens: tokens, reusingPrefix: reuse)
+            try Task.checkCancellation(); try cancellation.check()
+            if openSessions.contains(id) { kv = (id, tokens) }
+            return result
+        } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
+    /// The prefix of `tokens` the native state can keep: the common prefix with what it holds for this
+    /// session (another owner, a stateless call or an error left nothing), placed by the spec's policy.
+    private func reuseStart(_ id: UUID, _ tokens: [Int], _ runtime: any CoreMLDriving) -> Int {
+        guard let kv, kv.session == id else { return 0 }
+        return CoreMLReusePolicy.start(held: kv.tokens, next: tokens, batch: runtime.batchSize, policy: CoreMLReusePolicy(spec: spec))
+    }
+
+    func resetSession(_ id: UUID) { if kv?.session == id { kv = nil } }
+
+    func closeSession(_ id: UUID) {
+        openSessions.remove(id)
+        resetSession(id)
     }
 }
 

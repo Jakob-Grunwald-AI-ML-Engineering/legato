@@ -31,6 +31,9 @@ struct LegatoApp: App {
             nonisolated(unsafe) let box = task
             Task { @MainActor in AppController.shared.meetings.handleBackgroundProcessing(box) }
         }
+        #if LEGATO_INTERNAL
+        SessionProbe.runIfRequested(models: AppController.shared.models)  // `-LegatoSessionProbe <mode>`
+        #endif
     }
 
     @ViewBuilder

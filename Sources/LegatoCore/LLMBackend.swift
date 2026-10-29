@@ -37,7 +37,8 @@ public struct LLMExample: Sendable, Hashable {
 
 /// A language model that answers one self-contained request. Cleanup uses it now; summaries reuse it.
 ///
-/// Every call is independent: no conversation state carries over between calls.
+/// Every `respond` call is independent: no conversation state carries over between calls. A caller that
+/// wants state kept across turns asks for an ``LLMSession`` with ``makeSession()``.
 public protocol LLMBackend: Sendable {
     /// Stable identifier, recorded next to anything the backend produced.
     var id: String { get }
@@ -60,9 +61,19 @@ public protocol LLMBackend: Sendable {
     ///
     /// The default folds the examples into `instructions`, so a backend that cannot send turns still works.
     func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String
+
+    /// A new persistent conversation over this backend's model (see ``LLMSession``).
+    ///
+    /// The default throws ``LLMError/unavailable(reason:)``: a backend that cannot keep state across turns
+    /// says so instead of silently replaying the transcript every turn.
+    func makeSession() async throws -> any LLMSession
 }
 
 extension LLMBackend {
+    public func makeSession() async throws -> any LLMSession {
+        throw LLMError.unavailable(reason: "\(id) cannot keep a persistent session.")
+    }
+
     public func respond(instructions: String, examples: [LLMExample], prompt: String) async throws -> String {
         guard !examples.isEmpty else { return try await respond(instructions: instructions, prompt: prompt) }
         let shown = examples.map { "Input:\n\($0.user)\nOutput:\n\($0.assistant)" }.joined(separator: "\n\n")
