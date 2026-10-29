@@ -18,7 +18,8 @@ import Foundation
 /// cannot say; it is rewound with it, as before.
 ///
 /// Never typed twice (``failed(_:cursor:contextBefore:fieldEmpty:)``): a failed write keeps its progress, as if it
-/// landed, when the field is empty (cleared or sent: a run boundary, not a failed write), when the field shows the
+/// landed, when the field is empty after holding text (cleared or sent: a run boundary, not a failed write; a write
+/// into an empty field counts only when ClearWatch saw the clear, ``fieldCleared()``), when the field shows the
 /// text the write was to leave (it landed after all), or when it was planned from a point the cursor was already
 /// rewound to once (it is that retype: a chunk is typed again at most once).
 public struct HostWriteLedger: Sendable, Equatable {
@@ -53,6 +54,10 @@ public struct HostWriteLedger: Sendable, Equatable {
         var planned: AppliedCursor?
         /// The text before the caret the write leaves (its end), for whether the field shows it.
         var expected: String?
+        /// The host's field held text when the write was planned: an empty read later can be a clear.
+        var fieldHadText = true
+        /// ClearWatch saw the host empty the field while the write was open.
+        var clearSeen = false
         /// It landed while a write before it is still unresolved.
         var landed = false
     }
@@ -70,8 +75,11 @@ public struct HostWriteLedger: Sendable, Equatable {
     public var isEmpty: Bool { entries.isEmpty && orphans.isEmpty }
 
     /// A write submitted, planned from `previous` to `planned`. `expected`: the text before the caret once it ran.
-    public mutating func record(_ id: UUID, previous: AppliedCursor?, planned: AppliedCursor?, expected: String? = nil) {
-        entries.append(Entry(id: id, previous: previous, planned: planned, expected: expected))
+    /// `fieldHadText`: the host's field (its last read) held text when the write was planned.
+    public mutating func record(
+        _ id: UUID, previous: AppliedCursor?, planned: AppliedCursor?, expected: String? = nil, fieldHadText: Bool = true
+    ) {
+        entries.append(Entry(id: id, previous: previous, planned: planned, expected: expected, fieldHadText: fieldHadText))
     }
 
     /// ``failed(_:cursor:)`` with the field as it reads now (`contextBefore`, and whether it holds no text at all):
@@ -82,7 +90,9 @@ public struct HostWriteLedger: Sendable, Equatable {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return failed(id, cursor: cursor) }
         let entry = entries[index]
         let kept: Kept?
-        if fieldEmpty {
+        if fieldEmpty, entry.fieldHadText || entry.clearSeen {
+            // Empty only counts as cleared when there was text to clear (or ClearWatch saw it go): a first chunk
+            // the host dropped into an empty field reads empty too, and is typed again.
             kept = .cleared
         } else if let expected = entry.expected, !expected.isEmpty,
             contextBefore.hasSuffix(String(expected.suffix(Self.shownTail)))
@@ -103,6 +113,12 @@ public struct HostWriteLedger: Sendable, Equatable {
         }
         entries.remove(at: index)
         return Failure(cursor: cursor, withdraw: [], kept: kept)
+    }
+
+    /// ClearWatch saw the host empty the field (a send): for every open write, an empty read is that clear.
+    public mutating func fieldCleared() {
+        for index in entries.indices { entries[index].clearSeen = true }
+        for id in orphans.keys { orphans[id]?.clearSeen = true }
     }
 
     /// Confirmed or unconfirmed (it may have landed): it never rewinds the cursor.

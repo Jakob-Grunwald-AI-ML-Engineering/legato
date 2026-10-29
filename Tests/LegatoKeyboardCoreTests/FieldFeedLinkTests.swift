@@ -397,3 +397,48 @@ private func allEvents() -> [FeedEvent] {
         #expect(link(backing).readFeedFromStart(forRun: "run") == nil)
     }
 }
+
+/// The link's text ends with the run (review L6 #2), and a full ring stays in its budget (#1).
+@Suite struct FieldFeedLinkEndTests {
+    /// The keyboard stops following (the app scrubbed the link): a batch still on its way is not written, so the
+    /// field's text does not come back into the App Group.
+    @Test func noBatchIsWrittenAfterTheKeyboardStoppedFollowing() {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing)
+        keyboard.follow(runID: "run")
+        keyboard.append(batch([.asrDelta("x")]), window: "secret")
+        keyboard.stopFollowing()
+        #expect(backing.data(forKey: LinkChannel.Key.feed) == nil)
+        keyboard.append(batch([.asrDelta("y")], from: 2), window: "secret words")
+        #expect(backing.data(forKey: LinkChannel.Key.feed) == nil)
+        keyboard.follow(runID: "next")
+        keyboard.append(batch([.asrDelta("z")]), window: "z")
+        #expect(backing.data(forKey: LinkChannel.Key.feed) != nil)
+    }
+
+    /// The app's run is over: an edit sent after its end is not written.
+    @Test func noEditIsSentAfterTheAppsRunEnded() {
+        let backing = MemoryLinkStore()
+        let app = link(backing)
+        app.beginRun("run")
+        app.endRun()
+        app.sendEdits([EditTransaction(origin: .agent, owner: "run", base: FieldVersion(0), steps: [step])])
+        #expect(backing.data(forKey: LinkChannel.Key.edits) == nil)
+    }
+
+    /// The ring stays within its byte budget while it runs full, the oldest batches dropped first.
+    @Test func aFullRingStaysWithinItsByteBudget() throws {
+        let backing = MemoryLinkStore()
+        let keyboard = link(backing, maxBytes: 4_096)
+        keyboard.follow(runID: "run")
+        for n in 1...200 {
+            keyboard.append(batch([.asrDelta(String(repeating: "w", count: 40))], from: n, version: n), window: "window \(n)")
+        }
+        let data = try #require(backing.data(forKey: LinkChannel.Key.feed))
+        #expect(data.count <= 4_096)
+        let ring = try #require(LinkStore(backing).read(FeedRing.self, forKey: LinkChannel.Key.feed))
+        #expect(ring.lastSeq == 200 && ring.slots.last?.seq == 200 && ring.slots.count > 10)
+        #expect(ring.slots.map(\.seq) == Array((201 - ring.slots.count)...200))
+        #expect(ring.window == "window 200")
+    }
+}

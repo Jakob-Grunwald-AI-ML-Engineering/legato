@@ -219,22 +219,54 @@ final class KeyboardLinkHost: TranscriptSink {
         defer { agentGate?.agentRuns = false }  // the session's stop (its final pass) is behind us
         let raw = committed.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalText = text.flatMap { $0 != raw ? $0 : nil }
-        link.runEnded(committed: committed, finalText: finalText)
+        // A linked run's stop goes on after its final state (the agent's catch-up and final pass, their outcomes):
+        // the link's text stays, and the keyboard keeps following, until it is done.
+        link.runEnded(committed: committed, finalText: finalText, holdingScrub: linked != nil)
+        defer {
+            if linked != nil {
+                feedLink?.endRun()
+                link.releaseScrub()
+            }
+        }
         onTranscript?(text ?? committed, "")
         onRunActivity?(false)
         // Only a run streamed into a visible keyboard has anything to confirm.
-        guard run.target == .keyboard, text != nil, link.keyboardIsVisible() else {
-            linked?.cancel()
+        let visible = run.target == .keyboard && text != nil && link.keyboardIsVisible()
+        if let linked, let text, let mode = linkedMode {
+            let runID = run.id.uuidString
+            var applied: (@MainActor () async -> Bool)?
+            if visible {
+                let link = link
+                applied = { await link.awaitFinalApplied(runID: runID, timeout: Self.appliedTimeout) }
+            }
+            let statelessPass = statelessFinalPass, copy = copyFallback
+            let stop = await linked.stop(
+                mode, committed: committed, text: text, finalText: finalText, applied: applied,
+                statelessPass: { await statelessPass($0) }, copy: { copy($0) })
+            if let cleaned = stop.cleaned { await correctHistory(text, cleaned) }
+            if !visible {
+                #if LEGATO_INTERNAL
+                trace.runEnded(applied: nil, confirmed: false)
+                #endif
+                onDelivery?(runID, false)
+                return stop.landed  // the cleaned text on the clipboard: the session's raw text must not replace it
+            }
+            onDelivery?(runID, stop.landed)
+            #if LEGATO_INTERNAL
+            trace.runEnded(applied: link.appliedCursor(), confirmed: stop.landed)
+            #endif
+            if runDelivery == .clipboard, finalText != nil { return false }
+            return stop.landed
+        }
+        linked?.cancel()
+        guard visible else {
             #if LEGATO_INTERNAL
             trace.runEnded(applied: nil, confirmed: false)
             #endif
             onDelivery?(run.id.uuidString, false)
             return false
         }
-        var applied = await link.awaitFinalApplied(runID: run.id.uuidString, timeout: Self.appliedTimeout)
-        if let linked, let text {
-            applied = await finishLinked(linked, committed: committed, text: text, finalText: finalText, applied: applied)
-        }
+        let applied = await link.awaitFinalApplied(runID: run.id.uuidString, timeout: Self.appliedTimeout)
         onDelivery?(run.id.uuidString, applied)
         #if LEGATO_INTERNAL
         trace.runEnded(applied: link.appliedCursor(), confirmed: applied)
@@ -268,42 +300,13 @@ final class KeyboardLinkHost: TranscriptSink {
         linkTrace?("link.run delivery=\(runDelivery?.rawValue ?? "-") agent=\(run.hasAgent ? 1 : 0)")
     }
 
-    /// The stop of a linked run, once the keyboard confirmed (or not) the streamed text. Returns whether the final
-    /// text is in the field, or (Live) whether the cleaned text is on the clipboard instead (then the session's raw
-    /// text must not replace it there). See `LinkedCleanupRun`.
-    private func finishLinked(
-        _ linked: LinkedCleanupRun, committed: String, text: String, finalText: String?, applied: Bool
-    ) async -> Bool {
-        if runDelivery == .replace {
-            guard let finalText else { return applied }
-            // The stateless pass's text as patches; not landed: today's clipboard fallback (the cleaned text).
-            return await linked.deliver(raw: committed, cleaned: finalText) == .applied && applied
+    /// The current run's mode on the link (`LinkedCleanupRun.stop`); nil when it has none.
+    private var linkedMode: LinkedCleanupRun.Mode? {
+        switch runDelivery {
+        case .live: .live
+        case .replace: .replace
+        default: nil
         }
-        let outcome = await linked.finish()
-        var cleaned: String?
-        var fallback: String?
-        if outcome.agentAbsent {
-            if let pass = await statelessFinalPass(text) {
-                switch await linked.deliver(raw: committed, cleaned: pass) {
-                case .applied: cleaned = pass
-                case .unchanged: break
-                default: fallback = pass
-                }
-            }
-        } else if outcome.unapplied.isEmpty {
-            cleaned = linked.mirror.runText
-        } else {
-            fallback = linked.fallbackText(unapplied: outcome.unapplied)
-        }
-        var landed = applied
-        if fallback != nil || !applied, let copy = fallback ?? cleaned, copy != text {
-            // The field changed under the agent's edits (or never confirmed): the cleaned text goes to the clipboard.
-            landed = copyFallback(copy)
-            linkTrace?("link.fallback copied=\(landed ? 1 : 0)")
-            cleaned = copy
-        }
-        if let cleaned, !linked.mirror.wasCleared { await correctHistory(text, cleaned) }
-        return landed
     }
 
     func leaseChanged(until: Date?) {

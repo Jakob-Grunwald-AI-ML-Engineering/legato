@@ -60,6 +60,13 @@ private final class Keyboard {
         return [batch]
     }
 
+    /// The keyboard process starts over (a crash, a new appearance): a new queue instance over the same field; its
+    /// first batch is a resync from another session.
+    func restart() {
+        queue = FieldEditQueue(FieldSnapshot(window: field, caret: caret))
+        published = nil
+    }
+
     /// The keyboard takes no edits (it went away): they never get an outcome.
     var deaf = false
 
@@ -302,5 +309,146 @@ struct LinkedCleanupRunTests {
         keyboard.asr(" down")
         run.feedChanged()
         #expect(run.fallbackText(unapplied: [pending]) == "the cat sat down")
+    }
+
+    // MARK: Coalescing (review L6 #1)
+
+    /// Batches that arrive while a pass is in flight are taken in together once it is done: one pass over the
+    /// newest field (based on the newest version), not one per batch, each based further back.
+    @Test func batchesArrivingDuringAPassAreConsumedTogether() async {
+        let keyboard = Keyboard()
+        let session = ScriptedSession([(.milliseconds(300), edit(1, "I saw the dog."))])
+        let run = run(keyboard, session: session)
+        run.feedChanged()
+        keyboard.asr("I saw teh dog.")
+        run.feedChanged()
+        let asked = await linkSettles { await session.requests.count == 1 }
+        #expect(asked)
+        for sentence in [" It ran.", " It sat.", " It slept."] {
+            keyboard.asr(sentence)
+            run.feedChanged()
+        }
+        let landed = await linkSettles { @MainActor in keyboard.field.hasPrefix("I saw the dog.") }
+        #expect(landed)
+        try? await Task.sleep(for: .milliseconds(200))
+        let requests = await session.requests
+        #expect(requests.count == 2, "\(requests.count) passes")
+        #expect(requests.last.map { $0.contains("It ran.") && $0.contains("It slept.") } == true)
+        _ = await run.finish()
+    }
+
+    // MARK: Mirror re-anchoring (review L6 #5)
+
+    /// A resync from the same queue (the ring dropped batches the app had not read) keeps the run's text where it
+    /// is found exactly once, as the agent re-anchors it.
+    @Test func aResyncFromTheSameQueueKeepsTheRunsText() {
+        let keyboard = Keyboard("Hi")
+        var mirror = FeedMirror()
+        mirror.fold(keyboard.publish().first!)
+        keyboard.asr(" teh cat sat")
+        mirror.fold(keyboard.publish().first!)
+        keyboard.user("Oh. ", at: 0)
+        _ = keyboard.publish()  // never read by the app
+        mirror.fold(keyboard.queue.feed.since(nil))
+        #expect(mirror.runText == "teh cat sat")
+    }
+
+    /// A resync from another queue (the keyboard restarted) is another field as far as anyone can tell: nothing
+    /// is the run's, like the agent.
+    @Test func aResyncFromAnotherQueueForgetsTheRunsText() {
+        let keyboard = Keyboard()
+        var mirror = FeedMirror()
+        mirror.fold(keyboard.publish().first!)
+        keyboard.asr("teh cat sat")
+        mirror.fold(keyboard.publish().first!)
+        keyboard.restart()
+        mirror.fold(keyboard.publish().first!)
+        #expect(mirror.runText == nil)
+    }
+
+    // MARK: Stop (review L6 #4, #5, #6)
+
+    /// The keyboard went away mid-run with the agent cleaning it (the session's own final pass was off): the
+    /// stateless final pass cleans the run's text, and that goes to the clipboard and into the history.
+    @Test func aKeyboardGoneAtTheStopOfAnAgentRunCopiesTheStatelessPass() async {
+        let keyboard = Keyboard()
+        let run = run(keyboard, session: ScriptedSession([]))
+        run.feedChanged()
+        keyboard.asr("teh cat sat")
+        run.feedChanged()
+        var copied: [String] = []
+        let stop = await run.stop(
+            .live, committed: "teh cat sat ", text: "teh cat sat", finalText: nil, applied: nil,
+            statelessPass: { _ in "The cat sat." }, copy: { copied.append($0); return true })
+        #expect(copied == ["The cat sat."])
+        #expect(stop == .init(landed: true, cleaned: "The cat sat."))
+    }
+
+    /// Without an agent the session cleaned the text itself: a keyboard gone at the stop leaves it to the session.
+    @Test func aKeyboardGoneAtTheStopOfARunWithoutAnAgentLeavesTheSessionsText() async {
+        let keyboard = Keyboard()
+        let run = LinkedCleanupRun(owner: "run", agent: nil, transport: keyboard.transport, finalWait: .milliseconds(100))
+        var passes = 0
+        var copied: [String] = []
+        let stop = await run.stop(
+            .replace, committed: "teh cat ", text: "The cat.", finalText: "The cat.", applied: nil,
+            statelessPass: { _ in passes += 1; return "x" }, copy: { copied.append($0); return true })
+        #expect(stop == .init(landed: false, cleaned: nil))
+        #expect(passes == 0 && copied.isEmpty)
+    }
+
+    /// The keyboard restarted after the agent's final edit went out: the mirror no longer knows the run's spans,
+    /// so the edit cannot be placed in a fallback text. The whole text cleaned by the stateless pass is copied
+    /// instead, never nothing.
+    @Test func unknownSpansFallBackToTheWholeCleanedText() async {
+        let keyboard = Keyboard()
+        let run = run(keyboard, session: ScriptedSession([(.zero, edit(1, "I saw the dog"))]))
+        run.feedChanged()
+        keyboard.asr("I saw teh dog")  // unfinished: only the final pass reviews it
+        run.feedChanged()
+        keyboard.deaf = true  // the final edit goes nowhere, then the keyboard comes back as a new queue
+        var copied: [String] = []
+        let stopping = Task { @MainActor in
+            await run.stop(
+                .live, committed: "I saw teh dog ", text: "I saw teh dog", finalText: nil, applied: { true },
+                statelessPass: { _ in "I saw the dog." }, copy: { copied.append($0); return true })
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        keyboard.restart()
+        let stop = await stopping.value
+        #expect(copied == ["I saw the dog."])
+        #expect(stop.landed)
+    }
+
+    /// The keyboard restarted before the stop: the agent and the mirror both lost the run's text, nothing was
+    /// cleaned in the field. The stateless pass's text goes to the clipboard.
+    @Test func aRestartBeforeTheStopStillCopiesTheCleanedText() async {
+        let keyboard = Keyboard()
+        let run = run(keyboard, session: ScriptedSession([]))
+        run.feedChanged()
+        keyboard.asr("I saw teh dog")
+        run.feedChanged()
+        keyboard.restart()
+        var copied: [String] = []
+        let stop = await run.stop(
+            .live, committed: "I saw teh dog ", text: "I saw teh dog", finalText: nil, applied: { true },
+            statelessPass: { _ in "I saw the dog." }, copy: { copied.append($0); return true })
+        #expect(copied == ["I saw the dog."])
+        #expect(stop.landed)
+    }
+
+    /// Replace: a cleaned text that is the raw text once trimmed changes nothing, and does not reach the clipboard
+    /// (the stream is in the field).
+    @Test func anUnchangedReplaceLeavesTheClipboardAlone() async {
+        let keyboard = Keyboard()
+        let run = LinkedCleanupRun(owner: "run", agent: nil, transport: keyboard.transport, finalWait: .milliseconds(100))
+        run.feedChanged()
+        keyboard.asr("teh cat")
+        var copied: [String] = []
+        let stop = await run.stop(
+            .replace, committed: "teh cat", text: "teh cat ", finalText: "teh cat ", applied: { true },
+            statelessPass: { _ in nil }, copy: { copied.append($0); return true })
+        #expect(stop.landed)
+        #expect(copied.isEmpty)
     }
 }

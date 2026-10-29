@@ -98,6 +98,107 @@ struct FieldEditCoordinatorLinkTests {
         #expect(outcomes.all[id] == [.executed, .applied])
     }
 
+    // MARK: Throttle and mappable age (review L6 #1)
+
+    /// The stream ticks every 33 ms; the feed goes out a few times a second, never once per tick, nothing lost and
+    /// the latest state flushed when the interval ends.
+    @Test func aThrottledFeedPublishesAFewBatchesASecondWithEveryEvent() {
+        let d = ManualDocument("")
+        let (c, _) = coordinator(d)
+        let batches = Batches()
+        c.publishFeed(to: batches.sink, minInterval: .milliseconds(200))
+        for _ in 0..<30 {
+            _ = c.type("a")
+            d.report()
+            c.sync()
+            timers.advance(by: .milliseconds(33))
+        }
+        timers.advance(by: .milliseconds(250))
+        #expect(batches.all.count <= 7, "\(batches.all.count) batches in a second")
+        #expect(batches.all.last?.window == String(repeating: "a", count: 30))
+        let keys = batches.events.filter { if case .applied(_, .keystroke, _, _) = $0 { true } else { false } }
+        #expect(keys.count == 30)
+    }
+
+    /// An outcome of the app's edit is not held back by the throttle: the app's stop waits for it.
+    @Test func anAppEditsOutcomeIsPublishedAtOnce() {
+        let d = ManualDocument("teh cat")
+        let (c, _) = coordinator(d)
+        let batches = Batches()
+        c.publishFeed(to: batches.sink, minInterval: .milliseconds(200))
+        let read = batches.all[0].batch
+        _ = c.type(" ")
+        d.report()
+        c.sync()
+        let before = batches.all.count
+        let id = UUID()
+        c.submit(edit(read.version, 1, "eh", "he", session: read.session, id: id))
+        d.report()
+        c.sync()
+        #expect(batches.all.count == before + 1)
+        #expect(batches.events.contains { if case .applied(id, .agent, _, _) = $0 { true } else { false } })
+    }
+
+    /// What waits for the interval goes out at once when asked (a run's end), and nothing after publishing stops.
+    @Test func aWaitingBatchIsFlushedOnRequestAndDroppedWhenPublishingStops() {
+        let d = ManualDocument("")
+        let (c, _) = coordinator(d)
+        let batches = Batches()
+        c.publishFeed(to: batches.sink, minInterval: .milliseconds(200))
+        _ = c.type("a")
+        d.report()
+        c.sync()
+        #expect(batches.all.count == 1)
+        c.flushFeed()
+        #expect(batches.all.count == 2 && batches.all[1].window == "a")
+        _ = c.type("b")
+        d.report()
+        c.sync()
+        c.stopPublishing()
+        timers.advance(by: .seconds(1))
+        #expect(batches.all.count == 2)
+    }
+
+    /// Many batches within a long agent pass (100 in a second): the version the agent read at its start is still
+    /// mappable; the history is bounded by age, not by a batch count.
+    @Test func anEditBasedOnABatchFromASecondAgoLandsHoweverManyBatchesCameSince() {
+        let d = ManualDocument("teh cat")
+        let c = FieldEditCoordinator(document: d, settleTimeout: .milliseconds(250), schedule: timers.schedule, now: timers.clock)
+        let batches = Batches()
+        c.publishFeed(to: batches.sink)
+        let read = batches.all[0].batch
+        for _ in 0..<100 {
+            _ = c.type("a")
+            d.report()
+            c.sync()
+            timers.advance(by: .milliseconds(10))
+        }
+        #expect(batches.all.count > FieldEditCoordinator.linkedVersions)
+        let outcomes = Outcomes()
+        let id = UUID()
+        c.submit(edit(read.version, 1, "eh", "he", session: read.session, id: id), onOutcome: outcomes.record(id))
+        d.report()
+        c.sync()
+        #expect(outcomes.all[id] == [.executed, .applied])
+        #expect(d.field.text.hasPrefix("the cat"))
+    }
+
+    /// Past the age (and the count), an old base is out of window: the history stays bounded.
+    @Test func aBaseOlderThanTheMappableAgeIsOutOfWindow() {
+        let d = ManualDocument("teh cat")
+        let c = FieldEditCoordinator(document: d, settleTimeout: .milliseconds(250), schedule: timers.schedule, now: timers.clock)
+        let batches = Batches()
+        c.publishFeed(to: batches.sink)
+        let read = batches.all[0].batch
+        for _ in 0..<(FieldEditCoordinator.linkedVersions + 10) {
+            _ = c.type("a")
+            d.report()
+            c.sync()
+            timers.advance(by: FieldEditCoordinator.linkedAge / 10)
+        }
+        #expect(c.submit(edit(read.version, 1, "eh", "he", session: read.session)) == .refused(Conflict(.outOfWindow)))
+    }
+
     @Test func withoutPublishingAnOldBaseIsOutOfWindow() {
         let d = ManualDocument("teh cat")
         let (c, _) = coordinator(d)

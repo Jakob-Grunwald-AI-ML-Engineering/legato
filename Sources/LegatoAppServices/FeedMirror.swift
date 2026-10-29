@@ -5,9 +5,10 @@ import LegatoFieldEdit
 /// window, the version and queue instance new edits are based on, which text the run wrote, and what happened to
 /// the edits the app sent. Pure value type; ``LinkedCleanupRun`` keeps one per run.
 ///
-/// The run's text is only what the feed attributes to an automatic write (`applied` with a non-user origin since
-/// the last reset); user text and foreign changes are never the run's. A reset, or a resync from another queue
-/// instance, forgets it: nothing is the run's until new automatic text lands.
+/// The run's text is only what the feed attributes to an automatic write (`applied` with a non-user origin); user
+/// text and foreign changes are never the run's. A resync from the same queue, or a reset other than a clear,
+/// re-anchors it as ``CleanupAgent`` does (a span stays where its text occurs exactly once in the new window). A
+/// clear, or a resync from another queue instance, forgets it: nothing is the run's until new automatic text lands.
 public struct FeedMirror: Sendable, Equatable {
     public enum Result: Sendable, Equatable {
         case applied
@@ -48,8 +49,10 @@ public struct FeedMirror: Sendable, Equatable {
         if batch.resync || batch.session != session {
             guard batch.resync, let text = batch.window else { return }  // another queue, no window: wait
             if batch.session != session || text != window {
-                runs = []
-                touched = []
+                // As the agent does: the same queue's window is searched for the run's text, another queue's is not.
+                let anchored = batch.session == session ? reanchored(in: text) : nil
+                runs = anchored?.runs ?? []
+                touched = anchored?.touched ?? []
                 changes = []
             }
             session = batch.session
@@ -88,9 +91,10 @@ public struct FeedMirror: Sendable, Equatable {
             touched = touched.map { Span(location: $0.location + shift, length: $0.length) }
             changes = []  // offsets before the shift are not mapped across it
         case .reset(let reason, let text, _):
+            let anchored = reason == .cleared ? nil : reanchored(in: text)
             window = text
-            runs = []
-            touched = []
+            runs = anchored?.runs ?? []
+            touched = anchored?.touched ?? []
             changes = []
             if reason == .cleared { wasCleared = true }
         }
@@ -106,6 +110,36 @@ public struct FeedMirror: Sendable, Equatable {
         let result = Span(location: step.span.location, length: step.text.utf16.count)
         if run, result.length > 0 { runs = Self.merged(runs + [result]) }
         if user { touched.append(result) }
+    }
+
+    /// Each run span and the user-touched spans inside it, found again in `text` after a resync or reset: a span
+    /// only when its last known text occurs exactly once there; the others are dropped (`CleanupAgent`'s rule).
+    private func reanchored(in text: String) -> (runs: [Span], touched: [Span]) {
+        let old = window as NSString, new = text as NSString
+        var kept: [Span] = [], inside: [Span] = []
+        for run in runs where run.length > 0 && run.end <= old.length {
+            let known = old.substring(with: NSRange(location: run.location, length: run.length))
+            var found: [Int] = []
+            var from = 0
+            while from < new.length, found.count < 2 {
+                let hit = new.range(of: known, options: [.literal], range: NSRange(location: from, length: new.length - from))
+                guard hit.location != NSNotFound else { break }
+                found.append(hit.location)
+                from = hit.location + 1
+            }
+            guard found.count == 1, let location = found.first else { continue }
+            let shift = location - run.location
+            kept.append(Span(location: location, length: run.length))
+            for span in touched {
+                if span.length == 0 {
+                    if span.location > run.location && span.location < run.end { inside.append(Span(location: span.location + shift, length: 0)) }
+                    continue
+                }
+                let start = max(span.location, run.location), end = min(span.end, run.end)
+                if start < end { inside.append(Span(location: start + shift, length: end - start)) }
+            }
+        }
+        return (Self.merged(kept), inside)
     }
 
     /// `span` after `step`: unchanged before it, shifted after it, grown or shrunk around it when they overlap.

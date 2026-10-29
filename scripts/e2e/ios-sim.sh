@@ -349,6 +349,10 @@ begin() {
 }
 
 # relaunch [launch args...]: new process on the current install, log capture restarted.
+# `simctl launch` on an app that is already running only brings that copy forward and drops the arguments (same
+# pid, none of the scenario's flags: no harness, no fake engine). A copy can appear between the terminate and the
+# launch (the system launching the app in the background, another run on the same simulator), so the launch
+# terminates any running copy itself, and the scenario only starts once the launched pid has logged its launch.
 relaunch() {
   stop_log
   xcrun simctl terminate "$UDID" "$BID" > /dev/null 2>&1
@@ -358,9 +362,14 @@ relaunch() {
     --predicate 'subsystem == "de.gruenwald.legato" AND category == "e2e"' > "$LOG" 2>&1 &
   LOGPID=$!
   sleep 1.5
-  xcrun simctl launch "$UDID" "$BID" "$@" > "$WORK/launch.out" 2>&1
-  wait_log "e2e launch " 10 && return 0
-  record FAIL "app launches and logs" "no 'e2e launch' line ($(cat "$WORK/launch.out"))"
+  xcrun simctl launch --terminate-running-process "$UDID" "$BID" "$@" > "$WORK/launch.out" 2>&1
+  local pid deadline=$((SECONDS + 10))
+  pid="$(sed -n "s/^$BID: \([0-9][0-9]*\)$/\1/p" "$WORK/launch.out")"
+  while [ -n "$pid" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    grep -F -- "Legato[$pid:" "$LOG" | grep -q -F -- "e2e launch " && return 0
+    sleep 0.2
+  done
+  record FAIL "app launches and logs" "no 'e2e launch' line from the launched process ($(cat "$WORK/launch.out"))"
   return 1
 }
 LOGSEQ=0
@@ -1723,7 +1732,9 @@ scenario_fe() {
   echo "fe send-clear latency on:  ${onsend#*fe.lagsend }"
   assert_no_log "no lag step timed out" "fe.timeout"
   assert_log "the host's clear contradicted the prediction" "harness fe.settle final=0 outcome=notYet"
-  assert_log "keys typed while it was contradicted went through the queue (user lane)" "harness fe.key contradicted=1"
+  # The edit queue takes the host's clear as a run boundary (ClearWatch: `fieldCleared`, a `reset(cleared)`): the
+  # contradiction ends at the clear, so the keys after it are plain user-lane keys, not contradicted ones.
+  assert_log "the host's clear reset the queue as a run boundary" "harness fe.reset reason=cleared"
   assert_no_log "no key went around the queue" "fe.key direct=1"
   assert_eq "the keys typed after the clear are in the field at once" "ok" "$(log_field "fe.step name=send-cleared " doc)"
   assert_eq "after the reads caught up: field" "ok" "$(log_field "fe.step name=sent " doc)"
@@ -1802,6 +1813,8 @@ scenario_fa() {
   assert_eq "history holds what the field got" "texh cat sat. A dog ran." "$(history_texts | tail -1)"
   assert_no_log "nothing was typed twice" "fe.duplicate"
   assert_no_log "no chunk was typed again" "fe.mapped rewound=1"
+  wait_log "harness fe.link stop scrubbed=1" 15
+  assert_order "the keyboard followed the run until its stop was done (scrubbed after the agent's finish)" "link agent.finish" "harness fe.link stop scrubbed=1"
 
   SCENARIO="fa. agent: the host clears the field mid-run"
   relaunch "${common[@]}" -LegatoCleanupDelivery live || return
@@ -1864,6 +1877,7 @@ scenario_fa() {
   fa_stop 2
   sleep 1
   assert_no_log "Hold is not on the link" "link link.run"
+  assert_no_log "the keyboard publishes no feed for Hold" "harness fe.link follow"
   assert_log "the insert went through the queue (Hold, ASR lane)" "harness fe.write origin=hold lane=asr"
   assert_eq "field: the cleaned text" "the cat sat. A dog ran." "$(harness_doc)"
   assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"

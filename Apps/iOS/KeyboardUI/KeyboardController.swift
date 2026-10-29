@@ -91,11 +91,10 @@ final class KeyboardController {
     @ObservationIgnored private var hostHeld = false
     /// Host-text writes in the queue not landed yet, for where the cursor goes when one fails.
     @ObservationIgnored private var hostWrites = HostWriteLedger()
-    /// The run whose field events go to the app (`link.feed`) and whose edits come back (`link.edits`): a run the
-    /// app froze with the edit queue on (`HostState.fieldEdits`). Nil: none.
-    @ObservationIgnored private var linkedRun: String?
-    /// The app's edits already taken into the queue (the link delivers at least once).
-    @ObservationIgnored private var linkedSeen: Set<UUID> = []
+    /// The run whose field events go to the app (`link.feed`) and whose edits come back (`link.edits`): a Live or
+    /// Replace run the app froze with the edit queue on (`LinkedRunFollower`).
+    @ObservationIgnored private var linkedFollower = LinkedRunFollower()
+    private var linkedRun: String? { linkedFollower.runID }
     @ObservationIgnored private var isTornDown = false
     private var forcedOpenAppUntil: Date?
     private var remoteRequestID: String?
@@ -320,6 +319,7 @@ final class KeyboardController {
             history.clear()
             keptVersions = nil
             // A run boundary for the queue (and the app's agent): writes awaiting a read are not typed again.
+            hostWrites.fieldCleared()
             fieldEdits?.fieldCleared()
         }
         syncHistory()
@@ -417,6 +417,7 @@ final class KeyboardController {
         guard !isTornDown else { return }
         let decision = HostApplyDecision.decide(
             host: host, cursor: cursor, visible: isVisible, documentID: document.documentID, now: Date())
+        if case .apply = decision { updateLinkedRun(host, applies: true) } else { updateLinkedRun(host, applies: false) }
         guard case .apply = decision, let host, checkForClear() != .held else {
             stopTicker()
             #if DEBUG
@@ -425,13 +426,6 @@ final class KeyboardController {
             }
             #endif
             return
-        }
-        if host.fieldEdits == true {
-            followLinkedRun(host)
-        } else if linkedRun != nil, host.runID != linkedRun {
-            // A run without the link: the feed is nobody's any more.
-            fieldEdits?.stopPublishing()
-            linkedRun = nil
         }
         if fieldEdits != nil { return applyHostQueued(host, elapsedMs: elapsedMs, flush: flush) }
         let before = cursor
@@ -594,8 +588,7 @@ final class KeyboardController {
     private func stopFieldEdits() {
         fieldEdits?.close()
         fieldEdits = nil
-        linkedRun = nil
-        linkedSeen = []
+        linkedFollower.reset()
         pendingHostWrite = nil
         hostHeld = false
         hostWrites = HostWriteLedger()
@@ -635,7 +628,9 @@ final class KeyboardController {
         // Hold's one end-of-run insert is its own origin (the ASR lane, like the stream).
         let origin: EditOrigin = atCaret ? (delivery == .hold ? .hold : .asr) : Self.hostOrigin(planned: plan.cursor, previous: previous)
         let id = UUID()
-        hostWrites.record(id, previous: previous, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore))
+        hostWrites.record(
+            id, previous: previous, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore),
+            fieldHadText: fieldHasText)
         beginOwnEdit()
         let result = fieldEdits.write(edit, id: id, origin: origin, owner: runID, keepsCaret: true) { [weak self] outcome in
             self?.hostWrite(id, outcome)
@@ -703,20 +698,38 @@ final class KeyboardController {
 
     // MARK: Linked run (the app's cleanup agent)
 
-    /// A run the app froze with the edit queue on: the queue starts if this appearance has none, its feed goes to
-    /// `link.feed` (a resync of the field first, before any of the run's text is typed, so the app's agent can tell
-    /// the run's text from what was there), and the app's edits are taken from `link.edits`.
-    private func followLinkedRun(_ host: HostState) {
-        guard let runID = host.runID, host.target == .keyboard, host.insertAt == nil, linkedRun != runID,
-            let feed = link.fieldFeed
-        else { return }
-        if fieldEdits == nil { startFieldEdits(force: true) }
-        guard let fieldEdits else { return }
-        linkedRun = runID
-        linkedSeen = []
-        feed.follow(runID: runID)
-        fieldEdits.publishFeed { batch, window in feed.append(batch, window: window) }
-        trace?("fe.link follow")
+    /// The least time between two `link.feed` batches: the stream ticks every 33 ms, the app's agent needs a few
+    /// states a second (its outcomes go out at once).
+    static let feedInterval: Duration = .milliseconds(200)
+
+    /// Whether the host's field (its last read) holds any text: an empty read after a write into it can be a clear.
+    private var fieldHasText: Bool { !(document.contextBefore.isEmpty && document.contextAfter.isEmpty) }
+
+    /// Follows the app's linked run (`LinkedRunFollower`): a Live or Replace run the app froze with the edit queue
+    /// on starts the queue if this appearance has none (only while the host's state applies here: visible, for the
+    /// keyboard); its feed goes to `link.feed` (a resync of the field first, before any of the run's text is typed,
+    /// so the app's agent can tell the run's text from what was there), throttled, its final state at once; the
+    /// app's edits are taken from `link.edits`. Another run ends it; the app's scrub ends it without a last batch
+    /// and drops the ring, so the field's text does not come back into the App Group.
+    private func updateLinkedRun(_ host: HostState?, applies: Bool) {
+        guard let host, let feed = link.fieldFeed else { return }
+        let linked = LinkedRunFollower.isLinked(host)
+        guard applies || !linked else { return }
+        if linked, host.runID != linkedRun, fieldEdits == nil { startFieldEdits(force: true) }
+        if linked, fieldEdits == nil { return }
+        switch linkedFollower.hostChanged(host) {
+        case .none:
+            if host.isFinal, host.runID == linkedRun { fieldEdits?.flushFeed() }  // the app's stop reads it now
+        case .follow(let runID):
+            feed.follow(runID: runID)
+            fieldEdits?.publishFeed(to: { batch, window in feed.append(batch, window: window) }, minInterval: Self.feedInterval)
+            trace?("fe.link follow")
+        case .stop(let flush):
+            if flush { fieldEdits?.flushFeed() }
+            fieldEdits?.stopPublishing()
+            if !flush { feed.stopFollowing() }
+            trace?("fe.link stop scrubbed=\(flush ? 0 : 1)")
+        }
     }
 
     /// Takes the app's new edits into the queue (cleanup lane) and acknowledges them; each is done once (the link
@@ -726,7 +739,7 @@ final class KeyboardController {
         let read = feed.takeEdits(forRun: runID)
         guard !read.transactions.isEmpty else { return }
         if read.missed > 0 { trace?("fe.link missed=\(read.missed)") }
-        for transaction in read.transactions where linkedSeen.insert(transaction.id).inserted {
+        for transaction in linkedFollower.fresh(read.transactions) {
             beginOwnEdit()
             let result = fieldEdits.submit(transaction) { [weak self] outcome in self?.linkedOutcome(transaction, outcome) }
             typing.hostEdited()
@@ -974,7 +987,8 @@ final class KeyboardController {
             if !plan.ops.isEmpty, let edit = fieldEdits.caretEdit(for: plan.ops) {
                 let id = UUID()
                 hostWrites.record(
-                    id, previous: current, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore))
+                    id, previous: current, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore),
+                    fieldHadText: fieldHasText)
                 beginOwnEdit()
                 let result = fieldEdits.write(edit, id: id, origin: .asr, owner: host.runID, lane: .user, keepsCaret: true) {
                     [weak self] outcome in self?.hostWrite(id, outcome)

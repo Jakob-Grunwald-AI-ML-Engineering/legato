@@ -86,6 +86,9 @@ final class ManualTimers {
 
     var armed: Int { timers.count }
 
+    /// The test's clock, for a coordinator's `now`.
+    var clock: @MainActor () -> Duration { { [unowned self] in now } }
+
     /// Moves the clock on, firing every timer due on the way, in order.
     func advance(by delta: Duration) {
         let end = now + delta

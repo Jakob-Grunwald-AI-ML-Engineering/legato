@@ -81,4 +81,29 @@ struct HostWriteLedgerRetypeTests {
         ledger.record(b, previous: cursor(8), planned: cursor(12), expected: "hi there you")
         #expect(ledger.failed(b, cursor: cursor(12), contextBefore: "hi there") == .init(cursor: cursor(8), withdraw: []))
     }
+
+    /// The run's first chunk into an empty field is dropped by the host: the field reads empty because the write
+    /// never landed, not because it was cleared. It is rewound and typed again (no " world" without "Hello").
+    @Test func anEmptyFieldThatHeldNoTextBeforeTheWriteIsAFailedWrite() {
+        var ledger = HostWriteLedger()
+        let hello = UUID(), world = UUID()
+        ledger.record(hello, previous: cursor(0), planned: cursor(5), expected: "Hello", fieldHadText: false)
+        ledger.record(world, previous: cursor(5), planned: cursor(11), expected: "Hello world", fieldHadText: false)
+        let failure = ledger.failed(hello, cursor: cursor(11), contextBefore: "", fieldEmpty: true)
+        #expect(failure?.cursor == cursor(0))
+        #expect(failure?.kept == nil)
+        #expect(failure?.withdraw == [world])
+    }
+
+    /// ClearWatch saw the host empty the field (a send): then an empty read is the clear, also for a write that
+    /// went into an empty field.
+    @Test func aClearSeenByClearWatchKeepsAWriteIntoAnEmptyField() {
+        var ledger = HostWriteLedger()
+        let hello = UUID()
+        ledger.record(hello, previous: cursor(0), planned: cursor(5), expected: "Hello", fieldHadText: false)
+        ledger.fieldCleared()
+        let failure = ledger.failed(hello, cursor: cursor(5), contextBefore: "", fieldEmpty: true)
+        #expect(failure?.cursor == cursor(5))
+        #expect(failure?.kept == .cleared)
+    }
 }

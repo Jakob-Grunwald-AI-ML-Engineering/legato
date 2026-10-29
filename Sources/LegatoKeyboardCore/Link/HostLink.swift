@@ -35,6 +35,8 @@ public final class HostLink {
     private var appliedWaiter: (runID: String, continuation: CheckedContinuation<Bool, Never>)?
     private var appliedTimeout: Task<Void, Never>?
     private var scrub: Task<Void, Never>?
+    /// The ended run whose scrub waits for ``releaseScrub()``.
+    private var scrubHeldFor: String?
     /// The accepted start still awaiting its result. Stop invalidates it before cancelling admission.
     private var pendingStartID: String?
     private var pendingStartRequests: Set<String> = []
@@ -153,13 +155,27 @@ public final class HostLink {
     }
 
     /// The run is over: the final state goes out at once, whatever was held back is dropped. `finalText`:
-    /// the post-processed text when it differs from the trimmed `committed` text.
-    public func runEnded(committed: String, finalText: String? = nil) {
+    /// the post-processed text when it differs from the trimmed `committed` text. `holdingScrub`: the run's stop
+    /// goes on after its final state (the edit queue's linked run: the keyboard's confirmation, the agent's final
+    /// pass and its edits' outcomes, all bounded): the retention window starts at ``releaseScrub()``, so the
+    /// keyboard keeps the run, and its feed, until the stop is done.
+    public func runEnded(committed: String, finalText: String? = nil, holdingScrub: Bool = false) {
         state.phase = .idle
         state.committed = committed
         state.volatile = ""
         state.finalText = finalText
         publish()
+        cancelScrub()
+        scrubHeldFor = holdingScrub ? state.runID : nil
+        if !holdingScrub { scheduleScrub() }
+    }
+
+    /// The held stop of the run that ended last is done: its retention window starts now. Nothing when a newer
+    /// run (or insert) took the link meanwhile.
+    public func releaseScrub() {
+        guard let held = scrubHeldFor else { return }
+        scrubHeldFor = nil
+        guard state.runID == held, !isRunning else { return }
         scheduleScrub()
     }
 
@@ -219,6 +235,7 @@ public final class HostLink {
     private func cancelScrub() {
         scrub?.cancel()
         scrub = nil
+        scrubHeldFor = nil
     }
 
     /// The mic lease between runs: `until` is when it ends, nil when it is not held.

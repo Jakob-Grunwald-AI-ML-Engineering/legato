@@ -143,7 +143,7 @@ public actor CleanupAgent: FieldAgent {
     }
 
     public func conflicted(_ conflict: Conflict, for transaction: UUID) async {
-        await append(handBack(transaction, conflict: conflict, counts: true))
+        await append(handBack(transaction, conflict: conflict, counts: Self.counts(conflict)))
     }
 
     public func superseded(_ transaction: UUID, by landed: UUID) async {
@@ -253,7 +253,7 @@ public actor CleanupAgent: FieldAgent {
             fold(step, as: byUser ? .user : .other)
             return byUser ? "\n[user] \(step.expect) -> \(step.text)\n" : ""
         case .conflict(let id, let conflict):
-            return handBack(id, conflict: conflict, counts: true)
+            return handBack(id, conflict: conflict, counts: Self.counts(conflict))
         case .superseded(let id, _), .withdrawn(let id):
             return handBack(id, conflict: nil, counts: false)
         case .rebased(let text, let shift, _):
@@ -270,6 +270,11 @@ public actor CleanupAgent: FieldAgent {
             return "\n[field reset: \(reason.rawValue)]\n"
         }
     }
+
+    /// Whether a conflict goes toward giving its sentence up. `outOfWindow` does not: the queue could not map the
+    /// edit from its base (the field moved on under a long pass, a reset): no one disagreed with it, so it is
+    /// planned again from the newest field.
+    private static func counts(_ conflict: Conflict) -> Bool { conflict.reason != .outOfWindow }
 
     /// A planned edit that did not land. Returns the session note for it. Only a real conflict (`counts`) goes
     /// toward giving the sentence up; a superseded or withdrawn edit is planned again at no cost.
