@@ -110,3 +110,6 @@ if best:
     print(best[1])
 '
 }
+
+# shellcheck source-path=SCRIPTDIR source=../e2e/work-dir.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../e2e/work-dir.sh"

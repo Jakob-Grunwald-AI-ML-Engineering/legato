@@ -21,16 +21,19 @@ select_xcode
 xcodebuild -version
 
 scripts/e2e/tests/cleanup-test.sh
+scripts/e2e/tests/build-cache-test.sh
 swift test
 
 # Both apps, unsigned, against the stubs. arm64 only: the simulator slice is what local and e2e runs use.
 ensure_xcodegen
-work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/legato-gate"
+trap finish_build_cache EXIT
+prepare_build_cache gate
+work="$BUILD_WORK"
 build_app() { # build_app <project dir> <project> <destination> <extra args...>
   local dir="$1" project="$2" dest="$3"; shift 3
   (cd "$dir" && "$XCODEGEN" generate)
-  xcodebuild build -quiet -project "$dir/$project" -scheme Legato -destination "$dest" \
-    -derivedDataPath "$work/derived" -clonedSourcePackagesDirPath "$work/packages" CODE_SIGNING_ALLOWED=NO "$@"
+  run_build_command xcodebuild build -quiet -project "$dir/$project" -scheme Legato -destination "$dest" \
+    -derivedDataPath "$work/derived" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" CODE_SIGNING_ALLOWED=NO "$@"
 }
 if has_ios_app; then build_app Apps/iOS Legato.xcodeproj 'generic/platform=iOS Simulator' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES; fi
 if has_mac_app; then build_app Apps/macOS LegatoMac.xcodeproj 'generic/platform=macOS'; fi

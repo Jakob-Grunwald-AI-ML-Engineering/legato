@@ -54,3 +54,72 @@ lock_dir() { # lock_dir <path>
   proc_stamp "$$" > "$lock/owner"
 }
 unlock_dir() { rm -rf "$1.lock"; }
+
+# Mark only directories created/used by participating build scripts. Custom paths are never adopted.
+mark_build_cache() {
+  printf 'v1\n' > "$1/legato-managed"
+  touch "$1/legato-last-used"
+}
+
+# Shared local gate/release paths. CI remains cold under RUNNER_TEMP.
+prepare_build_cache() { # <gate|mac>
+  if [ -n "${CI:-}" ]; then
+    BUILD_WORK="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/legato-$1.XXXXXX")"
+    BUILD_PACKAGES="$BUILD_WORK/packages"
+    return
+  fi
+  local cache
+  cache="$(legato_cache_dir)"
+  bash scripts/dev/prune-build-caches.sh --managed-only --delete
+  BUILD_WORK="$cache/build-derived/$1-$(pwd -P | shasum | cut -c1-12)"
+  BUILD_PACKAGES="$cache/SourcePackages"
+  mkdir -p "$(dirname "$BUILD_WORK")" "$cache"
+  lock_dir "$BUILD_WORK"
+  BUILD_CACHE_LOCKED=1
+  mkdir -p "$BUILD_WORK"
+  mark_build_cache "$BUILD_WORK"
+  lock_dir "$BUILD_PACKAGES"
+  BUILD_PACKAGES_LOCKED=1
+  mkdir -p "$BUILD_PACKAGES"
+  mark_build_cache "$BUILD_PACKAGES"
+}
+finish_build_cache() {
+  if [ -n "${BUILD_PACKAGES_LOCKED:-}" ]; then
+    touch "$BUILD_PACKAGES/legato-last-used"
+    unlock_dir "$BUILD_PACKAGES"
+  fi
+  if [ -n "${BUILD_CACHE_LOCKED:-}" ]; then
+    touch "$BUILD_WORK/legato-last-used"
+    unlock_dir "$BUILD_WORK"
+    bash scripts/dev/prune-build-caches.sh --managed-only --delete
+  elif [ -n "${CI:-}" ] && [ -n "${BUILD_WORK:-}" ]; then
+    rm -rf "$BUILD_WORK"
+  fi
+}
+
+# Keep the build lease until the captured child process group has stopped and been reaped.
+stop_build_command() {
+  local i
+  [ -n "${BUILD_CHILD_PID:-}" ] || return 0
+  trap '' INT TERM
+  kill -TERM -- "-$BUILD_CHILD_PID" 2>/dev/null || true
+  for ((i=0; i<50; i++)); do
+    kill -0 "$BUILD_CHILD_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL -- "-$BUILD_CHILD_PID" 2>/dev/null || true
+  wait "$BUILD_CHILD_PID" 2>/dev/null || true
+  BUILD_CHILD_PID=""
+}
+run_build_command() {
+  local status=0
+  trap 'stop_build_command; exit 130' INT
+  trap 'stop_build_command; exit 143' TERM
+  set -m
+  "$@" &
+  BUILD_CHILD_PID=$!
+  set +m
+  wait "$BUILD_CHILD_PID" || status=$?
+  BUILD_CHILD_PID=""
+  return "$status"
+}
