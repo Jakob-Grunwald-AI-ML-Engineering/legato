@@ -44,6 +44,7 @@ let package = Package(
         .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
         .library(name: "LegatoVocabulary", targets: ["LegatoVocabulary"]),
+        .library(name: "LegatoFieldEdit", targets: ["LegatoFieldEdit"]),
     ],
     dependencies: stubDeps ? [] : [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
@@ -57,8 +58,13 @@ let package = Package(
         .target(name: "LegatoCoreML", dependencies: ["LegatoCore", "LegatoModels", "LegatoANEMLL"], resources: [.process("Resources")]),
         .testTarget(name: "LegatoCoreMLTests", dependencies: ["LegatoCoreML", "LegatoCore", "LegatoModels"]),
         .testTarget(name: "LegatoCoreTests", dependencies: ["LegatoCore"]),
-        // The keyboard extension links only this (Foundation only; it must not depend on LegatoCore).
-        .target(name: "LegatoKeyboardCore"),
+        // The field edit queue: position-mapped edits over a shadow document, lanes, conflicts and the change
+        // feed. Foundation only and no dependencies, so the keyboard, the Mac writer and the app services share it.
+        .target(name: "LegatoFieldEdit"),
+        .testTarget(name: "LegatoFieldEditTests", dependencies: ["LegatoFieldEdit"], resources: [.copy("Fixtures")]),
+        // The keyboard extension links only this and LegatoFieldEdit (Foundation only; it must not depend on
+        // LegatoCore).
+        .target(name: "LegatoKeyboardCore", dependencies: ["LegatoFieldEdit"]),
         .testTarget(name: "LegatoKeyboardCoreTests", dependencies: ["LegatoKeyboardCore"]),
         // The personal vocabulary (Foundation and NaturalLanguage only; like the keyboard core, it must not
         // depend on LegatoCore, so the keyboard extension can link it).
@@ -135,7 +141,7 @@ let package = Package(
             name: "LegatoAppServices",
             dependencies: [
                 "LegatoCore", "LegatoModels", "LegatoEngines", "LegatoFluidAudio", "LegatoCoreML", "LegatoPostProcessing",
-                "LegatoAppleSpeech", "LegatoAudio", "LegatoMeetings", "LegatoClaude", "LegatoVocabulary",
+                "LegatoAppleSpeech", "LegatoAudio", "LegatoMeetings", "LegatoClaude", "LegatoVocabulary", "LegatoFieldEdit",
             ]
         ),
         .testTarget(
@@ -145,7 +151,7 @@ let package = Package(
                 "LegatoEngines", "LegatoMeetings", "LegatoClaude", "LegatoFluidAudio",
             ]
         ),
-        .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
+        .target(name: "LegatoMac", dependencies: ["LegatoCore", "LegatoFieldEdit"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
         // Meeting notes: a multi-stream session, its store, recovery, echo de-duplication and export. Core only.
         .target(name: "LegatoMeetings", dependencies: ["LegatoCore"]),

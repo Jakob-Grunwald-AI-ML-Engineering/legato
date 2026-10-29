@@ -1,0 +1,150 @@
+[
+  {
+    "id": "P01",
+    "kind": "middle",
+    "old": "Send teh report while the meeting continues with no change to the remaining facts.",
+    "new": "Send the report while the meeting continues with no change to the remaining facts.",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " report while the meeting continues with no change to the remaining facts."
+  },
+  {
+    "id": "P02",
+    "kind": "insert",
+    "old": "Send report while the meeting continues with no change to the remaining facts.",
+    "new": "Send the report while the meeting continues with no change to the remaining facts.",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": "report while the meeting continues with no change to the remaining facts."
+  },
+  {
+    "id": "P03",
+    "kind": "delete",
+    "old": "Send the the report while the meeting continues with no change to the remaining facts.",
+    "new": "Send the report while the meeting continues with no change to the remaining facts.",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": "the report while the meeting continues with no change to the remaining facts."
+  },
+  {
+    "id": "P04",
+    "kind": "repeat",
+    "old": "go go go home today",
+    "new": "go go stay home today",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " home today"
+  },
+  {
+    "id": "P05",
+    "kind": "unicode",
+    "old": "Café and café remain",
+    "new": "Café and café remain",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " and café remain"
+  },
+  {
+    "id": "P06",
+    "kind": "emoji",
+    "old": "Keep 👩🏽‍💻 teh 🇩🇪 flag and 👨‍👩‍👧‍👦",
+    "new": "Keep 👩🏽‍💻 the 🇩🇪 flag and 👨‍👩‍👧‍👦",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " 🇩🇪 flag and 👨‍👩‍👧‍👦"
+  },
+  {
+    "id": "P07",
+    "kind": "newer",
+    "old": "send teh report",
+    "new": "send the report",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " report",
+    "newer": " and keep 42 unchanged"
+  },
+  {
+    "id": "P08",
+    "kind": "settling",
+    "old": "hello wor",
+    "new": "hello world",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": "",
+    "subcases": [
+      "volatile-change",
+      "context-delayed",
+      "context-timeout"
+    ]
+  },
+  {
+    "id": "P09",
+    "kind": "ordering",
+    "old": "send teh report",
+    "new": "send the report",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " report",
+    "subcases": [
+      "newest",
+      "duplicate",
+      "older",
+      "out-of-order"
+    ]
+  },
+  {
+    "id": "P10",
+    "kind": "manual",
+    "old": "send teh report",
+    "new": "send the report",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " report",
+    "subcases": [
+      "text-edit",
+      "caret",
+      "selection",
+      "focus",
+      "document"
+    ]
+  },
+  {
+    "id": "P11",
+    "kind": "sent",
+    "old": "hello world ",
+    "new": "Hello world. ",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": "",
+    "newer": "new message ",
+    "subcases": [
+      "cleared",
+      "new-raw",
+      "sent-revision"
+    ]
+  },
+  {
+    "id": "P12",
+    "kind": "fault",
+    "old": "send teh report suffix",
+    "new": "send the report suffix",
+    "prefix": "ANCHOR | ",
+    "outside": " | OUTSIDE",
+    "unchangedSuffix": " report suffix",
+    "subcases": [
+      "ignored",
+      "truncated",
+      "partial",
+      "throw",
+      "read-fail",
+      "read-delayed"
+    ],
+    "boundaries": [
+      "before-move",
+      "after-move",
+      "after-delete",
+      "after-insert",
+      "after-restore"
+    ]
+  }
+]
