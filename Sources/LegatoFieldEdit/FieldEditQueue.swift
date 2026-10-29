@@ -133,15 +133,29 @@ public struct FieldEditQueue: Sendable {
 
     // MARK: Host reads
 
-    /// Checks the host read after issued writes against the prediction.
+    /// Checks the host read after issued writes against the prediction, in one step: every write up to the last
+    /// prediction the read matches is confirmed (`applied`); the first diverging write and every write after it
+    /// fail with `verifyFailed`, and the shadow document returns to what the host shows. A read matching no
+    /// prediction fails them all and is then observed against the last confirmed field.
     public mutating func settle(_ snapshot: FieldSnapshot) {
         guard !unverified.isEmpty else { return observe(snapshot) }
-        if byteEqual(snapshot.window, document.window) {
-            for item in unverified { events.append(.applied(item.write.id, version: item.write.version)) }
-            unverified = []
-            confirmedWindow = document.window
-            document.caret = snapshot.caret
+        let predictions = [confirmedWindow] + unverified.map(\.window)
+        let matched = predictions.lastIndex { byteEqual($0, snapshot.window) }
+        let confirmed = matched ?? 0
+        for item in unverified[..<confirmed] {
+            events.append(.applied(item.write.id, version: item.write.version))
+            feed.append(.applied(item.write.id, origin: item.write.origin, steps: item.write.steps, version: item.write.version))
         }
+        for item in unverified[confirmed...] { conflict(item.write.id, Conflict(.verifyFailed)) }
+        unverified = []
+        // Undo what did not land; the feed never showed it, so this step stays off the feed.
+        if let undo = ContiguousPatch.between(document.window, predictions[confirmed], at: 0) {
+            document.caret = StepMap(undo).map(position: document.caret)
+            land(undo, transaction: nil, owner: nil, byUser: false)
+        }
+        confirmedWindow = document.window
+        if matched == nil { return observe(snapshot) }
+        document.caret = snapshot.caret
     }
 
     /// A host update the queue did not write: a caret move, a foreign change, or a window it cannot align.
@@ -155,6 +169,7 @@ public struct FieldEditQueue: Sendable {
         land(step, transaction: nil, owner: nil, byUser: true)
         confirmedWindow = document.window
         document.caret = snapshot.caret
+        feed.append(.foreign(step, byUser: true, version: document.version))
     }
 
     public mutating func reset(_ snapshot: FieldSnapshot, reason: ResetReason) {}
@@ -215,6 +230,7 @@ public struct FieldEditQueue: Sendable {
 
     private mutating func conflict(_ id: UUID, _ conflict: Conflict) {
         events.append(.conflict(id, conflict))
+        feed.append(.conflict(id, conflict))
     }
 }
 
