@@ -12,6 +12,8 @@ teardown() {
 }
 trap teardown EXIT
 export LEGATO_CACHE_DIR="$T/cache" LEGATO_DERIVED_DATA="$T/dd" TMPDIR="$T/tmp"
+# The default prune also scans agent scratchpads and test caches: keep every root inside the fixture.
+export LEGATO_SCRATCH_ROOT="$T/claude" LEGATO_SCRATCH_PROJECT_GLOB='-Users-x-Documents-legato*' LEGATO_TESTS_CACHE="$T/LegatoTests"
 mkdir -p "$TMPDIR" "$LEGATO_CACHE_DIR/build-derived"
 source "$ROOT/scripts/e2e/work-dir.sh"
 fixture() {
@@ -48,6 +50,82 @@ older_line="$(grep -n 'build-derived/older$' "$T/cap.log" | cut -d: -f1)"
 newer_line="$(grep -n 'build-derived/newer$' "$T/cap.log" | cut -d: -f1)"
 [ "$older_line" -lt "$newer_line" ] || { echo 'FAIL cap did not evict oldest first'; exit 1; }
 echo 'PASS cap evicts inactive caches and preserves active cache'
+
+# --- Unmanaged/legacy output: agent scratchpads, TMPDIR legato-* dirs, unmarked cache dirs, LegatoTests. ---
+u_fails=0
+ucheck() { if [ "$2" = ok ]; then echo "PASS $1"; else echo "FAIL $1 ($2)"; u_fails=$((u_fails+1)); fi; }
+OLD=202001010000
+PRJ="$LEGATO_SCRATCH_ROOT/-Users-x-Documents-legato/sess/scratchpad"
+OTHER="$LEGATO_SCRATCH_ROOT/-Users-x-Documents-other/sess/scratchpad"
+dd_fixture() { # <dir> <touch -t stamp or "now">
+  mkdir -p "$1/ModuleCache.noindex" "$1/Build"
+  head -c 1048576 /dev/zero > "$1/Build/blob"
+  : > "$1/ModuleCache.noindex/f"
+  if [ "$2" != now ]; then find "$1" -exec touch -t "$2" {} +; fi
+}
+dd_fixture "$PRJ/xcb-old" $OLD
+dd_fixture "$PRJ/nested/xcb-new" now
+dd_fixture "$PRJ/xcb-claimed" $OLD
+dd_fixture "$PRJ/xcb-locked" $OLD
+dd_fixture "$OTHER/xcb-old" $OLD
+mkdir -p "$PRJ/SourcePackages/checkouts" "$PRJ/notes"
+: > "$PRJ/SourcePackages/workspace-state.json"; : > "$PRJ/notes/keep.txt"
+find "$PRJ/SourcePackages" "$PRJ/notes" -exec touch -t $OLD {} +
+mkdir "$PRJ/xcb-claimed.lock"; proc_stamp "$$" > "$PRJ/xcb-claimed.lock/owner"
+claim_cache_lock "$PRJ/xcb-locked" 0   # kernel-held claim, no .lock dir
+mkdir -p "$TMPDIR/legato-gate.OLD1" "$TMPDIR/legato-xcodegen-1" "$TMPDIR/unrelated-old" "$TMPDIR/legato-mac.NEW1"
+: > "$TMPDIR/legato-gate.OLD1/f"; : > "$TMPDIR/legato-xcodegen-1/f"; : > "$TMPDIR/unrelated-old/f"
+find "$TMPDIR/legato-gate.OLD1" "$TMPDIR/legato-xcodegen-1" "$TMPDIR/unrelated-old" -exec touch -t $OLD {} +
+mkdir -p "$LEGATO_CACHE_DIR/phone-derived/Build" "$LEGATO_TESTS_CACHE/Models/m" "$LEGATO_TESTS_CACHE/leftover"
+: > "$LEGATO_CACHE_DIR/phone-derived/Build/f"; : > "$LEGATO_TESTS_CACHE/Models/m/f"; : > "$LEGATO_TESTS_CACHE/leftover/f"
+find "$LEGATO_CACHE_DIR/phone-derived" "$LEGATO_TESTS_CACHE" -exec touch -t $OLD {} +
+# A symlinked session dir must not lead the pruner outside the scratch root.
+OUTSIDE="$T/outside-root"; dd_fixture "$OUTSIDE/scratchpad/DerivedData" $OLD
+ln -s "$OUTSIDE" "$LEGATO_SCRATCH_ROOT/-Users-x-Documents-legato/linked-sess"
+
+"$ROOT/scripts/dev/prune-build-caches.sh" > "$T/udry.log"
+if [ -d "$PRJ/xcb-old" ] && [ -d "$TMPDIR/legato-gate.OLD1" ] && [ -d "$LEGATO_CACHE_DIR/phone-derived" ] && [ -d "$LEGATO_TESTS_CACHE/leftover" ]; then
+  ucheck 'dry run deletes nothing unmanaged' ok; else ucheck 'dry run deletes nothing unmanaged' 'something removed'; fi
+grep -q "expired: .*$PRJ/xcb-old$" "$T/udry.log" && ucheck 'dry run lists old scratchpad DerivedData' ok || ucheck 'dry run lists old scratchpad DerivedData' 'not listed'
+
+"$ROOT/scripts/dev/prune-build-caches.sh" --delete > "$T/udel.log"
+[ ! -d "$PRJ/xcb-old" ] && ucheck 'old scratchpad DerivedData is pruned' ok || ucheck 'old scratchpad DerivedData is pruned' 'retained'
+[ ! -d "$PRJ/SourcePackages" ] && ucheck 'old scratchpad package clones are pruned' ok || ucheck 'old scratchpad package clones are pruned' 'retained'
+[ -d "$PRJ/nested/xcb-new" ] && ucheck 'recent scratchpad DerivedData is kept' ok || ucheck 'recent scratchpad DerivedData is kept' 'removed'
+[ -d "$PRJ/xcb-claimed" ] && ucheck 'old DerivedData with a live .lock owner is kept' ok || ucheck 'old DerivedData with a live .lock owner is kept' 'removed'
+[ -d "$PRJ/xcb-locked" ] && ucheck 'old DerivedData with a kernel-held claim is kept' ok || ucheck 'old DerivedData with a kernel-held claim is kept' 'removed'
+release_cache_claim "$PRJ/xcb-locked"
+[ -d "$OTHER/xcb-old" ] && ucheck 'other project scratchpad is never touched' ok || ucheck 'other project scratchpad is never touched' 'removed'
+[ -d "$OUTSIDE/scratchpad/DerivedData" ] && ucheck 'symlinked session dir is never followed out of the scratch root' ok || ucheck 'symlinked session dir is never followed out of the scratch root' 'removed'
+[ -f "$PRJ/notes/keep.txt" ] && ucheck 'non-build files in a legato scratchpad are kept' ok || ucheck 'non-build files in a legato scratchpad are kept' 'removed'
+[ ! -d "$TMPDIR/legato-gate.OLD1" ] && ucheck 'old TMPDIR legato-gate dir is pruned' ok || ucheck 'old TMPDIR legato-gate dir is pruned' 'retained'
+[ -d "$TMPDIR/legato-mac.NEW1" ] && [ -d "$TMPDIR/legato-xcodegen-1" ] && [ -d "$TMPDIR/unrelated-old" ] && ucheck 'recent legato-*, xcodegen tool cache and non-legato TMPDIR dirs are kept' ok || ucheck 'recent legato-*, xcodegen tool cache and non-legato TMPDIR dirs are kept' 'removed'
+[ ! -d "$LEGATO_CACHE_DIR/phone-derived" ] && ucheck 'old unmarked cache dir is pruned' ok || ucheck 'old unmarked cache dir is pruned' 'retained'
+[ ! -d "$LEGATO_TESTS_CACHE/leftover" ] && [ -d "$LEGATO_TESTS_CACHE/Models" ] && ucheck 'LegatoTests leftovers are pruned, downloaded Models kept' ok || ucheck 'LegatoTests leftovers are pruned, downloaded Models kept' 'wrong'
+
+# Cap: oldest unclaimed first; entries inside the grace window stay.
+dd_fixture "$PRJ/cap-older" "$(date -v-30H +%Y%m%d%H%M)"
+dd_fixture "$PRJ/cap-newer" "$(date -v-10H +%Y%m%d%H%M)"
+dd_fixture "$PRJ/cap-fresh" now
+LEGATO_CACHE_MAX_KB=0 "$ROOT/scripts/dev/prune-build-caches.sh" --delete > "$T/ucap.log"
+if [ ! -d "$PRJ/cap-older" ] && [ ! -d "$PRJ/cap-newer" ] && [ -d "$PRJ/cap-fresh" ]; then ucheck 'cap prunes unmanaged output but keeps the grace-window entry' ok
+else ucheck 'cap prunes unmanaged output but keeps the grace-window entry' 'wrong set'; fi
+lo="$(grep -n 'cap-older$' "$T/ucap.log" | cut -d: -f1)"; ln="$(grep -n 'cap-newer$' "$T/ucap.log" | cut -d: -f1)"
+{ [ -n "$lo" ] && [ -n "$ln" ] && [ "$lo" -lt "$ln" ]; } && ucheck 'unmanaged cap evicts oldest first' ok || ucheck 'unmanaged cap evicts oldest first' "order ${lo:-none}/${ln:-none}"
+
+# Report: per-category totals against the budget, nothing deleted.
+"$ROOT/scripts/dev/prune-build-caches.sh" --report > "$T/report.log"
+scratch_kb="$(awk '/scratchpad build output/ {print $1}' "$T/report.log")"
+{ [ -n "$scratch_kb" ] && [ "$scratch_kb" -ge 1024 ]; } && ucheck 'report shows scratchpad build output size' ok || ucheck 'report shows scratchpad build output size' "kb=${scratch_kb:-none}"
+for label in 'agent scratchpads' 'TMPDIR legato-' 'legato cache' 'LegatoTests' 'Xcode DerivedData' 'Total' 'Budget'; do
+  grep -q "$label" "$T/report.log" && ucheck "report has '$label' line" ok || ucheck "report has '$label' line" missing
+done
+[ -d "$PRJ/xcb-claimed" ] && [ -d "$OTHER/xcb-old" ] && ucheck 'report deletes nothing' ok || ucheck 'report deletes nothing' removed
+# Default project glob derives from HOME (-Users-x-Documents-legato*).
+def_kb="$(env -u LEGATO_SCRATCH_PROJECT_GLOB HOME=/Users/x "$ROOT/scripts/dev/prune-build-caches.sh" --report | awk '/agent scratchpads/ {print $1}')"
+{ [ -n "$def_kb" ] && [ "$def_kb" -gt 0 ]; } && ucheck 'default project glob matches the legato project dir' ok || ucheck 'default project glob matches the legato project dir' "kb=${def_kb:-none}"
+rm -rf "$PRJ"/xcb-claimed* "$PRJ"/xcb-locked*
+[ "$u_fails" = 0 ] || { echo "$u_fails unmanaged-prune checks failed"; exit 1; }
 # Exercise the real mac-build entry point with only the external Xcode tools replaced.
 mkdir -p "$T/bin"
 cat > "$T/bin/xcodegen" <<'STUB'
