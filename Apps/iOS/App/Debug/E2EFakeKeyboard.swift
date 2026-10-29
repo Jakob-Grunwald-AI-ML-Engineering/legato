@@ -4,7 +4,8 @@ import LegatoKeyboardCore
 
 /// Stands in for the keyboard extension in the simulator end-to-end run, over the same App Group
 /// values and Darwin notes: it publishes presence, sends requests (and the URL the Link would open),
-/// and applies the streamed text to an in-memory document with the real `ProxyEditPlanner`,
+/// and applies the streamed text to an in-memory document through the real `TypewriterReveal` (ticked like
+/// the keyboard's, so the text arrives progressively),
 /// reporting `link.applied`. Debug builds only.
 @MainActor
 final class E2EFakeKeyboard {
@@ -18,6 +19,10 @@ final class E2EFakeKeyboard {
     private let documentID = "e2e-document"
     private let store: LinkStore? = UserDefaultsLinkStore().map(LinkStore.init)
     private var cursor: AppliedCursor?
+    private var reveal = TypewriterReveal()
+    private var ticker: Task<Void, Never>?
+    /// Same cadence as `KeyboardController.tickInterval`.
+    private static let tickInterval = Duration.milliseconds(33)
     private var visible = false
     private var presenceTask: Task<Void, Never>?
     private var observers: [DarwinObserver] = []
@@ -134,11 +139,18 @@ final class E2EFakeKeyboard {
         ]
     }
 
-    private func hostDidChange() {
+    private func hostDidChange() { applyHost() }
+
+    /// Mirrors `KeyboardController.applyHost`: a host update moves the reveal's target, the ticker (with
+    /// `elapsedMs`, the time since its last tick) reveals it.
+    private func applyHost(elapsedMs: Double = 0) {
         guard visible, applies, let store,
               let state = store.read(HostState.self, forKey: LinkChannel.Key.host)
-        else { return }
-        let plan = ProxyEditPlanner.plan(state: state, cursor: cursor, contextBefore: document, documentID: documentID)
+        else { return stopTicker() }
+        let before = cursor
+        let plan = reveal.plan(
+            state: state, cursor: cursor, contextBefore: document, documentID: documentID,
+            animated: true, elapsedMs: elapsedMs)
         for op in plan.ops {
             switch op {
             case .deleteBackward(let count): document.removeLast(min(count, document.count))
@@ -146,10 +158,35 @@ final class E2EFakeKeyboard {
             }
         }
         cursor = plan.cursor
-        guard !plan.ops.isEmpty || plan.cursor?.finalApplied == true, let applied = plan.cursor else { return }
+        startTickerIfNeeded()
+        if elapsedMs > 0, !plan.ops.isEmpty { E2E.log("kbd.reveal tick") }
+        guard plan.cursor != before || !plan.ops.isEmpty, let applied = plan.cursor,
+              !plan.ops.isEmpty || applied.finalApplied else { return }
         store.write(applied, forKey: LinkChannel.Key.applied)
         DarwinObserver.post(LinkChannel.Note.applied)
         E2E.log("kbd.apply final=\(applied.finalApplied ? 1 : 0) doc=\(E2E.quote(document))")
+    }
+
+    private func startTickerIfNeeded() {
+        guard reveal.needsTicks, visible else { return stopTicker() }
+        guard ticker == nil else { return }
+        ticker = Task { [weak self] in
+            let clock = ContinuousClock()
+            var last = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.tickInterval)
+                guard !Task.isCancelled, let self else { return }
+                let now = clock.now
+                let parts = last.duration(to: now).components
+                last = now
+                self.applyHost(elapsedMs: Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15)
+            }
+        }
+    }
+
+    private func stopTicker() {
+        ticker?.cancel()
+        ticker = nil
     }
 }
 #endif

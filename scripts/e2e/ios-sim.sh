@@ -717,6 +717,8 @@ scenario_p() {
   assert_eq "result offers the transcript" "$TEXT" "$(log_field "activity.result phase=result" tail)"
   trigger result-insert
   wait_log "e2e result-insert.done" 10
+  wait_log "e2e kbd.apply final=1" 10   # the typewriter reveal has finished
+  assert_log "typed through TypewriterReveal ticks" "kbd.reveal tick"
   assert_eq "keyboard field == script" "$TEXT" "$(log_field_last "kbd.apply final=1" doc)"
   assert_eq "explicit insert publishes exactly the transcript" "$TEXT" "$(log_field_last "link.host phase=idle final=1" committed)"
   assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
@@ -777,6 +779,7 @@ scenario_k() {
   assert_no_log "first result was not auto inserted" "kbd.apply"
   trigger result-insert
   wait_log "e2e result-insert.done" 10
+  wait_log "e2e kbd.apply final=1" 10   # the typewriter reveal has finished before the next run
   run_once 2
   assert_eq "second result waits for Insert" "$TEXT" "$(log_field_last "kbd.apply final=1" doc)"
   trigger result-insert
@@ -789,6 +792,7 @@ scenario_k() {
   assert_count "nothing released between the runs" "session.deactivate" 0
   assert_count "an activity per run" "activity.request phase=starting" 2
   assert_eq "history has both entries" "2" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  wait_log_n "e2e kbd.apply final=1" 2 10   # the typewriter reveal has finished
   assert_eq "keyboard field == script twice" "$TEXT $TEXT" "$(log_field_last "kbd.apply final=1" doc)"
   assert_log "lease published (remote start allowed)" "lease=1 accepts=1"
   trigger kbd-request-end-keep-alive
@@ -835,6 +839,7 @@ scenario_m() {
   assert_count "stop acked accepted too" "kbd.ack result=accepted" 2
   assert_count "still one session" "session.make" 1
   assert_count "mic armed once" "audio.start" 1
+  wait_log_n "e2e kbd.apply final=1" 2 10   # the typewriter reveal has finished
   assert_eq "keyboard field == script twice" "$TEXT $TEXT " "$(log_field_last "kbd.apply final=1" doc)"
 
   SCENARIO="m. remote start without a lease"
@@ -1043,6 +1048,7 @@ scenario_n() {
   trigger kbd-request-stop
   wait_log "e2e outcome kind=stopped" 10
   sleep 0.5
+  wait_log "e2e kbd.apply final=1" 10   # the typewriter reveal has finished
   assert_eq "keyboard field == script" "$TEXT " "$(log_field "kbd.apply final=1" doc)"
   assert_eq "final link.host committed == script" "$TEXT " "$(log_field "link.host phase=idle final=1" committed)"
   assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"

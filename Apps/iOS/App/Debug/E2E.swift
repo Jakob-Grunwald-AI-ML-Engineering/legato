@@ -45,7 +45,7 @@ import os
 /// the audio session sends on an interruption, so the real observer handles it.
 ///
 /// The fake keyboard (`E2EFakeKeyboard`) stands in for the keyboard extension: it publishes presence,
-/// sends requests, and applies the streamed text with the real `ProxyEditPlanner`. Commands
+/// sends requests, and applies the streamed text through the real `TypewriterReveal` (ticked like the keyboard). Commands
 /// `kbd-visible`, `kbd-hidden`, `kbd-request-start|stop|end-keep-alive`, `kbd-hop-arm` (the mic key with no
 /// lease: the arm request, then the URL), `kbd-hop-arm-url-first` (the URL, then the request),
 /// `kbd-hop-start` (a start the host answered with `hop`, then its URL), `kbd-forged-url` (an arm URL no request backs).
