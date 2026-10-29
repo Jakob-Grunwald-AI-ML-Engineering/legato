@@ -104,6 +104,9 @@ public final class FieldWriter {
     private var spanStart: Int?
     /// Streaming live only: tentative text currently shown in the field right after `written`.
     private var tentative = ""
+    /// Tentative text an agent step swallowed into `written` (a step across the edge): the next commit starts with
+    /// it, and it is not written again.
+    private var swallowed = ""
     /// A write was attempted whose landing could not be verified (the readback failed).
     private var uncertainWrite = false
     /// What the first write replaced: `replacedText` is nil when the selection could not be read.
@@ -371,6 +374,7 @@ public final class FieldWriter {
         } else if lower >= edge {
             tentative = text(whole[edge..<lower]) + step.text + text(whole[upper...])
         } else {
+            swallowed = text(whole[edge..<upper])
             written = text(whole[..<lower]) + step.text
             tentative = text(whole[upper...])
             absorbed = true
@@ -430,6 +434,14 @@ public final class FieldWriter {
         guard let target else { return }
         var delta = delta
         var newTentative = newTentative
+        // A step took the start of the tentative text into `written`: the commit of that text only adds the rest.
+        var kept = 0
+        if !swallowed.isEmpty, !delta.isEmpty {
+            if delta.hasPrefix(swallowed) {
+                kept = swallowed.count
+                delta = String(delta.dropFirst(kept))
+            }
+        }
         if written.isEmpty {
             let lead = delta.prefix(while: \.isWhitespace).count
             delta = String(delta.dropFirst(lead))
@@ -437,7 +449,10 @@ public final class FieldWriter {
             if delta.isEmpty { newTentative = String(newTentative.drop(while: \.isWhitespace)) }
         }
         let insertion = delta + newTentative
-        if delta.isEmpty, newTentative == tentative { return } // nothing changes
+        if delta.isEmpty, newTentative == tentative { // nothing changes in the field
+            if kept > 0 { writtenRaw += kept; swallowed = "" }
+            return
+        }
         if insertion.isEmpty, tentative.isEmpty { return } // never delete a selection for nothing
         guard target.isFocused() else { return degrade(.focusLost) }
 
@@ -503,7 +518,8 @@ public final class FieldWriter {
         }
         spanStart = start
         written += delta
-        writtenRaw += delta.count
+        writtenRaw += kept + delta.count
+        if !delta.isEmpty || kept > 0 { swallowed = "" }
         tentative = newTentative
     }
 

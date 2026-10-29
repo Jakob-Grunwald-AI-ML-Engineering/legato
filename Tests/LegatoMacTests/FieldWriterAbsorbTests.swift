@@ -53,4 +53,19 @@ import Testing
         writer.absorb(EditStep(span: Span(location: 9, length: 3), text: "cat", expect: "cow"))
         #expect(writer.degradeReason == .drift)
     }
+
+    @Test func aPatchAcrossTheEdgeDoesNotDuplicateTheTentativeTextItSwallowedWhenItIsCommitted() {
+        let field = FakeTextTarget()
+        let writer = FieldWriter(target: field, mode: .streamLive)
+        writer.apply(.commit(delta: "A B. "))
+        writer.apply(.replaceVolatile("C D"))
+        let target = span(of: "B. C", in: field)
+        field.externalEdit(UTF16Range(location: target.location, length: target.length), with: "b; c")
+        writer.absorb(EditStep(span: target, text: "b; c", expect: "B. C"))
+        #expect(writer.degradeReason == nil)
+
+        writer.apply(.commit(delta: "C D"))
+        #expect(writer.degradeReason == nil)
+        #expect(field.string == "A b; c D")
+    }
 }

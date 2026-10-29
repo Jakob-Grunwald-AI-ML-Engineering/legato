@@ -162,6 +162,54 @@ private struct GatedAgent: FieldAgent {
         #expect(await rig.run.finish().agentAbsent == false)
     }
 
+    @Test(.timeLimit(.minutes(1))) func aPresentButBusyAgentIsWaitedForPastTheCapAndItsWorkLands() async {
+        let session = ScriptedSession(replies: [ScriptedSession.edits((1, "Send the report."))])
+        let cleanup = CleanupAgent(session: session, options: .init(owner: "run"))
+        let gate = Gate()
+        let target = FakeTextTarget()
+        let run = FieldEditRun(
+            target: target, owner: "run",
+            agent: FieldRunAgent(
+                GatedAgent(base: cleanup, gate: gate), replan: { await cleanup.replan() }, finish: { await cleanup.finish() }),
+            agentWait: 0.05)!
+        let writer = FieldWriter(target: target, channel: run.channel)
+        run.attach(writer: writer)
+        run.start()
+        writer.apply(.commit(delta: "Send teh report."))
+        run.textChanged()
+
+        let finishing = Task { await run.finish() }
+        try? await Task.sleep(for: .milliseconds(300))  // well past the cap: the agent is there, only busy
+        await gate.open()
+        let outcome = await finishing.value
+        #expect(outcome.agentAbsent == false)
+        #expect(outcome.unapplied.isEmpty)
+        #expect(target.string == "Send the report.")
+    }
+
+    @Test(.timeLimit(.minutes(1))) func anAgentArrivingAfterTheRunClosedTouchesNothing() async {
+        let session = ScriptedSession(replies: [ScriptedSession.edits((1, "Send the report."))])
+        let gate = Gate()
+        let target = FakeTextTarget("Send teh report.")
+        let run = FieldEditRun(
+            target: target, owner: "run",
+            agent: FieldRunAgent(deferred: {
+                await gate.wait()
+                let cleanup = CleanupAgent(session: session, options: .init(owner: "run"))
+                return FieldRunAgent(cleanup, replan: { await cleanup.replan() }, finish: { await cleanup.finish() })
+            }), agentWait: 0.05)!
+        let writer = FieldWriter(target: target, channel: run.channel)
+        run.attach(writer: writer)
+        run.start()
+        #expect(await run.finish().agentAbsent)
+
+        await gate.open()
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(await session.appended.isEmpty)
+        #expect(await session.requests.isEmpty)
+        #expect(target.string == "Send teh report.")
+    }
+
     // MARK: Live
 
     @Test(.timeLimit(.minutes(1))) func aDeferredAgentCleansTextThatLandedBeforeItWasMade() async {

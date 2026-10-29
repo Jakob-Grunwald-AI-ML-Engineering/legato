@@ -1,5 +1,6 @@
 import Foundation
 import LegatoFieldEdit
+import Synchronization
 
 /// What ``FieldEditRun`` needs of the run's agent (the cleanup agent in the apps): the ``FieldAgent`` calls plus
 /// the two entry points beyond them. Closures, so this target does not depend on the agent's module.
@@ -12,34 +13,43 @@ public struct FieldRunAgent: Sendable {
     var finish: @Sendable () async -> [EditTransaction]
     /// Whether there is an agent after all (a deferred one may turn out missing). Only asked once it was awaited.
     var available: @Sendable () async -> Bool = { true }
+    /// The run is over: an agent that is made after this touches nothing (a deferred one drops every later call).
+    var retire: @Sendable () -> Void = {}
 
     /// An agent that is made in the background (its model session may still be warming): every call waits for
     /// `make`, in the order the run makes them. When `make` returns nil there is no agent after all: the run's text
     /// stays as the engine heard it.
     public init(deferred make: @escaping @Sendable () async -> FieldRunAgent?) {
         let made = Task { await make() }
+        let retired = Mutex(false)
+        /// The agent, unless there is none or the run is over by the time it is there.
+        @Sendable func agent() async -> FieldRunAgent? {
+            let agent = await made.value
+            return retired.withLock { $0 } ? nil : agent
+        }
         consume = { batch in
-            guard let agent = await made.value else { return [] }
+            guard let agent = await agent() else { return [] }
             return await agent.consume(batch)
         }
         tentative = { length in
-            if let agent = await made.value { await agent.tentative(length) }
+            if let agent = await agent() { await agent.tentative(length) }
         }
         conflicted = { conflict, id in
-            if let agent = await made.value { await agent.conflicted(conflict, id) }
+            if let agent = await agent() { await agent.conflicted(conflict, id) }
         }
         superseded = { id, by in
-            if let agent = await made.value { await agent.superseded(id, by) }
+            if let agent = await agent() { await agent.superseded(id, by) }
         }
         replan = {
-            guard let agent = await made.value else { return [] }
+            guard let agent = await agent() else { return [] }
             return await agent.replan()
         }
         finish = {
-            guard let agent = await made.value else { return [] }
+            guard let agent = await agent() else { return [] }
             return await agent.finish()
         }
         available = { await made.value != nil }
+        retire = { retired.withLock { $0 = true } }
     }
 
     public init(
@@ -162,12 +172,17 @@ public final class FieldEditRun {
     }
 
     private func begin(_ agent: FieldRunAgent, with first: FeedBatch) async {
+        guard !closed else { return finishedBegin() }
         let made = await agent.consume(first)
         if !closed {
             submit(made)
             executor.drain()
             absorbLanded()
         }
+        finishedBegin()
+    }
+
+    private func finishedBegin() {
         pumping = false
         if !wakeQueued { resumeIdle() }
     }
@@ -197,19 +212,19 @@ public final class FieldEditRun {
             return Outcome(unapplied: [])
         }
         wakes?.finish()
-        if let consumer, !(await Self.completes(consumer, within: agentWait)) {
-            // Still warming: the agent is treated as absent. Whatever it does later changes nothing (closed).
-            consumer.cancel()
-            self.consumer = nil
-            close()
+        // Only the wait for the agent to exist is capped. Once it is there, its running pass and its final pass
+        // are waited for (each bounded by the cleanup time limit): a busy agent is not an absent one.
+        guard await Self.exists(agent, within: agentWait) == true else {
+            // Still warming, or none: the agent is treated as absent. Whatever it does later changes nothing
+            // (closed), and any edit it held is taken back before the caller cleans the text another way.
+            consumer?.cancel()
+            consumer = nil
+            cancel()
             return Outcome(unapplied: [], agentAbsent: true)
         }
+        await consumer?.value
         consumer = nil
         wakeQueued = false
-        guard await agent.available() else {
-            close()
-            return Outcome(unapplied: [], agentAbsent: true)
-        }
         await pump()
         let finals = await agent.finish()
         submit(finals)
@@ -238,18 +253,16 @@ public final class FieldEditRun {
         return Outcome(unapplied: unapplied)
     }
 
-    /// Whether `task` ends within `seconds`. Neither side is waited for once the other has answered.
-    private static func completes(_ task: Task<Void, Never>, within seconds: TimeInterval) async -> Bool {
-        let once = Once()
+    /// Whether there is an agent after all, or nil when that is not known within `seconds`. Neither side is waited
+    /// for once the other has answered.
+    private static func exists(_ agent: FieldRunAgent, within seconds: TimeInterval) async -> Bool? {
+        let once = Once<Bool?>()
         return await withCheckedContinuation { continuation in
             once.continuation = continuation
-            Task {
-                await task.value
-                once.resume(true)
-            }
+            Task { once.resume(await agent.available()) }
             Task {
                 try? await Task.sleep(for: .seconds(seconds))
-                once.resume(false)
+                once.resume(nil)
             }
         }
     }
@@ -280,6 +293,7 @@ public final class FieldEditRun {
         wakeQueued = false
         wakes?.finish()
         consumer?.cancel()
+        agent?.retire()
         typingGuard.stop()
         resumeIdle()
     }
@@ -448,12 +462,12 @@ public final class FieldEditRun {
 }
 
 /// Resumes its continuation once, from whichever side answers first.
-private final class Once: @unchecked Sendable {
+private final class Once<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
-    var continuation: CheckedContinuation<Bool, Never>?
+    var continuation: CheckedContinuation<Value, Never>?
 
-    func resume(_ value: Bool) {
+    func resume(_ value: Value) {
         lock.lock()
         defer { lock.unlock() }
         guard !done else { return }
