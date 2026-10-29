@@ -100,6 +100,9 @@ enum DebugBridge {
         try? (lines.suffix(keepLines).joined(separator: "\n") + "\n").write(to: logURL, atomically: true, encoding: .utf8)
     }
 
+    /// For other code (a session probe): show a persistent banner line to Jakob; nil or empty removes it.
+    static func status(_ text: String?) { AgentMessages.shared.setStatus(text) }
+
     static func stop() {
         task?.cancel()
         task = nil
@@ -168,6 +171,24 @@ enum DebugBridge {
         register("ping") { _ in ["pong": true] }
         register("commands") { _ in ["commands": handlers.keys.sorted()] }
         register("state") { _ in state() }
+        register("say") { command in
+            guard let p = AgentMessages.parse(command.args, takesChoices: false) else { throw BridgeError.usage("say <text>") }
+            AgentMessages.shared.say(id: command.id, text: p.text)
+            return nil
+        }
+        register("ask") { command in
+            guard let p = AgentMessages.parse(command.args, takesChoices: true) else {
+                throw BridgeError.usage("ask <text> <choice1> [choice2 ...] [--timeout s] [--sound]")
+            }
+            AgentMessages.shared.ask(id: command.id, text: p.text, choices: p.choices, timeout: p.timeout, sound: p.sound)
+            return ["waitFor": "reply"]
+        }
+        register("status") { command in
+            guard let text = command.args.first else { throw BridgeError.usage("status <text>") }
+            AgentMessages.shared.setStatus(text)
+            return nil
+        }
+        register("clear") { _ in AgentMessages.shared.clear(); return nil }
         register("set-setting") { command in
             guard command.args.count == 2 else { throw BridgeError.usage("set-setting <key> <value>") }
             let key = command.args[0]

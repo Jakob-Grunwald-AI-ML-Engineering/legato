@@ -11,6 +11,10 @@
 #   send <command> [args...] queue a bridge command, print its id
 #   wait <id|event> [secs]   wait (default 30) for a command's done/error line, or for a new line with that event
 #   log                      print the bridge log lines not shown yet
+#   say <text>               show a dismissable message on the phone
+#   ask [--timeout s] <text> <choice>...   show buttons, block until he answers, print the choice (default timeout 300s: prints "timeout")
+#   status <text>            persistent banner on the phone; clear removes it and any messages
+#   clear
 #   background               launch com.apple.Preferences, which pushes Legato to the background
 #   foreground               bring Legato forward (no restart)
 #   terminate                stop the Legato process
@@ -141,6 +145,31 @@ cmd_send() {
   echo "$id"
 }
 
+cmd_say() { cmd_send say "$@"; }
+cmd_status() { cmd_send status "$@"; }
+cmd_clear() { cmd_send clear; }
+
+cmd_ask() {
+  local timeout=300
+  if [ "${1:-}" = "--timeout" ]; then timeout="${2:?--timeout needs seconds}"; shift 2; fi
+  [ $# -ge 2 ] || die "usage: ask [--timeout s] <text> <choice>..."
+  local id line deadline
+  id="$(cmd_send ask "$1" --timeout "$timeout" "${@:2}")"
+  deadline=$((SECONDS + timeout + 30))
+  while :; do
+    pull_log || true
+    line="$(jq -r --arg k "$id" 'select(.id == $k and (.event == "reply" or .event == "error")) | "\(.event) \(.choice // .message)"' "$LOG" 2> /dev/null || true)"
+    line="${line%%$'\n'*}"
+    if [ -n "$line" ]; then
+      [ "${line%% *}" = reply ] || die "${line#* }"
+      echo "${line#* }"
+      return 0
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || die "no reply to $id"
+    sleep 1
+  done
+}
+
 cmd_wait() {
   [ $# -ge 1 ] || die "usage: wait <id|event> [timeout]"
   require_device
@@ -206,6 +235,6 @@ cmd_pull() {
 sub="${1:-}"
 [ $# -eq 0 ] || shift
 case "$sub" in
-  devices | build | install | launch | send | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
+  devices | build | install | launch | send | say | ask | status | clear | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;
 esac
