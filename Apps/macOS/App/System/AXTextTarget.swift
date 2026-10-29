@@ -121,10 +121,14 @@ final class AXTextTarget: TextTarget {
     }
 
     func replace(_ range: UTF16Range, with text: String) throws {
-        var error = AXUIElementSetAttributeValue(
-            element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
-        guard error == .success else { throw AXTargetError.attribute(error) }
-        error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
+        // The edit queue's executor selects the span itself right before this call: selecting it again would only
+        // widen the window in which a keystroke can land on it.
+        if (try? selectedRange()) != range {
+            let error = AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
+            guard error == .success else { throw AXTargetError.attribute(error) }
+        }
+        let error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
         guard error == .success else { throw AXTargetError.attribute(error) }
     }
 

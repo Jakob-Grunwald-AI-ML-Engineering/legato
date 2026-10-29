@@ -238,7 +238,9 @@ public final class FieldWriter {
         let replacement = String(desired.dropFirst(shared.count)) + tentative
         let replaced = String(decoding: Array(shown.utf16).dropFirst(shared.utf16.count), as: UTF16.self)
         do {
-            try send(span, with: replacement, expect: replaced, origin: .liveCleanup)
+            try send(span, with: replacement, expect: replaced, preceding: shared.isEmpty ? nil : shared, origin: .liveCleanup)
+        } catch is QueuedFieldWriteChannel.Held {
+            return // the user is typing: this revision waits, the next one covers it (nothing was written)
         } catch {
             return degrade(.writeFailed)
         }
@@ -304,6 +306,8 @@ public final class FieldWriter {
         let replacement = text + written.dropFirst(body.count)
         do {
             try send(span, with: replacement, expect: written, origin: origin)
+        } catch is QueuedFieldWriteChannel.Held {
+            return .leftInPlace // the user is typing: the field is left as it is (nothing was written)
         } catch {
             degrade(.writeFailed)
             return .leftInPlace
@@ -371,7 +375,9 @@ public final class FieldWriter {
         }
 
         do {
-            try send(range, with: insertion, expect: believed, origin: mode == .insertOnStop ? .hold : .asr)
+            try send(
+                range, with: insertion, expect: believed, preceding: spanStart != nil && !written.isEmpty ? written : nil,
+                origin: mode == .insertOnStop ? .hold : .asr)
         } catch {
             return degrade(.writeFailed)
         }
@@ -404,9 +410,11 @@ public final class FieldWriter {
 
     private struct NoChannel: Error {}
 
-    private func send(_ range: UTF16Range, with text: String, expect: String?, origin: EditOrigin) throws {
+    private func send(
+        _ range: UTF16Range, with text: String, expect: String?, preceding: String? = nil, origin: EditOrigin
+    ) throws {
         guard let channel else { throw NoChannel() }
-        try channel.replace(range, with: text, expect: expect, origin: origin)
+        try channel.replace(range, with: text, expect: expect, preceding: preceding, origin: origin)
     }
 
     private func degrade(_ reason: DegradeReason) {

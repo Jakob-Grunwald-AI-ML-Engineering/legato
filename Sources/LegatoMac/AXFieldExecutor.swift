@@ -22,8 +22,10 @@ import LegatoFieldEdit
 /// - A field that cannot be read keeps everything: ``DrainResult/unreadable(retryAfter:)`` with a growing delay,
 ///   and a write that ran but could not be read back waits for the next read to settle it. After
 ///   ``maxUnreadableReads`` failed reads in a row everything is handed back as ``Conflict/Reason/unreadable``.
-/// - Non-user writes wait while the ``TypingGuard`` reports typing, without being issued: they stay queued and
-///   ``DrainResult/held(retryAfter:)`` says when to call again. User-origin edits are never held.
+/// - The cleanup lane (live cleanup, final swap, agent, tool edits) waits while the ``TypingGuard`` reports
+///   typing, without being issued (`peek` tells that something waits, `next(lanes:)` never asks for it): it stays
+///   queued, no version is spent, and ``DrainResult/held(retryAfter:)`` says when to call again. The run's own
+///   text (ASR lane) and user-origin edits are never held.
 /// - A lost focus hands every pending edit back as `focusLost`.
 /// - Events are kept per transaction: ``takeEvents(for:)`` takes one source's, ``takeEvents()`` the rest.
 @MainActor
@@ -60,8 +62,6 @@ public final class AXFieldExecutor {
     private var keepsSelection: Set<UUID> = []
     /// Writes that ran but could not be read back, oldest first: the next read settles them.
     private var awaitingReadback: [UUID] = []
-    /// Pending edits their source took back: handed back when they come up, never written.
-    private var withdrawn: Set<UUID> = []
     private var unreadableReads = 0
     private var events: [QueueEvent] = []
 
@@ -106,7 +106,15 @@ public final class AXFieldExecutor {
     /// already ran and is not affected.
     public func withdraw(_ id: UUID) {
         guard outstanding[id] != nil, !awaitingReadback.contains(id) else { return }
-        withdrawn.insert(id)
+        _ = queue.withdraw(id)
+        collect()
+    }
+
+    /// How long a write from `origin` has to wait for the typing guard before it may be issued; 0 when it may
+    /// run now. Only the cleanup lane waits: the run's own text (ASR lane) and user commands never do.
+    public func typingDelay(for origin: EditOrigin) -> TimeInterval {
+        guard origin.lane == .cleanup else { return 0 }
+        return typingGuard?.delay(for: origin) ?? 0
     }
 
     /// Reads the field and lets the queue see what changed since its last look (settling writes awaiting
@@ -140,27 +148,23 @@ public final class AXFieldExecutor {
             queue.observe(before.snapshot)
             collect()
             if let priority, !isOutstanding(priority) { return .idle }
-            if priority == nil, let wait = holdBeforeIssuing() { return .held(retryAfter: wait) }
-            guard let write = queue.next() else {
+            // The typing guard holds the cleanup lane by not asking for it (`peek` shows what waits): nothing is
+            // issued and aborted, so no version is spent and nothing conflicts for a write that never ran.
+            let wait = priority == nil ? typingGuard?.delay(for: .agent) ?? 0 : 0
+            let lanes: Set<Lane> = wait > 0 ? [.user, .asr] : Set(Lane.allCases)
+            let next: FieldWrite?
+            if let priority {
+                // The writer's own edit runs now, whatever its lane; user edits queued ahead of it run first.
+                next = queue.next(lanes: [.user]) ?? queue.next(for: priority)
+            } else {
+                next = queue.next(lanes: lanes)
+            }
+            guard let write = next else {
                 collect()
+                if wait > 0, queue.peek(lanes: [.cleanup]) != nil { return .held(retryAfter: wait) }
                 return .idle
             }
             collect()
-            if withdrawn.contains(write.id) {
-                queue.abort(write.id, requeue: false, reason: .writeFailed)
-                collect()
-                continue
-            }
-            if write.id != priority, !write.origin.isUser {
-                // Only reached when the guard said nothing before issuing (a user edit was outstanding), or for
-                // an automatic edit ahead of the writer's own: requeued at the front of its lane, no event.
-                let wait = priority == nil ? typingGuard?.delay(for: write.origin) ?? 0 : 0
-                if priority != nil || wait > 0 {
-                    queue.abort(write.id, requeue: true, reason: .expectMismatch)
-                    collect()
-                    return .held(retryAfter: wait)
-                }
-            }
             if !target.isFocused() {
                 queue.abort(write.id, requeue: false, reason: .focusLost)
                 return loseFocus()
@@ -168,20 +172,8 @@ public final class AXFieldExecutor {
             run(write, before: before)
             collect()
             if isAwaitingReadback(write.id) { return unreadable() }
+            if write.id == priority { return .idle }
         }
-    }
-
-    /// How long the next write must wait for the typing guard, decided before it is issued (no version is
-    /// spent on a write that does not run); nil when it may be taken now. The guard holds every non-user
-    /// origin alike, so only an outstanding user edit (or a withdrawn one, to hand back) can run while it holds.
-    private func holdBeforeIssuing() -> TimeInterval? {
-        guard let typingGuard else { return nil }
-        let wait = typingGuard.delay(for: .agent)
-        guard wait > 0 else { return nil }
-        let runnable = outstanding.contains { id, origin in
-            (origin.isUser || withdrawn.contains(id)) && !awaitingReadback.contains(id)
-        }
-        return runnable ? nil : wait
     }
 
     // MARK: Running one write
@@ -215,6 +207,13 @@ public final class AXFieldExecutor {
 
     private func runStep(_ step: EditStep, expected: inout [UInt16]) -> Fault? {
         let range = UTF16Range(location: step.span.location, length: step.span.length)
+        // Checked before anything is selected: a field that already changed never gets a stale span selected, so a
+        // keystroke cannot land on it. The check after the select narrows the rest of the window.
+        switch fieldHolds(expected, around: range) {
+        case nil: return .retry(.unreadable)
+        case false?: return .retry(.expectMismatch)
+        case true?: break
+        }
         do { try target.select(range) } catch { return .failed(.writeFailed) }
         switch fieldHolds(expected, around: range) {
         case nil: return .retry(.unreadable)
@@ -265,7 +264,12 @@ public final class AXFieldExecutor {
                 expected = units
             }
             let range = UTF16Range(location: span.location, length: span.length)
-            guard (try? target.select(range)) != nil, fieldHolds(expected, around: range) == true,
+            // What is there now must be exactly what the step wrote (a fresh read, not our bookkeeping), and the
+            // field must still be the one just read, before anything is selected.
+            guard range.location >= 0, range.end <= units.count,
+                (try? target.text(in: range)) == step.text,
+                fieldHolds(expected, around: range) == true,
+                (try? target.select(range)) != nil, fieldHolds(expected, around: range) == true,
                 (try? target.replace(range, with: step.expect)) != nil
             else { return false }
             expected.replaceSubrange(range.location..<range.end, with: Array(step.expect.utf16))
@@ -345,7 +349,8 @@ public final class AXFieldExecutor {
     private func collect() {
         for event in queue.takeEvents() {
             let id = event.transactionID
-            let dropped = withdrawn.remove(id) != nil
+            var dropped = false
+            if case .withdrawn = event { dropped = true }
             outstanding[id] = nil
             keepsSelection.remove(id)
             attempts[id] = nil
