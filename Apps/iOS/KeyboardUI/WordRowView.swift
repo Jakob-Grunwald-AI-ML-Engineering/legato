@@ -12,6 +12,7 @@ struct WordRowView<Swipe: Gesture>: View {
     /// How many slots the width allows (`WordRowLayout.visibleSlots`).
     let slots: Int
     var fontSize: CGFloat = 17
+    var contentOffset: CGFloat = 0
     let swipe: Swipe
 
     /// The slot being pressed (its position in the row), if any: its pill shows and the dividers beside it hide.
@@ -48,14 +49,23 @@ struct WordRowView<Swipe: Gesture>: View {
     private var row: some View {
         let ranks = WordRowLayout.ranks(visibleSlots: slots)
         let words = controller.suggestions
+        let highlighted = controller.highlightedSuggestionRank.flatMap { ranks.firstIndex(of: $0) }
         return HStack(spacing: 0) {
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
-                slot(rank < words.count ? words[rank] : nil, rank: rank, position: position)
+                SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
+                               rank: rank, fontSize: fontSize, highlighted: highlighted == position, contentOffset: contentOffset,
+                               swipe: swipe, onPressChange: { isPressed in
+                    if isPressed { pressed = position } else if pressed == position { pressed = nil }
+                })
                     .overlay(alignment: .trailing) {
                         // The system's bar drops the dividers beside the pressed pill, without animation.
                         if position < ranks.count - 1 {
-                            Rectangle().fill(Color(uiColor: KeyColors.divider)).frame(width: 0.67, height: 24)
-                                .opacity(pressed == position || pressed == position + 1 ? 0 : 1)
+                            Rectangle().fill(Color(uiColor: KeyColors.divider))
+                                // Center on the word ink without drawing above the extension's owned area.
+                                .frame(width: 0.67, height: contentOffset == 0 ? 24 : max(0, CGFloat(WordRowHeight.portrait) + 2 * contentOffset))
+                                .offset(y: contentOffset)
+                                .opacity(pressed == position || pressed == position + 1
+                                         || highlighted == position || highlighted == position + 1 ? 0 : 1)
                                 .transaction { $0.animation = nil }
                         }
                     }
@@ -63,28 +73,55 @@ struct WordRowView<Swipe: Gesture>: View {
         }
     }
 
-    /// An empty slot keeps its button (disabled, hidden from accessibility) so its word can fade out in place.
-    private func slot(_ word: String?, rank: Int, position: Int) -> some View {
-        Button { controller.suggestionTapped(rank: rank) } label: {
+}
+
+/// Keeps the touch-down proposal while asynchronous results may update the same visual slot.
+private struct SuggestionSlot<Swipe: Gesture>: View {
+    let controller: KeyboardController
+    let word: String?
+    let rank: Int
+    let fontSize: CGFloat
+    let highlighted: Bool
+    let contentOffset: CGFloat
+    let swipe: Swipe
+    let onPressChange: (Bool) -> Void
+    @State private var press = SuggestionPress()
+
+    var body: some View {
+        Button {
+            if let tap = press.activate(current: nil) { controller.suggestionTapped(tap) }
+        } label: {
             MorphingWord(text: word ?? "", fontSize: fontSize)
+                .offset(y: contentOffset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.001))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(WordSlotStyle(onPressChange: { isPressed in
-            if isPressed { pressed = position } else if pressed == position { pressed = nil }
+        .buttonStyle(WordSlotStyle(highlighted: highlighted, contentOffset: contentOffset, onPressChange: { isPressed in
+            if isPressed { press.began(controller.suggestionTap(rank: rank)) }
+            onPressChange(isPressed)
         }))
         .disabled(word == nil)
         .simultaneousGesture(swipe)
         .accessibilityHidden(word == nil)
         .accessibilityLabel(word ?? "")
+        .accessibilityHint(highlighted ? "Spelling correction. Tap to replace the word being typed." : "Tap to insert suggestion.")
         .accessibilityIdentifier("keyboard.word.\(rank)")
+        .accessibilityAction {
+            // A canceled touch can leave its token behind. VoiceOver activates the announced row,
+            // independently of that touch; ordinary Button actions always keep their frozen token.
+            if let tap = press.activate(current: controller.suggestionTap(rank: rank), accessibility: true) {
+                controller.suggestionTapped(tap)
+            }
+        }
     }
 }
 
 /// A word slot's press: a capsule across the whole slot (a little shorter than it), white over the bar, which
 /// appears and disappears within one frame, as on the system's bar.
 private struct WordSlotStyle: ButtonStyle {
+    let highlighted: Bool
+    let contentOffset: CGFloat
     let onPressChange: (Bool) -> Void
 
     /// The system's pill is white at about 30% over the light bar; in dark mode the same lift needs less.
@@ -96,7 +133,9 @@ private struct WordSlotStyle: ButtonStyle {
                 Capsule(style: .continuous)
                     .fill(Self.pill)
                     .padding(.vertical, 4)
-                    .opacity(configuration.isPressed ? 1 : 0)
+                    // Follow the raised word while keeping the capsule inside the extension's top edge.
+                    .offset(y: max(contentOffset, -4))
+                    .opacity(configuration.isPressed || highlighted ? 1 : 0)
                     .transaction { $0.animation = nil }
             }
             .onChange(of: configuration.isPressed) { _, isPressed in onPressChange(isPressed) }
@@ -104,12 +143,13 @@ private struct WordSlotStyle: ButtonStyle {
 }
 
 /// One slot's word as glyphs that change like the system's suggestion bar: letters both texts share stay and glide
-/// to their new places, removed ones fade out right to left, inserted ones fade in as the old ones finish; nothing
-/// blurs, scales or moves vertically. Each glyph is its own `Text` (a stable view per `GlyphMorph` id), so the word
+/// to their new places, removed ones fade out right to left, and new ones grow and fade in left to right around
+/// their baseline. Each glyph is its own `Text` (a stable view per `GlyphMorph` id), so the word
 /// loses the kerning a whole-word `Text` has. The slot is one accessibility element: the word.
 private struct MorphingWord: View {
     let text: String
     let fontSize: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var morph: GlyphMorph
     @State private var staggers = GlyphStaggers()
     /// The natural width of the last non-empty word: the word is centered by it, so a word that empties fades out
@@ -139,7 +179,8 @@ private struct MorphingWord: View {
                         .font(.system(size: fontSize))
                         .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                         .fixedSize()
-                        .transition(GlyphFade(id: glyph.id, staggers: staggers))
+                        .transition(GlyphReveal(id: glyph.id, staggers: staggers,
+                                                baseline: glyphBaseline, reduceMotion: reduceMotion))
                 }
             }
             .scaleEffect(scale, anchor: .leading)
@@ -149,13 +190,19 @@ private struct MorphingWord: View {
         .onChange(of: text) { _, new in
             let next = morph.morphing(to: new)
             staggers.record(next)
-            withAnimation(.easeInOut(duration: 0.25)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
                 morph = next
                 if !next.glyphs.isEmpty { anchorWidth = Self.naturalWidth(of: next, fontSize: fontSize) }
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
+    }
+
+    /// Scale new glyphs around the font baseline so their feet stay level with retained letters.
+    private var glyphBaseline: UnitPoint {
+        let font = UIFont.systemFont(ofSize: fontSize)
+        return UnitPoint(x: 0.5, y: font.ascender / font.lineHeight)
     }
 
     /// Long words shrink to fit (down to `minimumScale`), as the whole-word `Text` did.
@@ -192,21 +239,26 @@ private final class GlyphStaggers {
         .easeOut(duration: 0.1).delay(Self.step * Double(removal[id] ?? 0))
     }
 
-    /// 120 ms ease-out, starting as the removed glyphs finish (at once when nothing is removed).
+    /// A short grow/fade, staggered from the left after the old glyphs begin disappearing.
     func insertionAnimation(_ id: Int) -> Animation {
-        .easeOut(duration: 0.12).delay(Self.step * Double(insertion[id] ?? 0) + (hasRemovals ? 0.08 : 0))
+        .easeOut(duration: 0.18).delay(Self.step * Double(insertion[id] ?? 0) + (hasRemovals ? 0.08 : 0))
     }
 }
 
-/// Fade only: opacity with the glyph's own delay.
-private struct GlyphFade: Transition {
+/// The phone reference shows new letters growing toward their settled size while retained letters slide.
+/// The initial scale is a restrained approximation; the capture establishes growth, not Apple's hidden start value.
+private struct GlyphReveal: Transition {
     let id: Int
     let staggers: GlyphStaggers
+    let baseline: UnitPoint
+    let reduceMotion: Bool
 
     func body(content: Content, phase: TransitionPhase) -> some View {
         content
+            .scaleEffect(phase == .willAppear && !reduceMotion ? 0.85 : 1, anchor: baseline)
             .opacity(phase.isIdentity ? 1 : 0)
-            .animation(phase == .didDisappear ? staggers.removalAnimation(id) : staggers.insertionAnimation(id), value: phase.isIdentity)
+            .animation(reduceMotion ? nil : phase == .didDisappear
+                       ? staggers.removalAnimation(id) : staggers.insertionAnimation(id), value: phase.isIdentity)
     }
 }
 

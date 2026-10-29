@@ -89,6 +89,12 @@ enum Settings {
         set { AppGroup.defaults.set(newValue, forKey: AutoFillHandoff.preferenceKey) }
     }
 
+    /// Use the native next-keyboard / hold-to-choose control for the emoji key. Off shows our palette.
+    static var keyboardEmojiSystemSwitcher: Bool {
+        get { EmojiKeyboardBehavior.usesSystemSwitcher(in: AppGroup.defaults) }
+        set { EmojiKeyboardBehavior.setUsesSystemSwitcher(newValue, in: AppGroup.defaults) }
+    }
+
     /// The compact keyboard: one row with the dictation status, the mic key and a chevron that expands to the
     /// full keyboard. The keyboard reads the same key (`KeyboardPreferences`). Default off.
     static var keyboardStrip: Bool {

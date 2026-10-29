@@ -3,7 +3,7 @@ import Foundation
 /// The per-character diff behind the word row's text animation: a slot's text as glyphs with stable ids, and what
 /// changed since the previous text. Characters the old and new text share (a longest common subsequence) keep their
 /// ids, so the view slides them to their new places; the rest are removed (fading out right to left) or inserted
-/// (fading in). Chain it: each update takes the previous morph, so ids persist across rapid changes. A glyph is a
+/// (growing and fading in left to right). Chain it: each update takes the previous morph, so ids persist across rapid changes. A glyph is a
 /// grapheme cluster (an emoji sequence, a decomposed umlaut), and ids are never reused.
 public struct GlyphMorph: Equatable, Sendable {
     public struct Glyph: Identifiable, Equatable, Sendable {
@@ -21,7 +21,7 @@ public struct GlyphMorph: Equatable, Sendable {
 
     /// The new text, in order: kept glyphs (with their old ids) and inserted ones (with fresh ids).
     public let glyphs: [Glyph]
-    /// The inserted glyphs' ids, each with its stagger: 0 for the rightmost inserted glyph, counting up leftwards.
+    /// The inserted glyphs' ids, each with its stagger: 0 for the leftmost inserted glyph, counting up rightwards.
     public let insertionStagger: [Int: Int]
     /// The removed glyphs, rightmost first (stagger 0, 1, 2 ...).
     public let removals: [Removal]
@@ -81,7 +81,7 @@ public struct GlyphMorph: Equatable, Sendable {
             }
         }
         var staggers: [Int: Int] = [:]
-        for (stagger, glyphID) in inserted.reversed().enumerated() { staggers[glyphID] = stagger }
+        for (stagger, glyphID) in inserted.enumerated() { staggers[glyphID] = stagger }
         let removals = removed.reversed().enumerated().map { Removal(glyph: $1, stagger: $0) }
         return GlyphMorph(glyphs: result, insertionStagger: staggers, removals: removals, nextID: id)
     }

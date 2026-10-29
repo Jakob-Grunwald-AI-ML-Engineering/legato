@@ -1,7 +1,79 @@
+import Foundation
 import Testing
 @testable import LegatoKeyboardCore
 
 @Suite struct LayoutKeyboardStripTests {
+    private func withDefaults(_ body: (String, UserDefaults) -> Void) {
+        let suite = "LayoutKeyboardStripTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        body(suite, defaults)
+    }
+
+    @Test func retainedKeyboardsRefreshTheLatestGlobalChoiceOnAppearance() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
+            var retained = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            first.toggle()
+            retained.setStripEnabled(true)
+            #expect(retained.mode == .full)
+            retained.setStripEnabled(true)
+            #expect(retained.mode == .full)
+            retained.toggle()
+            first.setStripEnabled(true)
+            #expect(first.mode == .strip)
+        }
+    }
+
+    @Test func expandedChoiceSurvivesRecreatingTheKeyboardAndDefaults() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
+            first.toggle()
+            let recreated = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(recreated.mode == .full)
+            #expect(recreated.control == .collapse)
+        }
+    }
+
+    @Test func collapsedChoiceSurvivesRecreatingTheKeyboardAndDefaults() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
+            first.toggle()
+            var expanded = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(expanded.mode == .full)
+            expanded.toggle()
+            let recreated = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(recreated.mode == .strip)
+            #expect(recreated.control == .expand)
+        }
+    }
+
+    @Test func disabledCompactSettingOverridesAndResetsTheRememberedChoice() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
+            first.toggle()
+            #expect(KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults)).mode == .full)
+            let disabled = KeyboardExpansion(stripEnabled: false, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(disabled.mode == .full)
+            #expect(disabled.control == nil)
+            let enabled = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(enabled.mode == .strip)
+        }
+    }
+
+    @Test func changingTheSettingPersistsTheCollapsedReset() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
+            first.toggle()
+            var expanded = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(expanded.mode == .full)
+            expanded.setStripEnabled(false)
+            expanded.setStripEnabled(true)
+            let recreated = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(recreated.mode == .strip)
+        }
+    }
+
     @Test func withoutTheStripSettingTheKeyboardIsFullAndHasNoToggle() {
         let expansion = KeyboardExpansion(stripEnabled: false)
         #expect(expansion.mode == .full)
@@ -50,7 +122,7 @@ import Testing
     // MARK: height
 
     @Test func theHeightCandidatesAreTheExperimentsList() {
-        #expect(StripHeight.candidates == [0, 1, 30, 44, 56])
+        #expect(StripHeight.candidates == [0, 1, 30, 54])
     }
 
     @Test func cyclingWalksTheCandidatesAndWrapsAround() {
@@ -60,7 +132,7 @@ import Testing
             height = StripHeight.next(after: height)
             seen.append(height)
         }
-        #expect(seen == [0, 1, 30, 44, 56, 0])
+        #expect(seen == [0, 1, 30, 54, 0])
     }
 
     @Test func cyclingFromAnUnknownHeightStartsTheList() {

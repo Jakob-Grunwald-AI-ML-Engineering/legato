@@ -12,6 +12,7 @@ struct SettingsView: View {
     @State private var haptics = Settings.keyboardHaptics
     @State private var clicks = Settings.keyboardClicks
     @State private var automaticAutoFill = Settings.keyboardAutomaticAutoFill
+    @State private var emojiSystemSwitcher = Settings.keyboardEmojiSystemSwitcher
     @State private var strip = Settings.keyboardStrip
     #if DEBUG
     @State private var stripHeight = Settings.keyboardStripHeight
@@ -89,6 +90,11 @@ struct SettingsView: View {
             Section {
                 Toggle("Haptic feedback", isOn: $haptics)
                 Toggle("Key clicks", isOn: $clicks)
+                Toggle("System keyboard switcher", isOn: $emojiSystemSwitcher)
+                    .accessibilityIdentifier("settings.emojiSystemSwitcher")
+                Text("Emoji key: tap for next keyboard; touch and hold to choose Emoji. Off opens Legato’s small emoji panel.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Toggle("Compact keyboard (strip)", isOn: $strip)
                 Toggle("Automatically switch for AutoFill", isOn: $automaticAutoFill)
                     .accessibilityIdentifier("settings.automaticAutoFill")
@@ -135,6 +141,7 @@ struct SettingsView: View {
         .onChange(of: haptics) { _, new in Settings.keyboardHaptics = new }
         .onChange(of: clicks) { _, new in Settings.keyboardClicks = new }
         .onChange(of: automaticAutoFill) { _, new in Settings.keyboardAutomaticAutoFill = new }
+        .onChange(of: emojiSystemSwitcher) { _, new in Settings.keyboardEmojiSystemSwitcher = new }
         .onChange(of: strip) { _, new in Settings.keyboardStrip = new }
         #if DEBUG
         .onChange(of: stripHeight) { _, new in Settings.keyboardStripHeight = new }

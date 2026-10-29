@@ -1,0 +1,9 @@
+{
+  "result": "Passed",
+  "totalTestCount": 2,
+  "passedTests": 2,
+  "failedTests": 0,
+  "skippedTests": 0,
+  "runtimeWarnings": [],
+  "platform": "iPhone 17 simulator, iOS 26.5; actual keyboard extension; stub model engines"
+}

@@ -32,12 +32,12 @@ import Testing
 
     @Test func theMicPillStaysRightAnchoredAtTheMargin() {
         let r = row(402)
-        #expect(cell(r, .mic).maxX == 402 - 8)
+        #expect(abs(cell(r, .mic).maxX - 395.67) < 0.0001)
     }
 
     @Test func theHotkeysTakeWhatTheControlsLeave() {
-        // 402 - 2 x 8 margin - 4 gaps x 8 - 3 keys x 44 - pill 81
-        #expect(cell(row(402), .hotkeys).width == 141)
+        // 402 - 2 x 6.33 margin - 4 gaps x 6 - 3 keys x 44 - mic 81
+        #expect(abs(cell(row(402), .hotkeys).width - 152.34) < 0.0001)
     }
 
     @Test func aTextReturnLabelGetsAWiderKey() {
@@ -51,16 +51,16 @@ import Testing
     @Test func cellsAreSeparatedByTheGapAndStayInsideTheMargins() {
         for width in [375.0, 402, 430, 874] {
             let r = row(width, globe: true)
-            #expect(r.cells.first!.x == 8)
-            #expect(r.cells.last!.maxX == width - 8)
+            #expect(r.cells.first!.x == 6.33)
+            #expect(abs(r.cells.last!.maxX - (width - 6.33)) < 0.0001)
             for (a, b) in zip(r.cells, r.cells.dropFirst()) {
-                #expect(abs(b.x - a.maxX - 8) < 0.0001)
+                #expect(abs(b.x - a.maxX - 6) < 0.0001)
             }
         }
     }
 
     @Test func aNarrowPhoneWithAGlobeKeepsTheKeysUsableAndDropsRedoForRoom() {
-        // 375 with a globe and a text return: keys at 44 would leave the hotkeys 46 wide.
+        // At 375 pt, a globe and text return require dropping redo to preserve key widths.
         let r = row(375, globe: true, returnStyle: .text)
         #expect(!r.showsRedo)
         #expect(cell(r, .hotkeys).width >= StripRow.minCompactHotkeysWidth - 0.0001)
@@ -70,8 +70,8 @@ import Testing
 
     @Test func theHotkeyButtonsAreThirtyPointsAndTheKeyFloorIsThirtySix() {
         #expect(StripRow.hotkeyButtonWidth == 30)
-        #expect(StripRow.minHotkeysWidth == 3 * StripRow.hotkeyButtonWidth)
-        #expect(StripRow.minCompactHotkeysWidth == 2 * StripRow.hotkeyButtonWidth)
+        #expect(StripRow.minHotkeysWidth == 102)
+        #expect(StripRow.minCompactHotkeysWidth == 66)
         #expect(StripRow.minKeyWidth == 36)
     }
 
@@ -101,20 +101,18 @@ import Testing
         let r = row(320, globe: true)
         #expect(cell(r, .hotkeys).width >= StripRow.minCompactHotkeysWidth - 0.0001)
         #expect(cell(r, .mic).width == 81)
-        #expect(cell(r, .mic).maxX == 320 - 8)
+        #expect(abs(cell(r, .mic).maxX - 313.67) < 0.0001)
     }
 
     @Test func theNumbersAtTheSmallestCommonWidths() {
-        // 375, globe, text return: 178 left for 3 keys and the hotkeys; three buttons would squeeze the keys
-        // to 29, so redo goes and the keys get (178 - 60) / 3.
+        // Native 6.33 pt margins and 6 pt gaps leave 191.34 pt for three keys and hotkeys.
         let narrow = row(375, globe: true, returnStyle: .text)
-        #expect(abs(cell(narrow, .expand).width - 118.0 / 3) < 0.0001)
-        #expect(cell(narrow, .hotkeys).width == StripRow.minCompactHotkeysWidth)
-        // 320 without a globe: 191 left; the keys are back to their usual 44 at most.
+        #expect(abs(cell(narrow, .expand).width - 41.78) < 0.0001)
+        #expect(abs(cell(narrow, .hotkeys).width - 66) < 0.0001)
         let se = row(320)
         #expect(!se.showsRedo)
-        #expect(abs(cell(se, .expand).width - 131.0 / 3) < 0.0001)
-        #expect(cell(se, .hotkeys).width == StripRow.minCompactHotkeysWidth)
+        #expect(cell(se, .expand).width == 44)
+        #expect(abs(cell(se, .hotkeys).width - 70.34) < 0.0001)
     }
 
     @Test func noKeyEverCollapsesToNothing() {
@@ -135,10 +133,13 @@ import Testing
             for globe in [false, true] {
                 for style in [StripReturnStyle.glyph, .text] {
                     let r = row(width, globe: globe, returnStyle: style)
-                    #expect(r.cells.first!.x >= 8 - 0.0001, "w=\(width)")
-                    #expect(r.cells.last!.maxX <= width - 8 + 0.0001, "w=\(width) globe=\(globe) \(style)")
+                    #expect(r.cells.first!.x >= 6.33 - 0.0001, "w=\(width)")
+                    #expect(r.cells.last!.maxX <= width - 6.33 + 0.0001, "w=\(width) globe=\(globe) \(style)")
                     #expect(cell(r, .mic).width == 81, "w=\(width)")
                     #expect(cell(r, .hotkeys).width >= StripRow.minCompactHotkeysWidth - 0.0001, "w=\(width)")
+                    let buttons = r.showsRedo ? 3.0 : 2.0
+                    let actualButtonWidth = (cell(r, .hotkeys).width - (buttons - 1) * 6) / buttons
+                    #expect(actualButtonWidth >= 30 - 0.0001, "w=\(width) globe=\(globe) \(style)")
                     if width >= 375 {
                         for slot in [StripSlot.expand, .delete, .returnKey] {
                             #expect(cell(r, slot).width >= StripRow.minKeyWidth - 0.0001, "w=\(width) globe=\(globe) \(style) \(slot)")
@@ -169,15 +170,15 @@ import Testing
             #expect(c.hitMaxX >= c.maxX - 0.0001)
         }
         let delete = cell(r, .delete), ret = cell(r, .returnKey)
-        #expect(delete.hitMaxX == delete.maxX + 4)
-        #expect(ret.hitX == ret.x - 4)
+        #expect(delete.hitMaxX == delete.maxX + 3)
+        #expect(ret.hitX == ret.x - 3)
     }
 
     @Test func theMicHitAreaReachesTheRightScreenEdge() {
         let r = row(402)
         let mic = cell(r, .mic)
         #expect(mic.hitMaxX == 402)
-        #expect(mic.hitWidth == 4 + 81 + 8)
+        #expect(abs(mic.hitWidth - 90.33) < 0.0001)
     }
 
     @Test func theChevronHitAreaReachesTheLeftScreenEdge() {
@@ -186,8 +187,8 @@ import Testing
 
     @Test func insetsAreTheDistanceFromTheHitAreaToTheKey() {
         let c = cell(row(402), .mic)
-        #expect(c.leadingInset == 4)
-        #expect(c.trailingInset == 8)
-        #expect(cell(row(402), .expand).leadingInset == 8)
+        #expect(abs(c.leadingInset - 3) < 0.0001)
+        #expect(abs(c.trailingInset - 6.33) < 0.0001)
+        #expect(cell(row(402), .expand).leadingInset == 6.33)
     }
 }

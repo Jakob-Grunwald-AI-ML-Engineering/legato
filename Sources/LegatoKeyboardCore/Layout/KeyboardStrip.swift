@@ -16,14 +16,37 @@ public enum ExpansionControl: Sendable, Equatable {
     case collapse
 }
 
-/// Whether a keyboard session is collapsed to the strip or expanded to the full keyboard. A session
-/// with the strip setting on starts collapsed; with it off the keyboard is always full and has no control.
+/// Stores only the last keyboard layout. UserDefaults is thread-safe.
+public final class KeyboardExpansionPersistence: @unchecked Sendable {
+    private let defaults: UserDefaults
+    private let key = "keyboardExpanded"
+
+    public init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    fileprivate var expanded: Bool {
+        get { defaults.bool(forKey: key) }
+        set { defaults.set(newValue, forKey: key) }
+    }
+}
+
+/// Whether the keyboard is collapsed to the strip or expanded. With the strip setting on, restores
+/// the last choice (initially collapsed); with it off the keyboard is always full and has no control.
 public struct KeyboardExpansion: Sendable, Equatable {
     public private(set) var stripEnabled: Bool
     private var expanded = false
+    private let persistence: KeyboardExpansionPersistence?
 
-    public init(stripEnabled: Bool) {
+    public init(stripEnabled: Bool, persistence: KeyboardExpansionPersistence? = nil) {
         self.stripEnabled = stripEnabled
+        self.persistence = persistence
+        expanded = stripEnabled && (persistence?.expanded ?? false)
+        if !stripEnabled { persistence?.expanded = false }
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.stripEnabled == rhs.stripEnabled && lhs.expanded == rhs.expanded
     }
 
     public var mode: KeyboardMode { stripEnabled && !expanded ? .strip : .full }
@@ -36,6 +59,7 @@ public struct KeyboardExpansion: Sendable, Equatable {
     public mutating func toggle() {
         guard stripEnabled else { return }
         expanded.toggle()
+        persistence?.expanded = expanded
     }
 
     /// The least vertical travel, in points, that counts as a swipe.
@@ -49,19 +73,23 @@ public struct KeyboardExpansion: Sendable, Equatable {
     }
 
     /// The setting as the app last stored it. A change starts a new session (collapsed); the same value
-    /// keeps the state, so a keyboard that appears again in the same session does not collapse under the user.
+    /// reloads the global last choice, including choices made by another retained keyboard controller.
     public mutating func setStripEnabled(_ enabled: Bool) {
-        guard enabled != stripEnabled else { return }
+        guard enabled != stripEnabled else {
+            if enabled, let persistence { expanded = persistence.expanded }
+            return
+        }
         stripEnabled = enabled
         expanded = false
+        persistence?.expanded = false
     }
 }
 
 /// The strip's height, in points, for the height experiment: which values are tried and how to step through them.
 public enum StripHeight {
     /// 0 and 1 may leave nothing to touch; the debug picker in the app chooses the height a session starts with.
-    public static let candidates: [Double] = [0, 1, 30, 44, 56]
-    public static let standard: Double = 44
+    public static let candidates: [Double] = [0, 1, 30, 54]
+    public static let standard: Double = 54
 
     /// The candidate after `height`, wrapping around; the first one for a height that is not a candidate.
     public static func next(after height: Double) -> Double {
@@ -71,8 +99,12 @@ public enum StripHeight {
 
     /// The height to request from the system for a strip row of `row` points: the word row goes above it.
     /// The debug heights that leave nothing to touch (0 and 1) stay as they are.
-    public static func requested(row: Double) -> Double {
-        row >= 30 ? row + WordRowHeight.strip : row
+    public static func keyRowHeight(row: Double, landscape: Bool) -> Double {
+        row == standard && landscape ? 37.33 : row
+    }
+
+    public static func requested(row: Double, landscape: Bool = false) -> Double {
+        row >= 30 ? keyRowHeight(row: row, landscape: landscape) + WordRowHeight.content(landscape: landscape) : row
     }
 
     /// The stored starting height when it is a candidate, the standard one otherwise.

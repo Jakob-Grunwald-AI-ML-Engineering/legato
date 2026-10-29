@@ -7,19 +7,18 @@ import UIKit
 /// plus email, numbers and phone fields) was captured on the iPhone 17 Pro simulator (402 x 874 pt,
 /// iOS 26.5, 3x) with a UI test that opened a text view and pressed keys while taking screenshots
 /// (`XCUIScreen.screenshot`), and measured from the pixels. Reference values below are in points at
-/// that size; they scale with the key width for other devices. The top bar (suggestions and the mic
-/// pill) follows Superwhisper's iOS keyboard (references from the product owner), whose key rows are
-/// the system's own.
+/// that size; they scale with the key width for other devices. Prediction rows also use native
+/// dimensions; Legato adds one matching tool key row.
 ///
 /// Portrait, 402 pt wide:
-///  - Rows: first row top 51 pt under the keyboard top (the system's suggestion bar), pitch 54, key
+///  - Rows: first row top 52 pt under the keyboard top (the system's suggestion bar), pitch 54, key
 ///    height 43 (numpad 45.33). Side margin 6, gap 6, so a letter key is (W - 12 - 54) / 10 = 33.6 wide.
 ///  - Row 2 is indented half a pitch. Row 3: shift and delete 46 wide, the 7 letters centered
 ///    (13.67 gap); on the numbers page the 5 punctuation keys are 49.33 wide.
 ///  - Bottom row: "123" 44, emoji 43.33, space the rest, return 93 (numbers page: "ABC" 93.33, no
 ///    emoji). Email adds "@" and "." (43.33 each) around the space bar.
 ///  - Numpad: 3 columns 126.33 wide, margin 4.67, gap 6, key height 45.33.
-///  - Key corner radius 8.5 (25 px), no shadow, no outline. Letters: SF 25 pt, baseline 28 pt below the
+///  - Key corner radius 8.5 (25 px), no shadow, no outline. Letters: SF 25 pt lowercase / 22 pt capitals, baseline 28 pt below the
 ///    key top; "123"/"ABC": 18 pt, baseline 27.3. Symbols (shift, delete, return, emoji): 17-20 pt boxes.
 ///  - Key fill light #FFFFFF, dark white at 16.5% over the keyboard; pressed function key light
 ///    #C5C5C9, dark white at 44%; return key with an action: system blue.
@@ -28,19 +27,24 @@ import UIKit
 ///    bottom; glyph SF 38.3 pt, baseline 47 below the head top. Fill as the key (dark: white 26%).
 ///  - Alternates strip: cells 37.3 wide x 47.7 high, 11.5 pad, strip 66.7 high ending 5 above the key
 ///    top, radius 12; the highlighted cell is system blue (0,136,255) with white text.
-/// Landscape, 874 pt wide: side margin 79, gap 6, key height 25.33, pitch 35.33, row 1 at 51.
+/// Landscape, 874 pt screen: side margin 79 including system insets, gap 6, key height 27.33, pitch 35.33, row 1 at 50.
 ///
-/// Legato's top area (the vertical numbers are `KeyboardHeights`, tested in LegatoKeyboardCore): the mic
-/// pill 81 x 43.3 pt (portrait), 14.3 from the right edge and 15.7 above the first row, follows
-/// Superwhisper's iOS keyboard.
-///  - Portrait: the word row (three slots, "2 | 1 | 3", 24 pt dividers) is 32 pt high across the top. Below
-///    it, the hotkey bar (⌄ ↶ ↷ Refine) fills the space left of the pill. The pill's top is 32 pt down, so the
-///    first row sits at 91, not at the 86 it would without the word row: the keyboard is 306 pt high.
-///  - Landscape: one row, as high as the pill (34 pt): hotkeys, then the word slots, then the pill. The
-///    first row is at 51 and the keyboard 190 pt high, as before; below 70 pt a slot, only the best word shows.
-///  - Strip: the word row (30 pt) is a row of its own above the strip's row (`StripHeight.requested`).
+/// Legato adds a native-sized tool key row between predictions and the typing grid.
+/// Portrait predictions span the full width at 44 visible pt (27 in the extension plus the system's 17 pt top area); tools have 43 pt faces and a 54 pt pitch.
+/// The compact layout contains only predictions and one tool key row.
 struct KeyGeometry {
     let size: CGSize
+    let landscapeScreenWidth: CGFloat?
+
+    init(size: CGSize, landscapeScreenWidth: CGFloat? = nil) {
+        self.size = size
+        self.landscapeScreenWidth = landscapeScreenWidth
+    }
+
+    @MainActor static func screenWidth(in window: UIWindow?) -> CGFloat? {
+        guard let bounds = window?.windowScene?.screen.bounds else { return nil }
+        return max(bounds.width, bounds.height)
+    }
 
     /// A phone is wider than 500 pt only in landscape. Never compare width with height: the keyboard is
     /// shorter than it is wide in both orientations.
@@ -55,11 +59,16 @@ struct KeyGeometry {
         return min(1, max(0.5, size.height / Self.height(landscape: landscape)))
     }
 
-    var marginX: CGFloat { landscape ? 79 : 6.33 }
+    /// iOS may already inset the extension window (75 pt per side on iPhone 17).
+    /// Subtract that inset while preserving the full-screen harness's 79 pt margin.
+    var marginX: CGFloat {
+        landscape ? CGFloat(KeyboardSideMargins.landscape(
+            contentWidth: Double(size.width), screenWidth: landscapeScreenWidth.map(Double.init))) : 6.33
+    }
     var gap: CGFloat { 6 }
     /// A letter key's width.
     var keyWidth: CGFloat { (size.width - 2 * marginX - 9 * gap) / 10 }
-    var keyHeight: CGFloat { (landscape ? 25.33 : 43) * vScale }
+    var keyHeight: CGFloat { (landscape ? 27.33 : 43) * vScale }
     var rowPitch: CGFloat { (landscape ? 35.33 : 54) * vScale }
     /// Distance from the top of the keyboard view to the first row.
     var firstRowTop: CGFloat { Self.firstRowTop(landscape: landscape) * vScale }
@@ -79,43 +88,39 @@ struct KeyGeometry {
     var numpadKeyHeight: CGFloat { landscape ? keyHeight : 45.33 * vScale }
 
     /// Letter and label baselines below the key top.
-    var letterBaseline: CGFloat { (landscape ? 18.3 : 28.0) * vScale }
+    var letterBaseline: CGFloat { (landscape ? 19.3 : 28.0) * vScale }
     var labelBaseline: CGFloat { (landscape ? 17.6 : 27.3) * vScale }
-    /// Landscape (measured): x-height 11.3 pt against 12.7 pt in portrait.
-    var letterSize: CGFloat { landscape ? 22.2 : 25 }
+    /// Native portrait capitals are smaller than lowercase letters, on the same baseline.
+    /// Symbols have no case and keep their original size.
+    func letterSize(for text: String) -> CGFloat {
+        let uppercaseLetter = text == text.uppercased() && text != text.lowercased()
+        return landscape ? 22.2 : (uppercaseLetter ? 22 : 25)
+    }
     var labelSize: CGFloat { landscape ? 16 : 18 }
 
-    // MARK: Top bar
+    // MARK: Prediction and tool rows
 
-    var pillSize: CGSize { CGSize(width: 81, height: CGFloat(KeyboardHeights.pillHeight(landscape: landscape)) * vScale) }
-    var pillFrame: CGRect {
-        let h = pillSize.height
-        let gapToRow = CGFloat(KeyboardHeights.pillGapToRow(landscape: landscape)) * vScale
-        return CGRect(x: size.width - (landscape ? marginX : 14.3) - pillSize.width, y: firstRowTop - gapToRow - h, width: pillSize.width, height: h)
+    var pillSize: CGSize { CGSize(width: 81, height: keyHeight) }
+    func toolWidth(buttons: Int) -> CGFloat {
+        (size.width - 2 * marginX - CGFloat(buttons) * gap) / CGFloat(buttons + 1)
     }
-    /// The word row's own height (portrait; in landscape the word slots share the pill's row).
-    var wordRowHeight: CGFloat { CGFloat(KeyboardHeights.wordRowHeight(landscape: landscape)) * vScale }
-    private var barLeft: CGFloat { landscape ? marginX + 7.7 : 13.7 }
-    /// Landscape, where the hotkeys take only what they need: the collapse key 44 wide, the three others 76 ("Refine" fits).
-    private static let landscapeHotkeyWidth: CGFloat = 76
 
-    /// Where the hotkeys go: left of the pill, in the pill's row. In landscape a fixed width for `buttons` (3, or 4 with the collapse key).
+    func micFrame(buttons: Int) -> CGRect {
+        let width = toolWidth(buttons: buttons)
+        return CGRect(x: size.width - marginX - width,
+                      y: CGFloat(KeyboardHeights.toolRowTop(landscape: landscape)) * vScale,
+                      width: width, height: keyHeight)
+    }
+
     func hotkeyFrame(buttons: Int) -> CGRect {
-        let pill = pillFrame
-        let width = landscape ? CGFloat(buttons - 3) * 44 + 3 * Self.landscapeHotkeyWidth : pill.minX - barLeft
-        return CGRect(x: barLeft, y: pill.minY, width: width, height: pill.height)
+        let mic = micFrame(buttons: buttons)
+        return CGRect(x: marginX, y: mic.minY, width: mic.minX - gap - marginX, height: keyHeight)
     }
 
-    /// Where the word slots go: portrait, the row across the top; landscape, between the hotkeys and the pill.
-    func wordRowFrame(buttons: Int) -> CGRect {
-        guard landscape else {
-            return CGRect(x: barLeft, y: 0, width: size.width - 2 * barLeft, height: wordRowHeight)
-        }
-        let pill = pillFrame
-        let left = hotkeyFrame(buttons: buttons).maxX + 8
-        return CGRect(x: left, y: pill.minY, width: max(pill.minX - 8 - left, 0), height: pill.height)
+    var wordRowFrame: CGRect {
+        CGRect(x: 0, y: 0, width: size.width,
+               height: CGFloat(KeyboardHeights.wordRowHeight(landscape: landscape)) * vScale)
     }
-
 
     // MARK: Popups
 
@@ -129,8 +134,10 @@ enum KeyColors {
     static let pressed = UIColor {
         $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.44) : UIColor(red: 197 / 255, green: 197 / 255, blue: 201 / 255, alpha: 1)
     }
-    /// The popup (callout) body: the key color; dark: a bit lighter.
-    static let popup = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.26) : .white }
+    /// Opaque popup surface: a native dark capture has a subtle material gradient around #333.
+    /// Alpha here reveals sibling SwiftUI tool buttons underneath the grid's popup drawing;
+    /// clearing the grid's own backing does not clear those siblings.
+    static let popup = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.2, alpha: 1) : .white }
     static let ink = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
     static let accent = UIColor(red: 0, green: 122 / 255, blue: 1, alpha: 1)
     static let highlight = UIColor(red: 0, green: 136 / 255, blue: 1, alpha: 1)

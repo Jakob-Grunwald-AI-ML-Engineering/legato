@@ -50,6 +50,7 @@ final class SuggestionController {
     /// The row generation `actions` were built for: a keystroke starts a new one, and until the new words are
     /// published a tap on the old ones would apply them to a field that has moved on.
     private var actionsGeneration = 0
+    private var rowRevision = 0
     private var lastContent: WordRowContent = .empty
     private var generation = 0
     private var task: Task<Void, Never>?
@@ -205,6 +206,14 @@ final class SuggestionController {
         own = nil
     }
 
+    /// A deliberate cursor gesture supersedes a recent keystroke's delayed proxy echo.
+    func cursorPanBegan() {
+        interruptTyping()
+        own = nil
+        state.cursorPanBegan()
+        contextChanged()
+    }
+
     /// A key was typed or a word completed: `contextBefore` is the text before the cursor now.
     func keystroke(contextBefore: String) {
         reloadIfChanged()
@@ -212,7 +221,7 @@ final class SuggestionController {
         before = contextBefore
         after = document.contextAfter
         _ = state.keystroke(contextBefore: contextBefore, at: Date())
-        refreshRow()
+        refreshRow(force: true)
     }
 
     /// The keyboard is about to change the field so that the text before the cursor becomes `expected`.
@@ -240,7 +249,7 @@ final class SuggestionController {
         before = reported
         after = document.contextAfter
         _ = state.cursorMoved(contextBefore: reported, contextAfter: after, hasSelection: document.selectedText?.isEmpty == false, at: Date())
-        refreshRow()
+        refreshRow(force: foreign)
         return foreign
     }
 
@@ -267,6 +276,8 @@ final class SuggestionController {
     func pin(_ words: [String]) {
         pinned = words
         controller.suggestions = words
+        controller.highlightedSuggestionRank = nil
+        rowRevision += 1
         actions = []
         actionsGeneration = generation
     }
@@ -280,10 +291,10 @@ final class SuggestionController {
 
     // MARK: Row
 
-    private func refreshRow() {
+    private func refreshRow(force: Bool = false) {
         guard pinned == nil else { return }
         let content = state.content
-        guard content != lastContent else { return }
+        guard force || content != lastContent else { return }
         lastContent = content
         task?.cancel()
         generation += 1
@@ -307,19 +318,22 @@ final class SuggestionController {
         }
     }
 
-    private func publish(_ words: [String], _ actions: [Action]) {
+    private func publish(_ words: [String], _ actions: [Action], correctionRank: Int? = nil) {
         self.actions = actions
         actionsGeneration = generation
+        rowRevision += 1
+        controller.highlightedSuggestionRank = correctionRank
         if controller.suggestions != words { controller.suggestions = words }
     }
 
     private func completions(prefix: String, id: Int) async {
         let previous = WordContext.previousWord(beforePrefixIn: before).map { [$0] } ?? []
-        let words = await WordSuggester.completions(
+        let candidates = await WordSuggester.candidates(
             prefix: prefix, previous: previous, snapshot: resources.snapshot, pairs: resources.pairs,
-            completer: PlatformSpellChecker(), languages: languages)
+            completer: PlatformSpellChecker(), checker: PlatformSpellChecker(), languages: languages)
         guard !Task.isCancelled, id == generation else { return }
-        publish(words, words.map { _ in .complete(prefix: prefix) })
+        publish(candidates.map(\.text), candidates.map { _ in .complete(prefix: prefix) },
+                correctionRank: candidates.firstIndex { $0.kind == .correction })
     }
 
     /// The tapped word's alternatives, ranked in two steps so the row isn't held up by the platform spell
@@ -432,9 +446,21 @@ final class SuggestionController {
 
     /// A slot was tapped; `rank` 0 is the best suggestion.
     func tapped(rank: Int) {
+        guard let tap = tapIdentity(rank: rank) else { return }
+        tapped(tap)
+    }
+
+    func tapIdentity(rank: Int) -> SuggestionTap? {
+        guard controller.suggestions.indices.contains(rank) else { return nil }
+        return SuggestionTap(rank: rank, word: controller.suggestions[rank], revision: rowRevision,
+                             documentID: document.documentID, before: document.contextBefore, after: document.contextAfter)
+    }
+
+    func tapped(_ tap: SuggestionTap) {
         let words = controller.suggestions
-        guard words.indices.contains(rank) else { return }
-        let word = words[rank]
+        guard suggestsHere, tap.matches(revision: rowRevision, words: words, documentID: document.documentID,
+                                      before: document.contextBefore, after: document.contextAfter) else { return }
+        let rank = tap.rank, word = tap.word
         if pinned != nil {
             // The harness's fixed words complete whatever is being typed.
             let prefix = TextContext(documentContextBeforeInput: controller.typing.contextBefore).wordPrefix

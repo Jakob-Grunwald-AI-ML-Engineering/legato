@@ -14,8 +14,15 @@ struct KeyboardPreferences: Equatable {
     var haptics = true
     var clicks = true
     var automaticAutoFill = AutoFillHandoff.defaultEnabled
+    var emojiSystemSwitcher = false
     var strip = false
     var stripHeight = StripHeight.standard
+
+    /// The extension owns its last layout. Local defaults work with or without Full Access.
+    /// Only a boolean is retained, never document text.
+    static func expansionPersistence() -> KeyboardExpansionPersistence {
+        KeyboardExpansionPersistence(defaults: .standard)
+    }
 
     static func load() -> KeyboardPreferences {
         guard let defaults = UserDefaults(suiteName: LinkChannel.appGroupID) else { return KeyboardPreferences() }
@@ -27,6 +34,7 @@ struct KeyboardPreferences: Equatable {
             haptics: defaults.object(forKey: hapticsKey) as? Bool ?? true,
             clicks: defaults.object(forKey: clicksKey) as? Bool ?? true,
             automaticAutoFill: defaults.object(forKey: AutoFillHandoff.preferenceKey) as? Bool ?? AutoFillHandoff.defaultEnabled,
+            emojiSystemSwitcher: EmojiKeyboardBehavior.usesSystemSwitcher(in: defaults),
             strip: defaults.object(forKey: stripKey) as? Bool ?? false,
             stripHeight: StripHeight.resolve(stored: stored))
     }

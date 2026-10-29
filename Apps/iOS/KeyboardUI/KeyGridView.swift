@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 final class KeyGridView: UIView {
     static let holdDelay: Duration = .milliseconds(400)
-    private static let overlayKeys: Set<String> = ["globe"]
+    private var overlayKeys: Set<String> = ["globe"]
 
     weak var typing: TypingModel?
 
@@ -32,6 +32,7 @@ final class KeyGridView: UIView {
         var current: Key?
         var point: CGPoint
         var hold: Task<Void, Never>?
+        var cursorPan = SpaceCursorPan()
         /// The strip's cells (the alternates with the key's own letter at `baseIndex`); empty until it opens.
         var cells: [String] = []
         var baseIndex = 0
@@ -41,6 +42,7 @@ final class KeyGridView: UIView {
             self.origin = origin
             current = origin
             self.point = point
+            cursorPan.begin(onSpace: origin.action == .space, x: point.x)
         }
 
         var picking: Bool { !cells.isEmpty }
@@ -56,7 +58,9 @@ final class KeyGridView: UIView {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    private var geometry: KeyGeometry { KeyGeometry(size: bounds.size) }
+    private var geometry: KeyGeometry {
+        KeyGeometry(size: bounds.size, landscapeScreenWidth: KeyGeometry.screenWidth(in: window))
+    }
 
     /// The top bar (suggestions, mic pill) lies under this view; only the key rows take touches. A touch
     /// that began on a key keeps coming here wherever it moves (the popups reach into the bar).
@@ -64,12 +68,18 @@ final class KeyGridView: UIView {
         point.y >= geometry.firstRowTop - geometry.gap && super.point(inside: point, with: event)
     }
 
-    func apply(layout: TypingLayout, presentation: KeyPresentation) {
+    func apply(layout: TypingLayout, presentation: KeyPresentation, emojiSystemSwitcher: Bool) {
+        let overlays: Set<String> = emojiSystemSwitcher ? ["globe", "emoji"] : ["globe"]
+        let overlaysChanged = overlays != overlayKeys
+        overlayKeys = overlays
         let layoutChanged = layout != self.layout
-        guard layoutChanged || presentation != self.presentation else { return }
+        if layoutChanged || overlaysChanged || presentation.cursorReset != self.presentation.cursorReset {
+            cancelTouches()
+        }
+        guard layoutChanged || overlaysChanged || presentation != self.presentation else { return }
         self.layout = layout
         self.presentation = presentation
-        if layoutChanged { rebuild() } else { rebuildAccessibility() }
+        if layoutChanged || overlaysChanged { rebuild() } else { rebuildAccessibility() }
         setNeedsDisplay()
     }
 
@@ -87,12 +97,28 @@ final class KeyGridView: UIView {
     #endif
 
     private func rebuild() {
+        cancelTouches()
         builtFor = bounds.size
-        let all = layout.frames(in: bounds.size)
+        let all = layout.frames(in: bounds.size, landscapeScreenWidth: KeyGeometry.screenWidth(in: window))
         frames = Dictionary(all.map { ($0.id, $0.cgRect) }, uniquingKeysWith: { a, _ in a })
         keys = Dictionary(layout.rows.flatMap(\.keys).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        tester = KeyHitTester(frames: all.filter { !Self.overlayKeys.contains($0.id) })
+        tester = KeyHitTester(frames: all.filter { !overlayKeys.contains($0.id) })
         rebuildAccessibility()
+        setNeedsDisplay()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { cancelTouches() }
+    }
+
+    private func cancelTouches() {
+        for state in touchStates.values {
+            state.hold?.cancel()
+            typing?.keyCancelled(state.origin)
+        }
+        touchStates.removeAll()
+        typing?.endCursorPan()
         setNeedsDisplay()
     }
 
@@ -109,7 +135,7 @@ final class KeyGridView: UIView {
     private func rebuildAccessibility() {
         let typing = typing
         accessibilityElements = layout.rows.flatMap(\.keys).compactMap { key -> UIAccessibilityElement? in
-            guard !Self.overlayKeys.contains(key.id), let frame = frames[key.id] else { return nil }
+            guard !overlayKeys.contains(key.id), let frame = frames[key.id] else { return nil }
             let element = KeyElement(accessibilityContainer: self)
             element.accessibilityLabel = accessibilityName(key)
             element.accessibilityIdentifier = Self.identifier(key)
@@ -152,6 +178,7 @@ final class KeyGridView: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard typing?.isCursorPanning != true else { return }
         for touch in touches {
             let point = touch.location(in: self)
             guard let key = key(at: point) else { continue }
@@ -169,6 +196,11 @@ final class KeyGridView: UIView {
             guard let state = touchStates[ObjectIdentifier(touch)] else { continue }
             let point = touch.location(in: self)
             state.point = point
+            let steps = state.cursorPan.move(to: point.x)
+            if state.cursorPan.isActive {
+                typing?.panCursor(by: steps)
+                continue
+            }
             if state.picking {
                 let selected = nearestCell(state)
                 if selected != state.selected { typing?.feedback.tick() }
@@ -177,6 +209,7 @@ final class KeyGridView: UIView {
                 let hit = key(at: point).flatMap { slidable($0) ? $0 : nil }
                 if hit?.id != state.current?.id {
                     state.current = hit
+                    state.cursorPan.cancelArming()
                     scheduleHold(state)
                     if hit != nil { typing?.feedback.tick() }
                 }
@@ -189,7 +222,13 @@ final class KeyGridView: UIView {
         for touch in touches {
             guard let state = touchStates.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
             state.hold?.cancel()
-            if state.picking {
+            if state.cursorPan.isActive {
+                // The final position may arrive with touch-up rather than a separate move event.
+                typing?.panCursor(by: state.cursorPan.move(to: touch.location(in: self).x))
+            }
+            if state.cursorPan.finish() {
+                typing?.endCursorPan()
+            } else if state.picking {
                 let pick = state.selected == state.baseIndex ? nil : state.cells[state.selected]
                 typing?.keyUp(state.origin, alternate: pick)
             } else if let key = state.current {
@@ -205,6 +244,7 @@ final class KeyGridView: UIView {
         for touch in touches {
             guard let state = touchStates.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
             state.hold?.cancel()
+            if state.cursorPan.finish() { typing?.endCursorPan() }
             typing?.keyCancelled(state.origin)
         }
         setNeedsDisplay()
@@ -213,6 +253,23 @@ final class KeyGridView: UIView {
     private func scheduleHold(_ state: TouchState) {
         state.hold?.cancel()
         state.hold = nil
+        if state.origin.action == .space, state.current?.action == .space {
+            state.hold = Task { [weak self, weak state] in
+                try? await Task.sleep(for: Self.holdDelay)
+                guard !Task.isCancelled, let self, let state,
+                      self.touchStates.values.contains(where: { $0 === state }),
+                      state.cursorPan.activate() else { return }
+                // A pan owns the keyboard. Retire other fingers now so their later release cannot type.
+                for (id, other) in self.touchStates where other !== state {
+                    other.hold?.cancel()
+                    self.typing?.keyCancelled(other.origin)
+                    self.touchStates.removeValue(forKey: id)
+                }
+                self.typing?.beginCursorPan()
+                self.setNeedsDisplay()
+            }
+            return
+        }
         guard let key = state.current, let alternates = typing?.alternates(for: key), !alternates.isEmpty,
               let own = typing?.output(of: key)
         else { return }
@@ -263,9 +320,10 @@ final class KeyGridView: UIView {
         let trait = traitCollection
         let held = Set(touchStates.values.compactMap { $0.current?.id })
         for key in layout.rows.flatMap(\.keys) {
-            guard !Self.overlayKeys.contains(key.id), let frame = frames[key.id] else { continue }
+            guard !overlayKeys.contains(key.id), let frame = frames[key.id] else { continue }
             drawKey(key, in: frame, pressed: held.contains(key.id), ctx: ctx, trait: trait)
         }
+        guard typing?.isCursorPanning != true else { return }
         for state in touchStates.values {
             if state.picking {
                 drawStrip(state, ctx: ctx, trait: trait)
@@ -304,6 +362,7 @@ final class KeyGridView: UIView {
         }
         fill(CGPath(roundedRect: frame, cornerWidth: g.radius, cornerHeight: g.radius, transform: nil), color: color, ctx: ctx, trait: trait)
 
+        guard typing?.isCursorPanning != true else { return }
         let inkColor = ink.resolvedColor(with: trait)
         switch key.action {
         case .character(let c):
@@ -316,7 +375,7 @@ final class KeyGridView: UIView {
                 }
                 if key.id == "char:+" { drawText("+", centerX: frame.midX, baseline: frame.minY + 30, size: 30, weight: .regular, color: inkColor) }
             } else {
-                drawText(text, centerX: frame.midX, baseline: frame.minY + g.letterBaseline, size: g.letterSize, weight: .regular, color: inkColor)
+                drawText(text, centerX: frame.midX, baseline: frame.minY + g.letterBaseline, size: g.letterSize(for: text), weight: .regular, color: inkColor)
             }
         case .returnKey:
             if let symbol = KeyLabels.returnSymbol(for: p.returnLabel) {
@@ -438,6 +497,7 @@ struct KeyGrid: UIViewRepresentable {
     let layout: TypingLayout
     let presentation: KeyPresentation
     let appearance: UIUserInterfaceStyle
+    var emojiSystemSwitcher = false
 
     func makeUIView(context: Context) -> KeyGridView {
         let view = KeyGridView()
@@ -445,8 +505,12 @@ struct KeyGrid: UIViewRepresentable {
         return view
     }
 
+    static func dismantleUIView(_ view: KeyGridView, coordinator: ()) {
+        view.typing?.cancelCursorPan()
+    }
+
     func updateUIView(_ view: KeyGridView, context: Context) {
         view.overrideUserInterfaceStyle = appearance
-        view.apply(layout: layout, presentation: presentation)
+        view.apply(layout: layout, presentation: presentation, emojiSystemSwitcher: emojiSystemSwitcher)
     }
 }
