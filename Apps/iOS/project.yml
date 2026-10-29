@@ -84,6 +84,8 @@ targets:
       path: Gen/App.entitlements
       properties:
         com.apple.security.application-groups: [group.de.gruenwald.legato]
+        # The 1.7B cleanup model peaks near 1.8 GB; the raised per-process limit keeps headroom for it.
+        com.apple.developer.kernel.increased-memory-limit: true
     info:
       path: Gen/App-Info.plist
       properties:

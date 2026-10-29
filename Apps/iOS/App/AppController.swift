@@ -93,6 +93,13 @@ final class AppController {
     @ObservationIgnored private var engineResolution: Task<Void, Never>?
     @ObservationIgnored private var resourcePreparation: Task<Void, Never>?
     private enum PreparationError: Error { case needsForeground }
+    /// Selected-model preparations in flight; a memory warning never cancels one (`MemoryWarningPolicy`).
+    @ObservationIgnored private var loadsInFlight = 0
+    @ObservationIgnored private lazy var memoryWarnings = MemoryWarningPolicy(
+        availableMemory: { UInt64(os_proc_available_memory()) },
+        isLoading: { [weak self] in (self?.loadsInFlight ?? 0) > 0 },
+        release: { [weak self] in await self?.releaseModelsForMemoryPressure() },
+        log: { message in Self.log.info("\(message, privacy: .public)") })
     #if LEGATO_INTERNAL
     /// One instance for the process: it remembers whether a session is being held between runs.
     @ObservationIgnored private let sessionControl: KeepActiveSessionControl
@@ -414,6 +421,11 @@ final class AppController {
     }
 
     private func prepareSelectedResources() async throws {
+        loadsInFlight += 1
+        defer {
+            loadsInFlight -= 1
+            if loadsInFlight == 0 { Task { @MainActor [weak self] in await self?.memoryWarnings.loadFinished() } }
+        }
         let revision = modelRevision
         #if DEBUG
         if E2E.fakeEngine != nil {
@@ -1059,7 +1071,7 @@ final class AppController {
                     return
                 }
                 #endif
-                await self?.releaseModelsForMemoryPressure()
+                await self?.memoryWarnings.handleWarning()
             }
         }
         #endif
