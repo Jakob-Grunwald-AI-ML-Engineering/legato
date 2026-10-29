@@ -341,22 +341,40 @@ public final class FieldWriter {
     /// What the field shows for this run's text.
     public var shownText: String { written }
 
+    /// Where the run's text starts in the field (UTF-16); nil until the first write landed.
+    public var runStart: Int? { spanStart }
+
+    /// The length (UTF-16) of the tentative text at the end of the run's text (`.streamLive`): not final yet, so
+    /// the cleanup agent must not be offered it.
+    public var tentativeLength: Int { tentative.utf16.count }
+
     /// A step the cleanup agent landed in the field through the queue: `step` is in field coordinates and was
     /// applied. Folds it into what the writer believes it wrote, so its next check still reads the field as
-    /// expected. A step inside the written text is taken in; one entirely before or after it does not concern
-    /// the writer; one that straddles an edge of it, or does not match what was written, leaves the writer
-    /// unable to tell what it wrote (`drift`). Call it as soon as the step landed, before the writer writes again.
+    /// expected. A step inside the run's text (written or tentative) is taken in; one entirely before or after it
+    /// does not concern the writer; one that does not match what was written leaves the writer unable to tell what
+    /// it wrote (`drift`). A step across the edge between written and tentative text is taken in as written text
+    /// (the agent is not offered tentative text, so this is not expected). Call it as soon as the step landed,
+    /// before the writer writes again.
     public func absorb(_ step: EditStep) {
         guard !closed, let start = spanStart, degradeReason == nil else { return }
         let lower = step.span.location - start, upper = step.span.end - start
-        let length = written.utf16.count
-        if upper < 0 || lower > length { return }
-        guard lower >= 0, upper <= length else { return degrade(.drift) }
-        let units = Array(written.utf16)
-        guard String(decoding: units[lower..<upper], as: UTF16.self) == step.expect else { return degrade(.drift) }
-        written = String(decoding: units[..<lower], as: UTF16.self) + step.text
-            + String(decoding: units[upper...], as: UTF16.self)
-        absorbed = true
+        let whole = Array((written + tentative).utf16)
+        if upper < 0 || lower > whole.count { return }
+        guard lower >= 0, upper <= whole.count,
+              String(decoding: whole[lower..<upper], as: UTF16.self) == step.expect
+        else { return degrade(.drift) }
+        let edge = written.utf16.count
+        func text(_ units: ArraySlice<UInt16>) -> String { String(decoding: units, as: UTF16.self) }
+        if upper <= edge {
+            written = text(whole[..<lower]) + step.text + text(whole[upper..<edge])
+            absorbed = true
+        } else if lower >= edge {
+            tentative = text(whole[edge..<lower]) + step.text + text(whole[upper...])
+        } else {
+            written = text(whole[..<lower]) + step.text
+            tentative = text(whole[upper...])
+            absorbed = true
+        }
     }
 
     /// Swaps the text this writer put into the field for `text`, in one write verified by readback: for the

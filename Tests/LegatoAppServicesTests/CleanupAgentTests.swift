@@ -149,6 +149,32 @@ struct CleanupAgentTests {
         #expect(await rig.session.trims.isEmpty)
     }
 
+    @Test func tentativeTextAtTheEndOfTheRunIsNotOfferedUntilItIsFinal() async throws {
+        let rig = await Rig(scripts: [edits((1, "Teh cat sat.")), edits((2, "The dog ran."))])
+        rig.write("Teh cat sat. Teh dog ran.")
+        await rig.agent.setTentative(length: " Teh dog ran.".utf16.count)
+        let first = await rig.feed()
+        let request = try #require(await rig.session.requests.first)
+        #expect(request.contains("1. Teh cat sat."))
+        #expect(!request.contains("dog"))
+        #expect(first.allSatisfy { $0.steps.allSatisfy { $0.span.end <= "Teh cat sat.".utf16.count } })
+
+        // Once it is final, the sentence is the model's to review.
+        await rig.agent.setTentative(length: 0)
+        let second = await rig.agent.replan()
+        #expect(await rig.session.requests.last?.contains("2. Teh dog ran.") == true)
+        let step = try #require(second.first?.steps.first)
+        #expect(step.span.location >= "Teh cat sat. ".utf16.count)
+    }
+
+    @Test func aRunOfOnlyTentativeTextAsksNothing() async throws {
+        let rig = await Rig(scripts: [edits((1, "The cat sat."))])
+        rig.write("Teh cat sat.")
+        await rig.agent.setTentative(length: "Teh cat sat.".utf16.count)
+        #expect(await rig.feed().isEmpty)
+        #expect(await rig.session.requests.isEmpty)
+    }
+
     @Test func theModelSeesNumberedSentencesAndTheTextTheRunDidNotWriteStaysOut() async throws {
         let rig = await Rig(existing: "Old teh text. ", scripts: [edits((1, "New the one."))])
         let transactions = await rig.dictate("New teh one. Next.")

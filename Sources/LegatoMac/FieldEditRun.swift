@@ -5,16 +5,47 @@ import LegatoFieldEdit
 /// the two entry points beyond them. Closures, so this target does not depend on the agent's module.
 public struct FieldRunAgent: Sendable {
     var consume: @Sendable (FeedBatch) async -> [EditTransaction]
+    var tentative: @Sendable (Int) async -> Void
     var conflicted: @Sendable (Conflict, UUID) async -> Void
     var superseded: @Sendable (UUID, UUID) async -> Void
     var replan: @Sendable () async -> [EditTransaction]
     var finish: @Sendable () async -> [EditTransaction]
 
+    /// An agent that is made in the background (its model session may still be warming): every call waits for
+    /// `make`, in the order the run makes them. When `make` returns nil there is no agent after all: the run's text
+    /// stays as the engine heard it.
+    public init(deferred make: @escaping @Sendable () async -> FieldRunAgent?) {
+        let made = Task { await make() }
+        consume = { batch in
+            guard let agent = await made.value else { return [] }
+            return await agent.consume(batch)
+        }
+        tentative = { length in
+            if let agent = await made.value { await agent.tentative(length) }
+        }
+        conflicted = { conflict, id in
+            if let agent = await made.value { await agent.conflicted(conflict, id) }
+        }
+        superseded = { id, by in
+            if let agent = await made.value { await agent.superseded(id, by) }
+        }
+        replan = {
+            guard let agent = await made.value else { return [] }
+            return await agent.replan()
+        }
+        finish = {
+            guard let agent = await made.value else { return [] }
+            return await agent.finish()
+        }
+    }
+
     public init(
-        _ agent: some FieldAgent, replan: @escaping @Sendable () async -> [EditTransaction],
+        _ agent: some FieldAgent, tentative: @escaping @Sendable (Int) async -> Void = { _ in },
+        replan: @escaping @Sendable () async -> [EditTransaction],
         finish: @escaping @Sendable () async -> [EditTransaction]
     ) {
         consume = { await agent.consume($0) }
+        self.tentative = tentative
         conflicted = { await agent.conflicted($0, for: $1) }
         superseded = { await agent.superseded($0, by: $1) }
         self.replan = replan
@@ -32,8 +63,9 @@ public struct FieldRunAgent: Sendable {
 /// - **Feed.** With an agent, the queue's feed is read in-process: every wake (the writer put text in
 ///   (``textChanged()``), the field changed (the activity source), a held edit may run) is one pump that
 ///   refreshes the field, hands the new feed entries to the agent as a ``FeedBatch``, submits what it returns in
-///   the cleanup lane and runs it. The agent's conflicts and supersedes go back to it. ``start()`` makes the
-///   first batch, so the agent knows the field before the run's first text lands.
+///   the cleanup lane and runs it. The agent's conflicts and supersedes go back to it. ``start()`` queues the
+///   first batch ahead of every wake, so the agent knows the field before the run's first text lands, without
+///   holding the run back.
 /// - **The writer follows the agent.** An agent step that lands is folded into the writer
 ///   (``FieldWriter/absorb(_:)``) in the same main-actor step as the write, so the writer's next check still
 ///   reads the field as expected.
@@ -101,23 +133,34 @@ public final class FieldEditRun {
     /// The writer of this run: it follows the agent's edits.
     public func attach(writer: FieldWriter) { self.writer = writer }
 
-    /// Gives the agent its first batch (the field as it is) and starts reading the feed. Call it before the
-    /// run's first text lands.
-    public func start() async {
+    /// Starts reading the feed for the agent, whose first batch is the field as it is now. It does not wait for the
+    /// agent (its model session may still be warming): the batch is handed over in the background, before any
+    /// later one, so the agent still knows the field before the run's first text. Call it before that text lands.
+    public func start() {
         guard let agent, consumer == nil else { return }
         let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         wakes = continuation
         let first = executor.queue.feed.since(nil)
         fedThrough = first.lastSeq
-        submit(await agent.consume(first))
-        executor.drain()
-        absorbLanded()
+        pumping = true
         consumer = Task { [weak self] in
+            await self?.begin(agent, with: first)
             for await _ in stream {
                 guard let self else { return }
                 await self.handleWake()
             }
         }
+    }
+
+    private func begin(_ agent: FieldRunAgent, with first: FeedBatch) async {
+        let made = await agent.consume(first)
+        if !closed {
+            submit(made)
+            executor.drain()
+            absorbLanded()
+        }
+        pumping = false
+        if !wakeQueued { resumeIdle() }
     }
 
     /// The run's text, or the field, changed: read the feed again.
@@ -150,10 +193,12 @@ public final class FieldEditRun {
         wakeQueued = false
         await pump()
         let finals = await agent.finish()
-        let ids = Set(finals.map(\.id))
         submit(finals)
+        // Every edit of the run without an outcome yet is waited for: the final pass's, and the rolling ones the
+        // user's typing still holds back.
+        let awaited = outstanding
+        func pending() -> Bool { awaited.keys.contains(where: { outstanding[$0] != nil }) }
         var waited: TimeInterval = 0
-        func pending() -> Bool { outstanding.keys.contains(where: ids.contains) }
         while pending() {
             executor.refresh()
             let result = executor.drain()
@@ -164,10 +209,14 @@ public final class FieldEditRun {
             waited += delay
             await pause(delay)
         }
-        for id in ids where outstanding[id] != nil { executor.withdraw(id) }
+        for id in awaited.keys where outstanding[id] != nil { executor.withdraw(id) }
         _ = executor.takeEvents()
         close()
-        return Outcome(unapplied: finals.filter { !applied.contains($0.id) })
+        var all = awaited
+        for final in finals { all[final.id] = final }
+        let unapplied = all.values.filter { !applied.contains($0.id) }
+            .sorted { ($0.steps.first?.span.location ?? 0) < ($1.steps.first?.span.location ?? 0) }
+        return Outcome(unapplied: unapplied)
     }
 
     /// Ends the run without a final pass (cancelled): pending edits are taken back, the guard stops.
@@ -179,21 +228,74 @@ public final class FieldEditRun {
 
     private func close() {
         closed = true
+        wakeQueued = false
         wakes?.finish()
         consumer?.cancel()
         typingGuard.stop()
         resumeIdle()
     }
 
-    /// The cleaned text a clipboard fallback should carry when `unapplied` edits did not land: `shown` (the
-    /// run's text in the field) with each such patch applied where its expected text occurs exactly once.
-    public static func fallbackText(shown: String, unapplied: [EditTransaction]) -> String {
-        var text = shown
-        for step in unapplied.flatMap(\.steps) where !step.expect.isEmpty {
-            let parts = text.components(separatedBy: step.expect)
-            if parts.count == 2 { text = parts[0] + step.text + parts[1] }
+    /// The cleaned text a clipboard fallback should carry when `unapplied` edits did not land: the run's text as
+    /// the field holds it now, with each such edit applied where it belongs (see ``fallbackText(current:spanStart:unapplied:)``).
+    public func clipboardText(unapplied: [EditTransaction]) -> String {
+        guard let writer else { return "" }
+        guard let start = writer.runStart else { return writer.shownText }
+        executor.refresh()
+        let feed = executor.queue.feed
+        let window = feed.window as NSString
+        // The run's text may have grown or shrunk by what the user typed inside it.
+        var length = writer.shownText.utf16.count
+        for entry in feed.entries {
+            guard case .foreign(let step, true, _) = entry.event else { continue }
+            if step.span.location >= start, step.span.end <= start + length { length += step.text.utf16.count - step.span.length }
         }
-        return text
+        let region = NSIntersectionRange(NSRange(location: start, length: length), NSRange(location: 0, length: window.length))
+        let mapped = unapplied.map { transaction -> EditTransaction in
+            var moved = transaction
+            moved.steps = Self.mapped(transaction, through: feed.entries)
+            return moved
+        }
+        return Self.fallbackText(current: window.substring(with: region), spanStart: start, unapplied: mapped)
+    }
+
+    /// `current` (the run's text in the field, starting at field offset `spanStart`) with each `unapplied` step
+    /// applied at its position in the run (`span - spanStart`). The step's expected text is only a check: a step
+    /// whose expected text is not there (the user changed it) is left out. Insertions are included. Steps are
+    /// applied from the end, so none shifts another.
+    static func fallbackText(current: String, spanStart: Int, unapplied: [EditTransaction]) -> String {
+        var units = Array(current.utf16)
+        for step in unapplied.flatMap(\.steps).sorted(by: { $0.span.location > $1.span.location }) {
+            let lower = step.span.location - spanStart, upper = step.span.end - spanStart
+            guard lower >= 0, upper <= units.count,
+                  String(decoding: units[lower..<upper], as: UTF16.self) == step.expect
+            else { continue }
+            units.replaceSubrange(lower..<upper, with: Array(step.text.utf16))
+        }
+        return String(decoding: units, as: UTF16.self)
+    }
+
+    /// The steps of `transaction` (at its base version) at their place in the field now: moved through every
+    /// change that landed since. A step the changes deleted, or after a reset, is left out.
+    private static func mapped(_ transaction: EditTransaction, through entries: [FeedEntry]) -> [EditStep] {
+        var steps = transaction.steps
+        for entry in entries {
+            guard let version = entry.event.version, version > transaction.base else { continue }
+            let changes: [EditStep]
+            switch entry.event {
+            case .applied(_, _, let landed, _): changes = landed
+            case .foreign(let step, _, _): changes = [step]
+            case .rebased: continue
+            default: return []
+            }
+            for change in changes {
+                let map = StepMap(change)
+                steps = steps.compactMap { step in
+                    guard case .moved(let span) = map.map(step.span) else { return nil }
+                    return EditStep(span: span, text: step.text, expect: step.expect)
+                }
+            }
+        }
+        return steps
     }
 
     // MARK: Pump
@@ -259,6 +361,7 @@ public final class FieldEditRun {
             absorbLanded()
             let handedBack = await route(to: agent)
             let batch = executor.queue.feed.since(fedThrough)
+            await agent.tentative(writer?.tentativeLength ?? 0)
             var made: [EditTransaction] = []
             if batch.resync || !batch.entries.isEmpty {
                 fedThrough = batch.lastSeq

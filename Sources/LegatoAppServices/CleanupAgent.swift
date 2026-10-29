@@ -102,6 +102,9 @@ public actor CleanupAgent: FieldAgent {
     private var runs: [Span] = []
     /// What the user wrote or changed; the sentences touching it are locked.
     private var touched: [Span] = []
+    /// UTF-16 units at the end of the run's last span that are tentative (not final yet, the engine may still change
+    /// them): never offered to the model, so never edited.
+    private var tentativeTail = 0
 
     // What the model has decided about the run's text.
     private var pending: [UUID: Planned] = [:]
@@ -153,6 +156,13 @@ public actor CleanupAgent: FieldAgent {
     /// confirmed field writes.
     public func hear(_ text: String) async {
         await append(text)
+    }
+
+    /// The writer shows `length` UTF-16 units of tentative text at the end of the run's text (Mac live streaming).
+    /// It is left out of the sentences the model sees until it is final (`length` 0), so no edit lands in text the
+    /// engine is about to replace.
+    public func setTentative(length: Int) {
+        tentativeTail = max(0, length)
     }
 
     /// Plans again from what the agent knows now (after a conflict or supersede, without waiting for a batch).
@@ -309,8 +319,10 @@ public actor CleanupAgent: FieldAgent {
         guard let sessionID, !runs.isEmpty else { return nil }
         let text = window as NSString
         var found: [(location: Int, text: String)] = []
-        for run in runs {
-            let region = NSIntersectionRange(NSRange(location: run.location, length: run.length), NSRange(location: 0, length: text.length))
+        for (index, run) in runs.enumerated() {
+            // The newest span ends in the tentative text, if any.
+            let cut = index == runs.count - 1 ? min(tentativeTail, run.length) : 0
+            let region = NSIntersectionRange(NSRange(location: run.location, length: run.length - cut), NSRange(location: 0, length: text.length))
             guard region.length > 0 else { continue }
             text.enumerateSubstrings(in: region, options: .bySentences) { _, range, _, _ in
                 let body = Self.trimmed(range, in: text)
