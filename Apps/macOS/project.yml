@@ -36,6 +36,8 @@ targets:
         product: LegatoAppleSpeech
       - package: LegatoKit
         product: LegatoMac
+      - package: LegatoKit
+        product: LegatoFieldEdit
       # Downloadable models, engines and cleanup.
       - package: LegatoKit
         product: LegatoModels
