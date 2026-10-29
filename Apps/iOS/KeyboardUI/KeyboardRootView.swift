@@ -34,7 +34,8 @@ struct KeyboardRootView: View {
                     let wordFrame = g.wordRowFrame
                     place(wordFrame) {
                         WordRowView(
-                            controller: controller, slots: WordRowLayout.visibleSlots(width: Double(wordFrame.width)), swipe: swipe)
+                            controller: controller, slots: WordRowLayout.visibleSlots(width: Double(wordFrame.width)),
+                            contentOffset: WordRowHeight.textOffset(landscape: g.landscape), swipe: swipe)
                     }
                     place(g.hotkeyFrame(buttons: buttons)) { HotkeyBar(controller: controller, buttonWidth: g.toolWidth(buttons: buttons), swipe: swipe) }
                     place(g.micFrame(buttons: buttons)) { MicKey(controller: controller).simultaneousGesture(swipe) }
@@ -89,7 +90,8 @@ struct KeyboardRootView: View {
 
     private func stripWordRow(width: CGFloat) -> some View {
         let slots = WordRowLayout.visibleSlots(width: Double(width))
-        return WordRowView(controller: controller, slots: slots, swipe: swipe)
+        return WordRowView(controller: controller, slots: slots,
+                           contentOffset: WordRowHeight.textOffset(landscape: KeyGeometry.isLandscape(width: width)), swipe: swipe)
             // Not clear: the keyboard gets no touches on fully clear pixels.
             .background(Color.black.opacity(0.001).gesture(swipe))
             #if DEBUG

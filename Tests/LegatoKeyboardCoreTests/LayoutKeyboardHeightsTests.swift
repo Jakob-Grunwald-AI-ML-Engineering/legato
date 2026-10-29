@@ -13,13 +13,14 @@ import Testing
     }
 
     @Test func portraitAddsOneNativeToolRowBelowNativePredictions() {
-        // Native predictions are 44 pt; native Q starts 8 pt below that row.
+        // iOS 26 adds 17 pt above the extension in portrait. Request only the remaining 27 pt of the native 44 pt.
+        // Native Q starts 8 pt below the complete visible prediction row.
         // The tools add one native 54 pt key pitch before the unchanged typing grid.
-        #expect(KeyboardHeights.wordRowHeight(landscape: false) == 44)
+        #expect(KeyboardHeights.wordRowHeight(landscape: false) == 27)
         #expect(KeyboardHeights.pillHeight(landscape: false) == 43)
         #expect(KeyboardHeights.pillGapToRow(landscape: false) == 11)
-        #expect(KeyboardHeights.firstRowTop(landscape: false) == 106)
-        #expect(KeyboardHeights.height(landscape: false) == 314)
+        #expect(KeyboardHeights.firstRowTop(landscape: false) == 89)
+        #expect(KeyboardHeights.height(landscape: false) == 297)
     }
 
     @Test func landscapeKeyRowsAlignWithTheNativeScreenBottom() {
@@ -45,6 +46,15 @@ import Testing
         #expect(abs(StripHeight.requested(row: 54, landscape: true) - 81.33) < 0.0001)
     }
 
+    @Test func portraitPredictionContentExcludesTheSystemRoundedTopArea() {
+        // Retained before image: visible predictions 61 pt; native 44 pt. Public safe-area/style changes had no effect.
+        #expect(KeyboardHeights.height(landscape: false) - KeyboardHeights.firstRowTop(landscape: false) == 208)
+        #expect(KeyboardHeights.toolRowTop(landscape: false) == 35)
+        // The compositor supplies 17 pt; requesting 27 pt makes the visible row 44 pt without moving the typing grid.
+        #expect(KeyboardHeights.wordRowHeight(landscape: false) + 17 == 44)
+        #expect(KeyboardHeights.wordRowHeight(landscape: true) == 44)
+    }
+
     @Test func portraitRowsKeepNativePitchAndThreePointBottomGap() {
         let rows = KeyboardHeights.height(landscape: false) - KeyboardHeights.firstRowTop(landscape: false)
         #expect(rows == 3 * 54 + 43 + 3)
@@ -59,11 +69,11 @@ import Testing
     }
 
     @Test func theStripGrowsByTheWordRow() {
-        #expect(WordRowHeight.strip == 44)
-        #expect(StripHeight.requested(row: 54) == 98)
+        #expect(WordRowHeight.strip == 27)
+        #expect(StripHeight.requested(row: 54) == 81)
         #expect(StripHeight.resolve(stored: 56) == 54)
         #expect(StripHeight.resolve(stored: 44) == 54)
-        #expect(StripHeight.requested(row: 30) == 74)
+        #expect(StripHeight.requested(row: 30) == 57)
     }
 
     @Test func theDebugHeightsThatLeaveNothingToTouchStayAsRequested() {

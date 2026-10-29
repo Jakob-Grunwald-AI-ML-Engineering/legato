@@ -28,6 +28,7 @@ import UIKit
 ///   initial system field's semantic type. Other real fields below it cover credentials and ordinary prose.
 /// - `-LegatoHarnessSecure YES`: initial system field is secure (iOS supplies its native keyboard).
 /// - `-LegatoHarnessSingleField YES`: omit sibling fields to isolate host credential-form heuristics.
+/// - `-LegatoHarnessInitialText <text>`: seed only the ordinary host field for cursor and selection checks.
 /// - `-LegatoHarnessUnpinKeyboard YES`: release the Legato input-mode pin after initial focus, so native
 ///   keyboard switching and the picker work normally; recommended for AutoFill tests.
 ///
@@ -328,6 +329,7 @@ private final class SystemFieldController: UIViewController {
         ]
         field.accessibilityIdentifier = "systemfield.document"
         field.placeholder = "Initial field"
+        field.text = defaults.string(forKey: "LegatoHarnessInitialText")
         field.textContentType = defaults.string(forKey: "LegatoHarnessContentType").flatMap { contentTypes[$0] }
         field.isSecureTextEntry = defaults.bool(forKey: "LegatoHarnessSecure")
 

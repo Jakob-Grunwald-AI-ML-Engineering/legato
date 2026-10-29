@@ -518,6 +518,30 @@ final class KeyboardController {
         if !ops.isEmpty { typing.hostEdited() }
     }
 
+    // MARK: Cursor control
+
+    @ObservationIgnored private var cursorPanSession: SpaceCursorPan.Session?
+
+    func cursorPanBegan() {
+        // A selection omits its contents from the surrounding context; decline ambiguous movement.
+        cursorPanSession = document.selectedText?.isEmpty == false ? nil :
+            SpaceCursorPan.Session(before: document.contextBefore, after: document.contextAfter)
+        history.cursorMoved()
+        wordRow.cursorPanBegan()
+        syncHistory()
+    }
+
+    /// The public keyboard proxy exposes insertion offsets, not host line rectangles.
+    /// Track requested moves locally until release: the proxy may report stale context between events.
+    func moveCursor(by characters: Int) {
+        let offset = cursorPanSession?.move(by: characters) ?? 0
+        guard offset != 0 else { return }
+        document.adjustTextPosition(byCharacterOffset: offset)
+        documentDidChange()
+    }
+
+    func cursorPanEnded() { cursorPanSession = nil }
+
     // MARK: Typing
 
     /// A Return holds no clear back (`ClearWatch.returnTyped`): in a chat app it sends and empties the field.

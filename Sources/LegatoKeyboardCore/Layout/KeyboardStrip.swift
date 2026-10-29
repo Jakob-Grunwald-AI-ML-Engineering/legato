@@ -104,7 +104,7 @@ public enum StripHeight {
     }
 
     public static func requested(row: Double, landscape: Bool = false) -> Double {
-        row >= 30 ? keyRowHeight(row: row, landscape: landscape) + WordRowHeight.strip : row
+        row >= 30 ? keyRowHeight(row: row, landscape: landscape) + WordRowHeight.content(landscape: landscape) : row
     }
 
     /// The stored starting height when it is a candidate, the standard one otherwise.

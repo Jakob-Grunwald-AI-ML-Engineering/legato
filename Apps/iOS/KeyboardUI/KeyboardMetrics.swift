@@ -30,7 +30,7 @@ import UIKit
 /// Landscape, 874 pt screen: side margin 79 including system insets, gap 6, key height 27.33, pitch 35.33, row 1 at 50.
 ///
 /// Legato adds a native-sized tool key row between predictions and the typing grid.
-/// Portrait predictions span the full width at 44 pt; tools have 43 pt faces and a 54 pt pitch.
+/// Portrait predictions span the full width at 44 visible pt (27 in the extension plus the system's 17 pt top area); tools have 43 pt faces and a 54 pt pitch.
 /// The compact layout contains only predictions and one tool key row.
 struct KeyGeometry {
     let size: CGSize
@@ -134,8 +134,10 @@ enum KeyColors {
     static let pressed = UIColor {
         $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.44) : UIColor(red: 197 / 255, green: 197 / 255, blue: 201 / 255, alpha: 1)
     }
-    /// The popup (callout) body: the key color; dark: a bit lighter.
-    static let popup = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.26) : .white }
+    /// Opaque popup surface: a native dark capture has a subtle material gradient around #333.
+    /// Alpha here reveals sibling SwiftUI tool buttons underneath the grid's popup drawing;
+    /// clearing the grid's own backing does not clear those siblings.
+    static let popup = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.2, alpha: 1) : .white }
     static let ink = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
     static let accent = UIColor(red: 0, green: 122 / 255, blue: 1, alpha: 1)
     static let highlight = UIColor(red: 0, green: 136 / 255, blue: 1, alpha: 1)

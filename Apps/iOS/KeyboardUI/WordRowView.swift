@@ -12,6 +12,7 @@ struct WordRowView<Swipe: Gesture>: View {
     /// How many slots the width allows (`WordRowLayout.visibleSlots`).
     let slots: Int
     var fontSize: CGFloat = 17
+    var contentOffset: CGFloat = 0
     let swipe: Swipe
 
     /// The slot being pressed (its position in the row), if any: its pill shows and the dividers beside it hide.
@@ -52,14 +53,17 @@ struct WordRowView<Swipe: Gesture>: View {
         return HStack(spacing: 0) {
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
                 SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
-                               rank: rank, fontSize: fontSize, highlighted: highlighted == position,
+                               rank: rank, fontSize: fontSize, highlighted: highlighted == position, contentOffset: contentOffset,
                                swipe: swipe, onPressChange: { isPressed in
                     if isPressed { pressed = position } else if pressed == position { pressed = nil }
                 })
                     .overlay(alignment: .trailing) {
                         // The system's bar drops the dividers beside the pressed pill, without animation.
                         if position < ranks.count - 1 {
-                            Rectangle().fill(Color(uiColor: KeyColors.divider)).frame(width: 0.67, height: 24)
+                            Rectangle().fill(Color(uiColor: KeyColors.divider))
+                                // Center on the word ink without drawing above the extension's owned area.
+                                .frame(width: 0.67, height: contentOffset == 0 ? 24 : max(0, CGFloat(WordRowHeight.portrait) + 2 * contentOffset))
+                                .offset(y: contentOffset)
                                 .opacity(pressed == position || pressed == position + 1
                                          || highlighted == position || highlighted == position + 1 ? 0 : 1)
                                 .transaction { $0.animation = nil }
@@ -78,6 +82,7 @@ private struct SuggestionSlot<Swipe: Gesture>: View {
     let rank: Int
     let fontSize: CGFloat
     let highlighted: Bool
+    let contentOffset: CGFloat
     let swipe: Swipe
     let onPressChange: (Bool) -> Void
     @State private var press = SuggestionPress()
@@ -87,11 +92,12 @@ private struct SuggestionSlot<Swipe: Gesture>: View {
             if let tap = press.activate(current: nil) { controller.suggestionTapped(tap) }
         } label: {
             MorphingWord(text: word ?? "", fontSize: fontSize)
+                .offset(y: contentOffset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.001))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(WordSlotStyle(highlighted: highlighted, onPressChange: { isPressed in
+        .buttonStyle(WordSlotStyle(highlighted: highlighted, contentOffset: contentOffset, onPressChange: { isPressed in
             if isPressed { press.began(controller.suggestionTap(rank: rank)) }
             onPressChange(isPressed)
         }))
@@ -115,6 +121,7 @@ private struct SuggestionSlot<Swipe: Gesture>: View {
 /// appears and disappears within one frame, as on the system's bar.
 private struct WordSlotStyle: ButtonStyle {
     let highlighted: Bool
+    let contentOffset: CGFloat
     let onPressChange: (Bool) -> Void
 
     /// The system's pill is white at about 30% over the light bar; in dark mode the same lift needs less.
@@ -126,6 +133,8 @@ private struct WordSlotStyle: ButtonStyle {
                 Capsule(style: .continuous)
                     .fill(Self.pill)
                     .padding(.vertical, 4)
+                    // Follow the raised word while keeping the capsule inside the extension's top edge.
+                    .offset(y: max(contentOffset, -4))
                     .opacity(configuration.isPressed || highlighted ? 1 : 0)
                     .transaction { $0.animation = nil }
             }

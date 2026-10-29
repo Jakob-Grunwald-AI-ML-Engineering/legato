@@ -4,6 +4,8 @@ import UIKit
 
 /// What the key grid draws besides the layout.
 struct KeyPresentation: Equatable {
+    var cursorPanning = false
+    var cursorReset = 0
     var uppercase = false
     var shift = ShiftState.Mode.off
     var returnLabel = "return"
@@ -28,6 +30,9 @@ final class TypingModel {
     @ObservationIgnored let feedback = KeyFeedback()
     @ObservationIgnored var now: () -> Date = { Date() }
 
+    private(set) var isCursorPanning = false
+    private var cursorReset = 0
+    @ObservationIgnored private var cursorDocumentID: String?
     private(set) var page = KeyboardPage.letters
     private(set) var showsEmojiPanel = false
     private(set) var shift = ShiftState()
@@ -56,6 +61,7 @@ final class TypingModel {
 
     func openEmojiPanel() {
         guard allowsEmojiPanel else { return }
+        cancelCursorPan()
         endDelete()
         showsEmojiPanel = true
     }
@@ -75,6 +81,7 @@ final class TypingModel {
 
     var presentation: KeyPresentation {
         KeyPresentation(
+            cursorPanning: isCursorPanning, cursorReset: cursorReset,
             uppercase: page == .letters && shift.isUppercase,
             shift: shift.mode,
             returnLabel: KeyLabels.returnLabel(controller?.returnKeyType ?? .default),
@@ -122,6 +129,7 @@ final class TypingModel {
     }
 
     func disappeared() {
+        cancelCursorPan()
         closeEmojiPanel()
         endDelete()
         settleTask?.cancel()
@@ -129,6 +137,10 @@ final class TypingModel {
 
     /// The field or its traits changed: a new field starts on its own page.
     func documentChanged() {
+        if cursorDocumentID != controller?.document.documentID {
+            cancelCursorPan()
+            cursorDocumentID = controller?.document.documentID
+        }
         let field = field
         if !allowsEmojiPanel { closeEmojiPanel() }
         if field != lastField {
@@ -147,6 +159,7 @@ final class TypingModel {
 
     /// Back to the letters page with nothing typed (the DEBUG harness clears its field with this).
     func reset() {
+        cancelCursorPan()
         closeEmojiPanel()
         endDelete()
         page = .letters
@@ -154,6 +167,41 @@ final class TypingModel {
         lastSpaceAt = nil
         shadow = nil
         refreshAutoShift()
+    }
+
+    // MARK: Cursor control
+
+    func beginCursorPan() {
+        endDelete()
+        settleTask?.cancel()
+        shadow = nil
+        lastSpaceAt = nil
+        isCursorPanning = true
+        controller?.cursorPanBegan()
+        feedback.tick()
+    }
+
+    func panCursor(by steps: Int) {
+        guard isCursorPanning, steps != 0 else { return }
+        controller?.moveCursor(by: steps)
+        shadow = nil
+        lastSpaceAt = nil
+    }
+
+    func endCursorPan() {
+        controller?.cursorPanEnded()
+        guard isCursorPanning else { return }
+        isCursorPanning = false
+        shadow = nil
+        lastSpaceAt = nil
+        controller?.documentDidChange()
+        refreshAutoShift()
+    }
+
+    /// Lifecycle resets invalidate even a pending hold owned by the UIKit grid.
+    func cancelCursorPan() {
+        endCursorPan()
+        cursorReset += 1
     }
 
     // MARK: Keys
@@ -169,6 +217,7 @@ final class TypingModel {
 
     /// Delete acts on touch-down and repeats while held; every other key acts on `keyUp`.
     func keyDown(_ key: Key) {
+        guard !isCursorPanning else { return }
         guard key.action == .delete else { return }
         beginDelete()
     }
@@ -198,6 +247,7 @@ final class TypingModel {
 
     /// The touch lifted over `key`. `alternate` is the long-press pick, which replaces the key's output.
     func keyUp(_ key: Key, alternate: String? = nil) {
+        guard !isCursorPanning else { return }
         switch key.action {
         case .character(let c):
             let text = alternate ?? (page == .letters && shift.isUppercase ? c.uppercased() : c)

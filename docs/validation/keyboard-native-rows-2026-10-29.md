@@ -1,5 +1,7 @@
 # Native prediction and tool rows — 29 October 2026
 
+The later [polishing check](keyboard-polish-2026-10-29.md) corrects portrait prediction sizing for the system rounded top area and adds cursor panning. Its requested portrait heights supersede the table below.
+
 The full keyboard now places a native-sized prediction row above one tool key row, followed by the typing grid. Compact contains only predictions and one tool key row. The typing keys retain their previous native alignment. This supersedes the top-area and compact dimensions in the [earlier geometry report](keyboard-geometry-2026-10-29.md).
 
 | Layout | Predictions | Tool face | Total requested height |

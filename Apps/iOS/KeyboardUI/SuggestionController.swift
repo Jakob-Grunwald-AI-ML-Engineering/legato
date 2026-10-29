@@ -206,6 +206,14 @@ final class SuggestionController {
         own = nil
     }
 
+    /// A deliberate cursor gesture supersedes a recent keystroke's delayed proxy echo.
+    func cursorPanBegan() {
+        interruptTyping()
+        own = nil
+        state.cursorPanBegan()
+        contextChanged()
+    }
+
     /// A key was typed or a word completed: `contextBefore` is the text before the cursor now.
     func keystroke(contextBefore: String) {
         reloadIfChanged()

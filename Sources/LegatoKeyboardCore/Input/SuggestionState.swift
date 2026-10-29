@@ -39,6 +39,9 @@ public struct SuggestionState: Sendable {
         expected = (expectedContextBefore, now)
     }
 
+    /// Intentional cursor control supersedes the echo fence from a recent keystroke.
+    public mutating func cursorPanBegan() { expected = nil }
+
     /// A key was typed (or a completion applied); `contextBefore` is the text before the cursor now.
     @discardableResult
     public mutating func keystroke(contextBefore: String, at now: Date) -> WordRowContent {
