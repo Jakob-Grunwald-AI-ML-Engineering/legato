@@ -120,6 +120,9 @@ struct LLMSessionLeaseTests {
     @Test func preparingTheModelOpensOneWarmSessionWithTheHead() async throws {
         let model = SessionModel()
         let warmup = try await preparedWarmup(model)
+        // Warm before the resource counts as ready: no run admitted on it meets the head prefill.
+        let opened = try #require(await model.sessions.first)
+        #expect(await opened.warmed == 1)
         let session = try #require(await warmup.rollingSession(key: "cleanup:local") as? ScriptedSession)
         #expect(await session.chunks == head)
         #expect(await session.warmed == 1)

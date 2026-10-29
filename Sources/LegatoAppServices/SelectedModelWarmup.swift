@@ -155,10 +155,16 @@ public actor SelectedModelWarmup {
                 try Task.checkCancellation()
                 try await resource.lifecycle.prewarmResources()
                 try Task.checkCancellation()
+                // The rolling session's head prefills before the resource counts as ready, so no run admitted
+                // on it meets that prefill on a single-worker runtime.
+                var session: (any LLMSession)?
+                if let source = resource.session { session = await Self.open(source) }
                 if self.entries[key]?.token == token {
                     self.entries[key]?.ready = true
                     self.entries[key]?.task = nil
-                    self.openSession(key)
+                    self.entries[key]?.session = Task { session }
+                } else {
+                    await session?.close()
                 }
             } catch {
                 if self.entries[key]?.token == token {
@@ -189,16 +195,18 @@ public actor SelectedModelWarmup {
 
     private func openSession(_ key: String) {
         guard let entry = entries[key], entry.ready, entry.session == nil, let source = entry.resource.session else { return }
-        entries[key]?.session = Task {
-            guard let session = try? await source.make() else { return nil }
-            do {
-                for chunk in await source.head() { try await session.append(chunk) }
-                try await session.warm()
-                return session
-            } catch {
-                await session.close()
-                return nil
-            }
+        entries[key]?.session = Task { await Self.open(source) }
+    }
+
+    private nonisolated static func open(_ source: SessionSource) async -> (any LLMSession)? {
+        guard let session = try? await source.make() else { return nil }
+        do {
+            for chunk in await source.head() { try await session.append(chunk) }
+            try await session.warm()
+            return session
+        } catch {
+            await session.close()
+            return nil
         }
     }
 
