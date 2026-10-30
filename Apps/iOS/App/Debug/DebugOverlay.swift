@@ -182,7 +182,7 @@ struct DebugOverlayView: View {
                 .accessibilityLabel("Debug message: \(item.text)")
                 .reportFrame("card", to: messages)
                 .id(item.id)
-                .onAppear { messages.cardAppeared(id: item.id) }
+                .onChange(of: item.id, initial: true) { _, id in messages.cardAppeared(id: id) }
                 .onDisappear { messages.cardDisappeared(id: item.id) }
             }
             Spacer(minLength: 0)

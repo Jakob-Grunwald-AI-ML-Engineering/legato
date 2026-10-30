@@ -203,7 +203,7 @@ private struct DebugOverlayView: View {
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.orange, lineWidth: 3))
                 .id(item.id)
-                .onAppear { messages.cardAppeared(id: item.id) }
+                .onChange(of: item.id, initial: true) { _, id in messages.cardAppeared(id: id) }
                 .onDisappear { messages.cardDisappeared(id: item.id) }
             }
             if messages.blocking, messages.current == nil, messages.status == nil {
@@ -214,6 +214,7 @@ private struct DebugOverlayView: View {
         .padding(6)
         .frame(width: 500)
         .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("legato-debug-overlay")
         .onGeometryChange(for: CGSize.self) { $0.size } action: { messages.resize($0) }
     }
