@@ -43,7 +43,9 @@ import LegatoVocabulary
     @ObservationIgnored private var room: Room?
     @ObservationIgnored private var writer: AgentRunner?
     @ObservationIgnored private var transcriber: SonioxClient?
-    @ObservationIgnored private let mic = MicSource()
+    @ObservationIgnored private let mic: any AudioSource
+    @ObservationIgnored private let activateAudioSession: @MainActor () async throws -> Void
+    private var keepMicrophoneActive = true
     @ObservationIgnored private var eventsTask: Task<Void, Never>?
     @ObservationIgnored private var audioTask: Task<Void, Never>?
     @ObservationIgnored private var binder: HintBinder?
@@ -51,23 +53,70 @@ import LegatoVocabulary
     @ObservationIgnored private var lastTransactionID: String?
     @ObservationIgnored private var busyParticipants: Set<Participant> = []
     private let vocabularyURL: URL
-    public init(vocabularyURL: URL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")) { self.vocabularyURL = vocabularyURL }
+    public init(vocabularyURL: URL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json"), keepMicrophoneActive: Bool = true) {
+        self.vocabularyURL = vocabularyURL
+        #if os(iOS)
+        self.keepMicrophoneActive = keepMicrophoneActive
+        #else
+        self.keepMicrophoneActive = false
+        #endif
+        self.mic = MicSource()
+        self.activateAudioSession = Self.activateMicrophoneSession
+    }
+    init(microphone: any AudioSource, activateAudioSession: @escaping @MainActor () async throws -> Void) {
+        self.vocabularyURL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")
+        self.mic = microphone
+        self.activateAudioSession = activateAudioSession
+    }
     init(room: Room) {
         self.room = room
+        self.mic = MicSource()
+        self.activateAudioSession = Self.activateMicrophoneSession
         self.vocabularyURL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")
     }
     public func arm() async {
         guard !isArmed else { return }
         do {
-            #if os(iOS)
-            guard await AVAudioApplication.requestRecordPermission() else { throw NSError(domain: "Composer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings."]) }
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP])
-            try session.setActive(true)
-            #endif
-            _ = try await mic.start(format: .init(sampleRate: 16000, channelCount: 1))
-            isArmed = true; status = "ready"; onChange?()
+            _ = try await prepareMicrophoneStream()
+            isArmed = true; error = nil; status = "ready"; onChange?()
         } catch { fail(error) }
+    }
+    private static func activateMicrophoneSession() async throws {
+        #if os(iOS)
+        guard await AVAudioApplication.requestRecordPermission() else {
+            throw NSError(domain: "Composer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings."])
+        }
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP])
+        try session.setActive(true)
+        #endif
+    }
+    func prepareMicrophoneStream() async throws -> AsyncStream<AudioChunk> {
+        do {
+            // The keyboard starts while this host is backgrounded. Reconfiguring its
+            // already-live AVAudioSession can be refused with '!int'; route the held mic.
+            if isArmed { return try await mic.route() }
+            try await activateAudioSession()
+            let stream = try await mic.start(format: .init(sampleRate: 16000, channelCount: 1))
+            isArmed = keepMicrophoneActive
+            return stream
+        } catch {
+            // A route lost to interruption is no longer an honest background lease.
+            isArmed = false
+            await mic.stop()
+            throw error
+        }
+    }
+    /// Changes retention only; enabling this setting never starts a microphone.
+    public func setKeepMicrophoneActive(_ value: Bool) async {
+        keepMicrophoneActive = value
+        if !value, !isListening { isArmed = false; await mic.stop(); onChange?() }
+    }
+    /// Opting out stops new input on backgrounding, preserving the draft and final agent work.
+    public func prepareForBackground() async {
+        guard !keepMicrophoneActive else { return }
+        if isListening { await stop() }
+        isArmed = false; await mic.stop(); onChange?()
     }
     public func releaseMicrophone() async { isArmed = false; await cancel() }
     public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
@@ -113,18 +162,11 @@ import LegatoVocabulary
                 status = "listening"; onChange?(); return
             }
             #endif
-            #if os(iOS)
-            guard await AVAudioApplication.requestRecordPermission() else { throw NSError(domain: "Composer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings."]) }
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP])
-            try audioSession.setActive(true)
-            #endif
+            let audioOrigin = ProcessInfo.processInfo.systemUptime; self.audioOrigin = audioOrigin
+            let stream = try await prepareMicrophoneStream()
+            try requireGeneration(generation)
             let transcriber = SonioxClient(room: room, config: .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms), audioOrigin: nil)
             self.transcriber = transcriber; try await transcriber.start(apiKey: soniox); try requireGeneration(generation)
-            try requireGeneration(generation)
-            let audioOrigin = ProcessInfo.processInfo.systemUptime; self.audioOrigin = audioOrigin
-            let stream = try await (isArmed ? mic.route() : mic.start(format: .init(sampleRate: 16000, channelCount: 1)))
-            try requireGeneration(generation)
             await transcriber.setAudioOrigin(audioOrigin)
             let recorder = try ComposerAudioRecorder(url: log.audioURL)
             status = "listening"; onChange?()
@@ -138,9 +180,21 @@ import LegatoVocabulary
                         try recorder.append(chunk)
                         try await transcriber.sendAudio(converter.convert(chunk))
                     }
-                } catch is CancellationError {} catch { self?.fail(error) }
+                } catch is CancellationError {} catch {
+                    self?.fail(error)
+                    self?.isArmed = false
+                    await self?.mic.stop()
+                }
             }
-        } catch { if self.generation == generation { fail(error); try? await room?.cancel(); await cleanup() } }
+        } catch {
+            if self.generation == generation {
+                fail(error)
+                // Startup did not establish a working session: never retain its new
+                // microphone lease after a socket, credentials or recorder failure.
+                isArmed = false
+                try? await room?.cancel(); await cleanup()
+            }
+        }
     }
     #if DEBUG || LEGATO_INTERNAL
     public func startDebug(mode: ComposerMode = .message, microphoneLease: Bool = false) async {
@@ -184,7 +238,7 @@ import LegatoVocabulary
     }
     public func stop() async {
         guard isListening else { return }; status = "trailing"; onChange?()
-        if isArmed { await mic.detach() } else { await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
+        if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         do { try await transcriber?.finish() } catch { fail(error) }
     }
     /// The surface inserts its currently rendered value synchronously, then calls this to cancel work.
@@ -238,16 +292,27 @@ import LegatoVocabulary
                 status = value
                 if value == "done" { busyParticipants = []; busy = false; pendingLineIDs = [] }
             }
-            if event.payload["event"] == .string("asr.error"), case .string(let message) = event.payload["message"] { error = message; status = "error"; await mic.stop() }
+            if event.payload["event"] == .string("asr.error"), case .string(let message) = event.payload["message"] { error = message; status = "error"; isArmed = false; await mic.stop() }
         default: break
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { self.mode = mode }
         onChange?()
     }
     private func requireGeneration(_ expected: UUID) throws { try Task.checkCancellation(); if generation != expected { throw CancellationError() } }
-    private func fail(_ failure: any Error) { error = failure.localizedDescription; status = "error"; onChange?() }
+    private func fail(_ failure: any Error) {
+        var underlying: NSError? = failure as NSError
+        var refusal = failure as? MicSourceError == .notArmed
+        for _ in 0..<5 {
+            guard let current = underlying else { break }
+            if [560_557_684, 561_015_905, 561_145_187, 2_003_329_396].contains(current.code),
+               current.domain == NSOSStatusErrorDomain || current.domain == "com.apple.coreaudio.avfaudio" { refusal = true }
+            underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        error = refusal ? "Open Legato and tap the microphone to ready it again, then return to your keyboard." : failure.localizedDescription
+        status = "error"; onChange?()
+    }
     private func cleanup() async {
-        audioTask?.cancel(); if isArmed { await mic.detach() } else { await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
+        audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         await transcriber?.cancel(); transcriber = nil; await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
         isMuted = false

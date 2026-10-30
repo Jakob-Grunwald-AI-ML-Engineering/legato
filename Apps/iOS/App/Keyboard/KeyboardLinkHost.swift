@@ -93,7 +93,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 channel.publish(value)
                 DarwinObserver.post(LinkChannel.Note.composer)
-                if composer.isArmed || composer.isListening { self.link.leaseChanged(until: Date().addingTimeInterval(60)) }
+                self.link.leaseChanged(until: composer.isArmed || composer.isListening ? Date().addingTimeInterval(60) : nil)
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
