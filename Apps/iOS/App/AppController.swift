@@ -56,16 +56,18 @@ final class AppController {
     func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
         if composer.isListening { await composer.stop() } else { await composer.start() }
         lastTranscript = composer.renderedText
-        return .failed(composer.error ?? "")
+        if let error = composer.error { return .failed(error) }
+        return composer.isListening ? .started : .stopped(composer.renderedText)
     }
     func copy(_ text: String) { UIPasteboard.general.string = text }
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }
     func stopIfRunning() async { await composer.stop() }
     func handle(_ url: URL) async {
-        if let request = KeyboardURL.parse(url), request.command == .arm {
+        if let request = KeyboardURL.parse(url), request.command == .arm,
+           keyboardHost?.link.admitURL(requestID: request.requestID, command: request.command) == .act {
             await composer.arm(); keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
-        } else { _ = await toggle() }
+        }
     }
     func insertResult() async { if let lastTranscript { _ = await keyboardHost?.insert(lastTranscript) } }
     func copyResult() async { if let lastTranscript { UIPasteboard.general.string = lastTranscript } }
