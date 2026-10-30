@@ -64,6 +64,9 @@ final class KeyboardLinkHost: TranscriptSink {
                     case "cancel": await composer.cancel()
                     case "undo": await composer.undo()
                     case "stop": await composer.stop()
+                    case "mute":
+                        let muted = intent.text.flatMap(Bool.init) ?? !composer.isMuted
+                        await composer.setMuted(muted)
                     case "mode": if let text = intent.text, let mode = ComposerMode(rawValue: text) { await composer.setMode(mode) }
                     case "tap": if let line = intent.lineID, let word = intent.wordID { await composer.tap(lineID: line, wordID: word, timestamp: intent.timestamp) }
                     case "pick": if let line = intent.lineID, let word = intent.wordID, let text = intent.text { await composer.pick(lineID: line, wordID: word, text: text) }
@@ -78,7 +81,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 }
                 var value = self.composerHistory.publication(acknowledged: channel.acknowledged)
                 value.sessionID = composer.sessionID; value.tail = composer.tail; value.mode = composer.mode.rawValue
-                value.status = composer.status; value.error = composer.error; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
+                value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 channel.publish(value)
                 DarwinObserver.post(LinkChannel.Note.composer)
                 if composer.isArmed || composer.isListening { self.link.leaseChanged(until: Date().addingTimeInterval(60)) }

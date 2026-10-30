@@ -1,8 +1,16 @@
+import Foundation
 import Testing
 import LegatoComposerDoc
 @testable import LegatoKeyboardCore
 
 struct ComposerLinkTests {
+    @Test func mutePublicationRoundTripsAndReadsLegacySnapshot() throws {
+        let legacy = Data(#"{"snapshot":{"revision":0,"lines":[]},"hunks":[],"requiresSnapshot":false,"tail":"","mode":"message","status":"listening","pendingLineIDs":[],"busy":false}"#.utf8)
+        #expect(try JSONDecoder().decode(ComposerPublication.self, from: legacy).muted != true)
+        var publication = ComposerPublication()
+        publication.muted = true
+        #expect(try JSONDecoder().decode(ComposerPublication.self, from: JSONEncoder().encode(publication)).muted == true)
+    }
     @Test func cumulativePublicationAndGapSnapshot() {
         var host = ComposerLinkHistory()
         let a = DocumentSnapshot(revision: 1, lines: [Line(id: "L1", words: [Word(text: "Hello")])])

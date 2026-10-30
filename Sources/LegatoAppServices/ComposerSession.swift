@@ -18,6 +18,7 @@ import LegatoVocabulary
     public private(set) var error: String?
     public private(set) var pendingLineIDs: Set<String> = []
     public private(set) var busy = false
+    public private(set) var isMuted = false
     public private(set) var mode = ComposerMode.message
     public private(set) var sessionID: String?
     public private(set) var inputSource = "microphone.soniox"
@@ -127,7 +128,13 @@ import LegatoVocabulary
             audioTask = Task { [weak self] in
                 var converter = PCM16Converter()
                 do {
-                    for await chunk in stream { try Task.checkCancellation(); try recorder.append(chunk); try await transcriber.sendAudio(converter.convert(chunk)) }
+                    for await chunk in stream {
+                        try Task.checkCancellation()
+                        // Keep the iOS background mic lease, but never record/forward muted speech.
+                        guard let self, !self.isMuted else { continue }
+                        try recorder.append(chunk)
+                        try await transcriber.sendAudio(converter.convert(chunk))
+                    }
                 } catch is CancellationError {} catch { self?.fail(error) }
             }
         } catch { if self.generation == generation { fail(error); try? await room?.cancel(); await cleanup() } }
@@ -155,12 +162,20 @@ import LegatoVocabulary
         onChange?()
     }
     public var debugState: [String: Any] {
-        ["status": status, "dictating": isListening, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
+        ["status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
          "sessionID": sessionID ?? "", "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
     }
     #endif
+    /// Logical voice mute: keep the mic lease, Room and agent work alive while dropping new input.
+    public func setMuted(_ value: Bool) async {
+        guard isListening, room != nil, isMuted != value else { return }
+        isMuted = value; onChange?()
+        let generation = self.generation
+        do { try await transcriber?.setMuted(value) }
+        catch { if self.generation == generation { fail(error) } }
+    }
     public func stop() async {
         guard isListening else { return }; status = "trailing"; onChange?()
         if isArmed { await mic.detach() } else { await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
@@ -204,6 +219,7 @@ import LegatoVocabulary
         audioTask?.cancel(); if isArmed { await mic.detach() } else { await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         await transcriber?.cancel(); transcriber = nil; await agents?.stop(); agents = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
+        isMuted = false
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }
 }
