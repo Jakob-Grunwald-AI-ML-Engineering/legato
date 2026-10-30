@@ -95,3 +95,69 @@ import LegatoComposerDoc
     #expect(FileManager.default.fileExists(atPath: log.finalURL.path))
     #expect(log.audioURL.lastPathComponent == "audio.m4a")
 }
+
+@Test func finalPassWaitsForTranscriberAndAgents() async throws {
+    let room = Room(clock: { 77 })
+    let events = await room.subscribe(participant: .logger, channels: [.session])
+    var iterator = events.makeAsyncIterator()
+    try await room.micOff(transcriberDraining: true)
+    #expect(await room.state == .trailing)
+    _ = try await room.publishSegment(words: [Word(text: "last")])
+    await room.setAgentBusy(.liveAgent, busy: true)
+    await room.finishTranscription()
+    #expect(await room.state == .trailing)
+    await room.setAgentBusy(.liveAgent, busy: false)
+    #expect(await room.state == .finalPass)
+    try await room.finishFinalPass()
+    #expect(await room.state == .done)
+    var names: [JSONValue] = []
+    while let event = await iterator.next() {
+        #expect(event.tMono == 77)
+        if let name = event.payload["event"] { names.append(name) }
+    }
+    #expect(names == [.string("mic.off"), .string("final.pass"), .string("cancel.work"), .string("done")])
+}
+
+@Test func cancelAndInsertWorkAtEveryState() async throws {
+    for desiredState in [SessionState.listening, .trailing, .finalPass, .done] {
+        for cancel in [false, true] {
+            let room = Room()
+            _ = try await room.publishSegment(words: [Word(text: "current")])
+            if desiredState == .trailing {
+                await room.setAgentBusy(.liveAgent, busy: true)
+                try await room.micOff()
+            } else if desiredState == .finalPass || desiredState == .done {
+                try await room.micOff()
+                if desiredState == .done { try await room.finishFinalPass() }
+            }
+            #expect(await room.state == desiredState)
+            if cancel { try await room.cancel() } else { #expect(try await room.insert().text == "current") }
+            #expect(await room.state == .done)
+            await #expect(throws: RoomError.sessionEnded) {
+                try await room.applyDocument([], origin: .agent, versions: [:])
+            }
+        }
+    }
+}
+
+@Test func loggerCapturesEveryChannelAndLifecycleEnvelope() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try SessionLog(rootDirectory: root)
+    let room = Room(log: log)
+    let stream = await room.subscribe(participant: .logger, channels: Set(Channel.allCases))
+    for channel in Channel.allCases where !channel.isDocument && channel != .asrSegment {
+        _ = try await room.publish(channel: channel, participant: .ui,
+            payload: .object(["nested": .array([.null, .bool(true), .number(0.42), .string("ä\nline")])]))
+    }
+    _ = try await room.publishSegment(words: [Word(text: "content")])
+    _ = try await room.insert()
+    var delivered: [Envelope] = []
+    for await event in stream { delivered.append(event) }
+    let raw = try String(contentsOf: log.roomURL, encoding: .utf8)
+    let replayed = try raw.split(separator: "\n").map { try JSONDecoder().decode(Envelope.self, from: Data($0.utf8)) }
+    #expect(replayed == delivered)
+    #expect(Set(replayed.map(\.channel)) == Set(Channel.allCases))
+    #expect(try String(contentsOf: log.finalURL, encoding: .utf8) == "content")
+    #expect(await room.loggingError == nil)
+}

@@ -38,11 +38,13 @@ public final class SessionLog: Sendable {
         case .string(let text): return .string(redactString(text))
         case .array(let values): return .array(values.map(redacted))
         case .object(let fields):
-            return .object(Dictionary(uniqueKeysWithValues: fields.map { key, value in
+            var result: [String: JSONValue] = [:]
+            for (key, value) in fields {
                 let normalized = key.lowercased().filter { $0.isLetter || $0.isNumber }
                 let sensitive = ["authorization", "apikey", "xapikey", "anthropickey", "sonioxkey", "accesskey", "accesstoken", "bearer", "secret", "password"].contains(normalized)
-                return (redactString(key), sensitive ? .string("[REDACTED]") : redacted(value))
-            }))
+                result[redactString(key)] = sensitive ? .string("[REDACTED]") : redacted(value)
+            }
+            return .object(result)
         default: return value
         }
     }
