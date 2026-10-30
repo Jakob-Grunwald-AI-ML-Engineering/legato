@@ -27,6 +27,25 @@ struct RewritePatchTests {
         #expect(applied(steps, to: field) == String(repeating: "x", count: 10) + new)
     }
 
+    /// A rewrite that touches every word of a stretch (case, filler, punctuation) still lands as find-and-replace
+    /// sized steps, never the whole stretch written again.
+    @Test func neighbouringChangesStayFindAndReplaceSized() {
+        let old = "hi um testing if this is working okay okay it seems to work"
+        let new = "Hi, testing if this is working. Okay, it seems to work."
+        let steps = RewritePatch.steps(old, new, at: 0)
+        #expect(applied(steps, to: old) == new)
+        #expect(steps.count >= 4)
+        #expect(steps.allSatisfy { $0.expect.utf16.count <= 8 && $0.text.utf16.count <= 8 })
+    }
+
+    @Test func aRecasedWordIsOneLetter() {
+        let steps = RewritePatch.steps("we fly to paris.", "We fly to Paris.", at: 0)
+        #expect(steps == [
+            EditStep(span: Span(location: 0, length: 1), text: "W", expect: "w"),
+            EditStep(span: Span(location: 10, length: 1), text: "P", expect: "p"),
+        ])
+    }
+
     @Test func anIdenticalRewriteIsNoStep() {
         #expect(RewritePatch.steps("The ferry leaves at noon.", "The ferry leaves at noon.", at: 3).isEmpty)
     }

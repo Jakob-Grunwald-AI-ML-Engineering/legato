@@ -313,7 +313,9 @@ public struct FieldEditQueue: Sendable {
     private mutating func issue(_ item: Pending) -> FieldWrite {
         let before = document
         let transaction = item.transaction
-        let caretBias: Bias = transaction.origin.isUser || transaction.origin == .asr ? .after : .before
+        // The agent edits text before the caret: punctuation it adds at the caret (a sentence end) goes before the
+        // caret, or the next recognized words would land in front of it.
+        let caretBias: Bias = transaction.origin.isUser || transaction.origin == .asr || transaction.origin == .agent ? .after : .before
         let ordered = Array(transaction.steps.reversed())
         var caret = document.caret
         for (offset, step) in ordered.enumerated() {

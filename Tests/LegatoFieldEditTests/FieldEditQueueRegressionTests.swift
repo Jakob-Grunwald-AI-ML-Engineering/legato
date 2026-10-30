@@ -43,6 +43,20 @@ import LegatoFieldEdit
         #expect(field == "ab ab ab!")
     }
 
+    /// Device (#80): the agent's sentence end added at the caret goes before it, so the next recognized words follow
+    /// the period instead of landing in front of it (no ".?." piling up behind the caret).
+    @Test func punctuationTheAgentAddsAtTheCaretStaysBeforeIt() {
+        var field = "it seems to work"
+        var queue = macQueue(field)
+        queue.submit(EditTransaction(origin: .agent, owner: "run", base: v0, steps: [.insert(".", at: 16)]))
+        queue.drain(&field)
+        #expect(field == "it seems to work.")
+        #expect(queue.document.caret == 17)
+        queue.submit(EditTransaction(origin: .asr, owner: "run", base: queue.document.version, steps: [.insert(" And more", at: queue.document.caret)]))
+        queue.drain(&field)
+        #expect(field == "it seems to work. And more")
+    }
+
     // A3: a transaction's caret is in the field after its own steps.
     @Test func aTransactionCaretIsMappedInTheFieldAfterItsSteps() {
         var field = "abcdefg"

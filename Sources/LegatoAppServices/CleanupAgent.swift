@@ -693,8 +693,8 @@ public struct PassageRewriter: Sendable {
             let reference = String(decoding: oldUnits[lower..<upper], as: UTF16.self).trimmingCharacters(in: .whitespacesAndNewlines)
             let rewritten = String(decoding: candidate, as: UTF16.self).trimmingCharacters(in: .whitespacesAndNewlines)
             guard RewriteGuard.accepts(rewritten, reference: reference) else { continue }
-            let steps = own.compactMap { hunk in
-                ContiguousPatch.between(
+            let steps = own.flatMap { hunk in
+                RewritePatch.finer(
                     String(decoding: oldUnits[hunk.old], as: UTF16.self), String(decoding: newUnits[hunk.new], as: UTF16.self),
                     at: location + hunk.old.lowerBound)
             }
