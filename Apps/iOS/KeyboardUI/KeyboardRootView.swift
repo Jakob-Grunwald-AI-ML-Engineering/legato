@@ -26,55 +26,13 @@ struct KeyboardRootView: View {
                 Button("Insert") { controller.insertComposer() }.disabled(controller.composer.snapshot.lines.isEmpty)
                 Button { controller.composerIntent("cancel") } label: { Image(systemName: "xmark") }
             }.buttonStyle(.borderless).padding(.horizontal, 14).frame(height: 38)
-            keyboardBody.frame(height: controller.mode == .strip ? CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: false)) : KeyGeometry.height(landscape: false))
+            keyboardBody.frame(height: CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: false)))
         }
         .background(.background)
     }
-    @ViewBuilder private var keyboardBody: some View {
-        let typing = controller.typing!
-        let layout = typing.layout
+    private var keyboardBody: some View {
         GeometryReader { geometry in
-            let screenWidth = KeyGeometry.screenWidth(in: controller.inputModeTarget?.view.window)
-            let g = KeyGeometry(size: geometry.size, landscapeScreenWidth: screenWidth)
-            let frames = Dictionary(layout.frames(in: geometry.size, landscapeScreenWidth: screenWidth).map { ($0.id, $0.cgRect) }, uniquingKeysWith: { a, _ in a })
-            ZStack(alignment: .topLeading) {
-                if controller.mode == .strip {
-                    strip(typing: typing, size: geometry.size)
-                } else {
-                    // Under the grid: popups and the alternates strip are drawn over the top area, and the grid
-                    // only takes touches from the first row down (`KeyGridView.point(inside:with:)`, at
-                    // `firstRowTop - gap`, below the word row, the hotkeys and the pill).
-                    if controller.expansion.control == .collapse {
-                        // The area above the first row takes a swipe down, as do the controls on top of it.
-                        place(CGRect(x: 0, y: 0, width: geometry.size.width, height: g.firstRowTop)) {
-                            Color.clear.contentShape(Rectangle()).gesture(swipe)
-                        }
-                    }
-                    let buttons = controller.expansion.control == .collapse ? 4 : 3
-                    let wordFrame = g.wordRowFrame
-                    place(wordFrame) {
-                        WordRowView(
-                            controller: controller, slots: WordRowLayout.visibleSlots(width: Double(wordFrame.width)),
-                            contentOffset: WordRowHeight.textOffset(landscape: g.landscape), swipe: swipe)
-                    }
-                    place(g.hotkeyFrame(buttons: buttons)) { HotkeyBar(controller: controller, buttonWidth: g.toolWidth(buttons: buttons), swipe: swipe) }
-                    place(g.micFrame(buttons: buttons)) { MicKey(controller: controller).simultaneousGesture(swipe) }
-                    if typing.showsEmojiPanel {
-                        place(CGRect(x: 0, y: g.firstRowTop, width: geometry.size.width, height: max(geometry.size.height - g.firstRowTop, 0))) {
-                            EmojiPickerView(typing: typing, controller: controller)
-                        }
-                    } else {
-                        KeyGrid(typing: typing, layout: layout, presentation: typing.presentation, appearance: controller.appearance, emojiSystemSwitcher: controller.emojiSystemSwitcher)
-                        if controller.showsGlobe, let frame = frames["globe"] {
-                            place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing) }
-                        }
-                        if controller.emojiSystemSwitcher, let frame = frames["emoji"] {
-                            place(frame) { GlobeKey(target: controller.inputModeTarget, typing: typing, emoji: true) }
-                        }
-                    }
-                }
-            }
-            .animation(.easeInOut(duration: 0.2), value: controller.mode)
+            strip(typing: controller.typing!, size: geometry.size)
         }
         .environment(\.colorScheme, scheme)
     }
@@ -129,8 +87,10 @@ struct KeyboardRootView: View {
                 Group {
                     switch cell.slot {
                     case .expand:
-                        ExpansionKey(controller: controller, symbol: "chevron.up", insets: insets)
-                            .simultaneousGesture(swipe)
+                        Image(systemName: "waveform")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .accessibilityHidden(true)
                     case .globe:
                         // A UIKit button: the drawn size is its touch area.
                         GlobeKey(target: controller.inputModeTarget, typing: typing)
