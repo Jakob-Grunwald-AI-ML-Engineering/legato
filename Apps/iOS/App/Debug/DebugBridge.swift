@@ -1,6 +1,7 @@
 #if LEGATO_INTERNAL
 import Foundation
 import LegatoDevHarness
+import LegatoAppServices
 import UIKit
 
 @MainActor enum DebugBridge {
@@ -16,11 +17,21 @@ import UIKit
         #endif
         started = true
         harness.register("state") { _ in
-            let composer = AppController.shared.composer
-            return ["status": composer.status, "dictating": composer.isListening, "armed": composer.isArmed,
-                    "revision": composer.snapshot.revision, "text": composer.renderedText, "mode": composer.mode.rawValue,
-                    "error": composer.error ?? ""]
+            #if DEBUG
+            return AppController.shared.composer.debugState
+            #else
+            return ["status": AppController.shared.composer.status]
+            #endif
         }
+        #if DEBUG
+        for name in ComposerSession.debugCommands {
+            harness.register(name) { command in try await AppController.shared.composer.debugControl(name, args: command.args) }
+        }
+        harness.register("composer-import-keys") { command in
+            guard command.args == ["credentials.json"] else { throw Usage.invalid }
+            return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))
+        }
+        #endif
         harness.register("toggle") { _ in _ = await AppController.shared.toggle(); return ["status": AppController.shared.notice] }
         harness.register("stop") { _ in await AppController.shared.stopIfRunning(); return ["status": AppController.shared.composer.status] }
         harness.register("session-probe") { _ in try SessionProbe.start(); return nil }

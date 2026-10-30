@@ -80,6 +80,8 @@ public actor SonioxClient {
     private var completion: CheckedContinuation<Void, any Error>?
     private var failure: SonioxError?
     private var lastSend = ContinuousClock.now
+    private var debugInput = false
+    private var latestTail = ""
     private var audioOrigin: Double?
     public init(room: Room, config: SonioxConfig = SonioxConfig(), socket: any SonioxSocket = URLSessionSonioxSocket(),
                 keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20), audioOrigin: Double? = nil) {
@@ -106,6 +108,26 @@ public actor SonioxClient {
             }
         } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
     }
+    #if DEBUG || LEGATO_INTERNAL
+    /// Internal ingress shares the provider decoder and segmenter, with no socket or credentials.
+    public var currentDebugTail: String { latestTail }
+    public func startDebug() async throws {
+        guard state == .idle else { throw SonioxError.notConnected }
+        debugInput = true; state = .streaming
+        _ = try await room.publish(channel: .session, participant: .transcriber,
+            payload: .object(["event": .string("asr.started"), "inputSource": .string("debug.transcriber"), "thresholds": thresholds]))
+    }
+    public func injectDebugFrame(_ json: String) async throws {
+        guard debugInput, state == .streaming else { throw SonioxError.notConnected }
+        // Validate before logging/applying; arbitrary provider errors/finished flags are not an injection API.
+        let response = try JSONDecoder().decode(Response.self, from: Data(json.utf8))
+        guard response.finished != true, response.error_code == nil,
+              !(response.tokens ?? []).contains(where: { $0.text == "<fin>" }) else { throw SonioxError.invalidResponse }
+        _ = try await room.publish(channel: .session, participant: .transcriber,
+            payload: .object(["event": .string("debug.transcriber.frame"), "inputSource": .string("debug.transcriber"), "frame": try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))]))
+        try await receiveFrame(.text(json))
+    }
+    #endif
     public func setAudioOrigin(_ origin: Double) { audioOrigin = origin }
     public func sendAudio(_ pcm16: Data) async throws {
         guard state == .streaming else { throw failure ?? .notConnected }
@@ -122,7 +144,10 @@ public actor SonioxClient {
         state = .finalizing
         do {
             try await room.micOff(transcriberDraining: true)
-            try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now
+            if debugInput {
+                try await receiveFrame(.text("{\"tokens\":[{\"text\":\"<fin>\",\"is_final\":true}]}"))
+                try await receiveFrame(.text("{\"finished\":true}"))
+            } else { try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now }
         } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -153,30 +178,35 @@ public actor SonioxClient {
         do {
             while !Task.isCancelled {
                 let frame = try await socket.receive()
-                let data: Data
-                switch frame { case .text(let text): data = Data(text.utf8); case .binary(let bytes): data = bytes }
-                let response: Response
-                do { response = try JSONDecoder().decode(Response.self, from: data) }
-                catch { await fail(.invalidResponse); return }
-                if let code = response.error_code { await fail(.provider(code)); return }
-                let tokens = response.tokens ?? []
-                try await publish(segmenter.ingest(tokens, finished: response.finished == true))
-                if state == .finalizing && tokens.contains(where: { $0.text == "<fin>" && $0.isFinal }) {
-                    state = .ending
-                    // Empty binary is merely an audio chunk. Soniox requires an empty TEXT frame.
-                    try await socket.send(.text("")); lastSend = .now
-                }
-                if response.finished == true {
-                    state = .finished; heartbeat?.cancel(); timeoutTask?.cancel()
-                    _ = try? await room.publish(channel: .session, participant: .transcriber, payload: .object(["event": .string("asr.finished")]))
-                    await room.finishTranscription()
-                    completion?.resume(); completion = nil
-                    await socket.close(); return
-                }
+                try await receiveFrame(frame)
+                if state == .finished || state == .failed { return }
             }
         } catch { if state != .finished && state != .failed { await fail(error as? SonioxError ?? .network) } }
     }
+    private func receiveFrame(_ frame: SonioxFrame) async throws {
+        let data: Data
+        switch frame { case .text(let text): data = Data(text.utf8); case .binary(let bytes): data = bytes }
+        let response: Response
+        do { response = try JSONDecoder().decode(Response.self, from: data) }
+        catch { await fail(.invalidResponse); throw SonioxError.invalidResponse }
+        if let code = response.error_code { await fail(.provider(code)); throw SonioxError.provider(code) }
+        let tokens = response.tokens ?? []
+        try await publish(segmenter.ingest(tokens, finished: response.finished == true))
+        if state == .finalizing && tokens.contains(where: { $0.text == "<fin>" && $0.isFinal }) {
+            state = .ending
+            // Empty binary is merely an audio chunk. Soniox requires an empty TEXT frame.
+            if !debugInput { try await socket.send(.text("")); lastSend = .now }
+        }
+        if response.finished == true {
+            state = .finished; heartbeat?.cancel(); timeoutTask?.cancel()
+            _ = try? await room.publish(channel: .session, participant: .transcriber, payload: .object(["event": .string("asr.finished")]))
+            await room.finishTranscription()
+            completion?.resume(); completion = nil
+            if !debugInput { await socket.close() }; return
+        }
+    }
     private func publish(_ output: SegmenterOutput) async throws {
+        latestTail = output.tail
         for segment in output.segments {
             let t0 = segment.words.first?.t0
             let t1 = segment.words.last?.t1

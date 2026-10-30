@@ -1,6 +1,7 @@
 #if LEGATO_INTERNAL
 import Foundation
 import LegatoDevHarness
+import LegatoAppServices
 import AppKit
 
 @MainActor enum DebugBridge {
@@ -18,7 +19,25 @@ import AppKit
         guard UserDefaults.standard.bool(forKey: "LegatoDebugBridge") else { return }
         #endif
         started = true
-        harness.register("state") { _ in let c = MacAppController.shared; return ["status": c.composer.status, "dictating": c.isDictating, "error": c.composer.error ?? "", "text": c.composer.renderedText, "frontmostPID": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0, "keyWindow": NSApp.keyWindow?.title ?? ""] }
+        harness.register("state") { _ in
+            #if DEBUG
+            return MacAppController.shared.composer.debugState
+            #else
+            return ["status": MacAppController.shared.composer.status]
+            #endif
+        }
+        #if DEBUG
+        for name in ComposerSession.debugCommands {
+            harness.register(name) { command in
+                if name == "composer-debug-start" { return try await MacAppController.shared.startDebugComposer(command.args) }
+                return try await MacAppController.shared.composer.debugControl(name, args: command.args)
+            }
+        }
+        harness.register("composer-import-keys") { command in
+            guard command.args == ["credentials.json"] else { throw Usage.invalid }
+            return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))
+        }
+        #endif
         harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "starting"] }
         harness.register("stop") { _ in MacAppController.shared.stopComposer(); return ["status": "stopping"] }
         harness.register("composer-insert") { _ in MacAppController.shared.insertComposer(); return nil }

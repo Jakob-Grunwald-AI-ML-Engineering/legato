@@ -20,6 +20,8 @@ import LegatoVocabulary
     public private(set) var busy = false
     public private(set) var mode = ComposerMode.message
     public private(set) var sessionID: String?
+    public private(set) var inputSource = "microphone.soniox"
+    public private(set) var audioOrigin: Double?
     public private(set) var hunks: [AnimationHunk] = []
     public var onChange: (@MainActor () -> Void)?
     public var renderedText: String { snapshot.lines.enumerated().map { i, line in
@@ -59,18 +61,26 @@ import LegatoVocabulary
         } catch { fail(error) }
     }
     public func releaseMicrophone() async { isArmed = false; await cancel() }
-    public func start() async {
+    public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
+    private func startSession(debugMode: ComposerMode?, microphoneLease: Bool) async {
         await cancel()
+        inputSource = debugMode == nil ? "microphone.soniox" : "debug.transcriber"
+        audioOrigin = nil
+        if debugMode != nil {
+            if !microphoneLease { isArmed = false; await mic.stop() }
+            else if !isArmed { await arm(); guard isArmed else { return } }
+        }
         let generation = UUID(); self.generation = generation
         snapshot = .init(revision: 0, lines: []); tail = ""; error = nil; status = "starting"; hunks = []; pendingLineIDs = []; busyParticipants = []; busy = false
         let id = UUID().uuidString; sessionID = id
         do {
-            let soniox = try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? ""
+            let soniox = debugMode == nil ? (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "") : ""
             let claude = try KeychainKeyStore().apiKey() ?? ""
             let log = try SessionLog(rootDirectory: URL.documentsDirectory.appending(path: "sessions"), sessionID: id, secrets: [soniox, claude])
             let room = Room(log: log, segmentRouting: .intercepted); self.room = room
-            guard !soniox.isEmpty, !claude.isEmpty else {
-                throw NSError(domain: "Composer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Add Claude and Soniox API keys in Settings."])
+            _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("input.source"), "inputSource": .string(inputSource), "microphoneLeaseActive": .bool(isArmed)]))
+            guard (debugMode != nil || !soniox.isEmpty), !claude.isEmpty else {
+                throw NSError(domain: "Composer", code: 1, userInfo: [NSLocalizedDescriptionKey: debugMode == nil ? "Add Claude and Soniox API keys in Settings." : "Add a Claude API key in Settings for debug transcriber UAT."])
             }
             let store = VocabularyStore(fileURL: vocabularyURL)
             let learner = VocabularyLearner(store: store, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), languages: ["de", "en"])
@@ -78,7 +88,7 @@ import LegatoVocabulary
             let alternatives = AlternativesParticipant(room: room, store: store, learner: learner); self.alternatives = alternatives; await alternatives.start(); try requireGeneration(generation)
             let defaults = UserDefaults.standard
             let prompt = defaults.string(forKey: "composer.personalPrompt") ?? ""
-            mode = ComposerMode(rawValue: defaults.string(forKey: "composer.mode") ?? "message") ?? .message
+            mode = debugMode ?? ComposerMode(rawValue: defaults.string(forKey: "composer.mode") ?? "message") ?? .message
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let agents = AgentRunner(room: room, client: MessagesStream(keyStore: KeychainKeyStore()), configuration: .init(
                 liveModel: ModelChoice(rawValue: defaults.string(forKey: "composer.liveModel") ?? "") ?? .haiku,
@@ -87,6 +97,14 @@ import LegatoVocabulary
             self.agents = agents; await agents.start(); try requireGeneration(generation)
             let eventStream = await room.subscribe(participant: .ui, channels: Set(Channel.allCases), buffering: .unbounded)
             eventsTask = Task { [weak self] in for await event in eventStream { guard !Task.isCancelled else { break }; await self?.receive(event) } }
+            #if DEBUG || LEGATO_INTERNAL
+            if debugMode != nil {
+                let origin = ProcessInfo.processInfo.systemUptime; audioOrigin = origin
+                let transcriber = SonioxClient(room: room, config: .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms), audioOrigin: origin)
+                self.transcriber = transcriber; try await transcriber.startDebug(); try requireGeneration(generation)
+                status = "listening"; onChange?(); return
+            }
+            #endif
             #if os(iOS)
             guard await AVAudioApplication.requestRecordPermission() else { throw NSError(domain: "Composer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings."]) }
             let audioSession = AVAudioSession.sharedInstance()
@@ -96,7 +114,7 @@ import LegatoVocabulary
             let transcriber = SonioxClient(room: room, config: .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms), audioOrigin: nil)
             self.transcriber = transcriber; try await transcriber.start(apiKey: soniox); try requireGeneration(generation)
             try requireGeneration(generation)
-            let audioOrigin = ProcessInfo.processInfo.systemUptime
+            let audioOrigin = ProcessInfo.processInfo.systemUptime; self.audioOrigin = audioOrigin
             let stream = try await (isArmed ? mic.route() : mic.start(format: .init(sampleRate: 16000, channelCount: 1)))
             try requireGeneration(generation)
             await transcriber.setAudioOrigin(audioOrigin)
@@ -110,6 +128,35 @@ import LegatoVocabulary
             }
         } catch { if self.generation == generation { fail(error); try? await room?.cancel(); await cleanup() } }
     }
+    #if DEBUG || LEGATO_INTERNAL
+    public func startDebug(mode: ComposerMode = .message, microphoneLease: Bool = false) async {
+        await startSession(debugMode: mode, microphoneLease: microphoneLease)
+    }
+    public func injectDebugFrame(_ json: String) async throws {
+        guard inputSource == "debug.transcriber", isListening, let transcriber else { throw SonioxError.notConnected }
+        try await transcriber.injectDebugFrame(json)
+        tail = await transcriber.currentDebugTail
+        await refreshDebugState()
+    }
+    /// Text convenience still enters as provider tokens; it never mutates the document.
+    public func injectDebugText(_ text: String, isFinal: Bool, startMs: Double, durationMs: Double = 200, confidence: Double = 0.95, language: String = "de") async throws {
+        guard startMs.isFinite, startMs >= 0, durationMs.isFinite, durationMs >= 0, confidence.isFinite, (0...1).contains(confidence) else { throw SonioxError.invalidResponse }
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        let tokens = words.enumerated().map { index, word in SonioxToken(text: " " + word, confidence: confidence, isFinal: isFinal, startMs: startMs + Double(index) * durationMs, endMs: startMs + Double(index + 1) * durationMs, language: language) }
+        let frame: JSONValue = .object(["tokens": try .encoding(tokens)])
+        try await injectDebugFrame(String(decoding: JSONEncoder().encode(frame), as: UTF8.self))
+    }
+    public func refreshDebugState() async {
+        if let room { snapshot = await room.documentSnapshot }
+        onChange?()
+    }
+    public var debugState: [String: Any] {
+        ["status": status, "dictating": isListening, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
+         "sessionID": sessionID ?? "", "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
+         "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
+         "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
+    }
+    #endif
     public func stop() async {
         guard isListening else { return }; status = "trailing"; onChange?()
         if isArmed { await mic.detach() } else { await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil

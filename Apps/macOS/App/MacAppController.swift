@@ -68,6 +68,13 @@ import Observation
         if isDictating { stopComposer(); return }
         guard !starting else { return }
         starting = true
+        prepareComposerTarget()
+        sessionTask = Task {
+            await composer.start()
+            starting = false
+        }
+    }
+    private func prepareComposerTarget() {
         targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let target: AXTextTarget?
         secureField = false
@@ -78,11 +85,13 @@ import Observation
         }
         writer = FieldWriter(target: target, mode: .insertOnStop)
         notch.show(controller: self, targetPID: targetPID)
-        sessionTask = Task {
-            await composer.start()
-            starting = false
-        }
     }
+    #if DEBUG
+    func startDebugComposer(_ args: [String]) async throws -> [String: Any] {
+        prepareComposerTarget()
+        return try await composer.debugControl("composer-debug-start", args: args)
+    }
+    #endif
     func stopComposer() {
         gesture.runEnded()
         if starting { cancelComposer(); return }

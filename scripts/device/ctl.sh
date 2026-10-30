@@ -8,6 +8,7 @@
 #   build                    xcodegen + signed Debug device build (derived data kept under the cache dir)
 #   install                  install the last build on the device
 #   launch [args...]        (re)start Legato, e.g. launch -LegatoFakeEngine "hello world"; Debug builds start the bridge
+#   import-keys <0600-json-file>  one-time private keychain import; never passes keys in arguments
 #   send <command> [args...] queue a bridge command, print its id
 #   wait <id|event> [secs] [--ack]   wait (default 30) for a command's done/error line, or for a new line with that event
 #   log                      print the bridge log lines not shown yet
@@ -374,6 +375,19 @@ deliver() { # deliver <id> <file>
   copy_to "$file" "$BRIDGE/inbox/$id.json" # a last try that prints the reason
 }
 
+# Credentials never enter argv or logs. Only the fixed private destination name is queued.
+cmd_import_keys() {
+  [ $# -eq 1 ] && [ -f "$1" ] || die "usage: import-keys /private/credentials.json"
+  local permissions id
+  permissions="$(stat -f '%Lp' "$1")"
+  [ "$permissions" = 600 ] || die "credential source must have mode 0600"
+  require_device
+  copy_to "$1" "$BRIDGE/credentials.json"
+  if [ "$TARGET" != device ]; then chmod 600 "$(local_path "$BRIDGE/credentials.json")"; fi
+  id="$(cmd_send composer-import-keys credentials.json)"
+  cmd_wait "$id"
+}
+
 cmd_say() { cmd_send say "$@"; }
 cmd_status() { cmd_send status "$@"; }
 cmd_clear() { cmd_send clear; }
@@ -521,6 +535,7 @@ cmd_pull() {
 sub="${1:-}"
 [ $# -eq 0 ] || shift
 case "$sub" in
+  import-keys) cmd_import_keys "$@" ;;
   pull-sessions) cmd_pull "$@" ;;
   devices | build | install | launch | send | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;
