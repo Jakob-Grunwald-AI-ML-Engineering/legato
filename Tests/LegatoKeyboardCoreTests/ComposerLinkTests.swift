@@ -4,6 +4,17 @@ import LegatoComposerDoc
 @testable import LegatoKeyboardCore
 
 struct ComposerLinkTests {
+    @Test func rangeIntentRoundTripsAndLegacyWordIntentStillDecodes() throws {
+        let range = Data(#"{"id":"range","action":"tap","lineID":"L1","wordID":"W1","endLineID":"L3","endWordID":"W9","timestamp":100}"#.utf8)
+        let intent = try JSONDecoder().decode(ComposerIntent.self, from: range)
+        let encoded = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(intent)) as? [String: Any])
+        #expect(encoded["endLineID"] as? String == "L3")
+        #expect(encoded["endWordID"] as? String == "W9")
+        let legacy = Data(#"{"id":"word","action":"tap","lineID":"L1","wordID":"W1","timestamp":100}"#.utf8)
+        let old = try JSONDecoder().decode(ComposerIntent.self, from: legacy)
+        #expect(old.lineID == "L1" && old.wordID == "W1")
+    }
+
     @Test func mutePublicationRoundTripsAndReadsLegacySnapshot() throws {
         let legacy = Data(#"{"snapshot":{"revision":0,"lines":[]},"hunks":[],"requiresSnapshot":false,"tail":"","mode":"message","status":"listening","pendingLineIDs":[],"busy":false}"#.utf8)
         #expect(try JSONDecoder().decode(ComposerPublication.self, from: legacy).muted != true)

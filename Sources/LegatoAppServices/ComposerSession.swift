@@ -186,7 +186,13 @@ import LegatoVocabulary
     public func insert() async { generation = UUID(); _ = try? await room?.insert(); await cleanup(); status = "done"; onChange?() }
     public func cancel() async { generation = UUID(); try? await room?.cancel(); await cleanup(); status = "idle"; onChange?() }
     public func setMode(_ value: ComposerMode) async { mode = value; UserDefaults.standard.set(value.rawValue, forKey: "composer.mode"); try? await agents?.setMode(value); onChange?() }
-    public func tap(lineID: String, wordID: String, timestamp: Double = ProcessInfo.processInfo.systemUptime) async { try? await binder?.tap(lineID: lineID, wordID: wordID, timestamp: timestamp) }
+    public func tap(lineID: String, wordID: String, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
+        await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
+    }
+    public func select(lineID: String, wordID: String, endLineID: String? = nil, endWordID: String? = nil,
+                       timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
+        try? await binder?.select(lineID: lineID, wordID: wordID, endLineID: endLineID, endWordID: endWordID, timestamp: timestamp)
+    }
     public func pick(lineID: String, wordID: String, text: String) async { do { try await binder?.pick(lineID: lineID, wordID: wordID, text: text) } catch { fail(error) } }
     public func undo() async {
         guard let id = lastTransactionID else { return }

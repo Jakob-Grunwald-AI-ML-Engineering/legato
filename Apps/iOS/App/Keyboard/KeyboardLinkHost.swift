@@ -68,7 +68,11 @@ final class KeyboardLinkHost: TranscriptSink {
                         let muted = intent.text.flatMap(Bool.init) ?? !composer.isMuted
                         await composer.setMuted(muted)
                     case "mode": if let text = intent.text, let mode = ComposerMode(rawValue: text) { await composer.setMode(mode) }
-                    case "tap": if let line = intent.lineID, let word = intent.wordID { await composer.tap(lineID: line, wordID: word, timestamp: intent.timestamp) }
+                    case "tap":
+                        if let line = intent.lineID, let word = intent.wordID {
+                            await composer.select(lineID: line, wordID: word, endLineID: intent.endLineID,
+                                                  endWordID: intent.endWordID, timestamp: intent.timestamp)
+                        }
                     case "pick": if let line = intent.lineID, let word = intent.wordID, let text = intent.text { await composer.pick(lineID: line, wordID: word, text: text) }
                     default: break
                     }
