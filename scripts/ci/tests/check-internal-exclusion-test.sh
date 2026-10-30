@@ -21,7 +21,7 @@ make_object() {
 }
 expect_failure() {
   local name="$1" diagnostic="$2" bundle="$3" sources="${4:-$work/sources}"
-  if bash "$scanner" ios "$bundle" "$sources" > "$work/output" 2>&1; then
+  if "$BASH" "$scanner" ios "$bundle" "$sources" > "$work/output" 2>&1; then
     echo "FAIL $name: scanner accepted fixture"; exit 1
   fi
   if ! grep -Fq "$diagnostic" "$work/output"; then
@@ -30,7 +30,7 @@ expect_failure() {
   echo "PASS $name"
 }
 make_object "$work/clean app/Legato" 'ordinary application LLMSession SessionProbeCoordinator'
-if ! bash "$scanner" ios "$work/clean app" "$work/sources" > "$work/output" 2>&1; then
+if ! "$BASH" "$scanner" ios "$work/clean app" "$work/sources" > "$work/output" 2>&1; then
   cat "$work/output"; echo 'FAIL clean bundle'; exit 1
 fi
 echo 'PASS clean Mach-O bundle'
@@ -48,12 +48,12 @@ mkdir -p "$work/empty"
 expect_failure 'empty bundle' 'no Mach-O files' "$work/empty"
 printf '%s\n' 'session-probe' > "$work/empty/resource.txt"
 expect_failure 'resource-only bundle' 'no Mach-O files' "$work/empty"
-if ! bash "$scanner" mac "$work/clean app" "$work/sources" > "$work/output" 2>&1; then
+if ! "$BASH" "$scanner" mac "$work/clean app" "$work/sources" > "$work/output" 2>&1; then
   cat "$work/output"; echo 'FAIL clean Mac bundle'; exit 1
 fi
 echo 'PASS clean Mac bundle'
 make_object "$work/mac-leak/Legato" 'LEGATO_MAC_ROOT'
-if bash "$scanner" mac "$work/mac-leak" "$work/sources" > "$work/output" 2>&1; then
+if "$BASH" "$scanner" mac "$work/mac-leak" "$work/sources" > "$work/output" 2>&1; then
   echo 'FAIL Mac endpoint leak'; exit 1
 fi
 grep -Fq 'Release contains: LEGATO_MAC_ROOT' "$work/output"

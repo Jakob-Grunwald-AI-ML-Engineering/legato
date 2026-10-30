@@ -22,8 +22,8 @@ xcodebuild -version
 
 # Exercise macOS system Bash, including its EXIT-trap scoping on timeouts.
 /bin/bash scripts/device/tests/ctl-test.sh
-bash scripts/device/tests/sim-smoke-test.sh
-bash scripts/ci/tests/check-internal-exclusion-test.sh
+/bin/bash scripts/device/tests/sim-smoke-test.sh
+/bin/bash scripts/ci/tests/check-internal-exclusion-test.sh
 scripts/e2e/tests/cleanup-test.sh
 scripts/e2e/tests/build-cache-test.sh
 scripts/e2e/tests/cache-lock-race-test.sh

@@ -6,9 +6,12 @@ export LEGATO_SIMULATOR=preference-fixture
 LEGATO_SMOKE_OUTPUT="$(mktemp -d /tmp/legato-smoke-preferences.XXXXXX)"
 export LEGATO_SMOKE_OUTPUT
 work="$LEGATO_SMOKE_OUTPUT"
-# The prefix defines the real smoke functions without starting its runtime drive.
+# Load the real production prefix without starting its runtime drive. Bash 3's source
+# can return before reading a process-substitution pipe; use a complete regular file.
+definitions="$work/smoke-definitions.sh"
+sed '/^save_preferences$/,$d' "$ROOT/scripts/device/tests/sim-smoke.sh" > "$definitions"
 # shellcheck disable=SC1090
-source <(sed '/^save_preferences$/,$d' "$ROOT/scripts/device/tests/sim-smoke.sh")
+source "$definitions"
 fixture_ctl() {
   if [ "$1" = send ]; then
     if [ "$2" = set-setting ]; then printf '%s=%s\n' "$3" "$4" >> "$work/restored"; fi
@@ -30,7 +33,7 @@ failure_rc=0
 (
   export LEGATO_SMOKE_OUTPUT="$LEGATO_SMOKE_OUTPUT/failure"
   # shellcheck disable=SC1090
-  source <(sed '/^save_preferences$/,$d' "$ROOT/scripts/device/tests/sim-smoke.sh")
+  source "$definitions"
   # Called by sourced smoke functions and their EXIT trap.
   # shellcheck disable=SC2329
   ctl() { fixture_ctl "$@"; }
