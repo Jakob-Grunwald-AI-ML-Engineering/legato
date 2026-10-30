@@ -85,7 +85,7 @@ enum DebugBridge {
         for file in stale { try? fm.removeItem(at: file) }
         trimLog()
         registerBuiltins()
-        emit(id: "-", event: "started", ["dropped": stale.count, "pid": ProcessInfo.processInfo.processIdentifier, "commands": handlers.keys.sorted()])
+        emit(id: "-", event: "started", ["dropped": stale.count, "pid": ProcessInfo.processInfo.processIdentifier, "generation": UUID().uuidString, "commands": handlers.keys.sorted()])
         task = Task { @MainActor in
             while !Task.isCancelled {
                 await drain()

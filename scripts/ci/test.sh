@@ -20,6 +20,7 @@ export LEGATO_STUB_DEPS=1
 select_xcode
 xcodebuild -version
 
+bash scripts/device/tests/ctl-test.sh
 scripts/e2e/tests/cleanup-test.sh
 scripts/e2e/tests/build-cache-test.sh
 scripts/e2e/tests/cache-lock-race-test.sh

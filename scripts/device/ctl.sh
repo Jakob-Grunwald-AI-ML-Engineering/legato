@@ -28,6 +28,8 @@
 #
 # Environment: LEGATO_DEVICE (UDID, default the project iPhone), LEGATO_DEVICE_TEAM (default XWSGN23W75),
 # LEGATO_DEVICE_STATE (scratch dir for pulled logs), LEGATO_CACHE_DIR (build caches).
+# LEGATO_DEVICE_TIMEOUT (per-operation cap, 10s), LEGATO_DEVICE_INSTALL_TIMEOUT (120s),
+# LEGATO_DEVICE_LAUNCH_TIMEOUT and LEGATO_DEVICE_SEND_TIMEOUT (total budget, 30s each).
 # Limits: the phone must be unlocked for launch/copy; the keyboard extension and locking the phone
 # cannot be driven from here.
 set -euo pipefail
@@ -49,10 +51,21 @@ mkdir -p "$STATE"
 
 die() { echo "ctl.sh: $*" >&2; exit 1; }
 
+positive_seconds() {
+  case "$1" in '' | *[!0-9]*) die "$2 must be a positive integer" ;; esac
+  [ "$1" -gt 0 ] || die "$2 must be a positive integer"
+}
+
 # devicectl wrapper: on failure explains the usual causes (locked, unplugged) instead of the raw dump.
 dc() {
-  local out rc=0
-  out="$(xcrun devicectl "$@" 2>&1)" || rc=$?
+  local out rc=0 limit="${DC_TIMEOUT:-${LEGATO_DEVICE_TIMEOUT:-10}}" remaining
+  positive_seconds "$limit" "device timeout"
+  if [ -n "${DC_DEADLINE:-}" ]; then
+    remaining=$((DC_DEADLINE - SECONDS))
+    [ "$remaining" -gt 0 ] || { echo "ctl.sh: device operation deadline expired" >&2; return 124; }
+    [ "$limit" -le "$remaining" ] || limit="$remaining"
+  fi
+  out="$(xcrun devicectl --timeout "$limit" "$@" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     if grep -qiE 'locked|passcode' <<< "$out"; then
       echo "ctl.sh: the iPhone is locked: unlock it and retry." >&2
@@ -69,7 +82,7 @@ dc() {
 # The State column is the text after "(UDID)"; "unavailable" must not match.
 device_available() {
   local listing state
-  listing="$(xcrun devicectl list devices 2> /dev/null || true)"
+  listing="$(dc list devices)" || return 1
   state="$(awk -v d="$DEVICE" 'index($0, d) { sub(/.*\(UDID\) +/, ""); print; exit }' <<< "$listing")"
   case "$state" in available* | connected*) return 0 ;; *) return 1 ;; esac
 }
@@ -96,11 +109,23 @@ LOG="$STATE/log.jsonl"
 SEEN="$STATE/seen"
 
 pull_log() {
-  copy_from "$BRIDGE/log.jsonl" "$LOG" 2> /dev/null || { : > "$LOG"; return 1; }
+  # An absent destination avoids CoreDevice's ambiguous existing-file behavior. Publish only a
+  # complete successful snapshot; a failed/partial transfer must never destroy the last good log.
+  local staging rc=0
+  # Keep the last transfer diagnostic when the enclosing operation has exhausted its budget.
+  if [ -n "${DC_DEADLINE:-}" ] && [ "$SECONDS" -ge "$DC_DEADLINE" ]; then return 124; fi
+  staging="$(mktemp -d "$STATE/log.XXXXXX")"
+  copy_from "$BRIDGE/log.jsonl" "$staging/log.jsonl" 2> "$STATE/log.error" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    mv "$staging/log.jsonl" "$LOG"
+    : > "$STATE/log.error"
+  fi
+  rm -rf "$staging"
+  return "$rc"
 }
 
 cmd_devices() {
-  xcrun devicectl list devices
+  dc list devices
   device_available || echo "ctl.sh: target $DEVICE is not available: unlock the iPhone / plug it in." >&2
 }
 
@@ -118,18 +143,45 @@ cmd_build() {
 
 cmd_install() {
   [ -d "$APP" ] || die "no build at $APP: run 'ctl.sh build' first"
+  local DC_TIMEOUT="${LEGATO_DEVICE_INSTALL_TIMEOUT:-120}"
+  positive_seconds "$DC_TIMEOUT" "install timeout"
   require_device
   dc device install app --device "$DEVICE" "$APP"
 }
 
 cmd_launch() {
+  local budget="${LEGATO_DEVICE_LAUNCH_TIMEOUT:-30}"
+  positive_seconds "$budget" "launch timeout"
+  local DC_DEADLINE=$((SECONDS + 10#$budget))
+  local previous="" pid result
   require_device
+  pull_log || true
+  if [ -f "$LOG" ]; then
+    previous="$(jq -r -s '[.[] | select(.event == "started") | (.generation // .ts)] | last // ""' "$LOG")"
+  fi
+  result="$(mktemp "$STATE/launch.XXXXXX")"
   # `--` keeps app arguments such as -LegatoDebugBridge from being parsed as devicectl options.
-  dc device process launch --device "$DEVICE" --terminate-existing -- "$BID" "$@"
+  if ! dc device process launch --json-output "$result" --device "$DEVICE" --terminate-existing -- "$BID" "$@"; then
+    rm -f "$result"
+    return 1
+  fi
+  pid="$(jq -er '.result.process.processIdentifier' "$result")" || { rm -f "$result"; die "launch returned no process identifier"; }
+  rm -f "$result"
+  while :; do
+    if pull_log && jq -e -s --arg previous "$previous" --argjson pid "$pid" \
+      'any(.[]; .event == "started" and .pid == $pid and (.generation // .ts) != $previous)' "$LOG" > /dev/null; then
+      return 0
+    fi
+    [ "$SECONDS" -lt "$DC_DEADLINE" ] || wait_failure "bridge readiness for process $pid"
+    sleep 0.2
+  done
 }
 
 cmd_send() {
   [ $# -ge 1 ] || die "usage: send <command> [args...]"
+  local budget="${LEGATO_DEVICE_SEND_TIMEOUT:-30}"
+  positive_seconds "$budget" "send timeout"
+  local DC_DEADLINE=$((SECONDS + 10#$budget))
   require_device
   # Ids sort in send order (the bridge runs the oldest name first): epoch seconds, then a persistent counter.
   local n=0 id file args=[]
@@ -159,10 +211,10 @@ landed() {
 deliver() { # deliver <id> <file>
   local id="$1" file="$2" try
   for try in 1 2 3; do
-    xcrun devicectl device copy to --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BID" \
+    dc device copy to --device "$DEVICE" --domain-type appDataContainer --domain-identifier "$BID" \
       --source "$file" --destination "$BRIDGE/inbox/$id.json" > /dev/null 2>&1 && return 0
     landed "$id" && return 0
-    sleep 1
+    [ "$try" -eq 3 ] || sleep 1
   done
   copy_to "$file" "$BRIDGE/inbox/$id.json" # a last try that prints the reason
 }
@@ -183,7 +235,7 @@ cmd_ask() {
     pull_log || true
     # The phone starts the timeout when the card reaches the front (event "shown"); so does this.
     if [ -z "$deadline" ] && jq -e --arg k "$id" 'select(.id == $k and .event == "shown")' "$LOG" > /dev/null 2>&1; then
-      deadline=$((SECONDS + timeout + 30))
+      deadline=$((SECONDS + 10#$timeout + 30))
     fi
     line="$(jq -r --arg k "$id" 'select(.id == $k and (.event == "reply" or .event == "error")) | "\(.event) \(.choice // .message)"' "$LOG" 2> /dev/null || true)"
     line="${line%%$'\n'*}"
@@ -198,13 +250,22 @@ cmd_ask() {
   done
 }
 
+wait_failure() {
+  if [ -s "$STATE/log.error" ]; then
+    cat "$STATE/log.error" >&2
+    die "log transfer failed while waiting for $1"
+  fi
+  die "timed out waiting for $1"
+}
+
 cmd_wait() {
   [ $# -ge 1 ] || die "usage: wait <id|event> [timeout]"
+  local key="$1" timeout="${2:-30}" hit start=0
+  positive_seconds "$timeout" "wait timeout"
+  local DC_DEADLINE=$((SECONDS + 10#$timeout))
   require_device
-  local key="$1" timeout="${2:-30}" deadline hit start=0
   pull_log || true
-  start="$(wc -l < "$LOG" | tr -d ' ')"
-  deadline=$((SECONDS + timeout))
+  [ ! -f "$LOG" ] || start="$(wc -l < "$LOG" | tr -d ' ')"
   while :; do
     if [ -s "$LOG" ]; then
       hit="$(jq -c --arg k "$key" --argjson start "$start" -s '
@@ -217,8 +278,8 @@ cmd_wait() {
         return 0
       fi
     fi
-    [ "$SECONDS" -lt "$deadline" ] || die "timed out after ${timeout}s waiting for $key"
-    sleep 1
+    [ "$SECONDS" -lt "$DC_DEADLINE" ] || wait_failure "$key (${timeout}s budget)"
+    sleep 0.2
     pull_log || true
   done
 }
@@ -253,7 +314,8 @@ cmd_pull() {
   [ $# -eq 1 ] || die "usage: pull [--group] <path>"
   case "/$1/" in */../*) die "pull: '..' is not allowed in $1" ;; esac
   require_device
-  local dest="$STATE/pulled/$(basename "$1")"
+  local dest
+  dest="$STATE/pulled/$(basename "$1")"
   mkdir -p "$STATE/pulled"
   rm -rf "$dest"
   copy_from "$1" "$dest" "$group"
