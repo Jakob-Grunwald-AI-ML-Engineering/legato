@@ -5,7 +5,7 @@ import Synchronization
 /// builds: `audio-diag.jsonl`, with a memory sample; DEBUG: the e2e log), so a device run shows how many calls a
 /// run made, of which kind, on which backend, and what a load cost.
 ///
-/// - `cleanup.call kind=<session|sessionLive|stateless|agent|other> run=<id> backend=<name> ms=<n> outcome=<…>`
+/// - `cleanup.call kind=<session|agent|other> run=<id> backend=<name> ms=<n> outcome=<…>`
 /// - `cleanup.skip kind=session run=<id> reason=agent` (the session's own pass, gated off for the agent)
 /// - `model.loaded key=<resource> ms=<n>`
 public enum CleanupCallTrace {
@@ -13,8 +13,7 @@ public enum CleanupCallTrace {
 
     private static let state = Mutex<(sink: Sink?, run: String?)>((nil, nil))
 
-    /// What a cleanup call is for, set by its caller around it (the session's pass, the linked stop's stateless
-    /// pass); unset: `other` (refine, meetings).
+    /// What a cleanup call is for, set by its caller around it (the session's rewrite); unset: `other` (refine, meetings).
     @TaskLocal public static var kind = "other"
     /// Replaces the installed sink for the calls made in this task (tests).
     @TaskLocal public static var override: Sink?

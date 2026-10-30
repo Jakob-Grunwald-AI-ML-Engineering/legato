@@ -409,20 +409,4 @@ private final class ReplyingBackend: LLMBackend {
         await rig.service.waitForLearning()
         #expect(try await rig.entries().isEmpty)
     }
-
-    @Test func thePassesOfOneLiveRunCountAsOneRun() async throws {
-        let rig = VocabularyRig(); defer { rig.cleanUp() }
-        let backend = ReplyingBackend(reply: "ask Claude about it")
-        let processor = processor(backend: backend, vocabulary: rig.service)
-        let locale = Locale(identifier: "en-US")
-        processor.liveRunStarts()
-        _ = try await processor.cleanLivePass("ask kloud about it", context: "", locale: locale, atStop: false)
-        _ = try await processor.cleanLivePass("ask kloud about it", context: "", locale: locale, atStop: true)
-        await rig.service.waitForLearning()
-        #expect(try await rig.entries().isEmpty)  // one run: not yet the two distinct runs a fix needs
-        processor.liveRunStarts()
-        _ = try await processor.cleanLivePass("ask kloud about it", context: "", locale: locale, atStop: true)
-        await rig.service.waitForLearning()
-        #expect(try await rig.entries().map(\.text) == ["Claude"])
-    }
 }

@@ -1,8 +1,7 @@
 import Foundation
 import LegatoFieldEdit
 
-/// One iOS dictation run with the experimental edit queue ("Experimental: edit queue and cleanup agent" on), on
-/// the app's side of the keyboard link. The keyboard owns the queue; this type reads its feed and sends edits.
+/// One iOS dictation run with cleanup on, on the app's side of the keyboard link. The keyboard owns the queue; this type reads its feed and sends edits.
 ///
 /// - **Feed.** The keyboard publishes its field events as `FeedBatch`es to `link.feed` (``Transport/read``), a few
 ///   per second at most. Every batch is folded into a ``FeedMirror`` at once (also while the agent is still
@@ -15,11 +14,11 @@ import LegatoFieldEdit
 ///   version and queue instance; their conflicts and supersedes come back in the feed, which the agent reads
 ///   itself (it re-plans in the same call).
 /// - **Stop (Live).** ``finish()`` waits (``agentWait`` at most) for the agent to exist: absent, the caller cleans
-///   the run with the stateless pass and writes it with ``deliver(raw:cleaned:)``. Present, it catches the agent
+///   the run with the session's rewrite and writes it with ``deliver(raw:cleaned:)``. Present, it catches the agent
 ///   up, takes its final pass, sends it, and waits (``finalWait`` at most) for every edit of the run still without
 ///   an outcome; what did not land is ``Outcome/unapplied`` (the caller's clipboard fallback,
 ///   ``fallbackText(unapplied:)``).
-/// - **Replace / absent agent.** ``deliver(raw:cleaned:)``: one stateless final pass's text as the smallest
+/// - **Replace / absent agent.** ``deliver(raw:cleaned:)``: the rewrite's text as the smallest
 ///   patches of the run's text (``FeedMirror/patches(from:to:owner:origin:)``), one transaction per patch (one failed
 ///   guard never stops the others), their outcomes waited for.
 /// - **Out of the window (iOS).** Only the patches inside the caret-relative window are written; when any is not
@@ -265,7 +264,7 @@ public final class LinkedCleanupRun {
         guard await Self.exists(made, within: agentWait) == true, let agent = await made.value else {
             trace?("agent.absent")
             // An agent still being made holds the model (loading, prefilling): cancelled and settled before the
-            // caller's stateless pass, which a single-worker runtime would refuse.
+            // caller's rewrite, which a single-worker runtime would refuse.
             await settle()
             return Outcome(unapplied: [], agentAbsent: true)
         }
@@ -299,7 +298,7 @@ public final class LinkedCleanupRun {
         return Outcome(unapplied: unapplied)
     }
 
-    /// One stateless pass's text as patches of the run's text (Replace, or Live without an agent): the ones inside
+    /// One rewrite's text as patches of the run's text (Replace, or Live without an agent): the ones inside
     /// the window are written, the rest never (``Delivery/partial``).
     public func deliver(raw: String, cleaned: String) async -> Delivery {
         feedChanged()
@@ -357,7 +356,7 @@ public final class LinkedCleanupRun {
 
     /// How the run's cleaned text reaches the field.
     public enum Mode: String, Sendable, Equatable {
-        /// The cleanup agent edits the run as it goes (or, absent, the stop's stateless pass as patches).
+        /// The cleanup agent edits the run as it goes (or, absent, the stop's rewrite as patches).
         case live
         /// The session's final pass, written as patches at the stop.
         case replace
@@ -400,7 +399,7 @@ public final class LinkedCleanupRun {
             case noKeyboard
             /// Replace: the session's text is its raw text (the pass changed nothing, failed or timed out).
             case noFinalText
-            /// Live: no agent at the stop; `reason` says how its stateless pass went.
+            /// Live: no agent at the stop; `reason` says how its rewrite went.
             case agentAbsent
             /// Live: some of the agent's edits did not land (`reason`: how many); the clipboard has the text.
             case unapplied
@@ -455,10 +454,10 @@ public final class LinkedCleanupRun {
         }
         guard let applied else {
             // An agent call still in flight holds the model (a single-worker runtime refuses a second caller):
-            // it is cancelled and settled before the stateless pass.
+            // it is cancelled and settled before the rewrite.
             await settle()
             // The agent was to clean this run, so the session's own final pass was off and `text` is raw: the
-            // stateless pass cleans it for the clipboard (as for an absent agent). Without an agent the session's
+            // rewrite cleans it for the clipboard (as for an absent agent). Without an agent the session's
             // text is already its cleaned text.
             guard hasAgent, let pass = await rewrite(text), Self.changes(pass, text) else {
                 return done(Stop(landed: false), .noKeyboard)
@@ -517,7 +516,7 @@ public final class LinkedCleanupRun {
             }
         } else if mirror.runText == nil, !mirror.wasCleared, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // The run's spans are unknown (the keyboard restarted: another queue's window is not searched): where
-            // the agent's edits are cannot be told. The whole text cleaned by the stateless pass goes to the
+            // the agent's edits are cannot be told. The whole text cleaned by the rewrite goes to the
             // clipboard, or the session's own text: never nothing.
             trace?("link.spans unknown")
             guard let pass = await rewrite(text), Self.changes(pass, text) else {
@@ -533,7 +532,7 @@ public final class LinkedCleanupRun {
         } else if outcome.unapplied.isEmpty {
             cleaned = mirror.runText
             // The agent edits only the window: a sentence of the run that scrolled out (or is cut by the window's
-            // edge) was never reviewed, or could not be written. As Replace does: when the stateless pass over the
+            // edge) was never reviewed, or could not be written. As Replace does: when the rewrite over the
             // whole run still changes it, the whole cleaned text goes to the clipboard with the notice.
             if mirror.runLeftWindow || mirror.lostRunText, let pass = await rewrite(text),
                 Self.changes(pass, mirror.runText ?? text)

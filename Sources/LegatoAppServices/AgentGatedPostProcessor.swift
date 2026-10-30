@@ -4,7 +4,7 @@ import Synchronization
 
 /// The dictation session's post-processor (#80): the cleanup agent is the only cleanup, so the session never cleans
 /// live, and its one cleanup at stop is the rolling session's whole-text rewrite (``PassageRewriter``, through
-/// `rewrite`), never a stateless pass on another session. While ``agentRuns`` is set (the agent cleans the run
+/// `rewrite`), never a separate pass on another session. While ``agentRuns`` is set (the agent cleans the run
 /// through the field edit queue) the session cleans nothing at all. The run's resources (`runStarts`/`runEnds`)
 /// are always `base`'s.
 ///
@@ -41,5 +41,4 @@ public final class AgentGatedPostProcessor: TranscriptPostProcessor {
 
     public func runStarts() async throws { try await base.runStarts() }
     public func runEnds() async { await base.runEnds() }
-    public var cleansSegmentsLive: Bool { false }
 }

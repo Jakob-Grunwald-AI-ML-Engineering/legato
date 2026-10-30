@@ -120,8 +120,7 @@ final class MacAppController {
         let secureField: Bool
         /// How a cleaned text reaches the field: the setting when the run started, nil with cleanup off.
         let delivery: CleanupDelivery?
-        /// The run's text as the edit pump saw it: raw committed (`committed`), with live cleanup's revisions
-        /// applied for the HUD (`revisedCommitted`).
+        /// The run's text as the edit pump saw it (raw committed and the tentative tail), for the HUD.
         var transcript = LiveTranscript()
         /// Everything the engine committed, as the edit pump saw it.
         var committed: String { transcript.committed }
@@ -806,9 +805,8 @@ final class MacAppController {
             return
         }
         // `session.stop()` has yielded every edit; let the pump hand them to the writer. They carry the
-        // engine's (raw) text, not the cleaned one; a live run's revisions come after its last commit, so it
-        // waits for every edit.
-        await drainEdits(of: run, expecting: run.delivery == .live ? nil : entry.map { $0.rawText ?? $0.text })
+        // engine's (raw) text, not the cleaned one.
+        await drainEdits(of: run, expecting: entry.map { $0.rawText ?? $0.text })
 
         if let failure {
             Self.log.error("stop failed: \(Self.describe(failure), privacy: .public)")
@@ -880,10 +878,10 @@ final class MacAppController {
             if let fieldEdit = run.fieldEdit {
                 // A final swap held back by typing waits for a pause (a little) before it gives up.
                 action = await run.writer.finish(
-                    rawText: raw, cleanedText: cleaned, delivery: chosen, retryingFor: FieldEditRun.finalHoldBudget,
+                    rawText: raw, cleanedText: cleaned, retryingFor: FieldEditRun.finalHoldBudget,
                     wait: { await fieldEdit.wait($0) })
             } else {
-                action = run.writer.finish(rawText: raw, cleanedText: cleaned, delivery: chosen)
+                action = run.writer.finish(rawText: raw, cleanedText: cleaned)
             }
         } else {
             action = run.writer.finish(finalText: finalText)
@@ -958,8 +956,8 @@ final class MacAppController {
         run.fieldEdit?.textChanged()
         run.transcript.apply(edit)
         switch edit {
-        case .commit, .revise:
-            hud.model.committed = run.transcript.revisedCommitted
+        case .commit:
+            hud.model.committed = run.transcript.committed
         case .replaceVolatile(let text):
             hud.model.volatile = text
         }

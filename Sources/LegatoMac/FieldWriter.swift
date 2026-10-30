@@ -45,19 +45,12 @@ public enum DegradeReason: Sendable, Equatable {
 ///   may have landed.
 /// - A text the field is missing that the writer cannot place (the final text does not continue
 ///   what was written) is `.copy(final text)`; nothing is appended blindly.
-/// - `.insertOnStop` (Hold): when the field's selection or caret moved since the writer was created (the
+/// - `.insertOnStop`: when the field's selection or caret moved since the writer was created (the
 ///   run's start), `finish` writes nothing and gives `.copy(final text)`, so a selection made while
 ///   listening is never replaced.
 /// - Leading whitespace of the first phrase is not written, so the field matches the trimmed text.
 /// - Tentative text left in the field by a mid-run degrade in `.streamLive` is not cleaned up
 ///   by `finish`.
-/// - `.revise` (live cleanup, a whole-span revision) replaces what the field shows for the run with the
-///   revision's text followed by the raw text committed after its input, in one verified write of only the
-///   part that changed (from the first differing character to the end of our text, so the caret stays after
-///   it). Only while the focused field reads exactly as the writer left it and the caret sits right after our
-///   text; otherwise the revision is skipped (no degrade), and so is every later one: the field keeps what it
-///   shows. An older revision than the newest seen is ignored. The collected text follows the newest
-///   revision, so `finish` compares the field with the cleaned text.
 /// - `revert()` is for a cancelled run: it removes what this writer typed (and puts back the
 ///   selection the first write replaced) if the field still reads exactly as the writer left
 ///   it; otherwise it leaves everything alone. The writer ignores all edits after it.
@@ -81,22 +74,17 @@ public final class FieldWriter {
     private let channel: (any FieldWriteChannel)?
     /// Everything the engine committed, as received.
     private var rawCommitted = ""
-    /// Live cleanup's newest revision (the collected text shows it).
-    private var revision: TranscriptRevision?
-    /// Everything the engine committed, with live cleanup's newest revision applied.
+    /// Everything the engine committed, as the field shows it.
     private var committed: String {
         // Someone else's edits (the cleanup agent) changed what the field shows: it is what was written, then the
         // raw text not written yet.
         if absorbed { return written + String(rawCommitted.dropFirst(droppedLead + writtenRaw)) }
-        guard let revision else { return rawCommitted }
-        return String(rawCommitted.prefix(revision.start)) + revision.text + String(rawCommitted.dropFirst(revision.end))
+        return rawCommitted
     }
     /// Leading whitespace of the raw committed text that was never written (the field starts at its text).
     private var droppedLead = 0
     /// Raw committed characters whose text is in `written` (after `droppedLead`).
     private var writtenRaw = 0
-    /// A revision was skipped (the user worked in the field): later ones are too.
-    private var revisionsSkipped = false
     /// ``absorb(_:)`` changed `written`: it is no longer a copy of the raw committed text.
     private var absorbed = false
     /// The committed text verified to be in the field, starting at `spanStart` (UTF-16).
@@ -139,8 +127,6 @@ public final class FieldWriter {
         case .replaceVolatile(let text):
             guard degradeReason == nil, mode == .streamLive else { return }
             update(appending: "", tentative: text)
-        case .revise(let revision):
-            revise(revision)
         }
     }
 
@@ -186,7 +172,7 @@ public final class FieldWriter {
         let final = (finalText ?? committed).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !final.isEmpty else { return .done }
         guard let target else { return .paste(final) }
-        // Hold: the user selected text or moved the caret while listening; writing would replace that.
+        // Insert on stop: the user selected text or moved the caret while listening; writing would replace that.
         if mode == .insertOnStop, spanStart == nil, degradeReason == nil, let startSelection,
            (try? target.selectedRange()) != startSelection {
             return .copy(final)
@@ -220,77 +206,32 @@ public final class FieldWriter {
         case held(retryAfter: TimeInterval)
     }
 
-    /// Applies a live cleanup revision: to the collected text always, to the field when it is safe.
-    private func revise(_ new: TranscriptRevision) {
-        guard new.n > (revision?.n ?? 0), new.start >= 0, new.end <= rawCommitted.count,
-              String(rawCommitted.dropFirst(new.start).prefix(new.raw.count)) == new.raw
-        else { return }
-        revision = new
-
-        guard degradeReason == nil, mode != .insertOnStop, !revisionsSkipped, let target, let start = spanStart else { return }
-        // The field's text for the run once revised: the revision, then the raw text written after its input.
-        // Leading whitespace that was never written stays out.
-        let typed = droppedLead + writtenRaw
-        guard new.start <= droppedLead, new.end <= typed else { return } // covers text not in the field: nothing to do yet
-        let raw = Array(rawCommitted)
-        let desired = String((new.text + String(raw[new.end..<typed])).drop(while: \.isWhitespace))
-        let shown = written + tentative
-        guard target.isFocused(),
-              let current = try? target.text(in: UTF16Range(location: start, length: shown.utf16.count)), current == shown,
-              let selection = try? target.selectedRange(), selection == UTF16Range(location: start + shown.utf16.count, length: 0)
-        else {
-            revisionsSkipped = true // the user is working in the field: it keeps what it shows
-            return
-        }
-        guard desired != written else { return }
-        let shared = String(zip(written, desired).prefix { $0 == $1 }.map(\.0))
-        let span = UTF16Range(
-            location: start + shared.utf16.count, length: shown.utf16.count - shared.utf16.count)
-        let replacement = String(desired.dropFirst(shared.count)) + tentative
-        let replaced = String(decoding: Array(shown.utf16).dropFirst(shared.utf16.count), as: UTF16.self)
-        do {
-            try send(span, with: replacement, expect: replaced, preceding: shared.isEmpty ? nil : shared, origin: .liveCleanup)
-        } catch is QueuedFieldWriteChannel.Held {
-            return // the user is typing: this revision waits, the next one covers it (nothing was written)
-        } catch {
-            return degrade(.writeFailed)
-        }
-        guard let readback = try? target.text(in: UTF16Range(location: span.location, length: replacement.utf16.count)),
-              readback == replacement
-        else { return degrade(.notApplied) }
-        written = desired
-    }
-
     /// `finish(finalText:)` for a run whose text was cleaned up: `rawText` is what the engine heard (what
     /// streamed into the field), `cleanedText` the trimmed result. Call it once instead of `finish(finalText:)`.
     ///
-    /// - Nothing of ours in the field yet (nothing streamed, `.insertOnStop`, Hold): one verified write of
+    /// - Nothing of ours in the field yet (nothing streamed, `.insertOnStop`): one verified write of
     ///   the cleaned text, as `finish(finalText: cleanedText)`.
-    /// - Replace: the raw text is finished first (a missing tail is flushed), then swapped for the cleaned
+    /// - Otherwise the raw text is finished first (a missing tail is flushed), then swapped for the cleaned
     ///   text with `swapWritten(for:)`. If the field no longer ends with the raw text or the swap fails,
     ///   the field is left and the result is `.copy(cleanedText)`.
-    /// - Clipboard: the raw text is finished and stays; the result is `.copy(cleanedText)`.
     ///
     /// `.paste` and `.copy` carry the whole cleaned text: `.paste` when nothing of ours landed in the field,
     /// `.copy` when (some of) the raw text is in it and stays.
-    /// - Live: the revisions already put the cleaned text in the field; this finishes it like
-    ///   `finish(finalText: cleanedText)`. A field that does not show it (a revision was skipped) is left, and
-    ///   the result is `.copy(cleanedText)`.
-    public func finish(rawText: String?, cleanedText: String, delivery: CleanupDelivery) -> FinishAction {
-        switch prepareFinish(rawText: rawText, cleanedText: cleanedText, delivery: delivery) {
+    public func finish(rawText: String?, cleanedText: String) -> FinishAction {
+        switch prepareFinish(rawText: rawText, cleanedText: cleanedText) {
         case .action(let action): return action
         case .swap(let cleaned): return Self.action(for: swapWritten(for: cleaned), cleaned: cleaned)
         }
     }
 
-    /// ``finish(rawText:cleanedText:delivery:)`` where a final swap held back by typing (``SwapResult/held``) is
+    /// ``finish(rawText:cleanedText:)`` where a final swap held back by typing (``SwapResult/held``) is
     /// tried again after the wait `wait` performs, for at most `budget` seconds in all; then, as without the
     /// retry, the cleaned text goes to the pasteboard (`.copy`).
     public func finish(
-        rawText: String?, cleanedText: String, delivery: CleanupDelivery, retryingFor budget: TimeInterval,
+        rawText: String?, cleanedText: String, retryingFor budget: TimeInterval,
         wait: @MainActor (TimeInterval) async -> Void
     ) async -> FinishAction {
-        switch prepareFinish(rawText: rawText, cleanedText: cleanedText, delivery: delivery) {
+        switch prepareFinish(rawText: rawText, cleanedText: cleanedText) {
         case .action(let action):
             return action
         case .swap(let cleaned):
@@ -321,7 +262,7 @@ public final class FieldWriter {
         }
     }
 
-    private func prepareFinish(rawText: String?, cleanedText: String, delivery: CleanupDelivery) -> FinishStep {
+    private func prepareFinish(rawText: String?, cleanedText: String) -> FinishStep {
         let cleaned = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if spanStart == nil, degradeReason == nil, !uncertainWrite {
             return .action(finish(finalText: cleaned))

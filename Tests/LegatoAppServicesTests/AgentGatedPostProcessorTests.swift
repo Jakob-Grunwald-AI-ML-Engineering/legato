@@ -7,7 +7,6 @@ import Testing
 private final class Base: TranscriptPostProcessor, @unchecked Sendable {
     let id = "base"
     let starts = Mutex(0)
-    var cleansSegmentsLive: Bool { true }
     func process(_ text: String, locale: Locale) async throws -> String { "stateless: " + text }
     func runStarts() async throws { starts.withLock { $0 += 1 } }
 }
@@ -32,11 +31,5 @@ private final class Base: TranscriptPostProcessor, @unchecked Sendable {
         let gate = AgentGatedPostProcessor(Base(), rewrite: { text, _ in text.uppercased() })
         gate.agentRuns = true
         #expect(try await gate.process("a", locale: Locale(identifier: "en")) == "a")
-    }
-
-    /// The session's rolling live passes are gone (#80): the agent is the only live cleanup.
-    @Test func theSessionNeverCleansLive() {
-        let gate = AgentGatedPostProcessor(Base(), rewrite: { text, _ in text })
-        #expect(!gate.cleansSegmentsLive)
     }
 }

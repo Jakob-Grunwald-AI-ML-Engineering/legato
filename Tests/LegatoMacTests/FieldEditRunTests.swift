@@ -484,7 +484,7 @@ private struct GatedAgent: FieldAgent {
     @Test func replaceSwapsOnlyWhatDiffersThroughTheQueue() async {
         let rig = Rig.plain()
         rig.writer.apply(.commit(delta: "Send teh report now."))
-        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.", delivery: .replace)
+        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.")
         #expect(action == .done)
         #expect(rig.target.string == "Send the report now.")
         let patch = rig.target.writes.last
@@ -500,7 +500,7 @@ private struct GatedAgent: FieldAgent {
         let rig = Rig.plain(mode: .insertOnStop)
         rig.writer.apply(.commit(delta: "Send teh report now."))
         #expect(rig.target.writes.isEmpty)
-        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.", delivery: .replace)
+        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.")
         #expect(action == .done)
         #expect(rig.target.writes.count == 1)
         #expect(rig.target.string == "Send the report now.")
@@ -515,7 +515,7 @@ private struct GatedAgent: FieldAgent {
         rig.writer.apply(.commit(delta: "Send teh report now."))
         rig.run.typingGuard.noteUserActivity()
         let action = await rig.writer.finish(
-            rawText: "Send teh report now.", cleanedText: "Send the report now.", delivery: .replace,
+            rawText: "Send teh report now.", cleanedText: "Send the report now.",
             retryingFor: FieldEditRun.finalHoldBudget, wait: { await rig.run.wait($0) })
         #expect(action == .done)
         #expect(!rig.clock.pauses.isEmpty)
@@ -530,7 +530,7 @@ private struct GatedAgent: FieldAgent {
         guardRef.noteUserActivity()
         clock.keepTyping = { guardRef.noteUserActivity() }
         let action = await rig.writer.finish(
-            rawText: "Send teh report now.", cleanedText: "Send the report now.", delivery: .replace,
+            rawText: "Send teh report now.", cleanedText: "Send the report now.",
             retryingFor: FieldEditRun.finalHoldBudget, wait: { await rig.run.wait($0) })
         #expect(action == .copy("Send the report now."))
         #expect(clock.pauses.reduce(0, +) <= FieldEditRun.finalHoldBudget)
@@ -541,7 +541,7 @@ private struct GatedAgent: FieldAgent {
         let rig = Rig.plain()
         rig.writer.apply(.commit(delta: "Send teh report now."))
         rig.target.externalEdit(UTF16Range(location: 6, length: 2), with: "XX")  // the user changed the spot
-        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.", delivery: .replace)
+        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.")
         #expect(action == .copy("Send the report now."))
     }
 }
