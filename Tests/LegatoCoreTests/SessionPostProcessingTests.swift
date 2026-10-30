@@ -148,17 +148,15 @@ private func session(
 @Suite struct CleanupDeliveryTests {
     /// The raw values persist in the settings: they must not change.
     @Test func rawValuesAreStable() {
-        #expect(CleanupDelivery.allCases.map(\.rawValue) == ["replace", "clipboard", "hold", "live"])
+        #expect(CleanupDelivery.allCases.map(\.rawValue) == ["replace", "live"])
     }
 
-    @Test func onlyHoldKeepsTheFieldFreeWhileListening() {
-        #expect(CleanupDelivery.replace.streamsIntoField)
-        #expect(CleanupDelivery.clipboard.streamsIntoField)
-        #expect(!CleanupDelivery.hold.streamsIntoField)
-    }
-
-    @Test func liveStreamsIntoTheField() {
-        #expect(CleanupDelivery.live.streamsIntoField)
+    /// #80 removed Hold and Clipboard: their stored values read as Live.
+    @Test func removedModesReadAsLive() {
+        #expect(CleanupDelivery(stored: "hold") == .live)
+        #expect(CleanupDelivery(stored: "clipboard") == .live)
+        #expect(CleanupDelivery(stored: "replace") == .replace)
+        #expect(CleanupDelivery(stored: "unknown") == nil)
     }
 }
 

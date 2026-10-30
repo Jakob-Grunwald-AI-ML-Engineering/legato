@@ -31,18 +31,15 @@ final class KeyboardLinkHost: TranscriptSink {
     var onChoices: (@MainActor ([ChoiceRecord]) -> Void)?
     /// How a run that starts now delivers its cleaned text (nil with cleanup off); asked once per run.
     var deliveryForRun: @MainActor () -> HostDelivery? = { nil }
-    /// Whether the experimental edit queue is on; read once per run, like `deliveryForRun`.
-    var fieldEditsForRun: @MainActor () -> Bool = { false }
-
-    // The experimental edit queue's side of a run (the setting on, a keyboard run, Live or Replace).
-    /// The session's own cleanup; switched off while the cleanup agent cleans the run (Live).
+    // The edit queue's side of a keyboard run with cleanup on (Live or Replace).
+    /// The session's own cleanup; switched off while the cleanup agent cleans the run.
     var agentGate: AgentGatedPostProcessor?
     /// Makes the run's agent on the warm rolling session (nil: none); called in the background, never awaited by the run.
-    var makeAgent: @MainActor (_ runID: String) -> (@Sendable () async -> CleanupAgent?)? = { _ in nil }
+    var makeAgent: @MainActor (_ runID: String) -> LinkedCleanupRun.MakeAgent? = { _ in nil }
     /// How long a stop waits for an agent that is still warming (the run's cleanup time limit).
     var agentWait: @MainActor () -> Duration = { .seconds(2) }
-    /// Today's stateless final cleanup pass, for a Live run whose agent was absent at its stop.
-    var statelessFinalPass: @MainActor (String) async -> String? = { _ in nil }
+    /// The whole text rewritten on the rolling session, for a run whose agent was absent at its stop.
+    var rewriteAtStop: @MainActor (String) async -> String? = { _ in nil }
     /// Puts a fallback text on the clipboard; false when the clipboard did not change.
     var copyFallback: @MainActor (String) -> Bool = { _ in false }
     /// The session saved the engine's text; the history then holds what the field got (`AgentRunHistory`).
@@ -51,13 +48,11 @@ final class KeyboardLinkHost: TranscriptSink {
     var linkTrace: (@MainActor (String) -> Void)?
 
     private var feedLink: FieldFeedLink?
-    /// The current run's side of the edit queue; nil with the setting off (today's paths).
+    /// The current run's side of the edit queue; nil without cleanup or a keyboard field.
     private var linked: LinkedCleanupRun?
 
     /// The current run's delivery, fixed when it started (a settings change mid-run applies to the next).
     private var runDelivery: HostDelivery?
-    /// The current run's edit-queue flag, fixed when it started.
-    private var runFieldEdits = false
 
     private var observers: [DarwinObserver] = []
     #if LEGATO_INTERNAL
@@ -168,11 +163,10 @@ final class KeyboardLinkHost: TranscriptSink {
         // Cleanup delivery is about the keyboard's field: a run for the app's own screen or the activity's
         // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
         runDelivery = run.target == .keyboard ? deliveryForRun() : nil
-        runFieldEdits = run.target == .keyboard && fieldEditsForRun()
         startLinkedRun(run.id.uuidString)
         link.runStarted(
             id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery,
-            fieldEdits: runFieldEdits ? true : nil)
+            fieldEdits: run.target == .keyboard ? true : nil)
         onRunActivity?(true)
         #if LEGATO_INTERNAL
         trace.runStarted(run, delivery: runDelivery)
@@ -212,8 +206,8 @@ final class KeyboardLinkHost: TranscriptSink {
         #endif
     }
 
-    /// With cleanup, `text` is the cleaned text: the keyboard swaps it in (`.replace`), keeps the streamed
-    /// text (`.clipboard`: never confirmed, so the cleaned text goes to the clipboard) or inserts it (`.hold`).
+    /// A keyboard run with cleanup is cleaned by its agent through the edit queue (`text` is the raw text then);
+    /// without one, `text` is the session's rewrite, swapped in as patches.
     func runEnded(_ run: DictationRun, committed: String, text: String?) async -> Bool {
         let linked = self.linked
         self.linked = nil
@@ -240,10 +234,10 @@ final class KeyboardLinkHost: TranscriptSink {
                 let link = link
                 applied = { await link.awaitFinalApplied(runID: runID, timeout: Self.appliedTimeout) }
             }
-            let statelessPass = statelessFinalPass, copy = copyFallback
+            let rewrite = rewriteAtStop, copy = copyFallback
             let stop = await linked.stop(
                 mode, committed: committed, text: text, finalText: finalText, applied: applied,
-                statelessPass: { await statelessPass($0) }, copy: { copy($0) })
+                rewrite: { await rewrite($0) }, copy: { copy($0) })
             #if LEGATO_INTERNAL
             if let report = linked.stopReport { trace.linkedStop(report) }
             #endif
@@ -264,7 +258,6 @@ final class KeyboardLinkHost: TranscriptSink {
             #if LEGATO_INTERNAL
             trace.runEnded(applied: link.appliedCursor(), confirmed: stop.landed)
             #endif
-            if runDelivery == .clipboard, finalText != nil { return false }
             return stop.landed
         }
         linked?.cancel()
@@ -280,19 +273,19 @@ final class KeyboardLinkHost: TranscriptSink {
         #if LEGATO_INTERNAL
         trace.runEnded(applied: link.appliedCursor(), confirmed: applied)
         #endif
-        if runDelivery == .clipboard, finalText != nil { return false }
         return applied
     }
 
-    // MARK: Edit queue (the setting on)
+    // MARK: Edit queue
 
-    /// Starts the run's side of the edit queue: for a keyboard run with the setting on, in Live (the cleanup agent
-    /// on the warm rolling session, so the session's own cleanup stays out) or Replace (the final pass as patches).
+    /// Starts the run's side of the edit queue for a keyboard run with cleanup on: the cleanup agent on the warm
+    /// rolling session (Live: sentence by sentence; Replace: the whole text at stop), so the session's own cleanup
+    /// stays out.
     private func startLinkedRun(_ runID: String) {
         linked?.cancel()
         linked = nil
         agentGate?.agentRuns = false
-        guard runFieldEdits, runDelivery == .live || runDelivery == .replace, let feedLink else { return }
+        guard runDelivery == .live || runDelivery == .replace, let feedLink else { return }
         feedLink.beginRun(runID)
         let reader = FeedReader(link: feedLink, runID: runID)
         let transport = LinkedCleanupRun.Transport(
@@ -300,14 +293,14 @@ final class KeyboardLinkHost: TranscriptSink {
                 let dropped = feedLink.sendEdits(transactions)
                 if dropped > 0 { self?.linkTrace?("link.edits dropped=\(dropped)") }
             })
-        let agent = runDelivery == .live ? makeAgent(runID) : nil
+        let agent = makeAgent(runID)
         let passTimeout = agentWait()
         let run = LinkedCleanupRun(
             owner: runID, agent: agent, transport: transport, agentWait: passTimeout,
             finalWait: LinkedCleanupRun.stopWait(passTimeout: passTimeout))
         run.trace = linkTrace
         linked = run
-        // The agent cleans a Live run; the session runs no rolling passes and no final pass of its own.
+        // The agent cleans the run; the session makes no cleanup pass of its own.
         agentGate?.agentRuns = run.hasAgent
         linkTrace?("link.run delivery=\(runDelivery?.rawValue ?? "-") agent=\(run.hasAgent ? 1 : 0)")
     }

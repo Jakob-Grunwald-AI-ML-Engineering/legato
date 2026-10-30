@@ -39,7 +39,7 @@ private final class Recorder: Sendable {
     @Test func defaultsAreOffReplaceVerbatimFoundationModelsNoITNFourSeconds() {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         #expect(store.enabled == false)
-        #expect(store.delivery == .replace)
+        #expect(store.delivery == .live)  // #80: the continuous agent is the default cleanup
         #expect(store.style == .verbatim)
         #expect(store.backend == .foundationModels)
         #expect(store.itn == false)
@@ -50,14 +50,39 @@ private final class Recorder: Sendable {
         let defaults = freshDefaults()
         let store = CleanupSettingsStore(defaults: defaults)
         store.enabled = true
-        store.delivery = .hold
+        store.delivery = .replace
         store.style = .message
         store.backend = .foundationModels
         store.itn = true
         store.timeoutSeconds = 7
         let again = CleanupSettingsStore(defaults: defaults)
         #expect(again.options == CleanupOptions(
-            enabled: true, delivery: .hold, style: .message, backend: .foundationModels, itn: true, timeoutSeconds: 7))
+            enabled: true, delivery: .replace, style: .message, backend: .foundationModels, itn: true, timeoutSeconds: 7))
+    }
+
+    /// #80 removed Hold and Clipboard: a setting saved by an older build reads as Live, and is stored as Live.
+    @Test(arguments: ["hold", "clipboard"])
+    func aRemovedDeliveryModeReadsAsLive(stored: String) {
+        let defaults = freshDefaults()
+        defaults.set(stored, forKey: "cleanup.delivery")
+        let store = CleanupSettingsStore(defaults: defaults)
+        #expect(store.delivery == .live)
+        #expect(defaults.string(forKey: "cleanup.delivery") == "live")
+    }
+
+    @Test func anUnknownDeliveryReadsAsTheDefault() {
+        let defaults = freshDefaults()
+        defaults.set("someday", forKey: "cleanup.delivery")
+        #expect(CleanupSettingsStore(defaults: defaults).delivery == .live)
+    }
+
+    @Test(arguments: ["hold", "clipboard", "live"])
+    func aRemovedDeliveryModeDecodesAsLive(raw: String) throws {
+        let decoded = try JSONDecoder().decode(CleanupDelivery.self, from: Data("\"\(raw)\"".utf8))
+        #expect(decoded == .live)
+        #expect(CleanupDelivery(stored: raw) == .live)
+        #expect(CleanupDelivery(stored: "replace") == .replace)
+        #expect(CleanupDelivery.allCases == [.replace, .live])
     }
 
     @Test func timeLimitIsClampedToOneThroughTen() {
@@ -306,7 +331,7 @@ private struct SlowFoundationModels: LLMBackend {
         #expect(!p.cleansSegmentsLive, "cleanup off")
         store.enabled = true
         #expect(p.cleansSegmentsLive)
-        for other in [CleanupDelivery.replace, .clipboard, .hold] {
+        for other in [CleanupDelivery.replace] {
             store.delivery = other
             #expect(!p.cleansSegmentsLive)
         }

@@ -251,6 +251,15 @@ public final class ModelServices {
         return await warmup.rollingSession(key: await cleanupResource(backend: await effectiveDictationBackend(options: options)).key, head: head)
     }
 
+    /// `text` rewritten once on the dictation run's rolling session, as the agent does at a Replace stop
+    /// (``PassageRewriter``): the cleanup for a run without a field to edit, or whose agent was absent at stop. Nil
+    /// when cleanup is off, there is no session, or nothing changed.
+    public func rollingRewrite(_ text: String, options: CleanupOptions) async -> String? {
+        guard options.enabled, let session = await rollingDictationSession(options: options) else { return nil }
+        let locale = Self.singleLocale(engineSettings) ?? .current
+        return await PassageRewriter(session: session, options: .init(options, owner: "rewrite", locale: locale)).cleaned(text)
+    }
+
     public func acquireSummaryBackend(backend: CleanupBackendChoice, inBackground: Bool) async throws -> SummaryBackendLease {
         let id = selected(.cleanup)
         let resource = await cleanupResource(backend: backend)

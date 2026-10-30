@@ -1,27 +1,42 @@
 import Foundation
 import LegatoCore
+import Synchronization
 import Testing
 @testable import LegatoAppServices
 
-private struct LiveProcessor: TranscriptPostProcessor {
-    let id = "live"
+private final class Base: TranscriptPostProcessor, @unchecked Sendable {
+    let id = "base"
+    let starts = Mutex(0)
     var cleansSegmentsLive: Bool { true }
-    func process(_ text: String, locale: Locale) async throws -> String { text.uppercased() }
+    func process(_ text: String, locale: Locale) async throws -> String { "stateless: " + text }
+    func runStarts() async throws { starts.withLock { $0 += 1 } }
 }
 
 @Suite struct AgentGatedPostProcessorTests {
-    @Test func offIsTheBaseProcessor() async throws {
-        let gate = AgentGatedPostProcessor(LiveProcessor())
-        #expect(gate.cleansSegmentsLive)
+    /// Without the agent on the run (no field to edit), the session's one cleanup at stop is the rolling session's
+    /// rewrite, never the base processor's stateless pass; the base keeps the run's resources.
+    @Test func withoutTheAgentTheStopRewritesOnTheRollingSession() async throws {
+        let base = Base()
+        let gate = AgentGatedPostProcessor(base, rewrite: { text, _ in text.uppercased() })
         #expect(try await gate.process("a", locale: Locale(identifier: "en")) == "A")
+        try await gate.runStarts()
+        #expect(base.starts.withLock { $0 } == 1)
+    }
+
+    @Test func aRewriteThatGivesNothingKeepsTheText() async throws {
+        let gate = AgentGatedPostProcessor(Base(), rewrite: { _, _ in nil })
+        #expect(try await gate.process("a", locale: Locale(identifier: "en")) == "a")
     }
 
     @Test func whileTheAgentRunsTheSessionCleansNothing() async throws {
-        let gate = AgentGatedPostProcessor(LiveProcessor())
+        let gate = AgentGatedPostProcessor(Base(), rewrite: { text, _ in text.uppercased() })
         gate.agentRuns = true
-        #expect(!gate.cleansSegmentsLive)
         #expect(try await gate.process("a", locale: Locale(identifier: "en")) == "a")
-        gate.agentRuns = false
-        #expect(gate.cleansSegmentsLive)
+    }
+
+    /// The session's rolling live passes are gone (#80): the agent is the only live cleanup.
+    @Test func theSessionNeverCleansLive() {
+        let gate = AgentGatedPostProcessor(Base(), rewrite: { text, _ in text })
+        #expect(!gate.cleansSegmentsLive)
     }
 }

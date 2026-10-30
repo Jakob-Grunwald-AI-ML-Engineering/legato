@@ -43,12 +43,12 @@ import Testing
         #expect(field.writes.isEmpty)
     }
 
-    @Test func holdWithACleanupCopiesTheCleanedTextWhenTheSelectionMoved() {
+    @Test func insertOnStopWithACleanupCopiesTheCleanedTextWhenTheSelectionMoved() {
         let field = FakeTextTarget("abcdefghi", selection: UTF16Range(location: 3, length: 3))
         let writer = FieldWriter(target: field, mode: .insertOnStop)
         writer.apply(.commit(delta: "um hello"))
         field.moveCaret(to: 9)
-        #expect(writer.finish(rawText: "um hello", cleanedText: "Hello.", delivery: .hold) == .copy("Hello."))
+        #expect(writer.finish(rawText: "um hello", cleanedText: "Hello.", delivery: .replace) == .copy("Hello."))
         #expect(field.string == "abcdefghi")
     }
 
@@ -56,7 +56,7 @@ import Testing
         let field = FakeTextTarget("abcdefghi", selection: UTF16Range(location: 3, length: 3))
         let writer = FieldWriter(target: field, mode: .insertOnStop)
         writer.apply(.commit(delta: "um hello"))
-        #expect(writer.finish(rawText: "um hello", cleanedText: "Hello.", delivery: .hold) == .done)
+        #expect(writer.finish(rawText: "um hello", cleanedText: "Hello.", delivery: .replace) == .done)
         #expect(field.string == "abcHello.ghi")
     }
 

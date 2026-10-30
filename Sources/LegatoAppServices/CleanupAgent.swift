@@ -527,10 +527,10 @@ public actor CleanupAgent: FieldAgent {
         return NSRange(location: start, length: end - start)
     }
 
-    /// Whether `span` is where the user wrote or deleted: sentences touching it are never edited.
+    /// Whether `span` is where the user wrote or deleted: sentences touching it, or right next to it, are never
+    /// edited (the user's punctuation may have split a sentence there).
     private static func touches(_ touched: Span, _ sentence: Span) -> Bool {
-        if touched.length == 0 { return touched.location >= sentence.location && touched.location <= sentence.end }
-        return touched.location < sentence.end && touched.end > sentence.location
+        touched.location <= sentence.end && touched.end >= sentence.location
     }
 }
 

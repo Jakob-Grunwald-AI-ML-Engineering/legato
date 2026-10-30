@@ -163,7 +163,7 @@ private struct GatedAgent: FieldAgent {
     }
 
     @Test(.timeLimit(.minutes(1))) func aPresentButBusyAgentIsWaitedForPastTheCapAndItsWorkLands() async {
-        let session = ScriptedSession(replies: [ScriptedSession.edits((1, "Send the report."))])
+        let session = ScriptedSession(replies: ["Send the report."])
         let cleanup = CleanupAgent(session: session, options: .init(owner: "run"))
         let gate = Gate()
         let target = FakeTextTarget()
@@ -188,7 +188,7 @@ private struct GatedAgent: FieldAgent {
     }
 
     @Test(.timeLimit(.minutes(1))) func anAgentArrivingAfterTheRunClosedTouchesNothing() async {
-        let session = ScriptedSession(replies: [ScriptedSession.edits((1, "Send the report."))])
+        let session = ScriptedSession(replies: ["Send the report."])
         let gate = Gate()
         let target = FakeTextTarget("Send teh report.")
         let run = FieldEditRun(
@@ -212,8 +212,33 @@ private struct GatedAgent: FieldAgent {
 
     // MARK: Live
 
+    @MainActor final class Count { var value = 0 }
+
+    /// The agent saw the speaker pause (no new text): a nudge has it ask again without a new batch.
+    @Test(.timeLimit(.minutes(1))) func aNudgeAsksTheAgentAgainWithoutANewBatch() async {
+        let target = FakeTextTarget()
+        let replans = Count()
+        let agent = CleanupAgent(session: ScriptedSession(replies: []), options: .init(owner: "run"))
+        let run = FieldEditRun(
+            target: target, owner: "run",
+            agent: FieldRunAgent(
+                agent, replan: { await MainActor.run { replans.value += 1 }; return await agent.replan() },
+                finish: { await agent.finish() }))!
+        let writer = FieldWriter(target: target, channel: run.channel)
+        run.attach(writer: writer)
+        run.start()
+        await run.idle()
+        #expect(replans.value == 0)
+        run.nudge()
+        await run.idle()
+        #expect(replans.value == 1)
+        _ = await run.finish()
+        run.nudge()  // closed: nothing
+        #expect(replans.value == 1)
+    }
+
     @Test(.timeLimit(.minutes(1))) func aDeferredAgentCleansTextThatLandedBeforeItWasMade() async {
-        let session = ScriptedSession(replies: [ScriptedSession.edits((1, "Send the report."))])
+        let session = ScriptedSession(replies: ["Send the report."])
         let gate = Gate()
         let target = FakeTextTarget()
         let run = FieldEditRun(
@@ -255,7 +280,7 @@ private struct GatedAgent: FieldAgent {
 
 
     @Test(.timeLimit(.minutes(1))) func startDoesNotWaitForTheAgentAndItStillSeesTheFieldBeforeTheFirstText() async {
-        let session = ScriptedSession(replies: [ScriptedSession.edits((1, "Send the report."))])
+        let session = ScriptedSession(replies: ["Send the report."])
         let cleanup = CleanupAgent(session: session, options: .init(owner: "run"))
         let gate = Gate()
         let target = FakeTextTarget()
@@ -281,7 +306,7 @@ private struct GatedAgent: FieldAgent {
 
 
     @Test func liveAgentPatchesLandPatchSized() async {
-        let rig = await Rig.live(replies: [ScriptedSession.edits((1, "Send the report now."))])
+        let rig = await Rig.live(replies: ["Send the report now."])
         await rig.hear("Send teh report now.")
         #expect(rig.target.string == "Send the report now.")
         // P01: two characters out, two in, at their place; not the sentence.
@@ -302,7 +327,7 @@ private struct GatedAgent: FieldAgent {
 
     @Test func liveFinalPassCleansTheLastSentence() async {
         // The unfinished last sentence is only reviewed by the final pass.
-        let rig = await Rig.live(replies: [ScriptedSession.edits((1, "Send the report"))])
+        let rig = await Rig.live(replies: ["Send the report"])
         await rig.hear("Send teh report")
         #expect(rig.target.string == "Send teh report")
         let outcome = await rig.run.finish()
@@ -313,7 +338,7 @@ private struct GatedAgent: FieldAgent {
 
     @Test func tentativeTextIsNeverEditedByTheAgentAndTheWriterKeepsStreaming() async {
         let rig = await Rig.live(
-            replies: [ScriptedSession.edits((1, "Send the report.")), ScriptedSession.edits((2, "Then the dog."))],
+            replies: ["Send the report.", "Then the dog."],
             mode: .streamLive)
         rig.writer.apply(.commit(delta: "Send teh report."))
         rig.writer.apply(.replaceVolatile(" Then teh dog."))
@@ -336,12 +361,12 @@ private struct GatedAgent: FieldAgent {
         #expect(rig.writer.finish(finalText: nil) == .done)
     }
 
-    @Test func userTypingMidRunIsAConflictWithANoteAndTheAgentLeavesThatSpan() async {
+    @Test func userTypingMidRunIsAConflictAndTheAgentLeavesThatSpan() async {
         let target = FakeTextTarget()
         let typed = Typed()
         // While the model works (the first request only), the user types into the second sentence.
         let rig = await Rig.live(
-            replies: [ScriptedSession.edits((1, "Send the report."), (2, "Then go to the store."))],
+            replies: ["Send the report.", "Then go to the store."],
             onRespond: {
                 guard !typed.done else { return }
                 typed.done = true
@@ -351,18 +376,15 @@ private struct GatedAgent: FieldAgent {
         // First sentence cleaned; the second keeps the user's "!" and the agent did not rewrite it.
         #expect(target.string == "Send the report. Then go to te!h store.")
         #expect(!target.string.contains("Then go to the store."))
-        let appended = await rig.session!.appended.joined()
-        #expect(appended.contains(Conflict.userNote))
-        // The agent re-plans from the feed: the sentence the user touched is locked in the next request.
-        let requests = await rig.session!.requests
-        #expect(requests.count == 2)
-        #expect(requests.last?.contains("Locked: 2.") == true)
+        // The agent goes on from the feed: the sentence the user touched is never asked about.
         _ = await rig.run.finish()
+        let requests = await rig.session!.requests
+        #expect(requests == ["Send teh report."])
         #expect(target.string == "Send the report. Then go to te!h store.")
     }
 
     @Test func finalEditsHeldByTypingWaitThenLand() async {
-        let rig = await Rig.live(replies: [ScriptedSession.edits((1, "Send the report"))])
+        let rig = await Rig.live(replies: ["Send the report"])
         await rig.hear("Send teh report")
         rig.run.typingGuard.noteUserActivity()
         let outcome = await rig.run.finish()
@@ -373,7 +395,7 @@ private struct GatedAgent: FieldAgent {
 
     @Test func finalEditsStillHeldAfterTheBudgetAreGivenUpForTheClipboard() async {
         let clock = Clock()
-        let rig = await Rig.live(replies: [ScriptedSession.edits((1, "Send the report"))], clock: clock)
+        let rig = await Rig.live(replies: ["Send the report"], clock: clock)
         await rig.hear("Send teh report")
         let guardRef = rig.run.typingGuard
         guardRef.noteUserActivity()
@@ -388,7 +410,7 @@ private struct GatedAgent: FieldAgent {
 
     @Test func rollingEditsHeldByTypingAtStopAreNotWithdrawnSilently() async {
         let clock = Clock()
-        let rig = await Rig.live(replies: [ScriptedSession.edits((1, "Send the report."))], clock: clock)
+        let rig = await Rig.live(replies: ["Send the report."], clock: clock)
         let guardRef = rig.run.typingGuard
         guardRef.noteUserActivity()
         clock.blockPauses = true
@@ -406,7 +428,7 @@ private struct GatedAgent: FieldAgent {
 
     @Test func rollingEditsHeldByTypingAtStopLandOnceTheUserPauses() async {
         let clock = Clock()
-        let rig = await Rig.live(replies: [ScriptedSession.edits((1, "Send the report."))], clock: clock)
+        let rig = await Rig.live(replies: ["Send the report."], clock: clock)
         rig.run.typingGuard.noteUserActivity()
         clock.blockPauses = true
         await rig.hear("Send teh report. Then")
@@ -474,11 +496,11 @@ private struct GatedAgent: FieldAgent {
         #expect(origins == [.asr, .finalSwap])
     }
 
-    @Test func holdInsertsOnceThroughTheQueueInTheAsrLane() async {
+    @Test func insertOnStopInsertsOnceThroughTheQueueInTheAsrLane() async {
         let rig = Rig.plain(mode: .insertOnStop)
         rig.writer.apply(.commit(delta: "Send teh report now."))
         #expect(rig.target.writes.isEmpty)
-        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.", delivery: .hold)
+        let action = rig.writer.finish(rawText: "Send teh report now.", cleanedText: "Send the report now.", delivery: .replace)
         #expect(action == .done)
         #expect(rig.target.writes.count == 1)
         #expect(rig.target.string == "Send the report now.")

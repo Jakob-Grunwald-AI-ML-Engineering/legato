@@ -323,7 +323,6 @@ public final class FieldWriter {
 
     private func prepareFinish(rawText: String?, cleanedText: String, delivery: CleanupDelivery) -> FinishStep {
         let cleaned = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if delivery == .live { return .action(finish(finalText: cleaned)) }
         if spanStart == nil, degradeReason == nil, !uncertainWrite {
             return .action(finish(finalText: cleaned))
         }
@@ -334,7 +333,6 @@ public final class FieldWriter {
             return .action(cleaned.isEmpty ? .done : .copy(cleaned))
         case .done:
             guard !cleaned.isEmpty else { return .action(.done) }
-            if delivery == .clipboard { return .action(.copy(cleaned)) }
             return .swap(cleaned)
         }
     }

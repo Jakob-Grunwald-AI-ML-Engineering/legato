@@ -118,6 +118,8 @@ public final class FieldEditRun {
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var retrying = false
     private var closed = false
+    /// A nudge is waiting: the next pump asks the agent again even without a new batch.
+    private var nudged = false
     /// The last feed entry handed to the agent / folded into the writer.
     private var fedThrough: Int?
     private var absorbedThrough = 0
@@ -192,6 +194,13 @@ public final class FieldEditRun {
         guard agent != nil, !closed, !wakeQueued, let wakes else { return }
         wakeQueued = true
         wakes.yield()
+    }
+
+    /// The agent saw the speaker pause: it asks again without a new batch (its pause wake).
+    public func nudge() {
+        guard agent != nil, !closed else { return }
+        nudged = true
+        textChanged()
     }
 
     /// Returns once every wake so far has been handled.
@@ -429,7 +438,8 @@ public final class FieldEditRun {
             if batch.resync || !batch.entries.isEmpty {
                 fedThrough = batch.lastSeq
                 made = await agent.consume(batch)
-            } else if handedBack {
+            } else if handedBack || nudged {
+                nudged = false
                 made = await agent.replan()
             }
             if closed { return }

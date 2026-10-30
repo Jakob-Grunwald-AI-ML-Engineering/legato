@@ -363,6 +363,17 @@ struct CleanupAgentTests {
         #expect(await rig.session.requests.contains { $0.contains("Tea") } == false)
     }
 
+    /// The user typed a "!" into a word: the piece after it reads as a sentence of its own, but it sits right next
+    /// to the user's text and is never offered.
+    @Test func aSentenceTheUsersPunctuationSplitOffIsNotEdited() async throws {
+        let rig = await Rig()
+        _ = await rig.dictate("Go to teh store")
+        rig.user("Go to te!h store")
+        _ = await rig.feed()
+        _ = await rig.agent.finish()
+        #expect(await rig.session.requests.isEmpty)
+    }
+
     @Test func theTextTheRunDidNotWriteStaysOut() async throws {
         let rig = await Rig(existing: "Old teh text. ", scripts: [.reply("New the one.")])
         let transactions = await rig.dictate("New teh one. Next.")
