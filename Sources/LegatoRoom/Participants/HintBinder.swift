@@ -43,7 +43,7 @@ public struct HintEvent: Codable, Sendable, Equatable {
     public var instruction: String
 }
 
-/// Owns segment and partial-tail routing. No independent hint timeout or silence timer.
+/// Owns correction drafts and one cancellable host countdown; UI only renders its timestamps.
 public actor HintBinder {
     private struct Capture {
         let intent: WordIntent
@@ -60,6 +60,11 @@ public actor HintBinder {
         var end: Double?
         var segments: [String] = []
         var sources: [JSONValue] = []
+        var tail = ""
+        var submitting = false
+        var sendAt: Double?
+        var countdownStart: Double?
+        var countdownDeadline: Double?
     }
     private struct Timing: Decodable { let t0: Double?; let t1: Double? }
     private let room: Room
@@ -67,7 +72,69 @@ public actor HintBinder {
     private var capture: Capture?
     private var dismissed: [ClosedRange<Double>] = []
     private var task: Task<Void, Never>?
-    public init(room: Room, learner: VocabularyLearner? = nil) { self.room = room; self.learner = learner }
+    private var timer: Task<Void, Never>?
+    private var timerGeneration = UUID()
+    private let quietDelay: Duration
+    private let countdown: Duration
+    private let onSend: (@Sendable () async -> Void)?
+    public init(room: Room, learner: VocabularyLearner? = nil, quietDelay: Duration = .milliseconds(500),
+                countdown: Duration = .seconds(1), onSend: (@Sendable () async -> Void)? = nil) {
+        self.room = room; self.learner = learner; self.quietDelay = quietDelay
+        self.countdown = countdown; self.onSend = onSend
+    }
+    public func requestSend(timestamp: Double) async -> Bool {
+        guard var current = capture, !current.submitting, !draftText(current).isEmpty else { return false }
+        cancelTimer()
+        current.submitting = true; current.sendAt = timestamp
+        current.countdownStart = nil; current.countdownDeadline = nil
+        capture = current
+        await publishDraft()
+        return true
+    }
+    /// Used when transcription has already drained; otherwise the provider's finalization ack closes send.
+    public func completeSend() async {
+        guard capture?.submitting == true else { return }
+        _ = try? await room.publish(channel: .asrBoundary, participant: .hintBinder,
+            payload: .object(["reason": .string("finalize")]))
+    }
+    private func draftText(_ current: Capture) -> String {
+        [current.words.map(\.text).joined(separator: " "), current.tail].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+    private func publishDraft() async {
+        _ = try? await room.publish(channel: .correctionDraft, participant: .hintBinder, payload: .object([
+            "text": capture.map { .string(draftText($0)) } ?? .null,
+            "captureID": capture.map { .string($0.id) } ?? .null,
+            "countdownStart": capture?.countdownStart.map(JSONValue.number) ?? .null,
+            "countdownDeadline": capture?.countdownDeadline.map(JSONValue.number) ?? .null]))
+    }
+    private func cancelTimer() { timer?.cancel(); timer = nil; timerGeneration = UUID() }
+    private func activity() async {
+        guard var current = capture, !current.submitting, !draftText(current).isEmpty else { await publishDraft(); return }
+        cancelTimer()
+        current.countdownStart = nil; current.countdownDeadline = nil; capture = current
+        let generation = timerGeneration, id = current.id
+        timer = Task { [weak self, quietDelay, countdown] in
+            do {
+                try await Task.sleep(for: quietDelay)
+                guard await self?.beginCountdown(id: id, generation: generation) == true else { return }
+                try await Task.sleep(for: countdown)
+                await self?.autoSend(id: id, generation: generation)
+            } catch {}
+        }
+        await publishDraft()
+    }
+    private func beginCountdown(id: String, generation: UUID) async -> Bool {
+        guard var current = capture, current.id == id, timerGeneration == generation, !current.submitting else { return false }
+        let now = ProcessInfo.processInfo.systemUptime
+        let duration = Double(countdown.components.seconds) + Double(countdown.components.attoseconds) / 1e18
+        current.countdownStart = now; current.countdownDeadline = now + duration; capture = current
+        await publishDraft()
+        return true
+    }
+    private func autoSend(id: String, generation: UUID) async {
+        guard let current = capture, current.id == id, timerGeneration == generation, !current.submitting else { return }
+        await onSend?()
+    }
     public func start() async {
         guard task == nil else { return }
         let events = await room.subscribe(participant: .hintBinder,
@@ -76,7 +143,7 @@ public actor HintBinder {
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
     }
-    public func stop() async { task?.cancel(); task = nil; dismissed = []; await discardCapture() }
+    public func stop() async { task?.cancel(); task = nil; dismissed = []; await discardCapture(); await publishDraft() }
     public func tap(lineID: String, wordID: String, timestamp: Double) async throws {
         try await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
     }
@@ -107,16 +174,19 @@ public actor HintBinder {
                           endWordIndex: lastWord, targetLines: lines, selectedQuote: quote, discardFrom: discardFrom)
         try await room.publish(channel: .userIntent, participant: .hintBinder, payload: .encoding(intent), tOrigin: timestamp)
         try await room.publish(channel: .asrTail, participant: .hintBinder, payload: .object(["text": .string("")]))
+        await publishDraft()
     }
     /// Drop captured and still-in-flight speech from the dismissed selection, without targeting new speech.
     public func clearSelection(timestamp: Double) async {
         guard let current = capture else { return }
         dismissed.append(current.discardFrom...max(current.intent.timestamp, timestamp))
         await discardCapture()
+        await publishDraft()
         _ = try? await room.publish(channel: .asrTail, participant: .hintBinder, payload: .object(["text": .string("")]))
     }
     public func pick(lineID: String, wordID: String, text: String, fromVocabulary: Bool = false) async throws {
         await discardCapture()
+        await publishDraft()
         try await replace(lineID: lineID, wordID: wordID, text: text, fromVocabulary: fromVocabulary)
         let intent = WordIntent(event: "pick", lineID: lineID, wordID: wordID, text: text, timestamp: ProcessInfo.processInfo.systemUptime)
         try await room.publish(channel: .userIntent, participant: .hintBinder, payload: .encoding(intent))
@@ -129,6 +199,7 @@ public actor HintBinder {
         await learner?.recordChoice(original: word.text, chosen: text, fromVocabulary: fromVocabulary)
     }
     private func discardCapture() async {
+        cancelTimer()
         let ids = capture?.segments ?? []
         capture = nil
         for id in ids { await room.resolveSegment(id) }
@@ -144,13 +215,27 @@ public actor HintBinder {
             if intent.event == "deselect" { await clearSelection(timestamp: intent.timestamp) }
             if intent.event == "pick", let text = intent.text { try? await pick(lineID: intent.lineID, wordID: intent.wordID, text: text) }
         case .asrRawTail:
+            if var current = capture {
+                if case .array(let parts) = envelope.payload["parts"] {
+                    current.tail = parts.filter { part in
+                        guard case .number(let time) = part["tOrigin"] else { return true }
+                        return time >= current.intent.timestamp && (current.sendAt.map { time <= $0 } ?? true)
+                    }.compactMap { if case .string(let text) = $0["text"] { return text }; return nil }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                } else if case .string(let text) = envelope.payload["text"] { current.tail = text }
+                capture = current
+                if envelope.payload["activity"] == .bool(true), !current.tail.isEmpty { await activity() }
+                else { await publishDraft() }
+            }
             let payload = capture == nil && dismissed.isEmpty ? envelope.payload : .object(["text": .string("")])
             _ = try? await room.publish(channel: .asrTail, participant: .hintBinder,
                                        payload: payload, tOrigin: envelope.tOrigin, causedBy: envelope.id)
         case .asrBoundary:
             dismissed.removeAll { envelope.tOrigin >= $0.lowerBound }
-            guard let current = capture, envelope.tOrigin >= current.intent.timestamp else { return }
+            guard let current = capture, current.submitting,
+                  envelope.payload["reason"] == .string("finalize"), envelope.tOrigin >= current.intent.timestamp else { return }
+            cancelTimer()
             capture = nil
+            await publishDraft()
             if !current.words.isEmpty {
                 let hint = HintEvent(event: "targeted.speech", captureID: current.id,
                     lineID: current.line.id, wordID: current.intent.wordID, lineVersion: current.line.version,
@@ -170,7 +255,7 @@ public actor HintBinder {
         case .asrSegment: await routeSegment(envelope)
         case .session:
             if case .string(let event) = envelope.payload["event"],
-               ["asr.finished", "asr.error", "cancel.work", "done"].contains(event) { await discardCapture() }
+               ["asr.error", "cancel.work", "done"].contains(event) { await discardCapture(); await publishDraft() }
         default: break
         }
     }
@@ -194,16 +279,18 @@ public actor HintBinder {
         var ordinary: [Word] = [], targeted: [Word] = []
         for (word, start, end) in remaining {
             if start < current.discardFrom { ordinary.append(word) }
+            else if let sent = current.sendAt, start > sent { ordinary.append(word) }
             else if start >= current.intent.timestamp {
                 targeted.append(word); current.start = current.start ?? start; current.end = end
             }
             // Speech belonging to a cancelled selection is consumed, never moved to the draft end.
         }
         if !targeted.isEmpty {
-            current.words += targeted; current.segments.append(envelope.id)
+            current.words += targeted; current.tail = ""; current.segments.append(envelope.id)
             current.sources.append(.object(["segmentID": .string(envelope.id), "tOrigin": .number(envelope.tOrigin), "metadata": metadata]))
         }
         capture = current
+        if !targeted.isEmpty { await activity() }
         if !ordinary.isEmpty {
             _ = try? await room.appendSegment(words: ordinary, causedBy: envelope.id, resolve: targeted.isEmpty)
         } else if targeted.isEmpty { await room.resolveSegment(envelope.id) }
