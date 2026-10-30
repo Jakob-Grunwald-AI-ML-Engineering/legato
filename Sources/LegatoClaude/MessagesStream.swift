@@ -31,9 +31,9 @@ public final class MessagesStream: MessagesStreaming, Sendable {
                         throw MessagesStreamError.http(http.statusCode, body)
                     }
                     var parser = SSEParser(), stopped = false
-                    for try await line in bytes.lines {
+                    for try await byte in bytes {
                         try Task.checkCancellation()
-                        if let event = parser.consume(line: line) {
+                        if let event = parser.consume(byte: byte) {
                             if event.event == "error" { throw MessagesStreamError.provider(event.data) }
                             continuation.yield(event)
                             if event.event == "message_stop" { stopped = true; break }

@@ -255,7 +255,13 @@ cmd_build() {
   local dir=Apps/iOS project=Legato.xcodeproj destination="id=$DEVICE" extra=(-allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM")
   case "$TARGET" in
     sim) destination='generic/platform=iOS Simulator'; extra=(CODE_SIGNING_ALLOWED=NO) ;;
-    mac) dir=Apps/macOS; project=LegatoMac.xcodeproj; destination='generic/platform=macOS'; extra=(CODE_SIGNING_ALLOWED=NO) ;;
+    mac)
+      dir=Apps/macOS; project=LegatoMac.xcodeproj; destination='generic/platform=macOS'; extra=(CODE_SIGNING_ALLOWED=NO)
+      if [ "${LEGATO_MAC_SIGNED:-0}" = 1 ]; then
+        destination='platform=macOS,arch=arm64'
+        extra=(-allowProvisioningUpdates -allowProvisioningDeviceRegistration CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BID")
+      fi ;;
+
   esac
   (cd "$dir" && "$XCODEGEN" generate)
   mkdir -p "$DERIVED"
