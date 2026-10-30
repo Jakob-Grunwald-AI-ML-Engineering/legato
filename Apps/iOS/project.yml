@@ -42,7 +42,7 @@ targets:
     platform: iOS
     sources:
       - path: App
-        excludes: [SystemReadiness.swift, SystemStartEnvironment.swift, Debug/E2EFakes.swift, Debug/E2EFakeKeyboard.swift]
+        excludes: [Debug/E2EFakes.swift, Debug/E2EFakeKeyboard.swift]
       - Shared
       - KeyboardUI
     dependencies:

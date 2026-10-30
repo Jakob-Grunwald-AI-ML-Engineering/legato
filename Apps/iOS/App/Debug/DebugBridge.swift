@@ -33,6 +33,17 @@ import UIKit
         harness.register("clear") { _ in DebugMessages.shared.clear(); return nil }
         harness.register("foreground") { _ in UIApplication.shared.open(URL(string: "legato://open")!); return nil }
         harness.register("background") { _ in  return nil }
+        #if DEBUG
+        harness.register("harness-type") { _ in
+            let model = KeyboardHarnessModel.shared
+            model.run("harness-type")
+            return ["text": model.document.text]
+        }
+        harness.register("harness-status") { _ in
+            let model = KeyboardHarnessModel.shared
+            return ["text": model.document.text, "status": model.controller.dictationStatus ?? "Composer coming"]
+        }
+        #endif
         harness.start()
     }
     static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
