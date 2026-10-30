@@ -34,7 +34,7 @@ public struct LLMTokenUsage: Sendable, Hashable {
 }
 
 /// A conversation with a language model that keeps its state across turns: a backend reuses what it
-/// already processed (Foundation Models' session, ANEMLL's `MLState`, MLX's KV cache), so a turn only
+/// already processed (a provider session and its cache), so a turn only
 /// processes what is new. Created by ``LLMBackend/makeSession()``; one caller at a time.
 ///
 /// Context is scrolled, not grown without end: compare ``usage()`` with ``tokenBudget`` and

@@ -34,9 +34,6 @@ final class KeyboardLinkHost: TranscriptSink {
     private var runDelivery: HostDelivery?
 
     private var observers: [DarwinObserver] = []
-    #if LEGATO_INTERNAL
-    private let trace = LiveTrace()
-    #endif
 
     /// nil when the App Group is unavailable (misconfigured signing): the keyboard link is then off.
     init?() {
@@ -46,9 +43,6 @@ final class KeyboardLinkHost: TranscriptSink {
         }
         link = HostLink(store: LinkStore(backing))
         #if DEBUG || LEGATO_INTERNAL
-        #if LEGATO_INTERNAL
-        var wasPreparing = false
-        #endif
         link.onPublish = { state in
             #if DEBUG
             E2E.log("""
@@ -56,13 +50,6 @@ final class KeyboardLinkHost: TranscriptSink {
                 committed=\(E2E.quote(state.committed)) volatile=\(E2E.quote(state.volatile)) \
                 lease=\(state.leaseUntil == nil ? 0 : 1) accepts=\(state.acceptsRemoteStart ? 1 : 0) meeting=\(state.meetingRecording == true ? 1 : 0) seq=\(state.seq) preparing=\(state.preparingRequestID == nil ? 0 : 1)
                 """)
-            #endif
-            #if LEGATO_INTERNAL
-            let preparing = state.preparingRequestID != nil
-            if preparing != wasPreparing {
-                AudioDiagnostics.log("keyboard.preparation", ["pending": preparing, "phase": state.phase.rawValue])
-                wasPreparing = preparing
-            }
             #endif
         }
         #endif
@@ -138,9 +125,6 @@ final class KeyboardLinkHost: TranscriptSink {
         runDelivery = run.target == .keyboard ? deliveryForRun() : nil
         link.runStarted(id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery)
         onRunActivity?(true)
-        #if LEGATO_INTERNAL
-        trace.runStarted(run, delivery: runDelivery)
-        #endif
     }
 
     func runFinishing(_ run: DictationRun) {
@@ -150,18 +134,12 @@ final class KeyboardLinkHost: TranscriptSink {
     func update(committed: String, volatile: String) {
         link.update(committed: committed, volatile: volatile)
         onTranscript?(committed, volatile)
-        #if LEGATO_INTERNAL
-        trace.update(committed: committed)
-        #endif
     }
 
     /// Live cleanup's newest version of the run's text: the keyboard replaces what its field shows for the run
     /// while the field still ends with it.
     func revised(_ revision: TranscriptRevision) {
         link.revise(HostRevision(n: revision.n, start: revision.start, raw: revision.raw, text: revision.text))
-        #if LEGATO_INTERNAL
-        trace.revised(revision)
-        #endif
     }
 
     /// The tentative text the keyboard's field showed when it was cleared at `boundary`: it went with the message.
@@ -170,9 +148,6 @@ final class KeyboardLinkHost: TranscriptSink {
     }
 
     func liveTraced(_ event: LiveTraceEvent) {
-        #if LEGATO_INTERNAL
-        trace.traced(event)
-        #endif
     }
 
     /// With cleanup, `text` is the cleaned text: the keyboard swaps it in (`.replace`), keeps the streamed
@@ -185,17 +160,11 @@ final class KeyboardLinkHost: TranscriptSink {
         onRunActivity?(false)
         // Only a run streamed into a visible keyboard has anything to confirm.
         guard run.target == .keyboard, text != nil, link.keyboardIsVisible() else {
-            #if LEGATO_INTERNAL
-            trace.runEnded(applied: nil, confirmed: false)
-            #endif
             onDelivery?(run.id.uuidString, false)
             return false
         }
         let applied = await link.awaitFinalApplied(runID: run.id.uuidString, timeout: Self.appliedTimeout)
         onDelivery?(run.id.uuidString, applied)
-        #if LEGATO_INTERNAL
-        trace.runEnded(applied: link.appliedCursor(), confirmed: applied)
-        #endif
         if runDelivery == .clipboard, finalText != nil { return false }
         return applied
     }

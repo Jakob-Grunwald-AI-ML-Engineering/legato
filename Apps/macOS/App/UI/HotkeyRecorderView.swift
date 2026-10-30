@@ -4,10 +4,9 @@ import SwiftUI
 /// Shows the current hotkey and records a new one: a lone modifier (Right ⌘) or a combination.
 struct HotkeyRecorderView: View {
     @Environment(MacAppController.self) private var controller
-    var target: MacAppController.HotkeyTarget = .dictation
 
-    private var spec: HotkeySpec? { target == .dictation ? controller.settings.hotkey : controller.settings.muteHotkey }
-    private var isRecording: Bool { controller.isRecordingHotkey && controller.recordingTarget == target }
+    private var spec: HotkeySpec? { controller.settings.hotkey }
+    private var isRecording: Bool { controller.isRecordingHotkey }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -32,10 +31,8 @@ struct HotkeyRecorderView: View {
             if isRecording {
                 Button("Cancel") { controller.cancelRecording() }
             } else {
-                Button(spec == nil ? "Record" : "Change") { controller.beginRecording(target) }
-                if target == .mute, spec != nil {
-                    Button("Clear") { controller.settings.muteHotkey = nil }
-                }
+                Button(spec == nil ? "Record" : "Change") { controller.beginRecording() }
+
             }
         }
     }
