@@ -15,7 +15,9 @@ import LegatoRoom
     _ = try await room.applyDocument([.pinWord(lineID: line.id, wordID: line.words[0].id, text: "Morgan,")], origin: .user, versions: [line.id: line.version])
     await session.receive(try #require(await iterator.next()))
 
+    #expect(session.canUndo)
     await session.undo()
+    #expect(!session.canUndo)
     await session.receive(try #require(await iterator.next()))
     let undone = await room.documentSnapshot
     #expect(undone.lines.first?.text == "Morgan")
