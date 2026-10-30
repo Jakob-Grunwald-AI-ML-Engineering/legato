@@ -12,6 +12,7 @@ public actor Room {
     private var document = ComposerDocument()
     private var lifecycle = SessionLifecycle()
     private var transcriberDraining = false
+    private var pendingSegments: Set<String> = []
     private let clock: @Sendable () -> Double
     private let log: SessionLog?
     private let segmentRouting: SegmentRouting
@@ -52,6 +53,7 @@ public actor Room {
             let envelope = emit(channel: channel, participant: participant, payload: payload,
                                 tOrigin: tOrigin, baseRev: baseRev, causedBy: causedBy)
             if segmentRouting == .automatic { _ = try appendSegment(words: words, causedBy: envelope.id) }
+            else { pendingSegments.insert(envelope.id) }
             return envelope
         }
         return emit(channel: channel, participant: participant, payload: payload,
@@ -69,7 +71,14 @@ public actor Room {
         guard !words.isEmpty else { throw RoomError.invalidSegment }
         let transaction = try document.appendSegment(words: words)
         publishTransaction(transaction, causedBy: causedBy)
+        if let causedBy { resolveSegment(causedBy) }
         return transaction
+    }
+
+    /// A routed hint consumes an ASR segment without appending it to the document.
+    public func resolveSegment(_ envelopeID: String) {
+        guard pendingSegments.remove(envelopeID) != nil else { return }
+        advanceToFinalPass()
     }
 
     @discardableResult public func applyDocument(_ ops: [DocOp], origin: TransactionOrigin,
@@ -129,7 +138,7 @@ public actor Room {
     }
 
     private func advanceToFinalPass() {
-        guard !transcriberDraining, lifecycle.beginFinalPassIfReady() else { return }
+        guard !transcriberDraining, pendingSegments.isEmpty, lifecycle.beginFinalPassIfReady() else { return }
         sessionEvent("final.pass")
     }
 
