@@ -18,6 +18,24 @@ import XCTest
             app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: try number(index), dy: try number(index + 1)))
         }
         switch parts.first {
+        case "background-mic-settings":
+            app.tabBars.buttons["Settings"].tap()
+            let toggle = app.switches["settings.keepMicrophoneActive"]
+            for _ in 0..<4 where !toggle.isHittable { app.swipeUp() }
+            XCTAssertTrue(toggle.isHittable, "Background microphone setting must be reachable")
+            let original = toggle.value as? String
+            XCTAssertNotNil(original)
+            toggle.tap()
+            let changed = toggle.value as? String
+            XCTAssertNotEqual(changed, original)
+            app.terminate()
+            app.launch()
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+            app.tabBars.buttons["Settings"].tap()
+            for _ in 0..<4 where !toggle.isHittable { app.swipeUp() }
+            XCTAssertEqual(toggle.value as? String, changed, "Background microphone choice must survive relaunch")
+            toggle.tap()
+            XCTAssertEqual(toggle.value as? String, original, "Restore the user's original preference")
         case "companion-settings":
             let settings = app.tabBars.buttons["Settings"]
             XCTAssertTrue(settings.waitForExistence(timeout: 5), "Settings must be directly reachable from the companion")

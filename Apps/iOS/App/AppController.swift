@@ -23,7 +23,8 @@ final class AppController {
     private init() {
         let root = AppGroup.containerURL
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
-        composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"))
+        composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
+            keepMicrophoneActive: ComposerMicrophonePreference.keepActive())
         let settings = EngineSettings(defaults: AppGroup.defaults)
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(settings) },
