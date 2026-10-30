@@ -33,7 +33,8 @@ import LegatoComposerDoc
     }
     @Test func debugIngressUsesProviderDecodeAndKeepsPartialOutOfSegments() async throws {
         let room = Room(segmentRouting: .intercepted)
-        let stream = await room.subscribe(participant: .logger, channels: [.asrSegment, .asrTail], buffering: .unbounded)
+        // Inspect decoder output before the binder selects which tail is safe for the general UI.
+        let stream = await room.subscribe(participant: .logger, channels: [.asrSegment, .asrRawTail], buffering: .unbounded)
         var events = stream.makeAsyncIterator()
         let client = SonioxClient(room: room, audioOrigin: 100)
         try await client.startDebug()

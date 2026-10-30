@@ -46,6 +46,11 @@ public actor Room {
         tOrigin: Double? = nil, baseRev: Int? = nil, causedBy: String? = nil) throws -> Envelope {
         guard !channel.isDocument else { throw RoomError.documentChannelRequiresCapability }
         try requireActive()
+        // In intercepted sessions only the binder publishes the general partial transcript.
+        if channel == .asrTail, participant != .hintBinder, case .intercepted = segmentRouting {
+            return emit(channel: .asrRawTail, participant: participant, payload: payload,
+                        tOrigin: tOrigin, baseRev: baseRev, causedBy: causedBy)
+        }
         if channel == .asrSegment {
             guard let encodedWords = payload["words"], let words = try? encodedWords.decode([Word].self), !words.isEmpty else {
                 throw RoomError.invalidSegment
@@ -66,12 +71,12 @@ public actor Room {
                     payload: .object(["words": try .encoding(words)]), tOrigin: tOrigin, causedBy: causedBy)
     }
 
-    @discardableResult public func appendSegment(words: [Word], causedBy: String? = nil) throws -> Transaction {
+    @discardableResult public func appendSegment(words: [Word], causedBy: String? = nil, resolve: Bool = true) throws -> Transaction {
         try requireActive()
         guard !words.isEmpty else { throw RoomError.invalidSegment }
         let transaction = try document.appendSegment(words: words)
         publishTransaction(transaction, causedBy: causedBy)
-        if let causedBy { resolveSegment(causedBy) }
+        if resolve, let causedBy { resolveSegment(causedBy) }
         return transaction
     }
 

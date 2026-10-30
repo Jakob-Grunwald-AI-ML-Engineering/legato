@@ -146,7 +146,7 @@ import LegatoVocabulary
     public func injectDebugFrame(_ json: String) async throws {
         guard inputSource == "debug.transcriber", isListening, let transcriber else { throw SonioxError.notConnected }
         try await transcriber.injectDebugFrame(json)
-        tail = await transcriber.currentDebugTail
+        // The binder owns visible partial text, including suppressing targeted speech.
         await refreshDebugState()
     }
     /// Text convenience still enters as provider tokens; it never mutates the document.

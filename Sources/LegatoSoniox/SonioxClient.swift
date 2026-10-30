@@ -225,13 +225,20 @@ public actor SonioxClient {
     }
     private func publish(_ output: SegmenterOutput) async throws {
         latestTail = output.tail
-        for segment in output.segments {
-            let t0 = segment.words.first?.t0
-            let t1 = segment.words.last?.t1
-            let metadata: JSONValue = .object(["t0": t0.map(JSONValue.number) ?? .null, "t1": t1.map(JSONValue.number) ?? .null, "timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds])
-            _ = try await room.publish(channel: .asrSegment, participant: .segmenter,
-                payload: .object(["words": try .encoding(segment.words.map(\.word)), "metadata": metadata]),
-                tOrigin: t0.flatMap { start in audioOrigin.map { $0 + start } })
+        for event in output.events {
+            switch event {
+            case .boundary(let reason, let time):
+                _ = try await room.publish(channel: .asrBoundary, participant: .segmenter,
+                    payload: .object(["reason": .string(reason)]),
+                    tOrigin: time.flatMap { end in audioOrigin.map { $0 + end } })
+            case .segment(let segment):
+                let t0 = segment.words.first?.t0
+                let t1 = segment.words.last?.t1
+                let metadata: JSONValue = .object(["t0": t0.map(JSONValue.number) ?? .null, "t1": t1.map(JSONValue.number) ?? .null, "timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds])
+                _ = try await room.publish(channel: .asrSegment, participant: .segmenter,
+                    payload: .object(["words": try .encoding(segment.words.map(\.word)), "metadata": metadata]),
+                    tOrigin: t0.flatMap { start in audioOrigin.map { $0 + start } })
+            }
         }
         _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string(output.tail)]))
     }
