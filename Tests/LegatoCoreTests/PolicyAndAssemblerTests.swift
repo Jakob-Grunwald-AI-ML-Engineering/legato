@@ -51,8 +51,8 @@ import Testing
         #expect(c.options.contains(.defaultToSpeaker))
     }
 
-    @Test func meetingConfigMixesAndAllowsBluetoothHFPOnly() {
-        let c = SessionConfig.meeting
+    @Test func bluetoothConfigMixesAndAllowsBluetoothHFPOnly() {
+        let c = SessionConfig(options: [.mixWithOthers, .allowBluetoothHFP])
         #expect(c.category == .playAndRecord)
         #expect(c.mode == .default)
         #expect(c.options == [.mixWithOthers, .allowBluetoothHFP])

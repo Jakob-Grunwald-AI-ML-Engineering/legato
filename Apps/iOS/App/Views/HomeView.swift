@@ -1,48 +1,20 @@
 import SwiftUI
 
-/// The in-app fallback for dictation: a big button, the state, and the last transcript.
 struct HomeView: View {
     let controller: AppController
-
+    @State private var sample = ""
     var body: some View {
         VStack(spacing: 24) {
-            Button {
-                Task { _ = await controller.toggle() }
-            } label: {
-                Image(systemName: controller.isDictating ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 56))
-                    .frame(width: 160, height: 160)
-                    .foregroundStyle(.white)
-                    .background(controller.isDictating ? Color.red : Color.accentColor, in: Circle())
-            }
-            .accessibilityLabel(controller.isDictating ? "Stop dictation" : "Start dictation")
-            .disabled(controller.meetings.isActive)
-
-            Text(controller.meetings.isActive ? "Meeting recording" : (controller.isDictating ? "Listening" : "Ready"))
-                .font(.title2.bold())
-                .accessibilityIdentifier("home.status")
-
-            if let text = controller.lastTranscript {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Last transcript").font(.headline)
-                    ScrollView { Text(text).frame(maxWidth: .infinity, alignment: .leading) }
-                    Button("Copy") { controller.copy(text) }
-                        .buttonStyle(.bordered)
-                }
-            }
             Spacer()
-        }
-        .padding()
-        .navigationTitle("Legato")
-        .toolbar {
-            ToolbarItemGroup(placement: .bottomBar) {
-                NavigationLink("History") { HistoryView(controller: controller) }
-                Spacer()
-                NavigationLink("Meetings") { MeetingsView(controller: controller) }
-                    .accessibilityIdentifier("home.meetings")
-                Spacer()
-                NavigationLink("Settings") { SettingsView(controller: controller) }
-            }
-        }
+            Image(systemName: "waveform").font(.system(size: 54)).foregroundStyle(.tint)
+            Text(controller.notice).font(.title2.bold())
+            Text("Your keyboard is ready. Voice composition arrives with the next Composer legs.")
+                .foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Button { Task { _ = await controller.toggle() } } label: { Label("Voice composer", systemImage: "mic.fill") }
+                .buttonStyle(.borderedProminent)
+            TextField("Try your keyboard here", text: $sample, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+            Spacer()
+        }.padding(28)
     }
 }
