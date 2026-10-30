@@ -23,7 +23,7 @@ final class AppController {
 
     /// Installed after initialization; each source carries its own queued-event validity check.
     @MainActor private final class MicrophoneEvents {
-        var onChange: ((MicSource.ConfigurationChange) -> Void)?
+        var onChange: ((MicSource.ConfigurationChange, SessionProbeCoordinator.SystemEventToken) -> Void)?
     }
 
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "app")
@@ -181,8 +181,10 @@ final class AppController {
                 }
                 #endif
                 // A fresh session and mic per dictation; the engine is shared (it is re-prepared per run).
+                // Bind callbacks to this source's owner before either asynchronous hop.
+                let probeEvent = Self.captureProbeSystemEvent()
                 let onConfigurationChange: @Sendable (MicSource.ConfigurationChange) -> Void = { change in
-                    Task { @MainActor in microphoneEvents.onChange?(change) }
+                    Task { @MainActor in microphoneEvents.onChange?(change, probeEvent) }
                 }
                 #if LEGATO_INTERNAL
                 let source = MicSource(onAttempt: AudioDiagnostics.micAttempt, onFirstBuffer: AudioDiagnostics.micFirstBuffer,
@@ -200,8 +202,8 @@ final class AppController {
                     policy: policy,
                     linger: linger)
             })
-        microphoneEvents.onChange = { [weak self] change in
-            self?.stopForSystemEvent("engine configuration change", ifCurrent: { change.requiresStop })
+        microphoneEvents.onChange = { [weak self] change, probeEvent in
+            self?.stopForSystemEvent("engine configuration change", probeEvent: probeEvent, systemEvent: .configurationChanged, ifCurrent: { change.requiresStop })
         }
         coordinator.onIdle = { [weak self] in self?.runDidEnd() }
         coordinator.onResult = { [weak self] result in self?.resultReady(result) }
@@ -298,7 +300,7 @@ final class AppController {
 
     #if LEGATO_INTERNAL
     var probeAdmissionBusy: Bool {
-        !coordinator.isIdle || isDictating || keyboardRunActive || keyboardActivations > 0 || resolvingEngine || modelAdmission.isPreparing || modelAdmission.isResetting || meetings.isActive
+        !coordinator.isIdle || isDictating || keyboardRunActive || keyboardActivations > 0 || resolvingEngine || modelAdmission.isPreparing || modelAdmission.isResetting || meetings.isActive || DebugBridge.hasPendingControls
     }
     func releaseModelsForProbe(owner: UUID) async throws {
         guard SessionProbe.owns(owner) else { throw SessionProbeError.invalidOwner }
@@ -489,7 +491,7 @@ final class AppController {
     private func releaseModelsForMemoryPressure(probeOwner owner: UUID? = nil) async {
         #if LEGATO_INTERNAL
         if probeActive, !SessionProbe.owns(owner) {
-            if !SessionProbe.ignoresMemoryWarnings { SessionProbe.cancel() }
+            if !SessionProbe.ignoresMemoryWarnings { SessionProbe.cancel(cause: "memory-pressure") }
             return
         }
         #endif
@@ -1047,17 +1049,31 @@ final class AppController {
     ///
     /// `releasesHeldSession`: also deactivate an audio session that the "keep session active" debug
     /// switch is holding between runs (interruption, media reset).
+    private static func captureProbeSystemEvent() -> SessionProbeCoordinator.SystemEventToken {
+        #if LEGATO_INTERNAL
+        SessionProbe.captureSystemEvent()
+        #else
+        .unowned
+        #endif
+    }
+
     private func stopForSystemEvent(
         _ reason: String, releasesHeldSession: Bool = false,
         event: DictationCoordinator.SystemEventToken? = nil,
+        probeEvent: SessionProbeCoordinator.SystemEventToken,
+        systemEvent: SessionProbeSystemEvent = .inputLost,
         ifCurrent: @escaping @Sendable () -> Bool = { true }
     ) {
-        #if LEGATO_INTERNAL
-        if probeActive { SessionProbe.cancel(); return }
-        #endif
         let event = event ?? coordinator.captureSystemEvent()
         Task {
-            guard coordinator.isCurrent(event), ifCurrent() else { return }
+            let current = coordinator.isCurrent(event), requiresStop = ifCurrent()
+            #if LEGATO_INTERNAL
+            if probeActive || probeEvent.owner != nil {
+                SessionProbe.cancelForSystemEvent(systemEvent, event: probeEvent, cause: reason, isCurrent: current, requiresStop: requiresStop)
+                return
+            }
+            #endif
+            guard current, requiresStop else { return }
             #if LEGATO_INTERNAL
             AudioDiagnostics.log("microphone.invalidated", ["cause": reason, "leaseHeld": micReadyUntil != nil, "dictating": isDictating])
             if releasesHeldSession || isDictating { sessionControl.release(reason: reason) }
@@ -1066,7 +1082,7 @@ final class AppController {
             // or not, and the run this stops must not keep one either.
             await endKeepAlive()
             // Releasing an idle lease can suspend; a fresh source may have started in the meantime.
-            guard coordinator.isCurrent(event), ifCurrent() else { return }
+            guard coordinator.isCurrent(event), ifCurrent(), !probeActive else { return }
             #if DEBUG
             E2E.log("system-event reason=\(E2E.quote(reason))")
             #endif
@@ -1093,6 +1109,7 @@ final class AppController {
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             // The main-queue observer captures ownership before either asynchronous hop.
             let event = MainActor.assumeIsolated { self?.coordinator.captureSystemEvent() }
+            let probeEvent = MainActor.assumeIsolated { Self.captureProbeSystemEvent() }
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let shouldResume = AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
@@ -1105,12 +1122,13 @@ final class AppController {
                     return
                 }
                 guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-                self.stopForSystemEvent("interruption began", releasesHeldSession: true, event: event)
+                self.stopForSystemEvent("interruption began", releasesHeldSession: true, event: event, probeEvent: probeEvent, systemEvent: .interruption)
             }
         }
 
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
             let event = MainActor.assumeIsolated { self?.coordinator.captureSystemEvent() }
+            let probeEvent = MainActor.assumeIsolated { Self.captureProbeSystemEvent() }
             let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
                 .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
             let previous = (note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)
@@ -1128,7 +1146,7 @@ final class AppController {
             else { return }
             Task { @MainActor in
                 guard let self, let event, !self.meetings.isActive else { return } // a meeting restarts its own engine
-                self.stopForSystemEvent("input lost", event: event)
+                self.stopForSystemEvent("input lost", event: event, probeEvent: probeEvent)
             }
         }
 
@@ -1142,13 +1160,14 @@ final class AppController {
 
         center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
             let event = MainActor.assumeIsolated { self?.coordinator.captureSystemEvent() }
+            let probeEvent = MainActor.assumeIsolated { Self.captureProbeSystemEvent() }
             Task { @MainActor in
                 guard let self, let event else { return }
                 if self.meetings.isActive {
                     self.meetings.interruptionBegan()
                     self.meetings.interruptionEnded(shouldResume: true)
                 } else {
-                    self.stopForSystemEvent("media services reset", releasesHeldSession: true, event: event)
+                    self.stopForSystemEvent("media services reset", releasesHeldSession: true, event: event, probeEvent: probeEvent, systemEvent: .mediaServicesReset)
                 }
             }
         }

@@ -138,6 +138,44 @@ import Testing
         #expect(try rig.events().last?["event"] as? String == "probe.done")
     }
 
+    @Test func ownedAcceptanceReservesBeforeReturningAndLeavesThePumpResponsive() async throws {
+        let rig = HarnessRig()
+        defer { rig.clean() }
+        let release = Signal()
+        var reserved = false
+        rig.harness.register("long-owned") { command in
+            try rig.harness.acceptOperation(command, reserve: { reserved = true }) {
+                await release.wait()
+                return ["outcome": "ok"]
+            }
+        }
+        await rig.harness.execute(BridgeCommand(id: "owned", command: "long-owned"))
+        #expect(reserved)
+        #expect(rig.harness.pendingOperationCount == 1)
+        await rig.harness.execute(BridgeCommand(id: "responsive", command: "ping"))
+        #expect(try rig.events().last?["id"] as? String == "responsive")
+        #expect(try !rig.events().contains { $0["event"] as? String == "control.done" })
+        release.open()
+        await rig.harness.waitForOperations()
+        #expect(rig.harness.pendingOperationCount == 0)
+        #expect(try rig.events().last?["event"] as? String == "control.done")
+        #expect(try rig.events().last?["id"] as? String == "owned")
+    }
+
+    @Test func cancellationBeforeOwnedWorkStartsNeverRunsTheBody() async throws {
+        let rig = HarnessRig()
+        defer { rig.clean() }
+        var ran = false
+        _ = try rig.harness.acceptOperation(BridgeCommand(id: "cancelled", command: "toggle")) {
+            ran = true
+            return ["outcome": "ok"]
+        }
+        rig.harness.cancelOperations(commands: ["toggle"])
+        await rig.harness.waitForOperations()
+        #expect(!ran)
+        #expect(try rig.events().last?["outcome"] as? String == "cancelled")
+    }
+
     @Test func messagePresentationStartsOnlyFrontTimeoutAndClearReplies() async {
         let timer = TimerSignal(), replied = Signal()
         var events: [(String, String, String?)] = []

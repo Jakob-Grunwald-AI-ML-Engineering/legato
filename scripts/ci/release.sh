@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Usage: release.sh check|mac-build|real-deps|ship
+# Usage: release.sh check|mac-build|mac-release|real-deps|ship
 #   check      iOS: Release build (arm64 simulator) + scan that no e2e/fake code is in the binary.
 #   mac-build  macOS: Debug build, arm64, unsigned (a Release build of MLX takes over 12 min cold; the signed
 #              Release build belongs to the ship pipeline, #4).
+#   mac-release macOS: ordinary Release build, arm64, unsigned + internal harness exclusion scan.
 #   real-deps  `swift test` against the real MLX, FluidAudio, swift-huggingface and swift-transformers (the gate
 #              tests against stubs; tests that need the real libraries run only here).
 #   ship       the release pipeline (not implemented yet, #4).
@@ -10,23 +11,28 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-mode="${1:?usage: release.sh check|mac-build|real-deps|ship}"
+mode="${1:?usage: release.sh check|mac-build|mac-release|real-deps|ship}"
 
 case "$mode" in
   check)
     has_ios_app || { echo "::notice::No iOS app yet — nothing to check."; exit 0; }
     scripts/e2e/ios-sim.sh release-check   # selects Xcode and generates the project itself
     ;;
-  mac-build)
+  mac-build|mac-release)
     has_mac_app || { echo "::notice::No macOS app yet — nothing to build."; exit 0; }
     select_xcode
     ensure_xcodegen
     trap finish_build_cache EXIT
     prepare_build_cache mac
     (cd Apps/macOS && "$XCODEGEN" generate)
-    run_build_command xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato -configuration Debug \
+    configuration=Debug
+    [ "$mode" != mac-release ] || configuration=Release
+    run_build_command xcodebuild build -quiet -project Apps/macOS/LegatoMac.xcodeproj -scheme Legato -configuration "$configuration" \
       -derivedDataPath "$BUILD_WORK" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" \
       -destination 'generic/platform=macOS' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
+    if [ "$mode" = mac-release ]; then
+      bash scripts/ci/check-internal-exclusion.sh mac "$BUILD_WORK/Build/Products/Release/Legato.app"
+    fi
     ;;
   real-deps)
     select_xcode

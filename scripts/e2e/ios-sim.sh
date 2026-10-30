@@ -7,8 +7,8 @@
 #                   every needle must still occur in the sources (stale-needle control).
 #
 # SpeechTranscriber and the microphone don't work on the Simulator and there is no Action Button, so the
-# app runs with a scripted engine and a fake mic (-LegatoFakeEngine) and is driven by Darwin notifications
-# (`notifyutil -p de.gruenwald.legato.e2e.<toggle|interrupt|copy-last|kbd-...>`). The keyboard extension is
+# app runs with a scripted engine and a fake mic (-LegatoFakeEngine), driven through
+# `scripts/device/ctl.sh --target sim send <toggle|interrupt|copy-last|kbd-...>`. The keyboard extension is
 # stood in for by a fake keyboard inside the app (kbd-* commands) that speaks the real link protocol. Everything else is the real
 # app: ActivityKit (Live Activities), UIPasteboard, the history file in the App Group container, the
 # AVAudioSession interruption observer. Assertions read the app's `e2e` os_log lines
@@ -48,7 +48,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/../ci/lib.sh"   # also cd's to the repo r
 mode="${1:-run}"
 BID=de.gruenwald.legato
 SIM_NAME=legato-e2e
-NOTIFY=de.gruenwald.legato.e2e
 # shellcheck source-path=SCRIPTDIR source=work-dir.sh
 source "$(dirname "${BASH_SOURCE[0]}")/work-dir.sh"
 
@@ -244,6 +243,7 @@ if [ "$mode" = release-check ]; then
     if ! git grep -q -F -- "$n" -- Apps/iOS; then echo "FAIL  stale needle (not in the sources): $n"; stale=1; fi
   done
   if [ "$stale" = 1 ]; then fail=1; else echo "PASS  control: every needle occurs in the iOS sources"; fi
+  bash scripts/ci/check-internal-exclusion.sh ios "$app" || fail=1
   exit "$fail"
 fi
 
@@ -332,7 +332,10 @@ wait_log_n() {
   return 1
 }
 
-trigger() { xcrun simctl spawn "$UDID" notifyutil -p "$NOTIFY.$1" > /dev/null 2>&1; }
+trigger() {
+  LEGATO_SIMULATOR="$UDID" LEGATO_BUNDLE="$BID" LEGATO_STATE="$WORK/ctl" \
+    bash scripts/device/ctl.sh --target sim send "$@" > /dev/null
+}
 
 # begin <scenario name> [launch args...]: clean install, log capture, launch.
 begin() {

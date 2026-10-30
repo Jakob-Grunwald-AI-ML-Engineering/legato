@@ -4,6 +4,7 @@ import LegatoCore
 public enum SessionProbeError: Error, Sendable, Equatable {
     case busy, unsupportedMode, noBackends, backgroundTransitionFailed, invalidOwner
 }
+public enum SessionProbeSystemEvent: String, Sendable { case interruption, mediaServicesReset, inputLost, configurationChanged }
 public enum SessionProbeMode: String, Sendable, Codable, CaseIterable { case foreground, background, backgroundAudio = "background-audio" }
 public enum SessionProbeOutcome: String, Sendable, Codable { case ok, unavailable, cancelled, expired, failed, busy, backgroundTransitionFailed, restorationFailed }
 public struct SessionProbeSnapshot: Sendable, Codable, Equatable {
@@ -59,6 +60,17 @@ public struct SessionProbeBackend: Sendable {
 }
 
 @MainActor public final class SessionProbeCoordinator {
+    /// Captures absence as well as ownership so queued events cannot transfer to a later run.
+    public struct SystemEventToken: Sendable {
+        public let owner: UUID?
+        public static let unowned = Self(owner: nil)
+    }
+    public func captureSystemEvent() -> SystemEventToken { .init(owner: owner) }
+    @discardableResult public func cancelForSystemEvent(event: SystemEventToken, kind: SessionProbeSystemEvent,
+                                                        isCurrent: Bool, requiresStop: Bool) -> Bool {
+        guard let owner = event.owner else { return false }
+        return cancelForSystemEvent(id: owner, kind: kind, isCurrent: isCurrent, requiresStop: requiresStop)
+    }
     public struct Hooks {
         public var supportedModes: Set<SessionProbeMode>
         public var isBusy: @MainActor () -> Bool
@@ -95,6 +107,7 @@ public struct SessionProbeBackend: Sendable {
     private var owner: UUID?
     private var task: Task<Void, Never>?
     private var cancellationOutcome = SessionProbeOutcome.cancelled
+    private var audioPhaseActive = false
     public init(measurements: SessionProbeMeasurements = .init()) { self.measurements = measurements }
     public var isRunning: Bool { owner != nil }
     public func owns(_ id: UUID?) -> Bool { guard let id else { return false }; return owner == id }
@@ -104,7 +117,7 @@ public struct SessionProbeBackend: Sendable {
         guard hooks.supportedModes.contains(mode) else { throw SessionProbeError.unsupportedMode }
         guard owner == nil, !hooks.isBusy() else { return nil }
         let id = UUID()
-        owner = id; cancellationOutcome = .cancelled
+        owner = id; cancellationOutcome = .cancelled; audioPhaseActive = false
         task = Task { @MainActor in await run(id: id, mode: mode, hooks: hooks) }
         return id
     }
@@ -112,6 +125,18 @@ public struct SessionProbeBackend: Sendable {
         guard owner == id else { return }
         cancellationOutcome = expired ? .expired : .cancelled
         task?.cancel()
+    }
+    @discardableResult public func cancelForSystemEvent(id: UUID, kind: SessionProbeSystemEvent,
+                                                        isCurrent: Bool, requiresStop: Bool) -> Bool {
+        guard owns(id), isCurrent, requiresStop else { return false }
+        switch kind {
+        case .inputLost, .configurationChanged:
+            guard audioPhaseActive else { return false }
+        case .interruption, .mediaServicesReset:
+            break
+        }
+        cancel(id: id)
+        return true
     }
     public func waitUntilFinished() async { let current = task; await current?.value }
 
@@ -140,6 +165,7 @@ public struct SessionProbeBackend: Sendable {
             try Task.checkCancellation()
             guard !backends.isEmpty else { throw SessionProbeError.noBackends }
             if mode == .backgroundAudio {
+                audioPhaseActive = true
                 guard try await hooks.armAudio(id) else { throw SessionProbeError.backgroundTransitionFailed }
             }
             if mode != .foreground {
@@ -169,6 +195,9 @@ public struct SessionProbeBackend: Sendable {
         catch SessionProbeError.backgroundTransitionFailed { outcome = .backgroundTransitionFailed }
         catch { outcome = .failed }
 
+        // Audio teardown itself can deliver empty-route/configuration notifications. Retire their
+        // ownership before releasing any resources; explicit interruption/expiry still owns the run.
+        audioPhaseActive = false
         let prepared = backends, shouldRestore = releasedAppModels
         let restored = await Task { @MainActor in
             for descriptor in prepared { await descriptor.release() }

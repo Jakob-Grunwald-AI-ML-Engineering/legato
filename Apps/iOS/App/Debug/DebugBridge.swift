@@ -60,6 +60,7 @@ enum DebugBridge {
     static func stop() { harness.stop(); started = false }
     static func drain() async { await harness.drain() }
     static func execute(_ command: BridgeCommand) async { await harness.execute(command) }
+    static var hasPendingControls: Bool { harness.pendingOperationCount > 0 }
     static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
 
     // MARK: Built-ins
@@ -129,8 +130,24 @@ enum DebugBridge {
         #if DEBUG
         for name in E2E.commands {
             register(name) { command in
-                await AppController.shared.runE2E(command.command)
-                return nil
+                let app = AppController.shared
+                let starts: Set<String> = ["toggle", "toggle-after-hop", "meeting-start"]
+                let fast = command.command.hasPrefix("harness-") || ["preparation-release", "watcher-release", "foreground", "background", "foreign-engine-change", "interrupt", "interrupt-end"].contains(command.command)
+                if fast {
+                    if command.command == "interrupt" { harness.cancelOperations(commands: starts) }
+                    await app.runE2E(command.command)
+                    return nil
+                }
+                let stopPendingToggle = command.command == "toggle" && harness.pendingOperationCommands.contains { $0 == "toggle" || $0 == "toggle-after-hop" }
+                var settling: [Task<Void, Never>] = []
+                if stopPendingToggle || command.command == "stop" { settling = harness.cancelOperations(commands: ["toggle", "toggle-after-hop"]) }
+                if command.command == "meeting-stop" { settling = harness.cancelOperations(commands: ["meeting-start"]) }
+                if starts.contains(command.command), !stopPendingToggle, SessionProbe.isRunning { throw SessionProbeError.busy }
+                return try harness.acceptOperation(command) {
+                    for task in settling { await task.value }
+                    let outcome = await app.runE2E(stopPendingToggle ? "stop" : command.command)
+                    return ["outcome": outcome]
+                }
             }
         }
         #else

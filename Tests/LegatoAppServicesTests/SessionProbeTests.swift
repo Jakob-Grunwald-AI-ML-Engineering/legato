@@ -7,6 +7,109 @@ import Testing
 @testable import LegatoAppServices
 
 @Suite(.timeLimit(.minutes(1))) struct SessionProbeTests {
+    @Test(arguments: [false, true])
+    @MainActor func queuedSystemEventCannotTransferToANewerProbe(capturedDuringProbe: Bool) async throws {
+        let coordinator = SessionProbeCoordinator(measurements: .init(sleep: { _ in }))
+        var captured = coordinator.captureSystemEvent()
+        if capturedDuringProbe {
+            _ = try #require(try coordinator.start(mode: .foreground,
+                hooks: .init(prepare: { _ in [] }, emit: { _ in })))
+            captured = coordinator.captureSystemEvent()
+            await coordinator.waitUntilFinished()
+        }
+        let event = captured, backend = ProbeBackend()
+        var accepted: Bool?, terminal: SessionProbeOutcome?
+        let hooks = SessionProbeCoordinator.Hooks(prepare: { _ in
+            accepted = coordinator.cancelForSystemEvent(event: event, kind: .interruption, isCurrent: true, requiresStop: true)
+            return [.init(id: "fake", backend: backend, measuresKickstart: false)]
+        }, emit: { if $0.kind == .completed { terminal = $0.outcome } })
+        _ = try #require(try coordinator.start(mode: .foreground, hooks: hooks))
+        await coordinator.waitUntilFinished()
+        #expect(accepted == false)
+        #expect(terminal == .ok)
+        #expect(await backend.openSessions == 0)
+    }
+
+    @Test(arguments: [SessionProbeSystemEvent.inputLost, .configurationChanged])
+    @MainActor func ownedAudioCleanupCannotCancelSuccessfulProbe(kind: SessionProbeSystemEvent) async throws {
+        let coordinator = SessionProbeCoordinator(measurements: .init(sleep: { _ in })), backend = ProbeBackend()
+        var accepted: Bool?, terminal: SessionProbeOutcome?
+        let hooks = SessionProbeCoordinator.Hooks(supportedModes: [.backgroundAudio],
+            prepare: { _ in [.init(id: "fake", backend: backend, measuresKickstart: false)] },
+            armAudio: { _ in true }, waitForBackground: { true },
+            cleanup: { owner in accepted = coordinator.cancelForSystemEvent(id: owner, kind: kind, isCurrent: true, requiresStop: true) },
+            snapshot: { .init(appState: "background") }, emit: { if $0.kind == .completed { terminal = $0.outcome } })
+        _ = try #require(try coordinator.start(mode: .backgroundAudio, hooks: hooks))
+        await coordinator.waitUntilFinished()
+        #expect(accepted == false)
+        #expect(terminal == .ok)
+        #expect(await backend.openSessions == 0)
+    }
+
+    @Test(arguments: [SessionProbeSystemEvent.inputLost, .configurationChanged])
+    @MainActor func genuineAudioInvalidationCancelsActiveProbe(kind: SessionProbeSystemEvent) async throws {
+        let coordinator = SessionProbeCoordinator(measurements: .init(sleep: { _ in })), backend = ProbeBackend()
+        var accepted: Bool?, terminal: SessionProbeOutcome?, owner: UUID?
+        let hooks = SessionProbeCoordinator.Hooks(supportedModes: [.backgroundAudio],
+            prepare: { _ in [.init(id: "fake", backend: backend, measuresKickstart: false)] },
+            armAudio: { _ in true }, waitForBackground: { true }, snapshot: { .init(appState: "background") },
+            emit: { event in
+                if event.measurement?.turn == "1", let owner {
+                    accepted = coordinator.cancelForSystemEvent(id: owner, kind: kind, isCurrent: true, requiresStop: true)
+                }
+                if event.kind == .completed { terminal = event.outcome }
+            })
+        let id = try #require(try coordinator.start(mode: .backgroundAudio, hooks: hooks))
+        owner = id
+        await coordinator.waitUntilFinished()
+        #expect(accepted == true)
+        #expect(terminal == .cancelled)
+        #expect(await backend.openSessions == 0)
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func staleSystemEventsCannotCancelActiveProbe(staleGeneration: Bool) async throws {
+        let coordinator = SessionProbeCoordinator(measurements: .init(sleep: { _ in })), backend = ProbeBackend()
+        var accepted: Bool?, terminal: SessionProbeOutcome?, owner: UUID?
+        let hooks = SessionProbeCoordinator.Hooks(supportedModes: [.backgroundAudio],
+            prepare: { _ in [.init(id: "fake", backend: backend, measuresKickstart: false)] },
+            armAudio: { _ in true }, waitForBackground: { true }, snapshot: { .init(appState: "background") },
+            emit: { event in
+                if event.measurement?.turn == "1", let owner {
+                    accepted = coordinator.cancelForSystemEvent(id: owner, kind: .configurationChanged,
+                        isCurrent: !staleGeneration, requiresStop: staleGeneration)
+                }
+                if event.kind == .completed { terminal = event.outcome }
+            })
+        let id = try #require(try coordinator.start(mode: .backgroundAudio, hooks: hooks))
+        owner = id
+        await coordinator.waitUntilFinished()
+        #expect(accepted == false)
+        #expect(terminal == .ok)
+        #expect(await backend.openSessions == 0)
+    }
+
+    @Test(arguments: SessionProbeMode.allCases, [SessionProbeSystemEvent.interruption, .mediaServicesReset])
+    @MainActor func genuineSystemInterruptionCancelsEveryProbeMode(mode: SessionProbeMode, kind: SessionProbeSystemEvent) async throws {
+        let coordinator = SessionProbeCoordinator(measurements: .init(sleep: { _ in })), backend = ProbeBackend()
+        var accepted: Bool?, terminal: SessionProbeOutcome?, captured: SessionProbeCoordinator.SystemEventToken?
+        let hooks = SessionProbeCoordinator.Hooks(supportedModes: Set(SessionProbeMode.allCases),
+            prepare: { _ in [.init(id: "fake", backend: backend, measuresKickstart: false)] },
+            armAudio: { _ in true }, waitForBackground: { true },
+            snapshot: { .init(appState: mode == .foreground ? "active" : "background") }, emit: { event in
+                if event.measurement?.turn == "1", let captured {
+                    accepted = coordinator.cancelForSystemEvent(event: captured, kind: kind, isCurrent: true, requiresStop: true)
+                }
+                if event.kind == .completed { terminal = event.outcome }
+            })
+        _ = try #require(try coordinator.start(mode: mode, hooks: hooks))
+        captured = coordinator.captureSystemEvent()
+        await coordinator.waitUntilFinished()
+        #expect(accepted == true)
+        #expect(terminal == .cancelled)
+        #expect(await backend.openSessions == 0)
+    }
+
     @Test @MainActor func ownershipTokenAllowsOnlyTheProbeAdmission() async throws {
         let coordinator = SessionProbeCoordinator()
         let hooks = SessionProbeCoordinator.Hooks(prepare: { _ in [] }, emit: { _ in })

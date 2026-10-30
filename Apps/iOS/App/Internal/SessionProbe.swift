@@ -17,8 +17,23 @@ import os
     static func owns(_ owner: UUID?) -> Bool { coordinator.owns(owner) }
     private static var currentID: UUID?
 
-    static func cancel(expired: Bool = false) {
-        if let currentID { coordinator.cancel(id: currentID, expired: expired) }
+    static func cancel(expired: Bool = false, cause: String = "explicit") {
+        guard let currentID else { return }
+        AudioDiagnostics.log("session.probe.cancel-request", ["probeID": currentID.uuidString,
+            "cause": cause, "expired": expired])
+        coordinator.cancel(id: currentID, expired: expired)
+    }
+
+    static func captureSystemEvent() -> SessionProbeCoordinator.SystemEventToken { coordinator.captureSystemEvent() }
+
+    static func cancelForSystemEvent(_ kind: SessionProbeSystemEvent, event: SessionProbeCoordinator.SystemEventToken,
+                                     cause: String, isCurrent: Bool, requiresStop: Bool) {
+        let accepted = coordinator.cancelForSystemEvent(event: event, kind: kind,
+            isCurrent: isCurrent, requiresStop: requiresStop)
+        AudioDiagnostics.log("session.probe.system-event", ["probeID": currentID?.uuidString ?? "",
+            "capturedProbeID": event.owner?.uuidString ?? "",
+            "kind": kind.rawValue, "cause": cause, "isCurrent": isCurrent,
+            "requiresStop": requiresStop, "cancelAccepted": accepted])
     }
 
     static func start(commandID: String, mode: SessionProbeMode, ignoreMemoryWarnings: Bool = false) throws -> UUID? {
@@ -36,7 +51,11 @@ import os
                 DebugMessages.shared.setBlocking(true)
                 if mode != .foreground {
                     backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "session.probe") {
-                        MainActor.assumeIsolated { expired(); endBackgroundTask() }
+                        MainActor.assumeIsolated {
+                            AudioDiagnostics.log("session.probe.cancel-request", ["probeID": owner.uuidString,
+                                "cause": "background-expired", "expired": true])
+                            expired(); endBackgroundTask()
+                        }
                     }
                     guard backgroundTask != .invalid else { throw SessionProbeError.backgroundTransitionFailed }
                 }
@@ -45,7 +64,7 @@ import os
                     MainActor.assumeIsolated {
                         warnings += 1
                         AudioDiagnostics.log("session.probe.memoryWarning", ["probeID": owner.uuidString, "warnings": warnings])
-                        if !ignoresMemoryWarnings { cancel() }
+                        if !ignoresMemoryWarnings { cancel(cause: "memory-warning") }
                     }
                 }
                 sampler = Task { @MainActor in

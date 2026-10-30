@@ -17,6 +17,40 @@ import Foundation
         register("commands") { [weak self] _ in ["commands": self?.commandNames ?? []] }
     }
 
+    private var operations: [String: (command: String, task: Task<Void, Never>)] = [:]
+    public var pendingOperationCount: Int { operations.count }
+    public var pendingOperationCommands: [String] { operations.values.map(\.command) }
+
+    /// Reserve synchronously in the handler FIFO; owned work settles outside it so control requests can run.
+    public func acceptOperation(_ command: BridgeCommand, reserve: () throws -> Void = {},
+                                operation: @escaping @MainActor () async throws -> [String: Any]) throws -> [String: Any] {
+        try reserve()
+        let task = Task { @MainActor in
+            var fields: [String: Any]
+            do {
+                try Task.checkCancellation()
+                fields = try await operation()
+                try Task.checkCancellation()
+            } catch is CancellationError { fields = ["outcome": "cancelled"] }
+            catch { fields = ["outcome": "failed", "message": String(describing: error)] }
+            operations[command.id] = nil
+            fields["command"] = command.command
+            emit(id: command.id, event: "control.done", fields)
+        }
+        operations[command.id] = (command.command, task)
+        return ["accepted": true, "waitFor": "control.done"]
+    }
+    @discardableResult
+    public func cancelOperations(commands: Set<String>) -> [Task<Void, Never>] {
+        let current = operations.values.filter { commands.contains($0.command) }.map(\.task)
+        for task in current { task.cancel() }
+        return current
+    }
+    public func waitForOperations() async {
+        let current = operations.values.map(\.task)
+        for task in current { await task.value }
+    }
+
     public var commandNames: [String] { handlers.keys.sorted() }
     public func register(_ name: String, handler: @escaping Handler) { handlers[name] = handler }
     public func emit(id: String, event: String, _ fields: [String: Any] = [:]) { transport.emit(id: id, event: event, fields) }
