@@ -18,7 +18,8 @@ final class AppController {
     var isDictating: Bool { false }
 
     private init() {
-        let root = AppGroup.containerURL ?? URL.documentsDirectory
+        let root = AppGroup.containerURL
+            ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
         let settings = EngineSettings(defaults: AppGroup.defaults)
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(settings) },
