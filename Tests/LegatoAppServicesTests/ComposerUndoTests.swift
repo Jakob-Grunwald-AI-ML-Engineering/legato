@@ -24,3 +24,23 @@ import LegatoRoom
     #expect(repeated == undone, "A second Undo must not invert the first Undo and restore the comma")
     #expect(session.error == nil)
 }
+
+@MainActor @Test func completedComposerClearsActivityAndKeepsInsertableText() async throws {
+    let room = Room()
+    let events = await room.subscribe(participant: .ui, channels: [.session, .docSnapshot], buffering: .unbounded)
+    let session = ComposerSession(room: room)
+    _ = try await room.appendSegment(words: [.init(text: "Ready to insert")])
+    await session.receive(try await room.publish(channel: .agentStatus, participant: .liveAgent, payload: .object(["busy": .bool(true)])))
+    await session.receive(try await room.publish(channel: .agentStatus, participant: .liveAgent, payload: .object(["event": .string("pending.edit"), "lines": .array([.string("pending-line")])])))
+    #expect(session.busy)
+    #expect(session.pendingLineIDs == ["pending-line"])
+
+    try await room.cancel()
+    for await event in events { await session.receive(event) }
+
+    #expect(session.status == "done")
+    #expect(!session.busy, "Terminal Room events must clear the spinner without a final agent busy=false event")
+    #expect(session.pendingLineIDs.isEmpty)
+    #expect(session.renderedText == "Ready to insert")
+    #expect(session.error == nil)
+}
