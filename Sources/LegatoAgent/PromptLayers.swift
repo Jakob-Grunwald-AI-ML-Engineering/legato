@@ -12,7 +12,7 @@ public enum PromptLayers {
         case .targeted:
             "The user explicitly targeted a word or quoted range. Apply that instruction now using the necessary document tools, scoped to the provided target IDs/quoted span. Do not append the instruction or rewrite unrelated parts. Preserve pins and facts."
         case .pause:
-            "The user has paused. Compose the intended draft from raw notes and directives; reorganize only where it helps. Resolve writing instructions into authored content. Leave already suitable text alone; finish when satisfied. New speech will cancel this turn."
+            "The user has paused briefly. Act now: turn unprocessed speech and rough notes into a clear, natural draft in the user's voice, even without an explicit rewrite command. Remove dictation filler and repetition, repair grammar and phrasing, and organize ideas where it improves readability. Resolve writing directives into authored content; preserve every fact and pinned correction. Do not wait for Stop or a longer pause. Leave already suitable authored text alone; finish when satisfied. New speech will cancel this turn."
         case .final:
             "Dictation has ended and pending input has drained. Complete the intended draft using the same context and tools. Apply any remaining necessary cleanup or restructuring, preserving facts and pins. Leave a good draft alone and finish."
         }
