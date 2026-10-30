@@ -5,7 +5,6 @@ import LegatoAgent
 struct SettingsView: View {
     @Environment(MacAppController.self) private var controller
     @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
-    @AppStorage("composer.restructureModel") private var restructureModel = ModelChoice.sonnet.rawValue
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
     @State private var claudeKey = ""
     @State private var sonioxKey = ""
@@ -19,8 +18,8 @@ struct SettingsView: View {
                 Text(keyNotice).font(.caption).foregroundStyle(.secondary)
             }
             Section("Composer") {
-                modelPicker("Live agent", selection: $liveModel)
-                modelPicker("Restructure agent", selection: $restructureModel)
+                modelPicker("Writing model", selection: $liveModel)
+                Text("One model handles quick corrections and paused/final composing.").font(.caption).foregroundStyle(.secondary)
                 Text("Personal prompt")
                 TextEditor(text: $personalPrompt).frame(height: 80)
             }

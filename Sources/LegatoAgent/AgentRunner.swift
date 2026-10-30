@@ -10,37 +10,40 @@ private struct Conversation: Sendable {
     var seeded = false
 }
 
-/// Host-owned orchestration. Attach before audio; Insert/cancel.work cancels both provider streams.
+/// One host-owned writer with quick, quiet-pause and final turns in the same conversation.
 public actor AgentRunner {
     private let room: Room
     private let client: any MessagesStreaming
     private var configuration: AgentConfiguration
+    private let pauseDelay: Duration
     private var subscription: Task<Void, Never>?
     private var pauseTask: Task<Void, Never>?
-    private var liveTask: Task<Void, Never>?
-    private var restructureTask: Task<Void, Never>?
-    private var liveGeneration = UUID()
-    private var restructureGeneration = UUID()
-    private var livePolicy = LiveAgentPolicy()
-    private var restructurePolicy = RestructurePolicy()
-    private var conversations: [Participant: Conversation] = [:]
+    private var writerTask: Task<Void, Never>?
+    private var generation = UUID()
+    private var pauseGeneration = UUID()
+    private var policy = LiveAgentPolicy()
+    private var conversation = Conversation()
     private var history: [Envelope] = []
-    private var pendingContext: [Participant: [Envelope]] = [:]
+    private var pendingContext: [Envelope] = []
+    private var phase: WritingPhase?
+    private var pauseDue = false
+    private var finalPending = false
+    private var retiring = false
     private var stopped = false
 
-    public init(room: Room, client: any MessagesStreaming, configuration: AgentConfiguration = .init()) {
-        self.room = room; self.client = client; self.configuration = configuration
+    public init(room: Room, client: any MessagesStreaming, configuration: AgentConfiguration = .init(), pauseDelay: Duration = .milliseconds(2500)) {
+        self.room = room; self.client = client; self.configuration = configuration; self.pauseDelay = pauseDelay
     }
     public func start() async {
         guard subscription == nil else { return }; stopped = false
-        let events = await room.subscribe(participant: .liveAgent, channels: [.asrSegment, .hint, .userIntent, .docOps, .session])
+        let events = await room.subscribe(participant: .liveAgent, channels: [.asrRawTail, .asrTail, .asrSegment, .hint, .userIntent, .docOps, .session])
         subscription = Task { [weak self] in
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
     }
     public func stop() {
-        stopped = true; subscription?.cancel(); subscription = nil; pauseTask?.cancel()
-        liveTask?.cancel(); restructureTask?.cancel()
+        stopped = true; generation = UUID(); pauseGeneration = UUID()
+        subscription?.cancel(); subscription = nil; pauseTask?.cancel(); writerTask?.cancel()
     }
     public func setMode(_ mode: ComposerMode) async throws {
         configuration.mode = mode
@@ -49,45 +52,78 @@ public actor AgentRunner {
     }
     private func receive(_ event: Envelope) async {
         guard !stopped else { return }
-        // Only accepted content or the structured targeted chunk belongs in writing context.
+        // Partials keep the quiet-period clock honest, including hidden targeted speech, but never enter model context.
+        if event.channel == .asrRawTail || event.channel == .asrTail {
+            if case .string(let text) = event.payload["text"], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                await speechActivity()
+            }
+            return
+        }
+        // Preserve the binder's single admission path for ordinary and explicitly targeted speech.
         if event.channel == .asrSegment { return }
         if event.channel == .session, event.payload["event"] == .string("debug.transcriber.frame") { return }
         if event.channel == .userIntent, event.payload["event"] == .string("tap") { return }
-        history.append(event)
-        pendingContext[.liveAgent, default: []].append(event)
-        pendingContext[.restructureAgent, default: []].append(event)
+        history.append(event); pendingContext.append(event)
         if event.channel == .session {
             if event.payload["event"] == .string("cancel.work") { stop(); return }
-            if event.payload["event"] == .string("final.pass") { restructurePolicy.finalPass() }
-        }
-        if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { configuration.mode = mode }
-        if AgentAdmission.isAcceptedContent(event) {
-            restructurePolicy.segment(at: event.tMono)
-            pauseTask?.cancel()
-            pauseTask = Task { [weak self] in
-                do { try await Task.sleep(for: .milliseconds(2500)); await self?.scheduleRestructure() } catch {}
+            if event.payload["event"] == .string("final.pass") {
+                finalPending = true; pauseDue = false; pauseTask?.cancel()
             }
         }
-        let targets = Set(["line", "lineID"].compactMap { key -> String? in
-            if case .string(let s) = event.payload[key] { return s }; return nil
-        })
-        if livePolicy.enqueue(event, hintTargets: targets) {
-            liveTask?.cancel(); liveGeneration = UUID(); livePolicy.finish()
+        if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { configuration.mode = mode }
+        if AgentAdmission.isAcceptedContent(event) || event.channel == .hint || event.channel == .userIntent {
+            if AgentAdmission.isAcceptedContent(event) || event.channel == .hint || event.payload["event"] == .string("mode.changed") {
+                await speechActivity()
+            } else if phase == .pause { await cancelCurrentTurn() }
+            let targets = Set(["line", "lineID"].compactMap { key -> String? in
+                if case .string(let s) = event.payload[key] { return s }; return nil
+            })
+            if policy.enqueue(event, hintTargets: targets) { await cancelCurrentTurn() }
         }
-        await scheduleLive()
-        await scheduleRestructure()
+        await schedule()
     }
-    private func scheduleLive() async {
-        guard !stopped, let events = livePolicy.begin() else { return }
-        let generation = UUID(); liveGeneration = generation
+    private func speechActivity() async {
+        guard !finalPending, phase != .final else { return }
+        pauseTask?.cancel(); pauseDue = false
+        let token = UUID(); pauseGeneration = token
+        if phase == .pause { await cancelCurrentTurn() }
+        guard !stopped, token == pauseGeneration else { return }
+        let delay = pauseDelay
+        pauseTask = Task { [weak self] in
+            do { try await Task.sleep(for: delay); await self?.pauseElapsed(token) } catch {}
+        }
+    }
+    private func pauseElapsed(_ token: UUID) async {
+        guard !stopped, token == pauseGeneration, !finalPending else { return }
+        pauseDue = true; await schedule()
+    }
+    private func cancelCurrentTurn() async {
+        guard phase != nil else { return }
+        retiring = true
+        let old = writerTask
+        generation = UUID(); writerTask = nil; phase = nil; policy.finish()
+        old?.cancel()
+        // Do not open the next request until the canceled stream has actually retired.
+        await old?.value
+        await log(.liveAgent, ["event": .string("pending.edit"), "lines": .array([])])
+        await room.setAgentBusy(.liveAgent, busy: false)
+        retiring = false
+    }
+    private func schedule() async {
+        guard !stopped, !retiring, phase == nil else { return }
+        let events: [Envelope]
+        let next: WritingPhase
+        if let pending = policy.begin() {
+            events = pending; next = pending.contains { $0.channel == .hint } ? .targeted : .quick
+        } else if finalPending, policy.beginMaintenance() {
+            events = []; next = .final; finalPending = false
+        } else if pauseDue, policy.beginMaintenance() {
+            events = []; next = .pause; pauseDue = false
+        } else { return }
+        let token = UUID(); generation = token; phase = next
         await room.setAgentBusy(.liveAgent, busy: true)
-        liveTask = Task { [weak self] in await self?.run(participant: .liveAgent, events: events, final: false, generation: generation) }
-    }
-    private func scheduleRestructure() async {
-        guard !stopped, let final = restructurePolicy.begin(at: ProcessInfo.processInfo.systemUptime) else { return }
-        let generation = UUID(); restructureGeneration = generation
-        await room.setAgentBusy(.restructureAgent, busy: true)
-        restructureTask = Task { [weak self] in await self?.run(participant: .restructureAgent, events: [], final: final, generation: generation) }
+        guard !stopped, generation == token else { return }
+        writerTask = Task { [weak self] in await self?.run(events: events, phase: next, generation: token) }
     }
     public static func shouldReseed(tokens: Int, idle: Double) -> Bool { tokens > 50_000 || idle > 300 }
     public static func request(model: ModelChoice, system: String, messages: [JSONValue], live: Bool, mode: ComposerMode = .message) throws -> Data {
@@ -99,29 +135,30 @@ public actor AgentRunner {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(JSONValue.object(fields))
     }
-    private func run(participant: Participant, events: [Envelope], final: Bool, generation: UUID) async {
-        let live = participant == .liveAgent
+    private func run(events: [Envelope], phase: WritingPhase, generation: UUID) async {
+        let participant = Participant.liveAgent
         do {
-            var conversation = conversations[participant] ?? Conversation()
+            var conversation = self.conversation
             let now = ProcessInfo.processInfo.systemUptime
             let reseed = !conversation.seeded || Self.shouldReseed(tokens: conversation.tokens, idle: now - conversation.lastTurn)
             if reseed { conversation = Conversation() }
             let snapshot = await room.documentSnapshot
-            let context = reseed ? history : (pendingContext[participant] ?? events)
-            pendingContext[participant] = []
+            let context = reseed ? history : pendingContext
+            pendingContext = []
             let eventText = String(data: try JSONEncoder().encode(context), encoding: .utf8) ?? "[]"
-            let input = "Current mode: \(configuration.mode.rawValue)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n" + (final ? "Final whole-document pass: decide whether any changes help; finish when satisfied." : "Compose from the new events. " + (live ? "You are the live agent." : "You are the restructure agent."))
+            let input = "Writing phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
+            await log(participant, ["event": .string("turn.phase"), "phase": .string(phase.rawValue)])
             conversation.messages.append(.object(["role": .string("user"), "content": .string(input)]))
             let turnMode = configuration.mode
             let terms = await configuration.vocabulary(snapshot.text)
             let system = PromptLayers.build(mode: turnMode, personal: configuration.personalPrompt, vocabulary: terms)
             let group = UUID().uuidString
-            if reseed { await log(participant, ["event": .string("conversation.seed"), "system": .string(system), "tools": try .encoding(ToolExecutor.schemas(live: live, mode: turnMode))]) }
+            if reseed { await log(participant, ["event": .string("conversation.seed"), "system": .string(system), "tools": try .encoding(ToolExecutor.schemas(live: true, mode: turnMode))]) }
             // A turn may perform several tools and inspect their results before it finishes.
             for _ in 0..<24 {
                 try Task.checkCancellation()
-                let request = try Self.request(model: live ? configuration.liveModel : configuration.restructureModel,
-                    system: system, messages: conversation.messages, live: live, mode: turnMode)
+                let request = try Self.request(model: configuration.liveModel,
+                    system: system, messages: conversation.messages, live: true, mode: turnMode)
                 await log(participant, ["event": .string("request"), "request_hash": .string(SHA256.hash(data: request).map { String(format: "%02x", $0) }.joined()), "messages": .array(Array(conversation.messages.suffix(1)))])
                 var blocks: [Int: JSONValue] = [:], partial: [Int: String] = [:]
                 var usage: JSONValue = .null, first = true
@@ -144,7 +181,7 @@ public actor AgentRunner {
                     if case .string(let fragment) = delta["partial_json"] {
                         partial[i, default: ""] += fragment
                         let targets = PartialJSON.targets(in: partial[i]!)
-                        if live { livePolicy.editing.formUnion(targets) }
+                        policy.editing.formUnion(targets)
                         if !targets.isEmpty { await log(participant, ["event": .string("pending.edit"), "lines": .array(targets.sorted().map(JSONValue.string)), "group": .string(group)]) }
                     }
                     for key in ["text", "thinking", "signature"] {
@@ -155,6 +192,7 @@ public actor AgentRunner {
                     }
                     blocks[i] = .object(block)
                 }
+                try Task.checkCancellation()
                 for (i, json) in partial {
                     guard case .object(var block) = blocks[i] else { continue }
                     if json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -177,9 +215,8 @@ public actor AgentRunner {
                 for block in content where block["type"] == .string("tool_use") {
                     try Task.checkCancellation()
                     guard case .string(let id) = block["id"], case .string(let name) = block["name"], let input = block["input"] else { throw MessagesStreamError.incomplete }
-                    let result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: live)
+                    let result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: true, phase: phase)
                     if let mode = result.mode { configuration.mode = mode }
-                    if result.restructure { restructurePolicy.request(); await scheduleRestructure() }
                     let value: JSONValue = .object(["type": .string("tool_result"), "tool_use_id": .string(id), "content": .string(result.content), "is_error": .bool(result.isError)])
                     results.append(value); await log(participant, ["event": .string("tool.result"), "result": value])
                 }
@@ -188,19 +225,19 @@ public actor AgentRunner {
             }
             try Task.checkCancellation()
             conversation.lastTurn = ProcessInfo.processInfo.systemUptime; conversation.seeded = true
-            conversations[participant] = conversation
+            self.conversation = conversation
         } catch is CancellationError {} catch {
             await log(participant, ["event": .string("error"), "message": .string(String(describing: error))])
         }
-        guard generation == (live ? liveGeneration : restructureGeneration) else { return }
+        guard generation == self.generation else { return }
+        writerTask = nil; self.phase = nil; policy.finish()
         await log(participant, ["event": .string("pending.edit"), "lines": .array([])])
-        if live {
-            livePolicy.finish(); await scheduleLive()
-            if !livePolicy.running { await room.setAgentBusy(participant, busy: false) }
+        if phase == .final {
+            await room.setAgentBusy(participant, busy: false)
+            try? await room.finishFinalPass()
         } else {
-            restructurePolicy.finish()
-            if final { try? await room.finishFinalPass() }
-            else { await scheduleRestructure(); if !restructurePolicy.running { await room.setAgentBusy(participant, busy: false) } }
+            await schedule()
+            if !policy.running { await room.setAgentBusy(participant, busy: false) }
         }
     }
     private func log(_ participant: Participant, _ fields: [String: JSONValue]) async {
