@@ -85,7 +85,9 @@ positive_seconds() {
 # CoreDevice requires a native timeout of at least five seconds. Enforce shorter host budgets
 # ourselves, with a private process group so a timed-out tool cannot leave descendants behind.
 run_bounded_tool() (
-  local budget="$1" child="" output rc=0 end grace
+  # Bash 3 unwinds function locals before running the EXIT trap on timeout.
+  # This function already has its own subshell: these variables cannot escape it.
+  budget="$1" child="" output="" rc=0 end=0 grace=0
   shift
   output="$(mktemp "$STATE/devicectl.XXXXXX")"
   trap 'if [ -n "$child" ]; then kill -KILL -- "-$child" 2> /dev/null || true; wait "$child" 2> /dev/null || true; fi; rm -f "$output"' EXIT

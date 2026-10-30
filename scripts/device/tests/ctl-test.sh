@@ -113,7 +113,8 @@ setup() {
   mkdir -p "$LEGATO_DEVICE_STATE"
   printf '%s\n' '{"id":"c-test","event":"received"}' '{"id":"c-test","event":"done"}' > "$FIXTURE/done"
 }
-run_ctl() { bash "$ROOT/scripts/device/ctl.sh" "$@" > "$FIXTURE/out" 2> "$FIXTURE/err"; }
+# Use the fixture interpreter for the CLI too; PATH may otherwise silently select another Bash.
+run_ctl() { "$BASH" "$ROOT/scripts/device/ctl.sh" "$@" > "$FIXTURE/out" 2> "$FIXTURE/err"; }
 check() { if "$@"; then echo "PASS $SCENARIO"; else echo "FAIL $SCENARIO"; failures=$((failures + 1)); cat "$FIXTURE/err"; fi; }
 completed() { run_ctl wait c-test 2 && grep -q '"event":"done"' "$FIXTURE/out"; }
 setup complete; check completed
@@ -168,7 +169,8 @@ probe() { run_ctl wait c-test 2 && jq -e -s 'last.id == "probe-fixture" and last
 check probe
 setup probe-error
 echo '{"id":"probe-fixture","event":"session.probe.done","outcome":"failed","ok":false}' > "$FIXTURE/done"
-probe_error() { ! run_ctl wait probe-fixture 1 && grep -q '"outcome":"failed"' "$FIXTURE/out"; }
+# This tests terminal classification; bounded() separately enforces the one-second deadline.
+probe_error() { ! run_ctl wait probe-fixture 3 && grep -q '"outcome":"failed"' "$FIXTURE/out"; }
 check probe_error
 setup reply
 printf '%s\n' '{"id":"c-test","event":"done","waitFor":"reply"}' '{"id":"c-test","event":"reply","choice":"Continue"}' > "$FIXTURE/done"

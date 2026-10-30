@@ -20,7 +20,8 @@ export LEGATO_STUB_DEPS=1
 select_xcode
 xcodebuild -version
 
-bash scripts/device/tests/ctl-test.sh
+# Exercise macOS system Bash, including its EXIT-trap scoping on timeouts.
+/bin/bash scripts/device/tests/ctl-test.sh
 bash scripts/device/tests/sim-smoke-test.sh
 bash scripts/ci/tests/check-internal-exclusion-test.sh
 scripts/e2e/tests/cleanup-test.sh
