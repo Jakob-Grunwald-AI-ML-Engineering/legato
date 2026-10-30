@@ -15,11 +15,15 @@ private final class TurnLog: Sendable {
 
 private final class FakeTurns: FoundationModelsTurning, @unchecked Sendable {
     let log: TurnLog
-    init(log: TurnLog) { self.log = log }
+    let gate: TrimTokenGate?
+    init(log: TurnLog, gate: TrimTokenGate? = nil) { self.log = log; self.gate = gate }
     private func next(_ prompt: String) -> String {
         log.value.withLock { $0.prompts.append(prompt); return $0.replies.isEmpty ? "More" : $0.replies.removeFirst() }
     }
-    func respond(to prompt: String) async throws -> String { next(prompt) }
+    func respond(to prompt: String) async throws -> String {
+        if let gate { _ = try await gate.count(prompt) }
+        return next(prompt)
+    }
     func respondJSON(to prompt: String, schema: GenerationSchema) async throws -> String { next(prompt) }
     func prewarm(promptPrefix: String?) { log.value.withLock { $0.prewarmed += 1; $0.prefixes.append(promptPrefix) } }
 }
@@ -164,6 +168,61 @@ struct FoundationModelsSessionTests {
         let state = log.value.withLock { $0 }
         #expect(state.prefixes == ["run text"])
         #expect(state.prompts == ["run text\n\nGo."])  // the prefix the system cached starts the prompt
+    }
+
+    @Test(arguments: [false, true])
+    func headAppendedAfterWarmReachesTheNextNativeTurn(example: Bool) async throws {
+        let log = TurnLog(replies: ["One."])
+        let session = fakeSession(log)
+        if example { try await session.append(.instructions("Keep the instructions.")) }
+        try await session.warm()
+        if example {
+            try await session.append(.example(LLMExample(user: "Example input.", assistant: "Example output.")))
+        } else {
+            try await session.append(.instructions("Late instructions."))
+        }
+        _ = try await session.respond(to: "Go.")
+        let native = String(describing: log.value.withLock { $0.created.last })
+        if example {
+            #expect(native.contains("Keep the instructions."))
+            #expect(native.contains("Example input."))
+            #expect(native.contains("Example output."))
+        } else {
+            #expect(native.contains("Late instructions."))
+        }
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func headAppendedDuringFirstTurnRebuildsWithThatCompletedTurn(example: Bool) async throws {
+        let log = TurnLog(replies: ["First reply.", "Second reply."])
+        let gate = TrimTokenGate()
+        let session = FoundationModelsSession(tokenBudget: 3_000, count: words, makeTurns: { transcript in
+            log.value.withLock { $0.created.append(transcript) }
+            return FakeTurns(log: log, gate: gate)
+        })
+        if example { try await session.append(.instructions("Keep the instructions.")) }
+        try await session.warm()
+        let first = Task { try await session.respond(to: "First request.") }
+        await gate.entered()
+        if example {
+            try await session.append(.example(LLMExample(user: "Concurrent example.", assistant: "Example reply.")))
+        } else {
+            try await session.append(.instructions("Concurrent instructions."))
+        }
+        try await session.append(.text("Next text."))
+        gate.release()
+        #expect(try await first.value == "First reply.")
+        #expect(try await session.respond(to: "Second request.") == "Second reply.")
+        let state = log.value.withLock { $0 }
+        let native = String(describing: state.created.last)
+        #expect(native.contains(example ? "Concurrent example." : "Concurrent instructions."))
+        if example {
+            #expect(native.contains("Keep the instructions."))
+            #expect(native.contains("Example reply."))
+        }
+        #expect(native.contains("First request."))
+        #expect(native.contains("First reply."))
+        #expect(state.prompts == ["First request.", "Next text.\n\nSecond request."])
     }
 
     @Test func aTrimReopensAndPrewarmsTheRollingSessionOnTheKeptTranscript() async throws {

@@ -60,6 +60,14 @@ actor FoundationModelsSession: LLMSession {
     func append(_ chunk: LLMSessionChunk) async throws {
         try checkOpen()
         try transcript.append(chunk)
+        switch chunk {
+        case .instructions, .example:
+            // A warmed/live native transcript predates this head. An in-flight turn keeps its own
+            // native session and records its reply before the next turn rebuilds from our transcript.
+            live = nil
+        case .text:
+            break  // Pending text belongs to the next prompt, not the native transcript's head.
+        }
     }
 
     func respond(to request: String) async throws -> String {
