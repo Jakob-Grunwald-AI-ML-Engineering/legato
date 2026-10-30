@@ -182,7 +182,15 @@ import LegatoVocabulary
                     }
                 } catch is CancellationError {} catch { self?.fail(error) }
             }
-        } catch { if self.generation == generation { fail(error); try? await room?.cancel(); await cleanup() } }
+        } catch {
+            if self.generation == generation {
+                fail(error)
+                // Startup did not establish a working session: never retain its new
+                // microphone lease after a socket, credentials or recorder failure.
+                isArmed = false
+                try? await room?.cancel(); await cleanup()
+            }
+        }
     }
     #if DEBUG || LEGATO_INTERNAL
     public func startDebug(mode: ComposerMode = .message, microphoneLease: Bool = false) async {
