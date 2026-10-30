@@ -160,9 +160,9 @@ final class AppController {
         // While the cleanup agent cleans a run (a keyboard run), the session's own cleanup stays out; otherwise its
         // one cleanup at stop is the rolling session's rewrite.
         #if DEBUG
-        let agentGate = AgentGatedPostProcessor(E2E.fakeCleanup ?? cleanup, rewrite: { text, _ in await Self.rollingRewrite(text, models: models) })
+        let agentGate = AgentGatedPostProcessor(E2E.fakeCleanup ?? cleanup, rewrite: { text, _ in await Self.rollingRewrite(text, models: models, vocabulary: vocabulary) })
         #else
-        let agentGate = AgentGatedPostProcessor(cleanup, rewrite: { text, _ in await Self.rollingRewrite(text, models: models) })
+        let agentGate = AgentGatedPostProcessor(cleanup, rewrite: { text, _ in await Self.rollingRewrite(text, models: models, vocabulary: vocabulary) })
         #endif
         self.history = history
         let meetingRoot = directory.appending(path: "Meetings", directoryHint: .isDirectory)
@@ -266,9 +266,9 @@ final class AppController {
             keyboardLink.link.onRefine = { [weak self] text in await self?.refine(text) }
             keyboardLink.deliveryForRun = { Settings.hostDelivery }
             keyboardLink.agentGate = agentGate
-            keyboardLink.makeAgent = { runID in Self.makeAgent(runID: runID, models: models) }
+            keyboardLink.makeAgent = { runID in Self.makeAgent(runID: runID, models: models, vocabulary: vocabulary) }
             keyboardLink.agentWait = { .seconds(Settings.cleanupStore.options.timeoutSeconds) }
-            keyboardLink.rewriteAtStop = { raw in await Self.rollingRewrite(raw, models: models) }
+            keyboardLink.rewriteAtStop = { raw in await Self.rollingRewrite(raw, models: models, vocabulary: vocabulary) }
             keyboardLink.copyFallback = { [pasteboard] text in pasteboard.write(text) }
             keyboardLink.correctHistory = { saved, cleaned, field in
                 // The session saved its own text (the engine's, or a Replace run's cleaned text); the run's entry is
@@ -541,30 +541,30 @@ final class AppController {
 
     /// The cleanup agent of a keyboard run (Live or Replace), made in the background on the warm rolling session of
     /// the backend the run leased (nil there: no agent, the run's stop rewrites the text on the session instead).
-    private static func makeAgent(runID: String, models: ModelServices) -> LinkedCleanupRun.MakeAgent? {
+    private static func makeAgent(runID: String, models: ModelServices, vocabulary: VocabularyService) -> LinkedCleanupRun.MakeAgent? {
         let options = Settings.cleanupStore.options
         guard options.enabled else { return nil }
         let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
         #if DEBUG
         if let fake = E2E.makeFakeAgentSession() {
             return { wake in
-                fake.session.map { CleanupAgent(session: $0, options: .init(options, owner: runID, locale: locale), wake: wake) }
+                fake.session.map { CleanupAgent(session: $0, options: .init(options, owner: runID, locale: locale), vocabulary: vocabulary, wake: wake) }
             }
         }
         #endif
         return { wake in
             guard let rolling = await models.rollingDictationSession(options: options) else { return nil }
-            return CleanupAgent(session: rolling, options: .init(options, owner: runID, locale: locale), wake: wake)
+            return CleanupAgent(session: rolling, options: .init(options, owner: runID, locale: locale), vocabulary: vocabulary, wake: wake)
         }
     }
 
     /// The whole text rewritten once on the rolling session (`ModelServices.rollingRewrite`): the session's cleanup
     /// at stop for a run the agent does not clean, and the stop of a run whose agent was absent.
-    private static func rollingRewrite(_ text: String, models: ModelServices) async -> String? {
+    private static func rollingRewrite(_ text: String, models: ModelServices, vocabulary: VocabularyService) async -> String? {
         #if DEBUG
         if let fake = E2E.fakeCleanup { return try? await fake.process(text, locale: Locale.current) }
         #endif
-        return await models.rollingRewrite(text, options: Settings.cleanupStore.options)
+        return await models.rollingRewrite(text, options: Settings.cleanupStore.options, vocabulary: vocabulary)
     }
 
     /// Every cleanup model call and model load (`CleanupCallTrace`): to `audio-diag.jsonl` with a memory sample

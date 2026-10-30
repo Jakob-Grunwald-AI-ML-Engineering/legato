@@ -230,6 +230,33 @@ struct LinkedCleanupStopTests {
         #expect(stop == .init(landed: false, cleaned: nil))
     }
 
+    /// Live, the agent absent, and the user sent the run's first part (the host cleared the field): the stop rewrites
+    /// only what the field shows of the run since; the sent text never comes back, not even on the clipboard.
+    @Test func anAbsentAgentAfterASendCleansOnlyTheTextAfterIt() async {
+        let keyboard = WindowedKeyboard()
+        let run = LinkedCleanupRun(
+            owner: "run", agent: { _ in nil }, transport: keyboard.transport, agentWait: .milliseconds(100),
+            finalWait: .milliseconds(200))
+        run.feedChanged()
+        keyboard.asr("teh cat sat. ")
+        run.feedChanged()
+        keyboard.field = ""
+        keyboard.queue.reset(FieldSnapshot(window: "", caret: 0), reason: .cleared)
+        run.feedChanged()
+        keyboard.asr("a dgo ran.")
+        run.feedChanged()
+        var rewritten: [String] = []
+        var copied: [String] = []
+        _ = await run.stop(
+            .live, committed: "teh cat sat. a dgo ran.", text: "teh cat sat. a dgo ran.", finalText: nil, applied: { true },
+            rewrite: { rewritten.append($0); return $0 == "a dgo ran." ? "A dog ran." : "The cat sat. A dog ran." },
+            copy: { copied.append($0); return true })
+        #expect(rewritten == ["a dgo ran."])
+        #expect(!copied.contains { $0.contains("cat") })
+        #expect(keyboard.field == "A dog ran.")
+        #expect(run.stopReport?.branch == .agentAbsent)
+    }
+
     /// Live, the agent absent and the field's run text unknown at the stop (out of the window): the stateless
     /// pass goes to the clipboard, and its text only into the history when it got there.
     @Test func anAbsentAgentWhoseRunIsOutOfTheWindowCopiesAndReportsIt() async {

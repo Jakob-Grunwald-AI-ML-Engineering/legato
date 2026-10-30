@@ -230,6 +230,38 @@ struct FieldEditCoordinatorLinkTests {
         #expect(c.predicted.window == "")
     }
 
+    /// A document whose host reports the clear while our write's calls run (re-entrant, as a chat app's send can).
+    final class ClearingDocument: FieldEditDocument {
+        var field: CaretProxy
+        var documentID: String? = "clearing"
+        var onExecute: (() -> Void)?
+        init(_ text: String) { field = CaretProxy(text) }
+        var contextBefore: String { field.before }
+        var contextAfter: String { field.after }
+        func execute(_ calls: [ProxyCall]) {
+            field.run(calls)
+            let hook = onExecute
+            onExecute = nil
+            hook?()
+        }
+    }
+
+    /// The host clears the field while one of our writes executes: the clear is not lost, it is taken once the
+    /// write's calls returned (a run boundary, published as `reset(cleared)`).
+    @Test func aClearDuringAWriteIsTakenOnceTheWriteReturns() {
+        let d = ClearingDocument("hi there")
+        let (c, trace) = coordinator(d)
+        let batches = Batches()
+        c.publishFeed(to: batches.sink)
+        d.onExecute = { [weak c] in
+            d.field = CaretProxy("")
+            c?.fieldCleared()
+        }
+        c.submit(edit(c.predicted.version, 8, "", " you", origin: .asr))
+        #expect(trace.contains("fe.reset reason=cleared"))
+        #expect(batches.events.contains { if case .reset(.cleared, _, _) = $0 { true } else { false } })
+    }
+
     @Test func clearingAnEmptyPredictionDoesNothing() {
         let d = ManualDocument("")
         let (c, trace) = coordinator(d)

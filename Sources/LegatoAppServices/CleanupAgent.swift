@@ -107,6 +107,9 @@ public actor CleanupAgent: FieldAgent {
 
     private let session: any LLMSession
     private let options: Options
+    private let vocabulary: VocabularyService?
+    /// The run as the vocabulary learns it (one run, however many turns).
+    private let runID = UUID()
     private let endpointer: SentenceEndpointer
     private let now: @Sendable () -> ContinuousClock.Instant
     private let wake: (@Sendable () async -> Void)?
@@ -134,20 +137,24 @@ public actor CleanupAgent: FieldAgent {
     /// Sentences whose turn failed or timed out: not asked again while listening, retried at stop.
     private var skipped: Set<String> = []
     private var attempts: [String: Int] = [:]
+    /// Hand-backs no one disagreed with (superseded, withdrawn, out of window), per sentence: free, but not forever.
+    private var freeAttempts: [String: Int] = [:]
     private var busy = false
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var pauseTimer: Task<Void, Never>?
 
     /// - Parameters:
+    ///   - vocabulary: its terms go with each turn, and what a turn changed teaches it.
     ///   - now: the clock the pause is measured on.
     ///   - wake: called once the speaker has paused for the endpointer's pause after recognized text, so the run
     ///     asks again (``replan()``) without waiting for new text. Nil: a pause is only seen at the next batch.
     public init(
-        session: any LLMSession, options: Options, now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
-        wake: (@Sendable () async -> Void)? = nil
+        session: any LLMSession, options: Options, vocabulary: VocabularyService? = nil,
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }, wake: (@Sendable () async -> Void)? = nil
     ) {
         self.session = session
         self.options = options
+        self.vocabulary = vocabulary
         self.endpointer = SentenceEndpointer(config: options.endpoint)
         self.now = now
         self.wake = wake
@@ -298,14 +305,16 @@ public actor CleanupAgent: FieldAgent {
     /// edit from its base (the field moved on under a long turn, a reset): no one disagreed with it.
     private static func counts(_ conflict: Conflict) -> Bool { conflict.reason != .outOfWindow }
 
-    /// A planned edit that did not land. Only a real conflict (`counts`) goes toward giving the sentence up; a
-    /// superseded or withdrawn edit is planned again at no cost.
+    /// A planned edit that did not land. A real conflict (`counts`) goes toward giving the sentence up after two; a
+    /// superseded, withdrawn or out-of-window edit is planned again, up to ``freeRetries`` times (each costs a turn).
     private func handBack(_ id: UUID, counts: Bool) {
         guard let planned = pending.removeValue(forKey: id) else { return }
         for text in planned.settled where text != planned.old { reviewed.remove(text) }
         let tries = attempts[planned.old, default: 0] + (counts ? 1 : 0)
         attempts[planned.old] = tries
-        if tries >= 2 {
+        let free = freeAttempts[planned.old, default: 0] + (counts ? 0 : 1)
+        freeAttempts[planned.old] = free
+        if tries >= 2 || free > Self.freeRetries {
             reviewed.insert(planned.old)  // Gave up on this sentence: it stays as it is.
         } else {
             reviewed.remove(planned.old)
@@ -429,12 +438,13 @@ public actor CleanupAgent: FieldAgent {
         if options.mode == .replace { return await rewriteRun() }
         var made: [EditTransaction] = []
         var tried: Set<String> = []
-        let started = ContinuousClock.now
+        // The stop is bounded as a whole: no turn runs past the deadline; the rest stays as heard.
+        let deadline = ContinuousClock.now + Self.stopBudget(options)
         while let segment = nextReady(final: final, tried: tried) {
-            // The stop does not wait for a backlog without end: past the stop budget the rest stays as heard.
-            if final, ContinuousClock.now - started >= Self.stopBudget(options) { break }
+            let left = deadline - ContinuousClock.now
+            if final, left <= .zero || (left < Self.shortestTurn && !tried.isEmpty) { break }
             tried.insert(segment.text)
-            made += await turn(segment, final: final)
+            made += await turn(segment, final: final, timeout: final ? min(options.timeout, left) : options.timeout)
             if Task.isCancelled { return [] }
             // While listening, an edit goes out as soon as there is one.
             if !final, !made.isEmpty { break }
@@ -443,10 +453,11 @@ public actor CleanupAgent: FieldAgent {
     }
 
     /// One sentence through the model: its rewrite as one transaction, or nothing.
-    private func turn(_ segment: Segment, final: Bool) async -> [EditTransaction] {
+    private func turn(_ segment: Segment, final: Bool, timeout: Duration) async -> [EditTransaction] {
         guard let sessionID else { return [] }
         let base = version
-        guard let reply = await ask(segment.text, kind: "agent", final: final) else {
+        let terms = await vocabulary?.cleanupTerms(for: segment.text) ?? []
+        guard let reply = await ask(segment.text, kind: "agent", final: final, terms: terms, timeout: timeout) else {
             skipped.insert(segment.text)
             return []
         }
@@ -459,13 +470,37 @@ public actor CleanupAgent: FieldAgent {
             return []
         }
         let settled = [rewrite] + Self.sentences(of: rewrite)
+        if rewrite != segment.text {
+            vocabulary?.learnFromCleanup(
+                raw: segment.text, cleaned: rewrite, style: options.style, runID: runID, locale: options.locale, suggested: terms)
+        }
         reviewed.insert(segment.text)
         reviewed.formUnion(settled)
-        let steps = RewritePatch.steps(segment.text, rewrite, at: segment.location)
+        var steps = RewritePatch.steps(segment.text, rewrite, at: segment.location)
+        if options.style == .markdown, let lineBreak = blockBreak(before: segment, rewrite: rewrite) { steps.insert(lineBreak, at: 0) }
         guard !steps.isEmpty else { return [] }
         let transaction = EditTransaction(origin: .agent, owner: options.owner, base: base, steps: steps, session: sessionID)
         pending[transaction.id] = Planned(old: segment.text, settled: settled)
         return [transaction]
+    }
+
+    /// Markdown: a sentence rewritten as a list item or a heading starts its own line (a heading its own block), so
+    /// the spacing before it becomes the break; nil when it already does, or nothing precedes it.
+    private func blockBreak(before segment: Segment, rewrite: String) -> EditStep? {
+        let isHeading = rewrite.hasPrefix("#")
+        let isItem = ["- ", "* ", "+ "].contains { rewrite.hasPrefix($0) }
+            || rewrite.range(of: #"^\d+[.)] "#, options: .regularExpression) != nil
+        guard isHeading || isItem else { return nil }
+        let text = window as NSString
+        var start = segment.location
+        while start > 0, let scalar = Unicode.Scalar(text.character(at: start - 1)), CharacterSet.whitespacesAndNewlines.contains(scalar) {
+            start -= 1
+        }
+        guard start > 0 else { return nil }
+        let gap = text.substring(with: NSRange(location: start, length: segment.location - start))
+        let wanted = isHeading ? "\n\n" : "\n"
+        guard gap.filter(\.isNewline).count < wanted.count else { return nil }
+        return EditStep(span: Span(location: start, length: gap.utf16.count), text: wanted, expect: gap)
     }
 
     /// Replace: the run's whole text, rewritten in chunks that fit the context share, as minimal patches grouped
@@ -473,12 +508,13 @@ public actor CleanupAgent: FieldAgent {
     private func rewriteRun() async -> [EditTransaction] {
         guard let sessionID else { return [] }
         let base = version
-        let rewriter = PassageRewriter(session: session, options: options)
+        let rewriter = PassageRewriter(session: session, options: options, vocabulary: vocabulary, runID: runID)
         var made: [EditTransaction] = []
         let deadline = ContinuousClock.now + Self.stopBudget(options)
         for region in runRegions() {
             for group in await rewriter.groups(region.text, at: region.location, until: deadline) {
-                guard !group.steps.contains(where: { step in touched.contains { Self.touches($0, step.span) } }) else { continue }
+                // A sentence the user wrote in or next to stays as it is, whichever of its words the rewrite changed.
+                guard !touched.contains(where: { Self.touches($0, group.span) }) else { continue }
                 let transaction = EditTransaction(origin: .agent, owner: options.owner, base: base, steps: group.steps, session: sessionID)
                 pending[transaction.id] = Planned(old: group.reference, settled: [])
                 made.append(transaction)
@@ -504,12 +540,22 @@ public actor CleanupAgent: FieldAgent {
 
     /// The reply to `request` as one user turn, within the run's timeout, after trimming the session to the context
     /// share; nil when it failed or timed out.
-    private func ask(_ request: String, kind: String, final: Bool) async -> String? {
-        await PassageRewriter(session: session, options: options).ask(request, kind: kind, final: final)
+    private func ask(_ request: String, kind: String, final: Bool, terms: [String], timeout: Duration) async -> String? {
+        await PassageRewriter(session: session, options: options).ask(request, kind: kind, final: final, terms: terms, timeout: timeout)
     }
 
-    /// How long the stop may start new turns: one turn's timeout (the turn started last may take another).
-    static func stopBudget(_ options: Options) -> Duration { options.timeout }
+    /// The most the stop's turns take together (Live and Replace): the edit must land right after the speaker stops
+    /// (#80), so the turns' timeouts are cut to it; whatever is not reached stays as heard.
+    public static let stopLimit = Duration.seconds(3)
+
+    /// How often a sentence is planned again after hand-backs no one disagreed with.
+    static let freeRetries = 3
+
+    /// A stop turn after the first with less time left than this is not started.
+    static let shortestTurn = Duration.milliseconds(300)
+
+    /// How long the stop's turns may take together: ``stopLimit``, or the turn timeout when that is shorter.
+    static func stopBudget(_ options: Options) -> Duration { min(options.timeout, stopLimit) }
 
     // MARK: Text helpers
 
@@ -551,6 +597,14 @@ public struct PassageRewriter: Sendable {
         /// The sentence as recognized.
         public var reference: String
         public var steps: [EditStep]
+        /// Where the sentence is in the field (UTF-16).
+        public var span: Span
+
+        public init(reference: String, steps: [EditStep], span: Span) {
+            self.reference = reference
+            self.steps = steps
+            self.span = span
+        }
     }
 
     /// The largest chunk one turn rewrites, in estimated tokens (the reply decodes at about 20 tokens a second on
@@ -559,15 +613,21 @@ public struct PassageRewriter: Sendable {
 
     let session: any LLMSession
     let options: CleanupAgent.Options
+    let vocabulary: VocabularyService?
+    let runID: UUID
 
-    public init(session: any LLMSession, options: CleanupAgent.Options) {
+    /// - Parameter vocabulary: its terms go with each chunk, and what a chunk's accepted rewrite changed teaches it
+    ///   (as run `runID`).
+    public init(session: any LLMSession, options: CleanupAgent.Options, vocabulary: VocabularyService? = nil, runID: UUID = UUID()) {
         self.session = session
         self.options = options
+        self.vocabulary = vocabulary
+        self.runID = runID
     }
 
-    /// `text` cleaned, or nil when nothing changed or no turn answered. No chunk starts after twice the turn timeout.
+    /// `text` cleaned, or nil when nothing changed or no turn answered. The turns take the stop budget together.
     public func cleaned(_ text: String) async -> String? {
-        let groups = await groups(text, at: 0, until: ContinuousClock.now + options.timeout * 2)
+        let groups = await groups(text, at: 0, until: ContinuousClock.now + CleanupAgent.stopBudget(options))
         guard !groups.isEmpty else { return nil }
         var units = Array(text.utf16)
         for step in groups.flatMap(\.steps).sorted(by: { $0.span.location > $1.span.location }) {
@@ -577,16 +637,27 @@ public struct PassageRewriter: Sendable {
         return out == text ? nil : out
     }
 
-    /// The accepted patch groups for `text`, which starts at UTF-16 offset `location` of the field. No chunk is
-    /// started after `deadline` (the rest stays as it is).
+    /// The accepted patch groups for `text`, which starts at UTF-16 offset `location` of the field. No chunk runs
+    /// past `deadline` (the rest stays as it is).
     public func groups(_ text: String, at location: Int, until deadline: ContinuousClock.Instant? = nil) async -> [Group] {
         var out: [Group] = []
-        for chunk in chunks(text) {
-            if let deadline, ContinuousClock.now >= deadline { break }
-            guard let reply = await ask(CleanupPrompt.Agent.finalRequest(chunk.text), kind: "final", final: true),
+        for (index, chunk) in chunks(text).enumerated() {
+            var timeout = options.timeout
+            if let deadline {
+                let left = deadline - ContinuousClock.now
+                if left <= .zero || (left < CleanupAgent.shortestTurn && index > 0) { break }
+                timeout = min(timeout, left)
+            }
+            let terms = await vocabulary?.cleanupTerms(for: chunk.text) ?? []
+            guard let reply = await ask(CleanupPrompt.Agent.finalRequest(chunk.text), kind: "final", final: true, terms: terms, timeout: timeout),
                   let rewrite = RewriteReply.clean(reply, keepLineBreaks: true)
             else { continue }
-            out += Self.guardedGroups(chunk.text, rewrite, at: location + chunk.location)
+            let groups = Self.guardedGroups(chunk.text, rewrite, at: location + chunk.location)
+            if let vocabulary, let cleaned = Self.applying(groups, to: chunk.text, at: location + chunk.location) {
+                vocabulary.learnFromCleanup(
+                    raw: chunk.text, cleaned: cleaned, style: options.style, runID: runID, locale: options.locale, suggested: terms)
+            }
+            out += groups
         }
         return out
     }
@@ -627,9 +698,23 @@ public struct PassageRewriter: Sendable {
                     String(decoding: oldUnits[hunk.old], as: UTF16.self), String(decoding: newUnits[hunk.new], as: UTF16.self),
                     at: location + hunk.old.lowerBound)
             }
-            if !steps.isEmpty { groups.append(Group(reference: reference, steps: steps)) }
+            if !steps.isEmpty {
+                groups.append(Group(reference: reference, steps: steps, span: Span(location: location + lower, length: upper - lower)))
+            }
         }
         return groups
+    }
+
+    /// `text` (at field offset `location`) with `groups` applied; nil when they change nothing.
+    static func applying(_ groups: [Group], to text: String, at location: Int) -> String? {
+        var units = Array(text.utf16)
+        for step in groups.flatMap(\.steps).sorted(by: { $0.span.location > $1.span.location }) {
+            let from = step.span.location - location, to = step.span.end - location
+            guard from >= 0, to <= units.count, from <= to else { return nil }
+            units.replaceSubrange(from..<to, with: step.text.utf16)
+        }
+        let out = String(decoding: units, as: UTF16.self)
+        return out == text ? nil : out
     }
 
     /// Consecutive whole sentences of `text`, each chunk at most ``chunkTokens`` (or the context share's room) unless
@@ -660,8 +745,9 @@ public struct PassageRewriter: Sendable {
 
     /// One user turn within the run's timeout, after trimming the session to the context share; nil when the turn
     /// failed or timed out.
-    func ask(_ request: String, kind: String, final: Bool) async -> String? {
-        let session = session, timeout = options.timeout
+    func ask(_ request: String, kind: String, final: Bool, terms: [String] = [], timeout: Duration? = nil) async -> String? {
+        let request = CleanupPrompt.Agent.request(request, terms: terms)
+        let session = session, timeout = timeout ?? options.timeout
         let start = ContinuousClock.now
         var trimmedTo: Int?
         do {

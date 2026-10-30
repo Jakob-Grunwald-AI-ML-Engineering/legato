@@ -1745,6 +1745,23 @@ scenario_fe() {
   lagsend="$(last_line "fe.lagsend keys=")"
   echo "fe latency: ${lag#*fe.lag }"
   echo "fe send-clear latency: ${lagsend#*fe.lagsend }"
+  # Every key goes through the queue now: an absolute bound replaces the old queue off-vs-on comparison. Median and
+  # p95 within one frame (16 ms), the slowest within 50 ms (simulator jitter).
+  local stat val limit
+  for stat in keyMs keyP95Ms keyMaxMs tapMs tapP95Ms tapMaxMs undoMs undoP95Ms undoMaxMs; do
+    val="$(sed -n "s/.* $stat=\([0-9.]*\).*/\1/p" <<< " ${lag#*fe.lag }")"
+    case $stat in *MaxMs) limit=50 ;; *) limit=16 ;; esac
+    if [ -n "$val" ] && python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$val" "$limit"; then
+      record PASS "$stat $val <= $limit ms"
+    else record FAIL "$stat <= $limit ms" "got <$val>"; fi
+  done
+  for stat in keyMs keyP95Ms keyMaxMs; do
+    val="$(sed -n "s/.* $stat=\([0-9.]*\).*/\1/p" <<< " ${lagsend#*fe.lagsend }")"
+    case $stat in *MaxMs) limit=50 ;; *) limit=16 ;; esac
+    if [ -n "$val" ] && python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$val" "$limit"; then
+      record PASS "send-clear $stat $val <= $limit ms"
+    else record FAIL "send-clear $stat <= $limit ms" "got <$val>"; fi
+  done
   assert_no_log "no lag step timed out" "fe.timeout"
   assert_log "the host's clear contradicted the prediction" "harness fe.settle final=0 outcome=notYet"
   # The edit queue takes the host's clear as a run boundary (ClearWatch: `fieldCleared`, a `reset(cleared)`): the
@@ -1828,8 +1845,8 @@ scenario_fa() {
   wait_log "link agent.finish" 20
   sleep 0.5
   assert_eq "the host emptied the field" "" "$(log_field "fe.step name=host-sent " doc)"
-  # The queue's reset trace is not guaranteed here (FieldEditCoordinator.fieldCleared returns early mid-write); the
-  # boundary shows in the agent: it was asked once, for the sentence after the clear, never for the sent one.
+  # A clear reported mid-write is taken once the write returns, so the boundary always shows in the queue.
+  assert_log "the host's clear reset the queue as a run boundary" "harness fe.reset reason=cleared"
   assert_count "the agent was asked once: only the sentence after the clear" "agent.ask" 1
   doc="$(harness_doc)"
   assert_eq "the sent sentence is not typed again" "" "$(grep -o 'sat\.' <<< "$doc")"

@@ -107,4 +107,14 @@ struct SentenceRewriteTests {
         let usage = LLMTokenUsage(head: 1_200, history: 50)
         #expect(RewriteContext.trimTarget(usage: usage, request: 20, budget: 1_000) == 0)
     }
+
+    /// A rewrite may not add or drop the sentence's negation, whatever the word counts say.
+    @Test func aRewriteThatFlipsTheNegationIsRejected() {
+        #expect(!RewriteGuard.accepts("I want it.", reference: "I don't want it."))
+        #expect(!RewriteGuard.accepts("Das geht.", reference: "Das geht nicht."))
+        #expect(!RewriteGuard.accepts("I never said that.", reference: "I ever said that."))
+        #expect(RewriteGuard.accepts("I don't want it.", reference: "I do not want it."))
+        #expect(RewriteGuard.accepts("I didn't do it.", reference: "I didn't, I didn't do it."))
+        #expect(RewriteGuard.accepts("Book a table for seven people.", reference: "Book a table for six, no wait, seven people."))
+    }
 }

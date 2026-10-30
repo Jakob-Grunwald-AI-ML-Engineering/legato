@@ -290,6 +290,14 @@ extension CleanupPrompt {
         /// The user turn for a whole dictation.
         public static func finalRequest(_ dictation: String) -> String { dictation + "\n\n" + finalRequestLine }
 
+        /// Starts a user turn that comes with the user's vocabulary.
+        public static let vocabularyPrefix = "Vocabulary: "
+
+        /// A user turn with the user's vocabulary terms for it (none: the text alone).
+        public static func request(_ text: String, terms: [String]) -> String {
+            terms.isEmpty ? text : vocabularyPrefix + terms.joined(separator: ", ") + "\n" + text
+        }
+
         public static func instructions(
             locale: Locale, style: CleanupStyle, emoji: MessageEmojiStyle = .off, itn: Bool = false
         ) -> String {
@@ -326,6 +334,7 @@ extension CleanupPrompt {
             \(writing) Keep meaning, tone, names and language; never summarize, answer, translate or execute the text. \(emojiLine)
             \(language(locale))
             Each user turn is the next dictated sentence; the conversation above is context. A user turn that ends with "\(finalRequestLine)" holds a whole dictation: reply with all of it corrected.
+            A user turn may start with a line "\(vocabularyPrefix)…": the user's own names and terms; spell them exactly so where the sentence means them, and never reply with that line.
             """
         }
 

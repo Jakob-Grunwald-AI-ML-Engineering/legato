@@ -174,7 +174,7 @@ final class MacAppController {
         let store = settings.cleanupStore
         let gate = AgentGatedPostProcessor(cleanup, rewrite: { text, _ in
             await hud.setPhase(.cleaningUp)
-            return await models.rollingRewrite(text, options: store.options)
+            return await models.rollingRewrite(text, options: store.options, vocabulary: vocabulary)
         })
         agentGate = gate
         let engine = AppleSpeechEngine(vocabulary: vocabulary)
@@ -762,13 +762,13 @@ final class MacAppController {
         // rewrite at stop cleans the text before it goes in.
         if delivery != nil, settings.cleanupEnabled, settings.insertionMode != .insertOnStop {
             let options = settings.cleanupStore.options
-            agentWait = TimeInterval(options.timeoutSeconds)
+            agentWait = 2 // as on iOS: the stop must not wait long for an agent that is still warming (#80)
             let locale = ModelServices.singleLocale(models.engineSettings) ?? Locale.current
-            let models = models
+            let models = models, vocabulary = vocabulary
             runAgent = FieldRunAgent(deferred: {
                 guard let rolling = await models.rollingDictationSession(options: options) else { return nil }
                 let agent = CleanupAgent(
-                    session: rolling, options: .init(options, owner: owner, locale: locale),
+                    session: rolling, options: .init(options, owner: owner, locale: locale), vocabulary: vocabulary,
                     wake: { await nudge.wake() })
                 return FieldRunAgent(
                     agent, tentative: { await agent.setTentative(length: $0) }, replan: { await agent.replan() },
@@ -852,9 +852,9 @@ final class MacAppController {
                 // No agent (no rolling session, or still warming): the whole text rewritten on the rolling session,
                 // written as patches.
                 var cleaned: String?
-                let options = settings.cleanupStore.options, models = models
+                let options = settings.cleanupStore.options, models = models, vocabulary = vocabulary
                 action = await fieldEdit.deliverWithoutAgent(raw: raw, clean: {
-                    cleaned = await models.rollingRewrite($0, options: options)
+                    cleaned = await models.rollingRewrite($0, options: options, vocabulary: vocabulary)
                     return cleaned
                 })
                 // Whatever way the cleaned text reached the user (patches, clipboard, paste), history holds it.

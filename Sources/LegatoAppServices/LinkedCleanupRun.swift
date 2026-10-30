@@ -500,8 +500,12 @@ public final class LinkedCleanupRun {
         var shownInField = false
         if outcome.agentAbsent {
             branch = .agentAbsent
-            if let pass = await rewrite(text) {
-                let delivery = await deliver(raw: committed, cleaned: pass)
+            // After a send (the field was cleared mid-run) only what the field shows of the run since is cleaned:
+            // the sent text is gone from the field and never comes back, not even on the clipboard.
+            let scope = mirror.wasCleared ? mirror.runText : text
+            let raw = mirror.wasCleared ? scope : committed
+            if let scope, let raw, let pass = await rewrite(scope) {
+                let delivery = await deliver(raw: raw, cleaned: pass)
                 reason = delivery == .notShown ? notShownReason : delivery == .partial ? partialReason : Self.describe(delivery)
                 partial = delivery == .partial
                 switch delivery {
@@ -512,7 +516,7 @@ public final class LinkedCleanupRun {
                     shownInField = true
                 }
             } else {
-                reason = "noPass"
+                reason = scope == nil ? "sent" : "noPass"
             }
         } else if mirror.runText == nil, !mirror.wasCleared, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // The run's spans are unknown (the keyboard restarted: another queue's window is not searched): where

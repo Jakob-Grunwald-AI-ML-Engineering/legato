@@ -97,7 +97,7 @@ private final class Rig: @unchecked Sendable {
     init(
         existing: String = "", scripts: [FakeSession.Script] = [], budget: Int = 4_000, head: Int = 0,
         timeout: Duration = .seconds(5), style: CleanupStyle = .verbatim, mode: CleanupAgent.Mode = .live,
-        endpoint: SentenceEndpointer.Config = .init()
+        endpoint: SentenceEndpointer.Config = .init(), vocabulary: VocabularyService? = nil
     ) async {
         field = existing
         queue = FieldEditQueue(FieldSnapshot(window: existing, caret: existing.utf16.count, windowBase: 0))
@@ -106,7 +106,7 @@ private final class Rig: @unchecked Sendable {
         agent = CleanupAgent(
             session: session,
             options: .init(owner: "run", locale: Locale(identifier: "en"), timeout: timeout, style: style, mode: mode, endpoint: endpoint),
-            now: { clock.now() }, wake: { wakes.add() })
+            vocabulary: vocabulary, now: { clock.now() }, wake: { wakes.add() })
         _ = await feed()  // The first batch is a resync of the empty run.
     }
 
@@ -408,6 +408,40 @@ struct CleanupAgentTests {
         #expect(await rig.agent.finish().isEmpty)
     }
 
+    /// Hand-backs no one disagreed with are free, but not forever: each costs a model turn next to recognition.
+    @Test func supersededHandBacksStopBeingReplannedAfterAFewTries() async throws {
+        let rig = await Rig(scripts: Array(repeating: .reply("I saw the dog."), count: 10))
+        var transactions = await rig.dictate("I saw teh dog.")
+        var asked = 0
+        while let id = transactions.first?.id, asked < 10 {
+            await rig.agent.superseded(id, by: UUID())
+            transactions = await rig.agent.replan()
+            asked += 1
+        }
+        #expect(transactions.isEmpty)
+        #expect(asked == CleanupAgent.freeRetries + 1)
+    }
+
+    // MARK: Vocabulary
+
+    /// The user's vocabulary goes with the sentence it is for, on a line of its own before it.
+    @Test func theVocabularyGoesWithTheTurn() async throws {
+        let vocabulary = VocabularyRig(); defer { vocabulary.cleanUp() }
+        try await vocabulary.service.store.add(text: "Grunwald")
+        let rig = await Rig(scripts: [.reply("We met Grunwald today.")], vocabulary: vocabulary.service)
+        _ = await rig.dictate("We met Grunwald today.")
+        #expect(await rig.session.requests == ["Vocabulary: Grunwald\nWe met Grunwald today."])
+    }
+
+    // MARK: Markdown
+
+    /// A sentence rewritten as a list item starts its own line: the space before it becomes the break.
+    @Test func aMarkdownListItemStartsItsOwnLine() async throws {
+        let rig = await Rig(scripts: [.reply("Buy milk."), .reply("- Buy eggs.")], style: .markdown)
+        rig.land(await rig.dictate("Buy milk. Bullet point buy eggs."))
+        #expect(rig.field == "Buy milk.\n- Buy eggs.")
+    }
+
     @Test func outOfWindowHandBacksAreReplannedWithoutGivingUp() async throws {
         let rig = await Rig(scripts: Array(repeating: .reply("I saw the dog."), count: 5))
         var transactions = await rig.dictate("I saw teh dog.")
@@ -543,6 +577,31 @@ struct CleanupAgentTests {
         _ = await rig.agent.finish()
         let asked = await rig.session.requests.count
         #expect(asked >= 1 && asked < 6)
+    }
+
+    /// The stop is bounded as a whole, not per turn: with a long turn timeout, slow turns still end the stop within
+    /// ``CleanupAgent/stopLimit`` (plus one short turn's slack); the rest stays as heard.
+    @Test func theWholeStopEndsWithinTheStopLimit() async throws {
+        let replies = (0..<8).map { FakeSession.Script.slow(.milliseconds(900), "Sentence \($0) is fine.") }
+        let rig = await Rig(scripts: replies, timeout: .seconds(10))
+        rig.write((0..<8).map { "Sentence \($0) is fine." }.joined(separator: " "))
+        await rig.agent.setTentative(length: rig.field.utf16.count)
+        _ = await rig.feed()
+        await rig.agent.setTentative(length: 0)
+        let started = ContinuousClock.now
+        _ = await rig.agent.finish()
+        #expect(ContinuousClock.now - started < CleanupAgent.stopLimit + .milliseconds(500))
+        #expect(await rig.session.requests.count < 8)
+    }
+
+    /// Replace leaves a sentence the user wrote in alone as a whole, also the words of it the user did not touch.
+    @Test func replaceLeavesEveryWordOfATouchedSentence() async throws {
+        let rig = await Rig(scripts: [.reply("I saw the dog run. It ran away.")], mode: .replace)
+        _ = await rig.dictate("I saw teh dog runn. It rann away.")
+        rig.user("We saw teh dog runn. It rann away.")
+        _ = await rig.feed()
+        rig.land(await rig.agent.finish())
+        #expect(rig.field == "We saw teh dog runn. It ran away.")
     }
 
     @Test func aLongReplaceStopStartsNoChunkPastItsBudget() async throws {

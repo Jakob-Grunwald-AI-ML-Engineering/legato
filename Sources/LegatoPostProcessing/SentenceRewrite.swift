@@ -88,12 +88,30 @@ public enum RewriteReply {
 /// Whether a rewritten sentence still says what was dictated. Either guard may accept it: the message guard (drops
 /// filler, false starts and self-corrections; its content words must come from the input) or a word drift of at
 /// most 40 % (lets in the written forms the message guard counts as new words: "x code" → "Xcode", "four oh four"
-/// → "404", "their" → "there"). An answer, a translation or another text fails both.
+/// → "404", "their" → "there"). An answer, a translation or another text fails both. Neither may add or drop the
+/// sentence's negation: "I don't want it" → "I want it" stays out, whatever the word counts say.
 public enum RewriteGuard {
     public static let drift = CleanupGuard(maxDrift: 0.4)
 
     public static func accepts(_ candidate: String, reference: String) -> Bool {
-        CleanupGuard.message.accepts(candidate, reference: reference) || drift.accepts(candidate, reference: reference)
+        guard isNegated(candidate) == isNegated(reference) else { return false }
+        return CleanupGuard.message.accepts(candidate, reference: reference) || drift.accepts(candidate, reference: reference)
+    }
+
+    /// Negation words (English and German). "no" is left out: it starts self-corrections ("no wait") the rewrite drops.
+    private static let negations: Set<String> = [
+        "not", "never", "cannot", "nothing", "nobody", "neither", "nor", "none",
+        "nicht", "nie", "niemals", "nichts", "niemand", "kein", "keine", "keinen", "keinem", "keiner", "keines", "weder",
+    ]
+
+    /// Whether `text` holds a negation word or an "n't" contraction.
+    static func isNegated(_ text: String) -> Bool {
+        let words = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+            .split(whereSeparator: { !$0.isLetter && $0 != "'" })
+        return words.contains { word in
+            let bare = word.trimmingCharacters(in: CharacterSet(charactersIn: "'"))
+            return negations.contains(bare) || bare.hasSuffix("n't")
+        }
     }
 }
 
