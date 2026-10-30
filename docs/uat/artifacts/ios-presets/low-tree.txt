@@ -1,0 +1,65 @@
+Attributes: Application, 0x10a99be80, pid: 61110, label: 'Legato'
+Element subtree:
+ →Application, 0x10a99be80, pid: 61110, label: 'Legato'
+    Window (Main), 0x10a99bd40, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x10a99b480, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x10a99bac0, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x10a99bc00, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x10a99b840, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x10a99b980, {{0.0, 0.0}, {402.0, 874.0}}
+                Other, 0x10a99b5c0, {{16.0, 74.0}, {370.0, 324.0}}
+                  TextField, 0x10a99b700, {{16.0, 74.0}, {370.0, 34.0}}, identifier: 'systemfield.document', placeholderValue: 'Initial field', Keyboard Focused
+                  TextField, 0x10a99a1c0, {{16.0, 116.0}, {370.0, 34.0}}, identifier: 'systemfield.username', placeholderValue: 'username'
+                  SecureTextField, 0x10e2a4000, {{16.0, 158.0}, {370.0, 34.0}}, identifier: 'systemfield.password', placeholderValue: 'password'
+                  TextField, 0x10e2a4140, {{16.0, 200.0}, {370.0, 34.0}}, identifier: 'systemfield.newPassword', placeholderValue: 'newPassword'
+                  TextField, 0x10e2a4280, {{16.0, 242.0}, {370.0, 34.0}}, identifier: 'systemfield.oneTimeCode', placeholderValue: 'oneTimeCode'
+                  TextField, 0x10e2a43c0, {{16.0, 284.0}, {370.0, 34.0}}, identifier: 'systemfield.emailAddress', placeholderValue: 'emailAddress'
+                  TextField, 0x10e2a4500, {{16.0, 326.0}, {370.0, 34.0}}, identifier: 'systemfield.prose', placeholderValue: 'prose'
+                  Button, 0x10e2a4640, {{16.0, 368.0}, {370.0, 30.0}}, identifier: 'systemfield.releasePin', label: 'Release keyboard pin'
+                    StaticText, 0x10e2a4780, {{128.0, 374.0}, {146.0, 18.0}}, label: 'Release keyboard pin'
+    Window, 0x10e2a48c0, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x10e2a4a00, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x10e2a4b40, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x10e2a4c80, {{0.0, 692.0}, {402.0, 182.0}}
+          Other, 0x10e2a4dc0, {{0.0, 692.0}, {402.0, 182.0}}, identifier: 'inputView'
+    Window, 0x10e2a4f00, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x10e2a5040, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x10e2a5180, {{0.0, 675.0}, {402.0, 199.0}}
+          Other, 0x10e2a52c0, {{0.0, 675.0}, {402.0, 199.0}}
+            Other, 0x10e2a5400, {{0.0, 675.0}, {402.0, 199.0}}
+              Other, 0x10e2a5540, {{0.0, 675.0}, {402.0, 199.0}}
+          Other, 0x10e2a5680, {{0.0, 692.0}, {402.0, 107.0}}
+            Other, 0x10e2a57c0, {{0.0, 692.0}, {402.0, 107.0}}
+              Other, 0x10e2a5900, {{0.0, 717.0}, {402.0, 85.0}}
+                Other, 0x10e2a5a40, {{0.0, 717.0}, {402.0, 85.0}}
+                  Other, 0x10e2a5b80, {{0.0, 717.0}, {402.0, 85.0}}
+                    Other, 0x10e2a5cc0, {{0.0, 717.0}, {402.0, 85.0}}
+                      Other, 0x10e2a5e00, {{0.0, 717.0}, {402.0, 85.0}}
+                        Other, 0x10e2a5f40, {{0.0, 717.0}, {402.0, 85.0}}
+                          Other, 0x10e2a6080, {{0.0, 717.0}, {402.0, 85.0}}
+                            Other, 0x10e2a61c0, {{0.0, 717.0}, {402.0, 85.0}}
+                              Other, 0x10e2a6300, {{0.0, 717.0}, {402.0, 85.0}}
+                                Other, 0x10e2a6440, {{0.0, 718.7}, {402.0, 28.0}}, label: 'Composer size', value: Low
+                                Button, 0x10e2a6580, {{6.3, 754.7}, {60.0, 43.0}}, label: 'Message'
+                                  Button, 0x10e2a66c0, {{6.3, 754.7}, {60.0, 43.0}}
+                                    StaticText, 0x10e2a6800, {{9.2, 768.2}, {54.3, 15.7}}, label: 'Message'
+                                Button, 0x10e2a6940, {{72.3, 754.7}, {49.0, 43.0}}, identifier: 'arrow.uturn.backward', label: 'Undo', Disabled
+                                Button, 0x10e2a6a80, {{127.3, 754.7}, {48.7, 43.0}}, identifier: 'arrow.uturn.forward', label: 'Redo', Disabled
+                                Button, 0x10e2a6bc0, {{182.0, 754.7}, {49.0, 43.0}}, label: 'Insert', Disabled
+                                Button, 0x10e2a6d00, {{237.0, 754.7}, {49.0, 43.0}}, identifier: 'xmark', label: 'Cancel composition'
+                                Button, 0x10e2a6e40, {{292.0, 754.7}, {48.7, 43.0}}, identifier: 'mic.slash', label: 'Mute transcription', Disabled
+                                Button, 0x10e2a6f80, {{346.7, 754.7}, {49.0, 43.0}}, identifier: 'key.mic', label: 'Start dictation'
+          Other, 0x10e2a70c0, {{0.0, 692.0}, {402.0, 182.0}}
+            Button, 0x10e2a7200, {{8.5, 805.7}, {68.1, 68.7}}, label: 'Next keyboard', value: Superwhisper
+              StaticText, 0x10e2a7340, {{8.5, 805.7}, {0.0, 0.0}}
+            Button, 0x10e2a7480, {{325.4, 805.4}, {68.1, 68.7}}, identifier: 'dictation', label: 'Dictate'
+              StaticText, 0x10e2a75c0, {{325.4, 805.4}, {0.0, 0.0}}
+            Button, 0x10e2a7700, {{325.4, 805.4}, {68.1, 68.7}}, identifier: 'dictation', label: 'Dictate'
+              StaticText, 0x10e2a7840, {{325.4, 805.4}, {0.0, 0.0}}
+Path to element:
+ →Application, 0x10a99be80, pid: 61110, label: 'Legato'
+Query chain:
+ →Find: Application 'de.gruenwald.legato'
+  Output: {
+    Application, 0x10e2a7980, pid: 61110, label: 'Legato'
+  }
