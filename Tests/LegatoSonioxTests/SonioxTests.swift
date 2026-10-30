@@ -1,0 +1,105 @@
+import Foundation
+import Testing
+import LegatoComposerDoc
+import LegatoRoom
+@testable import LegatoSoniox
+
+@Suite(.timeLimit(.minutes(1))) struct SonioxTests {
+    @Test func wordsAndSegmentsNeverCommitThePartialTail() {
+        var pipeline = Segmenter()
+        let first = pipeline.ingest([
+            SonioxToken(text: "Gu", confidence: 0.95, isFinal: true, startMs: 0, endMs: 100, language: "de"),
+            SonioxToken(text: "ten", confidence: 0.7, isFinal: true, startMs: 100, endMs: 200, language: "de"),
+            SonioxToken(text: " Morgen", confidence: 0.9, isFinal: false)])
+        #expect(first.segments.isEmpty)
+        #expect(first.tail == "Guten Morgen")
+        let final = pipeline.ingest([
+            SonioxToken(text: " Morgen", confidence: 0.9, isFinal: true, startMs: 200, endMs: 400, language: "de"),
+            SonioxToken(text: ".", confidence: 0.99, isFinal: true, startMs: 400, endMs: 400)])
+        #expect(final.segments.count == 1)
+        #expect(final.segments[0].words.map(\.word.text) == ["Guten", "Morgen."])
+        #expect(final.segments[0].words[0].word.confidence == 0.7)
+        #expect(final.segments[0].words[0].word.language == "de")
+        #expect(final.segments[0].words[0].t0 == 0)
+        #expect(final.tail.isEmpty)
+    }
+    @Test func endGapAndLimitsCloseSegments() {
+        var p = Segmenter(maxWords: 2, maxDuration: 8, gap: 0.7)
+        let output = p.ingest([
+            .init(text: "one", isFinal: true, startMs: 0, endMs: 100),
+            .init(text: " two", isFinal: true, startMs: 200, endMs: 300),
+            .init(text: " three", isFinal: true, startMs: 1100, endMs: 1200),
+            .init(text: "<end>", isFinal: true)])
+        #expect(output.segments.flatMap(\.words).map(\.word.text) == ["one", "two", "three"])
+        #expect(output.segments.count == 2)
+        var duration = Segmenter(maxDuration: 8)
+        #expect(duration.ingest([.init(text: "long", isFinal: true, startMs: 0, endMs: 8100), .init(text: "<end>", isFinal: true)]).segments[0].reason == "duration")
+    }
+    @Test func configCapsContextAndUsesHeader() throws {
+        let config = SonioxConfig(mode: "Note", personalPrompt: String(repeating: "x", count: 40000), terms: (0..<150).map { "Term\($0)" })
+        let json = try JSONDecoder().decode(JSONValue.self, from: config.message())
+        #expect(json["model"] == .string("stt-rt-v5"))
+        #expect(json["audio_format"] == .string("pcm_s16le"))
+        #expect(config.terms.count == 100)
+        #expect(config.estimatedContextTokens < 8000)
+        #expect(config.request(apiKey: "secret").value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+        #expect(!String(decoding: try config.message(), as: UTF8.self).contains("secret"))
+    }
+    @Test func providerFailuresReachTheRoomWithoutCredentials() async throws {
+        for code in [401, 402, 408, 413, 429] {
+            let room = Room()
+            let events = await room.subscribe(participant: .logger, channels: [.session])
+            var iterator = events.makeAsyncIterator()
+            let socket = FakeSocket()
+            let client = SonioxClient(room: room, socket: socket)
+            try await client.start(apiKey: "never-log-this")
+            _ = await iterator.next() // asr.started
+            await socket.feed("{\"error_code\":\(code)}")
+            let event = try #require(await iterator.next())
+            #expect(event.payload["event"] == .string("asr.error"))
+            #expect(event.payload["message"] == .string(SonioxError.provider(code).localizedDescription))
+            #expect(!String(decoding: try JSONEncoder().encode(event), as: UTF8.self).contains("never-log-this"))
+        }
+    }
+    @Test func protocolFinalizationKeepaliveAndErrors() async throws {
+        let socket = FakeSocket()
+        let room = Room()
+        let tails = await room.subscribe(participant: .ui, channels: [.asrTail])
+        var tailEvents = tails.makeAsyncIterator()
+        let client = SonioxClient(room: room, config: SonioxConfig(), socket: socket, keepaliveInterval: .milliseconds(5))
+        try await client.start(apiKey: "test")
+        await socket.feed("{\"tokens\":[{\"text\":\"speculative\",\"is_final\":false}]}")
+        let tail = await tailEvents.next()
+        #expect(tail?.payload["text"] == .string("speculative"))
+        #expect(await room.documentSnapshot.lines.isEmpty)
+        try await Task.sleep(for: .milliseconds(25))
+        let finishing = Task { try await client.finish() }
+        while !(await socket.sent()).contains(.text("{\"type\":\"finalize\"}")) { await Task.yield() }
+        await socket.feed("{\"tokens\":[{\"text\":\"<fin>\",\"is_final\":true}]}")
+        while !(await socket.sent()).contains(.text("")) { await Task.yield() }
+        await socket.feed("{\"finished\":true}")
+        try await finishing.value
+        #expect(await socket.sent().contains(.text("{\"type\":\"keepalive\"}")))
+        for code in [401, 402, 408, 413, 429] {
+            #expect(!SonioxError.provider(code).localizedDescription.isEmpty)
+        }
+    }
+}
+
+actor FakeSocket: SonioxSocket {
+    var messages: [SonioxFrame] = []
+    var inbox: [SonioxFrame] = []
+    var waiter: CheckedContinuation<SonioxFrame, any Error>?
+    func connect(request: URLRequest) async throws {}
+    func send(_ frame: SonioxFrame) async throws { messages.append(frame) }
+    func receive() async throws -> SonioxFrame {
+        if !inbox.isEmpty { return inbox.removeFirst() }
+        return try await withCheckedThrowingContinuation { waiter = $0 }
+    }
+    func close() async { waiter?.resume(throwing: SonioxError.cancelled); waiter = nil }
+    func feed(_ text: String) {
+        if let waiter { self.waiter = nil; waiter.resume(returning: .text(text)) }
+        else { inbox.append(.text(text)) }
+    }
+    func sent() -> [SonioxFrame] { messages }
+}

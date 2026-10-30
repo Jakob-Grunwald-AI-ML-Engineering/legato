@@ -5,8 +5,9 @@ let package = Package(
     name: "LegatoKit",
     platforms: [.iOS(.v26), .macOS(.v26)],
     products: [
-        .library(name: "LegatoComposerDoc", targets: ["LegatoComposerDoc"]),
+        .library(name: "LegatoSoniox", targets: ["LegatoSoniox"]),
         .library(name: "LegatoRoom", targets: ["LegatoRoom"]),
+        .library(name: "LegatoComposerDoc", targets: ["LegatoComposerDoc"]),
         .library(name: "LegatoDevHarness", targets: ["LegatoDevHarness"]),
         .library(name: "LegatoCore", targets: ["LegatoCore"]),
         .library(name: "LegatoKeyboardCore", targets: ["LegatoKeyboardCore"]),
@@ -20,9 +21,11 @@ let package = Package(
         .package(url: "https://github.com/EmergeTools/Pow.git", exact: "1.0.5"),
     ],
     targets: [
+        .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
+        .target(name: "LegatoSoniox", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
+        .testTarget(name: "LegatoSonioxTests", dependencies: ["LegatoSoniox", "LegatoRoom", "LegatoComposerDoc"]),
         .target(name: "LegatoComposerDoc"),
         .target(name: "LegatoRoom", dependencies: ["LegatoComposerDoc", "LegatoVocabulary"]),
-        .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
         .testTarget(name: "LegatoComposerDocTests", dependencies: ["LegatoComposerDoc"]),
         .target(name: "LegatoDevHarness"),
         .testTarget(name: "LegatoDevHarnessTests", dependencies: ["LegatoDevHarness"]),
