@@ -129,7 +129,8 @@ cache="$(printf '%s\n' "$LEGATO_DEVICE_STATE"/*/log.jsonl)"
 [ -f "$cache" ] || cache="$LEGATO_DEVICE_STATE/log.jsonl"
 echo '{"id":"other","event":"done"}' > "$cache"
 failed_preserves() {
-  ! run_ctl wait c-test 1 && grep -q '"id":"other"' "$cache" && grep -q 'fixture transfer unavailable' "$FIXTURE/err"
+  # Exercise transfer classification and cache preservation, not deadline expiry.
+  ! run_ctl wait c-test 3 && grep -q '"id":"other"' "$cache" && grep -q 'fixture transfer unavailable' "$FIXTURE/err"
 }
 check failed_preserves
 bounded() {
@@ -178,7 +179,8 @@ reply() { run_ctl wait c-test 2 && jq -e -s 'last.choice == "Continue"' "$FIXTUR
 check reply
 setup malformed
 echo 'broken JSON' > "$FIXTURE/done"
-malformed() { ! run_ctl wait c-test 1 && grep -q 'invalid bridge log' "$FIXTURE/err"; }
+# Allow the pull to complete before asserting the malformed-log diagnostic.
+malformed() { ! run_ctl wait c-test 3 && grep -q 'invalid bridge log' "$FIXTURE/err"; }
 check malformed
 setup sim
 mkdir -p "$FIXTURE/container/Library/Caches/debug-bridge/inbox"
@@ -267,10 +269,15 @@ for scenario in mac-foreign mac-dead mac-stale mac-existing; do
     echo '{"id":"-","event":"started","pid":444444,"generation":"launch-services"}' > "$FIXTURE/mac/log.jsonl"
   fi
   rejects_invalid_mac_launch() {
-    ! LEGATO_DEVICE_LAUNCH_TIMEOUT=1 LEGATO_APP="$FIXTURE/Test.app" LEGATO_MAC_ROOT="$FIXTURE/mac" run_ctl --target mac launch || return 1
+    # Reach readiness/identity validation instead of passing from a pre-launch deadline.
+    ! LEGATO_DEVICE_LAUNCH_TIMEOUT=3 LEGATO_APP="$FIXTURE/Test.app" LEGATO_MAC_ROOT="$FIXTURE/mac" run_ctl --target mac launch || return 1
     local pids=("$LEGATO_DEVICE_STATE"/*/pid)
     [ ! -f "${pids[0]}" ] || return 1
-    if [ "$SCENARIO" = mac-existing ]; then grep -q 'Mac app already runs as PID 12345' "$FIXTURE/err"; fi
+    if [ "$SCENARIO" = mac-existing ]; then
+      [ ! -f "$FIXTURE/open-args" ] && grep -q 'Mac app already runs as PID 12345' "$FIXTURE/err"
+    else
+      grep -qx -- "LEGATO_MAC_ROOT=$FIXTURE/mac" "$FIXTURE/open-args"
+    fi
   }
   check rejects_invalid_mac_launch
 done
