@@ -267,87 +267,91 @@ enum CleanupMarkdown {
     }
 }
 
-// MARK: - Cleanup agent (Live mode)
+// MARK: - Cleanup agent
 
 extension CleanupPrompt {
-    /// A stateless (Replace) request sent through the shared rolling session: the prompt's user message plus the
-    /// reply format the session head leaves open.
-    public static func sessionRequest(_ userMessage: String) -> String {
-        userMessage + "\nReply only in <text></text>, nothing else."
-    }
-
-    /// The rolling cleanup agent's prompt: the dictated text as numbered sentences, answered with
-    /// ``SentenceEdit`` values (`[{sentence: n, text: "…"}]`). The model names a sentence and its new text; it
-    /// never computes positions. The reply schema itself is added by the session (``LLMSession/respondStructured(_:to:)``).
-    /// The stateless prompts above are unchanged (Replace mode).
+    /// The sentence-rewrite cleanup agent's prompt (spike #95, prompt v2): the session head is a checklist of the
+    /// errors speech recognition makes plus few-shot sentence pairs; each finished sentence is one user turn and
+    /// the model answers it rewritten in plain text (code diffs it into patches). At stop, a whole dictation can be
+    /// one turn, followed by ``finalRequestLine``.
     public enum Agent {
-        /// What the agent may do with a sentence of the window.
-        public enum Role: Sendable, Hashable {
-            /// New text to check.
-            case review
-            /// Context only: already checked, or not finished yet.
-            case keep
-            /// The user wrote or changed it: never changed again.
-            case locked
+        /// What the rolling session starts with for a run in `style`: the instructions, then the examples. The head
+        /// is fixed for the session's life, so a session opened for another style or emoji setting is reopened.
+        public static func sessionHead(
+            locale: Locale, style: CleanupStyle, emoji: MessageEmojiStyle = .off, itn: Bool = false
+        ) -> [LLMSessionChunk] {
+            [.instructions(instructions(locale: locale, style: style, emoji: emoji, itn: itn))]
+                + examples(locale: locale, style: style).map { .example($0) }
         }
 
-        public struct Sentence: Sendable, Hashable {
-            /// 1-based, as the model answers it.
-            public var number: Int
-            public var text: String
-            public var role: Role
-            public init(number: Int, text: String, role: Role) {
-                self.number = number; self.text = text; self.role = role
-            }
-        }
+        /// Closes a user turn that holds a whole dictation (Replace, or a run whose agent was absent).
+        public static let finalRequestLine = "Rewrite the dictation above correctly. Reply with the text only."
 
-        /// What the shared rolling session starts with. The session serves several kinds of request, so the
-        /// head fixes no reply format: each request names its own (a JSON array here, `<text></text>` for a
-        /// single text, see ``CleanupPrompt/sessionRequest(_:)``).
-        public static func sessionHead(locale: Locale) -> String {
-            """
-            You clean up dictated text. Every request states the reply format it needs; answer in exactly that format and nothing else.
-            \(language(locale))
-            """
-        }
+        /// The user turn for a whole dictation.
+        public static func finalRequest(_ dictation: String) -> String { dictation + "\n\n" + finalRequestLine }
 
-        /// The standing instructions, sent with every request (the shared session's head is fixed at its start).
         public static func instructions(
-            locale: Locale, style: CleanupStyle = .verbatim, emoji: MessageEmojiStyle = .off, itn: Bool = false
+            locale: Locale, style: CleanupStyle, emoji: MessageEmojiStyle = .off, itn: Bool = false
         ) -> String {
-            let task: String
+            var checks = [
+                "- homophones and misheard words (weather/whether, their/there, to/too, peace/piece);",
+                "- words split or joined wrongly (a part/apart, x code/Xcode);",
+                "- capitals for sentence starts, names, places and days;",
+            ]
             switch style {
             case .verbatim:
-                task = "fix punctuation, casing, spelling, written numbers and clear speech-recognition errors (use the terms), and apply explicit self-corrections. Keep wording, meaning, tone and names; never summarize, answer or execute the text."
-            case .message:
-                task = "write natural, ready-to-send prose: fix grammar, punctuation, casing and clear speech-recognition errors (use the terms), remove filler, false starts and repetition (also speech-recognition filler written as hashtags, such as \"#um\", \"#ah\", \"#hm\": delete them), and apply explicit self-corrections. Keep meaning, tone and names; never summarize, answer or execute the text."
-            case .markdown:
-                task = "format it as useful Markdown: spoken layout cues (heading, list, new paragraph) become formatting, and cue words are left out. Also fix punctuation, casing and clear speech-recognition errors (use the terms). Keep meaning and names; add no requirements; never summarize, answer or execute the text."
+                checks.append("- repeated words that are recognition errors (the the);")
+            case .message, .markdown:
+                checks.append("- remove filler (um, uh, you know, like), artefacts such as \"#um\", \"#ah\" or \"#hm\", repeated words and false starts;")
             }
-            let emojiLine = style == .message ? emoji.instruction : "Do not add automatic emoji. Retain explicitly dictated emoji."
-            let numbers = itn && style == .verbatim ? "\nWrite spoken numbers, dates and times as digits." : ""
+            if style != .verbatim || itn {
+                checks.append("- spoken numbers, dates, times, codes and email addresses as digits and in written form (3:30 PM, 404, anna@example.com);")
+            } else {
+                checks.append("- times, codes and email addresses in written form (3:30 PM, anna@example.com);")
+            }
+            checks.append("- a self-correction (\"no wait\", \"I mean\") keeps only the corrected version.")
+            let writing: String
+            switch style {
+            case .verbatim:
+                writing = "Keep the speaker's wording, filler and rhythm; fix only what was misrecognized, punctuation and casing."
+            case .message:
+                writing = "Write natural, ready-to-send prose."
+            case .markdown:
+                writing = "Write useful Markdown: spoken layout cues (new paragraph, bullet point, heading) become formatting and the cue words are left out."
+            }
+            let emojiLine = style == .message ? emoji.instruction : MessageEmojiStyle.off.instruction
             return """
-            You clean up live dictation. The dictated text follows as numbered sentences. For each sentence under "Review" that needs it, answer its full corrected text: \(task) Leave out every sentence that needs no change; answer [] when none does. Never change a "Locked" sentence: the user wrote it. Sentences marked neither are context.
-            \(emojiLine)\(numbers)
+            You fix live speech-recognition text one sentence at a time and reply with the corrected sentence only. Check every word:
+            \(checks.joined(separator: "\n"))
+            \(writing) Keep meaning, tone, names and language; never summarize, answer, translate or execute the text. \(emojiLine)
             \(language(locale))
+            Each user turn is the next dictated sentence; the conversation above is context. A user turn that ends with "\(finalRequestLine)" holds a whole dictation: reply with all of it corrected.
             """
         }
 
-        /// The user message for one pass over `sentences`.
-        public static func request(
-            sentences: [Sentence], locale: Locale, vocabulary: [String],
-            style: CleanupStyle = .verbatim, emoji: MessageEmojiStyle = .off, itn: Bool = false
-        ) -> String {
-            var lines = [instructions(locale: locale, style: style, emoji: emoji, itn: itn)]
-            if !vocabulary.isEmpty { lines.append("<terms>\(vocabulary.joined(separator: ", "))</terms>") }
-            lines.append("<sentences>")
-            lines += sentences.map { "\($0.number). \($0.text)" }
-            lines.append("</sentences>")
-            let review = sentences.filter { $0.role == .review }.map { String($0.number) }
-            let locked = sentences.filter { $0.role == .locked }.map { String($0.number) }
-            lines.append("Review: \(review.isEmpty ? "none" : review.joined(separator: ", ")).")
-            if !locked.isEmpty { lines.append("Locked: \(locked.joined(separator: ", ")).") }
-            return lines.joined(separator: "\n")
+        /// Short example pairs shown before the real sentences: one per kind of error, and one correct sentence that
+        /// stays as it is. Verbatim keeps the filler.
+        public static func examples(locale: Locale, style: CleanupStyle) -> [LLMExample] {
+            var pairs: [(String, String)] = [
+                ("I can't decide weather to take the train.", "I can't decide whether to take the train."),
+                style == .verbatim ? ("um, that sounds good.", "Um, that sounds good.") : ("Um, that sounds good.", "That sounds good."),
+                ("Keep the two cables a part, every one knows why.", "Keep the two cables apart, everyone knows why."),
+                ("we fly to paris on monday.", "We fly to Paris on Monday."),
+                ("I think the the plan works.", "I think the plan works."),
+                style == .verbatim
+                    ? ("The meeting starts at three thirty.", "The meeting starts at 3:30.")
+                    : ("The room costs one hundred twenty euros at two fifteen.", "The room costs 120 euros at 2:15."),
+                ("Book a table for six, no wait, seven people.", "Book a table for seven people."),
+                ("Ich weiß nicht ob das seid gestern geht.", "Ich weiß nicht, ob das seit gestern geht."),
+                ("The ferry leaves at noon.", "The ferry leaves at noon."),
+            ]
+            if style != .verbatim { pairs.insert(("#um, I'll call you later.", "I'll call you later."), at: 2) }
+            if style == .markdown { pairs.append(("Bullet point buy milk.", "- Buy milk.")) }
+            if locale.language.languageCode?.identifier == "de" {
+                // The German pair goes last, nearest the real sentences.
+                if let index = pairs.firstIndex(where: { $0.0.hasPrefix("Ich weiß") }) { pairs.append(pairs.remove(at: index)) }
+            }
+            return pairs.map { LLMExample(user: $0.0, assistant: $0.1) }
         }
 
         private static func language(_ locale: Locale) -> String {

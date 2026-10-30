@@ -61,6 +61,8 @@ public final class ModelServices {
     private let foundationResources: any LLMBackend & ModelResourceLifecycle
     private let resourceOverrides: ModelServiceResources?
     public let cleanupPreparation = CleanupPreparationStatus()
+    /// The stored cleanup settings (the rolling session's default head follows them).
+    private let cleanupSettings: CleanupSettingsStore
     public var cleanupPreparationNotice: String? { cleanupPreparation.state == .failed ? cleanupPreparation.message : nil }
     private let selection: SelectionStore
     private let familySelection: FamilySelection
@@ -91,6 +93,9 @@ public final class ModelServices {
         resourceOverrides = resources
         foundationResources = resources?.foundation ?? FoundationModelsBackend()
         meetingSettings = MeetingSettings(defaults: defaults)
+        cleanupSettings = CleanupSettingsStore(defaults: defaults)
+        let storedCleanup = cleanupSettings, storedEngines = EngineSettings(defaults: defaults)
+        rollingSessionHead = { Self.agentHead(storedCleanup.options, locale: Self.singleLocale(storedEngines) ?? .current) }
         speechResources = AppleSpeechEngine(vocabulary: vocabulary)
         FluidAudioModels.pinRevisions()
         selection = SelectionStore(defaults: defaults)
@@ -223,9 +228,13 @@ public final class ModelServices {
     public func cleanupChoice(for modelID: String) -> CleanupBackendChoice { .coreML }
 
     /// What the rolling cleanup session starts with (instructions, examples), prefilled when the model is
-    /// prepared. Set before the first preparation; a change applies to sessions opened afterwards.
-    public var rollingSessionHead: @Sendable () async -> [LLMSessionChunk] = {
-        [.instructions(CleanupPrompt.Agent.sessionHead(locale: .current))]
+    /// prepared: the cleanup agent's head for the stored cleanup settings, so a run in those settings finds it warm.
+    /// A run in other settings reopens it with its own head (``rollingDictationSession(options:)``).
+    public var rollingSessionHead: @Sendable () async -> [LLMSessionChunk]
+
+    /// The cleanup agent's session head for a run with `options` in `locale`.
+    nonisolated static func agentHead(_ options: CleanupOptions, locale: Locale) -> [LLMSessionChunk] {
+        CleanupPrompt.Agent.sessionHead(locale: locale, style: options.style, emoji: options.emoji, itn: options.itn)
     }
 
     /// The selected cleanup backend's one rolling session (see ``SelectedModelWarmup/rollingSession(key:)``):
@@ -235,9 +244,11 @@ public final class ModelServices {
     }
 
     /// The rolling session of the backend a dictation run with `options` uses (the one it leased), for the cleanup
-    /// agent. Nil when that backend has none ready: the run then keeps today's cleanup.
+    /// agent, with the agent's head for the run's style (reopened when it was opened for another). Nil when that
+    /// backend has none ready: the run's text then stays as heard.
     public func rollingDictationSession(options: CleanupOptions) async -> (any LLMSession)? {
-        await rollingCleanupSession(for: await effectiveDictationBackend(options: options))
+        let head = Self.agentHead(options, locale: Self.singleLocale(engineSettings) ?? .current)
+        return await warmup.rollingSession(key: await cleanupResource(backend: await effectiveDictationBackend(options: options)).key, head: head)
     }
 
     public func acquireSummaryBackend(backend: CleanupBackendChoice, inBackground: Bool) async throws -> SummaryBackendLease {
