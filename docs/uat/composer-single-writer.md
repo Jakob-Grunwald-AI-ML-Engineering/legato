@@ -1,6 +1,6 @@
 # One writer, two tempos
 
-The composer now uses one active writer, one selected model and one conversation. Ordinary speech receives quick local corrections. Substantial drafting/reorganization waits for 2.5 seconds of quiet or the final Stop pass. Fresh partial speech resets that timer and cancels a pause rewrite; the previous provider stream retires before another starts. Explicit word/quote corrections retain full tools immediately, scoped to the target. Stop drains pending input, then asks the same writer to finish.
+The composer now uses one active writer, one selected model and one conversation. Ordinary speech receives quick local corrections. Substantial drafting/reorganization waits for 1 second of quiet or the final Stop pass. Fresh partial speech resets that timer and cancels a pause rewrite; the previous provider stream retires before another starts. Explicit word/quote corrections retain full tools immediately, scoped to the target. Stop drains pending input, then asks the same writer to finish.
 
 Settings on both platforms contain one **Writing model** selector. The saved `composer.liveModel` choice is preserved; Haiku remains the unset default, with Sonnet and Opus available. There are no independent worker switches, second structure model, or delegation tool. Auto still loads specialized writing guidance as context without changing its UI mode. System/tool definitions remain stable across phases; quick broad-edit attempts return an explicit deferral rather than a generic refresh/retry error.
 
@@ -19,6 +19,8 @@ Three new contracts reproduced the old failures and pass after the change: one p
 ## Real provider pipeline check
 
 The signed Mac build passed. One bounded real Claude session, `A2B0139E-EE87-4211-9F80-AFB61B0D8B60`, used debug transcript input through the actual segmenter, document, Auto writer and UI, with no microphone lease. Its five provider requests all reported `claude-haiku-5-5`; the retained Room trace had one maximum in-flight request and only the `liveAgent` writing participant. It recorded quick → quick → pause → final, then completed normally with an empty error.
+
+The earlier 2.5-second implementation was measured as follows; these provider timings are historical, not a measurement of the current 1-second scheduler.
 
 The synthetic `Helo Morgan. The staging review is Friday at 2.` received a local `Helo`→`Hello` correction during the first quick turn, approximately 1.85 seconds after the accepted ASR append. The pause turn began 3.92 seconds after the last append, following the already queued quick turn and exceeding the 2.5-second quiet threshold. The final same-writer pass reached `done` approximately 1.16 seconds after Stop. Morgan, Friday and 2 remained intact; Auto remained selected throughout. No delegation or second model was used.
 
