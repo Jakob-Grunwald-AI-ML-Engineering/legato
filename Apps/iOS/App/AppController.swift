@@ -154,7 +154,11 @@ final class AppController {
         #endif
         // While the cleanup agent cleans a run (a keyboard run), the session's own cleanup stays out; otherwise its
         // one cleanup at stop is the rolling session's rewrite.
+        #if DEBUG
+        let agentGate = AgentGatedPostProcessor(E2E.fakeCleanup ?? cleanup, rewrite: { text, _ in await Self.rollingRewrite(text, models: models) })
+        #else
         let agentGate = AgentGatedPostProcessor(cleanup, rewrite: { text, _ in await Self.rollingRewrite(text, models: models) })
+        #endif
         self.history = history
         let meetingRoot = directory.appending(path: "Meetings", directoryHint: .isDirectory)
         #if DEBUG

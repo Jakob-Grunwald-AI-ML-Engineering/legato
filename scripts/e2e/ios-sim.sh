@@ -1799,7 +1799,9 @@ scenario_fa() {
   wait_log "link agent.finish" 20
   sleep 0.5
   assert_eq "the host emptied the field" "" "$(log_field "fe.step name=host-sent " doc)"
-  assert_log "the keyboard took the clear as a run boundary" "harness fe.reset reason=cleared"
+  # The queue's reset trace is not guaranteed here (FieldEditCoordinator.fieldCleared returns early mid-write); the
+  # boundary shows in the agent: it was asked once, for the sentence after the clear, never for the sent one.
+  assert_count "the agent was asked once: only the sentence after the clear" "agent.ask" 1
   doc="$(harness_doc)"
   assert_eq "the sent sentence is not typed again" "" "$(grep -o 'sat\.' <<< "$doc")"
   assert_eq "the rest of the run is in the field once" "1" "$(grep -o 'ran\.' <<< "$doc" | wc -l | tr -d ' ')"
