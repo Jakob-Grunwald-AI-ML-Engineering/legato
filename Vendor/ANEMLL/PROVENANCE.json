@@ -15,15 +15,17 @@
   "patches": {
     "anemll-tokenizer.patch": "a459cc20c77be06d3a969ef85ce84d73aff088393e157e3e6e2fbddd117fa5b6",
     "anemll-cancellation.patch": "e9144375a22a4a08791fa9edfef9a226d0ad8c85850a8cf8a65f73c17366c2c8",
-    "legato-production.patch": "7fce9219a956fed39057d085fcb7635289684a177e7b03710f2a4ce74df2ae80"
+    "legato-production.patch": "1014b4ad84cf6fe2ac7a0239f5cf8418270933062701d4008ff281f532d593c8",
+    "legato-session-reuse.patch": "b7e018237bba43e21eed98560d0a1deb7b6c5617df6e2e9e0802ba2316bc5b55"
   },
   "legatoModifications": [
     "Suppress upstream print diagnostics in production",
-    "Synchronize parallel argmax result publication using Mutex"
+    "Synchronize parallel argmax result publication using Mutex",
+    "Reuse explicitly tracked persistent-session KV prefixes and support prefill without generation; stateless calls still reset state"
   ],
   "finalSourceSHA256": {
     "FFNChunk.swift": "a2b7ee6d52641cee3af2bf9bbd882cf3bed3b3f863548a285729a6cdf0b5d750",
-    "InferenceManager.swift": "c46055976f84a332490e305b59e900578af3ebe90f7b4316fd26251bf6b3143d",
+    "InferenceManager.swift": "8644c3004ed2f11afbd5b901a40608ca7e339d82e5bc87dc52b455bcf1164038",
     "MetalArgmax.swift": "2fc4fed2f1de0b838367c8f65dc3a18ab261940ec2a3aa56d037d39a24e39971",
     "ModelLoader.swift": "ab7f1c4015323909b9eb01e8186bed97f208940553163a5d1efd6d64d433733b",
     "SamplingConfig.swift": "132006c29a4203d746ad38043e4cfdce04c17a265410023712f5eb952ef9a7ff",

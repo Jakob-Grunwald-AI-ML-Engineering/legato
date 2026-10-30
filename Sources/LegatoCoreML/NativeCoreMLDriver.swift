@@ -6,12 +6,13 @@ import LegatoCore
 /// Native objects are confined to CoreMLBackend's lease, including cancellation and preparation.
 final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
     let contextLength: Int
-    private let promptFamily: CoreMLPromptFamily
+    let batchSize: Int
+    let promptFamily: CoreMLPromptFamily
     private let tokenizer: LegatoANEMLL.Tokenizer
     private let manager: InferenceManager
     private let cancellation: CoreMLCancellation
     private init(config: YAMLConfig, promptFamily: CoreMLPromptFamily, tokenizer: LegatoANEMLL.Tokenizer, manager: InferenceManager, cancellation: CoreMLCancellation) {
-        self.promptFamily = promptFamily; self.contextLength = config.contextLength; self.tokenizer = tokenizer; self.manager = manager; self.cancellation = cancellation
+        self.promptFamily = promptFamily; self.contextLength = config.contextLength; self.batchSize = config.batchSize; self.tokenizer = tokenizer; self.manager = manager; self.cancellation = cancellation
     }
     static func load(spec: CoreMLModelSpec, folder: URL, cancellation: CoreMLCancellation) async throws -> NativeCoreMLDriver {
         let config = try YAMLConfig.load(from: folder.appending(path: "meta.yaml").path)
@@ -47,10 +48,30 @@ final class NativeCoreMLDriver: CoreMLDriving, @unchecked Sendable {
         guard tokens == canonical else { throw LLMError.failed("The installed checkpoint chat template differs from the supported \(promptFamily.rawValue) format.") }
         return tokens
     }
+    /// Pure tokenization: no native state, so nothing to cancel (sessions count tokens outside the worker).
+    func encode(_ text: String) async throws -> [Int] { tokenizer.rawTokens(text) }
     func generate(tokens: [Int], outputLimit: Int) async throws -> CoreMLGeneration {
+        try await generate(tokens: tokens, reusingPrefix: 0, outputLimit: outputLimit)
+    }
+    /// `reusingPrefix` is the backend's promise about `manager`'s state (see the vendored
+    /// `InferenceManager.generateResponse(reusingPrefix:)`); 0 always starts from a fresh state.
+    func generate(tokens: [Int], reusingPrefix: Int, outputLimit: Int) async throws -> CoreMLGeneration {
         let cancellation = cancellation
-        let result = try await manager.generateResponse(initialTokens: tokens, temperature: 0, maxTokens: outputLimit, eosTokens: tokenizer.eosTokenIds, tokenizer: tokenizer, onToken: nil, onWindowShift: { cancellation.cancel() })
+        // What the manager really reuses: it falls back to a full prefill for a promise it cannot use.
+        let reused = manager.effectiveReuse(reusingPrefix, of: tokens.count)
+        let result = try await manager.generateResponse(initialTokens: tokens, temperature: 0, maxTokens: outputLimit, eosTokens: tokenizer.eosTokenIds, tokenizer: tokenizer, onToken: nil, onWindowShift: { cancellation.cancel() }, reusingPrefix: reused)
         try cancellation.check()
-        return .init(text: tokenizer.decode(tokens: result.0, skipSpecialTokens: true), stopReason: result.2)
+        return .init(text: tokenizer.decode(tokens: result.0, skipSpecialTokens: true), stopReason: result.2,
+                     tokens: result.0, prefilled: tokens.count - reused, prefillSeconds: result.1)
+    }
+    func prefill(tokens: [Int], reusingPrefix: Int) async throws -> CoreMLPrefill {
+        let reused = manager.effectiveReuse(reusingPrefix, of: tokens.count)
+        let seconds = try await manager.prefillOnly(initialTokens: tokens, reusingPrefix: reused)
+        try cancellation.check()
+        return CoreMLPrefill(prefilled: tokens.count - reused, seconds: seconds)
+    }
+    /// The checkpoint template's tokens for `messages` (probes compare session continuations against it).
+    func canonicalTokens(messages: [[String: any Sendable]]) throws -> [Int] {
+        try tokenizer.canonicalChatTokens(messages: messages, thinking: false)
     }
 }

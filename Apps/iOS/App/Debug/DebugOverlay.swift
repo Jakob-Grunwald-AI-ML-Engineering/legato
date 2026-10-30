@@ -1,6 +1,7 @@
 #if LEGATO_INTERNAL
 import AudioToolbox
 import SwiftUI
+import LegatoDevHarness
 import UIKit
 import UserNotifications
 
@@ -11,128 +12,54 @@ import UserNotifications
 final class DebugMessages {
     static let shared = DebugMessages()
 
-    struct Item: Identifiable, Equatable {
-        let id: String
-        let text: String
-        /// Empty for `say` (a single dismiss button).
-        let choices: [String]
+    typealias Item = LegatoDevHarness.DebugMessages.Item
+    typealias Parsed = LegatoDevHarness.DebugMessages.Parsed
+    private let state: LegatoDevHarness.DebugMessages
+    @ObservationIgnored private var window: DebugOverlayWindow?
+    @ObservationIgnored private var visibleCardID: String?
+    @ObservationIgnored private(set) var interactiveRects: [String: CGRect] = [:]
+
+    private init() {
+        state = LegatoDevHarness.DebugMessages { id, event, fields in
+            DebugBridge.emit(id: id, event: event, fields)
+            if event == "reply" || event == "dismissed" {
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+            }
+        }
+        state.onChange = { [weak self] in self?.refreshWindow() }
     }
 
-    private(set) var queue: [Item] = []
-    private(set) var status: String?
-    /// While set, the overlay covers the app and swallows every tap except on the banner and the card.
-    private(set) var blocking = false
-    @ObservationIgnored private var shownID: String?
-    @ObservationIgnored private var timeouts: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored private var limits: [String: Double] = [:]
-    @ObservationIgnored private var window: DebugOverlayWindow?
-
-    var current: Item? { queue.first }
-
-    /// Frames (window coordinates) of the banner and the card: the only places the overlay takes touches.
-    @ObservationIgnored private(set) var interactiveRects: [String: CGRect] = [:]
+    var queue: [Item] { state.queue }
+    var status: String? { state.status }
+    var blocking: Bool { state.blocking }
+    var current: Item? { state.current }
     func setRect(_ key: String, _ rect: CGRect?) { interactiveRects[key] = rect }
-
-    /// Window-level check for `overlay-selftest`: does a touch at `point` reach the overlay?
     func overlayHit(at point: CGPoint) -> Bool { window?.hitTest(point, with: nil) != nil }
     var firstRect: CGRect? { interactiveRects["card"] ?? interactiveRects["status"] }
 
-    /// Parsed `ask`/`say` arguments: the text, the choices, `--timeout <s>` and `--sound`.
-    struct Parsed: Equatable {
-        var text: String
-        var choices: [String]
-        var timeout: Double?
-        var sound = false
-    }
-
     static func parse(_ args: [String], takesChoices: Bool) -> Parsed? {
-        var rest: [String] = []
-        var timeout: Double?
-        var sound = false
-        var i = 0
-        while i < args.count {
-            switch args[i] {
-            case "--timeout":
-                guard i + 1 < args.count, let t = Double(args[i + 1]), t > 0 else { return nil }
-                timeout = t
-                i += 1
-            case "--sound": sound = true
-            default: rest.append(args[i])
-            }
-            i += 1
-        }
-        guard let text = rest.first, !text.isEmpty else { return nil }
-        let choices = takesChoices ? Array(rest.dropFirst()) : []
-        if takesChoices && choices.isEmpty { return nil }
-        return Parsed(text: text, choices: choices, timeout: timeout, sound: sound)
+        LegatoDevHarness.DebugMessages.parse(args, takesChoices: takesChoices)
     }
-
-    func say(id: String, text: String) { enqueue(Item(id: id, text: text, choices: [])) }
-
+    func say(id: String, text: String) { state.say(id: id, text: text) }
     func ask(id: String, text: String, choices: [String], timeout: Double?, sound: Bool) {
-        enqueue(Item(id: id, text: text, choices: choices))
+        state.ask(id: id, text: text, choices: choices, timeout: timeout)
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
         if sound { AudioServicesPlaySystemSound(1007) }
         if UIApplication.shared.applicationState != .active { notify(id: id, text: text) }
-        if let timeout { limits[id] = timeout }
-        frontChanged()
     }
-
-    /// When an ask reaches the front it is logged as `shown`, and only then does its timeout start: it runs
-    /// while on screen, not while it waits behind other messages.
-    private func frontChanged() {
-        guard let front = current, !front.choices.isEmpty else { return }
-        if shownID != front.id {
-            shownID = front.id
-            DebugBridge.emit(id: front.id, event: "shown")
-        }
-        guard timeouts[front.id] == nil, let limit = limits[front.id] else { return }
-        let id = front.id
-        timeouts[id] = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(limit))
-            if !Task.isCancelled { reply(id: id, choice: "timeout") }
-        }
-    }
-
-    func setStatus(_ text: String?) {
-        status = (text?.isEmpty ?? true) ? nil : text
-        refreshWindow()
-    }
-
-    func setBlocking(_ on: Bool) {
-        blocking = on
-        refreshWindow()
-    }
-
+    func setStatus(_ text: String?) { state.setStatus(text) }
+    func setBlocking(_ on: Bool) { state.setBlocking(on) }
     func clear() {
-        blocking = false
-        shownID = nil
-        for item in queue where !item.choices.isEmpty { DebugBridge.emit(id: item.id, event: "reply", ["choice": "cleared"]) }
-        queue = []
-        status = nil
-        timeouts.values.forEach { $0.cancel() }
-        timeouts = [:]
-        limits = [:]
+        state.clear()
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
-        refreshWindow()
     }
+    func reply(id: String, choice: String) { state.reply(id: id, choice: choice) }
 
-    /// Jakob tapped a button (or the ask timed out).
-    func reply(id: String, choice: String) {
-        guard let index = queue.firstIndex(where: { $0.id == id }) else { return }
-        let item = queue.remove(at: index)
-        timeouts.removeValue(forKey: id)?.cancel()
-        limits[id] = nil
-        DebugBridge.emit(id: id, event: item.choices.isEmpty ? "dismissed" : "reply", ["choice": choice])
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
-        frontChanged()
-        refreshWindow()
-    }
-
-    private func enqueue(_ item: Item) {
-        queue.append(item)
-        refreshWindow()
-        frontChanged()
+    func cardAppeared(id: String) { visibleCardID = id; reportPresentation() }
+    func cardDisappeared(id: String) { if visibleCardID == id { visibleCardID = nil } }
+    func reportPresentation() {
+        guard UIApplication.shared.applicationState == .active, window?.isHidden == false else { return }
+        state.presented(id: visibleCardID)
     }
 
     /// Local notification so an `ask` is seen while the app is in the background; asks for permission on first use.
@@ -210,6 +137,9 @@ struct DebugOverlayView: View {
             }
             content
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            messages.reportPresentation()
+        }
     }
 
     private var content: some View {
@@ -251,6 +181,9 @@ struct DebugOverlayView: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Debug message: \(item.text)")
                 .reportFrame("card", to: messages)
+                .id(item.id)
+                .onChange(of: item.id, initial: true) { _, id in messages.cardAppeared(id: id) }
+                .onDisappear { messages.cardDisappeared(id: item.id) }
             }
             Spacer(minLength: 0)
         }

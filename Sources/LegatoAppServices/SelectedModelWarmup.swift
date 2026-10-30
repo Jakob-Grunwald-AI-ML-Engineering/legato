@@ -41,6 +41,15 @@ public actor SelectedModelWarmup {
     private var pressureRelease: Task<Void, Never>?
     private var epoch = 0
 
+    private var probeOwner: UUID?
+    public func reserveForProbe(_ owner: UUID) throws {
+        guard probeOwner == nil, leases.isEmpty else { throw SessionProbeError.busy }
+        probeOwner = owner
+    }
+    public func releaseProbeReservation(_ owner: UUID) {
+        if probeOwner == owner { probeOwner = nil }
+    }
+
     public init() {}
     public func state(for key: String) -> State {
         guard let entry = entries[key] else { return .idle }
@@ -50,6 +59,7 @@ public actor SelectedModelWarmup {
     }
     /// A deliberate retry clears a failed attempt; reconciliation and reads never do.
     public func retry(keys: Set<String>, inBackground: Bool) {
+        guard probeOwner == nil else { return }
         guard !inBackground else { return }
         for key in keys where entries[key]?.failure != nil {
             entries[key]?.failure = nil
@@ -61,7 +71,8 @@ public actor SelectedModelWarmup {
     }
 
     /// Starts independent foreground preparations without waiting for the entire retained union.
-    public func setRequested(_ resources: [Resource], for role: Role, inBackground: Bool) {
+    public func setRequested(_ resources: [Resource], for role: Role, inBackground: Bool, probeOwner owner: UUID? = nil) {
+        guard probeOwner == nil || probeOwner == owner else { return }
         update(resources, for: role)
         if !inBackground { for resource in resources { start(resource.key) } }
     }
@@ -73,6 +84,7 @@ public actor SelectedModelWarmup {
 
     /// Compatibility for callers selecting one complete resource set. Role-based callers prepare subsets.
     public func prepare(_ resources: [Resource], inBackground: Bool) async throws {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
         let keys = Set(resources.map(\.key))
         if inBackground, keys.contains(where: { entries[$0]?.ready != true && entries[$0]?.task == nil }) {
             throw PreparationError.needsForeground
@@ -87,7 +99,8 @@ public actor SelectedModelWarmup {
         try await prepare(keys: keys, inBackground: inBackground)
     }
 
-    public func prepare(keys: Set<String>, inBackground: Bool) async throws {
+    public func prepare(keys: Set<String>, inBackground: Bool, probeOwner owner: UUID? = nil) async throws {
+        guard probeOwner == nil || probeOwner == owner else { throw SessionProbeError.busy }
         for key in keys {
             guard let entry = entries[key] else { throw PreparationError.superseded }
             if let failure = entry.failure { throw failure }
@@ -100,6 +113,7 @@ public actor SelectedModelWarmup {
             guard let entry = entries[key] else { throw PreparationError.superseded }
             let token = entry.token
             if let task = entry.task { try await Self.waitForPreparation(task).get() }
+            guard probeOwner == nil || probeOwner == owner else { throw SessionProbeError.busy }
             guard let current = entries[key], current.token == token, current.ready else { throw PreparationError.superseded }
             try Task.checkCancellation()
         }
@@ -107,6 +121,7 @@ public actor SelectedModelWarmup {
 
     /// A lease pins the admitted identities through the caller's entire operation, including summary merges.
     public func acquire(keys: Set<String>, inBackground: Bool) async throws -> Lease {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
         guard keys.allSatisfy({ entries[$0] != nil }) else { throw PreparationError.needsForeground }
         let id = UUID()
         leases[id] = keys

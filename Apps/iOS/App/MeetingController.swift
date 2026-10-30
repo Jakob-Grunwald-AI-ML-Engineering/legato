@@ -232,6 +232,12 @@ final class MeetingController {
     // MARK: Start and stop
 
     func start() async {
+        #if LEGATO_INTERNAL
+        guard !SessionProbe.isRunning else {
+            notices.post("A session probe is running. Try again when it finishes.", kind: .start, meeting: nil)
+            return
+        }
+        #endif
         guard phase == .idle else { return }
         notices.clear(kind: .start, meeting: nil)
         var startNotes: [String] = []

@@ -44,7 +44,9 @@
          self.topP = topP
          self.repetitionPenalty = repetitionPenalty
      }
--}+}
+-}
+\ No newline at end of file
++}
 +// Legato modification: upstream diagnostics can contain prompts and decoded tokens.
 +// Keep diagnostics silent in the production runtime, including upstream's unconditional prints.
 +func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {}

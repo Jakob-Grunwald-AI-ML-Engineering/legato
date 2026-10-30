@@ -104,7 +104,14 @@ final class MacAppController {
     private enum Command: Sendable {
         case start, stop, cancel
         case aborted(UUID)
+        #if LEGATO_INTERNAL
+        case debug(DebugControl, String)
+        #endif
     }
+    #if LEGATO_INTERNAL
+    enum DebugControl: String, Sendable { case toggle, start, stop, interrupt, meetingStart, meetingStop }
+    @ObservationIgnored private var debugPendingControls = 0
+    #endif
 
     /// One dictation from key press to delivery.
     private final class Run {
@@ -252,6 +259,9 @@ final class MacAppController {
         }
         attachSession()
         installModelLifecycleObservers()
+        #if LEGATO_INTERNAL
+        DebugBridge.start()
+        #endif
         Task { [weak self, samples = tap.samples] in
             for await sample in samples { self?.handle(sample) }
         }
@@ -309,11 +319,92 @@ final class MacAppController {
         releaseStuckTrigger()
     }
 
+    #if LEGATO_INTERNAL
+    var probeAdmissionBusy: Bool {
+        debugPendingControls > 0 || activeRun != nil || phase != .idle || isRefining || isPreparingModels || resolvingEngine || modelAdmission.isPreparing || modelAdmission.isResetting || meetings.probeAdmissionBusy
+    }
+    func releaseModelsForProbe(owner: UUID) async throws {
+        guard SessionProbe.owns(owner) else { throw SessionProbeError.invalidOwner }
+        await releaseModelsForMemoryPressure(probeOwner: owner)
+    }
+    func restoreModelsAfterProbe(owner: UUID) async throws {
+        guard SessionProbe.owns(owner) else { throw SessionProbeError.invalidOwner }
+        try await models.restoreProbeResources(owner: owner, options: settings.cleanupStore.options, inBackground: false)
+        rebuildSessionIfStale()
+    }
+    func probeDidFinish() { Task { await refreshEngine() } }
+    #endif
+    private var probeActive: Bool {
+        #if LEGATO_INTERNAL
+        SessionProbe.isRunning
+        #else
+        false
+        #endif
+    }
+
+    #if LEGATO_INTERNAL
+    func debugSetSetting(_ key: String, value: String) throws {
+        guard !probeActive else { throw SessionProbeError.busy }
+        try settings.setDebugSetting(key, value: value)
+        if key == "gestureMode", phase == .idle {
+            resetGesture()
+            gesture = HotkeyGesture(mode: settings.gestureMode)
+        }
+        if key.hasPrefix("cleanup") { cleanupSettingsChanged() }
+    }
+
+    /// Reserve acceptance synchronously; the controller's existing channel owns and joins execution.
+    func debugControl(_ action: DebugControl, id: String) throws {
+        // A start injected through the hotkey path exercises startRun's real probe refusal.
+        guard !probeActive || action == .start || action == .meetingStart else { throw SessionProbeError.busy }
+        guard let commands else { throw SessionProbeError.busy }
+        debugPendingControls += 1
+        if action == .stop || action == .interrupt || (action == .toggle && isPreparingModels) { modelAdmission.cancel() }
+        if action == .meetingStop { meetings.cancelStart() }
+        commands.yield(.debug(action, id))
+    }
+    private func performDebugControl(_ action: DebugControl, id: String) async {
+        let wasProbe = probeActive
+        let starting = action == .start || (action == .toggle && phase == .idle && activeRun == nil)
+        switch action {
+        case .start: await startRun()
+        case .toggle:
+            if starting { await startRun() } else { await finishRun(discard: false) }
+        case .stop: await finishRun(discard: false)
+        case .interrupt: await finishRun(discard: true)
+        case .meetingStart: await meetings.start()
+        case .meetingStop: _ = await meetings.stop()
+        }
+        debugPendingControls -= 1
+        let refused = (starting && phase == .idle) || (action == .meetingStart && meetings.phase != .recording)
+        DebugBridge.emit(id: id, event: "control.done", ["control": action.rawValue,
+            "outcome": wasProbe ? "busy" : (refused ? "refused" : "ok"), "phase": String(describing: phase),
+            "meetingPhase": String(describing: meetings.phase)])
+    }
+    func debugState() -> [String: Any] {
+        ["app": NSApp.isActive ? "active" : (NSApp.isHidden ? "background" : "inactive"),
+         "phase": String(describing: phase), "isDictating": isDictating,
+         "recognitionPreparing": isPreparingModels, "resolvingEngine": resolvingEngine,
+         "lastTranscriptChars": lastDictation?.text.count ?? 0,
+         "activeTranscriptChars": activeRun?.transcript.committed.count ?? 0,
+         "engine": engine.id, "probeRunning": SessionProbe.isRunning,
+         "modelsReserved": models.isProbeReserved, "pendingControls": debugPendingControls,
+         "readiness": ["micGranted": permissions.micGranted, "accessibility": permissions.accessibility,
+                       "hotkeyTapActive": permissions.hotkeyTapActive, "modelInstalled": permissions.modelInstalled,
+                       "isReady": !needsSetup],
+         "settings": settings.debugSnapshot, "liveGestureMode": gesture.mode.rawValue,
+         "meeting": ["phase": String(describing: meetings.phase), "muted": meetings.isMuted,
+                     "probeAdmissionBusy": meetings.probeAdmissionBusy],
+         "messages": DebugMessages.shared.debugSnapshot]
+    }
+    #endif
+
     // MARK: Models
 
     /// Resolves the live engine from the pick and the engine settings, for the runs from now on. A run in
     /// progress keeps its engine; the session is rebuilt before the next one.
     func refreshEngine() async {
+        guard !probeActive else { return }
         modelRevision += 1
         engineRevision += 1
         let revision = engineRevision
@@ -338,6 +429,7 @@ final class MacAppController {
     }
 
     func cleanupSettingsChanged() {
+        guard !probeActive else { return }
         modelRevision += 1
         modelAdmission.cancel()
         scheduleResourcePreparation()
@@ -345,6 +437,7 @@ final class MacAppController {
 
     /// Meeting preferences change retention without superseding dictation admission.
     func meetingSettingsChanged() {
+        guard !probeActive else { return }
         Task { [weak self] in
             guard let self else { return }
             await models.reconcileSelectedModels(options: settings.cleanupStore.options, inBackground: false)
@@ -353,11 +446,13 @@ final class MacAppController {
     }
 
     private func scheduleResourcePreparation() {
+        guard !probeActive else { return }
         resourcePreparation?.cancel()
         resourcePreparation = Task { [weak self] in await self?.warmSelectedResources() }
     }
 
     private func prepareSelectedResources() async throws {
+        guard !probeActive else { throw ModelAdmission.AdmissionError.busy }
         let revision = modelRevision
         do {
             try await models.prepareSelectedModels(options: settings.cleanupStore.options, inBackground: false)
@@ -369,6 +464,7 @@ final class MacAppController {
     }
 
     private func warmSelectedResources() async {
+        guard !probeActive else { return }
         guard !resolvingEngine, !modelAdmission.isResetting else { return }
         do { try await prepareSelectedResources(); meetings.resumeProcessing() }
         catch is CancellationError { }
@@ -389,7 +485,10 @@ final class MacAppController {
         source.resume()
     }
 
-    private func releaseModelsForMemoryPressure() async {
+    private func releaseModelsForMemoryPressure(probeOwner owner: UUID? = nil) async {
+        #if LEGATO_INTERNAL
+        if probeActive, !SessionProbe.owns(owner) { SessionProbe.cancel(); return }
+        #endif
         modelRevision += 1
         resourcePreparation?.cancel()
         await modelAdmission.reset {
@@ -410,6 +509,7 @@ final class MacAppController {
     /// The menu's engine switch: nil is Apple Speech. An installed model is picked straight away; anything
     /// else is for the Speech engine pane, which shows the download.
     func switchEngine(to id: String?) {
+        guard !probeActive else { return }
         guard let id else {
             models.clearPick(.liveDictation)
             Task { await refreshEngine() }
@@ -423,6 +523,7 @@ final class MacAppController {
 
     /// The menu's engine switch for a family: its chosen tier, picked straight away when installed.
     func switchEngine(to family: ModelFamily) {
+        guard !probeActive else { return }
         models.pick(family: family) { [weak self] error in
             if let error { self?.hud.show(toast: "Could not switch: \(String(describing: error))") }
             Task { await self?.refreshEngine() }
@@ -440,6 +541,7 @@ final class MacAppController {
 
     /// Refines the last dictation in the selected mode (Voice uses Message), swapped in like `revertLastToRaw`.
     func refineLast() async {
+        guard !probeActive else { return }
         guard phase == .idle, !isRefining, let entry = lastDictation else { return }
         isRefining = true
         defer { isRefining = false }
@@ -642,10 +744,14 @@ final class MacAppController {
         case .stop: await finishRun(discard: false)
         case .cancel: await finishRun(discard: true)
         case .aborted(let id): await abortRun(id: id)
+        #if LEGATO_INTERNAL
+        case .debug(let action, let id): await performDebugControl(action, id: id)
+        #endif
         }
     }
 
     private func startRun() async {
+        guard !probeActive else { gesture.runEnded(); return }
         guard activeRun == nil else {
             // A start while a run is already going means the gesture lost track of it (events were
             // lost): treat the press as the stop tap.
@@ -663,7 +769,7 @@ final class MacAppController {
         do {
             try await modelAdmission.admit(
                 isIdle: { self.activeRun == nil && self.phase == .idle },
-                canStart: { !self.resolvingEngine },
+                canStart: { !self.resolvingEngine && !self.probeActive },
                 prepare: { try await self.prepareSelectedResources() },
                 operation: { await self.startPreparedRun() })
         } catch is CancellationError {

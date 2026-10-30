@@ -288,24 +288,27 @@ extension AppController {
         guard url.scheme == RuntimeIdentity.current.urlScheme, let command = url.host, command == "toggle" || command == "interrupt" else {
             return false
         }
-        await runE2E(command)
+        await DebugBridge.execute(BridgeCommand(id: "url-\(UUID().uuidString)", command: command))
         return true
     }
 
     /// `toggle`, `interrupt`, `copy-last`, `result-insert`, `result-copy`, `foreground`, `background`, `toggle-after-hop` or one of the `kbd-` commands.
-    func runE2E(_ command: String) async {
+    @discardableResult
+    func runE2E(_ command: String) async -> String {
         E2E.log("command \(command)")
         if command.hasPrefix("kbd-") {
             await E2EFakeKeyboard.shared.run(command)
-            return
+            return "ok"
         }
         if command.hasPrefix("harness-") {
             KeyboardHarnessModel.shared.run(command)
-            return
+            return "ok"
         }
         switch command {
         case "toggle":
-            _ = await toggle()
+            return Self.e2eOutcome(await toggle())
+        case "stop":
+            _ = await stopIfRunning()
         case "foreign-engine-change":
             NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: AVAudioEngine())
         case "interrupt":
@@ -362,16 +365,25 @@ extension AppController {
             E2E.releaseStartWatch()
         case "toggle-after-hop":
             // What the intent does after `continueInForeground`, with the fake background still on.
-            _ = await toggle(afterForegroundHop: .backgroundStartRefused)
+            return Self.e2eOutcome(await toggle(afterForegroundHop: .backgroundStartRefused))
         default:
             E2E.log("command.unknown \(command)")
+            return "refused"
+        }
+        return "ok"
+    }
+    private static func e2eOutcome(_ outcome: DictationCoordinator.Outcome) -> String {
+        switch outcome {
+        case .started, .stopped: "ok"
+        case .busy: "busy"
+        case .failed, .needsForeground, .needsOnboarding: "refused"
         }
     }
 }
 
 extension E2E {
     static let commands = [
-        "toggle", "foreign-engine-change", "interrupt", "interrupt-end", "copy-last", "result-insert", "result-copy", "foreground", "background", "toggle-after-hop",
+        "toggle", "stop", "foreign-engine-change", "interrupt", "interrupt-end", "copy-last", "result-insert", "result-copy", "foreground", "background", "toggle-after-hop",
         "meeting-start", "meeting-stop", "meeting-mute", "meeting-unmute", "meeting-pause", "meeting-resume", "meeting-discard", "meeting-export", "meeting-route-change",
         "kbd-visible", "kbd-hidden", "kbd-request-start", "kbd-request-stop", "kbd-request-end-keep-alive",
         "kbd-hop-arm", "kbd-hop-start", "kbd-hop-arm-url-first", "kbd-forged-url",
@@ -390,7 +402,9 @@ extension E2E {
                 { _, _, name, _, _ in
                     guard let raw = name?.rawValue as String?, let command = raw.split(separator: ".").last.map(String.init)
                     else { return }
-                    Task { @MainActor in await AppController.shared.runE2E(command) }
+                    Task { @MainActor in
+                        await DebugBridge.execute(BridgeCommand(id: "darwin-\(UUID().uuidString)", command: command))
+                    }
                 },
                 "\(RuntimeIdentity.current.notificationNamespace).e2e.\(command)" as CFString, nil, .deliverImmediately)
         }

@@ -120,6 +120,18 @@ public actor ProcessingScheduler {
         self.work = work
     }
 
+    private var probeOwner: UUID?
+    public func reserveForProbe(_ owner: UUID) throws {
+        guard probeOwner == nil, running == nil, manual.isEmpty, !isRecording() else { throw SessionProbeError.busy }
+        probeOwner = owner
+    }
+    public func releaseProbeReservation(_ owner: UUID) {
+        guard probeOwner == owner else { return }
+        probeOwner = nil
+        pump()
+        if !queue.isEmpty { poll(lookNow: true) }
+    }
+
     /// The meetings waiting for their deferred job, in the order they will run.
     public var queued: [UUID] { queue }
 
@@ -158,6 +170,7 @@ public actor ProcessingScheduler {
     /// - Throws: ``MeetingServicesError/recording`` while a meeting records; what `work` throws;
     ///   `CancellationError` when cut short (see the type's notes).
     public func perform<T: Sendable>(for meeting: UUID, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
         guard !isRecording() else { throw MeetingServicesError.recording }
         let id = UUID()
         let result = try await withTaskCancellationHandler {
@@ -175,7 +188,7 @@ public actor ProcessingScheduler {
     /// Looks once: runs every meeting that may run now, one after another. Returns when none may, when the
     /// work of one was cut short, or when a manual job takes the lane.
     public func tick() async {
-        guard running == nil else { return }
+        guard running == nil, probeOwner == nil else { return }
         while true {
             guard manual.isEmpty else { return pump() }
             let recording = isRecording()
@@ -199,7 +212,7 @@ public actor ProcessingScheduler {
 
     /// Starts the first manual job if the lane is free and nothing records.
     private func pump() {
-        guard running == nil, !isRecording(), let job = manual.first else { return }
+        guard probeOwner == nil, running == nil, !isRecording(), let job = manual.first else { return }
         let (id, work) = (job.id, job.work)
         runningManual = id
         running = Task(priority: .userInitiated) { [self] in
