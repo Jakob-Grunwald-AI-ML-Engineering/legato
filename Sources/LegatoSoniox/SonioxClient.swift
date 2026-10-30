@@ -20,15 +20,23 @@ public actor URLSessionSonioxSocket: SonioxSocket {
     }
     public func send(_ frame: SonioxFrame) async throws {
         guard let task else { throw SonioxError.notConnected }
-        switch frame { case .text(let text): try await task.send(.string(text)); case .binary(let data): try await task.send(.data(data)) }
+        do {
+            switch frame { case .text(let text): try await task.send(.string(text)); case .binary(let data): try await task.send(.data(data)) }
+        } catch { throw transportError(task) }
     }
     public func receive() async throws -> SonioxFrame {
         guard let task else { throw SonioxError.notConnected }
-        switch try await task.receive() {
+        let message: URLSessionWebSocketTask.Message
+        do { message = try await task.receive() } catch { throw transportError(task) }
+        switch message {
         case .string(let text): return .text(text)
         case .data(let data): return .binary(data)
         @unknown default: throw SonioxError.invalidResponse
         }
+    }
+    private func transportError(_ task: URLSessionWebSocketTask) -> SonioxError {
+        if let response = task.response as? HTTPURLResponse, response.statusCode >= 400 { return .provider(response.statusCode) }
+        return .network
     }
     public func close() async {
         task?.cancel(with: .normalClosure, reason: nil); task = nil
@@ -72,10 +80,11 @@ public actor SonioxClient {
     private var completion: CheckedContinuation<Void, any Error>?
     private var failure: SonioxError?
     private var lastSend = ContinuousClock.now
+    private var audioOrigin: Double?
     public init(room: Room, config: SonioxConfig = SonioxConfig(), socket: any SonioxSocket = URLSessionSonioxSocket(),
-                keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20)) {
+                keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20), audioOrigin: Double? = nil) {
         self.room = room; self.config = config; self.socket = socket
-        self.keepaliveInterval = keepaliveInterval; self.finishTimeout = finishTimeout
+        self.keepaliveInterval = keepaliveInterval; self.finishTimeout = finishTimeout; self.audioOrigin = audioOrigin
     }
     public func start(apiKey: String) async throws {
         guard state == .idle else { throw SonioxError.notConnected }
@@ -95,11 +104,12 @@ public actor SonioxClient {
                     await self?.keepalive()
                 }
             }
-        } catch { await fail(.network); throw SonioxError.network }
+        } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
     }
     public func sendAudio(_ pcm16: Data) async throws {
         guard state == .streaming else { throw failure ?? .notConnected }
         guard !pcm16.isEmpty else { return }
+        if audioOrigin == nil { audioOrigin = ProcessInfo.processInfo.systemUptime }
         do { try await socket.send(.binary(pcm16)); lastSend = .now }
         catch { await fail(.network); throw SonioxError.network }
     }
@@ -112,7 +122,7 @@ public actor SonioxClient {
         do {
             try await room.micOff(transcriberDraining: true)
             try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now
-        } catch { await fail(.network); throw SonioxError.network }
+        } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 if state == .finished { continuation.resume(); return }
@@ -131,7 +141,7 @@ public actor SonioxClient {
         guard state == .streaming || state == .finalizing || state == .ending else { return }
         guard lastSend.duration(to: .now) >= keepaliveInterval else { return }
         do { try await socket.send(.text("{\"type\":\"keepalive\"}")); lastSend = .now }
-        catch { await fail(.network) }
+        catch { await fail(error as? SonioxError ?? .network) }
     }
     private struct Response: Decodable {
         var tokens: [SonioxToken]?
@@ -157,19 +167,22 @@ public actor SonioxClient {
                 }
                 if response.finished == true {
                     state = .finished; heartbeat?.cancel(); timeoutTask?.cancel()
-                    try await room.finishTranscription()
-                    _ = try await room.publish(channel: .session, participant: .transcriber, payload: .object(["event": .string("asr.finished")]))
+                    _ = try? await room.publish(channel: .session, participant: .transcriber, payload: .object(["event": .string("asr.finished")]))
+                    await room.finishTranscription()
                     completion?.resume(); completion = nil
                     await socket.close(); return
                 }
             }
-        } catch { if state != .finished && state != .failed { await fail(.network) } }
+        } catch { if state != .finished && state != .failed { await fail(error as? SonioxError ?? .network) } }
     }
     private func publish(_ output: SegmenterOutput) async throws {
         for segment in output.segments {
-            let metadata: JSONValue = .object(["timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds])
+            let t0 = segment.words.first?.t0
+            let t1 = segment.words.last?.t1
+            let metadata: JSONValue = .object(["t0": t0.map(JSONValue.number) ?? .null, "t1": t1.map(JSONValue.number) ?? .null, "timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds])
             _ = try await room.publish(channel: .asrSegment, participant: .segmenter,
-                payload: .object(["words": try .encoding(segment.words.map(\.word)), "metadata": metadata]))
+                payload: .object(["words": try .encoding(segment.words.map(\.word)), "metadata": metadata]),
+                tOrigin: t0.flatMap { start in audioOrigin.map { $0 + start } })
         }
         _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string(output.tail)]))
     }

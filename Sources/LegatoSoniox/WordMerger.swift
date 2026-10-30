@@ -17,7 +17,8 @@ public struct WordMerger: Sendable {
         guard token.isFinal, !token.text.hasPrefix("<") else { return [] }
         var output: [TimedWord] = []
         // A leading space marks a new word; punctuation/subword pieces attach to the current one.
-        for part in token.text.split(omittingEmptySubsequences: false, whereSeparator: \.isWhitespace) {
+        for (index, part) in token.text.split(omittingEmptySubsequences: false, whereSeparator: \.isWhitespace).enumerated() {
+            if index > 0, let word = flush() { output.append(word) }
             if part.isEmpty { if let word = flush() { output.append(word) }; continue }
             let text = String(part)
             if pending == nil {
@@ -25,7 +26,7 @@ public struct WordMerger: Sendable {
                                     t0: token.startMs.map { $0 / 1000 }, t1: token.endMs.map { $0 / 1000 })
             } else {
                 pending?.word.text += text
-                if let confidence = token.confidence { pending?.word.confidence = min(pending?.word.confidence ?? confidence, confidence) }
+                if let confidence = token.confidence { let previous = pending?.word.confidence ?? confidence; pending?.word.confidence = min(previous, confidence) }
                 if pending?.word.language == nil { pending?.word.language = token.language }
                 if let end = token.endMs { pending?.t1 = end / 1000 }
             }

@@ -4,7 +4,7 @@ import LegatoComposerDoc
 import LegatoRoom
 @testable import LegatoSoniox
 
-@Suite struct SonioxTests {
+@Suite(.timeLimit(.minutes(1))) struct SonioxTests {
     @Test func wordsAndSegmentsNeverCommitThePartialTail() {
         var pipeline = Segmenter()
         let first = pipeline.ingest([
@@ -45,10 +45,33 @@ import LegatoRoom
         #expect(config.request(apiKey: "secret").value(forHTTPHeaderField: "Authorization") == "Bearer secret")
         #expect(!String(decoding: try config.message(), as: UTF8.self).contains("secret"))
     }
+    @Test func providerFailuresReachTheRoomWithoutCredentials() async throws {
+        for code in [401, 402, 408, 413, 429] {
+            let room = Room()
+            let events = await room.subscribe(participant: .logger, channels: [.session])
+            var iterator = events.makeAsyncIterator()
+            let socket = FakeSocket()
+            let client = SonioxClient(room: room, socket: socket)
+            try await client.start(apiKey: "never-log-this")
+            _ = await iterator.next() // asr.started
+            await socket.feed("{\"error_code\":\(code)}")
+            let event = try #require(await iterator.next())
+            #expect(event.payload["event"] == .string("asr.error"))
+            #expect(event.payload["message"] == .string(SonioxError.provider(code).localizedDescription))
+            #expect(!String(decoding: try JSONEncoder().encode(event), as: UTF8.self).contains("never-log-this"))
+        }
+    }
     @Test func protocolFinalizationKeepaliveAndErrors() async throws {
         let socket = FakeSocket()
-        let client = SonioxClient(room: Room(), config: SonioxConfig(), socket: socket, keepaliveInterval: .milliseconds(5))
+        let room = Room()
+        let tails = await room.subscribe(participant: .ui, channels: [.asrTail])
+        var tailEvents = tails.makeAsyncIterator()
+        let client = SonioxClient(room: room, config: SonioxConfig(), socket: socket, keepaliveInterval: .milliseconds(5))
         try await client.start(apiKey: "test")
+        await socket.feed("{\"tokens\":[{\"text\":\"speculative\",\"is_final\":false}]}")
+        let tail = await tailEvents.next()
+        #expect(tail?.payload["text"] == .string("speculative"))
+        #expect(await room.documentSnapshot.lines.isEmpty)
         try await Task.sleep(for: .milliseconds(25))
         let finishing = Task { try await client.finish() }
         while !(await socket.sent()).contains(.text("{\"type\":\"finalize\"}")) { await Task.yield() }
@@ -65,19 +88,18 @@ import LegatoRoom
 
 actor FakeSocket: SonioxSocket {
     var messages: [SonioxFrame] = []
-    let input = AsyncStream<SonioxFrame>.makeStream()
-    var iterator: AsyncStream<SonioxFrame>.Iterator
-    init() { iterator = input.stream.makeAsyncIterator() }
+    var inbox: [SonioxFrame] = []
+    var waiter: CheckedContinuation<SonioxFrame, any Error>?
     func connect(request: URLRequest) async throws {}
     func send(_ frame: SonioxFrame) async throws { messages.append(frame) }
     func receive() async throws -> SonioxFrame {
-        // Only one receive loop consumes this stream.
-        var next = iterator
-        let result = await next.next()
-        iterator = next
-        return result ?? .text("{}")
+        if !inbox.isEmpty { return inbox.removeFirst() }
+        return try await withCheckedThrowingContinuation { waiter = $0 }
     }
-    func close() async { input.continuation.finish() }
-    func feed(_ text: String) { input.continuation.yield(.text(text)) }
+    func close() async { waiter?.resume(throwing: SonioxError.cancelled); waiter = nil }
+    func feed(_ text: String) {
+        if let waiter { self.waiter = nil; waiter.resume(returning: .text(text)) }
+        else { inbox.append(.text(text)) }
+    }
     func sent() -> [SonioxFrame] { messages }
 }
