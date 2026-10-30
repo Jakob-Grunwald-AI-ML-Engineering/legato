@@ -139,3 +139,25 @@ import LegatoComposerDoc
         }
     }
 }
+
+@Test func loggerCapturesEveryChannelAndLifecycleEnvelope() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try SessionLog(rootDirectory: root)
+    let room = Room(log: log)
+    let stream = await room.subscribe(participant: .logger, channels: Set(Channel.allCases))
+    for channel in Channel.allCases where !channel.isDocument && channel != .asrSegment {
+        _ = try await room.publish(channel: channel, participant: .ui,
+            payload: .object(["nested": .array([.null, .bool(true), .number(0.42), .string("ä\nline")])]))
+    }
+    _ = try await room.publishSegment(words: [Word(text: "content")])
+    _ = try await room.insert()
+    var delivered: [Envelope] = []
+    for await event in stream { delivered.append(event) }
+    let raw = try String(contentsOf: log.roomURL, encoding: .utf8)
+    let replayed = try raw.split(separator: "\n").map { try JSONDecoder().decode(Envelope.self, from: Data($0.utf8)) }
+    #expect(replayed == delivered)
+    #expect(Set(replayed.map(\.channel)) == Set(Channel.allCases))
+    #expect(try String(contentsOf: log.finalURL, encoding: .utf8) == "content")
+    #expect(await room.loggingError == nil)
+}
