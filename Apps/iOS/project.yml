@@ -157,3 +157,23 @@ targets:
             PrefersRightToLeft: false
             PrimaryLanguage: en-US
             RequestsOpenAccess: true
+
+  # Standalone runner: no app dependency or TEST_TARGET_NAME, so canonical Legato is not installed.
+  LegatoNativeControl:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [NativeControl]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.native-control
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: ""
+
+schemes:
+  LegatoNativeControl:
+    build:
+      targets:
+        LegatoNativeControl: [test]
+    test:
+      targets: [LegatoNativeControl]
+      parallelizeBuild: false
