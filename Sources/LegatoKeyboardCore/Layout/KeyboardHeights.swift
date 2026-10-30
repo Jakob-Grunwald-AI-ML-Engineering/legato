@@ -46,15 +46,35 @@ public enum KeyboardSideMargins {
     }
 }
 
-/// Total extension height, including the grabber, document and tool strip.
-public enum ComposerKeyboardHeight {
-    public static func resolve(_ requested: Double, screenHeight: Double) -> Double {
-        let maximum = min(600, max(180, screenHeight - 180))
-        let minimum = min(260, maximum)
-        return min(maximum, max(minimum, requested.isFinite ? requested : 420))
+/// Three composer sizes. Heights exclude iOS's rounded cap and bottom system tray.
+public enum ComposerKeyboardSize: String, CaseIterable, Sendable {
+    case low, medium, full
+
+    public func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false) -> Double {
+        let maximum = max(0, min(screenHeight - 60, screenHeight * 0.85 - systemOverhead))
+        switch self {
+        case .low: return min(136, maximum)
+        case .medium:
+            let native = KeyboardHeights.height(landscape: landscape) - (landscape ? 35.33 : 54)
+            return min(native, maximum)
+        case .full: return maximum
+        }
     }
 
-    public static func resized(start: Double, translation: Double, screenHeight: Double) -> Double {
-        resolve(start - translation, screenHeight: screenHeight)
+    public func stepped(up: Bool) -> Self {
+        switch (self, up) {
+        case (.low, true): .medium
+        case (.medium, true): .full
+        case (.full, false): .medium
+        case (.medium, false): .low
+        default: self
+        }
     }
+
+    public func swiped(dx: Double, dy: Double) -> Self {
+        guard abs(dy) >= 24, abs(dy) > abs(dx) else { return self }
+        return stepped(up: dy < 0)
+    }
+
+    public var cycled: Self { self == .full ? .low : stepped(up: true) }
 }

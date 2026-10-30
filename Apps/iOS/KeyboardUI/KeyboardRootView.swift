@@ -11,51 +11,52 @@ struct KeyboardRootView: View {
     /// Whether the current drag already toggled (`swipe`); resets when the drag ends or is cancelled.
     @GestureState private var swipeFired = false
 
-    @State private var resizeStart: Double?
-    @State private var resizePreview: Double?
-    @GestureState private var resizing = false
-
     var body: some View {
         VStack(spacing: 0) {
             resizeHandle
-            ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
-                         pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
-                         onWordTap: { controller.composerIntent("tap", lineID: $0, wordID: $1) },
-                         onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
-                .frame(maxHeight: .infinity)
-            if let error = controller.composer.error { Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal) }
-            HStack(spacing: 16) {
-                ModeChip(mode: controller.composer.mode) { controller.composerIntent("mode", text: $0) }
-                Spacer()
-                Button { controller.composerIntent("undo") } label: { Image(systemName: "arrow.uturn.backward") }
-                Button("Insert") { controller.insertComposer() }.disabled(controller.composer.snapshot.lines.isEmpty)
-                Button { controller.composerIntent("cancel") } label: { Image(systemName: "xmark") }
-            }.buttonStyle(.borderless).padding(.horizontal, 14).frame(height: 38)
+            if controller.composerSize != .low {
+                ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
+                             pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
+                             onWordTap: { controller.composerIntent("tap", lineID: $0, wordID: $1) },
+                             onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
+                    .frame(maxHeight: .infinity)
+                if let error = controller.composer.error { Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).padding(.horizontal) }
+            }
+            HStack(spacing: 6) {
+                Button { changeMode(1) } label: {
+                    Text(controller.composer.mode.capitalized).lineLimit(1).minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .simultaneousGesture(DragGesture(minimumDistance: 15).onEnded { value in
+                    if abs(value.translation.width) > abs(value.translation.height) {
+                        changeMode(value.translation.width < 0 ? 1 : -1)
+                    }
+                })
+                .accessibilityHint("Tap or swipe to change writing mode")
+                Button { controller.insertComposer() } label: {
+                    Text("Insert").frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .opacity(controller.composer.snapshot.lines.isEmpty ? 0.35 : 1)
+                }.disabled(controller.composer.snapshot.lines.isEmpty)
+                Button { controller.composerIntent("cancel") } label: {
+                    Image(systemName: "xmark").frame(width: 60).frame(maxHeight: .infinity)
+                }.accessibilityLabel("Cancel composition")
+            }
+            .font(.system(size: 17))
+            .foregroundStyle(Color(uiColor: KeyColors.ink))
+            .buttonStyle(KeyButtonStyle())
+            .padding(.horizontal, 6.33).padding(.top, 8).padding(.bottom, 3).frame(height: 54)
             keyboardBody.frame(height: CGFloat(StripHeight.keyRowHeight(row: controller.stripHeight, landscape: false)))
         }
         // UIInputView(.keyboard) supplies the same adaptive material as the system tray.
         // A nonzero alpha also keeps blank portions touchable in keyboard extensions.
         .background(Color.black.opacity(0.001))
         .environment(\.colorScheme, scheme)
-        .overlay(alignment: .top) {
-            if let resizePreview {
-                GeometryReader { geometry in
-                    VStack(spacing: 5) {
-                        Capsule().fill(.tint).frame(width: 48, height: 3)
-                        Text("\(Int(resizePreview)) pt").font(.caption.monospacedDigit())
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(.regularMaterial, in: Capsule())
-                    }
-                    .frame(maxWidth: .infinity)
-                    .offset(y: max(0, geometry.size.height - resizePreview))
-                }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            }
-        }
     }
-    private var screenHeight: Double {
-        Double(controller.inputModeTarget?.view.window?.windowScene?.screen.bounds.height ?? 874)
+
+    private func changeMode(_ step: Int) {
+        let modes = ["message", "email", "prompt", "note"]
+        let index = modes.firstIndex(of: controller.composer.mode) ?? 0
+        controller.composerIntent("mode", text: modes[(index + step + modes.count) % modes.count])
     }
 
     private var resizeHandle: some View {
@@ -66,38 +67,18 @@ struct KeyboardRootView: View {
             .frame(height: 28, alignment: .top)
             .background(Color.black.opacity(0.001))
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                .updating($resizing) { _, active, _ in active = true }
-                .onChanged { value in
-                    if resizeStart == nil { resizeStart = ComposerKeyboardHeight.resolve(controller.composerHeight, screenHeight: screenHeight) }
-                    // Preview only. Resizing the host on every move makes native layout lag behind the finger.
-                    resizePreview = ComposerKeyboardHeight.resized(
-                        start: resizeStart ?? controller.composerHeight,
-                        translation: value.translation.height, screenHeight: screenHeight)
-                }
+            .gesture(DragGesture(minimumDistance: 12, coordinateSpace: .global)
                 .onEnded { value in
-                    let height = ComposerKeyboardHeight.resized(start: resizeStart ?? controller.composerHeight,
-                        translation: value.translation.height, screenHeight: screenHeight)
-                    resizeStart = nil
-                    resizePreview = nil
-                    controller.resizeComposer(to: height)
+                    controller.setComposerSize(controller.composerSize.swiped(
+                        dx: value.translation.width, dy: value.translation.height))
                 })
-            .onChange(of: resizing) { _, active in
-                // iOS may cancel an upward drag when it leaves the extension. Never commit on cancellation.
-                if !active { resizeStart = nil; resizePreview = nil }
-            }
-            .onTapGesture {
-                // Expansion remains available when an upward drag leaves this extension's touch surface.
-                let height = controller.composerHeight < 430 ? 600.0 : 260.0
-                controller.resizeComposer(to: ComposerKeyboardHeight.resolve(height, screenHeight: screenHeight))
-            }
+            .onTapGesture { controller.setComposerSize(controller.composerSize.cycled) }
             .accessibilityElement()
-            .accessibilityLabel("Resize composer")
-            .accessibilityValue("\(Int(controller.composerHeight)) points")
-            .accessibilityHint("Drag to resize, or tap to switch between compact and expanded")
+            .accessibilityLabel("Composer size")
+            .accessibilityValue(controller.composerSize.rawValue.capitalized)
+            .accessibilityHint("Swipe up or down to change size. Tap to cycle Low, Medium, and Full")
             .accessibilityAdjustableAction { direction in
-                let change: Double = direction == .increment ? 60 : -60
-                controller.resizeComposer(to: ComposerKeyboardHeight.resolve(controller.composerHeight + change, screenHeight: screenHeight))
+                controller.setComposerSize(controller.composerSize.stepped(up: direction == .increment))
             }
     }
 

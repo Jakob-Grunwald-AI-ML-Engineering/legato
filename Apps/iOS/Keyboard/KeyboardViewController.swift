@@ -59,8 +59,19 @@ final class KeyboardViewController: UIInputViewController {
     /// The height the current mode asks for: the native tool row plus the prediction row above it, or the full keyboard's for the orientation. By width, as `KeyGeometry` does: a portrait
     /// keyboard (402 x 297) is wider than tall too.
     private var requestedHeight: CGFloat {
-        let screenHeight = view.window?.windowScene?.screen.bounds.height ?? 852
-        return CGFloat(ComposerKeyboardHeight.resolve(controller?.composerHeight ?? 420, screenHeight: screenHeight))
+        let screenHeight = view.window?.windowScene?.screen.bounds.height ?? 874
+        let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
+        // The observed native tray ends 75 pt below our portrait view (21 pt landscape).
+        // Once laid out, measure that gap instead of adding the tray on top of an 85% request.
+        var bottomTray: CGFloat = landscape ? 21 : 75
+        if let window = view.window, view.bounds.height > 0 {
+            let bottom = view.convert(view.bounds, to: window).maxY + window.frame.minY
+            let gap = screenHeight - bottom
+            if (0...150).contains(gap) { bottomTray = gap }
+        }
+        let overhead = bottomTray + (landscape ? 0 : WordRowHeight.portraitSystemTop)
+        return CGFloat((controller?.composerSize ?? .medium).height(
+            screenHeight: screenHeight, systemOverhead: overhead, landscape: landscape))
     }
 
     /// The mode or the strip height changed (the chevron, the debug height cycle, the setting): resize
