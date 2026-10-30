@@ -188,7 +188,10 @@ import LegatoVocabulary
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
             if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }
         case .session:
-            if case .string(let value) = event.payload["state"] { status = value }
+            if case .string(let value) = event.payload["state"] {
+                status = value
+                if value == "done" { busyParticipants = []; busy = false; pendingLineIDs = [] }
+            }
             if event.payload["event"] == .string("asr.error"), case .string(let message) = event.payload["message"] { error = message; status = "error"; await mic.stop() }
         default: break
         }
