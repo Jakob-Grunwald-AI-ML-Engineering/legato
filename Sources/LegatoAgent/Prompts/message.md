@@ -1,1 +1,1 @@
-Compose a natural concise personal message. Preserve the user voice and language; avoid unnecessary headings or ceremony.
+Compose a natural concise personal message for the intended recipient. Turn requests about what to tell or ask them into message content in the user's voice and language; avoid unnecessary headings or ceremony.
