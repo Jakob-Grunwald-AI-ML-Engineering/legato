@@ -42,6 +42,8 @@ import XCTest
             XCTAssertTrue(app.buttons[parts[1]].waitForExistence(timeout: 5), "Selected mode must reach the keyboard")
         case "tap": try coordinate(1).tap()
         case "hold": try coordinate(1).press(forDuration: number(3))
+        case "quote":
+            try coordinate(1).press(forDuration: 0.45, thenDragTo: coordinate(3), withVelocity: .slow, thenHoldForDuration: 0.15)
         case "swipe":
             if parts.count == 6 {
                 let hold = try number(5)
