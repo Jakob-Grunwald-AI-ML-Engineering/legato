@@ -7,9 +7,7 @@ struct LegatoMacApp: App {
 
     init() {
         MacAppController.shared.bootstrap()
-        #if DEBUG
-        MacMeetingDiagnostics.shared?.install(meetings: MacAppController.shared.meetings)
-        #endif
+
     }
 
     var body: some Scene {
@@ -28,22 +26,6 @@ struct LegatoMacApp: App {
         }
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
-
-        Window("Meetings", id: MeetingController.windowID) {
-            MeetingsWindow()
-                .environment(controller)
-        }
-        .defaultLaunchBehavior(.suppressed)
-        .commands {
-            // Control-Command-M: Command-M stays Minimize.
-            CommandGroup(after: .windowArrangement) {
-                Button(controller.meetings.pillVisible ? "Expand Meeting Pill" : "Shrink Meeting to Pill") {
-                    controller.meetings.togglePill()
-                }
-                .keyboardShortcut("m", modifiers: [.control, .command])
-                .disabled(controller.meetings.phase != .recording)
-            }
-        }
 
         Settings {
             SettingsView()
@@ -67,10 +49,6 @@ private struct MenuBarLabel: View {
                 NSApp.activate()
                 openWindow(id: MacAppController.onboardingWindowID)
             }
-            .onChange(of: controller.meetings.windowRequests) { _, count in
-                guard count > 0 else { return }
-                NSApp.activate()
-                openWindow(id: MeetingController.windowID)
-            }
+
     }
 }
