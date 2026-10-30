@@ -29,6 +29,7 @@ let package = Package(
     name: "LegatoKit",
     platforms: [.iOS(.v26), .macOS(.v26)],
     products: [
+        .library(name: "LegatoComposerDoc", targets: ["LegatoComposerDoc"]),
         .library(name: "LegatoDevHarness", targets: ["LegatoDevHarness"]),
         .library(name: "LegatoCore", targets: ["LegatoCore"]),
         .library(name: "LegatoAudio", targets: ["LegatoAudio"]),
@@ -54,6 +55,8 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers.git", exact: "1.3.5"),
     ],
     targets: [
+        .target(name: "LegatoComposerDoc"),
+        .testTarget(name: "LegatoComposerDocTests", dependencies: ["LegatoComposerDoc"]),
         .target(name: "LegatoDevHarness"),
         .testTarget(name: "LegatoDevHarnessTests", dependencies: ["LegatoDevHarness"]),
         .target(name: "LegatoCore"),
