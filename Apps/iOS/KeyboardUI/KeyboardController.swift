@@ -204,7 +204,7 @@ final class KeyboardController {
     }
     func insertComposer() {
         let text = composer.snapshot.lines.enumerated().map { i, line in
-            switch line.kind { case .li: "• " + line.text; case .oli: "\(i + 1). " + line.text; case .quote: "> " + line.text; default: line.text }
+            switch line.kind { case .li: "• " + line.text; case .oli: "\(i + 1). " + line.text; case .quote: "> " + line.text; case .h1: "# " + line.text; case .h2: "## " + line.text; case .h3: "### " + line.text; default: line.text }
         }.joined(separator: "\n")
         guard !text.isEmpty else { return }
         type(text); composerIntent("insert")
@@ -740,12 +740,14 @@ final class KeyboardController {
 
     /// Whether the app is listening right now, rather than preparing resources or starting capture.
     var isCapturing: Bool {
+        if composer.status == "listening" { return true }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
         return host.phase == .listening
     }
 
     /// What tapping the mic key does now.
     var micMode: MicKeyMode {
+        if composer.status == "listening" { return .remote(.stop) }
         if pendingRemoteStartID != nil, hasFullAccess() { return .remote(.stop) }
         if let until = forcedOpenAppUntil, until > now, hasFullAccess() { return .openApp }
         return MicKeyMode.resolve(host: host, now: now, fullAccess: hasFullAccess())
