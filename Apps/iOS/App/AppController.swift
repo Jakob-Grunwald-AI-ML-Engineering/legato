@@ -3,6 +3,8 @@ import LegatoAppServices
 import LegatoCore
 import LegatoKeyboardCore
 import LegatoVocabulary
+import LegatoAgent
+import LegatoComposerDoc
 import Observation
 import UIKit
 
@@ -13,13 +15,15 @@ final class AppController {
     let vocabulary: VocabularyService
     let keyboardHost: KeyboardLinkHost?
     let history: any HistoryStore
-    var notice = "Composer coming"
+    let composer: ComposerSession
+    var notice: String { composer.error ?? composer.status.capitalized }
     var lastTranscript: String?
-    var isDictating: Bool { false }
+    var isDictating: Bool { composer.isListening }
 
     private init() {
         let root = AppGroup.containerURL
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
+        composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"))
         let settings = EngineSettings(defaults: AppGroup.defaults)
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(settings) },
@@ -32,9 +36,16 @@ final class AppController {
                     fromVocabulary: choice.fromVocabulary)
             }
         }
-        keyboardHost?.link.onRequest = { [weak self] _ in
-            self?.notice = "Composer coming"
-            return false
+        keyboardHost?.attach(composer)
+        keyboardHost?.link.onRequest = { [weak self] request in
+            guard let self else { return false }
+            switch request.command {
+            case .start: await self.composer.start()
+            case .stop: await self.composer.stop()
+            case .arm: self.keyboardHost?.link.leaseChanged(until: Date().addingTimeInterval(3600))
+            default: await self.composer.cancel()
+            }
+            return true
         }
         keyboardHost?.startListening()
         #if LEGATO_INTERNAL
@@ -43,13 +54,14 @@ final class AppController {
     }
 
     func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
-        notice = "Composer coming"
-        return .failed(notice)
+        if composer.isListening { await composer.stop() } else { await composer.start() }
+        lastTranscript = composer.renderedText
+        return .failed(composer.error ?? "")
     }
     func copy(_ text: String) { UIPasteboard.general.string = text }
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }
-    func stopIfRunning() async {}
+    func stopIfRunning() async { await composer.stop() }
     func handle(_ url: URL) async { _ = await toggle() }
     func insertResult() async { if let lastTranscript { _ = await keyboardHost?.insert(lastTranscript) } }
     func copyResult() async { if let lastTranscript { UIPasteboard.general.string = lastTranscript } }

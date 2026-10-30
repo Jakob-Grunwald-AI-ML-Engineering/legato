@@ -1,5 +1,6 @@
 import Foundation
 import LegatoKeyboardCore
+import LegatoComposerDoc
 import Observation
 import UIKit
 
@@ -193,12 +194,38 @@ final class KeyboardController {
     /// dictate. Believed only while the app keeps beating: an app that died mid-meeting leaves the flag behind.
     var meetingNotice: String? { host?.meetingNotice(now: Date()) }
 
+    private(set) var composer = ComposerPublication()
+    @ObservationIgnored private var composerPoll: Task<Void, Never>?
+    private var composerLink: ComposerLink? { UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) } }
+    func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, text: String? = nil) {
+        guard fullAccess else { show("Allow Full Access to connect to the composer."); return }
+        composerLink?.send(.init(action: action, lineID: lineID, wordID: wordID, text: text))
+        DarwinObserver.post(LinkChannel.Note.composerIntent)
+    }
+    func insertComposer() {
+        let text = composer.snapshot.lines.enumerated().map { i, line in
+            switch line.kind { case .li: "• " + line.text; case .oli: "\(i + 1). " + line.text; case .quote: "> " + line.text; default: line.text }
+        }.joined(separator: "\n")
+        guard !text.isEmpty else { return }
+        type(text); composerIntent("insert")
+        composer = ComposerPublication()
+    }
     // MARK: Visibility
 
     /// The keyboard came on screen: beat presence once a second, and catch up with a run in progress.
     func appeared() {
         guard !isTornDown else { return }
         isVisible = true
+        composerPoll?.cancel()
+        composerPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if let value = self.composerLink?.read(), value != self.composer {
+                    self.composer = value; self.composerLink?.acknowledge(value.snapshot.revision)
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
         // A return from the app is a new attempt, even before the previous tap's URL-settle timer.
         openAppRequestID = UUID().uuidString
         refreshPreferences()
@@ -219,6 +246,7 @@ final class KeyboardController {
     }
 
     func disappeared() {
+        composerPoll?.cancel(); composerPoll = nil
         remoteRequestID = nil
         pendingRemoteStartID = nil
         // Text still to be revealed goes in now; with no field left to type into this does nothing, and the
@@ -730,6 +758,7 @@ final class KeyboardController {
     /// The mic key was tapped. In `.openApp` mode the key is a `Link` that opens the app by itself; this
     /// sends the same request over the link, for an app that is already running.
     func micTapped() {
+        if composer.status == "listening" { composerIntent("stop"); return }
         reloadHost()
         let mode = micMode
         switch mode {

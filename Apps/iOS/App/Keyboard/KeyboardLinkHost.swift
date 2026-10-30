@@ -1,5 +1,8 @@
 import Foundation
 import LegatoCore
+import LegatoAppServices
+import LegatoAgent
+import LegatoComposerDoc
 import LegatoKeyboardCore
 import os
 
@@ -34,6 +37,45 @@ final class KeyboardLinkHost: TranscriptSink {
     private var runDelivery: HostDelivery?
 
     private var observers: [DarwinObserver] = []
+    private var composerTask: Task<Void, Never>?
+    private var composerHistory = ComposerLinkHistory()
+    private var composerRevision = -1
+    private var composerSessionID: String?
+    private var composerChannel: ComposerLink?
+    func attach(_ composer: ComposerSession) {
+        guard let backing = UserDefaultsLinkStore() else { return }
+        let channel = ComposerLink(store: LinkStore(backing)); composerChannel = channel
+        composerTask = Task { [weak self, weak composer] in
+            while !Task.isCancelled {
+                guard let self, let composer else { return }
+                for intent in channel.drainIntents() {
+                    switch intent.action {
+                    case "insert": await composer.insert()
+                    case "cancel": await composer.cancel()
+                    case "undo": await composer.undo()
+                    case "stop": await composer.stop()
+                    case "mode": if let text = intent.text, let mode = ComposerMode(rawValue: text) { await composer.setMode(mode) }
+                    case "tap": if let line = intent.lineID, let word = intent.wordID { await composer.tap(lineID: line, wordID: word, timestamp: intent.timestamp) }
+                    case "pick": if let line = intent.lineID, let word = intent.wordID, let text = intent.text { await composer.pick(lineID: line, wordID: word, text: text) }
+                    default: break
+                    }
+                }
+                if composer.sessionID != self.composerSessionID {
+                    self.composerSessionID = composer.sessionID; self.composerHistory = ComposerLinkHistory(); self.composerRevision = -1
+                }
+                if composer.snapshot.revision != self.composerRevision {
+                    self.composerHistory.record(composer.snapshot, hunks: composer.hunks); self.composerRevision = composer.snapshot.revision
+                }
+                var value = self.composerHistory.publication(acknowledged: channel.acknowledged)
+                value.sessionID = composer.sessionID; value.tail = composer.tail; value.mode = composer.mode.rawValue
+                value.status = composer.status; value.error = composer.error; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
+                channel.publish(value)
+                DarwinObserver.post(LinkChannel.Note.composer)
+                if composer.sessionID != nil { self.link.leaseChanged(until: Date().addingTimeInterval(60)) }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
 
     /// nil when the App Group is unavailable (misconfigured signing): the keyboard link is then off.
     init?() {

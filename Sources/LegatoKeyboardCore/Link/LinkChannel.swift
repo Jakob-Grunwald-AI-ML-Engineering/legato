@@ -8,6 +8,9 @@ public enum LinkChannel {
 
     /// App Group `UserDefaults` keys.
     public enum Key {
+        public static let composer = "link.composer"
+        public static let composerAck = "link.composer.ack"
+        public static let composerIntentPrefix = "link.composer.intent."
         /// app -> keyboard: `HostState`.
         public static let host = "link.host"
         /// keyboard -> app: `KeyboardRequest`.
@@ -28,6 +31,8 @@ public enum LinkChannel {
 
     /// Darwin notification names, one per key.
     public enum Note {
+        public static let composer = "\(RuntimeIdentity.current.notificationNamespace).link.composer"
+        public static let composerIntent = "\(RuntimeIdentity.current.notificationNamespace).link.composer.intent"
         public static let host = "\(RuntimeIdentity.current.notificationNamespace).link.host"
         public static let request = "\(RuntimeIdentity.current.notificationNamespace).link.request"
         public static let ack = "\(RuntimeIdentity.current.notificationNamespace).link.ack"

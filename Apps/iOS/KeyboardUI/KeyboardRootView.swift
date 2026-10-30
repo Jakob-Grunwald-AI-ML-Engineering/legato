@@ -1,4 +1,5 @@
 import LegatoKeyboardCore
+import LegatoComposerUI
 import SwiftUI
 import UIKit
 
@@ -11,6 +12,25 @@ struct KeyboardRootView: View {
     @GestureState private var swipeFired = false
 
     var body: some View {
+        VStack(spacing: 0) {
+            ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
+                         pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
+                         onWordTap: { controller.composerIntent("tap", lineID: $0, wordID: $1) },
+                         onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
+                .frame(maxHeight: .infinity)
+            if let error = controller.composer.error { Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal) }
+            HStack(spacing: 16) {
+                ModeChip(mode: controller.composer.mode) { controller.composerIntent("mode", text: $0) }
+                Spacer()
+                Button { controller.composerIntent("undo") } label: { Image(systemName: "arrow.uturn.backward") }
+                Button("Insert") { controller.insertComposer() }.disabled(controller.composer.snapshot.lines.isEmpty)
+                Button { controller.composerIntent("cancel") } label: { Image(systemName: "xmark") }
+            }.buttonStyle(.borderless).padding(.horizontal, 14).frame(height: 38)
+            keyboardBody.frame(height: controller.mode == .strip ? CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: false)) : KeyGeometry.height(landscape: false))
+        }
+        .background(.background)
+    }
+    private var keyboardBody: some View {
         let typing = controller.typing!
         let layout = typing.layout
         GeometryReader { geometry in
