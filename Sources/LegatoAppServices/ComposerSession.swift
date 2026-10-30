@@ -47,6 +47,10 @@ import LegatoVocabulary
     @ObservationIgnored private var busyParticipants: Set<Participant> = []
     private let vocabularyURL: URL
     public init(vocabularyURL: URL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")) { self.vocabularyURL = vocabularyURL }
+    init(room: Room) {
+        self.room = room
+        self.vocabularyURL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")
+    }
     public func arm() async {
         guard !isArmed else { return }
         do {
@@ -168,11 +172,16 @@ import LegatoVocabulary
     public func setMode(_ value: ComposerMode) async { mode = value; UserDefaults.standard.set(value.rawValue, forKey: "composer.mode"); try? await agents?.setMode(value); onChange?() }
     public func tap(lineID: String, wordID: String, timestamp: Double = ProcessInfo.processInfo.systemUptime) async { try? await binder?.tap(lineID: lineID, wordID: wordID, timestamp: timestamp) }
     public func pick(lineID: String, wordID: String, text: String) async { do { try await binder?.pick(lineID: lineID, wordID: wordID, text: text) } catch { fail(error) } }
-    public func undo() async { guard let id = lastTransactionID else { return }; do { _ = try await room?.undoDocument(transactionID: id) } catch { fail(error) } }
-    private func receive(_ event: Envelope) async {
+    public func undo() async {
+        guard let id = lastTransactionID else { return }
+        // Consume the selection before yielding: repeated taps must never invert this Undo.
+        lastTransactionID = nil
+        do { _ = try await room?.undoDocument(transactionID: id) } catch { fail(error) }
+    }
+    func receive(_ event: Envelope) async {
         switch event.channel {
         case .docSnapshot: if let value = try? event.payload.decode(DocumentSnapshot.self) { snapshot = value }
-        case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; lastTransactionID = value.id }
+        case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; if value.origin != .undo { lastTransactionID = value.id } }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
         case .agentStatus:
             if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty }
@@ -192,7 +201,7 @@ import LegatoVocabulary
         audioTask?.cancel(); if isArmed { await mic.detach() } else { await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         await transcriber?.cancel(); transcriber = nil; await agents?.stop(); agents = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
-        eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []
+        eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }
 }
 
