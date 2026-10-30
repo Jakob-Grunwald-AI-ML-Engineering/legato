@@ -216,3 +216,80 @@ private struct NoEntities: EntityTagging {
     _ = try await insertRoom.insert()
     #expect(await insertRoom.state == .done)
 }
+
+@Test func singleWordTapUsesTheQuoteRangeContract() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(id: "word", text: "Alex")])
+    let line = try #require(await room.documentSnapshot.lines.first)
+    let binder = HintBinder(room: room)
+    await binder.start()
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: line.id, wordID: "word", timestamp: 100)
+    try await segment(room, words: [Word(text: "Morgan")], at: 101, reason: "punctuation")
+    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("endpoint")]), tOrigin: 102)
+    let hint = try #require(await waitForHint(events))
+    #expect(hint.payload["selectedQuote"] == .string("Alex"))
+    #expect(hint.payload["endLineID"] == .string(line.id))
+    #expect(hint.payload["endWordID"] == .string("word"))
+    #expect(hint.payload["lineVersions"] == .object([line.id: .number(Double(line.version))]))
+    await binder.stop()
+}
+
+@Test func reverseCrossLineSelectionCapturesQuoteAndAllObservedVersions() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(text: "Hello"), Word(id: "start", text: "Alex")])
+    try await room.appendSegment(words: [Word(text: "please"), Word(text: "confirm")])
+    try await room.appendSegment(words: [Word(text: "tomorrow"), Word(id: "end", text: "at"), Word(text: "ten.")])
+    let initial = await room.documentSnapshot
+    let first = initial.lines[0], middle = initial.lines[1], last = initial.lines[2]
+    let binder = HintBinder(room: room)
+    await binder.start()
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    let cleared = await room.subscribe(participant: .logger, channels: [.asrTail])
+    var clearing = cleared.makeAsyncIterator()
+    // The same tap intent carries a dragged range, including a reverse drag.
+    try await room.publish(channel: .userIntent, participant: .ui, payload: .object([
+        "event": .string("tap"), "lineID": .string(last.id), "wordID": .string("end"),
+        "endLineID": .string(first.id), "endWordID": .string("start"), "timestamp": .number(100)]))
+    _ = await clearing.next() // Capture is established before changing a source line.
+    try await room.applyDocument([.setKind(ids: [middle.id], kind: .quote)], origin: .agent, versions: [middle.id: middle.version])
+    try await segment(room, words: [Word(text: "Make"), Word(text: "this"), Word(text: "shorter.")], at: 101, reason: "punctuation")
+    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("endpoint")]), tOrigin: 102)
+    let hint = try #require(await waitForHint(events))
+    #expect(hint.payload["lineID"] == .string(first.id))
+    #expect(hint.payload["wordID"] == .string("start"))
+    #expect(hint.payload["endLineID"] == .string(last.id))
+    #expect(hint.payload["endWordID"] == .string("end"))
+    #expect(hint.payload["selectedQuote"] == .string("Alex\nplease confirm\ntomorrow at"))
+    #expect(hint.payload["lineVersions"] == .object(Dictionary(uniqueKeysWithValues: initial.lines.map { ($0.id, .number(Double($0.version))) })))
+    let capturedLines = try #require(hint.payload["targetLines"]).decode([Line].self)
+    #expect(capturedLines == initial.lines)
+    #expect(await room.documentSnapshot.text == initial.text)
+    await binder.stop()
+}
+
+@Test func dismissingSelectionDiscardsBufferedAndDelayedInstructionBeforeResumingGeneralSpeech() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
+    let line = try #require(await room.documentSnapshot.lines.first)
+    let binder = HintBinder(room: room)
+    await binder.start()
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: line.id, wordID: "target", timestamp: 100)
+    try await segment(room, words: [Word(text: "buffered instruction")], at: 101, reason: "punctuation")
+    try await room.publish(channel: .userIntent, participant: .ui,
+        payload: .encoding(WordIntent(event: "deselect", lineID: line.id, wordID: "target", timestamp: 102)))
+    try await segment(room, words: [Word(text: "delayed instruction")], at: 101.5, reason: "punctuation")
+    try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("old partial")]))
+    try await room.publish(channel: .asrBoundary, participant: .segmenter,
+                           payload: .object(["reason": .string("endpoint")]), tOrigin: 101.9)
+    try await segment(room, words: [Word(text: "ordinary")], at: 103, reason: "punctuation")
+    let final = try await settled(room) { $0.lines.count == 2 }
+    #expect(final.text == "Alex\nordinary")
+    #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
+    #expect(await events.values.filter { $0.channel == .asrTail && $0.payload["text"] == .string("old partial") }.isEmpty)
+    await binder.stop()
+}
