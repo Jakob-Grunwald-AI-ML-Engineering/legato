@@ -21,13 +21,18 @@ select_xcode
 xcodebuild -version
 
 # Exercise macOS system Bash, including its EXIT-trap scoping on timeouts.
+phase_started=$SECONDS
 /bin/bash scripts/device/tests/ctl-test.sh
 /bin/bash scripts/device/tests/sim-smoke-test.sh
 /bin/bash scripts/ci/tests/check-internal-exclusion-test.sh
 scripts/e2e/tests/cleanup-test.sh
 scripts/e2e/tests/build-cache-test.sh
 scripts/e2e/tests/cache-lock-race-test.sh
-swift test
+echo "::notice::Shell checks completed in $((SECONDS - phase_started)) s."
+phase_started=$SECONDS
+# This gate consumes binaries and test results, not IDE indexing data.
+swift test --disable-index-store
+echo "::notice::Swift build and tests completed in $((SECONDS - phase_started)) s."
 
 # Both apps, unsigned, against the stubs. arm64 only: the simulator slice is what local and e2e runs use.
 ensure_xcodegen
@@ -35,10 +40,12 @@ trap finish_build_cache EXIT
 prepare_build_cache gate
 work="$BUILD_WORK"
 build_app() { # build_app <project dir> <project> <destination> <extra args...>
-  local dir="$1" project="$2" dest="$3"; shift 3
+  local dir="$1" project="$2" dest="$3" started=$SECONDS; shift 3
   (cd "$dir" && "$XCODEGEN" generate)
   run_build_command xcodebuild build -quiet -project "$dir/$project" -scheme Legato -destination "$dest" \
-    -derivedDataPath "$work/derived" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" CODE_SIGNING_ALLOWED=NO "$@"
+    -derivedDataPath "$work/derived" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" \
+    CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO "$@"
+  echo "::notice::$dir build completed in $((SECONDS - started)) s."
 }
 if has_ios_app; then build_app Apps/iOS Legato.xcodeproj 'generic/platform=iOS Simulator' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES; fi
 if has_mac_app; then build_app Apps/macOS LegatoMac.xcodeproj 'generic/platform=macOS'; fi
