@@ -45,3 +45,16 @@ public enum KeyboardSideMargins {
         return max(4, 79 - systemInset)
     }
 }
+
+/// Total extension height, including the grabber, document and tool strip.
+public enum ComposerKeyboardHeight {
+    public static func resolve(_ requested: Double, screenHeight: Double) -> Double {
+        let maximum = min(600, max(180, screenHeight - 180))
+        let minimum = min(260, maximum)
+        return min(maximum, max(minimum, requested.isFinite ? requested : 420))
+    }
+
+    public static func resized(start: Double, translation: Double, screenHeight: Double) -> Double {
+        resolve(start - translation, screenHeight: screenHeight)
+    }
+}

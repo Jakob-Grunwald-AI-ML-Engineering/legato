@@ -81,3 +81,16 @@ import Testing
         #expect(StripHeight.requested(row: 1) == 1)
     }
 }
+
+@Suite struct ComposerKeyboardHeightTests {
+    @Test func resizingKeepsToolbarAndReadableComposerWithinScreen() {
+        #expect(ComposerKeyboardHeight.resolve(100, screenHeight: 874) == 260)
+        #expect(ComposerKeyboardHeight.resolve(1000, screenHeight: 874) == 600)
+        #expect(ComposerKeyboardHeight.resolve(420, screenHeight: 874) == 420)
+        #expect(ComposerKeyboardHeight.resolve(600, screenHeight: 402) == 222)
+    }
+    @Test func upwardDragExpandsAndDownwardDragContractsFromOriginalHeight() {
+        #expect(ComposerKeyboardHeight.resized(start: 420, translation: -100, screenHeight: 874) == 520)
+        #expect(ComposerKeyboardHeight.resized(start: 420, translation: 100, screenHeight: 874) == 320)
+    }
+}

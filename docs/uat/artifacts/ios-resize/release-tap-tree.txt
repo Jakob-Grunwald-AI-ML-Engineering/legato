@@ -1,0 +1,76 @@
+Attributes: Application, 0x11d5b4000, pid: 60798, label: 'Legato'
+Element subtree:
+ →Application, 0x11d5b4000, pid: 60798, label: 'Legato'
+    Window (Main), 0x11d5b4140, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x11d5b61c0, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x11d5b66c0, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x11d5b6800, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x11d5b6940, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x11d5b7340, {{0.0, 0.0}, {402.0, 874.0}}
+                Other, 0x11d5b7e80, {{16.0, 74.0}, {370.0, 324.0}}
+                  TextField, 0x11d5b7200, {{16.0, 74.0}, {370.0, 34.0}}, identifier: 'systemfield.document', placeholderValue: 'Initial field', Keyboard Focused
+                  TextField, 0x11d5b70c0, {{16.0, 116.0}, {370.0, 34.0}}, identifier: 'systemfield.username', placeholderValue: 'username'
+                  SecureTextField, 0x11d5b6f80, {{16.0, 158.0}, {370.0, 34.0}}, identifier: 'systemfield.password', placeholderValue: 'password'
+                  TextField, 0x11d5b6e40, {{16.0, 200.0}, {370.0, 34.0}}, identifier: 'systemfield.newPassword', placeholderValue: 'newPassword'
+                  TextField, 0x11d5b6d00, {{16.0, 242.0}, {370.0, 34.0}}, identifier: 'systemfield.oneTimeCode', placeholderValue: 'oneTimeCode'
+                  TextField, 0x11d5b6bc0, {{16.0, 284.0}, {370.0, 34.0}}, identifier: 'systemfield.emailAddress', placeholderValue: 'emailAddress'
+                  TextField, 0x11d5b6a80, {{16.0, 326.0}, {370.0, 34.0}}, identifier: 'systemfield.prose', placeholderValue: 'prose'
+                  Button, 0x11c18ea80, {{16.0, 368.0}, {370.0, 30.0}}, identifier: 'systemfield.releasePin', label: 'Release keyboard pin'
+                    StaticText, 0x11c18ee40, {{128.0, 374.0}, {146.0, 18.0}}, label: 'Release keyboard pin'
+    Window, 0x11c18ef80, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x11c18f200, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x11c18f340, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x11c18f480, {{0.0, 539.0}, {402.0, 335.0}}
+          Other, 0x11c18f5c0, {{0.0, 539.0}, {402.0, 335.0}}, identifier: 'inputView'
+    Window, 0x11c18f700, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x11c18fe80, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x11c18fd40, {{0.0, 522.0}, {402.0, 352.0}}
+          Other, 0x11c18fc00, {{0.0, 522.0}, {402.0, 352.0}}
+            Other, 0x11c18fac0, {{0.0, 522.0}, {402.0, 352.0}}
+              Other, 0x11c18f980, {{0.0, 522.0}, {402.0, 352.0}}
+          Other, 0x11c18f840, {{0.0, 539.0}, {402.0, 260.0}}
+            Other, 0x11d6421c0, {{0.0, 539.0}, {402.0, 260.0}}
+              Other, 0x11d642800, {{0.0, 539.0}, {402.0, 260.0}}
+                Other, 0x11d642940, {{0.0, 539.0}, {402.0, 260.0}}
+                  Other, 0x11d642580, {{0.0, 539.0}, {402.0, 260.0}}
+                    Other, 0x11d6426c0, {{0.0, 539.0}, {402.0, 260.0}}
+                      Other, 0x11d642300, {{0.0, 539.0}, {402.0, 260.0}}
+                        Other, 0x11d642440, {{0.0, 539.0}, {402.0, 260.0}}
+                          Other, 0x11d640000, {{0.0, 539.0}, {402.0, 260.0}}
+                            Other, 0x11d640140, {{0.0, 539.0}, {402.0, 260.0}}
+                              Other, 0x11d640280, {{0.0, 539.0}, {402.0, 260.0}}
+                                Other, 0x11d6403c0, {{0.0, 539.0}, {402.0, 28.0}}, label: 'Resize composer', value: 260 points
+                                ScrollView, 0x11d640500, {{0.0, 567.0}, {402.0, 140.0}}
+                                  Other, 0x11d640640, {{0.0, 567.0}, {402.0, 56.3}}
+                                    StaticText, 0x11d642080, {{16.0, 583.0}, {155.0, 24.3}}, label: 'Speak to compose…'
+                                  Other, 0x11d641e00, {{369.0, 567.0}, {30.0, 140.0}}, label: 'Vertical scroll bar, 1 page', value: 0%
+                                    Other, 0x11d641f40, {{396.0, 1311.0}, {3.0, 7.0}}
+                                  Other, 0x11d641b80, {{369.0, 567.0}, {30.0, 140.0}}, label: 'Vertical scroll bar, 1 page', value: 0%
+                                    Other, 0x11d641cc0, {{396.0, 1311.0}, {3.0, 7.0}}
+                                Button, 0x11d641a40, {{14.0, 710.3}, {76.7, 31.3}}, label: 'Message'
+                                Button, 0x11d641900, {{275.3, 717.3}, {20.0, 17.7}}, identifier: 'arrow.uturn.backward', label: 'Undo'
+                                Button, 0x11d6417c0, {{311.3, 714.0}, {43.3, 24.3}}, label: 'Insert', Disabled
+                                Button, 0x11d641680, {{370.7, 718.3}, {17.3, 15.3}}, identifier: 'xmark', label: 'Close'
+                                Image, 0x11d641540, {{19.0, 763.3}, {15.3, 17.7}}, identifier: 'waveform', label: 'waveform'
+                                Button, 0x11d641400, {{56.3, 753.0}, {46.7, 43.0}}, identifier: 'keyboard.hotkey.undo', label: 'Undo', Disabled
+                                Button, 0x11d6412c0, {{109.0, 753.0}, {47.0, 43.0}}, identifier: 'keyboard.hotkey.redo', label: 'Redo', Disabled
+                                Button, 0x11d641180, {{162.0, 753.0}, {46.7, 43.0}}, identifier: 'keyboard.hotkey.refine', label: 'Refine'
+                                Button, 0x11d6408c0, {{211.7, 745.0}, {50.0, 54.0}}, identifier: 'key.delete', label: 'Delete'
+                                  Image, 0x11d640f00, {{211.7, 745.0}, {50.0, 54.0}}, identifier: 'delete.left', label: 'Backspace'
+                                Button, 0x11d641040, {{261.7, 745.0}, {50.0, 54.0}}, identifier: 'key.return', label: 'return'
+                                  Image, 0x11d640c80, {{261.7, 745.0}, {50.0, 54.0}}, identifier: 'return', label: 'Return'
+                                Button, 0x11d640dc0, {{311.7, 745.0}, {90.3, 54.0}}, identifier: 'key.mic', label: 'Start dictation'
+          Other, 0x11d640a00, {{0.0, 539.0}, {402.0, 335.0}}
+            Button, 0x11d640b40, {{8.5, 805.7}, {68.1, 68.7}}, label: 'Next keyboard', value: English (US)
+              StaticText, 0x11d640780, {{8.5, 805.7}, {0.0, 0.0}}
+            Button, 0x11d5d9680, {{325.4, 805.4}, {68.1, 68.7}}, identifier: 'dictation', label: 'Dictate'
+              StaticText, 0x11d5db200, {{325.4, 805.4}, {0.0, 0.0}}
+            Button, 0x11d5db340, {{325.4, 805.4}, {68.1, 68.7}}, identifier: 'dictation', label: 'Dictate'
+              StaticText, 0x11d5db480, {{325.4, 805.4}, {0.0, 0.0}}
+Path to element:
+ →Application, 0x11d5b4000, pid: 60798, label: 'Legato'
+Query chain:
+ →Find: Application 'de.gruenwald.legato'
+  Output: {
+    Application, 0x11d5d92c0, pid: 60798, label: 'Legato'
+  }
