@@ -84,6 +84,7 @@ public actor SonioxClient {
     private var debugInput = false
     private var muted = false
     private var latestTail = ""
+    private var debugPartialTokens: [SonioxToken] = []
     private var audioOrigin: Double?
     public init(room: Room, config: SonioxConfig = SonioxConfig(), socket: any SonioxSocket = URLSessionSonioxSocket(),
                 keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20), audioOrigin: Double? = nil) {
@@ -140,11 +141,27 @@ public actor SonioxClient {
         guard value else { return }
         do {
             if debugInput {
-                try await receiveFrame(.text("{\"tokens\":[{\"text\":\"<fin>\",\"is_final\":true}]}"))
+                try await flushDebugHypothesis()
             } else {
                 try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now
             }
         } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
+    }
+    /// Flush the current provider hypothesis without stopping microphone/session input.
+    @discardableResult public func finalizeChunk() async throws -> Bool {
+        if state == .finished { return false }
+        if state == .finalizing || state == .ending { return true }
+        guard state == .streaming else { throw failure ?? .notConnected }
+        if debugInput { try await flushDebugHypothesis() }
+        else { try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now }
+        return true
+    }
+    private func flushDebugHypothesis() async throws {
+        var final = debugPartialTokens
+        for index in final.indices { final[index].isFinal = true }
+        final.append(SonioxToken(text: "<fin>", isFinal: true))
+        let data = try JSONEncoder().encode(JSONValue.object(["tokens": try .encoding(final)]))
+        try await receiveFrame(.text(String(decoding: data, as: UTF8.self)))
     }
     public func setAudioOrigin(_ origin: Double) { audioOrigin = origin }
     public func sendAudio(_ pcm16: Data) async throws {
@@ -163,7 +180,7 @@ public actor SonioxClient {
         do {
             try await room.micOff(transcriberDraining: true)
             if debugInput {
-                try await receiveFrame(.text("{\"tokens\":[{\"text\":\"<fin>\",\"is_final\":true}]}"))
+                try await flushDebugHypothesis()
                 try await receiveFrame(.text("{\"finished\":true}"))
             } else { try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now }
         } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
@@ -209,7 +226,9 @@ public actor SonioxClient {
         catch { await fail(.invalidResponse); throw SonioxError.invalidResponse }
         if let code = response.error_code { await fail(.provider(code)); throw SonioxError.provider(code) }
         let tokens = response.tokens ?? []
-        try await publish(segmenter.ingest(tokens, finished: response.finished == true))
+        if debugInput { debugPartialTokens = tokens.filter { !$0.isFinal && !$0.text.hasPrefix("<") } }
+        try await publish(segmenter.ingest(tokens, finished: response.finished == true),
+                          activity: tokens.contains { !$0.text.hasPrefix("<") && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         if state == .finalizing && tokens.contains(where: { $0.text == "<fin>" && $0.isFinal }) {
             state = .ending
             // Empty binary is merely an audio chunk. Soniox requires an empty TEXT frame.
@@ -223,7 +242,7 @@ public actor SonioxClient {
             if !debugInput { await socket.close() }; return
         }
     }
-    private func publish(_ output: SegmenterOutput) async throws {
+    private func publish(_ output: SegmenterOutput, activity: Bool) async throws {
         latestTail = output.tail
         for event in output.events {
             switch event {
@@ -240,7 +259,9 @@ public actor SonioxClient {
                     tOrigin: t0.flatMap { start in audioOrigin.map { $0 + start } })
             }
         }
-        _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string(output.tail)]))
+        _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string(output.tail), "activity": .bool(activity),
+                "parts": .array(output.tailParts.map { part in .object(["text": .string(part.text),
+                    "tOrigin": .number(part.time.flatMap { time in audioOrigin.map { $0 + time } } ?? ProcessInfo.processInfo.systemUptime)]) })]))
     }
     private func fail(_ error: SonioxError) async {
         guard state != .finished && state != .failed else { return }

@@ -73,6 +73,7 @@ final class KeyboardLinkHost: TranscriptSink {
                             await composer.select(lineID: line, wordID: word, endLineID: intent.endLineID,
                                                   endWordID: intent.endWordID, timestamp: intent.timestamp)
                         }
+                    case "send-correction": await composer.sendCorrection()
                     case "deselect": await composer.clearSelection(timestamp: intent.timestamp)
                     case "pick": if let line = intent.lineID, let word = intent.wordID, let text = intent.text { await composer.pick(lineID: line, wordID: word, text: text) }
                     default: break
@@ -86,6 +87,9 @@ final class KeyboardLinkHost: TranscriptSink {
                 }
                 var value = self.composerHistory.publication(acknowledged: channel.acknowledged)
                 value.sessionID = composer.sessionID; value.tail = composer.tail; value.mode = composer.mode.rawValue
+                value.correctionDraft = composer.correctionDraft
+                value.correctionCountdownStart = composer.correctionCountdownStart
+                value.correctionCountdownDeadline = composer.correctionCountdownDeadline
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 channel.publish(value)
                 DarwinObserver.post(LinkChannel.Note.composer)

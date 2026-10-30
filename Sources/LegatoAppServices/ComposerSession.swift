@@ -14,6 +14,9 @@ import LegatoVocabulary
 @MainActor @Observable public final class ComposerSession {
     public private(set) var snapshot = DocumentSnapshot(revision: 0, lines: [])
     public private(set) var tail = ""
+    public private(set) var correctionDraft: String?
+    public private(set) var correctionCountdownStart: Double?
+    public private(set) var correctionCountdownDeadline: Double?
     public private(set) var status = "idle"
     public private(set) var error: String?
     public private(set) var pendingLineIDs: Set<String> = []
@@ -90,7 +93,7 @@ import LegatoVocabulary
             }
             let store = VocabularyStore(fileURL: vocabularyURL)
             let learner = VocabularyLearner(store: store, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), languages: ["de", "en"])
-            let binder = HintBinder(room: room, learner: learner); self.binder = binder; await binder.start(); try requireGeneration(generation)
+            let binder = HintBinder(room: room, learner: learner, onSend: { [weak self] in await self?.sendCorrection() }); self.binder = binder; await binder.start(); try requireGeneration(generation)
             let alternatives = AlternativesParticipant(room: room, store: store, learner: learner); self.alternatives = alternatives; await alternatives.start(); try requireGeneration(generation)
             let defaults = UserDefaults.standard
             let prompt = defaults.string(forKey: "composer.personalPrompt") ?? ""
@@ -162,9 +165,12 @@ import LegatoVocabulary
         onChange?()
     }
     public var debugState: [String: Any] {
-        ["status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
+        ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
          "sessionID": sessionID ?? "", "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
+         "correctionDraft": correctionDraft as Any? ?? NSNull(),
+         "correctionCountdownStart": correctionCountdownStart as Any? ?? NSNull(),
+         "correctionCountdownDeadline": correctionCountdownDeadline as Any? ?? NSNull(),
          "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
     }
     #endif
@@ -195,6 +201,12 @@ import LegatoVocabulary
     public func clearSelection(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         await binder?.clearSelection(timestamp: timestamp)
     }
+    public func sendCorrection() async {
+        guard await binder?.requestSend(timestamp: ProcessInfo.processInfo.systemUptime) == true else { return }
+        do {
+            if try await transcriber?.finalizeChunk() != true { await binder?.completeSend() }
+        } catch { fail(error) }
+    }
     public func pick(lineID: String, wordID: String, text: String) async { do { try await binder?.pick(lineID: lineID, wordID: wordID, text: text) } catch { fail(error) } }
     public func undo() async {
         guard let id = lastTransactionID else { return }
@@ -207,6 +219,10 @@ import LegatoVocabulary
         case .docSnapshot: if let value = try? event.payload.decode(DocumentSnapshot.self) { snapshot = value }
         case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; if value.origin != .undo { lastTransactionID = value.id } }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
+        case .correctionDraft:
+            correctionDraft = try? event.payload["text"]?.decode(String.self)
+            correctionCountdownStart = try? event.payload["countdownStart"]?.decode(Double.self)
+            correctionCountdownDeadline = try? event.payload["countdownDeadline"]?.decode(Double.self)
         case .agentStatus:
             if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty }
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
@@ -229,6 +245,7 @@ import LegatoVocabulary
         await transcriber?.cancel(); transcriber = nil; await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
         isMuted = false
+        correctionDraft = nil; correctionCountdownStart = nil; correctionCountdownDeadline = nil
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }
 }

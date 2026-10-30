@@ -13,6 +13,9 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var pendingLineIDs: Set<String> = []
     public var busy = false
     /// nil decodes legacy publications written before voice mute was available.
+    public var correctionDraft: String?
+    public var correctionCountdownStart: Double?
+    public var correctionCountdownDeadline: Double?
     public var muted: Bool?
     public init(snapshot: DocumentSnapshot = .init(revision: 0, lines: []), hunks: [AnimationHunk] = [], requiresSnapshot: Bool = false) {
         self.snapshot = snapshot; self.hunks = hunks; self.requiresSnapshot = requiresSnapshot

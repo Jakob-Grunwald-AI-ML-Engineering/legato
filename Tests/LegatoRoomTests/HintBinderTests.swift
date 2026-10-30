@@ -36,7 +36,7 @@ private actor HintEvents {
 }
 
 private func observeHints(_ room: Room, _ values: HintEvents) async -> Task<Void, Never> {
-    let stream = await room.subscribe(participant: .logger, channels: [.hint, .asrTail])
+    let stream = await room.subscribe(participant: .logger, channels: [.hint, .asrTail, .correctionDraft])
     return Task { for await event in stream { await values.add(event) } }
 }
 
@@ -68,9 +68,11 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     try await Task.sleep(for: .milliseconds(30))
     #expect(await room.documentSnapshot.text == "wrong")
     #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await binder.requestSend(timestamp: 112))
     let boundary = try #require(Channel(rawValue: "asr.boundary"))
     try await room.publish(channel: boundary, participant: .segmenter,
-                           payload: .object(["reason": .string("endpoint")]), tOrigin: 112)
+                           payload: .object(["reason": .string("finalize")]), tOrigin: 112)
     let hint = try #require(await waitForHint(events))
     #expect(hint.payload["event"] == .string("targeted.speech"))
     #expect(hint.payload["lineID"] == .string(original.id))
@@ -100,8 +102,10 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     try await binder.tap(lineID: line.id, wordID: "b", timestamp: 101)
     try await segment(room, words: [Word(text: "old")], at: 99, reason: "gap")
     try await segment(room, words: [Word(text: "replacement")], at: 102, reason: "punctuation")
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await binder.requestSend(timestamp: 102.5))
     let boundary = try #require(Channel(rawValue: "asr.boundary"))
-    try await room.publish(channel: boundary, participant: .segmenter, payload: .object(["reason": .string("gap")]), tOrigin: 103)
+    try await room.publish(channel: boundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]), tOrigin: 103)
     let hint = try #require(await waitForHint(events))
     #expect(hint.payload["wordID"] == .string("b"))
     #expect(hint.payload["text"] == .string("replacement"))
@@ -132,6 +136,7 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     try await room.micOff(transcriberDraining: true)
     await room.finishTranscription()
     #expect(await room.state == .trailing, "Appending the ordinary prefix must not resolve the targeted remainder")
+    #expect(await binder.requestSend(timestamp: 101.2))
     try await room.publish(channel: .asrBoundary, participant: .segmenter,
                            payload: .object(["reason": .string("finalize")]), tOrigin: 101.2)
     let hint = try #require(await waitForHint(events))
@@ -227,7 +232,9 @@ private struct NoEntities: EntityTagging {
     defer { observation.cancel() }
     try await binder.tap(lineID: line.id, wordID: "word", timestamp: 100)
     try await segment(room, words: [Word(text: "Morgan")], at: 101, reason: "punctuation")
-    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("endpoint")]), tOrigin: 102)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await binder.requestSend(timestamp: 102))
+    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]), tOrigin: 102)
     let hint = try #require(await waitForHint(events))
     #expect(hint.payload["selectedQuote"] == .string("Alex"))
     #expect(hint.payload["endLineID"] == .string(line.id))
@@ -256,7 +263,9 @@ private struct NoEntities: EntityTagging {
     _ = await clearing.next() // Capture is established before changing a source line.
     try await room.applyDocument([.setKind(ids: [middle.id], kind: .quote)], origin: .agent, versions: [middle.id: middle.version])
     try await segment(room, words: [Word(text: "Make"), Word(text: "this"), Word(text: "shorter.")], at: 101, reason: "punctuation")
-    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("endpoint")]), tOrigin: 102)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await binder.requestSend(timestamp: 102))
+    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]), tOrigin: 102)
     let hint = try #require(await waitForHint(events))
     #expect(hint.payload["lineID"] == .string(first.id))
     #expect(hint.payload["wordID"] == .string("start"))
@@ -286,10 +295,83 @@ private struct NoEntities: EntityTagging {
     try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("old partial")]))
     try await room.publish(channel: .asrBoundary, participant: .segmenter,
                            payload: .object(["reason": .string("endpoint")]), tOrigin: 101.9)
+    try await segment(room, words: [Word(text: "late after endpoint")], at: 101.7, reason: "punctuation")
     try await segment(room, words: [Word(text: "ordinary")], at: 103, reason: "punctuation")
     let final = try await settled(room) { $0.lines.count == 2 }
     #expect(final.text == "Alex\nordinary")
     #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
     #expect(await events.values.filter { $0.channel == .asrTail && $0.payload["text"] == .string("old partial") }.isEmpty)
+    await binder.stop()
+}
+
+@Test func correctionDraftAccumulatesAcrossPauseAndOnlySendsAfterExplicitFlush() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
+    let line = try #require(await room.documentSnapshot.lines.first)
+    let binder = HintBinder(room: room, quietDelay: .seconds(60))
+    await binder.start()
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: line.id, wordID: "target", timestamp: 100)
+    try await room.publish(channel: .asrTail, participant: .transcriber,
+                           payload: .object(["text": .string("Use Morgan"), "activity": .bool(true)]), tOrigin: 101)
+    try await Task.sleep(for: .milliseconds(15))
+    #expect(await events.values.last(where: { $0.channel == .correctionDraft })?.payload["text"] == .string("Use Morgan"))
+    try await segment(room, words: [Word(text: "Use"), Word(text: "Morgan"), Word(text: "instead.")], at: 101, reason: "punctuation")
+    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("endpoint")]), tOrigin: 102)
+    try await Task.sleep(for: .milliseconds(15))
+    #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
+    #expect(await room.documentSnapshot.text == "Alex")
+    #expect(await binder.requestSend(timestamp: 103))
+    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]), tOrigin: 104)
+    let hint = try #require(await waitForHint(events))
+    #expect(hint.payload["text"] == .string("Use Morgan instead."))
+    #expect(!(await binder.requestSend(timestamp: 105)))
+    try await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]), tOrigin: 106)
+    try await Task.sleep(for: .milliseconds(10))
+    #expect(await events.values.filter { $0.channel == .hint }.count == 1)
+    await binder.stop()
+}
+
+private actor SendCount {
+    var count = 0
+    func increment() { count += 1 }
+}
+
+@Test func correctionCountdownCancelsOnSpeechAndDismissalAndSendsOnce() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
+    let line = try #require(await room.documentSnapshot.lines.first)
+    let count = SendCount()
+    let binder = HintBinder(room: room, quietDelay: .milliseconds(40), countdown: .milliseconds(120), onSend: { await count.increment() })
+    await binder.start()
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: line.id, wordID: "target", timestamp: 100)
+    func speech(_ activity: Bool = true) async throws {
+        try await room.publish(channel: .asrTail, participant: .transcriber,
+            payload: .object(["text": .string("Morgan"), "activity": .bool(activity)]), tOrigin: 101)
+    }
+    try await speech()
+    try await Task.sleep(for: .milliseconds(70))
+    let started = try #require(await events.values.last(where: { $0.channel == .correctionDraft }))
+    #expect(started.payload["countdownDeadline"] != .null)
+    try await speech()
+    try await Task.sleep(for: .milliseconds(15))
+    #expect(await events.values.last(where: { $0.channel == .correctionDraft })?.payload["countdownDeadline"] == .null)
+    try await Task.sleep(for: .milliseconds(60))
+    try await speech(false) // A non-speech tail publication must not restart the timer.
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(await count.count == 1)
+    #expect(await binder.requestSend(timestamp: 102)) // Same path used by the host callback.
+    await binder.completeSend()
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(!(await binder.requestSend(timestamp: 103)))
+    try await binder.tap(lineID: line.id, wordID: "target", timestamp: 104)
+    try await speech()
+    await binder.clearSelection(timestamp: 105)
+    try await Task.sleep(for: .milliseconds(190))
+    #expect(await count.count == 1)
+    #expect(await events.values.last(where: { $0.channel == .correctionDraft })?.payload["text"] == .null)
     await binder.stop()
 }

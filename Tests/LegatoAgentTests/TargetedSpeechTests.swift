@@ -39,8 +39,10 @@ private final class TargetedMessages: MessagesStreaming {
     try await binder.tap(lineID: line.id, wordID: "selected", timestamp: 100)
     try await room.publish(channel: .asrSegment, participant: .segmenter,
                            payload: .object(["words": try .encoding([Word(text: "Use"), Word(text: "Morgan"), Word(text: "instead.")])]), tOrigin: 101)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await binder.requestSend(timestamp: 102))
     try await room.publish(channel: .asrBoundary, participant: .segmenter,
-                           payload: .object(["reason": .string("endpoint")]), tOrigin: 102)
+                           payload: .object(["reason": .string("finalize")]), tOrigin: 102)
     for _ in 0..<100 {
         if client.requests.withLock({ $0.count >= 2 }) { break }
         try await Task.sleep(for: .milliseconds(5))

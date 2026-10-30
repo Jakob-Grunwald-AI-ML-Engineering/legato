@@ -31,7 +31,7 @@ import LegatoRoom
         #expect(!sent.contains(.text("")), "Muting cannot send end-of-stream or close the provider")
         await client.cancel()
     }
-    @Test func targetedChunkHidesPartialTailAndClosesAtEmptyEndpointAfterPunctuation() async throws {
+    @Test func targetedDraftFlushesLatestPartialOnceAfterPauses() async throws {
         let room = Room(segmentRouting: .intercepted)
         try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
         let line = try #require(await room.documentSnapshot.lines.first)
@@ -55,8 +55,13 @@ import LegatoRoom
         #expect(await room.documentSnapshot.text == "Alex")
         // Both punctuation segments already emptied the segmenter's words array.
         try await client.injectDebugFrame(#"{"tokens":[{"text":"<end>","is_final":true}]}"#)
+        _ = await tail.next()
+        try await client.injectDebugFrame(#"{"tokens":[{"text":" Make it brief","is_final":false,"start_ms":900,"end_ms":1100}]}"#)
+        _ = await tail.next()
+        #expect(await binder.requestSend(timestamp: 101.2))
+        try await client.finalizeChunk()
         let event = try #require(await hint.next())
-        #expect(event.payload["text"] == .string("Use Morgan. Use the surname too."))
+        #expect(event.payload["text"] == .string("Use Morgan. Use the surname too. Make it brief"))
         _ = await tail.next()
         try await client.injectDebugFrame(#"{"tokens":[{"text":"ordinary.","is_final":true,"start_ms":2000,"end_ms":2100}]}"#)
         _ = await tail.next()

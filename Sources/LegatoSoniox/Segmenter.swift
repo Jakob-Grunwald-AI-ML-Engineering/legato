@@ -8,10 +8,15 @@ public enum SegmenterEvent: Sendable {
     case segment(SonioxSegment)
     case boundary(reason: String, time: Double?)
 }
+public struct TailPart: Codable, Sendable {
+    public var text: String
+    public var time: Double?
+}
 public struct SegmenterOutput: Sendable {
     public var segments: [SonioxSegment]
     public var tail: String
     public var events: [SegmenterEvent]
+    public var tailParts: [TailPart]
 }
 
 public struct Segmenter: Sendable {
@@ -66,6 +71,11 @@ public struct Segmenter: Sendable {
         let pending = merger.pending?.word.text ?? ""
         let speculative = tokens.filter { !$0.isFinal && !$0.text.hasPrefix("<") }.map(\.text).joined()
         let tail = [committedTail, pending + speculative].filter { !$0.isEmpty }.joined(separator: " ")
-        return SegmenterOutput(segments: segments, tail: tail, events: events)
+        var parts = words.enumerated().map { index, word in
+            TailPart(text: (index == 0 ? "" : " ") + word.word.text, time: word.t0)
+        }
+        if let word = merger.pending { parts.append(TailPart(text: (parts.isEmpty ? "" : " ") + word.word.text, time: word.t0)) }
+        parts += tokens.filter { !$0.isFinal && !$0.text.hasPrefix("<") }.map { TailPart(text: $0.text, time: $0.startMs.map { $0 / 1000 }) }
+        return SegmenterOutput(segments: segments, tail: tail, events: events, tailParts: parts)
     }
 }
