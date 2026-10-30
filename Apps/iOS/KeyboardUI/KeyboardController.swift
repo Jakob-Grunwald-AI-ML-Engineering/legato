@@ -120,6 +120,14 @@ final class KeyboardController {
 
     var fullAccess: Bool { hasFullAccess() }
 
+    private(set) var composerHeight = UserDefaults.standard.object(forKey: "composerKeyboardHeight") as? Double ?? 420
+
+    func resizeComposer(to height: Double) {
+        composerHeight = height
+        UserDefaults.standard.set(height, forKey: "composerKeyboardHeight")
+        onLayoutChange?("composer-resize")
+    }
+
     // MARK: Strip
 
     var mode: KeyboardMode { expansion.mode }

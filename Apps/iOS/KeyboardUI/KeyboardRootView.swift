@@ -11,8 +11,12 @@ struct KeyboardRootView: View {
     /// Whether the current drag already toggled (`swipe`); resets when the drag ends or is cancelled.
     @GestureState private var swipeFired = false
 
+    @State private var resizeStart: Double?
+    @GestureState private var resizing = false
+
     var body: some View {
         VStack(spacing: 0) {
+            resizeHandle
             ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
                          pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
                          onWordTap: { controller.composerIntent("tap", lineID: $0, wordID: $1) },
@@ -26,10 +30,44 @@ struct KeyboardRootView: View {
                 Button("Insert") { controller.insertComposer() }.disabled(controller.composer.snapshot.lines.isEmpty)
                 Button { controller.composerIntent("cancel") } label: { Image(systemName: "xmark") }
             }.buttonStyle(.borderless).padding(.horizontal, 14).frame(height: 38)
-            keyboardBody.frame(height: CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: false)))
+            keyboardBody.frame(height: CGFloat(StripHeight.keyRowHeight(row: controller.stripHeight, landscape: false)))
         }
-        .background(.background)
+        // UIInputView(.keyboard) supplies the same adaptive material as the system tray.
+        // A nonzero alpha also keeps blank portions touchable in keyboard extensions.
+        .background(Color.black.opacity(0.001))
+        .environment(\.colorScheme, scheme)
     }
+    private var screenHeight: Double {
+        Double(controller.inputModeTarget?.view.window?.windowScene?.screen.bounds.height ?? 874)
+    }
+
+    private var resizeHandle: some View {
+        Capsule().fill(.secondary.opacity(0.5))
+            .frame(width: 36, height: 5)
+            .frame(maxWidth: .infinity).frame(height: 28)
+            .background(Color.black.opacity(0.001))
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .updating($resizing) { _, active, _ in active = true }
+                .onChanged { value in
+                    if resizeStart == nil { resizeStart = ComposerKeyboardHeight.resolve(controller.composerHeight, screenHeight: screenHeight) }
+                    // Update while moving: iOS can cancel a touch once it leaves the extension.
+                    controller.resizeComposer(to: ComposerKeyboardHeight.resized(
+                        start: resizeStart ?? controller.composerHeight,
+                        translation: value.translation.height, screenHeight: screenHeight))
+                }
+                .onEnded { _ in resizeStart = nil })
+            .onChange(of: resizing) { _, active in if !active { resizeStart = nil } }
+            .accessibilityElement()
+            .accessibilityLabel("Resize composer")
+            .accessibilityValue("\(Int(controller.composerHeight)) points")
+            .accessibilityHint("Drag up to expand or down to make room for the app")
+            .accessibilityAdjustableAction { direction in
+                let change: Double = direction == .increment ? 60 : -60
+                controller.resizeComposer(to: ComposerKeyboardHeight.resolve(controller.composerHeight + change, screenHeight: screenHeight))
+            }
+    }
+
     private var keyboardBody: some View {
         GeometryReader { geometry in
             strip(typing: controller.typing!, size: geometry.size)
@@ -46,7 +84,7 @@ struct KeyboardRootView: View {
         // debug heights that leave nothing to touch have none.
         let landscape = KeyGeometry.isLandscape(width: size.width)
         let keyRowHeight = StripHeight.keyRowHeight(row: controller.stripHeight, landscape: landscape)
-        let wordRowHeight = CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: landscape) - keyRowHeight)
+        let wordRowHeight: CGFloat = 0
         let rowHeight = max(size.height - wordRowHeight, 0)
         // At the full keyboard's height: the strip's own height would scale the pill down (`vScale`).
         let fullHeight = KeyGeometry.height(landscape: landscape)

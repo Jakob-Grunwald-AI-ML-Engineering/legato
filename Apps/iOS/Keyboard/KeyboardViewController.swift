@@ -60,7 +60,7 @@ final class KeyboardViewController: UIInputViewController {
     /// keyboard (402 x 297) is wider than tall too.
     private var requestedHeight: CGFloat {
         let screenHeight = view.window?.windowScene?.screen.bounds.height ?? 852
-        return min(600, max(360, screenHeight - 180))
+        return CGFloat(ComposerKeyboardHeight.resolve(controller?.composerHeight ?? 420, screenHeight: screenHeight))
     }
 
     /// The mode or the strip height changed (the chevron, the debug height cycle, the setting): resize
@@ -68,6 +68,8 @@ final class KeyboardViewController: UIInputViewController {
     private func layoutChanged(reason: String) {
         heightConstraint?.constant = requestedHeight
         let settle: UIView = view.superview ?? view
+        // Follow the finger without stacking animations during a continuous drag.
+        if reason == "composer-resize" { settle.layoutIfNeeded(); return }
         #if DEBUG
         UIView.animate(withDuration: 0.2, animations: { settle.layoutIfNeeded() }, completion: { [weak self] _ in
             guard let self else { return }
