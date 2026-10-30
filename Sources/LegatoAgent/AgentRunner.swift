@@ -153,7 +153,12 @@ public actor AgentRunner {
                 }
                 for (i, json) in partial {
                     guard case .object(var block) = blocks[i] else { continue }
-                    block["input"] = try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)); blocks[i] = .object(block)
+                    if json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if block["input"] == nil { block["input"] = .object([:]) }
+                    } else {
+                        block["input"] = try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))
+                    }
+                    blocks[i] = .object(block)
                 }
                 let content = blocks.keys.sorted().compactMap { blocks[$0] }
                 guard !content.isEmpty else { throw MessagesStreamError.incomplete }
