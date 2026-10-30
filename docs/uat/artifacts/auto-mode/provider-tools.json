@@ -1,0 +1,633 @@
+[
+  {
+    "case": "email",
+    "sessionID": "7B610FB9-5EDE-4A58-880B-9D99638FAFCB",
+    "tools": [
+      {
+        "name": "load_writing_guidance",
+        "participant": "liveAgent",
+        "seq": 27,
+        "input": {
+          "mode": "email"
+        },
+        "result_seq": 38,
+        "is_error": false,
+        "content": "Compose a clear email with appropriate greeting, paragraphs and closing only when supported by the user input.\n"
+      },
+      {
+        "name": "view",
+        "participant": "liveAgent",
+        "seq": 32,
+        "input": {},
+        "result_seq": 39,
+        "is_error": false,
+        "content": "L84D14C52-67B8-4539-9309-A10766D3D7D5 v0 [p] Write an email to Morgan: The Project Atlas staging rollout is Tuesday at 14:30.\nL449E28E7-16F3-49CC-AB72-BF3E5708DD45 v0 [p] Ask whether that time works."
+      },
+      {
+        "name": "load_writing_guidance",
+        "participant": "restructureAgent",
+        "seq": 98,
+        "input": {
+          "mode": "email"
+        },
+        "result_seq": 118,
+        "is_error": false,
+        "content": "Compose a clear email with appropriate greeting, paragraphs and closing only when supported by the user input.\n"
+      },
+      {
+        "name": "replace_lines",
+        "participant": "liveAgent",
+        "seq": 52,
+        "input": {
+          "from": "L84D14C52-67B8-4539-9309-A10766D3D7D5",
+          "lines": [
+            "Hi Morgan,",
+            "The Project Atlas staging rollout is scheduled for Tuesday at 14:30.",
+            "Does that time work for you?",
+            "Best regards"
+          ],
+          "to": "L449E28E7-16F3-49CC-AB72-BF3E5708DD45",
+          "versions": [
+            {
+              "line": "L84D14C52-67B8-4539-9309-A10766D3D7D5",
+              "version": 0
+            },
+            {
+              "line": "L449E28E7-16F3-49CC-AB72-BF3E5708DD45",
+              "version": 0
+            }
+          ]
+        },
+        "result_seq": 136,
+        "is_error": false,
+        "content": "Applied transaction 1CDC64BA-551F-4A4A-8556-660AF9024B7F\nLEE0A2608-2732-4BDD-BDE6-5736BFB18FCD v0 [p] Hi Morgan,\nLEAAE455A-01DE-4BF0-AC38-CA472BC64C2C v0 [p] The Project Atlas staging rollout is scheduled for Tuesday at 14:30.\nLB1C0F9F7-5E41-45E3-BCAF-D27DB5CC0687 v0 [p] Does that time work for you?\nL6CB579B3-6016-4C8F-9EC3-73B6EE730CDD v0 [p] Best regards"
+      },
+      {
+        "name": "replace_lines",
+        "participant": "restructureAgent",
+        "seq": 155,
+        "input": {
+          "from": "L84D14C52-67B8-4539-9309-A10766D3D7D5",
+          "lines": [
+            "Hi Morgan,",
+            "The Project Atlas staging rollout is scheduled for Tuesday at 14:30. Does that time work for you?",
+            "Thanks."
+          ],
+          "to": "L449E28E7-16F3-49CC-AB72-BF3E5708DD45",
+          "versions": [
+            {
+              "line": "L84D14C52-67B8-4539-9309-A10766D3D7D5",
+              "version": 0
+            },
+            {
+              "line": "L449E28E7-16F3-49CC-AB72-BF3E5708DD45",
+              "version": 0
+            }
+          ]
+        },
+        "result_seq": 249,
+        "is_error": true,
+        "content": "invalidOperation. Call view to refresh line ids and versions before retrying."
+      },
+      {
+        "name": "view",
+        "participant": "restructureAgent",
+        "seq": 291,
+        "input": {},
+        "result_seq": 298,
+        "is_error": false,
+        "content": "LEE0A2608-2732-4BDD-BDE6-5736BFB18FCD v0 [p] Hi Morgan,\nLEAAE455A-01DE-4BF0-AC38-CA472BC64C2C v0 [p] The Project Atlas staging rollout is scheduled for Tuesday at 14:30.\nLB1C0F9F7-5E41-45E3-BCAF-D27DB5CC0687 v0 [p] Does that time work for you?\nL6CB579B3-6016-4C8F-9EC3-73B6EE730CDD v0 [p] Best regards"
+      }
+    ],
+    "final": {
+      "mode": "auto",
+      "status": "listening",
+      "busy": false,
+      "text": "Hi Morgan,\nThe Project Atlas staging rollout is scheduled for Tuesday at 14:30.\nDoes that time work for you?\nBest regards",
+      "revision": 3,
+      "error": "",
+      "microphoneLeaseActive": false,
+      "inputSource": "debug.transcriber"
+    },
+    "usage": [
+      {
+        "usage": {
+          "inference_geo": "global",
+          "cache_creation_input_tokens": 8854,
+          "speed": "standard",
+          "output_tokens": 91,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 4,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 8854,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "service_tier": "standard"
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "inference_geo": "global",
+          "service_tier": "standard",
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 8751
+          },
+          "input_tokens": 4,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 65,
+          "cache_creation_input_tokens": 8751,
+          "speed": "standard"
+        },
+        "event": "usage"
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "cache_read_input_tokens": 8854,
+          "inference_geo": "global",
+          "cache_creation_input_tokens": 298,
+          "service_tier": "standard",
+          "speed": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 298
+          },
+          "output_tokens": 333,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "input_tokens": 2
+        }
+      },
+      {
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation_input_tokens": 577,
+          "inference_geo": "global",
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 577,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "cache_read_input_tokens": 9152,
+          "service_tier": "standard",
+          "output_tokens": 111,
+          "speed": "standard"
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "cache_read_input_tokens": 8751,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 106,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "speed": "standard",
+          "cache_creation_input_tokens": 106,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "input_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "global",
+          "output_tokens": 294
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "service_tier": "standard",
+          "input_tokens": 4,
+          "cache_creation_input_tokens": 5911,
+          "output_tokens": 155,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 5911,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "cache_read_input_tokens": 9729,
+          "inference_geo": "global",
+          "speed": "standard",
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          }
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "service_tier": "standard",
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 337,
+          "output_tokens": 24,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 337
+          },
+          "cache_read_input_tokens": 8857,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "speed": "standard",
+          "inference_geo": "global"
+        },
+        "event": "usage"
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_read_input_tokens": 9194,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 228
+          },
+          "service_tier": "standard",
+          "cache_creation_input_tokens": 228,
+          "output_tokens": 26,
+          "speed": "standard",
+          "input_tokens": 2,
+          "inference_geo": "global"
+        }
+      }
+    ]
+  },
+  {
+    "case": "prompt",
+    "sessionID": "134DD82C-91B6-4129-8EF0-C711228B2AE4",
+    "tools": [
+      {
+        "name": "load_writing_guidance",
+        "participant": "liveAgent",
+        "seq": 26,
+        "input": {
+          "mode": "prompt"
+        },
+        "result_seq": 37,
+        "is_error": false,
+        "content": "Compose an actionable prompt: clear objective, relevant context and explicit constraints. Organize lists where useful.\n"
+      },
+      {
+        "name": "view",
+        "participant": "liveAgent",
+        "seq": 31,
+        "input": {},
+        "result_seq": 38,
+        "is_error": false,
+        "content": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4 v0 [p] Write a prompt for a coding assistant to build a CSV import preview.\nL0DB7E1D3-0F73-45A1-B374-81997B3D8EE6 v0 [p] Let users map fields, validate every row, and run a dry run in staging only.\nL8903EFD8-B21E-43B2-9060-4AE24617FAA4 v0 [p] Never write to production."
+      },
+      {
+        "name": "replace_lines",
+        "participant": "liveAgent",
+        "seq": 60,
+        "input": {
+          "from": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4",
+          "lines": [
+            "Build a CSV import preview for a coding assistant to implement. Let users map CSV fields to target fields, validate every row, and run a dry run in staging only. Never write to production."
+          ],
+          "to": "DAB2C01F-0ECE-4BD9-87A1-F256E8C92D94",
+          "versions": [
+            {
+              "line": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4",
+              "version": 0
+            },
+            {
+              "line": "L0DB7E1D3-0F73-45A1-B374-81997B3D8EE6",
+              "version": 0
+            },
+            {
+              "line": "L8903EFD8-B21E-43B2-9060-4AE24617FAA4",
+              "version": 0
+            }
+          ]
+        },
+        "result_seq": 162,
+        "is_error": true,
+        "content": "invalidOperation. Call view to refresh line ids and versions before retrying."
+      },
+      {
+        "name": "load_writing_guidance",
+        "participant": "restructureAgent",
+        "seq": 225,
+        "input": {
+          "mode": "prompt"
+        },
+        "result_seq": 244,
+        "is_error": false,
+        "content": "Compose an actionable prompt: clear objective, relevant context and explicit constraints. Organize lists where useful.\n"
+      },
+      {
+        "name": "delete_lines",
+        "participant": "liveAgent",
+        "seq": 174,
+        "input": {
+          "from": "L0DB7E1D3-0F73-45A1-B374-81997B3D8EE6",
+          "to": "L8903EFD8-B21E-43B2-9060-4AE24617FAA4",
+          "versions": [
+            {
+              "line": "L0DB7E1D3-0F73-45A1-B374-81997B3D8EE6",
+              "version": 0
+            },
+            {
+              "line": "L8903EFD8-B21E-43B2-9060-4AE24617FAA4",
+              "version": 0
+            }
+          ]
+        },
+        "result_seq": 311,
+        "is_error": false,
+        "content": "Applied transaction 0C45C895-6765-4872-BC3C-2240139EF72E\nLF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4 v0 [p] Write a prompt for a coding assistant to build a CSV import preview."
+      },
+      {
+        "name": "replace_lines",
+        "participant": "liveAgent",
+        "seq": 235,
+        "input": {
+          "from": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4",
+          "lines": [
+            "Build a CSV import preview for a coding assistant to implement. Let users map CSV fields to target fields, validate every row, and run a dry run in staging only. Never write to production."
+          ],
+          "to": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4",
+          "versions": [
+            {
+              "line": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4",
+              "version": 0
+            }
+          ]
+        },
+        "result_seq": 314,
+        "is_error": false,
+        "content": "Applied transaction 3F91B7A5-01CF-4054-A38E-B5BC2CB3F61E\nL9474D067-A22C-40FD-B2EB-6F65A1843415 v0 [p] Build a CSV import preview for a coding assistant to implement. Let users map CSV fields to target fields, validate every row, and run a dry run in staging only. Never write to production."
+      },
+      {
+        "name": "view",
+        "participant": "liveAgent",
+        "seq": 437,
+        "input": {},
+        "result_seq": 443,
+        "is_error": false,
+        "content": "L9474D067-A22C-40FD-B2EB-6F65A1843415 v0 [p] Build a CSV import preview for a coding assistant to implement. Let users map CSV fields to target fields, validate every row, and run a dry run in staging only. Never write to production."
+      },
+      {
+        "name": "replace_lines",
+        "participant": "restructureAgent",
+        "seq": 318,
+        "input": {
+          "from": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4",
+          "lines": [
+            "Build a CSV import preview feature.",
+            "Requirements:",
+            "- Field mapping: let users map CSV columns to target fields.",
+            "- Validation: validate every row and show errors clearly per row and field.",
+            "- Dry run: let users run a dry run of the import against the staging environment only.",
+            "Constraints:",
+            "- Never write to production, under any circumstances. Do not add any code path, config, or credential that could reach production data.",
+            "- Run all dry runs in staging only, and make that restriction explicit in the code and UI.",
+            "Deliver the implementation with tests covering mapping, row validation, and the staging-only guard."
+          ],
+          "to": "L8903EFD8-B21E-43B2-9060-4AE24617FAA4",
+          "versions": [
+            {
+              "line": "LF00B1AFF-80CC-4A6F-B22A-CE7381EDDCA4",
+              "version": 0
+            },
+            {
+              "line": "L0DB7E1D3-0F73-45A1-B374-81997B3D8EE6",
+              "version": 0
+            },
+            {
+              "line": "L8903EFD8-B21E-43B2-9060-4AE24617FAA4",
+              "version": 0
+            }
+          ]
+        },
+        "result_seq": 566,
+        "is_error": true,
+        "content": "invalidOperation. Call view to refresh line ids and versions before retrying."
+      },
+      {
+        "name": "view",
+        "participant": "restructureAgent",
+        "seq": 570,
+        "input": {},
+        "result_seq": 577,
+        "is_error": false,
+        "content": "L9474D067-A22C-40FD-B2EB-6F65A1843415 v0 [p] Build a CSV import preview for a coding assistant to implement. Let users map CSV fields to target fields, validate every row, and run a dry run in staging only. Never write to production."
+      }
+    ],
+    "final": {
+      "mode": "auto",
+      "status": "listening",
+      "busy": false,
+      "text": "Build a CSV import preview for a coding assistant to implement. Let users map CSV fields to target fields, validate every row, and run a dry run in staging only. Never write to production.",
+      "revision": 5,
+      "error": "",
+      "microphoneLeaseActive": false,
+      "inputSource": "debug.transcriber"
+    },
+    "usage": [
+      {
+        "usage": {
+          "inference_geo": "global",
+          "input_tokens": 4,
+          "speed": "standard",
+          "cache_creation_input_tokens": 11665,
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 11665,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "output_tokens": 95,
+          "cache_read_input_tokens": 0
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "cache_read_input_tokens": 11665,
+          "input_tokens": 2,
+          "service_tier": "standard",
+          "speed": "standard",
+          "cache_creation_input_tokens": 359,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 359
+          },
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "output_tokens": 400,
+          "inference_geo": "global"
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "service_tier": "standard",
+          "input_tokens": 4,
+          "cache_creation_input_tokens": 12499,
+          "output_tokens": 88,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 12499
+          },
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "speed": "standard"
+        },
+        "event": "usage"
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "cache_read_input_tokens": 12024,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "inference_geo": "global",
+          "output_tokens": 540,
+          "input_tokens": 2,
+          "service_tier": "standard",
+          "speed": "standard",
+          "cache_creation_input_tokens": 444,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 444,
+            "ephemeral_1h_input_tokens": 0
+          }
+        }
+      },
+      {
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation_input_tokens": 821,
+          "inference_geo": "global",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 821
+          },
+          "cache_read_input_tokens": 12468,
+          "service_tier": "standard",
+          "output_tokens": 126,
+          "speed": "standard"
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "input_tokens": 4,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation_input_tokens": 9292,
+          "inference_geo": "global",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 9292
+          },
+          "service_tier": "standard",
+          "cache_read_input_tokens": 13289,
+          "output_tokens": 69,
+          "speed": "standard"
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation_input_tokens": 165,
+          "inference_geo": "global",
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 165,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "cache_read_input_tokens": 22581,
+          "service_tier": "standard",
+          "output_tokens": 87,
+          "speed": "standard"
+        },
+        "event": "usage"
+      },
+      {
+        "usage": {
+          "cache_read_input_tokens": 12499,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 133,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "speed": "standard",
+          "cache_creation_input_tokens": 133,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "input_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "global",
+          "output_tokens": 482
+        },
+        "event": "usage"
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 534
+          },
+          "cache_read_input_tokens": 12632,
+          "service_tier": "standard",
+          "cache_creation_input_tokens": 534,
+          "output_tokens": 24,
+          "speed": "standard",
+          "input_tokens": 2,
+          "inference_geo": "global"
+        }
+      },
+      {
+        "usage": {
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 118
+          },
+          "cache_read_input_tokens": 13166,
+          "service_tier": "standard",
+          "cache_creation_input_tokens": 118,
+          "output_tokens": 28,
+          "speed": "standard",
+          "input_tokens": 2,
+          "inference_geo": "global"
+        },
+        "event": "usage"
+      }
+    ]
+  }
+]

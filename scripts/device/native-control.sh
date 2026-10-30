@@ -8,7 +8,7 @@ Usage: native-control.sh screenshot OUTPUT.png
        native-control.sh record OUTPUT.mp4 SECONDS
        native-control.sh keyboard  # Select Legato on the current iPhone 17
        native-control.sh tree
-       native-control.sh mode Message|Email|Prompt|Note
+       native-control.sh mode Message|Email|Prompt|Note|Auto
        native-control.sh tap X Y
        native-control.sh hold X Y SECONDS
        native-control.sh swipe X1 Y1 X2 Y2 [HOLD_SECONDS]

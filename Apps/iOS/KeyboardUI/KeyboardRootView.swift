@@ -8,7 +8,7 @@ struct KeyboardRootView: View {
     let controller: KeyboardController
     @Environment(\.colorScheme) private var systemScheme
     @State private var showsModePicker = false
-    private let modes = [("message", "message"), ("email", "envelope"), ("prompt", "sparkles"), ("note", "note.text")]
+    private let modes = [("message", "message"), ("email", "envelope"), ("prompt", "sparkles"), ("note", "note.text"), ("auto", "wand.and.stars")]
 
     var body: some View {
         VStack(spacing: 0) {

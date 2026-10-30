@@ -56,6 +56,9 @@ public struct ToolExecutor: Sendable {
             case "set_kind":
                 guard let v = input["lines"], let kind = LineKind(rawValue: try string("kind")) else { throw DocumentError.invalidOperation }
                 op = .setKind(ids: try v.decode([String].self), kind: kind); observed = try versions()
+            case "load_writing_guidance":
+                guard let mode = ComposerMode(rawValue: try string("mode")) else { throw DocumentError.invalidOperation }
+                return ToolResult(content: try PromptLayers.writingGuidance(for: mode), isError: false)
             case "set_mode":
                 guard let mode = ComposerMode(rawValue: try string("mode")) else { throw DocumentError.invalidOperation }
                 _ = try await room.publish(channel: .userIntent, participant: live ? .liveAgent : .restructureAgent,
@@ -72,7 +75,7 @@ public struct ToolExecutor: Sendable {
             return ToolResult(content: "Applied transaction \(txn.id)\n" + DocPresenter.present(await room.documentSnapshot), isError: false)
         } catch { return ToolResult(content: "\(error). Call view to refresh line ids and versions before retrying.", isError: true) }
     }
-    public static func schemas(live: Bool) -> [ToolSchema] {
+    public static func schemas(live: Bool, mode: ComposerMode = .message) -> [ToolSchema] {
         typealias S = ToolSchema.Schema
         let str = S(type: "string"), array = S(type: "array", items: S(type: "string"))
         // Strict JSON Schema forbids open dictionaries. Represent the version map as line/version pairs.
@@ -88,6 +91,13 @@ public struct ToolExecutor: Sendable {
             tool("move_lines", ["from": str,"to": str,"after": str,"versions": versions], ["from","to","versions"]),
             tool("set_kind", ["lines": array,"kind": str,"versions": versions]),
             tool("set_mode", ["mode": str]), tool("note", ["text": str])]
+        if mode == .auto {
+            // Specialization loads context without changing the Auto system prefix or UI mode.
+            tools.removeAll { $0.name == "set_mode" }
+            tools.append(ToolSchema(name: "load_writing_guidance",
+                description: "Load the existing writing skill for the intended format before drafting or revising in Auto. Returns guidance as context; does not edit the document or change mode.",
+                properties: ["mode": S(type: "string", enumValues: ["message", "email", "prompt", "note"])], required: ["mode"]))
+        }
         if live { tools.append(tool("request_restructure", ["reason": str])) }; return tools
     }
 }
