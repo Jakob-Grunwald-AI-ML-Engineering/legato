@@ -231,6 +231,15 @@ sim_lifecycle() {
   grep -q -- 'simctl install sim-fixture' "$FIXTURE/calls" && grep -q -- '--terminate-running-process sim-fixture' "$FIXTURE/calls"
 }
 check sim_lifecycle
+setup sim-sessions
+mkdir -p "$FIXTURE/container/Documents/sessions/test"
+echo '{"seq":1}' > "$FIXTURE/container/Documents/sessions/test/room.jsonl"
+sim_sessions() {
+  LEGATO_SIMULATOR=sim-fixture run_ctl --target sim pull-sessions Documents/sessions/test || return 1
+  local pulled=("$LEGATO_DEVICE_STATE"/*/pulled/test/room.jsonl)
+  [ "$(cat "${pulled[0]}")" = '{"seq":1}' ]
+}
+check sim_sessions
 setup sim-alias
 mkdir -p "$FIXTURE/container/Library/Caches/debug-bridge/inbox"
 sim_alias() {

@@ -21,6 +21,7 @@
 #   terminate                stop the Legato process
 #   pull [--group] <path>    copy a file from the data container (Library/, Documents/, tmp/) or, with
 #                            --group, the App Group container, and print it (e.g. pull Library/Caches/audio-diag.jsonl)
+#   pull-sessions [--group] <path>  alias of pull for session directories/files
 #
 # Bridge commands (send): ping, commands, state, set-setting <key> <value>, plus in Debug builds every
 # simulator e2e command (toggle, interrupt, copy-last, result-insert, result-copy, foreground, background,
@@ -520,6 +521,7 @@ cmd_pull() {
 sub="${1:-}"
 [ $# -eq 0 ] || shift
 case "$sub" in
+  pull-sessions) cmd_pull "$@" ;;
   devices | build | install | launch | send | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;
 esac
