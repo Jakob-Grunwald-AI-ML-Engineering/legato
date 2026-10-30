@@ -38,7 +38,7 @@ import LegatoVocabulary
     public var canUndo: Bool { lastTransactionID != nil }
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var room: Room?
-    @ObservationIgnored private var agents: AgentRunner?
+    @ObservationIgnored private var writer: AgentRunner?
     @ObservationIgnored private var transcriber: SonioxClient?
     @ObservationIgnored private let mic = MicSource()
     @ObservationIgnored private var eventsTask: Task<Void, Never>?
@@ -96,11 +96,10 @@ import LegatoVocabulary
             let prompt = defaults.string(forKey: "composer.personalPrompt") ?? ""
             mode = debugMode ?? ComposerMode(rawValue: defaults.string(forKey: "composer.mode") ?? "message") ?? .message
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
-            let agents = AgentRunner(room: room, client: MessagesStream(keyStore: KeychainKeyStore()), configuration: .init(
+            let writer = AgentRunner(room: room, client: MessagesStream(keyStore: KeychainKeyStore()), configuration: .init(
                 liveModel: ModelChoice(rawValue: defaults.string(forKey: "composer.liveModel") ?? "") ?? .haiku,
-                restructureModel: ModelChoice(rawValue: defaults.string(forKey: "composer.restructureModel") ?? "") ?? .sonnet,
                 mode: mode, personalPrompt: prompt, vocabulary: { _ in terms }))
-            self.agents = agents; await agents.start(); try requireGeneration(generation)
+            self.writer = writer; await writer.start(); try requireGeneration(generation)
             let eventStream = await room.subscribe(participant: .ui, channels: Set(Channel.allCases), buffering: .unbounded)
             eventsTask = Task { [weak self] in for await event in eventStream { guard !Task.isCancelled else { break }; await self?.receive(event) } }
             #if DEBUG || LEGATO_INTERNAL
@@ -185,7 +184,7 @@ import LegatoVocabulary
     /// The surface inserts its currently rendered value synchronously, then calls this to cancel work.
     public func insert() async { generation = UUID(); _ = try? await room?.insert(); await cleanup(); status = "done"; onChange?() }
     public func cancel() async { generation = UUID(); try? await room?.cancel(); await cleanup(); status = "idle"; onChange?() }
-    public func setMode(_ value: ComposerMode) async { mode = value; UserDefaults.standard.set(value.rawValue, forKey: "composer.mode"); try? await agents?.setMode(value); onChange?() }
+    public func setMode(_ value: ComposerMode) async { mode = value; UserDefaults.standard.set(value.rawValue, forKey: "composer.mode"); try? await writer?.setMode(value); onChange?() }
     public func tap(lineID: String, wordID: String, timestamp: Double = ProcessInfo.processInfo.systemUptime) async { try? await binder?.tap(lineID: lineID, wordID: wordID, timestamp: timestamp) }
     public func pick(lineID: String, wordID: String, text: String) async { do { try await binder?.pick(lineID: lineID, wordID: wordID, text: text) } catch { fail(error) } }
     public func undo() async {
@@ -218,7 +217,7 @@ import LegatoVocabulary
     private func fail(_ failure: any Error) { error = failure.localizedDescription; status = "error"; onChange?() }
     private func cleanup() async {
         audioTask?.cancel(); if isArmed { await mic.detach() } else { await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
-        await transcriber?.cancel(); transcriber = nil; await agents?.stop(); agents = nil
+        await transcriber?.cancel(); transcriber = nil; await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
         isMuted = false
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil

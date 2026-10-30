@@ -28,7 +28,7 @@ import LegatoRoom
             #expect(value["cache_control"]?["type"] == .string("ephemeral"))
             let tools = try #require(value["tools"]).decode([JSONValue].self)
             #expect(tools.allSatisfy { $0["strict"] == .bool(true) && $0["eager_input_streaming"] == .bool(true) })
-            #expect(tools.contains { $0["name"] == .string("request_restructure") } == live)
+            #expect(!tools.contains { $0["name"] == .string("request_restructure") })
         }
     }
     #expect(PromptLayers.build(mode: .email, personal: "Be direct", vocabulary: ["Kubernetes"]).contains("Kubernetes"))

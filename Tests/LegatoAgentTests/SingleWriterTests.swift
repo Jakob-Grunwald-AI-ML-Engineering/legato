@@ -1,0 +1,130 @@
+import Foundation
+import Synchronization
+import Testing
+import LegatoClaude
+import LegatoComposerDoc
+import LegatoRoom
+@testable import LegatoAgent
+
+private final class WriterMessages: MessagesStreaming {
+    struct Call: Sendable {
+        let model: String
+        let phase: String
+        let request: Data
+        let continuation: AsyncThrowingStream<SSEEvent, any Error>.Continuation
+    }
+    struct State {
+        var calls: [Call] = []
+        var active: Set<Int> = []
+        var maxActive = 0
+        var canceledPhases: [String] = []
+    }
+    let state = Mutex(State())
+    func stream(request: Data) -> AsyncThrowingStream<SSEEvent, any Error> {
+        let json = try! JSONDecoder().decode(JSONValue.self, from: request)
+        let model: String
+        if case .string(let s) = json["model"] { model = s } else { model = "missing" }
+        let messages = (try? json["messages"]?.decode([JSONValue].self)) ?? []
+        let text = messages.reversed().compactMap { message -> String? in
+            if case .string(let content) = message["content"], content.contains("Writing phase:") { return content }; return nil
+        }.first ?? ""
+        let phase = ["targeted", "final", "pause", "quick"].first { text.contains("Writing phase: \($0)") } ?? "legacy"
+        let pair = AsyncThrowingStream<SSEEvent, any Error>.makeStream()
+        let id = state.withLock { s in
+            let id = s.calls.count
+            s.calls.append(.init(model: model, phase: phase, request: request, continuation: pair.continuation))
+            s.active.insert(id); s.maxActive = max(s.maxActive, s.active.count)
+            return id
+        }
+        pair.continuation.onTermination = { [self] reason in
+            state.withLock { s in
+                s.active.remove(id)
+                if case .cancelled = reason { s.canceledPhases.append(phase) }
+            }
+        }
+        return pair.stream
+    }
+    func finish(_ index: Int) {
+        let c = state.withLock { $0.calls[index].continuation }
+        c.yield(.init(event: "content_block_start", data: #"{"index":0,"content_block":{"type":"text","text":"No edit needed."}}"#))
+        c.yield(.init(event: "message_stop", data: #"{"type":"message_stop"}"#))
+        c.finish()
+    }
+    func calls() -> [Call] { state.withLock { $0.calls } }
+}
+private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
+    for _ in 0..<100 {
+        if await condition() { return true }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+}
+
+@Test func oneWriterUsesSelectedModelForQuickPauseAndFinalWithoutConcurrentRequests() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client,
+        configuration: .init(liveModel: .haiku), pauseDelay: .milliseconds(80))
+    await runner.start()
+    for n in 1...4 { _ = try await room.publishSegment(words: [.init(text: "Fact \(n)")]) }
+    #expect(try await waitForWriter { client.calls().count >= 1 })
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    #expect(client.calls().allSatisfy { $0.model == ModelChoice.haiku.rawValue })
+    // Drain batched quick work, then exactly one pause pass is eligible.
+    for _ in 0..<10 {
+        let calls = client.calls()
+        if calls.last?.phase == "pause" { break }
+        for i in client.state.withLock({ $0.active.sorted() }) { client.finish(i) }
+        try await Task.sleep(for: .milliseconds(25))
+    }
+    #expect(try await waitForWriter { client.calls().last?.phase == "pause" })
+    for i in client.state.withLock({ $0.active.sorted() }) { client.finish(i) }
+    try await room.micOff()
+    #expect(try await waitForWriter { client.calls().last?.phase == "final" })
+    let final = try #require(client.calls().last)
+    #expect(final.model == ModelChoice.haiku.rawValue)
+    #expect(String(decoding: final.request, as: UTF8.self).contains("No edit needed."), "Final uses the existing writer conversation")
+    for i in client.state.withLock({ $0.active.sorted() }) { client.finish(i) }
+    #expect(try await waitForWriter { await room.state == .done })
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+@Test func continuedSpeechDefersAndPreemptsPauseWithoutASecondWriter() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(90))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "A draft")])
+    #expect(try await waitForWriter { client.calls().count == 1 })
+    client.finish(0)
+    for _ in 0..<3 {
+        try await Task.sleep(for: .milliseconds(40))
+        _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("continuing speech")]))
+    }
+    #expect(!client.calls().contains { $0.phase == "pause" })
+    #expect(try await waitForWriter { client.calls().last?.phase == "pause" })
+    _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("new speech")]))
+    #expect(try await waitForWriter { client.state.withLock { $0.canceledPhases.contains("pause") } })
+    _ = try await room.publishSegment(words: [.init(text: "Another fact")])
+    #expect(try await waitForWriter { client.calls().last?.phase == "quick" })
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+@Test func quickPassAllowsSpellingButDefersBroadEditsAndTargetedPassRetainsThem() async throws {
+    let room = Room()
+    _ = try await room.publishSegment(words: [.init(text: "helo")])
+    _ = try await room.publishSegment(words: [.init(text: "world")])
+    let first = try #require(await room.documentSnapshot.lines.first)
+    let executor = ToolExecutor(room: room)
+    let spelling: JSONValue = .object(["line": .string(first.id), "old": .string("helo"), "new": .string("hello"), "version": .number(0)])
+    #expect(!(await executor.execute(name: "replace_in_line", input: spelling, groupID: "quick", live: true, phase: .quick)).isError)
+    let before = await room.documentSnapshot
+    let last = try #require(before.lines.last)
+    let replacement: JSONValue = .object(["from": .string(first.id), "to": .string(last.id), "lines": .array([.string("A targeted replacement")]),
+        "versions": .array(before.lines.map { .object(["line": .string($0.id), "version": .number(Double($0.version))]) })])
+    #expect((await executor.execute(name: "replace_lines", input: replacement, groupID: "quick", live: true, phase: .quick)).isError)
+    #expect(await room.documentSnapshot == before)
+    #expect(!(await executor.execute(name: "replace_lines", input: replacement, groupID: "targeted", live: true, phase: .targeted)).isError)
+    #expect(await room.documentSnapshot.text == "A targeted replacement")
+}

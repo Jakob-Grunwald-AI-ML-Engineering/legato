@@ -32,7 +32,7 @@ import LegatoRoom
         let schema = try JSONValue.encoding(loader)
         #expect(schema["input_schema"]?["properties"]?["mode"]?["enum"] == .array(["message", "email", "prompt", "note"].map(JSONValue.string)))
         #expect(!tools.contains { $0.name == "set_mode" })
-        #expect(tools.contains { $0.name == "request_restructure" } == live)
+        #expect(!tools.contains { $0.name == "request_restructure" })
     }
 }
 

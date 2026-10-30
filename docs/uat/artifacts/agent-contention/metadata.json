@@ -1,0 +1,273 @@
+{
+  "sessionID": "536307AF-9D41-4BC8-A525-CB592F8B4DA1",
+  "events": 5506,
+  "asrSegments": 28,
+  "transactions": 57,
+  "agentTransactionCounts": {
+    "liveAgent": 13,
+    "restructureAgent": 12
+  },
+  "requestCounts": {
+    "liveAgent": 52,
+    "restructureAgent": 28
+  },
+  "toolErrorCounts": {
+    "invalidOperation": 6,
+    "versionConflict": 1
+  },
+  "toolErrors": [
+    {
+      "participant": "restructureAgent",
+      "eventID": "A20D4965-67DB-4E97-898C-D07AEDC24706",
+      "seq": 468,
+      "relativeSeconds": 17.238,
+      "tool": "replace_lines",
+      "observedVersions": {
+        "L81538A82-833A-4840-9FC4-6E2521F83E41": 0,
+        "LC5AAA203-D21B-4AC0-AAA4-FB05E1D7C78A": 0,
+        "L3C92F042-C708-42D0-BBF5-6A1C0CA9FB56": 0,
+        "L38ADED95-FFA8-48EB-ADC3-CE7993B7D6C1": 0
+      },
+      "targetIDs": {
+        "from": "L81538A82-833A-4840-9FC4-6E2521F83E41",
+        "to": "L38ADED95-FFA8-48EB-ADC3-CE7993B7D6C1"
+      },
+      "kind": "invalidOperation"
+    },
+    {
+      "participant": "restructureAgent",
+      "eventID": "D7D1F498-D9C7-4696-9ECC-57A5CAD74250",
+      "seq": 677,
+      "relativeSeconds": 22.912,
+      "tool": "delete_lines",
+      "observedVersions": {
+        "L38ADED95-FFA8-48EB-ADC3-CE7993B7D6C1": 1
+      },
+      "targetIDs": {
+        "from": "L38ADED95-FFA8-48EB-ADC3-CE7993B7D6C1",
+        "to": "L38ADED95-FFA8-48EB-ADC3-CE7993B7D6C1"
+      },
+      "kind": "invalidOperation"
+    },
+    {
+      "participant": "restructureAgent",
+      "eventID": "D0009CC8-31FD-425D-AA3E-B89A7AE2C9B8",
+      "seq": 3250,
+      "relativeSeconds": 154.538,
+      "tool": "delete_lines",
+      "observedVersions": {
+        "L91EEA29D-02B5-49D2-BDB7-EC14870A77D1": 0,
+        "LE39C5549-648A-4E6B-A073-BE546D0A1555": 0
+      },
+      "targetIDs": {
+        "from": "L91EEA29D-02B5-49D2-BDB7-EC14870A77D1",
+        "to": "LE39C5549-648A-4E6B-A073-BE546D0A1555"
+      },
+      "kind": "invalidOperation"
+    },
+    {
+      "participant": "liveAgent",
+      "eventID": "18DF0A3B-F791-4D36-B491-2B97A4BEAFC2",
+      "seq": 3682,
+      "relativeSeconds": 207.167,
+      "tool": "replace_lines",
+      "observedVersions": {
+        "LFFFA4F3E-D892-40F3-B880-95510DB4E269": 0,
+        "LF16EE5E5-61D4-41EB-B964-2032A5E62875": 0
+      },
+      "targetIDs": {
+        "from": "LFFFA4F3E-D892-40F3-B880-95510DB4E269",
+        "to": "LF16EE5E5-61D4-41EB-B964-2032A5E62875"
+      },
+      "kind": "versionConflict"
+    },
+    {
+      "participant": "restructureAgent",
+      "eventID": "3AE293B7-0A10-40E9-BF3C-9F7AAA7D6E0D",
+      "seq": 4090,
+      "relativeSeconds": 215.657,
+      "tool": "replace_lines",
+      "observedVersions": {
+        "L6F412B32-6EBA-4CA4-8EA4-732B07ECAAA8": 0,
+        "LF16EE5E5-61D4-41EB-B964-2032A5E62875": 0
+      },
+      "targetIDs": {
+        "from": "L6F412B32-6EBA-4CA4-8EA4-732B07ECAAA8",
+        "to": "LF16EE5E5-61D4-41EB-B964-2032A5E62875"
+      },
+      "kind": "invalidOperation"
+    },
+    {
+      "participant": "restructureAgent",
+      "eventID": "AAE4CB1C-1DD9-4FD9-A595-CFD896BB2A9E",
+      "seq": 4370,
+      "relativeSeconds": 220.929,
+      "tool": "replace_lines",
+      "observedVersions": {
+        "L19344FE3-991C-4D68-994D-E71EA84251F4": 0,
+        "L18745273-9DD7-4F2A-AFE5-4990CB0189F2": 0,
+        "LF16EE5E5-61D4-41EB-B964-2032A5E62875": 0
+      },
+      "targetIDs": {
+        "from": "L19344FE3-991C-4D68-994D-E71EA84251F4",
+        "to": "LF16EE5E5-61D4-41EB-B964-2032A5E62875"
+      },
+      "kind": "invalidOperation"
+    },
+    {
+      "participant": "liveAgent",
+      "eventID": "026634B0-520D-4DF4-8EE4-A59F15AC0107",
+      "seq": 4586,
+      "relativeSeconds": 225.72,
+      "tool": "delete_lines",
+      "observedVersions": {
+        "LF16EE5E5-61D4-41EB-B964-2032A5E62875": 0
+      },
+      "targetIDs": {
+        "from": "LF16EE5E5-61D4-41EB-B964-2032A5E62875",
+        "to": "LF16EE5E5-61D4-41EB-B964-2032A5E62875"
+      },
+      "kind": "invalidOperation"
+    }
+  ],
+  "exampleTransactions": [
+    {
+      "revision": 41,
+      "transactionID": "B49A9CAC-6708-490F-BD83-915A857451B1",
+      "eventID": "789E2B1F-918D-48FA-B578-E46A03DE3377",
+      "seq": 3831,
+      "relativeSeconds": 211.047,
+      "origin": "agent",
+      "participant": "liveAgent",
+      "operations": [
+        "replaceLines"
+      ],
+      "tool": "replace_lines",
+      "observedVersions": {
+        "LFFFA4F3E-D892-40F3-B880-95510DB4E269": 0
+      },
+      "targetIDs": {
+        "from": "LFFFA4F3E-D892-40F3-B880-95510DB4E269",
+        "to": "LFFFA4F3E-D892-40F3-B880-95510DB4E269"
+      }
+    },
+    {
+      "revision": 42,
+      "transactionID": "EDED019E-854F-40BF-B603-60D9BD802465",
+      "eventID": "59374F27-AC8D-4434-87E7-E5CD4ECD6E9A",
+      "seq": 3891,
+      "relativeSeconds": 212.704,
+      "origin": "agent",
+      "participant": "restructureAgent",
+      "operations": [
+        "deleteLines"
+      ],
+      "tool": "delete_lines",
+      "observedVersions": {
+        "LE6BBCB17-A671-4747-A620-6D674CB9721B": 0,
+        "L7770C959-BA95-438A-AF00-1D57DA82A524": 0
+      },
+      "targetIDs": {
+        "from": "LE6BBCB17-A671-4747-A620-6D674CB9721B",
+        "to": "L7770C959-BA95-438A-AF00-1D57DA82A524"
+      }
+    },
+    {
+      "revision": 43,
+      "transactionID": "4E2140E8-4972-4C55-9E2F-DA97E97B3DAA",
+      "eventID": "736193EB-3B8A-4134-986C-E6C5F0260250",
+      "seq": 3958,
+      "relativeSeconds": 213.499,
+      "origin": "agent",
+      "participant": "liveAgent",
+      "operations": [
+        "replaceLines"
+      ],
+      "tool": "replace_lines",
+      "observedVersions": {
+        "L6F412B32-6EBA-4CA4-8EA4-732B07ECAAA8": 0
+      },
+      "targetIDs": {
+        "from": "L6F412B32-6EBA-4CA4-8EA4-732B07ECAAA8",
+        "to": "L6F412B32-6EBA-4CA4-8EA4-732B07ECAAA8"
+      }
+    },
+    {
+      "revision": 46,
+      "transactionID": "F8670AF8-2FAB-471D-8FDD-5C6A62A21456",
+      "eventID": "F080C7AC-3C88-4AD8-B707-5CB48773E672",
+      "seq": 4544,
+      "relativeSeconds": 225.237,
+      "origin": "agent",
+      "participant": "restructureAgent",
+      "operations": [
+        "replaceLines"
+      ],
+      "tool": "replace_lines",
+      "observedVersions": {
+        "LF16EE5E5-61D4-41EB-B964-2032A5E62875": 0
+      },
+      "targetIDs": {
+        "from": "LF16EE5E5-61D4-41EB-B964-2032A5E62875",
+        "to": "LF16EE5E5-61D4-41EB-B964-2032A5E62875"
+      }
+    },
+    {
+      "revision": 47,
+      "transactionID": "E7929349-90E7-4223-9CDF-EA06DD9C94B0",
+      "eventID": "E503D9A7-5E6D-4344-8BE0-40BF9B087592",
+      "seq": 4583,
+      "relativeSeconds": 225.703,
+      "origin": "agent",
+      "participant": "liveAgent",
+      "operations": [
+        "insertLines"
+      ],
+      "tool": "insert_lines",
+      "observedVersions": {},
+      "targetIDs": {}
+    },
+    {
+      "revision": 48,
+      "transactionID": "F1F2038A-10F2-44A3-9982-57725B2C5252",
+      "eventID": "E396469A-38A7-46D7-936B-DEBD2E62054A",
+      "seq": 4800,
+      "relativeSeconds": 229.455,
+      "origin": "agent",
+      "participant": "liveAgent",
+      "operations": [
+        "deleteLines"
+      ],
+      "tool": "delete_lines",
+      "observedVersions": {
+        "L9BB02144-0F89-4DA3-8473-98751B57DE8A": 0,
+        "L0C41945C-D03E-43A9-806A-B0D80CD12860": 0
+      },
+      "targetIDs": {
+        "from": "L9BB02144-0F89-4DA3-8473-98751B57DE8A",
+        "to": "L0C41945C-D03E-43A9-806A-B0D80CD12860"
+      }
+    },
+    {
+      "revision": 51,
+      "transactionID": "5BF444D3-A3AD-4065-9BCE-F97DF623BC07",
+      "eventID": "BF140ED6-1F06-47D1-805D-939575A093A7",
+      "seq": 4852,
+      "relativeSeconds": 231.192,
+      "origin": "agent",
+      "participant": "liveAgent",
+      "operations": [
+        "replaceInLine"
+      ],
+      "tool": "replace_in_line",
+      "observedVersions": {
+        "L9E5E23C2-D6FE-475F-A83F-38916C0F258B": 0
+      },
+      "targetIDs": {
+        "line": "L9E5E23C2-D6FE-475F-A83F-38916C0F258B"
+      }
+    }
+  ],
+  "simultaneousBusySeconds": 75.88,
+  "sessionDurationSeconds": 259.66
+}

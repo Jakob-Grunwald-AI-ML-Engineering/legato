@@ -19,6 +19,10 @@ public struct LiveAgentPolicy: Sendable {
         guard !running, !pending.isEmpty else { return nil }; running = true
         active = pending; defer { pending = []; editing = [] }; return pending
     }
+    public mutating func beginMaintenance() -> Bool {
+        guard !running, pending.isEmpty else { return false }
+        running = true; active = []; editing = []; return true
+    }
     public mutating func finish() { running = false; editing = []; active = [] }
 }
 

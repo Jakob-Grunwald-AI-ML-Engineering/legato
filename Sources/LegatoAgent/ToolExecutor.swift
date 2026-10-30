@@ -7,12 +7,14 @@ public struct ToolResult: Sendable {
     public let content: String
     public let isError: Bool
     public var mode: ComposerMode? = nil
-    public var restructure = false
 }
 public struct ToolExecutor: Sendable {
     public let room: Room
     public init(room: Room) { self.room = room }
-    public func execute(name: String, input: JSONValue, groupID: String, live: Bool) async -> ToolResult {
+    public func execute(name: String, input: JSONValue, groupID: String, live: Bool, phase: WritingPhase = .pause) async -> ToolResult {
+        if phase == .quick, ["replace_lines", "insert_lines", "delete_lines", "move_lines", "set_kind"].contains(name) {
+            return ToolResult(content: "Deferred: this quick pass only makes local corrections. Leave broader changes for the quiet-pause or final turn; do not retry them now.", isError: true)
+        }
         do {
             let snapshot = await room.documentSnapshot
             func string(_ key: String) throws -> String { guard case .string(let s) = input[key] else { throw DocumentError.invalidOperation }; return s }
@@ -64,9 +66,6 @@ public struct ToolExecutor: Sendable {
                 _ = try await room.publish(channel: .userIntent, participant: live ? .liveAgent : .restructureAgent,
                     payload: .object(["event": .string("mode.changed"), "mode": .string(mode.rawValue)]))
                 return ToolResult(content: "Mode changed", isError: false, mode: mode)
-            case "request_restructure":
-                guard live else { throw DocumentError.invalidOperation }; _ = try string("reason")
-                return ToolResult(content: "Restructure queued", isError: false, restructure: true)
             case "note": return ToolResult(content: try string("text"), isError: false)
             default: throw DocumentError.invalidOperation
             }
@@ -98,6 +97,6 @@ public struct ToolExecutor: Sendable {
                 description: "Load the existing writing skill for the intended format before drafting or revising in Auto. Returns guidance as context; does not edit the document or change mode.",
                 properties: ["mode": S(type: "string", enumValues: ["message", "email", "prompt", "note"])], required: ["mode"]))
         }
-        if live { tools.append(tool("request_restructure", ["reason": str])) }; return tools
+        return tools
     }
 }

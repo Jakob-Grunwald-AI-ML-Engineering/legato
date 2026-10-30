@@ -9,7 +9,6 @@ struct SettingsView: View {
     @State private var sonioxKey = ""
     @State private var keyMessage: String?
     @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
-    @AppStorage("composer.restructureModel") private var restructureModel = ModelChoice.sonnet.rawValue
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
     var body: some View {
         Form {
@@ -26,8 +25,8 @@ struct SettingsView: View {
                 if let keyMessage { Text(keyMessage).font(.caption) }
             }
             Section("Composer") {
-                Picker("Live agent", selection: $liveModel) { ForEach(ModelChoice.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) } }
-                Picker("Final pass", selection: $restructureModel) { ForEach(ModelChoice.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) } }
+                Picker("Writing model", selection: $liveModel) { ForEach(ModelChoice.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) } }
+                Text("One model handles quick corrections and paused/final composing.").font(.caption).foregroundStyle(.secondary)
                 TextField("Personal instructions", text: $personalPrompt, axis: .vertical).lineLimit(3...8)
             }
             Section("Keyboard") {
