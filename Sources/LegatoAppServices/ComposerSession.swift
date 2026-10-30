@@ -165,9 +165,12 @@ import LegatoVocabulary
         onChange?()
     }
     public var debugState: [String: Any] {
-        ["status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
+        ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
          "sessionID": sessionID ?? "", "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
+         "correctionDraft": correctionDraft as Any? ?? NSNull(),
+         "correctionCountdownStart": correctionCountdownStart as Any? ?? NSNull(),
+         "correctionCountdownDeadline": correctionCountdownDeadline as Any? ?? NSNull(),
          "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
     }
     #endif

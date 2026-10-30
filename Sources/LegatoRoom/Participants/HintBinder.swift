@@ -17,7 +17,7 @@ public struct WordIntent: Codable, Sendable, Equatable {
     }
 }
 
-/// A silence-delimited utterance addressed to a selected word, not general dictation.
+/// A submitted correction draft addressed to the selected quote, not general dictation.
 public struct HintEvent: Codable, Sendable, Equatable {
     public var event: String
     public var captureID: String
@@ -71,6 +71,7 @@ public actor HintBinder {
     private let learner: VocabularyLearner?
     private var capture: Capture?
     private var dismissed: [ClosedRange<Double>] = []
+    private var suppressUntimedTail = false
     private var task: Task<Void, Never>?
     private var timer: Task<Void, Never>?
     private var timerGeneration = UUID()
@@ -143,7 +144,7 @@ public actor HintBinder {
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
     }
-    public func stop() async { task?.cancel(); task = nil; dismissed = []; await discardCapture(); await publishDraft() }
+    public func stop() async { task?.cancel(); task = nil; dismissed = []; suppressUntimedTail = false; await discardCapture(); await publishDraft() }
     public func tap(lineID: String, wordID: String, timestamp: Double) async throws {
         try await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
     }
@@ -180,6 +181,7 @@ public actor HintBinder {
     public func clearSelection(timestamp: Double) async {
         guard let current = capture else { return }
         dismissed.append(current.discardFrom...max(current.intent.timestamp, timestamp))
+        suppressUntimedTail = true
         await discardCapture()
         await publishDraft()
         _ = try? await room.publish(channel: .asrTail, participant: .hintBinder, payload: .object(["text": .string("")]))
@@ -226,11 +228,20 @@ public actor HintBinder {
                 if envelope.payload["activity"] == .bool(true), !current.tail.isEmpty { await activity() }
                 else { await publishDraft() }
             }
-            let payload = capture == nil && dismissed.isEmpty ? envelope.payload : .object(["text": .string("")])
+            let payload: JSONValue
+            if capture != nil { payload = .object(["text": .string("")]) }
+            else if case .array(let parts) = envelope.payload["parts"] {
+                let text = parts.filter { part in
+                    guard case .number(let time) = part["tOrigin"] else { return !suppressUntimedTail }
+                    return !dismissed.contains { $0.contains(time) }
+                }.compactMap { if case .string(let text) = $0["text"] { return text }; return nil }.joined()
+                payload = .object(["text": .string(text)])
+            } else { payload = suppressUntimedTail ? .object(["text": .string("")]) : envelope.payload }
             _ = try? await room.publish(channel: .asrTail, participant: .hintBinder,
                                        payload: payload, tOrigin: envelope.tOrigin, causedBy: envelope.id)
         case .asrBoundary:
-            dismissed.removeAll { envelope.tOrigin >= $0.lowerBound }
+            // Keep audio-time tombstones: late finals may arrive after an endpoint or UI dismissal.
+            suppressUntimedTail = false
             guard let current = capture, current.submitting,
                   envelope.payload["reason"] == .string("finalize"), envelope.tOrigin >= current.intent.timestamp else { return }
             cancelTimer()
