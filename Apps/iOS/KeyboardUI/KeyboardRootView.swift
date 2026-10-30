@@ -12,6 +12,7 @@ struct KeyboardRootView: View {
     @GestureState private var swipeFired = false
 
     @State private var resizeStart: Double?
+    @State private var resizePreview: Double?
     @GestureState private var resizing = false
 
     var body: some View {
@@ -36,6 +37,22 @@ struct KeyboardRootView: View {
         // A nonzero alpha also keeps blank portions touchable in keyboard extensions.
         .background(Color.black.opacity(0.001))
         .environment(\.colorScheme, scheme)
+        .overlay(alignment: .top) {
+            if let resizePreview {
+                GeometryReader { geometry in
+                    VStack(spacing: 5) {
+                        Capsule().fill(.tint).frame(width: 48, height: 3)
+                        Text("\(Int(resizePreview)) pt").font(.caption.monospacedDigit())
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(.regularMaterial, in: Capsule())
+                    }
+                    .frame(maxWidth: .infinity)
+                    .offset(y: max(0, geometry.size.height - resizePreview))
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
     }
     private var screenHeight: Double {
         Double(controller.inputModeTarget?.view.window?.windowScene?.screen.bounds.height ?? 874)
@@ -44,24 +61,40 @@ struct KeyboardRootView: View {
     private var resizeHandle: some View {
         Capsule().fill(.secondary.opacity(0.5))
             .frame(width: 36, height: 5)
-            .frame(maxWidth: .infinity).frame(height: 28)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .padding(.top, 2)
+            .frame(height: 28, alignment: .top)
             .background(Color.black.opacity(0.001))
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .updating($resizing) { _, active, _ in active = true }
                 .onChanged { value in
                     if resizeStart == nil { resizeStart = ComposerKeyboardHeight.resolve(controller.composerHeight, screenHeight: screenHeight) }
-                    // Update while moving: iOS can cancel a touch once it leaves the extension.
-                    controller.resizeComposer(to: ComposerKeyboardHeight.resized(
+                    // Preview only. Resizing the host on every move makes native layout lag behind the finger.
+                    resizePreview = ComposerKeyboardHeight.resized(
                         start: resizeStart ?? controller.composerHeight,
-                        translation: value.translation.height, screenHeight: screenHeight))
+                        translation: value.translation.height, screenHeight: screenHeight)
                 }
-                .onEnded { _ in resizeStart = nil })
-            .onChange(of: resizing) { _, active in if !active { resizeStart = nil } }
+                .onEnded { value in
+                    let height = ComposerKeyboardHeight.resized(start: resizeStart ?? controller.composerHeight,
+                        translation: value.translation.height, screenHeight: screenHeight)
+                    resizeStart = nil
+                    resizePreview = nil
+                    controller.resizeComposer(to: height)
+                })
+            .onChange(of: resizing) { _, active in
+                // iOS may cancel an upward drag when it leaves the extension. Never commit on cancellation.
+                if !active { resizeStart = nil; resizePreview = nil }
+            }
+            .onTapGesture {
+                // Expansion remains available when an upward drag leaves this extension's touch surface.
+                let height = controller.composerHeight < 430 ? 600.0 : 260.0
+                controller.resizeComposer(to: ComposerKeyboardHeight.resolve(height, screenHeight: screenHeight))
+            }
             .accessibilityElement()
             .accessibilityLabel("Resize composer")
             .accessibilityValue("\(Int(controller.composerHeight)) points")
-            .accessibilityHint("Drag up to expand or down to make room for the app")
+            .accessibilityHint("Drag to resize, or tap to switch between compact and expanded")
             .accessibilityAdjustableAction { direction in
                 let change: Double = direction == .increment ? 60 : -60
                 controller.resizeComposer(to: ComposerKeyboardHeight.resolve(controller.composerHeight + change, screenHeight: screenHeight))
@@ -83,7 +116,6 @@ struct KeyboardRootView: View {
         // The word row goes above the strip's row (the height requested is the row plus the word row); the
         // debug heights that leave nothing to touch have none.
         let landscape = KeyGeometry.isLandscape(width: size.width)
-        let keyRowHeight = StripHeight.keyRowHeight(row: controller.stripHeight, landscape: landscape)
         let wordRowHeight: CGFloat = 0
         let rowHeight = max(size.height - wordRowHeight, 0)
         // At the full keyboard's height: the strip's own height would scale the pill down (`vScale`).

@@ -68,7 +68,7 @@ final class KeyboardViewController: UIInputViewController {
     private func layoutChanged(reason: String) {
         heightConstraint?.constant = requestedHeight
         let settle: UIView = view.superview ?? view
-        // Follow the finger without stacking animations during a continuous drag.
+        // The handle commits once on release; apply that final height without a second animation.
         if reason == "composer-resize" { settle.layoutIfNeeded(); return }
         #if DEBUG
         UIView.animate(withDuration: 0.2, animations: { settle.layoutIfNeeded() }, completion: { [weak self] _ in
