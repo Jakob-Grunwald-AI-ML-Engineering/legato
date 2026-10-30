@@ -36,6 +36,8 @@ struct MeetingAudioEnvironment: Sendable {
 final class BackgroundToken {
     private var identifier = UIBackgroundTaskIdentifier.invalid
 
+    var isActive: Bool { identifier != .invalid }
+
     func begin(name: String, onExpiry: @escaping @MainActor () -> Void) {
         identifier = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
             onExpiry()

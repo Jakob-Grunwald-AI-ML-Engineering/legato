@@ -913,7 +913,7 @@ scenario_n4() {
 
 scenario_n6() {
   begin "n6. interruption ends: the keep-ready hold is retaken" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoKeepAliveSeconds -1 -LegatoFakeBackgroundRefusal pla || return
+    -LegatoKeepAliveSeconds 600 -LegatoFakeBackgroundRefusal pla || return
   trigger kbd-hop-arm
   wait_log "arm outcome=armed" 10
   assert_count "lease armed once" "arm outcome=armed" 1
@@ -928,6 +928,16 @@ scenario_n6() {
   trigger interrupt-end
   wait_log_n "hold.interruption ended" 2 5
   assert_log "ended with nothing lost does not resume" "hold.interruption ended shouldResume=1 resume=0"
+  # Two interruptions back to back: the second begins while the first retake may still be in flight.
+  trigger interrupt
+  trigger interrupt
+  wait_log_n "hold.interruption began" 3 10
+  trigger interrupt-end
+  trigger interrupt-end
+  wait_log_n "hold.interruption ended" 4 10
+  wait_log_n "hold.resume ok" 2 10
+  assert_count "the double interruption retakes the lease" "arm outcome=armed" 3
+  assert_no_log "no dictation was restarted by the double interruption" "outcome kind=started"
 }
 
 scenario_n3() {

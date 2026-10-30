@@ -51,7 +51,6 @@ final class AppController {
     private var holdInterruptions = HoldInterruptions()
     /// The stop an interruption began; a retake waits for it so it never races the release.
     private var interruptionStop: Task<Void, Never>?
-    private var resumingHold = false
     private let interruptionBackgroundTask = BackgroundToken()
     var keyboardHopState: KeyboardHopState {
         .resolve(runActive: keyboardRunActive, microphoneReady: micReadyUntil != nil,
@@ -246,7 +245,7 @@ final class AppController {
                 AudioDiagnostics.log("microphone.lease", ["held": until != nil, "previousHeld": self?.micReadyUntil != nil])
                 #endif
                 self?.micReadyUntil = until
-                if until != nil { self?.holdInterruptions.resumed(); self?.interruptionBackgroundTask.end() } // armed again by any path
+                if until != nil { self?.holdInterruptions.leaseObserved(); self?.syncInterruptionBackgroundTask() } // settles a lost hold only outside an interruption and a retake
                 // Preparation never extends the user's finite microphone lease. A lost lease revokes
                 // its pending keyboard start before native preparation can complete in the background.
                 if until == nil, self?.keyboardLink?.link.state.preparingRequestID != nil {
@@ -1168,14 +1167,7 @@ final class AppController {
             leaseHeld: micReadyUntil != nil, dictating: isDictating,
             keepsLeaseAfterRun: Settings.keepAliveLinger.holdsLease)
         holdInterruptions.began(wasHolding: holding)
-        if holding {
-            interruptionBackgroundTask.end()
-            interruptionBackgroundTask.begin(name: "microphone.interruption") {
-                #if LEGATO_INTERNAL
-                AudioDiagnostics.log("microphone.interruption.backgroundExpired")
-                #endif
-            }
-        }
+        syncInterruptionBackgroundTask()
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("microphone.interruption.began", ["holding": holding, "dictating": isDictating])
         #endif
@@ -1186,7 +1178,8 @@ final class AppController {
     }
 
     private func holdInterruptionEnded(shouldResume: Bool) {
-        let attempt = holdInterruptions.ended(shouldResume: shouldResume)
+        let attempt = holdInterruptions.ended(keepReady: Settings.keepAliveLinger.holdsLease)
+        syncInterruptionBackgroundTask()
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("microphone.interruption.ended", ["shouldResume": shouldResume, "willResume": attempt])
         #endif
@@ -1197,34 +1190,50 @@ final class AppController {
         Task { await resumeHold() }
     }
 
-    /// Retakes the lost hold (activates the session and arms the lease again). On failure the flag stays
-    /// and the next foreground tries again.
+    /// The background task exists exactly while the state machine wants one.
+    private func syncInterruptionBackgroundTask() {
+        let wanted = holdInterruptions.backgroundTaskWanted
+        if wanted, !interruptionBackgroundTask.isActive {
+            interruptionBackgroundTask.begin(name: "microphone.interruption") {
+                #if LEGATO_INTERNAL
+                AudioDiagnostics.log("microphone.interruption.backgroundExpired")
+                #endif
+            }
+        } else if !wanted {
+            interruptionBackgroundTask.end()
+        }
+    }
+
+    /// Retakes the lost hold (activates the session and arms the lease again); the caller has already
+    /// scheduled it with `holdInterruptions`. On failure the flag stays and the next foreground tries again.
     private func resumeHold() async {
-        guard holdInterruptions.needsResume, !resumingHold, !meetings.isActive else { return }
-        resumingHold = true
-        defer { resumingHold = false }
+        let started = holdInterruptions.generation
+        guard !meetings.isActive else {
+            holdInterruptions.abandonRetake()
+            syncInterruptionBackgroundTask()
+            return
+        }
         await interruptionStop?.value
-        interruptionStop = nil
-        guard holdInterruptions.needsResume else { interruptionBackgroundTask.end(); return }
         let inBackground = startEnvironment.current().inBackground
-        await perform(.arm)
-        let ok = micReadyUntil != nil
-        if ok {
-            holdInterruptions.resumed()
-        } else {
-            holdInterruptions.resumeFailed()
+        var outcome = HoldInterruptions.Outcome.failed
+        // A newer interruption began while waiting: its end retakes.
+        if holdInterruptions.generation == started {
+            await perform(.arm)
+            if micReadyUntil != nil { outcome = .held } else if !coordinator.isIdle { outcome = .busy }
         }
         #if LEGATO_INTERNAL
-        AudioDiagnostics.log(ok ? "microphone.resume.ok" : "microphone.resume.failed",
-            ["inBackground": inBackground, "error": armFailure ?? ""])
-        if !ok { AudioDiagnostics.log("microphone.resume.deferred", ["inBackground": inBackground]) }
+        AudioDiagnostics.log(outcome == .held ? "microphone.resume.ok" : "microphone.resume.failed",
+            ["inBackground": inBackground, "error": armFailure ?? "", "outcome": "\(outcome)"])
+        if outcome == .failed { AudioDiagnostics.log("microphone.resume.deferred", ["inBackground": inBackground]) }
         #endif
         #if DEBUG
-        E2E.log(ok ? "hold.resume ok" : "hold.resume failed error=\(E2E.quote(armFailure ?? ""))")
-        if !ok { E2E.log("hold.resume deferred") }
+        E2E.log(outcome == .held ? "hold.resume ok" : "hold.resume failed error=\(E2E.quote(armFailure ?? ""))")
+        if outcome == .failed { E2E.log("hold.resume deferred") }
         #endif
-        if ok { armFailure = nil }
-        interruptionBackgroundTask.end()
+        if outcome == .held { armFailure = nil }
+        let rerun = holdInterruptions.finishRetake(outcome, generation: started)
+        syncInterruptionBackgroundTask()
+        if rerun { await resumeHold() }
     }
 
     /// Observers are installed once, from `init` of the singleton. Handlers run on the main queue; only
@@ -1345,7 +1354,9 @@ final class AppController {
     func appBecameActive() {
         keyboardLink?.drainChoices() // choices whose Darwin note arrived while the app was suspended
         self.meetings.appBecameActive()
-        if holdInterruptions.shouldResumeWhenForegrounded { Task { await resumeHold() } }
+        let retake = holdInterruptions.foregrounded(keepReady: Settings.keepAliveLinger.holdsLease)
+        syncInterruptionBackgroundTask()
+        if retake { Task { await resumeHold() } }
         scheduleResourcePreparation()
     }
 

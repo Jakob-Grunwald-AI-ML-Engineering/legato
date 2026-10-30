@@ -164,8 +164,26 @@ public enum MeetingSilence {
 /// background iOS may refuse activation) keeps the flag, so the next foreground (or keyboard activity
 /// that arms again) retakes it. Only the hold is retaken, never a dictation that was running.
 public struct HoldInterruptions: Sendable, Equatable {
+    /// How a retake ended.
+    public enum Outcome: Sendable, Equatable {
+        /// The lease is held again.
+        case held
+        /// The session could not be activated (iOS may refuse in the background); the foreground retries.
+        case failed
+        /// A run owns the microphone: the hold is not ours to retake.
+        case busy
+    }
+
     /// A hold was lost to an interruption and has not been retaken.
     public private(set) var needsResume = false
+    /// Between a `began` and its `ended`.
+    public private(set) var inInterruption = false
+    /// Counts interruptions; a retake that started in an older one is stale.
+    public private(set) var generation = 0
+    /// A retake is scheduled or running.
+    public private(set) var retaking = false
+    /// An `ended` arrived while a retake was in flight; it runs again once that one finishes.
+    public private(set) var pendingRetake = false
 
     public init() {}
 
@@ -175,23 +193,70 @@ public struct HoldInterruptions: Sendable, Equatable {
         leaseHeld || (dictating && keepsLeaseAfterRun)
     }
 
+    /// The background task covering the gap should exist: from losing the hold until a retake settles
+    /// outside an interruption.
+    public var backgroundTaskWanted: Bool { needsResume && (inInterruption || retaking) }
+
     /// An interruption began. A began while the flag is already set (a second interruption before the
-    /// first hold came back) keeps it.
+    /// first hold came back, even mid-retake) keeps it.
     public mutating func began(wasHolding: Bool) {
+        inInterruption = true
+        generation += 1
         if wasHolding { needsResume = true }
     }
 
-    /// Whether to try to retake the hold right now.
-    public func ended(shouldResume: Bool) -> Bool {
-        needsResume
+    /// Whether to try to retake the hold right now (with or without the system's `shouldResume`). When true a retake is scheduled and the caller runs
+    /// it, then reports `finishRetake`. During an in-flight retake the end is remembered instead.
+    public mutating func ended(keepReady: Bool = true) -> Bool {
+        inInterruption = false
+        return scheduleRetake(keepReady: keepReady, deferringWhileRetaking: true)
     }
 
-    /// The hold is back (a retake succeeded, or something armed again).
-    public mutating func resumed() { needsResume = false }
+    /// The app came to the foreground: whether to retake now.
+    public mutating func foregrounded(keepReady: Bool = true) -> Bool {
+        guard !inInterruption else { return false }
+        return scheduleRetake(keepReady: keepReady, deferringWhileRetaking: false)
+    }
 
-    /// The retake failed; the flag stays for the next foreground.
-    public mutating func resumeFailed() {}
+    private mutating func scheduleRetake(keepReady: Bool, deferringWhileRetaking: Bool) -> Bool {
+        guard keepReady else { needsResume = false; pendingRetake = false; return false }
+        guard needsResume else { return false }
+        if retaking {
+            if deferringWhileRetaking { pendingRetake = true }
+            return false
+        }
+        retaking = true
+        return true
+    }
+
+    /// A lease was published by some other path (a keyboard arm, a run's end). It only settles the lost
+    /// hold outside an interruption and outside a retake, which report their own outcome.
+    public mutating func leaseObserved() {
+        if !inInterruption && !retaking { needsResume = false }
+    }
+
+    /// The retake that started in `generation` ended. Returns whether to run another one (an `ended`
+    /// arrived meanwhile and the hold is still lost).
+    public mutating func finishRetake(_ outcome: Outcome, generation started: Int) -> Bool {
+        retaking = false
+        switch outcome {
+        case .held where started == generation && !inInterruption: needsResume = false
+        case .busy where started == generation && !inInterruption: needsResume = false
+        default: break
+        }
+        guard pendingRetake else { return false }
+        pendingRetake = false
+        guard needsResume, !inInterruption else { return false }
+        retaking = true
+        return true
+    }
+
+    /// The retake was dropped (a meeting owns the microphone); the flag stays for the foreground.
+    public mutating func abandonRetake() {
+        retaking = false
+        pendingRetake = false
+    }
 
     /// The app came to the foreground: retake now if a hold is still lost.
-    public var shouldResumeWhenForegrounded: Bool { needsResume }
+    public var shouldResumeWhenForegrounded: Bool { needsResume && !retaking && !inInterruption }
 }
