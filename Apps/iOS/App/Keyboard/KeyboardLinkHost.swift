@@ -161,12 +161,11 @@ final class KeyboardLinkHost: TranscriptSink {
         CleanupCallTrace.currentRun = run.id.uuidString
         onRunStarted?(run.id.uuidString)
         // Cleanup delivery is about the keyboard's field: a run for the app's own screen or the activity's
-        // result has none (the cleaned text is its text), so the keyboard shows no hold text for it.
+        // result has none (the cleaned text is its text).
         runDelivery = run.target == .keyboard ? deliveryForRun() : nil
         startLinkedRun(run.id.uuidString)
         link.runStarted(
-            id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery,
-            fieldEdits: run.target == .keyboard ? true : nil)
+            id: run.id.uuidString, target: run.target == .keyboard ? .keyboard : .app, delivery: runDelivery)
         onRunActivity?(true)
         #if LEGATO_INTERNAL
         trace.runStarted(run, delivery: runDelivery)
@@ -183,26 +182,6 @@ final class KeyboardLinkHost: TranscriptSink {
         onTranscript?(committed, volatile)
         #if LEGATO_INTERNAL
         trace.update(committed: committed)
-        #endif
-    }
-
-    /// Live cleanup's newest version of the run's text: the keyboard replaces what its field shows for the run
-    /// while the field still ends with it.
-    func revised(_ revision: TranscriptRevision) {
-        link.revise(HostRevision(n: revision.n, start: revision.start, raw: revision.raw, text: revision.text))
-        #if LEGATO_INTERNAL
-        trace.revised(revision)
-        #endif
-    }
-
-    /// The tentative text the keyboard's field showed when it was cleared at `boundary`: it went with the message.
-    func sentTentative(runID: String, boundary: Int) -> String {
-        link.sentTentative(runID: runID, boundary: boundary)
-    }
-
-    func liveTraced(_ event: LiveTraceEvent) {
-        #if LEGATO_INTERNAL
-        trace.traced(event)
         #endif
     }
 

@@ -1,12 +1,11 @@
 import Foundation
 import LegatoFieldEdit
 
-/// The keyboard's side of a linked run (the edit queue on, the app's cleanup on the link): which run it publishes
+/// The keyboard's side of a linked run (the app's cleanup agent on the link): which run it publishes
 /// its field feed for (`link.feed`) and takes the app's edits from (`link.edits`), from each `link.host` state.
 ///
-/// - Followed: a keyboard run the app froze with the setting on (`HostState.fieldEdits`) whose cleaned text the
-///   app writes over the link: Live (the cleanup agent, or the stop's stateless pass) and Replace. Hold, Clipboard
-///   and runs without cleanup have no reader: no feed is published for them.
+/// - Followed: a keyboard run with cleanup, whose cleaned text the app writes over the link: Live (the cleanup
+///   agent, or the stop's rewrite) and Replace. Runs without cleanup have no reader: no feed is published for them.
 /// - The run stays followed through its final state (the app's stop still sends edits and reads their outcomes)
 ///   until another run starts (its last batch still goes out) or the app scrubs the link (no run any more:
 ///   nothing more is written, not even a last batch, so the field's text does not come back).
@@ -28,7 +27,7 @@ public struct LinkedRunFollower: Sendable, Equatable {
 
     /// Whether a run's field events have a reader on the app's side.
     public static func isLinked(_ host: HostState) -> Bool {
-        host.fieldEdits == true && host.runID != nil && host.target == .keyboard && host.insertAt == nil
+        host.runID != nil && host.target == .keyboard && host.insertAt == nil
             && (host.delivery == .live || host.delivery == .replace)
     }
 

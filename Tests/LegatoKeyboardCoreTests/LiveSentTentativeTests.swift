@@ -3,11 +3,10 @@ import Testing
 
 /// A `.live` run's state for the keyboard.
 private func live(
-    _ committed: String, _ volatile: String = "", revision: HostRevision? = nil, phase: HostPhase = .listening
+    _ committed: String, _ volatile: String = "", phase: HostPhase = .listening
 ) -> HostState {
     var state = hostState(phase: phase, committed: committed, volatile: volatile)
     state.delivery = .live
-    state.revision = revision
     return state
 }
 
@@ -60,13 +59,6 @@ private func plan(_ state: HostState, _ cursor: AppliedCursor, context: String =
         let p = plan(live("hello world how ", "are you"), sent)
         #expect(p.ops.isEmpty)
         #expect(p.cursor?.sentTentative == "how are")
-    }
-
-    @Test func aRevisionAfterTheSentPhraseReplacesOnlyTheTextAfterIt() throws {
-        let after = HostRevision(n: 1, start: 20, raw: "you ", text: "You? ")
-        let p = plan(live("hello world how are you ", revision: after), try sentWithTentative())
-        #expect(p.ops == [.insert("You? ")])
-        #expect(p.cursor?.shownRevision == 1)
     }
 
     @Test func aRunThatEndsOnTheSentPhraseTypesNothingAndLands() throws {
@@ -133,22 +125,19 @@ private struct SendRig {
 
         rig.drain(live("hello world how are you "))
         #expect(rig.field == "you ")
-        let after = HostRevision(n: 1, start: 20, raw: "you ", text: "You? ")
-        rig.drain(live("hello world how are you ", revision: after))
-        #expect(rig.field == "You? ")
-        rig.drain(live("hello world how are you ", revision: after, phase: .idle))
-        #expect(rig.field == "You? ")
+        rig.drain(live("hello world how are you ", phase: .idle))
+        #expect(rig.field == "you ")
         #expect(rig.cursor?.finalApplied == true)
     }
 }
 
 @MainActor
 @Suite struct HostLinkSentTentativeTests {
-    @Test func aBoundaryWithOnlyTentativeTextReachesTheAppWithThatText() {
+    @Test func aBoundaryWithOnlyTentativeTextReachesTheApp() {
         let store = LinkStore(MemoryLinkStore())
         let link = HostLink(store: store, post: { _ in }, now: { t0 }, sleep: { _ in try await Task.sleep(for: .seconds(3600)) })
-        var heard: [(String, Int, Int)] = []
-        link.onSent = { heard.append(($0, $1, $2)) }
+        var heard: [(String, Int)] = []
+        link.onSent = { heard.append(($0, $1)) }
         link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
         link.update(committed: "", volatile: "hello")
 
@@ -159,15 +148,13 @@ private struct SendRig {
         link.appliedDidChange()
         #expect(heard.map(\.0) == ["run-1"])
         #expect(heard.first?.1 == 0)
-        #expect(link.sentTentative(runID: "run-1", boundary: 0) == "hello")
-        #expect(link.sentTentative(runID: "run-0", boundary: 0) == "")
     }
 
     @Test func aSentBoundaryReportedAfterTheRunEndedStillReachesTheApp() {
         let store = LinkStore(MemoryLinkStore())
         let link = HostLink(store: store, post: { _ in }, now: { t0 }, sleep: { _ in try await Task.sleep(for: .seconds(3600)) })
-        var heard: [(String, Int, Int)] = []
-        link.onSent = { heard.append(($0, $1, $2)) }
+        var heard: [(String, Int)] = []
+        link.onSent = { heard.append(($0, $1)) }
         link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
         link.update(committed: "hello world ", volatile: "")
         link.runEnded(committed: "hello world ", finalText: "Hello world.")

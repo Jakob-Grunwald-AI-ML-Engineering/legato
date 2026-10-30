@@ -6,7 +6,7 @@ import LegatoKeyboardCore
 /// Stands in for the keyboard extension in the simulator end-to-end run, over the same App Group
 /// values and Darwin notes: it publishes presence, sends requests (and the URL the Link would open),
 /// and applies the streamed text to an in-memory document with the real `ProxyEditPlanner`,
-/// reporting `link.applied`. With `-LegatoFieldEdits YES` the planner's ops go through the field edit queue
+/// reporting `link.applied`. The planner's ops go through the field edit queue
 /// (`CaretOpsStep` → `FieldEditQueue` → `ProxyOpCompiler`), each write verified against the field. Debug builds only.
 @MainActor
 final class E2EFakeKeyboard {
@@ -24,7 +24,6 @@ final class E2EFakeKeyboard {
     private var presenceTask: Task<Void, Never>?
     private var observers: [DarwinObserver] = []
     private var requestCount = 0
-    private let queued = KeyboardPreferences.forcedFieldEdits
     private var queue: FieldEditQueue?
 
     func run(_ command: String) async {
@@ -143,16 +142,7 @@ final class E2EFakeKeyboard {
               let state = store.read(HostState.self, forKey: LinkChannel.Key.host)
         else { return }
         let plan = ProxyEditPlanner.plan(state: state, cursor: cursor, contextBefore: document, documentID: documentID)
-        if queued {
-            guard applyQueued(plan.ops) else { return }
-        } else {
-            for op in plan.ops {
-                switch op {
-                case .deleteBackward(let count): document.removeLast(min(count, document.count))
-                case .insert(let text): document += text
-                }
-            }
-        }
+        guard applyQueued(plan.ops) else { return }
         cursor = plan.cursor
         guard !plan.ops.isEmpty || plan.cursor?.finalApplied == true, let applied = plan.cursor else { return }
         store.write(applied, forKey: LinkChannel.Key.applied)

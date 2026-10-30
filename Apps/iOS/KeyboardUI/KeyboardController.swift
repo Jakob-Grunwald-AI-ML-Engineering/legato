@@ -82,8 +82,8 @@ final class KeyboardController {
     /// Types the host's text into the field a few characters at a time; `ticker` drives it while it has text left.
     @ObservationIgnored private var reveal = TypewriterReveal()
     @ObservationIgnored private var ticker: Task<Void, Never>?
-    /// The experimental field edit queue, per keyboard appearance (`KeyboardPreferences.fieldEdits`); nil: the
-    /// keyboard writes to the document directly, as it always did.
+    /// The field edit queue, per keyboard appearance (started when it appears, closed when it goes); every edit the
+    /// keyboard makes goes through it. Nil while no appearance is on.
     @ObservationIgnored private var fieldEdits: FieldEditCoordinator?
     /// The host-text write waiting in the queue (only one at a time: the next is planned once it ran).
     @ObservationIgnored private var pendingHostWrite: UUID?
@@ -328,7 +328,7 @@ final class KeyboardController {
         guard let sent else { return .none }
         cursor = sent
         link.writeApplied(sent, notify: true)
-        trace?("sent at=\(sent.sentBase) shown=\(sent.sentShownRevision) tentative=\(sent.sentTentative.count)")
+        trace?("sent at=\(sent.sentBase) tentative=\(sent.sentTentative.count)")
         return .sent
     }
 
@@ -430,33 +430,11 @@ final class KeyboardController {
             #endif
             return
         }
-        if fieldEdits != nil { return applyHostQueued(host, elapsedMs: elapsedMs, flush: flush) }
-        let before = cursor
-        let plan = reveal.plan(
-            state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID,
-            animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs)
-        perform(plan.ops)
-        startTickerIfNeeded()
-        if let updated = plan.cursor, updated != before {
-            cursor = updated
-            // Tick writes keep the cursor exact (a restarted keyboard continues from it) but only the last one wakes the app.
-            link.writeApplied(updated, notify: elapsedMs == 0 || updated.finalApplied)
-            if updated.finalApplied || (elapsedMs == 0 && !plan.ops.isEmpty) {
-                trace?("apply final=\(updated.finalApplied ? 1 : 0) replaced=\(updated.finalReplaced.map { $0 ? "1" : "0" } ?? "-")")
-            }
-            #if DEBUG
-            let firstText = before?.runID != updated.runID || (before?.committedCount == 0 && before?.volatile.isEmpty == true)
-            if host.insertAt != nil, !plan.ops.isEmpty, updated.finalApplied || firstText {
-                WakeProbeLog.log("insert", "run=\(host.runID?.prefix(8) ?? "-") ops=\(plan.ops.count) final=\(updated.finalApplied ? 1 : 0)")
-            }
-            #endif
-        }
-        updateVersions(host)
+        applyHostQueued(host, elapsedMs: elapsedMs, flush: flush)
     }
 
-    /// `applyHost` through the field edit queue: planned against the predicted field (every write that ran), one
-    /// host write in the queue at a time (a tick that finds one waiting is held until it ran). A Live revision the
-    /// reveal reaches is planned after the tick's stream text, so each is its own patch.
+    /// The host's text through the field edit queue: planned against the predicted field (every write that ran), one
+    /// host write in the queue at a time (a tick that finds one waiting is held until it ran).
     private func applyHostQueued(_ state: HostState, elapsedMs: Double, flush: Bool) {
         guard let fieldEdits else { return }
         fieldEdits.sync()
@@ -468,30 +446,17 @@ final class KeyboardController {
         // A Replace run on the link: the app writes the cleaned text as patches (`link.edits`); the stream is all
         // the keyboard types, and its final state is confirmed once the stream landed.
         var host = state
-        if host.fieldEdits == true, host.delivery == .replace, linkedRun == host.runID { host.finalText = nil }
+        if host.delivery == .replace, linkedRun == host.runID { host.finalText = nil }
         let before = cursor
-        var states = [host]
-        if let revision = host.revision, let current = cursor, current.runID == host.runID,
-           revision.n > current.revisionHandled
-        {
-            var streamOnly = host
-            streamOnly.revision = nil
-            states.insert(streamOnly, at: 0)
-        }
         let animated = !flush && !UIAccessibility.isReduceMotionEnabled
         var typed = false
-        for (index, state) in states.enumerated() {
-            let previous = cursor
-            let plan = reveal.plan(
-                state: state, cursor: previous, contextBefore: fieldEdits.predictedBefore, documentID: document.documentID,
-                animated: animated, elapsedMs: index == 0 ? elapsedMs : 0, rush: rushes(host))
-            guard performHost(plan, previous: previous, runID: host.runID, delivery: host.delivery) else { break } // its handler set the cursor
-            typed = typed || !plan.ops.isEmpty
+        let previous = cursor
+        let plan = reveal.plan(
+            state: host, cursor: previous, contextBefore: fieldEdits.predictedBefore, documentID: document.documentID,
+            animated: animated, elapsedMs: elapsedMs, rush: rushes(host))
+        if performHost(plan, previous: previous, runID: host.runID) { // else its handler set the cursor
+            typed = !plan.ops.isEmpty
             if let updated = plan.cursor { cursor = updated }
-            if pendingHostWrite != nil {
-                if index < states.count - 1 { hostHeld = true }
-                break
-            }
         }
         startTickerIfNeeded()
         if let updated = cursor, updated != before {
@@ -557,29 +522,11 @@ final class KeyboardController {
         ticker = nil
     }
 
-    /// The host's text going into the field (typewriter ticks, live re-cleans, version swaps). Never recorded in
-    /// the history; whoever swaps a version records that itself.
-    private func perform(_ ops: [ProxyOp]) {
-        if !ops.isEmpty {
-            clearWatch.ownEdit(at: Date())
-            history.cursorMoved()
-            wordRow.interruptTyping() // what was typed so far is learned; the host's text is not typing
-        }
-        for op in ops {
-            switch op {
-            case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
-            case .insert(let text): document.insert(text)
-            }
-        }
-        if !ops.isEmpty { typing.hostEdited() }
-    }
-
     // MARK: Field edit queue
 
-    /// Starts the queue for this appearance when the setting is on (frozen until the keyboard goes away).
-    private func startFieldEdits(force: Bool = false) {
+    /// Starts the queue for this appearance (until the keyboard goes away).
+    private func startFieldEdits() {
         stopFieldEdits()
-        guard force || preferences().fieldEdits else { return }
         hostWrites = HostWriteLedger()
         let coordinator = FieldEditCoordinator(document: document)
         coordinator.trace = { [weak self] message in self?.trace?(message) }
@@ -598,8 +545,6 @@ final class KeyboardController {
     }
 
     #if DEBUG
-    /// Whether a host-text write waits in the queue (the harness's scripted run looks).
-    var fieldEditsHostWaiting: Bool { pendingHostWrite != nil }
     /// Whether the queue still verifies a write or holds one.
     var fieldEditsBusy: Bool { fieldEdits.map { $0.awaitsVerification || $0.hasPending } ?? false }
     #endif
@@ -611,25 +556,23 @@ final class KeyboardController {
         wordRow.interruptTyping() // what was typed so far is learned; the host's text is not typing
     }
 
-    /// The reveal rushes while edits wait behind it: a Live revision or the Replace swap it has not reached yet,
-    /// or anything pending in the queue.
+    /// The reveal rushes while edits wait behind it: the Replace swap it has not reached yet, or anything pending
+    /// in the queue.
     private func rushes(_ host: HostState) -> Bool {
         guard let fieldEdits else { return false }
         if fieldEdits.hasPending { return true }
         guard let current = cursor, current.runID == host.runID else { return false }
-        if let revision = host.revision, revision.n > current.revisionHandled, !current.revisionSkipped { return true }
         return host.isFinal && host.delivery == .replace && host.finalText != nil && current.finalReplaced == nil
             && linkedRun != host.runID
     }
 
     /// The host's text as one patch through the queue: the ASR lane for text at the caret (stream appends; the
-    /// caret follows it), the cleanup lane for a Live revision or the Replace swap before it (the caret stays).
+    /// caret follows it), the cleanup lane for the Replace swap before it (the caret stays).
     /// False when the queue refused it at once: the plan's cursor is not taken.
-    private func performHost(_ plan: ProxyPlan, previous: AppliedCursor?, runID: String?, delivery: HostDelivery?) -> Bool {
+    private func performHost(_ plan: ProxyPlan, previous: AppliedCursor?, runID: String?) -> Bool {
         guard let fieldEdits, !plan.ops.isEmpty, let edit = fieldEdits.caretEdit(for: plan.ops) else { return true }
         let atCaret = edit.step.span.isEmpty && edit.step.span.location == fieldEdits.predicted.caret
-        // Hold's one end-of-run insert is its own origin (the ASR lane, like the stream).
-        let origin: EditOrigin = atCaret ? (delivery == .hold ? .hold : .asr) : Self.hostOrigin(planned: plan.cursor, previous: previous)
+        let origin: EditOrigin = atCaret ? .asr : Self.hostOrigin(planned: plan.cursor, previous: previous)
         let id = UUID()
         hostWrites.record(
             id, previous: previous, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore),
@@ -649,16 +592,13 @@ final class KeyboardController {
 
     private static func hostOrigin(planned: AppliedCursor?, previous: AppliedCursor?) -> EditOrigin {
         if planned?.finalReplaced == true, previous?.finalReplaced != true { return .finalSwap }
-        if planned?.shownRevision != previous?.shownRevision || planned?.revisedText != previous?.revisedText {
-            return .liveCleanup
-        }
         return .asr
     }
 
     /// A host-text write ran (a held tick goes on), landed, or was handed back. Only a write the queue failed moves
     /// the cursor (`HostWriteLedger`): a stream chunk back to before it, with every later write planned on top of it
-    /// withdrawn, so the next plan types them once; a Live revision marked skipped; a Replace swap marked not done
-    /// (the app falls back to the clipboard, as when the field changed under them today). A write that may still
+    /// withdrawn, so the next plan types them once; a Replace swap marked not done
+    /// (the app falls back to the clipboard). A write that may still
     /// land (`unconfirmed`: the keyboard went away first) keeps its progress.
     private func hostWrite(_ id: UUID, _ outcome: FieldEditCoordinator.Outcome) {
         switch outcome {
@@ -687,7 +627,7 @@ final class KeyboardController {
             if let kept = failure.kept { trace?("fe.mapped kept=\(kept.rawValue)") }
             for later in failure.withdraw { fieldEdits?.withdraw(later) }
             let reverted = failure.cursor
-            trace?("fe.mapped rewound=\(reverted != cursor ? 1 : 0) withdrawn=\(failure.withdraw.count) skipped=\(reverted?.revisionSkipped == true ? 1 : 0) replaced=\(reverted?.finalReplaced.map { $0 ? "1" : "0" } ?? "-")")
+            trace?("fe.mapped rewound=\(reverted != cursor ? 1 : 0) withdrawn=\(failure.withdraw.count) replaced=\(reverted?.finalReplaced.map { $0 ? "1" : "0" } ?? "-")")
             if reverted != cursor {
                 cursor = reverted
                 if let reverted { link.writeApplied(reverted) }
@@ -708,9 +648,8 @@ final class KeyboardController {
     /// Whether the host's field (its last read) holds any text: an empty read after a write into it can be a clear.
     private var fieldHasText: Bool { !(document.contextBefore.isEmpty && document.contextAfter.isEmpty) }
 
-    /// Follows the app's linked run (`LinkedRunFollower`): a Live or Replace run the app froze with the edit queue
-    /// on starts the queue if this appearance has none (only while the host's state applies here: visible, for the
-    /// keyboard); its feed goes to `link.feed` (a resync of the field first, before any of the run's text is typed,
+    /// Follows the app's linked run (`LinkedRunFollower`): a Live or Replace run with cleanup follows (only while the
+    /// host's state applies here: visible, for the keyboard); its feed goes to `link.feed` (a resync of the field first, before any of the run's text is typed,
     /// so the app's agent can tell the run's text from what was there), throttled, its final state at once; the
     /// app's edits are taken from `link.edits`. Another run ends it; the app's scrub ends it without a last batch
     /// and drops the ring, so the field's text does not come back into the App Group.
@@ -718,7 +657,6 @@ final class KeyboardController {
         guard let host, let feed = link.fieldFeed else { return }
         let linked = LinkedRunFollower.isLinked(host)
         guard applies || !linked else { return }
-        if linked, host.runID != linkedRun, fieldEdits == nil { startFieldEdits(force: true) }
         if linked, fieldEdits == nil { return }
         switch linkedFollower.hostChanged(host) {
         case .none:
@@ -851,30 +789,11 @@ final class KeyboardController {
     func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) -> Bool {
         resolveHeldClear()
         beforeUserEdit()
-        if let fieldEdits { return applyEditQueued(edit, removed: removed, asTyping: asTyping, record: record, fieldEdits) }
-        let before = typing.contextBefore
-        let after = document.contextAfter
-        let moved = before + String(after.prefix(edit.forward))
-        let expected = String(moved.dropLast(edit.deleteCount)) + edit.insert
-        versions = nil
-        if asTyping {
-            // A completion goes on in the live typing buffer (the word typed so far becomes the completed word), so
-            // the pair learned is previous -> completed word, not previous -> prefix.
-            wordRow.completed(deleting: edit.deleteCount, with: edit.insert)
-        } else {
-            wordRow.interruptTyping()
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-        }
-        clearWatch.ownEdit(at: Date(), leavesFieldEmpty: expected.isEmpty && String(after.dropFirst(edit.forward)).isEmpty)
-        // The proxy moves by UTF-16 units; the edit counts characters.
-        if edit.forward != 0 { document.adjustTextPosition(byCharacterOffset: edit.utf16Forward(contextAfter: after)) }
-        for _ in 0..<edit.deleteCount { document.deleteBackward() }
-        if !edit.insert.isEmpty { document.insert(edit.insert) }
-        finishEdit(edit, removed: removed, asTyping: asTyping, record: record, expected: expected)
-        return true
+        guard let fieldEdits else { return false } // no field edit queue: the keyboard is not on screen
+        return applyEditQueued(edit, removed: removed, asTyping: asTyping, record: record, fieldEdits)
     }
 
-    /// `applyEdit` through the field edit queue, planned on the predicted field (the text the write itself uses,
+    /// The word row's edit through the field edit queue, planned on the predicted field (the text the write itself uses,
     /// for the expected context and the history alike). A refused edit changes nothing: the dictation's versions,
     /// the typing the row learns from and the history stay as they were.
     private func applyEditQueued(
@@ -983,34 +902,26 @@ final class KeyboardController {
         guard let current = cursor, let documentID = document.documentID, current.documentID == documentID,
               let host, host.runID == current.runID, host.phase != .idle
         else { return }
-        if let fieldEdits {
-            // The tentative text goes ahead of the key, in the user lane: it is the run's own text (not the user's).
-            fieldEdits.sync()
-            let plan = ProxyEditPlanner.prepareForTyping(cursor: current, contextBefore: fieldEdits.predictedBefore)
-            if !plan.ops.isEmpty, let edit = fieldEdits.caretEdit(for: plan.ops) {
-                let id = UUID()
-                hostWrites.record(
-                    id, previous: current, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore),
-                    fieldHadText: fieldHasText)
-                beginOwnEdit()
-                let result = fieldEdits.write(edit, id: id, origin: .asr, owner: host.runID, lane: .user, keepsCaret: true) {
-                    [weak self] outcome in self?.hostWrite(id, outcome)
-                }
-                typing.hostEdited()
-                // Refused: the tentative text is still in the field, and the cursor still says so.
-                if case .refused(let conflict) = result {
-                    trace?("fe.refused origin=prepare reason=\(conflict.reason.rawValue)")
-                    return
-                }
+        guard let fieldEdits else { return }
+        // The tentative text goes ahead of the key, in the user lane: it is the run's own text (not the user's).
+        fieldEdits.sync()
+        let plan = ProxyEditPlanner.prepareForTyping(cursor: current, contextBefore: fieldEdits.predictedBefore)
+        if !plan.ops.isEmpty, let edit = fieldEdits.caretEdit(for: plan.ops) {
+            let id = UUID()
+            hostWrites.record(
+                id, previous: current, planned: plan.cursor, expected: edit.step.apply(to: fieldEdits.predictedBefore),
+                fieldHadText: fieldHasText)
+            beginOwnEdit()
+            let result = fieldEdits.write(edit, id: id, origin: .asr, owner: host.runID, lane: .user, keepsCaret: true) {
+                [weak self] outcome in self?.hostWrite(id, outcome)
             }
-            if let updated = plan.cursor, updated != current {
-                cursor = updated
-                link.writeApplied(updated)
+            typing.hostEdited()
+            // Refused: the tentative text is still in the field, and the cursor still says so.
+            if case .refused(let conflict) = result {
+                trace?("fe.refused origin=prepare reason=\(conflict.reason.rawValue)")
+                return
             }
-            return
         }
-        let plan = ProxyEditPlanner.prepareForTyping(cursor: current, contextBefore: document.contextBefore)
-        perform(plan.ops)
         if let updated = plan.cursor, updated != current {
             cursor = updated
             link.writeApplied(updated)
@@ -1158,33 +1069,31 @@ final class KeyboardController {
     /// version shown now. `record`: whether this is a new step of the history (Refine) rather than undo or redo.
     @discardableResult
     private func showVersion(at index: Int, record: Bool) -> Bool {
-        guard var current = keptVersions ?? versions, current.texts.indices.contains(index) else { return false }
+        guard var current = keptVersions ?? versions, current.texts.indices.contains(index), let fieldEdits else {
+            return false
+        }
         let from = current.current
-        if let fieldEdits { fieldEdits.sync() }
+        fieldEdits.sync()
         guard current.documentID == document.documentID,
-              let ops = current.swapOps(to: index, contextBefore: fieldEdits?.predictedBefore ?? typing.contextBefore)
+              let ops = current.swapOps(to: index, contextBefore: fieldEdits.predictedBefore)
         else {
             trace?("version swap=refused")
             show("The text changed, so there is nothing to swap.")
             return false
         }
-        let before = fieldEdits?.predictedBefore ?? typing.contextBefore
+        let before = fieldEdits.predictedBefore
         let expected = String(before.dropLast(current.shown.count)) + current.texts[index] + current.trailing
         wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-        if let fieldEdits {
-            if let edit = fieldEdits.caretEdit(for: ops) {
-                beginOwnEdit()
-                if case .refused(let conflict) = fieldEdits.write(edit, origin: .versions, lane: .user, keepsCaret: false) {
-                    trace?("version swap=refused reason=\(conflict.reason.rawValue)")
-                    show("The text changed, so there is nothing to swap.")
-                    return false
-                }
-                typing.hostEdited()
+        if let edit = fieldEdits.caretEdit(for: ops) {
+            beginOwnEdit()
+            if case .refused(let conflict) = fieldEdits.write(edit, origin: .versions, lane: .user, keepsCaret: false) {
+                trace?("version swap=refused reason=\(conflict.reason.rawValue)")
+                show("The text changed, so there is nothing to swap.")
+                return false
             }
-        } else {
-            perform(ops)
+            typing.hostEdited()
         }
-        // `perform` forgot the tracked context (it is for the host's text); this swap is the keyboard's own, so a
+        // The write forgot the tracked context (it is for the host's text); this swap is the keyboard's own, so a
         // quick second undo reads the context the swap left rather than the field's lagging report.
         typing.ownEdit(contextBefore: expected)
         current.show(index)
@@ -1252,8 +1161,7 @@ final class KeyboardController {
 
     // MARK: Status
 
-    /// The top bar's dictation line: the live text while a `.hold` run listens (nothing is typed then),
-    /// "Listening…" otherwise, "Cleaning up…" while a run with cleanup finishes.
+    /// The top bar's dictation line: "Listening…" while a run listens, "Cleaning up…" while a run with cleanup finishes.
     var dictationStatus: String? {
         if pendingRemoteStartID != nil, host?.phase != .starting, host?.phase != .listening { return "Preparing dictation…" }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return nil }
@@ -1262,9 +1170,7 @@ final class KeyboardController {
         case .starting:
             return "Starting dictation…"
         case .listening:
-            let live = host.committed + host.volatile
-            guard host.delivery == .hold, !live.trimmingCharacters(in: .whitespaces).isEmpty else { return "Listening…" }
-            return live.count > 90 ? "…" + live.suffix(90) : live
+            return "Listening…"
         case .finishing:
             return host.delivery == nil ? nil : "Cleaning up…"
         case .idle:

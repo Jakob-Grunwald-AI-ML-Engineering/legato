@@ -8,7 +8,6 @@ import Foundation
 /// a write the queue failed rewinds it, once:
 /// - a stream chunk: back to before it, so the next plan types it again; every later write planned on top of it
 ///   (the next tick waiting behind it) is withdrawn and planned again with it, so nothing is typed twice or lost;
-/// - a Live revision: marked skipped (never retried, as when the user edited the run's text);
 /// - the Replace swap: marked not replaced (the app falls back to the clipboard).
 /// A cursor that moved on by other means (a new run, a sent boundary) keeps its progress; only those flags apply.
 ///
@@ -159,11 +158,6 @@ public struct HostWriteLedger: Sendable, Equatable {
         let onChain = cursor == entry.previous || chain.contains { $0.planned == cursor }
         var reverted = onChain ? entry.previous : cursor
         if var flagged = reverted, let planned = entry.planned, planned.runID == flagged.runID {
-            if planned.revisionHandled > (entry.previous?.revisionHandled ?? 0) {
-                flagged.revisionHandled = max(flagged.revisionHandled, planned.revisionHandled)
-                flagged.revisionSkipped = true
-                flagged.finalApplied = false
-            }
             if planned.finalReplaced == true, entry.previous?.finalReplaced == nil {
                 flagged.finalReplaced = false
                 flagged.finalApplied = false

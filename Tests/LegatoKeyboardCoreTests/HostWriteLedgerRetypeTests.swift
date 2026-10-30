@@ -60,18 +60,6 @@ struct HostWriteLedgerRetypeTests {
         #expect(ledger.isEmpty)
     }
 
-    /// A cleared field keeps a failed Live revision's progress too: it is the sent text's, never retried.
-    @Test func aClearedFieldKeepsAFailedRevisionAsItIs() {
-        var ledger = HostWriteLedger()
-        let a = UUID()
-        let previous = cursor(9)
-        var planned = previous
-        planned.revisionHandled = 1
-        planned.shownRevision = 1
-        ledger.record(a, previous: previous, planned: planned, expected: "the cat")
-        #expect(ledger.failed(a, cursor: planned, contextBefore: "", fieldEmpty: true)?.cursor == planned)
-    }
-
     /// Another chunk failing later (a different point of the run) is rewound as usual.
     @Test func aLaterChunkFailingIsRewoundAsUsual() {
         var ledger = HostWriteLedger()

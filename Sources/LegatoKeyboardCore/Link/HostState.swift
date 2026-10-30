@@ -28,43 +28,26 @@ public enum HostTarget: String, Codable, Sendable, Equatable {
     case keyboard
 }
 
-/// How the run's text reaches the field when post-processing (cleanup) changed it. Mirrors the app's
-/// cleanup delivery setting; nil when cleanup is off (the final text is the streamed text).
+/// How the run's cleaned text reaches the field. Mirrors the app's cleanup delivery setting; nil when cleanup is
+/// off (the final text is the streamed text).
 public enum HostDelivery: String, Codable, Sendable, Equatable {
-    /// Stream while listening; at the end swap the streamed text for `finalText` in one edit, when the
-    /// field still ends with it (otherwise the app puts `finalText` on the clipboard).
+    /// Stream while listening; at the end the cleaned text is swapped in for the streamed text (the cleanup agent's
+    /// patches on the link), only while the field still ends with it (otherwise the app puts it on the clipboard).
     case replace
-    /// Stream while listening; the field keeps the streamed text, the app puts `finalText` on the clipboard.
-    case clipboard
-    /// Type nothing while listening; insert the final text (`finalText`, else the committed text) at the end.
-    case hold
-    /// Stream while listening; the newest `HostState.revision` (a rolling cleanup of the run's whole text)
-    /// replaces what the field shows for the run while the field still ends with it; once the user edited
-    /// it, revisions are skipped. A cleared field (a sent message) is a boundary the app is told about.
+    /// Stream while listening; the cleanup agent corrects the run sentence by sentence through the link's edits.
     case live
-}
 
-/// Live cleanup's cleaned version of the run's text (`HostDelivery.live`), a whole-span replacement: the
-/// keyboard replaces what the field shows for the run from `start` with `text` followed by the raw text of
-/// `HostState.committed` from `end` on. Positions count characters of `committed`, which stays the raw text.
-public struct HostRevision: Codable, Sendable, Equatable {
-    /// Counts the run's revisions from 1; only a newer one than the keyboard handled is applied.
-    public var n: Int
-    /// Where the span starts in `committed`: 0, or the last sent boundary.
-    public var start: Int
-    /// The raw text the pass cleaned (from `start`).
-    public var raw: String
-    /// What replaces it (the cleaned text with the raw span's surrounding whitespace).
-    public var text: String
-
-    public init(n: Int, start: Int, raw: String, text: String) {
-        self.n = n
-        self.start = start
-        self.raw = raw
-        self.text = text
+    /// A state written by an older build may name the removed modes: "hold" and "clipboard" read as `.live`.
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "replace": self = .replace
+        case "live", "hold", "clipboard": self = .live
+        default:
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "Unknown delivery \(raw)"))
+        }
     }
-
-    public var end: Int { start + raw.count }
 }
 
 /// What the app publishes to the keyboard (`link.host`): the run's text so far and whether the app
@@ -89,7 +72,7 @@ public struct HostState: Codable, Sendable, Equatable {
     public var leaseUntil: Date?
     /// The app can start a run from where it is, without being opened (a lease is held).
     public var acceptsRemoteStart: Bool
-    /// How this run's final text reaches the field (set when the run starts); nil without cleanup.
+    /// How this run's cleaned text reaches the field (set when the run starts); nil without cleanup.
     public var delivery: HostDelivery?
     /// On the final state: the post-processed text when it differs from the trimmed `committed` text.
     public var finalText: String?
@@ -97,8 +80,6 @@ public struct HostState: Codable, Sendable, Equatable {
     /// visible keyboard types it without having followed the run, while the request is fresh
     /// (`LinkChannel.insertMaxAge`). Nil for every other state.
     public var insertAt: Date?
-    /// `.live`: the newest revision of this run; nil before the first.
-    public var revision: HostRevision?
     /// A meeting is recording: dictation is blocked. Absent (nil) otherwise, so older readers see the same state.
     public var meetingRecording: Bool?
     /// A keyboard start is preparing selected resources; its microphone key cancels that admission.
@@ -106,9 +87,6 @@ public struct HostState: Codable, Sendable, Equatable {
     public var preparingRequestID: String?
     /// Retained after preparation clears, so a keyboard need not observe a fleeting pending state.
     public var startCompletion: HostStartCompletion?
-    /// The experimental edit queue and cleanup agent are on for this run (frozen when it starts). Optional so
-    /// states written by an older host decode, and absent from the JSON unless set.
-    public var fieldEdits: Bool?
     /// On a finished run's state: what its stop has to tell the user (part of the cleanup is on the clipboard),
     /// for a keyboard that followed the run to show once. Absent from the JSON unless set.
     public var notice: String?
@@ -116,7 +94,7 @@ public struct HostState: Codable, Sendable, Equatable {
     public init(
         runID: String?, phase: HostPhase, target: HostTarget, committed: String, volatile: String, seq: Int,
         beatAt: Date, leaseUntil: Date?, acceptsRemoteStart: Bool, delivery: HostDelivery? = nil,
-        finalText: String? = nil, insertAt: Date? = nil, revision: HostRevision? = nil
+        finalText: String? = nil, insertAt: Date? = nil
     ) {
         self.v = Self.version
         self.runID = runID
@@ -131,7 +109,6 @@ public struct HostState: Codable, Sendable, Equatable {
         self.delivery = delivery
         self.finalText = finalText
         self.insertAt = insertAt
-        self.revision = revision
     }
 
     /// The state carries an insert request that is still recent enough to act on.

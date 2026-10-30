@@ -15,17 +15,11 @@ import Foundation
 ///   doesn't end with the cursor's tentative text, ticks wait (`settleLimitMs` at most, then it is
 ///   planned against as before: the user did move on). Host updates don't use up that wait.
 /// - Nothing is drained without a field to type into (no field, another field, not the keyboard's run).
-/// - Cleanup delivery (`HostState.delivery`): `.hold` is not revealed (nothing is typed while listening and
-///   the final text goes in as one edit, which the reveal would otherwise insert again on every tick).
-///   With `.replace` the streamed text is revealed like any other; the swap for the final text waits until
-///   all of it is in the field and the field's context shows it (`settleLimitMs` at most), and is then one
-///   edit. With `.clipboard` the streamed text is the result.
-///   With `.live` a revision (`HostState.revision`) is applied by the planner only to text the reveal has
-///   typed (the planner sees the state cut to the revealed part, so a revision waits until the text it covers
-///   is revealed), and, like the swap, only once the field's context shows the run text typed on earlier
-///   ticks (`settleLimitMs` at most): a revision that finds the field changed is skipped for good. After a sent
-///   boundary the reveal goes on from the boundary; tentative text sent with the message holds it until the
-///   committed text shows where that text ends (`ProxyEditPlanner.awaitsSentTentative`, on the whole state).
+/// - Cleanup delivery (`HostState.delivery`): with `.replace` the streamed text is revealed like any other; a
+///   swap for the final text (a run off the link) waits until all of it is in the field and the field's context
+///   shows it (`settleLimitMs` at most), and is then one edit. With `.live`, after a sent boundary the reveal goes
+///   on from the boundary; tentative text sent with the message holds it until the committed text shows where
+///   that text ends (`ProxyEditPlanner.awaitsSentTentative`, on the whole state).
 /// - Rush (`rush`, the field edit queue's path): while edits wait behind the reveal, it drains `rushFactor` times
 ///   faster and is done at the latest `rushLimitMs` after it started rushing, so queued edits are not held up.
 public struct TypewriterReveal: Sendable, Equatable {
@@ -59,7 +53,7 @@ public struct TypewriterReveal: Sendable, Equatable {
     ) -> ProxyPlan {
         needsTicks = false
         if !rush { rushedMs = 0 }
-        guard let documentID, state.target == .keyboard, let runID = state.runID, state.delivery != .hold,
+        guard let documentID, state.target == .keyboard, let runID = state.runID,
               cursor == nil || cursor?.runID != runID || cursor?.documentID == documentID
         else {
             return ProxyEditPlanner.plan(state: state, cursor: cursor, contextBefore: contextBefore, documentID: documentID)
@@ -106,10 +100,8 @@ public struct TypewriterReveal: Sendable, Equatable {
         let span = ProxyEditPlanner.streamedSpan(of: state.committed)
         let swapWaits = swapDue && streamedLanded && !span.isEmpty && !contextBefore.hasSuffix(span)
 
-        let revisionWaits = Self.revisionAwaitsContext(state: state, cursor: cursor, contextBefore: contextBefore)
-
         if let cursor, cursor.runID == runID, waitedMs < Self.settleLimitMs,
-           (!cursor.volatile.isEmpty && !contextBefore.hasSuffix(cursor.volatile)) || swapWaits || revisionWaits {
+           (!cursor.volatile.isEmpty && !contextBefore.hasSuffix(cursor.volatile)) || swapWaits {
             waitedMs += elapsedMs
             needsTicks = true
             return ProxyPlan(ops: [], cursor: cursor)
@@ -137,18 +129,6 @@ public struct TypewriterReveal: Sendable, Equatable {
             needsTicks = true
         }
         return plan
-    }
-
-    /// `.live`: a revision not yet handled replaces the run text typed on earlier ticks, which the planner looks
-    /// for at the end of the field's context (before the tentative text). True while the context does not
-    /// show that text yet.
-    private static func revisionAwaitsContext(state: HostState, cursor: AppliedCursor?, contextBefore: String) -> Bool {
-        guard state.delivery == .live, let cursor, cursor.runID == state.runID, let revision = state.revision,
-              revision.n > cursor.revisionHandled, revision.start == cursor.sentBase, !cursor.revisionSkipped
-        else { return false }
-        let typed = min(cursor.committedCount, state.committed.count)
-        let shown = ProxyEditPlanner.runText(cursor: cursor, committed: state.committed, upTo: typed)
-        return !contextBefore.hasSuffix(shown + cursor.volatile)
     }
 
     /// `state` cut to its first `count` characters of `committed + volatile`.

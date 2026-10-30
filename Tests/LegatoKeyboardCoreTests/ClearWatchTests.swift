@@ -3,11 +3,10 @@ import Testing
 @testable import LegatoKeyboardCore
 
 private func live(
-    _ committed: String, _ volatile: String = "", revision: HostRevision? = nil, phase: HostPhase = .listening
+    _ committed: String, _ volatile: String = "", phase: HostPhase = .listening
 ) -> HostState {
     var state = hostState(phase: phase, committed: committed, volatile: volatile)
     state.delivery = .live
-    state.revision = revision
     return state
 }
 
@@ -180,12 +179,8 @@ private struct TickRig {
         #expect(rig.cursor?.sentBase == typed, "the clear was believed after the window")
         #expect(rig.field == String("hello world how are you ".dropFirst(typed)), "only what was not sent goes in")
 
-        let base = typed
-        let after = HostRevision(
-            n: 1, start: base, raw: String("hello world how are you ".dropFirst(base)), text: "How are you? ")
-        rig.drain(live("hello world how are you ", revision: after))
-        #expect(rig.field == "How are you? ", "later revisions apply to the text after the send")
-        rig.drain(live("hello world how are you ", revision: after, phase: .idle))
+        rig.drain(live("hello world how are you ", phase: .idle))
+        #expect(rig.field == String("hello world how are you ".dropFirst(typed)))
         #expect(rig.cursor?.finalApplied == true)
     }
 

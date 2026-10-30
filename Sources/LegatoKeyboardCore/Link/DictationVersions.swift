@@ -36,14 +36,8 @@ public struct DictationVersions: Sendable, Equatable {
         if let cleaned = ProxyEditPlanner.cleanedText(state) { texts.append(cleaned) }
         let streamedTrailing = ProxyEditPlanner.trailingWhitespace(of: ProxyEditPlanner.streamedSpan(of: state.committed))
         switch state.delivery {
-        case .hold:
-            return DictationVersions(
-                runID: runID, documentID: cursor.documentID, texts: texts, current: texts.count - 1, trailing: "")
-        case .clipboard:
-            return DictationVersions(
-                runID: runID, documentID: cursor.documentID, texts: texts, current: 0, trailing: streamedTrailing)
         case .live:
-            // Landed means every revision did: the field shows the cleaned text.
+            // The field shows the cleaned text.
             return DictationVersions(
                 runID: runID, documentID: cursor.documentID, texts: texts, current: texts.count - 1,
                 trailing: streamedTrailing)

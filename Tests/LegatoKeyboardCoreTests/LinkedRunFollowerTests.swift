@@ -4,16 +4,14 @@ import Testing
 @testable import LegatoKeyboardCore
 
 /// Which runs the keyboard publishes its feed for and takes the app's edits from (review L6 #1, #2): only a run
-/// whose cleaned text the app writes over the link (Live, Replace); never Hold, Clipboard or a run without
-/// cleanup; stopped (without a last flush) when the app scrubs the link.
+/// whose cleaned text the app writes over the link (Live, Replace); never a run without cleanup; stopped (without a last flush) when the app scrubs the link.
 struct LinkedRunFollowerTests {
     func host(
-        _ runID: String? = "run-1", delivery: HostDelivery? = .live, fieldEdits: Bool? = true,
+        _ runID: String? = "run-1", delivery: HostDelivery? = .live,
         target: HostTarget = .keyboard, phase: HostPhase = .listening
     ) -> HostState {
         var state = hostState(runID: runID, phase: phase, target: target)
         state.delivery = delivery
-        state.fieldEdits = fieldEdits
         return state
     }
 
@@ -25,16 +23,14 @@ struct LinkedRunFollowerTests {
         #expect(follower.hostChanged(host(delivery: delivery)) == .none)  // once
     }
 
-    @Test(arguments: [HostDelivery.hold, .clipboard, nil])
-    func aRunNobodyReadsTheFeedOfIsNotFollowed(_ delivery: HostDelivery?) {
+    @Test func aRunWithoutCleanupIsNotFollowed() {
         var follower = LinkedRunFollower()
-        #expect(follower.hostChanged(host(delivery: delivery)) == .none)
+        #expect(follower.hostChanged(host(delivery: nil)) == .none)
         #expect(follower.runID == nil)
     }
 
-    @Test func aRunWithoutTheSettingOrForTheAppIsNotFollowed() {
+    @Test func aRunForTheAppIsNotFollowed() {
         var follower = LinkedRunFollower()
-        #expect(follower.hostChanged(host(fieldEdits: nil)) == .none)
         #expect(follower.hostChanged(host(target: .app)) == .none)
         #expect(follower.runID == nil)
     }
@@ -43,7 +39,7 @@ struct LinkedRunFollowerTests {
     @Test func anotherRunStopsFollowing() {
         var follower = LinkedRunFollower()
         _ = follower.hostChanged(host())
-        #expect(follower.hostChanged(host("run-2", delivery: .hold)) == .stop(flush: true))
+        #expect(follower.hostChanged(host("run-2", delivery: nil)) == .stop(flush: true))
         #expect(follower.runID == nil)
     }
 
@@ -51,8 +47,8 @@ struct LinkedRunFollowerTests {
     @Test func theScrubStopsWithoutALastBatch() {
         var follower = LinkedRunFollower()
         _ = follower.hostChanged(host())
-        #expect(follower.hostChanged(host(nil, delivery: nil, fieldEdits: nil, phase: .idle)) == .stop(flush: false))
-        #expect(follower.hostChanged(host(nil, delivery: nil, fieldEdits: nil, phase: .idle)) == .none)
+        #expect(follower.hostChanged(host(nil, delivery: nil, phase: .idle)) == .stop(flush: false))
+        #expect(follower.hostChanged(host(nil, delivery: nil, phase: .idle)) == .none)
     }
 
     /// The run's final state keeps it followed: the app's stop still sends edits and reads their outcomes.

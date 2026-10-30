@@ -312,43 +312,16 @@ private func allEvents() -> [FeedEvent] {
     }
 }
 
-@Suite struct HostStateFieldEditsTests {
-    @Test func theFlagIsAbsentUnlessSetAndOldStatesStillDecode() throws {
-        let backing = MemoryLinkStore()
-        let store = LinkStore(backing)
-        store.write(hostState(), forKey: LinkChannel.Key.host)
-        let plainData = try #require(backing.data(forKey: LinkChannel.Key.host))
-        let plain = try #require(JSONSerialization.jsonObject(with: plainData) as? [String: Any])
-        #expect(plain["fieldEdits"] == nil)
-        #expect(store.read(HostState.self, forKey: LinkChannel.Key.host)?.fieldEdits == nil)
-
-        var on = hostState()
-        on.fieldEdits = true
-        store.write(on, forKey: LinkChannel.Key.host)
-        let storedData = try #require(backing.data(forKey: LinkChannel.Key.host))
-        let stored = try #require(JSONSerialization.jsonObject(with: storedData) as? [String: Any])
-        #expect(stored["fieldEdits"] as? Bool == true)
-        #expect(stored["v"] as? Int == 1)
-        #expect(store.read(HostState.self, forKey: LinkChannel.Key.host)?.fieldEdits == true)
-    }
-
-    @Test func aStateWrittenBeforeTheFlagExistedDecodes() throws {
+@Suite struct HostStateDecodingTests {
+    @Test func aStateWrittenWithTheRemovedFlagDecodes() throws {
         let old = """
             {"v":1,"runID":"r","phase":"listening","target":"keyboard","committed":"a","volatile":"b","seq":3,\
-            "beatAt":1000,"acceptsRemoteStart":false}
+            "beatAt":1000,"acceptsRemoteStart":false,"fieldEdits":true}
             """
-        do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .secondsSince1970
-            let state = try decoder.decode(HostState.self, from: Data(old.utf8))
-            #expect(state.fieldEdits == nil && state.committed == "a")
-        }
-    }
-
-    @MainActor @Test func aRunFreezesTheFlagWhenItStarts() {
-        let link = HostLink(store: LinkStore(MemoryLinkStore()), post: { _ in })
-        link.runStarted(id: "r", target: .keyboard, fieldEdits: true)
-        #expect(link.state.fieldEdits == true)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let state = try decoder.decode(HostState.self, from: Data(old.utf8))
+        #expect(state.committed == "a")
     }
 }
 

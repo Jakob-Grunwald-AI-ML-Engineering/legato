@@ -24,7 +24,7 @@ public enum LinkChannel {
         public static let refined = "link.refined"
         /// keyboard -> app: one `ChoiceRecord` per key, `link.choice.<uuid>` (the app removes each once read).
         public static let choicePrefix = "link.choice."
-        /// keyboard -> app: the field-event ring (`FeedRing`), only for runs with `HostState.fieldEdits`.
+        /// keyboard -> app: the field-event ring (`FeedRing`), only for runs with cleanup (`LinkedRunFollower`).
         public static let feed = "link.feed"
         /// app -> keyboard: pending `EditTransaction`s (`EditsBox`).
         public static let edits = "link.edits"

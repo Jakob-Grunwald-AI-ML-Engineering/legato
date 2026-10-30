@@ -35,12 +35,11 @@ import UIKit
 /// mode, plus the URL its Link would open), `harness-type` (the scripted typing cases below),
 /// `harness-numbers` (tap the 123 key).
 ///
-/// The field edit queue (`-LegatoFieldEdits YES` forces it on): `harness-fieldedits` runs the scripted edits
+/// The field edit queue: `harness-fieldedits` runs the scripted edits
 /// of scenario fe over a lagging document (`HarnessDocument.lag`: a Live run streamed by a scripted host, the
-/// word row, undo and redo, a version swap, typing while a revision waits for a read that lags past the settle
-/// timeout, deleting into the word a waiting revision rewrites, a write the field never shows);
+/// word row, undo and redo, a write the field never shows);
 /// `harness-fe-lag` measures how long a key press, a word-row tap and ↶ take until the action returns
-/// (`fe.lag`), with the queue on or off, then how long keys take over the lagging document while the host sends
+/// (`fe.lag`), then how long keys take over the lagging document while the host sends
 /// and clears the field after each Return before it reports it (`fe.lagsend`: a read none of our states is, so
 /// the queue's prediction is contradicted until a read decides; `fe.step name=send-cleared` after the first
 /// round's keys). Both register their own Darwin observers.
@@ -360,14 +359,12 @@ final class KeyboardHarnessModel {
 
     /// What the app would publish for a scripted Live run (fresh beat), followed by its Darwin note.
     private func publish(
-        run: String, phase: HostPhase = .listening, committed: String, finalText: String? = nil,
-        revision: HostRevision? = nil
+        run: String, phase: HostPhase = .listening, committed: String, finalText: String? = nil
     ) {
         hostSeq += 1
         let state = HostState(
             runID: run, phase: phase, target: .keyboard, committed: committed, volatile: "", seq: hostSeq,
-            beatAt: Date(), leaseUntil: nil, acceptsRemoteStart: false, delivery: .live, finalText: finalText,
-            revision: revision)
+            beatAt: Date(), leaseUntil: nil, acceptsRemoteStart: false, delivery: .live, finalText: finalText)
         linkStore?.write(state, forKey: LinkChannel.Key.host)
         DarwinObserver.post(LinkChannel.Note.host)
     }
@@ -420,13 +417,12 @@ final class KeyboardHarnessModel {
     /// reads trail the calls, show every intermediate state, and some arrive after the 250 ms settle timeout);
     /// the script checks the logs.
     func runFieldEdits() async {
-        E2E.log("fe.begin on=\(KeyboardPreferences.forcedFieldEdits ? 1 : 0)")
+        E2E.log("fe.begin")
         clearField()
         document.lag = .milliseconds(60)
 
-        // 1. A Live run streams (ASR lane) and its revision lands as a patch (cleanup lane) while the reveal rushes.
-        //    The reads of the last chunk and of the revision lag 400 ms: past the timeout, so each final read is
-        //    stale once and the write is confirmed when the host catches up, never typed twice.
+        // 1. A Live run streams (ASR lane). The read of the last chunk lags 400 ms: past the timeout, so its final
+        //    read is stale once and the write is confirmed when the host catches up, never typed twice.
         let run1 = "fe-run-1"
         publish(run: run1, committed: "teh")
         await waitUntil("stream-1", timeout: 5) { document.text == "teh" }
@@ -434,12 +430,11 @@ final class KeyboardHarnessModel {
         await waitUntil("stream-2", timeout: 5) { document.text == "teh cat sat" }
         await settled("stream-2-settled")
         document.lag = .milliseconds(400)
-        let revision1 = HostRevision(n: 1, start: 0, raw: "teh cat sat", text: "the cat sat")
-        publish(run: run1, committed: "teh cat sat on", revision: revision1)
-        await waitUntil("revision", timeout: 5) { document.text == "the cat sat on" }
-        await settled("revision-settled")
+        publish(run: run1, committed: "teh cat sat on")
+        await waitUntil("stream-3", timeout: 5) { document.text == "teh cat sat on" }
+        await settled("stream-3-settled")
         document.lag = .milliseconds(60)
-        publish(run: run1, phase: .idle, committed: "teh cat sat on", finalText: "the cat sat on", revision: revision1)
+        publish(run: run1, phase: .idle, committed: "teh cat sat on")
         await waitUntil("versions", timeout: 5) { controller.shownVersionIndex != nil }
         await settled("stream-settled")
         step("stream")
@@ -449,62 +444,13 @@ final class KeyboardHarnessModel {
         controller.suggestionTapped(rank: 0)
         step("row")
 
-        // 3. Undo and redo: the completion, then the version swap (cleaned -> raw), and back; each runs at once,
-        //    on the field as the writes before it left it, while their reads still trail.
+        // 3. Undo and redo of the completion; each runs at once, on the field as the writes before it left it, while
+        //    their reads still trail.
         controller.undo()
         step("undo-row")
-        controller.undo()
-        step("undo-version")
-        controller.redo()
-        step("redo-version")
         controller.redo()
         step("redo-row")
         await settled("history-settled")
-
-        // 4. Typing while a revision waits: revision 1's read lags 400 ms, so revision 2 waits in the queue; the
-        //    keys run at once and the waiting revision is mapped past them and lands after them.
-        let run2 = "fe-run-2"
-        publish(run: run2, committed: "a dgo ran")
-        await waitUntil("run2-stream", timeout: 5) { document.text.hasSuffix("a dgo ran") }
-        await settled("run2-stream-settled")
-        document.lag = .milliseconds(400)
-        publish(run: run2, committed: "a dgo ran", revision: HostRevision(n: 1, start: 0, raw: "a dgo ran", text: "a dog ran"))
-        await waitUntil("run2-revision1") { document.text.hasSuffix("a dog ran") }
-        publish(run: run2, committed: "a dgo ran", revision: HostRevision(n: 2, start: 0, raw: "a dgo ran", text: "A dog ran"))
-        await waitUntil("run2-revision2-waits") { controller.fieldEditsHostWaiting }
-        E2E.log("fe.pending waiting=\(controller.fieldEditsHostWaiting ? 1 : 0)")
-        press("space i s")
-        step("typed-while-pending")
-        await waitUntil("run2-revision2", timeout: 5) { document.text.hasSuffix("A dog ran is") }
-        await settled("run2-settled")
-        document.lag = .milliseconds(60)
-        publish(run: run2, phase: .idle, committed: "a dgo ran", finalText: "A dog ran",
-                revision: HostRevision(n: 2, start: 0, raw: "a dgo ran", text: "A dog ran"))
-        try? await Task.sleep(for: .milliseconds(300))
-        await settled("run2-final-settled")
-        step("pending")
-
-        // 5. Deleting into the word a waiting revision rewrites ("dgo" -> "dog"): the revision is handed back as
-        //    the user's change (overlap, byUser) and the user's text stays.
-        let run3 = "fe-run-3"
-        publish(run: run3, committed: "the dgo")
-        await waitUntil("run3-stream", timeout: 5) { document.text.hasSuffix(" the dgo") }
-        await settled("run3-stream-settled")
-        document.lag = .milliseconds(400)
-        publish(run: run3, committed: "the dgo", revision: HostRevision(n: 1, start: 0, raw: "the dgo", text: "The dgo"))
-        await waitUntil("run3-revision1") { document.text.hasSuffix(" The dgo") }
-        publish(run: run3, committed: "the dgo", revision: HostRevision(n: 2, start: 0, raw: "the dgo", text: "The dog"))
-        await waitUntil("run3-revision2-waits") { controller.fieldEditsHostWaiting }
-        step("before-same-word")
-        press("delete delete i")
-        step("typed-into-pending")
-        await settled("run3-settled")
-        document.lag = .milliseconds(60)
-        publish(run: run3, phase: .idle, committed: "the dgo", finalText: "The dog",
-                revision: HostRevision(n: 2, start: 0, raw: "the dgo", text: "The dog"))
-        try? await Task.sleep(for: .milliseconds(300))
-        await settled("run3-final-settled")
-        step("same-word")
 
         // 6. A write the field never shows (the host lost it): its reads stay stale through the extended wait, it
         //    fails once, and the chunk (with the tick waiting behind it) is typed again, exactly once.
@@ -566,8 +512,7 @@ final class KeyboardHarnessModel {
             try? await Task.sleep(for: .milliseconds(30))
         }
         for ch in "lagprobe" { keys.append(measure { _ = typing.press(keyID: "char:\(ch)") }) }
-        let on = KeyboardPreferences.forcedFieldEdits ? 1 : 0
-        E2E.log("fe.lag on=\(on) keys=\(keys.count) taps=\(taps.count) undos=\(undos.count) \(Self.stats("key", keys)) \(Self.stats("tap", taps)) \(Self.stats("undo", undos)) doc=\(E2E.quote(document.text))")
+        E2E.log("fe.lag keys=\(keys.count) taps=\(taps.count) undos=\(undos.count) \(Self.stats("key", keys)) \(Self.stats("tap", taps)) \(Self.stats("undo", undos)) doc=\(E2E.quote(document.text))")
 
         // The lagging document (60 ms), and a host that sends and clears the field after each Return before it
         // reports it: the keys after it are typed in the call they arrive, none waits and none is lost.
@@ -586,7 +531,7 @@ final class KeyboardHarnessModel {
         await settled("lagsend-settled")
         step("sent")
         document.lag = nil
-        E2E.log("fe.lagsend on=\(on) keys=\(sent.count) \(Self.stats("key", sent)) doc=\(E2E.quote(document.text))")
+        E2E.log("fe.lagsend keys=\(sent.count) \(Self.stats("key", sent)) doc=\(E2E.quote(document.text))")
     }
 
     /// How long `action` takes, in milliseconds.

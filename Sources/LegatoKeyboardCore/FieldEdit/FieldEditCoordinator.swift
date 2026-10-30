@@ -16,7 +16,7 @@ public protocol FieldEditDocument: AnyObject {
     func execute(_ calls: [ProxyCall])
 }
 
-/// The keyboard's field edit queue (the experimental setting), for one keyboard appearance: every edit the
+/// The keyboard's field edit queue, for one keyboard appearance: every edit the
 /// keyboard makes goes through one `FieldEditQueue` over the caret-relative window
 /// (`documentContextBefore/AfterInput`) and is carried out by this type on the document.
 ///
