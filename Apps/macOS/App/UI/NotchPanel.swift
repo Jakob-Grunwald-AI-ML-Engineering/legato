@@ -14,10 +14,12 @@ private final class ComposerPanel: NSPanel {
 
 @MainActor final class NotchPanelController {
     private var panel: NSPanel?
+    private var screen: NSScreen?
     func show(controller: MacAppController, targetPID: pid_t?) {
         let screen = targetScreen(pid: targetPID) ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
-        let frame = NotchGeometry.frame(screen: screen.frame, visible: screen.visibleFrame, safeTop: screen.safeAreaInsets.top)
+        self.screen = screen
+        let frame = NotchGeometry.frame(screen: screen.frame, visible: screen.visibleFrame, safeTop: screen.safeAreaInsets.top, height: 188)
         let panel = self.panel ?? ComposerPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         self.panel = panel
         panel.isFloatingPanel = true
@@ -29,7 +31,7 @@ private final class ComposerPanel: NSPanel {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.becomesKeyOnlyIfNeeded = true
-        panel.contentView = NSHostingView(rootView: NotchComposerView(controller: controller))
+        panel.contentView = NSHostingView(rootView: NotchComposerView(controller: controller, attached: screen.safeAreaInsets.top > 0, resize: resize))
         panel.setFrame(frame.offsetBy(dx: 0, dy: 24), display: false)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
@@ -41,6 +43,14 @@ private final class ComposerPanel: NSPanel {
         }
     }
     func hide() { panel?.orderOut(nil) }
+    private func resize(_ height: CGFloat) {
+        guard let panel, let screen else { return }
+        let frame = NotchGeometry.frame(screen: screen.frame, visible: screen.visibleFrame, safeTop: screen.safeAreaInsets.top, height: height)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            panel.animator().setFrame(frame, display: true)
+        }
+    }
     private func targetScreen(pid: pid_t?) -> NSScreen? {
         guard let pid,
               let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
@@ -58,7 +68,16 @@ private final class ComposerPanel: NSPanel {
 
 private struct NotchComposerView: View {
     let controller: MacAppController
+    let attached: Bool
+    let resize: (CGFloat) -> Void
     private var session: ComposerSession { controller.composer }
+    private var contentHeight: CGFloat {
+        let rows = session.snapshot.lines.reduce(0) { count, line in
+            count + max(1, Int(ceil(Double(line.words.map(\.text).joined(separator: " ").count) / 58)))
+        }
+        let tailRows = session.tail.isEmpty ? 0 : max(1, Int(ceil(Double(session.tail.count) / 58)))
+        return min(440, max(188, 138 + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
+    }
     var body: some View {
         VStack(spacing: 10) {
             HStack {
@@ -75,7 +94,7 @@ private struct NotchComposerView: View {
             ComposerView(snapshot: session.snapshot, tail: session.tail, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
                 onWordTap: { line, word in Task { await session.tap(lineID: line, wordID: word) } },
                 onPick: { line, word, text in Task { await session.pick(lineID: line, wordID: word, text: text) } })
-            if let error = session.error { Text(error).font(.callout).foregroundStyle(.red).textSelection(.disabled) }
+            if let error = session.error { Text(error).font(.callout).foregroundStyle(.red).lineLimit(2).help(error).textSelection(.disabled) }
             HStack {
                 Button("Cancel") { controller.cancelComposer() }
                 Button("Undo", systemImage: "arrow.uturn.backward") { Task { await session.undo() } }
@@ -85,9 +104,12 @@ private struct NotchComposerView: View {
                     .buttonStyle(.borderedProminent).disabled(session.renderedText.isEmpty)
             }
         }
-        .padding(18)
+        .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.black.opacity(0.94), in: UnevenRoundedRectangle(bottomLeadingRadius: 24, bottomTrailingRadius: 24))
+        .background(Color(red: 0.075, green: 0.075, blue: 0.085), in: UnevenRoundedRectangle(topLeadingRadius: attached ? 14 : 20, bottomLeadingRadius: 22, bottomTrailingRadius: 22, topTrailingRadius: attached ? 14 : 20))
+        .clipShape(UnevenRoundedRectangle(topLeadingRadius: attached ? 14 : 20, bottomLeadingRadius: 22, bottomTrailingRadius: 22, topTrailingRadius: attached ? 14 : 20))
+        .onAppear { resize(contentHeight) }
+        .onChange(of: contentHeight) { _, height in resize(height) }
         .environment(\.colorScheme, .dark)
     }
 }
