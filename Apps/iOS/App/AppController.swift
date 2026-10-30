@@ -42,8 +42,8 @@ final class AppController {
             switch request.command {
             case .start: await self.composer.start()
             case .stop: await self.composer.stop()
-            case .arm: self.keyboardHost?.link.leaseChanged(until: Date().addingTimeInterval(3600))
-            default: await self.composer.cancel()
+            case .arm: await self.composer.arm(); self.keyboardHost?.link.leaseChanged(until: self.composer.isArmed ? Date().addingTimeInterval(3600) : nil)
+            default: await self.composer.releaseMicrophone()
             }
             return true
         }
@@ -62,7 +62,11 @@ final class AppController {
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }
     func stopIfRunning() async { await composer.stop() }
-    func handle(_ url: URL) async { _ = await toggle() }
+    func handle(_ url: URL) async {
+        if let request = KeyboardURL.parse(url), request.command == .arm {
+            await composer.arm(); keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
+        } else { _ = await toggle() }
+    }
     func insertResult() async { if let lastTranscript { _ = await keyboardHost?.insert(lastTranscript) } }
     func copyResult() async { if let lastTranscript { UIPasteboard.general.string = lastTranscript } }
 }
