@@ -38,9 +38,8 @@ struct KeyboardRootView: View {
                     }
                 }
             } label: {
-                Text(controller.composer.mode.capitalized).font(.system(size: 13))
-                    .lineLimit(1).minimumScaleFactor(0.75)
-                    .frame(width: 60).frame(maxHeight: .infinity)
+                Image(systemName: modes.first(where: { $0.0 == controller.composer.mode })?.1 ?? "message")
+                    .font(.system(size: 18)).frame(maxWidth: .infinity, maxHeight: .infinity)
             } primaryAction: {
                 let index = modes.firstIndex(where: { $0.0 == controller.composer.mode }) ?? 0
                 controller.composerIntent("mode", text: modes[(index + 1) % modes.count].0)

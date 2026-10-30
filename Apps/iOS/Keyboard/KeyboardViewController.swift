@@ -146,7 +146,9 @@ final class KeyboardViewController: UIInputViewController {
                 "from": heightAnimationFrom, "to": heightAnimationTarget,
                 "completed": completed, "frames": heightAnimationSamples,
                ], options: [.sortedKeys]) {
-                try? data.write(to: group.appendingPathComponent("composer-height-animation.json"), options: .atomic)
+                let cache = group.appendingPathComponent("Library/Caches", isDirectory: true)
+                try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+                try? data.write(to: cache.appendingPathComponent("composer-height-animation.json"), options: .atomic)
             }
             heightAnimationSamples.removeAll(keepingCapacity: true)
         }
