@@ -27,7 +27,15 @@ import XCTest
             XCTAssertTrue(app.buttons["Insert"].waitForExistence(timeout: 10), "Selected Legato composer did not appear")
         case "tap": try coordinate(1).tap()
         case "hold": try coordinate(1).press(forDuration: number(3))
-        case "swipe": try coordinate(1).press(forDuration: 0.1, thenDragTo: coordinate(3))
+        case "swipe":
+            if parts.count == 6 {
+                let hold = try number(5)
+                guard hold >= 0 else { throw ControlError.invalidArguments }
+                try coordinate(1).press(forDuration: 0.1, thenDragTo: coordinate(3),
+                    withVelocity: .slow, thenHoldForDuration: hold)
+            } else {
+                try coordinate(1).press(forDuration: 0.1, thenDragTo: coordinate(3))
+            }
         case "label":
             let label = parts.dropFirst().joined(separator: " ")
             let element = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch

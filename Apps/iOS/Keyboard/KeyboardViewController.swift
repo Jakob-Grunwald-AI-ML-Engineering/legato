@@ -68,8 +68,14 @@ final class KeyboardViewController: UIInputViewController {
     private func layoutChanged(reason: String) {
         heightConstraint?.constant = requestedHeight
         let settle: UIView = view.superview ?? view
-        // The handle commits once on release; apply that final height without a second animation.
-        if reason == "composer-resize" { settle.layoutIfNeeded(); return }
+        // One host resize on release, with the document and strip settling together.
+        if reason == "composer-resize" {
+            UIView.animate(withDuration: 0.22, delay: 0,
+                           options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]) {
+                settle.layoutIfNeeded()
+            }
+            return
+        }
         #if DEBUG
         UIView.animate(withDuration: 0.2, animations: { settle.layoutIfNeeded() }, completion: { [weak self] _ in
             guard let self else { return }
