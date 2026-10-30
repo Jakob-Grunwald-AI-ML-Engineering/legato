@@ -911,6 +911,35 @@ scenario_n4() {
   assert_count "genuine interruption releases retained microphone" "session.deactivate" 1
 }
 
+scenario_n6() {
+  begin "n6. interruption ends: the keep-ready hold is retaken" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
+    -LegatoKeepAliveSeconds 600 -LegatoFakeBackgroundRefusal pla || return
+  trigger kbd-hop-arm
+  wait_log "arm outcome=armed" 10
+  assert_count "lease armed once" "arm outcome=armed" 1
+  trigger interrupt
+  wait_log "hold.interruption began holding=1" 10
+  wait_log 'system-event reason="interruption began"' 10
+  trigger interrupt-end
+  wait_log "hold.resume ok" 10
+  assert_log "ended while holding resumes" "hold.interruption ended shouldResume=1 resume=1"
+  assert_count "the lease was armed again" "arm outcome=armed" 2
+  assert_no_log "no dictation was restarted" "outcome kind=started"
+  trigger interrupt-end
+  wait_log_n "hold.interruption ended" 2 5
+  assert_log "ended with nothing lost does not resume" "hold.interruption ended shouldResume=1 resume=0"
+  # Two interruptions back to back: the second begins while the first retake may still be in flight.
+  trigger interrupt
+  trigger interrupt
+  wait_log_n "hold.interruption began" 3 10
+  trigger interrupt-end
+  trigger interrupt-end
+  wait_log_n "hold.interruption ended" 4 10
+  wait_log_n "hold.resume ok" 2 10
+  assert_count "the double interruption retakes the lease" "arm outcome=armed" 3
+  assert_no_log "no dictation was restarted by the double interruption" "outcome kind=started"
+}
+
 scenario_n3() {
   begin "n3. app cancels before first keyboard poll" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
     -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoFakeStartWatchHeld YES \
@@ -1947,7 +1976,7 @@ scenario_fa() {
 
 t_run=$SECONDS
 wanted() { [ -z "${LEGATO_E2E_ONLY:-}" ] || [[ " $LEGATO_E2E_ONLY " == *" $1 "* ]]; }
-for s in a b c d e f g h i p j o k l m n n2 n3 n4 n5 q t r s u x x2 y z fe fa; do if wanted "$s"; then "scenario_$s"; fi; done
+for s in a b c d e f g h i p j o k l m n n2 n6 n3 n4 n5 q t r s u x x2 y z fe fa; do if wanted "$s"; then "scenario_$s"; fi; done
 if wanted v; then
   scenario_v "retry succeeds" duckOthers 1 2 yes
   scenario_v "default fails twice" duckOthers 9 2 no
