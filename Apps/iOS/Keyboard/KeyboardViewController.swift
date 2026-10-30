@@ -59,8 +59,8 @@ final class KeyboardViewController: UIInputViewController {
     /// The height the current mode asks for: the native tool row plus the prediction row above it, or the full keyboard's for the orientation. By width, as `KeyGeometry` does: a portrait
     /// keyboard (402 x 297) is wider than tall too.
     private var requestedHeight: CGFloat {
-        if let controller, controller.mode == .strip { return CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: KeyGeometry.isLandscape(width: view.bounds.width))) }
-        return KeyGeometry.isLandscape(width: view.bounds.width) ? Self.landscapeHeight : Self.portraitHeight
+        let screenHeight = view.window?.windowScene?.screen.bounds.height ?? 852
+        return min(600, max(360, screenHeight - 180))
     }
 
     /// The mode or the strip height changed (the chevron, the debug height cycle, the setting): resize

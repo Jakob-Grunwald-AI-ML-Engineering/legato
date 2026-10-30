@@ -1,5 +1,6 @@
 import Foundation
 import LegatoRoom
+import LegatoComposerDoc
 
 public struct LiveAgentPolicy: Sendable {
     public private(set) var pending: [Envelope] = []
@@ -8,7 +9,7 @@ public struct LiveAgentPolicy: Sendable {
     public var editing: Set<String> = []
     public init() {}
     @discardableResult public mutating func enqueue(_ event: Envelope, hintTargets: Set<String> = []) -> Bool {
-        guard [.asrSegment, .hint, .userIntent].contains(event.channel) else { return false }
+        guard [.hint, .userIntent].contains(event.channel) || AgentAdmission.isAcceptedContent(event) else { return false }
         let preempt = running && event.channel == .hint && !editing.isDisjoint(with: hintTargets)
         if preempt { pending = active + pending }
         if event.channel == .hint { pending.insert(event, at: 0) } else { pending.append(event) }
@@ -19,4 +20,11 @@ public struct LiveAgentPolicy: Sendable {
         active = pending; defer { pending = []; editing = [] }; return pending
     }
     public mutating func finish() { running = false; editing = []; active = [] }
+}
+
+/// Raw ASR remains context, but only a binder-accepted append admits a content turn.
+enum AgentAdmission {
+    static func isAcceptedContent(_ event: Envelope) -> Bool {
+        event.channel == .docOps && (try? event.payload.decode(Transaction.self).origin) == .asr
+    }
 }

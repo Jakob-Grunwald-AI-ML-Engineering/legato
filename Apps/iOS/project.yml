@@ -57,6 +57,10 @@ targets:
       - package: LegatoKit
         product: LegatoKeyboardCore
       - package: LegatoKit
+        product: LegatoComposerUI
+      - package: LegatoKit
+        product: LegatoComposerDoc
+      - package: LegatoKit
         product: LegatoVocabulary
       # Downloadable models, engines and cleanup: the app only, never the keyboard or the widgets.
       - package: LegatoKit
@@ -125,6 +129,10 @@ targets:
     dependencies:
       - package: LegatoKit
         product: LegatoKeyboardCore
+      - package: LegatoKit
+        product: LegatoComposerUI
+      - package: LegatoKit
+        product: LegatoComposerDoc
       - package: LegatoKit
         product: LegatoVocabulary
     settings:

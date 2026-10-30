@@ -106,6 +106,7 @@ public actor SonioxClient {
             }
         } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
     }
+    public func setAudioOrigin(_ origin: Double) { audioOrigin = origin }
     public func sendAudio(_ pcm16: Data) async throws {
         guard state == .streaming else { throw failure ?? .notConnected }
         guard !pcm16.isEmpty else { return }
