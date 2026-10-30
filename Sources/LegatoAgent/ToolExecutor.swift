@@ -94,7 +94,7 @@ public struct ToolExecutor: Sendable {
             // Specialization loads context without changing the Auto system prefix or UI mode.
             tools.removeAll { $0.name == "set_mode" }
             tools.append(ToolSchema(name: "load_writing_guidance",
-                description: "Load the existing writing skill for the intended format before drafting or revising in Auto. Returns guidance as context; does not edit the document or change mode.",
+                description: "Load specialized format guidance when useful for composing in Auto. General prose and quick local corrections do not require this lookup. Returns guidance as context; does not edit the document or change mode.",
                 properties: ["mode": S(type: "string", enumValues: ["message", "email", "prompt", "note"])], required: ["mode"]))
         }
         return tools

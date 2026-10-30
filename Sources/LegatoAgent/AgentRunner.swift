@@ -31,7 +31,7 @@ public actor AgentRunner {
     private var retiring = false
     private var stopped = false
 
-    public init(room: Room, client: any MessagesStreaming, configuration: AgentConfiguration = .init(), pauseDelay: Duration = .milliseconds(2500)) {
+    public init(room: Room, client: any MessagesStreaming, configuration: AgentConfiguration = .init(), pauseDelay: Duration = .seconds(1)) {
         self.room = room; self.client = client; self.configuration = configuration; self.pauseDelay = pauseDelay
     }
     public func start() async {
@@ -114,7 +114,16 @@ public actor AgentRunner {
         let events: [Envelope]
         let next: WritingPhase
         if let pending = policy.begin() {
-            events = pending; next = pending.contains { $0.channel == .hint } ? .targeted : .quick
+            events = pending
+            if pending.contains(where: { $0.channel == .hint }) {
+                next = .targeted
+            } else if pauseDue && !finalPending {
+                // Speech stopped while the previous quick request was still running.
+                // Compose these queued notes now instead of paying for a redundant quick turn.
+                next = .pause; pauseDue = false
+            } else {
+                next = .quick
+            }
         } else if finalPending, policy.beginMaintenance() {
             events = []; next = .final; finalPending = false
         } else if pauseDue, policy.beginMaintenance() {

@@ -128,3 +128,63 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
     #expect(!(await executor.execute(name: "replace_lines", input: replacement, groupID: "targeted", live: true, phase: .targeted)).isError)
     #expect(await room.documentSnapshot.text == "A targeted replacement")
 }
+
+
+@Test func defaultWriterComposesAfterOneSecondQuietWithoutStopping() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client)
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "Some rough notes")])
+    #expect(try await waitForWriter { client.calls().count == 1 })
+    client.finish(0)
+    // Continued partial speech must reset the actual quiet clock.
+    try await Task.sleep(for: .milliseconds(600))
+    _ = try await room.publish(channel: .asrTail, participant: .transcriber,
+        payload: .object(["text": .string("still speaking")]))
+    try await Task.sleep(for: .milliseconds(600))
+    #expect(!client.calls().contains { $0.phase == "pause" })
+    try await Task.sleep(for: .milliseconds(650))
+    #expect(client.calls().last?.phase == "pause",
+        "A short natural pause should allow composing without waiting 2.5 seconds or Stop")
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+@Test func quietQueuedContentComposesInNextTurnInsteadOfAnotherQuickRoundTrip() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(80))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "First rough thought")])
+    #expect(try await waitForWriter { client.calls().count == 1 })
+    _ = try await room.publishSegment(words: [.init(text: "Second rough thought")])
+    try await Task.sleep(for: .milliseconds(140))
+    #expect(client.calls().count == 1)
+    client.finish(0)
+    #expect(try await waitForWriter { client.calls().count == 2 })
+    let next = try #require(client.calls().last)
+    #expect(next.phase == "pause", "Quiet queued content needs full composing tools immediately")
+    #expect(String(decoding: next.request, as: UTF8.self).contains("Second rough thought"))
+    client.finish(1)
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(client.calls().count == 2, "The folded composing turn consumes the quiet deadline")
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+
+@Test func targetedCorrectionKeepsPriorityWhenOrdinaryContentIsQuiet() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(80))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "First rough thought")])
+    #expect(try await waitForWriter { client.calls().count == 1 })
+    _ = try await room.publishSegment(words: [.init(text: "Second rough thought")])
+    _ = try await room.publish(channel: .hint, participant: .hintBinder,
+        payload: .object(["instruction": .string("Correct the selected name")]))
+    try await Task.sleep(for: .milliseconds(140))
+    client.finish(0)
+    #expect(try await waitForWriter { client.calls().count == 2 })
+    #expect(client.calls().last?.phase == "targeted")
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
