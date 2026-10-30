@@ -77,6 +77,9 @@ final class KeyboardViewController: UIInputViewController {
     /// The mode or the strip height changed (the chevron, the debug height cycle, the setting): resize
     /// with the content's cross-fade, and log the height asked for against the one laid out.
     private func layoutChanged(reason: String) {
+        #if DEBUG
+        KeyboardGeometryLog.observeMotion(view: view)
+        #endif
         heightConstraint?.constant = requestedHeight
         let settle: UIView = view.superview ?? view
         #if DEBUG
