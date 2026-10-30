@@ -21,7 +21,7 @@ public struct ComposerView: View {
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(Array(snapshot.lines.enumerated()), id: \.element.id) { index, line in
                     LineView(line: line, ordinal: index + 1, pending: pendingLineIDs.contains(line.id))
-                        .transition(.asymmetric(insertion: .opacity.combined(with: .blurReplace), removal: .movingParts.vanish(Color.secondary)))
+                        .transition(AnyTransition.asymmetric(insertion: .opacity.combined(with: .movingParts.blur(radius: 6)), removal: .movingParts.vanish(Color.secondary)))
                         .environment(\.openURL, OpenURLAction { url in
                             guard url.scheme == "legato-word", let word = line.words.first(where: { $0.id == url.host }) else { return .systemAction }
                             onWordTap(line.id, word.id); selected = .init(lineID: line.id, word: word); return .handled

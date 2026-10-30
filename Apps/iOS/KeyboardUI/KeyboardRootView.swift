@@ -30,7 +30,7 @@ struct KeyboardRootView: View {
         }
         .background(.background)
     }
-    private var keyboardBody: some View {
+    @ViewBuilder private var keyboardBody: some View {
         let typing = controller.typing!
         let layout = typing.layout
         GeometryReader { geometry in
