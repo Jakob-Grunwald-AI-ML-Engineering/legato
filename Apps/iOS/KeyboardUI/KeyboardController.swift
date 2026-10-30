@@ -207,9 +207,9 @@ final class KeyboardController {
     private(set) var composer = ComposerPublication()
     @ObservationIgnored private var composerPoll: Task<Void, Never>?
     private var composerLink: ComposerLink? { UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) } }
-    func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, text: String? = nil) {
+    func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
         guard fullAccess else { show("Allow Full Access to connect to the composer."); return }
-        composerLink?.send(.init(action: action, lineID: lineID, wordID: wordID, text: text))
+        composerLink?.send(.init(action: action, lineID: lineID, wordID: wordID, endLineID: endLineID, endWordID: endWordID, text: text))
         DarwinObserver.post(LinkChannel.Note.composerIntent)
     }
     func insertComposer() {

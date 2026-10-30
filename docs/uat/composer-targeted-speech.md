@@ -17,3 +17,11 @@ The tap used the internal session bridge, not a native popover interaction. This
 The phone was left idle in Note mode, with no microphone lease, busy participant or error. The optional motion probe was disabled (`0`).
 
 Validation: 95 affected tests passed (17 Room, 11 Soniox, 8 Agent, 59 AppServices); signed iOS Debug build passed. Tests cover multi-punctuation capture, silence after punctuation, hidden partial text, retargeting, mixed timing/final-pass drain, resumed general speech and the actual AgentRunner/tool path. Full suites and extra review agents were not run.
+
+## Inclusive quote-range backend
+
+A tap and a dragged phrase now use the same `ComposerSession.select(lineID:wordID:endLineID:endWordID:timestamp:)` entry point. Missing end IDs mean the starting word. Keyboard intents retain action `tap` and add optional end IDs, so legacy word intents still decode. Reverse endpoints normalize into document order. The structured hint adds concrete end IDs, `selectedQuote`, all immutable `targetLines` and their observed `lineVersions`; quotes preserve source newlines. Existing silence capture, partial-tail suppression and version/pin protections are unchanged.
+
+Three focused contracts passed after reproducing failures: single-word quote equivalence, reversed selection across three lines with immutable observed versions, and legacy/range intent serialization. This backend extension adds no paid calls or device-interaction claim; native phrase selection and popover presentation belong to the UI integration.
+
+Dismissing the selection uses `clearSelection` / keyboard `deselect`. Buffered speech is dropped, and timestamp-bounded in-flight speech from before dismissal is discarded until the existing boundary; it never reappears as general dictation. A focused RED→GREEN dismissal regression passed with the 35 affected tests.

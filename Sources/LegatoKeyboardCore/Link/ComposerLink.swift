@@ -42,9 +42,12 @@ public struct ComposerIntent: Codable, Equatable, Sendable {
     public var lineID: String?
     public var wordID: String?
     public var text: String?
+    public var endLineID: String?
+    public var endWordID: String?
     public var timestamp: Double
-    public init(action: String, lineID: String? = nil, wordID: String? = nil, text: String? = nil) {
+    public init(action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
         id = UUID().uuidString; self.action = action; self.lineID = lineID; self.wordID = wordID; self.text = text
+        self.endLineID = endLineID; self.endWordID = endWordID
         timestamp = ProcessInfo.processInfo.systemUptime
     }
 }
