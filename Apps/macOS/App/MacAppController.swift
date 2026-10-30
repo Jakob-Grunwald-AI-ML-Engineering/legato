@@ -15,8 +15,15 @@ import Observation
     let vocabulary: VocabularyService
     let history: any HistoryStore
     var recent: [DictationEntry] = []
-    var notice = "Composer coming"
-    var isDictating: Bool { false }
+    let composer = ComposerSession()
+    let notch = NotchPanelController()
+    private var writer: FieldWriter?
+    private var targetPID: pid_t?
+    private var secureField = false
+    private var starting = false
+    private var sessionTask: Task<Void, Never>?
+    var notice: String { composer.error ?? composer.status.capitalized }
+    var isDictating: Bool { starting || composer.isListening }
     var isRecordingHotkey = false
     var recordingPreview: String?
     var onboardingRequests = 0
@@ -43,7 +50,13 @@ import Observation
         pollTask = Task {
             while !Task.isCancelled {
                 permissions.refresh()
-                if !tap.isActive { permissions.hotkeyTapActive = tap.start() }
+                if !tap.isEnabled {
+                    tap.stop()
+                    permissions.hotkeyTapActive = false
+                    if CGPreflightListenEventAccess() { permissions.hotkeyTapActive = tap.start() }
+                } else {
+                    permissions.hotkeyTapActive = true
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -51,7 +64,53 @@ import Observation
         DebugBridge.start()
         #endif
     }
-    func toggle() { notice = "Composer coming"; hud.show(toast: notice); gesture.runEnded() }
+    func toggle() {
+        if isDictating { stopComposer(); return }
+        guard !starting else { return }
+        starting = true
+        targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let target: AXTextTarget?
+        secureField = false
+        switch AXTextTarget.captureFocused() {
+        case .target(let value): target = value
+        case .none: target = nil
+        case .secure: target = nil; secureField = true
+        }
+        writer = FieldWriter(target: target, mode: .insertOnStop)
+        notch.show(controller: self, targetPID: targetPID)
+        sessionTask = Task {
+            await composer.start()
+            starting = false
+        }
+    }
+    func stopComposer() {
+        gesture.runEnded()
+        if starting { cancelComposer(); return }
+        Task { await composer.stop() }
+    }
+    func cancelComposer() {
+        sessionTask?.cancel(); sessionTask = nil; starting = false
+        notch.hide(); writer = nil; gesture.runEnded()
+        Task { await composer.cancel() }
+    }
+    func insertComposer() {
+        let text = composer.renderedText
+        guard !text.isEmpty else { return }
+        sessionTask?.cancel(); starting = false
+        let pid = targetPID, secure = secureField, restore = settings.restoreClipboard
+        let action = writer?.finish(finalText: text) ?? .paste(text)
+        writer = nil; notch.hide(); gesture.runEnded()
+        Task {
+            Task { await composer.insert() }
+            switch action {
+            case .done: break
+            case .copy(let text): paster.copy(text); hud.show(toast: "Copied — paste with ⌘V.")
+            case .paste(let text):
+                let result = await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure)
+                if case .copied(let reason) = result { hud.show(toast: reason.toast) }
+            }
+        }
+    }
     func beginRecording() {
         guard tap.isActive else { permissions.requestAccessibility(); return }
         armTask?.cancel(); gesture.reset(); recorder = HotkeyRecorderLogic(); isRecordingHotkey = true; recordingPreview = nil
@@ -85,7 +144,14 @@ import Observation
             }
         }
     }
-    private func dispatch(_ action: HotkeyGesture.Action?) { if action == .start { toggle() } }
+    private func dispatch(_ action: HotkeyGesture.Action?) {
+        switch action {
+        case .start: toggle()
+        case .stop: stopComposer()
+        case .cancel: cancelComposer()
+        case nil: break
+        }
+    }
     func refreshRecent() async { recent = (try? await history.recent(limit: 20)) ?? [] }
     func copy(_ entry: DictationEntry) { paster.copy(entry.text) }
     func delete(_ entry: DictationEntry) { Task { try? await history.delete(id: entry.id); await refreshRecent() } }

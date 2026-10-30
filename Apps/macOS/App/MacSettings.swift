@@ -15,7 +15,7 @@ import Observation
     var restoreClipboard: Bool { didSet { defaults.set(restoreClipboard, forKey: "restoreClipboard") } }
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        hotkey = defaults.data(forKey: "hotkey").flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) }
+        hotkey = defaults.data(forKey: "hotkey").flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) } ?? .modifier(.rightCommand)
         gestureMode = defaults.string(forKey: "gestureMode").flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
         insertionMode = defaults.string(forKey: "insertionMode").flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         restoreClipboard = defaults.object(forKey: "restoreClipboard") as? Bool ?? true

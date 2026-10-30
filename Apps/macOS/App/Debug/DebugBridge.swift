@@ -18,9 +18,11 @@ import AppKit
         guard UserDefaults.standard.bool(forKey: "LegatoDebugBridge") else { return }
         #endif
         started = true
-        harness.register("state") { _ in ["status": "Composer coming", "dictating": false] }
-        harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "Composer coming"] }
-        harness.register("stop") { _ in return ["status": "idle"] }
+        harness.register("state") { _ in let c = MacAppController.shared; return ["status": c.composer.status, "dictating": c.isDictating, "error": c.composer.error ?? "", "text": c.composer.renderedText, "frontmostPID": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0, "keyWindow": NSApp.keyWindow?.title ?? ""] }
+        harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "starting"] }
+        harness.register("stop") { _ in MacAppController.shared.stopComposer(); return ["status": "stopping"] }
+        harness.register("composer-insert") { _ in MacAppController.shared.insertComposer(); return nil }
+        harness.register("composer-cancel") { _ in MacAppController.shared.cancelComposer(); return nil }
         harness.register("session-probe") { _ in try SessionProbe.start(); return nil }
         harness.register("say") { command in
             guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }
