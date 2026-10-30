@@ -66,3 +66,39 @@ import LegatoRoom
     #expect(!session.isMuted)
     #expect(session.status == "idle")
 }
+
+@MainActor @Test func composerCancelClearsDraftAndDoesNotRestoreCancelledRoom() async throws {
+    let room = Room()
+    let session = ComposerSession(room: room)
+    _ = try await room.appendSegment(words: [.init(text: "Discard this draft")])
+    await session.refreshDebugState()
+    await session.receive(try await room.publish(channel: .asrTail, participant: .ui, payload: .object(["text": .string("unfinished speech")])))
+    await session.receive(try await room.publish(channel: .agentStatus, participant: .liveAgent, payload: .object(["busy": .bool(true), "event": .string("error"), "message": .string("Previous failure")])))
+    await session.receive(try await room.publish(channel: .agentStatus, participant: .liveAgent, payload: .object(["event": .string("pending.edit"), "lines": .array([.string("pending-line")])])))
+    await session.receive(try await room.publish(channel: .correctionDraft, participant: .ui, payload: .object(["text": .string("replace this"), "countdownStart": .number(1), "countdownDeadline": .number(2)])))
+    #expect(!session.renderedText.isEmpty)
+    #expect(session.busy)
+    #expect(session.error != nil)
+
+    await session.cancel()
+    await session.refreshDebugState()
+
+    #expect(session.snapshot.lines.isEmpty)
+    #expect(session.renderedText.isEmpty)
+    #expect(session.tail.isEmpty)
+    #expect(session.hunks.isEmpty)
+    #expect(session.status == "idle")
+    #expect(session.sessionID == nil)
+    #expect(session.audioOrigin == nil)
+    #expect(session.error == nil)
+    #expect(!session.busy)
+    #expect(session.pendingLineIDs.isEmpty)
+    #expect(!session.canUndo)
+    #expect(session.correctionDraft == nil)
+    #expect(session.correctionCountdownStart == nil)
+    #expect(session.correctionCountdownDeadline == nil)
+    // Repeated cancellation is safe before the next Start.
+    await session.cancel()
+    #expect(session.status == "idle")
+    #expect(session.renderedText.isEmpty)
+}
