@@ -36,7 +36,11 @@ targets:
         product: LegatoAudio
       - package: LegatoKit
         product: LegatoMac
-      # Downloadable models, engines and cleanup.
+      - package: LegatoKit
+        product: LegatoComposerUI
+      - package: LegatoKit
+        product: LegatoAgent
+      # Shared composer runtime.
       - package: LegatoKit
         product: LegatoAppServices
       # Meeting notes: the session and store, and the opt-in Claude summary backend with its Keychain key.

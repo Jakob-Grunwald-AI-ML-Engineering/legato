@@ -7,7 +7,7 @@ struct MenuContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label(controller.notice, systemImage: "waveform").font(.headline)
-            Button("Voice composer") { controller.toggle() }
+            Button(controller.isDictating ? "Stop composer" : "Voice composer") { controller.toggle() }
             Text(controller.settings.hotkey?.displayName ?? "Set a hotkey in Settings").foregroundStyle(.secondary)
             Divider()
             HStack {
