@@ -46,14 +46,13 @@ public enum KeyboardSideMargins {
     }
 }
 
-/// Three composer sizes. Heights exclude iOS's rounded cap and bottom system tray.
+/// Two composer sizes. Heights exclude iOS's rounded cap and bottom system tray.
 public enum ComposerKeyboardSize: String, CaseIterable, Sendable {
-    case low, medium, full
+    case medium, full
 
     public func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false) -> Double {
         let maximum = max(0, min(screenHeight - 60, screenHeight * 0.85 - systemOverhead))
         switch self {
-        case .low: return min(82, maximum)
         case .medium:
             let native = KeyboardHeights.height(landscape: landscape) - (landscape ? 35.33 : 54)
             return min(native, maximum)
@@ -63,10 +62,8 @@ public enum ComposerKeyboardSize: String, CaseIterable, Sendable {
 
     public func stepped(up: Bool) -> Self {
         switch (self, up) {
-        case (.low, true): .medium
         case (.medium, true): .full
         case (.full, false): .medium
-        case (.medium, false): .low
         default: self
         }
     }
@@ -76,5 +73,8 @@ public enum ComposerKeyboardSize: String, CaseIterable, Sendable {
         return stepped(up: dy < 0)
     }
 
-    public var cycled: Self { self == .full ? .low : stepped(up: true) }
+    public var cycled: Self { self == .full ? .medium : .full }
+
+    /// Older installations may have retained the removed Low preset.
+    public static func restore(_ stored: String?) -> Self { Self(rawValue: stored ?? "") ?? .medium }
 }

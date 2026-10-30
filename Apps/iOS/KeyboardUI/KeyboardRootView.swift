@@ -3,16 +3,17 @@ import LegatoComposerUI
 import SwiftUI
 import UIKit
 
-/// A composer above one native keyboard tool row. Low keeps only the grabber and tool row.
+/// A composer above one native keyboard tool row, with Medium and Full heights.
 struct KeyboardRootView: View {
     let controller: KeyboardController
     @Environment(\.colorScheme) private var systemScheme
+    @State private var showsModePicker = false
     private let modes = [("message", "message"), ("email", "envelope"), ("prompt", "sparkles"), ("note", "note.text")]
 
     var body: some View {
         VStack(spacing: 0) {
             resizeHandle
-            if controller.composerSize != .low {
+            Group {
                 ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
                              pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
                              onWordTap: { controller.composerIntent("tap", lineID: $0, wordID: $1) },
@@ -29,32 +30,46 @@ struct KeyboardRootView: View {
         .background(Color.black.opacity(0.001))
         .environment(\.colorScheme, scheme)
         .animation(.easeInOut(duration: 0.2), value: controller.composerSize)
+        .overlay {
+            if showsModePicker {
+                GeometryReader { geometry in
+                    ZStack(alignment: .bottomLeading) {
+                        Color.black.opacity(0.001).contentShape(Rectangle())
+                            .onTapGesture { showsModePicker = false }
+                            .accessibilityLabel("Dismiss writing modes")
+                            .accessibilityAddTraits(.isButton)
+                        KeyboardModePicker(modes: modes, selected: controller.composer.mode,
+                                           keyWidth: (geometry.size.width - 12.66 - 36) / 7,
+                                           maximumHeight: max(0, geometry.size.height - 66)) { mode in
+                            controller.composerIntent("mode", text: mode)
+                            showsModePicker = false
+                        }
+                        .frame(width: min(232, geometry.size.width - 12.66))
+                        .padding(.leading, 6.33).padding(.bottom, 42)
+                    }
+                    .accessibilityAction(.escape) { showsModePicker = false }
+                }
+            }
+        }
+        .onDisappear { showsModePicker = false }
     }
 
     private var toolRow: some View {
         HStack(spacing: 6) {
-            Menu {
-                ForEach(modes, id: \.0) { mode, icon in
-                    Button { controller.composerIntent("mode", text: mode) } label: {
-                        Label(mode.capitalized, systemImage: icon)
-                    }
-                }
-            } label: {
+            Button { showsModePicker.toggle() } label: {
                 Image(systemName: modes.first(where: { $0.0 == controller.composer.mode })?.1 ?? "message")
                     .font(.system(size: 18)).frame(maxWidth: .infinity, maxHeight: .infinity)
-            } primaryAction: {
-                let index = modes.firstIndex(where: { $0.0 == controller.composer.mode }) ?? 0
-                controller.composerIntent("mode", text: modes[(index + 1) % modes.count].0)
             }
+            .buttonStyle(KeyboardModeKeyStyle(expanded: showsModePicker))
             .accessibilityLabel(controller.composer.mode.capitalized)
-            .accessibilityHint("Tap to cycle modes. Hold to choose a writing mode")
+            .accessibilityHint("Choose a writing mode")
             key("Undo", symbol: "arrow.uturn.backward", enabled: controller.canUndo, action: controller.undo)
             key("Redo", symbol: "arrow.uturn.forward", enabled: controller.canRedo, action: controller.redo)
             Button { controller.insertComposer() } label: {
-                Text("Insert").font(.system(size: 14)).lineLimit(1).minimumScaleFactor(0.8)
+                Image(systemName: "paperplane.fill").font(.system(size: 17))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .opacity(controller.composer.snapshot.lines.isEmpty ? 0.35 : 1)
-            }.disabled(controller.composer.snapshot.lines.isEmpty)
+            }.disabled(controller.composer.snapshot.lines.isEmpty).accessibilityLabel("Insert")
             key("Cancel composition", symbol: "xmark", action: { controller.composerIntent("cancel") })
             key(controller.composer.muted == true ? "Unmute transcription" : "Mute transcription",
                 symbol: controller.composer.muted == true ? "mic.slash.fill" : "mic.slash",
@@ -91,7 +106,7 @@ struct KeyboardRootView: View {
             .onTapGesture { controller.setComposerSize(controller.composerSize.cycled) }
             .accessibilityElement().accessibilityLabel("Composer size")
             .accessibilityValue(controller.composerSize.rawValue.capitalized)
-            .accessibilityHint("Swipe up or down to change size. Tap to cycle Low, Medium, and Full")
+            .accessibilityHint("Swipe up or down to change size. Tap to switch between Medium and Full")
             .accessibilityAdjustableAction { direction in
                 controller.setComposerSize(controller.composerSize.stepped(up: direction == .increment))
             }
