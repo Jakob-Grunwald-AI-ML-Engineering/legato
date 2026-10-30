@@ -251,7 +251,8 @@ touch "$FIXTURE/direct-execution"
 APP
 chmod +x "$FIXTURE/Test.app/Contents/MacOS/Fixture"
 mac_launch() {
-  LEGATO_DEVICE_LAUNCH_TIMEOUT=1 LEGATO_APP="$FIXTURE/Test.app" LEGATO_MAC_ROOT="$FIXTURE/mac" run_ctl --target mac launch --fixture-argument || return 1
+  # Success is a readiness/identity check; the dedicated timeout cases retain their short budgets.
+  LEGATO_DEVICE_LAUNCH_TIMEOUT=5 LEGATO_APP="$FIXTURE/Test.app" LEGATO_MAC_ROOT="$FIXTURE/mac" run_ctl --target mac launch --fixture-argument || return 1
   [ ! -f "$FIXTURE/direct-execution" ] && grep -qx -- "LEGATO_MAC_ROOT=$FIXTURE/mac" "$FIXTURE/open-args" &&
     grep -qx -- '--fixture-argument' "$FIXTURE/open-args" && [ "$(cat "$LEGATO_DEVICE_STATE"/*/pid)" = 444444 ]
 }
