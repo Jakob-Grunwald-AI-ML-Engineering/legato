@@ -25,6 +25,19 @@ import XCTest
             XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "Legato missing from native keyboard chooser")
             keyboard.tap()
             XCTAssertTrue(app.buttons["Insert"].waitForExistence(timeout: 10), "Selected Legato composer did not appear")
+        case "mode":
+            guard parts.count == 2 else { throw ControlError.invalidArguments }
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 30, dy: 774)).tap()
+            let picker = app.descendants(matching: .any).matching(identifier: "keyboard.mode-picker").firstMatch
+            XCTAssertTrue(picker.waitForExistence(timeout: 5), "A tap must open the keyboard-owned picker")
+            for mode in ["Message", "Email", "Prompt", "Note"] {
+                XCTAssertTrue(picker.buttons[mode].isHittable, "Every mode must be visible")
+            }
+            let popup = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            popup.name = "keyboard-mode-picker"; popup.lifetime = .keepAlways; add(popup)
+            picker.buttons[parts[1]].tap()
+            XCTAssertFalse(picker.exists, "Selecting a mode must close the picker")
+            XCTAssertTrue(app.buttons[parts[1]].waitForExistence(timeout: 5), "Selected mode must reach the keyboard")
         case "tap": try coordinate(1).tap()
         case "hold": try coordinate(1).press(forDuration: number(3))
         case "swipe":

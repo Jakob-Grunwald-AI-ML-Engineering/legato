@@ -120,8 +120,8 @@ final class KeyboardController {
 
     var fullAccess: Bool { hasFullAccess() }
 
-    private(set) var composerSize = ComposerKeyboardSize(
-        rawValue: UserDefaults.standard.string(forKey: "composerKeyboardSize") ?? "") ?? .medium
+    private(set) var composerSize = ComposerKeyboardSize.restore(
+        UserDefaults.standard.string(forKey: "composerKeyboardSize"))
 
     func setComposerSize(_ size: ComposerKeyboardSize) {
         guard size != composerSize else { return }

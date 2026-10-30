@@ -35,6 +35,7 @@ import LegatoVocabulary
     }.joined(separator: "\n") }
     public private(set) var isArmed = false
     public var isListening: Bool { status == "listening" }
+    public var canUndo: Bool { lastTransactionID != nil }
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var room: Room?
     @ObservationIgnored private var agents: AgentRunner?
