@@ -180,7 +180,11 @@ import LegatoVocabulary
                         try recorder.append(chunk)
                         try await transcriber.sendAudio(converter.convert(chunk))
                     }
-                } catch is CancellationError {} catch { self?.fail(error) }
+                } catch is CancellationError {} catch {
+                    self?.fail(error)
+                    self?.isArmed = false
+                    await self?.mic.stop()
+                }
             }
         } catch {
             if self.generation == generation {
