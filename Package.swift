@@ -30,6 +30,7 @@ let package = Package(
     platforms: [.iOS(.v26), .macOS(.v26)],
     products: [
         .library(name: "LegatoComposerDoc", targets: ["LegatoComposerDoc"]),
+        .library(name: "LegatoRoom", targets: ["LegatoRoom"]),
         .library(name: "LegatoDevHarness", targets: ["LegatoDevHarness"]),
         .library(name: "LegatoCore", targets: ["LegatoCore"]),
         .library(name: "LegatoAudio", targets: ["LegatoAudio"]),
@@ -56,6 +57,8 @@ let package = Package(
     ],
     targets: [
         .target(name: "LegatoComposerDoc"),
+        .target(name: "LegatoRoom", dependencies: ["LegatoComposerDoc", "LegatoVocabulary"]),
+        .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
         .testTarget(name: "LegatoComposerDocTests", dependencies: ["LegatoComposerDoc"]),
         .target(name: "LegatoDevHarness"),
         .testTarget(name: "LegatoDevHarnessTests", dependencies: ["LegatoDevHarness"]),

@@ -11,6 +11,7 @@ public actor Room {
     private var subscribers: [UUID: (Set<Channel>, AsyncStream<Envelope>.Continuation)] = [:]
     private var document = ComposerDocument()
     private var lifecycle = SessionLifecycle()
+    private var transcriberDraining = false
     private let clock: @Sendable () -> Double
     private let log: SessionLog?
     private let segmentRouting: SegmentRouting
@@ -113,16 +114,22 @@ public actor Room {
     }
 
     /// Call after issuing provider finalize. Segment/status events may still arrive while trailing.
-    public func micOff() throws {
+    public func micOff(transcriberDraining: Bool = false) throws {
         try requireActive()
         guard state == .listening else { return }
+        self.transcriberDraining = transcriberDraining
         lifecycle.micOff()
         sessionEvent("mic.off")
         advanceToFinalPass()
     }
 
+    public func finishTranscription() {
+        transcriberDraining = false
+        advanceToFinalPass()
+    }
+
     private func advanceToFinalPass() {
-        guard lifecycle.beginFinalPassIfReady() else { return }
+        guard !transcriberDraining, lifecycle.beginFinalPassIfReady() else { return }
         sessionEvent("final.pass")
     }
 
