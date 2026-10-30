@@ -33,7 +33,7 @@ struct MeetingAudioEnvironment: Sendable {
 
 /// An iOS background task that ends exactly once, from the pipeline finishing or from its expiry.
 @MainActor
-private final class BackgroundToken {
+final class BackgroundToken {
     private var identifier = UIBackgroundTaskIdentifier.invalid
 
     func begin(name: String, onExpiry: @escaping @MainActor () -> Void) {

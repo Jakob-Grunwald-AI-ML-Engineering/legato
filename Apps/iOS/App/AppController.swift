@@ -47,6 +47,12 @@ final class AppController {
     private(set) var recognitionPreparing = true
     private(set) var recognitionFailure: String?
     private var keyboardActivations = 0
+    /// A hold (keep-ready lease) lost to an interruption that is still to be retaken.
+    private var holdInterruptions = HoldInterruptions()
+    /// The stop an interruption began; a retake waits for it so it never races the release.
+    private var interruptionStop: Task<Void, Never>?
+    private var resumingHold = false
+    private let interruptionBackgroundTask = BackgroundToken()
     var keyboardHopState: KeyboardHopState {
         .resolve(runActive: keyboardRunActive, microphoneReady: micReadyUntil != nil,
             failure: armFailure, arming: keyboardActivations > 0, recognitionFailure: recognitionFailure)
@@ -240,6 +246,7 @@ final class AppController {
                 AudioDiagnostics.log("microphone.lease", ["held": until != nil, "previousHeld": self?.micReadyUntil != nil])
                 #endif
                 self?.micReadyUntil = until
+                if until != nil { self?.holdInterruptions.resumed(); self?.interruptionBackgroundTask.end() } // armed again by any path
                 // Preparation never extends the user's finite microphone lease. A lost lease revokes
                 // its pending keyboard start before native preparation can complete in the background.
                 if until == nil, self?.keyboardLink?.link.state.preparingRequestID != nil {
@@ -1121,13 +1128,14 @@ final class AppController {
     ///
     /// `releasesHeldSession`: also deactivate an audio session that the "keep session active" debug
     /// switch is holding between runs (interruption, media reset).
+    @discardableResult
     private func stopForSystemEvent(
         _ reason: String, releasesHeldSession: Bool = false,
         event: DictationCoordinator.SystemEventToken? = nil,
         ifCurrent: @escaping @Sendable () -> Bool = { true }
-    ) {
+    ) -> Task<Void, Never> {
         let event = event ?? coordinator.captureSystemEvent()
-        Task {
+        return Task {
             guard coordinator.isCurrent(event), ifCurrent() else { return }
             #if LEGATO_INTERNAL
             AudioDiagnostics.log("microphone.invalidated", ["cause": reason, "leaseHeld": micReadyUntil != nil, "dictating": isDictating])
@@ -1148,6 +1156,75 @@ final class AppController {
                 #endif
             }
         }
+    }
+
+    // MARK: Interruption recovery for the hold
+
+    /// An alarm, call or Siri took the microphone. Asks iOS for background time (the app is otherwise
+    /// suspended within seconds of losing the audio session), remembers a lost hold, and stops capture as
+    /// before: a running dictation ends and its text is kept, and is not restarted.
+    private func holdInterruptionBegan(event: DictationCoordinator.SystemEventToken) {
+        let holding = HoldInterruptions.wasHolding(
+            leaseHeld: micReadyUntil != nil, dictating: isDictating,
+            keepsLeaseAfterRun: Settings.keepAliveLinger.holdsLease)
+        holdInterruptions.began(wasHolding: holding)
+        if holding {
+            interruptionBackgroundTask.end()
+            interruptionBackgroundTask.begin(name: "microphone.interruption") {
+                #if LEGATO_INTERNAL
+                AudioDiagnostics.log("microphone.interruption.backgroundExpired")
+                #endif
+            }
+        }
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("microphone.interruption.began", ["holding": holding, "dictating": isDictating])
+        #endif
+        #if DEBUG
+        E2E.log("hold.interruption began holding=\(holding ? 1 : 0)")
+        #endif
+        interruptionStop = stopForSystemEvent("interruption began", releasesHeldSession: true, event: event)
+    }
+
+    private func holdInterruptionEnded(shouldResume: Bool) {
+        let attempt = holdInterruptions.ended(shouldResume: shouldResume)
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log("microphone.interruption.ended", ["shouldResume": shouldResume, "willResume": attempt])
+        #endif
+        #if DEBUG
+        E2E.log("hold.interruption ended shouldResume=\(shouldResume ? 1 : 0) resume=\(attempt ? 1 : 0)")
+        #endif
+        guard attempt else { return }
+        Task { await resumeHold() }
+    }
+
+    /// Retakes the lost hold (activates the session and arms the lease again). On failure the flag stays
+    /// and the next foreground tries again.
+    private func resumeHold() async {
+        guard holdInterruptions.needsResume, !resumingHold, !meetings.isActive else { return }
+        resumingHold = true
+        defer { resumingHold = false }
+        await interruptionStop?.value
+        interruptionStop = nil
+        guard holdInterruptions.needsResume else { interruptionBackgroundTask.end(); return }
+        let inBackground = startEnvironment.current().inBackground
+        await perform(.arm)
+        let ok = micReadyUntil != nil
+        if ok {
+            holdInterruptions.resumed()
+        } else {
+            holdInterruptions.resumeFailed()
+        }
+        #if LEGATO_INTERNAL
+        AudioDiagnostics.log(ok ? "microphone.resume.ok" : "microphone.resume.failed",
+            ["inBackground": inBackground, "error": armFailure ?? ""])
+        if !ok { AudioDiagnostics.log("microphone.resume.deferred", ["inBackground": inBackground]) }
+        #endif
+        #if DEBUG
+        E2E.log(ok ? "hold.resume ok" : "hold.resume failed error=\(E2E.quote(armFailure ?? ""))")
+        if !ok { E2E.log("hold.resume deferred") }
+        #endif
+        if ok { armFailure = nil }
+        interruptionBackgroundTask.end()
     }
 
     /// Observers are installed once, from `init` of the singleton. Handlers run on the main queue; only
@@ -1186,8 +1263,11 @@ final class AppController {
                     if raw == AVAudioSession.InterruptionType.ended.rawValue { self.meetings.interruptionEnded(shouldResume: shouldResume) }
                     return
                 }
-                guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-                self.stopForSystemEvent("interruption began", releasesHeldSession: true, event: event)
+                if raw == AVAudioSession.InterruptionType.began.rawValue {
+                    self.holdInterruptionBegan(event: event)
+                } else if raw == AVAudioSession.InterruptionType.ended.rawValue {
+                    self.holdInterruptionEnded(shouldResume: shouldResume)
+                }
             }
         }
 
@@ -1265,6 +1345,7 @@ final class AppController {
     func appBecameActive() {
         keyboardLink?.drainChoices() // choices whose Darwin note arrived while the app was suspended
         self.meetings.appBecameActive()
+        if holdInterruptions.shouldResumeWhenForegrounded { Task { await resumeHold() } }
         scheduleResourcePreparation()
     }
 

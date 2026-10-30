@@ -155,3 +155,43 @@ public enum MeetingSilence {
         return missing > tolerance ? missing : 0
     }
 }
+
+/// Bookkeeping for an alarm, call or Siri taking the microphone away from dictation's hold (the keep-ready
+/// lease, or the lease behind a run).
+///
+/// `began` remembers whether a hold was lost. `ended` says whether to try to retake it now: every end
+/// tries once when a hold was lost, with or without the system's `shouldResume`. A failed retake (in the
+/// background iOS may refuse activation) keeps the flag, so the next foreground (or keyboard activity
+/// that arms again) retakes it. Only the hold is retaken, never a dictation that was running.
+public struct HoldInterruptions: Sendable, Equatable {
+    /// A hold was lost to an interruption and has not been retaken.
+    public private(set) var needsResume = false
+
+    public init() {}
+
+    /// Whether the interruption took a hold: a held lease, or a run that keeps the mic ready afterwards
+    /// (a run without keep-ready leaves nothing to retake).
+    public static func wasHolding(leaseHeld: Bool, dictating: Bool, keepsLeaseAfterRun: Bool) -> Bool {
+        leaseHeld || (dictating && keepsLeaseAfterRun)
+    }
+
+    /// An interruption began. A began while the flag is already set (a second interruption before the
+    /// first hold came back) keeps it.
+    public mutating func began(wasHolding: Bool) {
+        if wasHolding { needsResume = true }
+    }
+
+    /// Whether to try to retake the hold right now.
+    public func ended(shouldResume: Bool) -> Bool {
+        needsResume
+    }
+
+    /// The hold is back (a retake succeeded, or something armed again).
+    public mutating func resumed() { needsResume = false }
+
+    /// The retake failed; the flag stays for the next foreground.
+    public mutating func resumeFailed() {}
+
+    /// The app came to the foreground: retake now if a hold is still lost.
+    public var shouldResumeWhenForegrounded: Bool { needsResume }
+}
