@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# The merge-queue gate: package tests and both app builds, cold, within the 10-minute budget. MLX, FluidAudio,
-# swift-huggingface and swift-transformers are swapped for the CI-only stubs in Stubs/ (LEGATO_STUB_DEPS=1), so
-# only our own code compiles. The real libraries are compiled and tested on the release path (release.sh real-deps).
+# Composer shell gate: retained contracts, package tests and unsigned app builds.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -16,16 +14,13 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
-export LEGATO_STUB_DEPS=1
 select_xcode
 xcodebuild -version
 
 # Exercise macOS system Bash, including its EXIT-trap scoping on timeouts.
 phase_started=$SECONDS
 /bin/bash scripts/device/tests/ctl-test.sh
-/bin/bash scripts/device/tests/sim-smoke-test.sh
 /bin/bash scripts/ci/tests/check-internal-exclusion-test.sh
-scripts/e2e/tests/cleanup-test.sh
 scripts/e2e/tests/build-cache-test.sh
 scripts/e2e/tests/cache-lock-race-test.sh
 echo "::notice::Shell checks completed in $((SECONDS - phase_started)) s."
@@ -34,7 +29,7 @@ phase_started=$SECONDS
 swift test --disable-index-store
 echo "::notice::Swift build and tests completed in $((SECONDS - phase_started)) s."
 
-# Both apps, unsigned, against the stubs. arm64 only: the simulator slice is what local and e2e runs use.
+# Both apps, unsigned, against the shell package. Device compilation does not start a simulator.
 ensure_xcodegen
 trap finish_build_cache EXIT
 prepare_build_cache gate
@@ -47,7 +42,5 @@ build_app() { # build_app <project dir> <project> <destination> <extra args...>
     CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO "$@"
   echo "::notice::$dir build completed in $((SECONDS - started)) s."
 }
-if has_ios_app; then build_app Apps/iOS Legato.xcodeproj 'generic/platform=iOS Simulator' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES; fi
+if has_ios_app; then build_app Apps/iOS Legato.xcodeproj 'generic/platform=iOS' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES; fi
 if has_mac_app; then build_app Apps/macOS LegatoMac.xcodeproj 'generic/platform=macOS'; fi
-# With no remote dependencies SwiftPM deletes the tracked Package.resolved; put it back.
-git checkout -- Package.resolved 2> /dev/null || true

@@ -55,12 +55,6 @@ public struct MicInUseMonitor: Sendable {
         }
     }
 
-    /// The meeting mic's device now: the call app's input, else the default input (``MeetingMicRoute``).
-    public func meetingMic(ownPID: Int32) -> MeetingMicChoice {
-        MeetingMicRoute.choose(
-            processes: (try? activeProcesses()) ?? [], ownPID: ownPID, defaultInput: AudioDevices.defaultInput())
-    }
-
     /// The active processes, polled every `interval`; yields on change (and once at the start).
     /// Read errors are skipped. Ends when the consumer stops iterating.
     public func processChanges() -> AsyncStream<[AutoMuteProcess]> {

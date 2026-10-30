@@ -40,7 +40,11 @@ targets:
   Legato:
     type: application
     platform: iOS
-    sources: [App, Shared, KeyboardUI]
+    sources:
+      - path: App
+        excludes: [Debug/E2EFakes.swift, Debug/E2EFakeKeyboard.swift]
+      - Shared
+      - KeyboardUI
     dependencies:
       - package: LegatoKit
         product: LegatoDevHarness
@@ -51,25 +55,13 @@ targets:
       - package: LegatoKit
         product: LegatoAudio
       - package: LegatoKit
-        product: LegatoAppleSpeech
-      - package: LegatoKit
         product: LegatoKeyboardCore
       - package: LegatoKit
         product: LegatoVocabulary
       # Downloadable models, engines and cleanup: the app only, never the keyboard or the widgets.
       - package: LegatoKit
-        product: LegatoModels
-      - package: LegatoKit
-        product: LegatoFluidAudio
-      - package: LegatoKit
-        product: LegatoEngines
-      - package: LegatoKit
-        product: LegatoPostProcessing
-      - package: LegatoKit
         product: LegatoAppServices
       # Meetings: the session, the store and the summaries; Claude is the opt-in summary backend.
-      - package: LegatoKit
-        product: LegatoMeetings
       - package: LegatoKit
         product: LegatoClaude
     settings:
@@ -94,13 +86,11 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        UIBackgroundModes: [audio, processing]
-        BGTaskSchedulerPermittedIdentifiers: [de.gruenwald.legato.meeting-processing]
+        UIBackgroundModes: [audio]
         NSSupportsLiveActivities: true
         # Only Apple's own encryption (TLS, system frameworks): exempt, so App Store Connect stops asking.
         ITSAppUsesNonExemptEncryption: false
-        NSMicrophoneUsageDescription: Legato records your voice to turn it into text. For meeting notes it also saves the meeting audio on this device.
-        NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this device.
+        NSMicrophoneUsageDescription: Legato records your voice to compose text.
         CFBundleURLTypes:
           - CFBundleURLName: de.gruenwald.legato
             CFBundleURLSchemes: [legato]
