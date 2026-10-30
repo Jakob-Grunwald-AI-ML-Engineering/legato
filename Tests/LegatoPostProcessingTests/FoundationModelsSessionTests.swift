@@ -24,6 +24,27 @@ private final class FakeTurns: FoundationModelsTurning, @unchecked Sendable {
     func prewarm(promptPrefix: String?) { log.value.withLock { $0.prewarmed += 1; $0.prefixes.append(promptPrefix) } }
 }
 
+/// Holds token counting until the test has closed the session; cancellation unwinds both waits.
+private final class TrimTokenGate: Sendable {
+    private let enteredStream: AsyncStream<Void>
+    private let enteredContinuation: AsyncStream<Void>.Continuation
+    private let releaseStream: AsyncStream<Void>
+    private let releaseContinuation: AsyncStream<Void>.Continuation
+    init() {
+        (enteredStream, enteredContinuation) = AsyncStream.makeStream()
+        (releaseStream, releaseContinuation) = AsyncStream.makeStream()
+    }
+    func count(_ text: String) async throws -> Int {
+        enteredContinuation.yield(())
+        enteredContinuation.finish()
+        for await _ in releaseStream { break }
+        try Task.checkCancellation()
+        return text.split(whereSeparator: \.isWhitespace).count
+    }
+    func entered() async { for await _ in enteredStream { break } }
+    func release() { releaseContinuation.finish() }
+}
+
 private let words: @Sendable (String) async throws -> Int = { $0.split(whereSeparator: \.isWhitespace).count }
 
 private func fakeSession(_ log: TurnLog, budget: Int = 3_000,
@@ -160,6 +181,24 @@ struct FoundationModelsSessionTests {
         _ = try await session.respond(to: "after")
         state = log.value.withLock { $0 }
         #expect(state.created.count == 2)
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [0, 100])
+    func closeDuringWarmTrimCannotRecreateOrPrewarmTheNativeSession(keeping tokens: Int) async throws {
+        let log = TurnLog(replies: [])
+        let gate = TrimTokenGate()
+        let session = fakeSession(log, count: { try await gate.count($0) })
+        try await session.append(.instructions("Keep the head."))
+        try await session.append(.text("one two three"))
+        try await session.warm()
+        let trim = Task { try await session.trim(keepingSuffix: tokens) }
+        await gate.entered()
+        await session.close()
+        gate.release()
+        await #expect(throws: LLMSessionError.closed) { try await trim.value }
+        let state = log.value.withLock { $0 }
+        #expect(state.created.count == 1)
+        #expect(state.prewarmed == 1)
     }
 
     @Test func aTrimOfAColdSessionStaysCold() async throws {

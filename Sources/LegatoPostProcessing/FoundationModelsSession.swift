@@ -84,7 +84,9 @@ actor FoundationModelsSession: LLMSession {
         try await exclusive {
             let original = transcript
             var trimmed = original
-            guard try await trimmed.trim(keepingSuffix: tokens, count: count) else { return }
+            let didTrim = try await trimmed.trim(keepingSuffix: tokens, count: count)
+            try checkOpen()  // Token counting may have suspended while close() invalidated the session.
+            guard didTrim else { return }
             try trimmed.carryAppends(from: transcript, since: original)
             transcript = trimmed
             live = nil
