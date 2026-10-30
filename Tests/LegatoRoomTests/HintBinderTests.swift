@@ -269,3 +269,27 @@ private struct NoEntities: EntityTagging {
     #expect(await room.documentSnapshot.text == initial.text)
     await binder.stop()
 }
+
+@Test func dismissingSelectionDiscardsBufferedAndDelayedInstructionBeforeResumingGeneralSpeech() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
+    let line = try #require(await room.documentSnapshot.lines.first)
+    let binder = HintBinder(room: room)
+    await binder.start()
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: line.id, wordID: "target", timestamp: 100)
+    try await segment(room, words: [Word(text: "buffered instruction")], at: 101, reason: "punctuation")
+    try await room.publish(channel: .userIntent, participant: .ui,
+        payload: .encoding(WordIntent(event: "deselect", lineID: line.id, wordID: "target", timestamp: 102)))
+    try await segment(room, words: [Word(text: "delayed instruction")], at: 101.5, reason: "punctuation")
+    try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("old partial")]))
+    try await room.publish(channel: .asrBoundary, participant: .segmenter,
+                           payload: .object(["reason": .string("endpoint")]), tOrigin: 101.9)
+    try await segment(room, words: [Word(text: "ordinary")], at: 103, reason: "punctuation")
+    let final = try await settled(room) { $0.lines.count == 2 }
+    #expect(final.text == "Alex\nordinary")
+    #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
+    #expect(await events.values.filter { $0.channel == .asrTail && $0.payload["text"] == .string("old partial") }.isEmpty)
+    await binder.stop()
+}

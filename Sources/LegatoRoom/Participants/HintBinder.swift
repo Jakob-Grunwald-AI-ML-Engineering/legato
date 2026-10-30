@@ -65,6 +65,7 @@ public actor HintBinder {
     private let room: Room
     private let learner: VocabularyLearner?
     private var capture: Capture?
+    private var dismissed: [ClosedRange<Double>] = []
     private var task: Task<Void, Never>?
     public init(room: Room, learner: VocabularyLearner? = nil) { self.room = room; self.learner = learner }
     public func start() async {
@@ -75,7 +76,7 @@ public actor HintBinder {
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
     }
-    public func stop() async { task?.cancel(); task = nil; await discardCapture() }
+    public func stop() async { task?.cancel(); task = nil; dismissed = []; await discardCapture() }
     public func tap(lineID: String, wordID: String, timestamp: Double) async throws {
         try await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
     }
@@ -107,6 +108,13 @@ public actor HintBinder {
         try await room.publish(channel: .userIntent, participant: .hintBinder, payload: .encoding(intent), tOrigin: timestamp)
         try await room.publish(channel: .asrTail, participant: .hintBinder, payload: .object(["text": .string("")]))
     }
+    /// Drop captured and still-in-flight speech from the dismissed selection, without targeting new speech.
+    public func clearSelection(timestamp: Double) async {
+        guard let current = capture else { return }
+        dismissed.append(current.discardFrom...max(current.intent.timestamp, timestamp))
+        await discardCapture()
+        _ = try? await room.publish(channel: .asrTail, participant: .hintBinder, payload: .object(["text": .string("")]))
+    }
     public func pick(lineID: String, wordID: String, text: String, fromVocabulary: Bool = false) async throws {
         await discardCapture()
         try await replace(lineID: lineID, wordID: wordID, text: text, fromVocabulary: fromVocabulary)
@@ -133,12 +141,14 @@ public actor HintBinder {
                 try? await select(lineID: intent.lineID, wordID: intent.wordID,
                                   endLineID: intent.endLineID, endWordID: intent.endWordID, timestamp: intent.timestamp)
             }
+            if intent.event == "deselect" { await clearSelection(timestamp: intent.timestamp) }
             if intent.event == "pick", let text = intent.text { try? await pick(lineID: intent.lineID, wordID: intent.wordID, text: text) }
         case .asrRawTail:
-            let payload = capture == nil ? envelope.payload : .object(["text": .string("")])
+            let payload = capture == nil && dismissed.isEmpty ? envelope.payload : .object(["text": .string("")])
             _ = try? await room.publish(channel: .asrTail, participant: .hintBinder,
                                        payload: payload, tOrigin: envelope.tOrigin, causedBy: envelope.id)
         case .asrBoundary:
+            dismissed.removeAll { envelope.tOrigin >= $0.lowerBound }
             guard let current = capture, envelope.tOrigin >= current.intent.timestamp else { return }
             capture = nil
             if !current.words.isEmpty {
@@ -166,18 +176,23 @@ public actor HintBinder {
     }
     private func routeSegment(_ envelope: Envelope) async {
         guard let words = try? envelope.payload["words"]?.decode([Word].self) else { return }
-        guard var current = capture else {
-            _ = try? await room.appendSegment(words: words, causedBy: envelope.id)
-            return
-        }
         let metadata = envelope.payload["metadata"] ?? .null
         let t0 = (try? metadata["t0"]?.decode(Double.self)) ?? 0
         let timings = (try? metadata["timings"]?.decode([Timing].self)) ?? []
-        var ordinary: [Word] = [], targeted: [Word] = []
-        for (index, word) in words.enumerated() {
+        let remaining: [(word: Word, start: Double, end: Double)] = words.enumerated().compactMap { index, word in
             let timing = timings.indices.contains(index) ? timings[index] : nil
             let start = envelope.tOrigin + max(0, (timing?.t0 ?? t0) - t0)
             let end = envelope.tOrigin + max(0, (timing?.t1 ?? t0) - t0)
+            guard !dismissed.contains(where: { $0.contains(start) }) else { return nil }
+            return (word, start, end)
+        }
+        guard var current = capture else {
+            if remaining.isEmpty { await room.resolveSegment(envelope.id) }
+            else { _ = try? await room.appendSegment(words: remaining.map(\.word), causedBy: envelope.id) }
+            return
+        }
+        var ordinary: [Word] = [], targeted: [Word] = []
+        for (word, start, end) in remaining {
             if start < current.discardFrom { ordinary.append(word) }
             else if start >= current.intent.timestamp {
                 targeted.append(word); current.start = current.start ?? start; current.end = end

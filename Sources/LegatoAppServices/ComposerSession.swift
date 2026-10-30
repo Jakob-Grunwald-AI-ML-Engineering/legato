@@ -193,6 +193,9 @@ import LegatoVocabulary
                        timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         try? await binder?.select(lineID: lineID, wordID: wordID, endLineID: endLineID, endWordID: endWordID, timestamp: timestamp)
     }
+    public func clearSelection(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
+        await binder?.clearSelection(timestamp: timestamp)
+    }
     public func pick(lineID: String, wordID: String, text: String) async { do { try await binder?.pick(lineID: lineID, wordID: wordID, text: text) } catch { fail(error) } }
     public func undo() async {
         guard let id = lastTransactionID else { return }

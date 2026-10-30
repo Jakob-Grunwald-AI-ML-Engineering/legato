@@ -73,6 +73,7 @@ final class KeyboardLinkHost: TranscriptSink {
                             await composer.select(lineID: line, wordID: word, endLineID: intent.endLineID,
                                                   endWordID: intent.endWordID, timestamp: intent.timestamp)
                         }
+                    case "deselect": await composer.clearSelection(timestamp: intent.timestamp)
                     case "pick": if let line = intent.lineID, let word = intent.wordID, let text = intent.text { await composer.pick(lineID: line, wordID: word, text: text) }
                     default: break
                     }
