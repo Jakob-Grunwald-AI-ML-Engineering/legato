@@ -105,3 +105,27 @@ private struct NoEntities: EntityTagging {
     let completions = await WordSuggester.completions(prefix: "Kube", previous: [], snapshot: snapshot, pairs: nil, completer: nil, languages: ["en"])
     #expect(completions.contains("Kubernetes"))
 }
+
+@Test func interceptedFinalSegmentMustDrainBeforeFinalPass() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    let segment = try await room.publishSegment(words: [Word(text: "last")])
+    try await room.micOff(transcriberDraining: true)
+    await room.finishTranscription()
+    #expect(await room.state == .trailing)
+    try await room.appendSegment(words: [Word(text: "last")], causedBy: segment.id)
+    #expect(await room.state == .finalPass)
+    #expect(await room.documentSnapshot.text == "last")
+
+    let hintRoom = Room(segmentRouting: .intercepted)
+    let hint = try await hintRoom.publishSegment(words: [Word(text: "hint")])
+    try await hintRoom.micOff(transcriberDraining: true)
+    await hintRoom.finishTranscription()
+    #expect(await hintRoom.state == .trailing)
+    await hintRoom.resolveSegment(hint.id)
+    #expect(await hintRoom.state == .finalPass)
+
+    let insertRoom = Room(segmentRouting: .intercepted)
+    try await insertRoom.publishSegment(words: [Word(text: "pending")])
+    _ = try await insertRoom.insert()
+    #expect(await insertRoom.state == .done)
+}

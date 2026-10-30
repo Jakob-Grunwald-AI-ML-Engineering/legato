@@ -76,6 +76,7 @@ public actor HintBinder {
                     try await replace(lineID: tap.lineID, wordID: tap.wordID, text: text, fromVocabulary: false)
                     let hint = HintEvent(lineID: tap.lineID, wordID: tap.wordID, text: text, direct: true)
                     try await room.publish(channel: .hint, participant: .hintBinder, payload: .encoding(hint), tOrigin: envelope.tOrigin, causedBy: envelope.id)
+                    await room.resolveSegment(envelope.id)
                     return
                 } catch { /* A vanished target leaves speech as content. */ }
             }
