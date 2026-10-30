@@ -28,6 +28,11 @@ import Observation
     var recordingPreview: String?
     var onboardingRequests = 0
     var setupAttention: Bool { !permissions.accessibility || settings.hotkey == nil }
+    #if DEBUG
+    private let hotkeysEnabled = !UserDefaults.standard.bool(forKey: "LegatoDisableHotkeys")
+    #else
+    private let hotkeysEnabled = true
+    #endif
     private let tap = HotkeyTap()
     private var recorder = HotkeyRecorderLogic()
     private var gesture = HotkeyGesture()
@@ -45,7 +50,7 @@ import Observation
     }
     func bootstrap() {
         guard !bootstrapped else { return }; bootstrapped = true
-        permissions.hotkeyTapActive = tap.start()
+        permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
         eventTask = Task { for await sample in tap.samples { handle(sample) } }
         pollTask = Task {
             while !Task.isCancelled {
@@ -53,7 +58,7 @@ import Observation
                 if !tap.isEnabled {
                     tap.stop()
                     permissions.hotkeyTapActive = false
-                    if CGPreflightListenEventAccess() { permissions.hotkeyTapActive = tap.start() }
+                    if CGPreflightListenEventAccess() { permissions.hotkeyTapActive = hotkeysEnabled && tap.start() }
                 } else {
                     permissions.hotkeyTapActive = true
                 }
@@ -68,6 +73,13 @@ import Observation
         if isDictating { stopComposer(); return }
         guard !starting else { return }
         starting = true
+        prepareComposerTarget()
+        sessionTask = Task {
+            await composer.start()
+            starting = false
+        }
+    }
+    private func prepareComposerTarget() {
         targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let target: AXTextTarget?
         secureField = false
@@ -78,11 +90,13 @@ import Observation
         }
         writer = FieldWriter(target: target, mode: .insertOnStop)
         notch.show(controller: self, targetPID: targetPID)
-        sessionTask = Task {
-            await composer.start()
-            starting = false
-        }
     }
+    #if DEBUG
+    func startDebugComposer(_ args: [String]) async throws -> [String: Any] {
+        prepareComposerTarget()
+        return try await composer.debugControl("composer-debug-start", args: args)
+    }
+    #endif
     func stopComposer() {
         gesture.runEnded()
         if starting { cancelComposer(); return }

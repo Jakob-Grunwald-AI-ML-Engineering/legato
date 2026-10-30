@@ -72,3 +72,39 @@ Native Mac verification passed Foundation Models and installed Core ML measureme
 Native validation used the available Xcode 27.2; the pinned Xcode 26.6 was unavailable locally. Toolchain pins were preserved. Full package suites remain the protected merge queue's gate; a green PR report alone does not establish that gate.
 
 Ordinary iOS and Mac Release builds passed the internal endpoint/overlay/probe-adapter exclusion scan with valid source controls (three iOS Mach-O files, one Mac executable). The existing iOS fake/e2e exclusion gate also passed. Repeat these checks with `bash scripts/ci/release.sh check` and `bash scripts/ci/release.sh mac-release`; `mac-build` retains its separate Debug compilation role. The scanner fixture suite rejects leaked embedded endpoints, stale controls and empty/resource-only bundles.
+
+### Composer transcriber bypass (Debug builds)
+
+Use the real iPhone host/keyboard or Mac composer with synthetic **Soniox output**, while keeping the real word merger, segmenter, hint binder, alternatives, Claude agents, document and UI. This validates composer behavior; it does not validate ASR, microphone quality or audio timing. No Soniox credentials, socket, microphone or audio artifact is needed by default. A Claude key is required; finalized segments and mic-off can make real paid Claude requests.
+
+Mac credential storage requires a development-signed build with its application-identifier entitlement. Build it with `LEGATO_MAC_SIGNED=1 LEGATO_BUNDLE=de.gruenwald.legato.mac.composer-debug scripts/device/ctl.sh --target mac build` (actual Mac destination allows Xcode's device registration/profile creation). Set `LEGATO_APP` to that build's `Debug/Legato.app` and an isolated `LEGATO_MAC_ROOT` when launching and controlling it. The ordinary unsigned Mac compile cannot access the Data Protection Keychain. Launch the isolated UAT app with `launch -LegatoDisableHotkeys YES` to prevent ambient global shortcuts from starting ordinary microphone sessions while agents use bridge controls. This launch-only flag is Debug-only.
+
+Import credentials once without putting secrets in arguments, launch defaults or bridge logs:
+
+```bash
+scripts/device/ctl.sh --target mac import-keys /private/path/credentials.json
+```
+
+The local JSON file must be mode `0600` and contain `anthropic` and `soniox` strings. The tool copies it to the app's private bridge directory; the host saves the existing keychain services and deletes its copy, returning only storage booleans. The local source remains yours to remove. Import does not start any client. Use `--target device` for the phone. Only one build/instance per target should consume that bridge inbox.
+
+Send commands sequentially and wait for each command ID before continuing:
+
+```bash
+ctl=scripts/device/ctl.sh
+id=$($ctl --target mac send composer-debug-start message)
+$ctl --target mac wait "$id"
+id=$($ctl --target mac send composer-debug-text 'Guten Morgen' partial 0)
+$ctl --target mac wait "$id"
+id=$($ctl --target mac send composer-debug-frame '{"tokens":[{"text":"Guten","is_final":true,"start_ms":0,"end_ms":200,"confidence":0.4,"language":"de"},{"text":" Morgen","is_final":true,"start_ms":200,"end_ms":400,"confidence":0.98,"language":"de"},{"text":"<end>","is_final":true}]}')
+$ctl --target mac wait "$id"
+id=$($ctl --target mac send composer-state)
+$ctl --target mac wait "$id"
+```
+
+For fixtures, pass the file content as the single JSON argument: `send composer-debug-frame "$(cat /path/frame.json)"`. These are transcript data, never credential files. Frame JSON uses Soniox's `tokens` array with `text`, `is_final`, optional `confidence`, `language`, `start_ms` and `end_ms`. Partial frames replace the speculative tail; final frames append final tokens. Use `<end>` to close a segment. `composer-stop` runs mic-off, final-token drain and the real final pass; `<fin>` and `finished` are reserved for that lifecycle. Text convenience accepts `<text> partial|final <start_ms>` and generates spaced word tokens with 200 ms duration, confidence 0.95 and language de. Use raw JSON for precise metadata.
+
+`composer-state` and action replies include `sessionID`, `inputSource`, `audioOrigin`, `microphoneLeaseActive`, `status`, `tail`, `pendingLineIDs`, and `document` with real line/word IDs, versions, confidence, language, pins and alternatives. Injection acknowledges the frame being decoded/published; Claude work continues asynchronously and must be polled through state. The session's `Documents/sessions/<sessionID>/room.jsonl` records `input.source` and every full injected frame with `inputSource: debug.transcriber`. No fake audio file is created.
+
+Other controls use actual session actions: `composer-tap <lineID> <wordID> <offset_ms>`, `composer-pick <lineID> <wordID> <text>`, `composer-mode message|email|prompt|note`, `composer-undo`, `composer-cancel`, and `composer-insert-host`. Tap offsets use exactly `audioOrigin + offset_ms/1000`, sharing the injected token clock without sleeps. Query state for targets, tap, then inject correction speech at a matching offset. `composer-insert-host` immediately accepts the host document and cancels remaining work; it does **not** prove keyboard text-proxy delivery. On Mac, `composer-insert` uses the existing focused-field/paste delivery path. For actual phone keyboard Insert proof, launch the existing native field harness (`-LegatoKeyboardHarness YES -LegatoHarnessSystemField YES`) and tap the real keyboard button; `harness-status` is only the separate in-process keyboard harness.
+
+Foreground is the default phone setup. For another app's keyboard, `composer-debug-start message microphone-lease` explicitly holds the existing real microphone lease for host liveness, without forwarding or recording audio. `microphoneLeaseActive` reports it. That path still requires microphone permission; do not describe it as audio-free background execution. Without a lease, iOS can suspend a background host. Normal mic starts still use Soniox and require its key. Controls and key import are unavailable in Release builds.
