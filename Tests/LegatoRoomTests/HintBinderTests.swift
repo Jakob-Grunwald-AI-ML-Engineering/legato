@@ -30,33 +30,120 @@ private func settled(_ room: Room, until predicate: (DocumentSnapshot) -> Bool) 
     await binder.stop()
 }
 
-@Test(arguments: [(-0.3, 2, false), (0.2, 2, true), (4.1, 1, false), (0.2, 4, false)])
-func hintUsesAudioStartRatherThanDelivery(offset: Double, count: Int, direct: Bool) async throws {
-    let room = Room(segmentRouting: .intercepted, clock: { 999 })
-    try await room.appendSegment(words: [Word(id: "w", text: "wrong")])
-    let lineID = try #require(await room.documentSnapshot.lines.first?.id)
+private actor HintEvents {
+    var values: [Envelope] = []
+    func add(_ event: Envelope) { values.append(event) }
+}
+
+private func observeHints(_ room: Room, _ values: HintEvents) async -> Task<Void, Never> {
+    let stream = await room.subscribe(participant: .logger, channels: [.hint, .asrTail])
+    return Task { for await event in stream { await values.add(event) } }
+}
+
+private func waitForHint(_ values: HintEvents) async -> Envelope? {
+    for _ in 0..<100 {
+        if let hint = await values.values.first(where: { $0.channel == .hint }) { return hint }
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    return nil
+}
+
+private func segment(_ room: Room, words: [Word], at time: Double, reason: String) async throws {
+    try await room.publish(channel: .asrSegment, participant: .segmenter,
+                           payload: .object(["words": try .encoding(words), "metadata": .object(["reason": .string(reason)])]), tOrigin: time)
+}
+
+@Test func tappedSpeechBuffersPunctuationUntilSilenceAndNextChunkIsGeneral() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(id: "target", text: "wrong")])
+    let original = try #require(await room.documentSnapshot.lines.first)
     let binder = HintBinder(room: room)
     await binder.start()
-    try await binder.tap(lineID: lineID, wordID: "w", timestamp: 100)
-    let words = (0..<count).map { Word(text: "hint\($0)") }
-    try await room.publishSegment(words: words, tOrigin: 100 + offset)
-    let snapshot = try await settled(room) { direct ? $0.lines.first?.words.first?.pinned == true : $0.lines.count == 2 }
-    #expect(snapshot.lines.count == (direct ? 1 : 2))
-    #expect(snapshot.lines.first?.words.first?.pinned == direct)
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: original.id, wordID: "target", timestamp: 100)
+    // No old four-second/three-word limit; punctuation is not the silence boundary.
+    try await segment(room, words: [Word(text: "Use"), Word(text: "the"), Word(text: "full"), Word(text: "name.")], at: 110, reason: "punctuation")
+    try await segment(room, words: [Word(text: "Morgan", confidence: 0.42), Word(text: "Grunwald", language: "de")], at: 111, reason: "words")
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(await room.documentSnapshot.text == "wrong")
+    #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
+    let boundary = try #require(Channel(rawValue: "asr.boundary"))
+    try await room.publish(channel: boundary, participant: .segmenter,
+                           payload: .object(["reason": .string("endpoint")]), tOrigin: 112)
+    let hint = try #require(await waitForHint(events))
+    #expect(hint.payload["event"] == .string("targeted.speech"))
+    #expect(hint.payload["lineID"] == .string(original.id))
+    #expect(hint.payload["wordID"] == .string("target"))
+    #expect(hint.payload["lineVersion"] == .number(Double(original.version)))
+    #expect(hint.payload["text"] == .string("Use the full name. Morgan Grunwald"))
+    let words = try #require(hint.payload["words"]).decode([Word].self)
+    #expect(words[4].confidence == 0.42 && words[5].language == "de")
+    #expect(await room.documentSnapshot.lines.first?.words.first?.pinned == false)
+    try await segment(room, words: [Word(text: "ordinary")], at: 113, reason: "punctuation")
+    let snapshot = try await settled(room) { $0.lines.count == 2 }
+    #expect(snapshot.text == "wrong\nordinary")
     await binder.stop()
 }
 
-@Test func firstPreTapSegmentClosesHintWindow() async throws {
+@Test func retapRetargetsAndDelayedPreTapSpeechDoesNotConsumeCapture() async throws {
     let room = Room(segmentRouting: .intercepted)
-    try await room.appendSegment(words: [Word(id: "w", text: "wrong")])
-    let lineID = try #require(await room.documentSnapshot.lines.first?.id)
+    try await room.appendSegment(words: [Word(id: "a", text: "first"), Word(id: "b", text: "second")])
+    let line = try #require(await room.documentSnapshot.lines.first)
     let binder = HintBinder(room: room)
     await binder.start()
-    try await binder.tap(lineID: lineID, wordID: "w", timestamp: 100)
-    try await room.publishSegment(words: [Word(text: "old")], tOrigin: 99.8)
-    try await room.publishSegment(words: [Word(text: "new")], tOrigin: 100.2)
-    let snapshot = try await settled(room) { $0.lines.count == 3 }
-    #expect(snapshot.lines.first?.words.first?.text == "wrong")
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: line.id, wordID: "a", timestamp: 100)
+    try await segment(room, words: [Word(text: "discarded")], at: 100.2, reason: "punctuation")
+    try await Task.sleep(for: .milliseconds(20))
+    try await binder.tap(lineID: line.id, wordID: "b", timestamp: 101)
+    try await segment(room, words: [Word(text: "old")], at: 99, reason: "gap")
+    try await segment(room, words: [Word(text: "replacement")], at: 102, reason: "punctuation")
+    let boundary = try #require(Channel(rawValue: "asr.boundary"))
+    try await room.publish(channel: boundary, participant: .segmenter, payload: .object(["reason": .string("gap")]), tOrigin: 103)
+    let hint = try #require(await waitForHint(events))
+    #expect(hint.payload["wordID"] == .string("b"))
+    #expect(hint.payload["text"] == .string("replacement"))
+    #expect(await room.documentSnapshot.text == "first second\nold")
+    await binder.stop()
+    await binder.start()
+    try await segment(room, words: [Word(text: "after-stop")], at: 104, reason: "punctuation")
+    let after = try await settled(room) { $0.lines.count == 3 }
+    #expect(after.text == "first second\nold\nafter-stop")
+    await binder.stop()
+}
+
+@Test func mixedPreTapSegmentKeepsOrdinaryPrefixButDrainsTargetedSuffixBeforeFinalPass() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
+    let line = try #require(await room.documentSnapshot.lines.first)
+    let binder = HintBinder(room: room)
+    await binder.start()
+    let events = HintEvents(), observation = await observeHints(room, events)
+    defer { observation.cancel() }
+    try await binder.tap(lineID: line.id, wordID: "target", timestamp: 100.5)
+    let metadata: JSONValue = .object(["t0": .number(0), "t1": .number(1.2),
+        "timings": .array([.object(["t0": .number(0), "t1": .number(0.2)]),
+                           .object(["t0": .number(1), "t1": .number(1.2)])]), "reason": .string("punctuation")])
+    try await room.publish(channel: .asrSegment, participant: .segmenter,
+        payload: .object(["words": try .encoding([Word(text: "earlier"), Word(text: "Morgan")]), "metadata": metadata]), tOrigin: 100)
+    _ = try await settled(room) { $0.lines.count == 2 }
+    try await room.micOff(transcriberDraining: true)
+    await room.finishTranscription()
+    #expect(await room.state == .trailing, "Appending the ordinary prefix must not resolve the targeted remainder")
+    try await room.publish(channel: .asrBoundary, participant: .segmenter,
+                           payload: .object(["reason": .string("finalize")]), tOrigin: 101.2)
+    let hint = try #require(await waitForHint(events))
+    #expect(hint.payload["text"] == .string("Morgan"))
+    #expect(hint.payload["speechStart"] == .number(101))
+    #expect(hint.payload["speechEnd"] == .number(101.2))
+    #expect(await room.documentSnapshot.text == "Alex\nearlier")
+    for _ in 0..<100 {
+        if await room.state == .finalPass { break }
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    #expect(await room.state == .finalPass)
     await binder.stop()
 }
 

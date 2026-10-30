@@ -49,6 +49,10 @@ public actor AgentRunner {
     }
     private func receive(_ event: Envelope) async {
         guard !stopped else { return }
+        // Only accepted content or the structured targeted chunk belongs in writing context.
+        if event.channel == .asrSegment { return }
+        if event.channel == .session, event.payload["event"] == .string("debug.transcriber.frame") { return }
+        if event.channel == .userIntent, event.payload["event"] == .string("tap") { return }
         history.append(event)
         pendingContext[.liveAgent, default: []].append(event)
         pendingContext[.restructureAgent, default: []].append(event)
@@ -57,7 +61,6 @@ public actor AgentRunner {
             if event.payload["event"] == .string("final.pass") { restructurePolicy.finalPass() }
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { configuration.mode = mode }
-        if event.channel == .asrSegment { return }
         if AgentAdmission.isAcceptedContent(event) {
             restructurePolicy.segment(at: event.tMono)
             pauseTask?.cancel()

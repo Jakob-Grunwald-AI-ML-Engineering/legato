@@ -4,9 +4,14 @@ public struct SonioxSegment: Codable, Sendable, Equatable {
     public var words: [TimedWord]
     public var reason: String
 }
+public enum SegmenterEvent: Sendable {
+    case segment(SonioxSegment)
+    case boundary(reason: String, time: Double?)
+}
 public struct SegmenterOutput: Sendable {
     public var segments: [SonioxSegment]
     public var tail: String
+    public var events: [SegmenterEvent]
 }
 
 public struct Segmenter: Sendable {
@@ -15,18 +20,32 @@ public struct Segmenter: Sendable {
     public let gap: Double
     private var merger = WordMerger()
     private var words: [TimedWord] = []
+    private var lastWordEnd: Double?
+    private var hasUnclosedChunk = false
     public init(maxWords: Int = 25, maxDuration: Double = 8, gap: Double = 0.7) {
         self.maxWords = max(1, maxWords); self.maxDuration = maxDuration; self.gap = gap
     }
     public mutating func ingest(_ tokens: [SonioxToken], finished: Bool = false) -> SegmenterOutput {
         var segments: [SonioxSegment] = []
+        var events: [SegmenterEvent] = []
         func close(_ reason: String) {
-            guard !words.isEmpty else { return }
-            segments.append(SonioxSegment(words: words, reason: reason)); words = []
+            if !words.isEmpty {
+                let segment = SonioxSegment(words: words, reason: reason)
+                segments.append(segment); events.append(.segment(segment)); words = []
+            }
+            // Silence/endpoint is a chunk boundary even when punctuation already flushed the words.
+            if ["gap", "endpoint", "finalize", "finished"].contains(reason) {
+                if reason != "gap" || hasUnclosedChunk {
+                    events.append(.boundary(reason: reason, time: lastWordEnd))
+                }
+                hasUnclosedChunk = false
+            }
         }
         func add(_ word: TimedWord) {
-            if let start = word.t0, let end = words.last?.t1, start - end >= gap { close("gap") }
+            if let start = word.t0, let end = lastWordEnd, hasUnclosedChunk, start - end >= gap { close("gap") }
             words.append(word)
+            lastWordEnd = word.t1 ?? lastWordEnd
+            hasUnclosedChunk = true
             if let last = word.word.text.last, ".!?。！？".contains(last) { close("punctuation") }
             else if words.count >= maxWords { close("words") }
             else if let start = words.first?.t0, let end = word.t1, end - start >= maxDuration { close("duration") }
@@ -47,6 +66,6 @@ public struct Segmenter: Sendable {
         let pending = merger.pending?.word.text ?? ""
         let speculative = tokens.filter { !$0.isFinal && !$0.text.hasPrefix("<") }.map(\.text).joined()
         let tail = [committedTail, pending + speculative].filter { !$0.isEmpty }.joined(separator: " ")
-        return SegmenterOutput(segments: segments, tail: tail)
+        return SegmenterOutput(segments: segments, tail: tail, events: events)
     }
 }
