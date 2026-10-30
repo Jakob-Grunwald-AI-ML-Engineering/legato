@@ -57,7 +57,8 @@ public actor AgentRunner {
             if event.payload["event"] == .string("final.pass") { restructurePolicy.finalPass() }
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { configuration.mode = mode }
-        if event.channel == .asrSegment {
+        if event.channel == .asrSegment { return }
+        if AgentAdmission.isAcceptedContent(event) {
             restructurePolicy.segment(at: event.tMono)
             pauseTask?.cancel()
             pauseTask = Task { [weak self] in

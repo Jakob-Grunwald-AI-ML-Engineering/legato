@@ -64,9 +64,10 @@ final class AppController {
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }
     func stopIfRunning() async { await composer.stop() }
     func handle(_ url: URL) async {
-        if let request = KeyboardURL.parse(url), request.command == .arm {
+        if let request = KeyboardURL.parse(url), request.command == .arm,
+           keyboardHost?.link.admitURL(requestID: request.requestID, command: request.command) == .act {
             await composer.arm(); keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
-        } else { _ = await toggle() }
+        }
     }
     func insertResult() async { if let lastTranscript { _ = await keyboardHost?.insert(lastTranscript) } }
     func copyResult() async { if let lastTranscript { UIPasteboard.general.string = lastTranscript } }

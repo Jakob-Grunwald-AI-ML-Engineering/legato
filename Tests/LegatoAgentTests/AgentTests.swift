@@ -62,7 +62,10 @@ import LegatoRoom
 
 @Test func triggerPolicies() async throws {
     let room = Room(clock: { 1 })
-    let segment = try await room.publishSegment(words: [Word(text: "hello")])
+    let acceptedSegments = await room.subscribe(participant: .logger, channels: [.docOps])
+    _ = try await room.publishSegment(words: [Word(text: "hello")])
+    var acceptedIterator = acceptedSegments.makeAsyncIterator()
+    let segment = try #require(await acceptedIterator.next())
     let hint = try await room.publish(channel: .hint, participant: .ui, payload: .null)
     var live = LiveAgentPolicy()
     #expect(live.begin() == nil)
