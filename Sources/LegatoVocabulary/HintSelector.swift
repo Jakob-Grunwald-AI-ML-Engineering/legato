@@ -33,7 +33,7 @@ public struct HintSelector: Sendable {
     ) -> [SelectedHint] {
         guard limit > 0 else { return [] }
         return ranked(eligibleEntries(in: snapshot, sink: sink), now: now)
-            .prefix(limit)
+            .prefix(sink == .soniox ? min(limit, 100) : limit)
             .map { SelectedHint(text: $0.text, spellings: $0.spellings) }
     }
 

@@ -106,7 +106,12 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
         case .nemotron: .nemotron
         case .appleSpeech: .appleSpeech
         case .cleanup: .cleanup
+        case .soniox: .soniox
         }
+    }
+
+    public func sonioxTerms() async -> [String] {
+        await hints(for: .soniox, limit: 100).map(\.text)
     }
 
     // MARK: learning
