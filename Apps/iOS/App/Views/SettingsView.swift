@@ -3,11 +3,13 @@ import UIKit
 import AVFAudio
 import LegatoClaude
 import LegatoAgent
+import LegatoAppServices
 
 struct SettingsView: View {
     let controller: AppController
     @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
+    @State private var keepMicrophoneActive = ComposerMicrophonePreference.keepActive()
     @State private var haptics = Settings.keyboardHaptics
     @State private var clicks = Settings.keyboardClicks
     @State private var microphoneAllowed = AVAudioApplication.shared.recordPermission == .granted
@@ -44,6 +46,12 @@ struct SettingsView: View {
                 Text("In iOS Settings, open Keyboards, enable Legato and Allow Full Access. Then touch and hold the globe key in any text field to choose Legato. Haptics and sounds require Full Access.")
             }
             Section {
+                Toggle("Keep microphone active in background", isOn: $keepMicrophoneActive)
+                    .accessibilityIdentifier("settings.keepMicrophoneActive")
+            } header: { Text("Background microphone") } footer: {
+                Text("Keeps a microphone session you enable available while using the keyboard or other apps. When off, switching away from Legato stops voice input. This switch never starts the microphone. Stop, clear and mute still control voice input.")
+            }
+            Section {
                 HStack {
                     Label("Microphone", systemImage: "mic")
                     Spacer()
@@ -57,6 +65,10 @@ struct SettingsView: View {
             } header: { Text("Setup") } footer: { Text("Microphone access is needed to compose by voice. You can change permissions in iOS Settings.") }
         }
         .navigationTitle("Settings")
+        .onChange(of: keepMicrophoneActive) { _, value in
+            ComposerMicrophonePreference.setKeepActive(value)
+            Task { await controller.composer.setKeepMicrophoneActive(value) }
+        }
         .onChange(of: haptics) { _, value in Settings.keyboardHaptics = value }
         .onChange(of: clicks) { _, value in Settings.keyboardClicks = value }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in

@@ -8,6 +8,7 @@ Usage: native-control.sh screenshot OUTPUT.png
        native-control.sh record OUTPUT.mp4 SECONDS
        native-control.sh keyboard  # Select Legato on the current iPhone 17
        native-control.sh tree
+       native-control.sh background-mic-settings  # Toggle, relaunch, verify and restore
        native-control.sh mode Message|Email|Prompt|Note|Auto
        native-control.sh tap X Y
        native-control.sh hold X Y SECONDS
@@ -30,8 +31,8 @@ HELP
 [ "$#" -gt 0 ] || { usage >&2; exit 2; }
 command="$1"; shift
 case "$command" in
-  tree|keyboard|mode|tap|hold|swipe|quote|scroll|label|companion-settings)
-    case "$command:$#" in tree:0|companion-settings:0|keyboard:0|mode:1|tap:2|hold:3|swipe:4|swipe:5|quote:4|scroll:0|label:1) ;; *) usage >&2; exit 2 ;; esac
+  tree|keyboard|mode|tap|hold|swipe|quote|scroll|label|companion-settings|background-mic-settings)
+    case "$command:$#" in tree:0|companion-settings:0|background-mic-settings:0|keyboard:0|mode:1|tap:2|hold:3|swipe:4|swipe:5|quote:4|scroll:0|label:1) ;; *) usage >&2; exit 2 ;; esac
     root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     build="${LEGATO_NATIVE_BUILD:-/tmp/legato-native-control-build}"
     output_root="${LEGATO_NATIVE_OUTPUT:-$root/.claude/tmp/native-control}"

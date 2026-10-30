@@ -11,6 +11,7 @@ struct LegatoShortcuts: AppShortcutsProvider {
 struct LegatoApp: App {
     @UIApplicationDelegateAdaptor(CompanionAppDelegate.self) private var appDelegate
     @State private var controller = AppController.shared
+    @Environment(\.scenePhase) private var scenePhase
     init() { LegatoShortcuts.updateAppShortcutParameters() }
     var body: some Scene {
         WindowGroup {
@@ -21,6 +22,9 @@ struct LegatoApp: App {
                 RootView(controller: controller)
                 #endif
             }.onOpenURL { url in Task { await controller.handle(url) } }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .background { Task { await controller.composer.prepareForBackground() } }
+                }
         }
     }
 }
