@@ -50,7 +50,13 @@ import Observation
         pollTask = Task {
             while !Task.isCancelled {
                 permissions.refresh()
-                if !tap.isActive { permissions.hotkeyTapActive = tap.start() }
+                if !tap.isEnabled {
+                    tap.stop()
+                    permissions.hotkeyTapActive = false
+                    if CGPreflightListenEventAccess() { permissions.hotkeyTapActive = tap.start() }
+                } else {
+                    permissions.hotkeyTapActive = true
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
