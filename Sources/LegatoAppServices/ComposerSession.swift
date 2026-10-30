@@ -225,12 +225,13 @@ import LegatoVocabulary
 }
 
 /// AAC is written from the same chunks forwarded to Soniox, keeping diagnostic audio aligned.
-private final class ComposerAudioRecorder {
+final class ComposerAudioRecorder {
     private let file: AVAudioFile
     private let format: AVAudioFormat
     init(url: URL) throws {
         format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
-        file = try AVAudioFile(forWriting: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64000], commonFormat: .pcmFormatFloat32, interleaved: false)
+        // 64 kb/s exceeds Apple AAC's supported rate for 16 kHz mono ('!dat').
+        file = try AVAudioFile(forWriting: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 32000], commonFormat: .pcmFormatFloat32, interleaved: false)
     }
     func append(_ chunk: AudioChunk) throws {
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(chunk.samples.count)) else { return }
