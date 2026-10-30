@@ -12,13 +12,6 @@ final class KeyboardViewController: UIInputViewController {
     private var handoffVisible = false
     private var controller: KeyboardController?
     private var heightConstraint: NSLayoutConstraint?
-    private var heightDisplayLink: CADisplayLink?
-    private var heightAnimationStart = 0.0
-    private var heightAnimationFrom: CGFloat = 0
-    private var heightAnimationTarget: CGFloat = 0
-    #if DEBUG
-    private var heightAnimationSamples: [[String: Double]] = []
-    #endif
 
     private static let portraitHeight = KeyGeometry.height(landscape: false)
     private static let landscapeHeight = KeyGeometry.height(landscape: true)
@@ -84,8 +77,6 @@ final class KeyboardViewController: UIInputViewController {
     /// The mode or the strip height changed (the chevron, the debug height cycle, the setting): resize
     /// with the content's cross-fade, and log the height asked for against the one laid out.
     private func layoutChanged(reason: String) {
-        if reason == "composer-resize" { animateHeight(to: requestedHeight); return }
-        stopHeightAnimation(completed: false)
         heightConstraint?.constant = requestedHeight
         let settle: UIView = view.superview ?? view
         #if DEBUG
@@ -96,62 +87,6 @@ final class KeyboardViewController: UIInputViewController {
         })
         #else
         UIView.animate(withDuration: 0.2) { settle.layoutIfNeeded() }
-        #endif
-    }
-
-    /// Native keyboard hosts can ignore a UIView animation transaction around a single height jump.
-    /// Feed them bounded intermediate heights after the user selects one preset, never during a swipe.
-    private func animateHeight(to target: CGFloat) {
-        let current = view.bounds.height > 0 ? view.bounds.height : heightConstraint?.constant ?? target
-        stopHeightAnimation(completed: false)
-        heightAnimationFrom = current
-        heightAnimationTarget = target
-        heightAnimationStart = CACurrentMediaTime()
-        heightConstraint?.constant = current
-        let link = CADisplayLink(target: self, selector: #selector(stepHeightAnimation(_:)))
-        heightDisplayLink = link
-        link.preferredFramesPerSecond = 60
-        link.add(to: .main, forMode: .common)
-    }
-
-    @objc private func stepHeightAnimation(_ link: CADisplayLink) {
-        let progress = min(1, max(0, (link.timestamp - heightAnimationStart) / 0.28))
-        let eased = 1 - pow(1 - progress, 3)
-        let height = heightAnimationFrom + (heightAnimationTarget - heightAnimationFrom) * eased
-        var ancestor: UIView = view
-        while let parent = ancestor.superview { ancestor = parent }
-        UIView.performWithoutAnimation {
-            heightConstraint?.constant = height
-            ancestor.layoutIfNeeded()
-            view.layoutIfNeeded()
-        }
-        #if DEBUG
-        heightAnimationSamples.append([
-            "elapsed": link.timestamp - heightAnimationStart, "requested": height,
-            "actual": view.bounds.height, "presentation": view.layer.presentation()?.bounds.height ?? view.bounds.height,
-            "window": view.window?.bounds.height ?? 0,
-        ])
-        #endif
-        if progress >= 1 { stopHeightAnimation(completed: true) }
-    }
-
-    private func stopHeightAnimation(completed: Bool) {
-        heightDisplayLink?.invalidate()
-        heightDisplayLink = nil
-        #if DEBUG
-        if !heightAnimationSamples.isEmpty {
-            // Geometry only. Write once after animation, never on a display-link tick.
-            if let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LinkChannel.appGroupID),
-               let data = try? JSONSerialization.data(withJSONObject: [
-                "from": heightAnimationFrom, "to": heightAnimationTarget,
-                "completed": completed, "frames": heightAnimationSamples,
-               ], options: [.sortedKeys]) {
-                let cache = group.appendingPathComponent("Library/Caches", isDirectory: true)
-                try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
-                try? data.write(to: cache.appendingPathComponent("composer-height-animation.json"), options: .atomic)
-            }
-            heightAnimationSamples.removeAll(keepingCapacity: true)
-        }
         #endif
     }
 
@@ -172,8 +107,6 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         handoffVisible = false
-        stopHeightAnimation(completed: false)
-        heightConstraint?.constant = requestedHeight
         super.viewWillDisappear(animated)
     }
 
@@ -207,7 +140,6 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        guard heightDisplayLink == nil else { return }
         let wanted = requestedHeight
         if heightConstraint?.constant != wanted { heightConstraint?.constant = wanted }
     }

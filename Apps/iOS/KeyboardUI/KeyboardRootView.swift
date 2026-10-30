@@ -18,6 +18,7 @@ struct KeyboardRootView: View {
                              onWordTap: { controller.composerIntent("tap", lineID: $0, wordID: $1) },
                              onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
                     .frame(maxHeight: .infinity)
+                    .transition(.opacity)
                 if let error = controller.composer.error {
                     Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).padding(.horizontal)
                 }
@@ -27,6 +28,7 @@ struct KeyboardRootView: View {
         // UIInputView(.keyboard) supplies the system cap/tray material. Nonzero alpha keeps blank pixels touchable.
         .background(Color.black.opacity(0.001))
         .environment(\.colorScheme, scheme)
+        .animation(.easeInOut(duration: 0.2), value: controller.composerSize)
     }
 
     private var toolRow: some View {
