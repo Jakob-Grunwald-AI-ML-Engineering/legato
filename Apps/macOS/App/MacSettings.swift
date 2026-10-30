@@ -156,3 +156,56 @@ extension FieldWriter.Mode {
         }
     }
 }
+
+#if LEGATO_INTERNAL
+extension MacSettings {
+    nonisolated static let debugSettingKeys: Set<String> = [
+        "gestureMode", "insertionMode", "restoreClipboard", "cleanupEnabled", "cleanupDelivery",
+        "cleanupStyle", "cleanupEmoji", "cleanupBackend", "cleanupITN", "cleanupTimeoutSeconds",
+    ]
+
+    /// Typed setters keep the observable model, persisted values and cleanup store in agreement.
+    func setDebugSetting(_ key: String, value: String) throws {
+        guard Self.debugSettingKeys.contains(key) else { throw DebugSettingError.unknownKey }
+        func boolean() throws -> Bool {
+            guard let result = Bool(value.lowercased()) else { throw DebugSettingError.invalidValue(key) }
+            return result
+        }
+        func choice<T: RawRepresentable>(_ type: T.Type) throws -> T where T.RawValue == String {
+            guard let result = T(rawValue: value) else { throw DebugSettingError.invalidValue(key) }
+            return result
+        }
+        switch key {
+        case "gestureMode": gestureMode = try choice(HotkeyGesture.Mode.self)
+        case "insertionMode": insertionMode = try choice(FieldWriter.Mode.self)
+        case "restoreClipboard": restoreClipboard = try boolean()
+        case "cleanupEnabled": cleanupEnabled = try boolean()
+        case "cleanupDelivery": cleanupDelivery = try choice(CleanupDelivery.self)
+        case "cleanupStyle": cleanupStyle = try choice(CleanupStyle.self)
+        case "cleanupEmoji": cleanupEmoji = try choice(MessageEmojiStyle.self)
+        case "cleanupBackend": cleanupBackend = try choice(CleanupBackendChoice.self)
+        case "cleanupITN": cleanupITN = try boolean()
+        case "cleanupTimeoutSeconds":
+            guard let seconds = Int(value), (1...10).contains(seconds) else { throw DebugSettingError.invalidValue(key) }
+            cleanupTimeoutSeconds = seconds
+        default: throw DebugSettingError.unknownKey
+        }
+    }
+    var debugSnapshot: [String: Any] {
+        ["gestureMode": gestureMode.rawValue, "insertionMode": insertionMode.rawValue,
+         "restoreClipboard": restoreClipboard, "cleanupEnabled": cleanupEnabled,
+         "cleanupDelivery": cleanupDelivery.rawValue, "cleanupStyle": cleanupStyle.rawValue,
+         "cleanupEmoji": cleanupEmoji.rawValue, "cleanupBackend": cleanupBackend.rawValue,
+         "cleanupITN": cleanupITN, "cleanupTimeoutSeconds": cleanupTimeoutSeconds]
+    }
+    enum DebugSettingError: Error, CustomStringConvertible {
+        case unknownKey, invalidValue(String)
+        var description: String {
+            switch self {
+            case .unknownKey: "unsupported setting key; allowed: \(MacSettings.debugSettingKeys.sorted().joined(separator: ", "))"
+            case .invalidValue(let key): "invalid value for \(key)"
+            }
+        }
+    }
+}
+#endif

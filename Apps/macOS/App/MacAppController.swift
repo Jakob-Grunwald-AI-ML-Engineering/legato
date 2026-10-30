@@ -104,7 +104,14 @@ final class MacAppController {
     private enum Command: Sendable {
         case start, stop, cancel
         case aborted(UUID)
+        #if LEGATO_INTERNAL
+        case debug(DebugControl, String)
+        #endif
     }
+    #if LEGATO_INTERNAL
+    enum DebugControl: String, Sendable { case toggle, start, stop, interrupt, meetingStart, meetingStop }
+    @ObservationIgnored private var debugPendingControls = 0
+    #endif
 
     /// One dictation from key press to delivery.
     private final class Run {
@@ -252,6 +259,9 @@ final class MacAppController {
         }
         attachSession()
         installModelLifecycleObservers()
+        #if LEGATO_INTERNAL
+        DebugBridge.start()
+        #endif
         Task { [weak self, samples = tap.samples] in
             for await sample in samples { self?.handle(sample) }
         }
@@ -311,7 +321,7 @@ final class MacAppController {
 
     #if LEGATO_INTERNAL
     var probeAdmissionBusy: Bool {
-        activeRun != nil || phase != .idle || isRefining || isPreparingModels || resolvingEngine || modelAdmission.isPreparing || modelAdmission.isResetting || meetings.probeAdmissionBusy
+        debugPendingControls > 0 || activeRun != nil || phase != .idle || isRefining || isPreparingModels || resolvingEngine || modelAdmission.isPreparing || modelAdmission.isResetting || meetings.probeAdmissionBusy
     }
     func releaseModelsForProbe(owner: UUID) async throws {
         guard SessionProbe.owns(owner) else { throw SessionProbeError.invalidOwner }
@@ -331,6 +341,63 @@ final class MacAppController {
         false
         #endif
     }
+
+    #if LEGATO_INTERNAL
+    func debugSetSetting(_ key: String, value: String) throws {
+        guard !probeActive else { throw SessionProbeError.busy }
+        try settings.setDebugSetting(key, value: value)
+        if key == "gestureMode", phase == .idle {
+            resetGesture()
+            gesture = HotkeyGesture(mode: settings.gestureMode)
+        }
+        if key.hasPrefix("cleanup") { cleanupSettingsChanged() }
+    }
+
+    /// Reserve acceptance synchronously; the controller's existing channel owns and joins execution.
+    func debugControl(_ action: DebugControl, id: String) throws {
+        // A start injected through the hotkey path exercises startRun's real probe refusal.
+        guard !probeActive || action == .start || action == .meetingStart else { throw SessionProbeError.busy }
+        guard let commands else { throw SessionProbeError.busy }
+        debugPendingControls += 1
+        if action == .stop || action == .interrupt || (action == .toggle && isPreparingModels) { modelAdmission.cancel() }
+        if action == .meetingStop { meetings.cancelStart() }
+        commands.yield(.debug(action, id))
+    }
+    private func performDebugControl(_ action: DebugControl, id: String) async {
+        let wasProbe = probeActive
+        let starting = action == .start || (action == .toggle && phase == .idle && activeRun == nil)
+        switch action {
+        case .start: await startRun()
+        case .toggle:
+            if starting { await startRun() } else { await finishRun(discard: false) }
+        case .stop: await finishRun(discard: false)
+        case .interrupt: await finishRun(discard: true)
+        case .meetingStart: await meetings.start()
+        case .meetingStop: _ = await meetings.stop()
+        }
+        debugPendingControls -= 1
+        let refused = (starting && phase == .idle) || (action == .meetingStart && meetings.phase != .recording)
+        DebugBridge.emit(id: id, event: "control.done", ["control": action.rawValue,
+            "outcome": wasProbe ? "busy" : (refused ? "refused" : "ok"), "phase": String(describing: phase),
+            "meetingPhase": String(describing: meetings.phase)])
+    }
+    func debugState() -> [String: Any] {
+        ["app": NSApp.isActive ? "active" : (NSApp.isHidden ? "background" : "inactive"),
+         "phase": String(describing: phase), "isDictating": isDictating,
+         "recognitionPreparing": isPreparingModels, "resolvingEngine": resolvingEngine,
+         "lastTranscriptChars": lastDictation?.text.count ?? 0,
+         "activeTranscriptChars": activeRun?.transcript.committed.count ?? 0,
+         "engine": engine.id, "probeRunning": SessionProbe.isRunning,
+         "modelsReserved": models.isProbeReserved, "pendingControls": debugPendingControls,
+         "readiness": ["micGranted": permissions.micGranted, "accessibility": permissions.accessibility,
+                       "hotkeyTapActive": permissions.hotkeyTapActive, "modelInstalled": permissions.modelInstalled,
+                       "isReady": !needsSetup],
+         "settings": settings.debugSnapshot, "liveGestureMode": gesture.mode.rawValue,
+         "meeting": ["phase": String(describing: meetings.phase), "muted": meetings.isMuted,
+                     "probeAdmissionBusy": meetings.probeAdmissionBusy],
+         "messages": DebugMessages.shared.debugSnapshot]
+    }
+    #endif
 
     // MARK: Models
 
@@ -677,6 +744,9 @@ final class MacAppController {
         case .stop: await finishRun(discard: false)
         case .cancel: await finishRun(discard: true)
         case .aborted(let id): await abortRun(id: id)
+        #if LEGATO_INTERNAL
+        case .debug(let action, let id): await performDebugControl(action, id: id)
+        #endif
         }
     }
 

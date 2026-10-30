@@ -29,6 +29,8 @@ targets:
     sources: [App]
     dependencies:
       - package: LegatoKit
+        product: LegatoDevHarness
+      - package: LegatoKit
         product: LegatoCore
       - package: LegatoKit
         product: LegatoAudio
