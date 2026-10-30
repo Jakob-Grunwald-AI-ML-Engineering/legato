@@ -30,8 +30,8 @@ HELP
 [ "$#" -gt 0 ] || { usage >&2; exit 2; }
 command="$1"; shift
 case "$command" in
-  tree|keyboard|mode|tap|hold|swipe|quote|scroll|label)
-    case "$command:$#" in tree:0|keyboard:0|mode:1|tap:2|hold:3|swipe:4|swipe:5|quote:4|scroll:0|label:1) ;; *) usage >&2; exit 2 ;; esac
+  tree|keyboard|mode|tap|hold|swipe|quote|scroll|label|companion-settings)
+    case "$command:$#" in tree:0|companion-settings:0|keyboard:0|mode:1|tap:2|hold:3|swipe:4|swipe:5|quote:4|scroll:0|label:1) ;; *) usage >&2; exit 2 ;; esac
     root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     build="${LEGATO_NATIVE_BUILD:-/tmp/legato-native-control-build}"
     output_root="${LEGATO_NATIVE_OUTPUT:-$root/.claude/tmp/native-control}"
@@ -39,7 +39,7 @@ case "$command" in
     output="$(mktemp -d "$output_root/run.XXXXXX")"
     xcodegen generate --spec "$root/Apps/iOS/project.yml" > "$output/build.log" 2>&1
     if ! xcodebuild -quiet build-for-testing -project "$root/Apps/iOS/Legato.xcodeproj" \
-      -scheme LegatoNativeControl -destination "id=${LEGATO_DEVICE:-00008150-000E60360245401C}" \
+      -scheme LegatoNativeControl -destination "platform=iOS,arch=arm64,id=${LEGATO_DEVICE:-00008150-000E60360245401C}" \
       -derivedDataPath "$build" -allowProvisioningUpdates >> "$output/build.log" 2>&1; then
       tail -50 "$output/build.log" >&2; exit 1
     fi
@@ -56,7 +56,7 @@ case "$command" in
     /usr/libexec/PlistBuddy -c "Add :LegatoNativeControl:EnvironmentVariables:LEGATO_NATIVE_COMMAND string $command $*" "$run_file"
     /usr/libexec/PlistBuddy -c "Add :LegatoNativeControl:EnvironmentVariables:LEGATO_NATIVE_BUNDLE string ${LEGATO_BUNDLE:-de.gruenwald.legato}" "$run_file"
     if ! xcodebuild -quiet test-without-building -xctestrun "$run_file" \
-      -destination "id=${LEGATO_DEVICE:-00008150-000E60360245401C}" -parallel-testing-enabled NO \
+      -destination "platform=iOS,arch=arm64,id=${LEGATO_DEVICE:-00008150-000E60360245401C}" -parallel-testing-enabled NO \
       -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 \
       -resultBundlePath "$output/result.xcresult" > "$output/control.log" 2>&1; then
       tail -60 "$output/control.log" >&2; echo "Artifacts: $output" >&2; exit 1

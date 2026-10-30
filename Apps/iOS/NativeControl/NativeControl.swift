@@ -18,6 +18,38 @@ import XCTest
             app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: try number(index), dy: try number(index + 1)))
         }
         switch parts.first {
+        case "companion-settings":
+            let settings = app.tabBars.buttons["Settings"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 5), "Settings must be directly reachable from the companion")
+            settings.tap()
+            app.buttons["settings.personalInstructionsLink"].tap()
+            let instructions = app.descendants(matching: .any).matching(identifier: "settings.personalInstructions").firstMatch
+            XCTAssertTrue(instructions.waitForExistence(timeout: 5))
+            let original = instructions.value as? String ?? ""
+            instructions.tap()
+            instructions.typeText("Native keyboard check")
+            XCTAssertTrue(app.keyboards.firstMatch.exists, "Instructions must have a usable keyboard")
+            // Restore the user's preference without logging its contents.
+            if let value = instructions.value as? String {
+                instructions.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count))
+            }
+            if !original.isEmpty && !original.hasPrefix("For example:") { instructions.typeText(original) }
+            app.buttons["Done"].tap()
+            app.navigationBars.buttons.firstMatch.tap()
+            for provider in ["Claude", "Soniox"] {
+                app.buttons.containing(.staticText, identifier: provider).firstMatch.tap()
+                let field = app.secureTextFields["settings.\(provider.lowercased())Key"]
+                XCTAssertTrue(field.waitForExistence(timeout: 5))
+                let save = app.buttons["Replace \(provider) key"]
+                XCTAssertTrue(save.exists, "Existing provider key must remain configured")
+                XCTAssertFalse(save.isEnabled, "Blank replacement must never overwrite a saved key")
+                field.tap(); field.typeText("   ")
+                XCTAssertFalse(save.isEnabled, "Whitespace must never overwrite a saved key")
+                app.buttons["Done"].tap()
+                app.navigationBars.buttons.firstMatch.tap()
+            }
+            app.tabBars.buttons["Compose"].tap()
+            XCTAssertTrue(app.buttons["Compose"].exists)
         case "tree": break
         case "keyboard":
             app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 42, dy: 820)).press(forDuration: 1.2)

@@ -9,6 +9,7 @@ struct LegatoShortcuts: AppShortcutsProvider {
 
 @main
 struct LegatoApp: App {
+    @UIApplicationDelegateAdaptor(CompanionAppDelegate.self) private var appDelegate
     @State private var controller = AppController.shared
     init() { LegatoShortcuts.updateAppShortcutParameters() }
     var body: some Scene {
@@ -21,5 +22,14 @@ struct LegatoApp: App {
                 #endif
             }.onOpenURL { url in Task { await controller.handle(url) } }
         }
+    }
+}
+
+/// Settings need ordinary text entry even when the voice-only Legato keyboard was last selected.
+@MainActor final class CompanionAppDelegate: NSObject, UIApplicationDelegate {
+    static var isEditingSettings = false
+    func application(_ application: UIApplication,
+                     shouldAllowExtensionPointIdentifier extensionPointIdentifier: UIApplication.ExtensionPointIdentifier) -> Bool {
+        extensionPointIdentifier != .keyboard || !Self.isEditingSettings
     }
 }
