@@ -2,36 +2,52 @@ import SwiftUI
 import LegatoComposerDoc
 
 struct AlternativesPopover: View {
-    var quote: String
-    var word: Word?
+    var capturedText: String
     var pointX: CGFloat
     var pointsDown: Bool
+    var maximumHeight: CGFloat
+    var countdownStart: Double?
+    var countdownDeadline: Double?
     var dismiss: () -> Void
-    var pick: (String) -> Void
+    var send: (() -> Void)?
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "wand.and.stars").foregroundStyle(.purple)
-                    .symbolEffect(.breathe, options: .repeating)
-                Text(quote).font(.callout.weight(.semibold)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                Button(action: dismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
-                    .buttonStyle(.plain).accessibilityLabel("Dismiss correction")
-            }
-            if let word {
-                ForEach(word.alternatives ?? [], id: \.self) { text in
-                    Button(text) { pick(text) }.buttonStyle(.plain).font(.callout).foregroundStyle(.primary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Speak a correction").font(.caption).foregroundStyle(.primary.opacity(0.75))
+                    Spacer(minLength: 4)
+                    Button(action: dismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)) }
+                        .buttonStyle(.plain).accessibilityLabel("Cancel correction")
                 }
-            }
-            Label("Speak to change this \(word == nil ? "quote" : "word")", systemImage: "waveform")
-                .font(.caption).foregroundStyle(.secondary)
+                HStack(alignment: .bottom, spacing: 10) {
+                    Text(capturedText.isEmpty ? "…" : capturedText).font(.callout).foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    TimelineView(.animation(minimumInterval: 1.0 / 30, paused: countdownDeadline == nil)) { _ in
+                        Button { send?() } label: {
+                            Image(systemName: "wand.and.stars").foregroundStyle(.purple).frame(width: 28, height: 28)
+                                .overlay {
+                                    if let start = countdownStart, let deadline = countdownDeadline {
+                                        let progress = min(1, max(0, (ProcessInfo.processInfo.systemUptime - start) / max(0.001, deadline - start)))
+                                        RoundedRectangle(cornerRadius: 8).trim(from: 0, to: progress)
+                                            .stroke(AngularGradient(colors: [.purple, .blue, .pink, .purple], center: .center), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                            .shadow(color: .purple.opacity(0.6), radius: 4)
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain).disabled(send == nil || capturedText.isEmpty).accessibilityLabel("Apply correction")
+                    }
+                }
+            }.padding(11)
         }
-        .padding(12)
+        .scrollIndicators(.hidden)
+        .frame(height: min(maximumHeight, capturedText.isEmpty ? 68 : 100))
         .background(.regularMaterial, in: CorrectionBubble(pointX: pointX, pointsDown: pointsDown))
         .overlay { CorrectionBubble(pointX: pointX, pointsDown: pointsDown).stroke(.purple.opacity(0.28), lineWidth: 0.7).allowsHitTesting(false) }
         .shadow(color: .purple.opacity(0.14), radius: 12, y: 3)
         .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
     }
 }
+
 private struct CorrectionBubble: Shape {
     var pointX: CGFloat
     var pointsDown: Bool

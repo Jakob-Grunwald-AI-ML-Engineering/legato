@@ -157,8 +157,11 @@ private struct NotchComposerView: View {
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             }
             ComposerView(snapshot: session.snapshot, tail: session.tail, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
+                correctionDraft: session.correctionDraft,
+                correctionCountdownStart: session.correctionCountdownStart, correctionCountdownDeadline: session.correctionCountdownDeadline,
                 onSelect: { selection in showingCorrection = true; Task { await session.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
                 onDeselect: { showingCorrection = false; Task { await session.clearSelection() } },
+                onSendCorrection: { Task { await session.sendCorrection() } },
                 onPick: { line, word, text in Task { await session.pick(lineID: line, wordID: word, text: text) } })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if let error = session.error { Text(error).font(.callout).foregroundStyle(.red).lineLimit(2).help(error).textSelection(.disabled) }

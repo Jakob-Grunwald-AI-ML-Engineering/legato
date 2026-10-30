@@ -42,6 +42,9 @@ import XCTest
             XCTAssertTrue(app.buttons[parts[1]].waitForExistence(timeout: 5), "Selected mode must reach the keyboard")
         case "tap": try coordinate(1).tap()
         case "hold": try coordinate(1).press(forDuration: number(3))
+        case "scroll":
+            XCTAssertTrue(app.scrollViews.firstMatch.exists)
+            app.scrollViews.firstMatch.swipeUp(velocity: .fast)
         case "quote":
             try coordinate(1).press(forDuration: 0.45, thenDragTo: coordinate(3), withVelocity: .slow, thenHoldForDuration: 0.15)
         case "swipe":
@@ -51,7 +54,7 @@ import XCTest
                 try coordinate(1).press(forDuration: 0.1, thenDragTo: coordinate(3),
                     withVelocity: .slow, thenHoldForDuration: hold)
             } else {
-                try coordinate(1).press(forDuration: 0.1, thenDragTo: coordinate(3))
+                try coordinate(1).press(forDuration: 0.01, thenDragTo: coordinate(3), withVelocity: .fast, thenHoldForDuration: 0)
             }
         case "label":
             let label = parts.dropFirst().joined(separator: " ")
