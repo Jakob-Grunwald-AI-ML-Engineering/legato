@@ -28,19 +28,13 @@ public struct ProxyPlan: Sendable, Equatable {
 ///   With no document (`documentID` nil: no field is bound) nothing is planned and the cursor stays.
 /// - A separating space goes in front of the first text of a run (and after the user typed into the
 ///   run) when the field's text before it doesn't end in whitespace.
-/// - Cleanup (`HostState.delivery`, `finalText`): with `.replace` the streamed text is swapped for the
+/// - Cleanup (`HostState.delivery`, `finalText`): with `.replace` the streamed text can be swapped for the
 ///   final text in one edit once it has all landed, only while the field still ends with it (never
-///   retried; without the swap the final state is not confirmed, so the app uses the clipboard). With
-///   `.clipboard` the streamed text stays. With `.hold` nothing is typed while listening; the final text
-///   is inserted once, at the end.
-/// - Live cleanup (`.live`): the newest `HostState.revision` replaces what the field shows for the run
-///   (`runText`) with its text followed by the raw text committed after it, in one common-prefix edit, when
-///   the field still ends with exactly that run text (`applyLiveRevision`). One that would replace text not
-///   typed yet waits. When the field no longer ends with it (the user edited) the revision is skipped, and
-///   so is every later one. The final state is confirmed only when the newest revision landed and none was
-///   skipped. A cleared field is a sent boundary (`fieldCleared`): revisions of the sent text are dropped and
-///   the rest of the run streams into the empty field; tentative text it showed went too, and the committed
-///   text that finalizes it is not typed again (`awaitsSentTentative`).
+///   retried; without the swap the final state is not confirmed, so the app uses the clipboard). A run on the
+///   link (the app's cleanup agent) gets its cleaned text as patches instead and has no `finalText` here.
+/// - A cleared field is a sent boundary (`fieldCleared`, `.live` runs): the rest of the run streams into the
+///   empty field; tentative text it showed went too, and the committed text that finalizes it is not typed
+///   again (`awaitsSentTentative`).
 public enum ProxyEditPlanner {
     public static func plan(
         state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?
@@ -62,8 +56,8 @@ public enum ProxyEditPlanner {
             current = AppliedCursor(runID: runID, documentID: documentID)
         }
 
-        if state.delivery == .hold { return planHeld(state: state, cursor: current, ops: ops, context: context) }
-        if state.delivery == .live { return planLive(state: state, cursor: current, ops: ops, context: context) }
+        // Tentative text sent with a message: nothing goes in until the committed text shows where it ends.
+        if awaitsSentTentative(state: state, cursor: &current) { return ProxyPlan(ops: ops, cursor: current) }
 
         // The tentative text in the field is only editable while it is still the end of the context.
         var inField = current.volatile
@@ -89,7 +83,7 @@ public enum ProxyEditPlanner {
         current.needsSeparator = current.needsSeparator && delta.isEmpty
         let streamedLanded = state.isFinal && current.committedCount == state.committed.count && current.volatile.isEmpty
         current.finalApplied = streamedLanded
-        if streamedLanded, state.delivery != .clipboard, let finalText = cleanedText(state) {
+        if streamedLanded, state.delivery != .live, let finalText = cleanedText(state) {
             if current.finalReplaced == nil {
                 let span = streamedSpan(of: state.committed)
                 if !span.isEmpty, (context + target).hasSuffix(span) {
@@ -104,41 +98,6 @@ public enum ProxyEditPlanner {
         return ProxyPlan(ops: ops, cursor: current)
     }
 
-    /// `.live`: streams like `.replace` and applies the new revisions; the edit is one common-prefix diff
-    /// from the field as it is to the field as it should be.
-    private static func planLive(state: HostState, cursor: AppliedCursor, ops: [ProxyOp], context: String) -> ProxyPlan {
-        var ops = ops
-        var current = cursor
-        // Tentative text sent with a message: nothing goes in until the committed text shows where it ends.
-        if awaitsSentTentative(state: state, cursor: &current) { return ProxyPlan(ops: ops, cursor: current) }
-        var stripped = context
-        var inField = current.volatile
-        if !inField.isEmpty {
-            if stripped.hasSuffix(inField) { stripped.removeLast(inField.count) } else { inField = "" }
-        }
-        let delta = state.committed.count > current.committedCount
-            ? String(state.committed.dropFirst(current.committedCount)) : ""
-        let body = delta + state.volatile
-        let separator = (current.committedCount == 0 || current.needsSeparator) && needsSeparator(before: stripped, inserting: body)
-            ? " " : ""
-
-        // The field's committed part once this plan ran, before the tentative text.
-        let committedCount = current.committedCount + delta.count
-        var field = stripped + (delta.isEmpty ? "" : separator + delta)
-        applyLiveRevision(state: state, cursor: &current, committedCount: committedCount, field: &field)
-        let desired = field + (delta.isEmpty ? separator : "") + state.volatile
-        // The field holds `context`; the edit turns it into `desired` (a shared beginning stays).
-        ops += replaceOps(from: context, to: desired)
-
-        current.committedCount = committedCount
-        current.volatile = delta.isEmpty ? separator + state.volatile : state.volatile
-        current.needsSeparator = current.needsSeparator && delta.isEmpty
-        let streamedLanded = state.isFinal && committedCount == state.committed.count && current.volatile.isEmpty
-        current.finalApplied = streamedLanded && current.revisionHandled >= (state.revision?.n ?? 0)
-            && !current.revisionSkipped
-        return ProxyPlan(ops: ops, cursor: current)
-    }
-
     /// `.live`: the field was cleared while it showed tentative text (`AppliedCursor.sentTentative`). Once the
     /// committed text after the boundary shows where that text ends (`SentTentative`; at the run's final state at
     /// the latest), the boundary moves past it and false is returned; true while that can't be told yet, and
@@ -150,54 +109,24 @@ public enum ProxyEditPlanner {
         else { return true }
         cursor.sentBase += covered
         cursor.committedCount = max(cursor.committedCount, cursor.sentBase)
-        cursor.revisedEnd = cursor.sentBase
-        cursor.revisedText = ""
         cursor.sentTentative = ""
         return false
     }
 
     /// What the field shows for the run's committed text since the last sent boundary, up to `count` raw
-    /// characters typed: the applied revision's text, then the raw text after it.
+    /// characters typed.
     static func runText(cursor: AppliedCursor, committed: String, upTo count: Int) -> String {
-        let from = max(cursor.revisedEnd, cursor.sentBase)
-        guard count > from else { return count == from ? cursor.revisedText : "" }
-        return cursor.revisedText + String(committed.dropFirst(from).prefix(count - from))
-    }
-
-    /// Applies `state.revision` to `field` (the field's text up to the end of the run's committed part,
-    /// `committedCount` raw characters typed) when it is newer than the one the cursor handled: replaces the
-    /// run text the field ends with by the revision's text and the raw text after it. A revision past the
-    /// typed text waits; one of text before the last sent boundary is dropped; after a skip, or when the field
-    /// no longer ends with the run text, it is skipped. Kept apart from the planning so a typewriter reveal can
-    /// drive the same replacement.
-    static func applyLiveRevision(state: HostState, cursor: inout AppliedCursor, committedCount: Int, field: inout String) {
-        guard let revision = state.revision, revision.n > cursor.revisionHandled else { return }
-        guard revision.start == cursor.sentBase, !cursor.revisionSkipped else {
-            cursor.revisionHandled = revision.n // the sent text's, or the user's field: never applied
-            return
-        }
-        guard revision.end <= committedCount, committedCount <= state.committed.count else { return } // waits
-        let shown = runText(cursor: cursor, committed: state.committed, upTo: committedCount)
-        let rawMatches = String(state.committed.dropFirst(revision.start).prefix(revision.raw.count)) == revision.raw
-        if rawMatches, field.hasSuffix(shown) {
-            field = String(field.dropLast(shown.count)) + revision.text
-                + String(state.committed.dropFirst(revision.end).prefix(committedCount - revision.end))
-            cursor.revisedEnd = revision.end
-            cursor.revisedText = revision.text
-            cursor.shownRevision = revision.n
-        } else if rawMatches {
-            cursor.revisionSkipped = true
-        }
-        cursor.revisionHandled = revision.n
+        guard count > cursor.sentBase else { return "" }
+        return String(committed.dropFirst(cursor.sentBase).prefix(count - cursor.sentBase))
     }
 
     /// The keyboard saw its field change (the host's own edit): when the field is now empty although it showed
     /// the run's text (a chat app sent it), returns the cursor with a sent boundary at what was typed; nil for
     /// anything else (no run text there, another field, a run all in the field, an edit that left text). Only a
     /// `.live` run that is still going, or whose final state is still being typed, has boundaries. Everything
-    /// the field showed went: the committed text up to the boundary and the tentative text after it (`sentTentative`, which the boundary moves past once it is
-    /// committed: `awaitsSentTentative`). The field then shows nothing of the run: the rest streams into it
-    /// afresh, without a separator, and revisions start over after the boundary.
+    /// the field showed went: the committed text up to the boundary and the tentative text after it
+    /// (`sentTentative`, which the boundary moves past once it is committed: `awaitsSentTentative`). The field
+    /// then shows nothing of the run: the rest streams into it afresh, without a separator.
     public static func fieldCleared(
         state: HostState, cursor: AppliedCursor?, documentID: String?, contextBefore: String, hasText: Bool
     ) -> AppliedCursor? {
@@ -208,33 +137,13 @@ public enum ProxyEditPlanner {
         else { return nil }
         let shown = runText(cursor: current, committed: state.committed, upTo: current.committedCount) + current.volatile
         guard !shown.allSatisfy(\.isWhitespace) else { return nil }
-        current.sentShownRevision = current.revisedEnd > current.sentBase ? current.shownRevision : 0
         current.sentBase = current.committedCount
         current.sentTentative = current.volatile.allSatisfy(\.isWhitespace) ? "" : current.volatile
         current.sentCount += 1
-        current.revisedEnd = current.committedCount
-        current.revisedText = ""
-        current.shownRevision = 0
         current.volatile = ""
         current.needsSeparator = false
-        current.revisionSkipped = false
         current.finalApplied = false
         return current
-    }
-
-    /// `.hold`: nothing goes into the field while listening; the final text goes in once, at the end.
-    private static func planHeld(state: HostState, cursor: AppliedCursor, ops: [ProxyOp], context: String) -> ProxyPlan {
-        var ops = ops
-        var current = cursor
-        guard state.isFinal, !current.finalApplied else { return ProxyPlan(ops: ops, cursor: current) }
-        let text = cleanedText(state) ?? state.committed.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty {
-            ops.append(.insert((needsSeparator(before: context, inserting: text) ? " " : "") + text))
-        }
-        current.committedCount = state.committed.count
-        current.volatile = ""
-        current.finalApplied = true
-        return ProxyPlan(ops: ops, cursor: current)
     }
 
     /// The final state's post-processed text, trimmed, when there is one that differs from the streamed text.

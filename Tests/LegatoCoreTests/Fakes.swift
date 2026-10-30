@@ -433,8 +433,6 @@ final class FakeSink: TranscriptSink {
     private(set) var leases: [Date?] = []
     /// What `runEnded` reports: the final text landed in the field.
     var finalApplied = false
-    /// Live cleanup's revisions, in order (not logged, so the sink trails other tests compare stay as they were).
-    private(set) var revisions: [TranscriptRevision] = []
 
     init(log: EventLog) { self.log = log }
 
@@ -458,19 +456,8 @@ final class FakeSink: TranscriptSink {
         onRunEnded?()
         return finalApplied
     }
-    func revised(_ revision: TranscriptRevision) {
-        revisions.append(revision)
-    }
-    /// Live cleanup's trace, in order (not logged either).
-    private(set) var liveTrace: [LiveTraceEvent] = []
-    func liveTraced(_ event: LiveTraceEvent) {
-        liveTrace.append(event)
-    }
     func leaseChanged(until: Date?) {
         log.add(until == nil ? "sink.lease:nil" : "sink.lease:set")
         leases.append(until)
     }
-    /// What `sentTentative` answers: the tentative text the keyboard's field showed when it was cleared.
-    var tentative = ""
-    func sentTentative(runID: String, boundary: Int) -> String { tentative }
 }

@@ -2,10 +2,6 @@ import Foundation
 
 /// The text of a run as it is being spoken: what is committed plus the tentative tail, with a
 /// publish throttle. Feeds a size-limited surface such as a Live Activity.
-///
-/// Revision-capable: live cleanup's newest revision (`TranscriptEdit.revise`) replaces the run's text from
-/// its start, followed by the raw text committed after it. `committed` stays the raw text as committed
-/// (revision positions count in it); `revisedCommitted` and `text` show the revision.
 public struct LiveTranscript: Sendable, Equatable {
     /// At most one publish per this interval (unless forced).
     public static let minPublishInterval: TimeInterval = 1
@@ -14,18 +10,10 @@ public struct LiveTranscript: Sendable, Equatable {
 
     public private(set) var committed = ""
     public private(set) var volatile = ""
-    /// The newest revision applied, if any.
-    public private(set) var revision: TranscriptRevision?
     private var lastPublished: Date?
 
-    /// The revised committed text plus the tentative tail.
-    public var text: String { revisedCommitted + volatile }
-
-    /// `committed` with the newest revision applied.
-    public var revisedCommitted: String {
-        guard let revision else { return committed }
-        return String(committed.prefix(revision.start)) + revision.text + String(committed.dropFirst(revision.end))
-    }
+    /// The committed text plus the tentative tail.
+    public var text: String { committed + volatile }
 
     public init() {}
 
@@ -33,12 +21,6 @@ public struct LiveTranscript: Sendable, Equatable {
         switch edit {
         case .commit(let delta): committed += delta
         case .replaceVolatile(let text): volatile = text
-        case .revise(let new):
-            // Only a newer revision of raw text that is there applies.
-            guard new.n > (revision?.n ?? 0), new.start >= 0, new.end <= committed.count,
-                  String(committed.dropFirst(new.start).prefix(new.raw.count)) == new.raw
-            else { return }
-            revision = new
         }
     }
 

@@ -95,20 +95,6 @@ import Testing
         #expect(r.field.string == "Hi hello!")
     }
 
-    @Test func liveRevisionWhileTypingWaitsAndTheNextOneLandsWithoutDegrading() throws {
-        let r = rig("")
-        let writer = FieldWriter(target: r.field, channel: r.channel)
-        writer.apply(.commit(delta: "meet on friday "))
-        r.guardian.noteUserActivity()
-        writer.apply(.revise(TranscriptRevision(n: 1, start: 0, raw: "meet on friday ", text: "Meet on Friday. ")))
-        #expect(r.field.string == "meet on friday ")
-        #expect(writer.degradeReason == nil)
-        r.clock.now += 0.31
-        writer.apply(.revise(TranscriptRevision(n: 2, start: 0, raw: "meet on friday ", text: "Meet on Friday! ")))
-        #expect(r.field.string == "Meet on Friday! ")
-        #expect(writer.degradeReason == nil)
-    }
-
     @Test func finalSwapWhileTypingLeavesTheFieldAndTheWriterHealthy() throws {
         let r = rig("")
         let writer = FieldWriter(target: r.field, channel: r.channel)

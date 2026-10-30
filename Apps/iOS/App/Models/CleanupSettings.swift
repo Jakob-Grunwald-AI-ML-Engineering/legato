@@ -51,8 +51,6 @@ extension Settings {
         guard cleanupEnabled else { return nil }
         switch cleanupDelivery {
         case .replace: return .replace
-        case .clipboard: return .clipboard
-        case .hold: return .hold
         case .live: return .live
         }
     }

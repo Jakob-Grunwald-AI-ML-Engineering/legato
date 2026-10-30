@@ -306,11 +306,10 @@ private actor BridgeSpeechPreparation {
         await models.releaseSelectedModels()
     }
 
-    @Test func captureAndWholeLiveRunUseFoundationUntilNextKeptSessionRun() async throws {
+    @Test func captureAndWholeRunUseFoundationUntilNextKeptSessionRun() async throws {
         let local = BridgeBackend("local"), foundation = BridgeBackend("foundation"), gate = BridgeSignal()
         await local.block(gate)
         let (models, settings) = try rig(local: local, foundation: foundation)
-        settings.delivery = .live
         let reports = BridgeReports(), source = BridgeSource(), engine = BridgeEngine()
         let processor = CleanupProcessor(registry: models.cleanup, settings: settings,
             acquireRun: { try await models.acquireDictationCleanup(options: settings.options, inBackground: true) },
@@ -333,16 +332,15 @@ private actor BridgeSpeechPreparation {
         #expect(await models.selectedModelsAreWarm(options: settings.options))
         try await session.start(locale: Locale(identifier: "en"))
         engine.emit("hello")
-        await reports.first.wait()
         await gate.signal()
         let localReady = try await models.acquireRefine(options: settings.options, inBackground: true)
         await localReady.release()
         #expect(models.cleanupPreparation.state == .ready)
         engine.finalText("hello world")
         _ = try await session.stop()
-        #expect(await foundation.replies == 2, "Rolling and final passes keep the admitted FM backend")
+        #expect(await foundation.replies == 1, "The stop's cleanup keeps the admitted FM backend")
         #expect(await local.replies == 0)
-        #expect(await reports.reports.map(\.backend) == ["Apple Foundation Models", "Apple Foundation Models"])
+        #expect(await reports.reports.map(\.backend) == ["Apple Foundation Models"])
         try await session.start(locale: Locale(identifier: "en"))
         engine.finalText("hello")
         _ = try await session.stop()

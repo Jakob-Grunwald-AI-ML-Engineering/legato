@@ -71,10 +71,10 @@ private struct LinkRig {
 
     @Test func theRunsDeliveryIsPublishedWithItsStart() {
         let r = LinkRig()
-        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .hold)
-        #expect(r.host?.delivery == .hold)
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
+        #expect(r.host?.delivery == .live)
         r.link.update(committed: "hello ", volatile: "")
-        #expect(r.host?.delivery == .hold)
+        #expect(r.host?.delivery == .live)
     }
 
     @Test func theFinalStateCarriesTheCleanedText() {
@@ -88,7 +88,7 @@ private struct LinkRig {
 
     @Test func aNewRunForgetsTheLastCleanedTextAndDelivery() {
         let r = LinkRig()
-        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .clipboard)
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
         r.link.runEnded(committed: "a ", finalText: "A.")
         r.link.runStarted(id: "run-2", target: .keyboard)
         #expect(r.host?.finalText == nil && r.host?.delivery == nil)
@@ -105,7 +105,7 @@ private struct LinkRig {
     /// The edit queue's keys carry the field's text: the scrub removes them with the rest (L6).
     @Test func theScrubRemovesTheFieldEditKeys() {
         let r = LinkRig()
-        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live, fieldEdits: true)
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
         for key in [LinkChannel.Key.feed, LinkChannel.Key.edits, LinkChannel.Key.editsAck] {
             r.store.write(["text"], forKey: key)
         }

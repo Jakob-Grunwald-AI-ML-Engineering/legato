@@ -689,19 +689,17 @@ import Testing
 
     // MARK: Cleanup swaps through the channel keep their origin
 
-    @Test func liveRevisionAndFinalSwapGoThroughTheQueueAsCleanupEdits() throws {
+    @Test func theFinalSwapGoesThroughTheQueueAsACleanupEdit() throws {
         let field = FakeTextTarget("")
         let executor = AXFieldExecutor(target: field)!
         let writer = FieldWriter(target: field, channel: QueuedFieldWriteChannel(executor: executor, owner: "run"))
         writer.apply(.commit(delta: "meet on friday "))
-        writer.apply(.revise(TranscriptRevision(n: 1, start: 0, raw: "meet on friday ", text: "Meet on Friday. ")))
-        #expect(field.string == "Meet on Friday. ")
         #expect(writer.swapWritten(for: "Meet on Friday!") == .swapped)
         #expect(field.string == "Meet on Friday! ")
         let origins = executor.queue.feed.entries.compactMap { entry -> EditOrigin? in
             if case .applied(_, let origin, _, _) = entry.event { origin } else { nil }
         }
-        #expect(origins == [.asr, .liveCleanup, .finalSwap])
+        #expect(origins == [.asr, .finalSwap])
     }
 }
 

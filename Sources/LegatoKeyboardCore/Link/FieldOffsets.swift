@@ -1,7 +1,7 @@
 import Foundation
 import LegatoFieldEdit
 
-/// Character <-> UTF-16 conversion at the link boundary. `HostRevision` and the app's text count Characters;
+/// Character <-> UTF-16 conversion at the link boundary. The app's text counts Characters;
 /// the field edit queue counts UTF-16 units (``Span``). A position inside a Character (a surrogate pair, a ZWJ
 /// sequence, a flag, a combining mark) has no Character offset and converts to nil: callers must handle nil
 /// (drop or re-plan the edit); never round to a neighbour.

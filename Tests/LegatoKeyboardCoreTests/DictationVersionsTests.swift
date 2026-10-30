@@ -20,24 +20,6 @@ private func final(committed: String, finalText: String?, delivery: HostDelivery
         #expect(versions.runID == "run-1" && versions.documentID == "doc-A")
     }
 
-    @Test func aClipboardRunShowsTheRawText() throws {
-        let versions = try #require(DictationVersions.landed(
-            state: final(committed: "um hello world ", finalText: "Hello, world.", delivery: .clipboard),
-            cursor: cursor(committedCount: 15, finalApplied: true)))
-        #expect(versions.texts == ["um hello world", "Hello, world."])
-        #expect(versions.current == 0)
-        #expect(versions.shown == "um hello world ")
-    }
-
-    @Test func aHeldRunShowsTheInsertedTextWithNothingAfterIt() throws {
-        let versions = try #require(DictationVersions.landed(
-            state: final(committed: "um hello world ", finalText: "Hello, world.", delivery: .hold),
-            cursor: cursor(committedCount: 15, finalApplied: true)))
-        #expect(versions.texts == ["um hello world", "Hello, world."])
-        #expect(versions.current == 1)
-        #expect(versions.shown == "Hello, world.")
-    }
-
     @Test func aRunWithoutCleanupHasOneVersionToRefine() throws {
         let versions = try #require(DictationVersions.landed(
             state: final(committed: "hello world ", finalText: nil, delivery: nil),

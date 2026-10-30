@@ -14,7 +14,6 @@ final class MacSettings {
         static let gestureMode = "gestureMode"
         static let insertionMode = "insertionMode"
         static let restoreClipboard = "restoreClipboard"
-        static let experimentalEditQueue = "experimentalEditQueue"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -54,11 +53,6 @@ final class MacSettings {
     /// Put the previous clipboard back after a paste.
     var restoreClipboard: Bool {
         didSet { defaults.set(restoreClipboard, forKey: Key.restoreClipboard) }
-    }
-
-    /// "Experimental: edit queue and cleanup agent". Off by default; a run freezes it when it starts.
-    var experimentalEditQueue: Bool {
-        didSet { defaults.set(experimentalEditQueue, forKey: Key.experimentalEditQueue) }
     }
 
     // MARK: Cleanup (mirrors `cleanupStore`, observable for the UI)
@@ -116,7 +110,6 @@ final class MacSettings {
         gestureMode = defaults.string(forKey: Key.gestureMode).flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
         insertionMode = defaults.string(forKey: Key.insertionMode).flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         restoreClipboard = defaults.object(forKey: Key.restoreClipboard) as? Bool ?? true
-        experimentalEditQueue = defaults.bool(forKey: Key.experimentalEditQueue)
     }
 }
 
@@ -134,8 +127,6 @@ extension CleanupDelivery {
     var title: String {
         switch self {
         case .replace: "Replace"
-        case .clipboard: "Clipboard"
-        case .hold: "Hold"
         case .live: "Live"
         }
     }
@@ -143,13 +134,9 @@ extension CleanupDelivery {
     var explanation: String {
         switch self {
         case .replace:
-            "The raw text is typed while you speak and swapped for the cleaned text when you stop. If you typed after it or moved the cursor meanwhile, the field is left alone and the cleaned text goes to the clipboard."
-        case .clipboard:
-            "The field keeps the raw text; the cleaned text goes to the clipboard."
-        case .hold:
-            "Nothing is typed while you speak (the floating panel shows the live text); the cleaned text is inserted when you stop."
+            "The raw text is typed while you speak; when you stop, the whole text is cleaned once and only what changed is rewritten. Text you edited yourself stays; what could not be written goes to the clipboard."
         case .live:
-            "After each phrase the whole text so far is cleaned again and replaces what you see, so a later \"no wait, Thursday\" can fix an earlier phrase; a last pass runs when you stop. Once you edit the text it stays as you left it."
+            "Each sentence is cleaned as soon as you finish it, while you keep speaking; the rest is cleaned when you stop. Text you edit yourself is never changed again."
         }
     }
 }

@@ -38,7 +38,6 @@ public struct CleanupRunReport: Sendable, Equatable {
     public var refine: Bool
     /// Configured execution policy when supplied by the backend; physical placement remains unverified.
     public var device: String?
-    /// Every outcome is retained when live passes are aggregated.
     public var outcome: String = "completed"
 
     public init(
@@ -75,11 +74,6 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     /// Called when a run's cleanup begins (cleanup on), before any stage: the UI shows "Cleaning up…".
     let willRun: @Sendable () async -> Void
     let report: @Sendable (CleanupRunReport) async -> Void
-    /// What the passes of the current live run did so far.
-    private let liveRun = LiveRunTally()
-    /// The id of the current live run, for the vocabulary: every segment of one run counts as one run. A box,
-    /// because the processor is a struct.
-    private let liveRunID = LiveRunID()
     /// Supplies the `<terms>` for the model and learns from what a run changed; nil: neither.
     private let vocabulary: VocabularyService?
     private let acquireRun: (@Sendable () async throws -> CleanupRunLease?)?
@@ -147,48 +141,6 @@ public struct CleanupProcessor: TranscriptPostProcessor {
         }
     }
 
-    /// Cleanup on with delivery Live: the session cleans the run's text in rolling passes while it goes on.
-    public var cleansSegmentsLive: Bool {
-        let options = self.options
-        return options.enabled && options.delivery == .live
-    }
-
-    /// A live run starts: its readout begins afresh.
-    public func liveRunStarts() {
-        liveRun.reset()
-        liveRunID.renew()
-    }
-
-    /// The stop of a live run spends at most the setting's time limit on cleanup, the pass in flight and
-    /// the final pass together.
-    public var liveStopTimeLimit: Duration? {
-        let options = self.options
-        return options.enabled ? .seconds(options.timeoutSeconds) : nil
-    }
-
-    /// One live pass, with the frozen cleaned text before it as `context` (empty for a whole-text pass). Only
-    /// the final pass (`atStop`) shows "Cleaning up…": a pass while listening must not change what the UI says.
-    /// The report covers the run so far (``liveRunStarts()``): the time of all its passes, changed when any
-    /// changed. The result says which backend ran and whether the guard rejected a reply or time ran out.
-    public func cleanLivePass(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> LivePassResult {
-        let options = self.options
-        guard options.enabled else { return LivePassResult(text: text) }
-        if atStop { await willRun() }
-        let liveRun = liveRun
-        let report = report
-        let resolution = await runCleanup.resolution, runID = liveRunID.current
-        let ran = await CleanupCallTrace.$kind.withValue("sessionLive") {
-            await Self.runReporting(
-                text, locale: preferredLocale() ?? locale, style: options.style, refine: false,
-                timeout: .seconds(options.timeoutSeconds), settings: settings, registry: registry,
-                report: { await report(liveRun.adding($0)) }, context: context,
-                vocabulary: vocabulary, runID: runID, resolution: resolution, options: options)
-        }
-        return LivePassResult(
-            text: ran.pipeline.text, guardRejected: ran.pipeline.guardRejected, timedOut: ran.pipeline.timedOut,
-            backend: ran.report.backend, device: ran.report.device)
-    }
-
     /// One cleanup in `style`, whatever the on/off switch says (refine uses it directly). ITN and the backend
     /// come from `settings`. `context`: the frozen cleaned text before `text` (a live pass past the length cap).
     /// `vocabulary`: its terms go to the model, and what the run changed teaches it (as run `runID`), in the
@@ -253,56 +205,12 @@ public struct CleanupProcessor: TranscriptPostProcessor {
     }
 }
 
-/// The id of the current live run.
-final class LiveRunID: Sendable {
-    private let id = Mutex(UUID())
-    var current: UUID { id.withLock { $0 } }
-    func renew() { id.withLock { $0 = UUID() } }
-}
-
-/// The sum of a live run's pass reports: total time, changed when any pass changed, every backend
-/// and device that ran (in order, each once) and every skip reason.
-final class LiveRunTally: Sendable {
-    private let total = Mutex<CleanupRunReport?>(nil)
-
-    func reset() { total.withLock { $0 = nil } }
-
-    /// Adds one pass's report and returns the run's so far.
-    func adding(_ segment: CleanupRunReport) -> CleanupRunReport {
-        total.withLock { total in
-            guard var run = total else {
-                total = segment
-                return segment
-            }
-            run.backend = Self.merged(run.backend, segment.backend, separator: " + ")
-            run.outcome = Self.merged(run.outcome, segment.outcome, separator: " + ")
-            run.device = Self.merged(run.device, segment.device, separator: "/")
-            for reason in segment.skipped where !run.skipped.contains(reason) { run.skipped.append(reason) }
-            run.style = segment.style
-            run.changed = run.changed || segment.changed
-            run.milliseconds += segment.milliseconds
-            total = run
-            return run
-        }
-    }
-
-    private static func merged(_ run: String?, _ next: String?, separator: String) -> String? {
-        guard let next else { return run }
-        guard let run else { return next }
-        return run.components(separatedBy: separator).contains(next) ? run : run + separator + next
-    }
-
-    private static func merged(_ run: String, _ next: String, separator: String) -> String {
-        merged(Optional(run), Optional(next), separator: separator) ?? run
-    }
-}
-
 extension CleanupRunLease {
     /// Gives the admitted backend back.
     public func end() async { await release() }
 }
 
-/// One cleanup pass outside a session's run (the stateless final pass of a run whose cleanup agent was absent): it
+/// One cleanup pass outside a session's run (the final pass of a run whose cleanup agent was absent): it
 /// takes the same lease a run takes at its start, so the pass runs on the admitted backend (the Foundation Models
 /// bridge while a Core ML load is still warming) and neither contends with that load nor has it retired mid-pass.
 public enum LeasedCleanup {

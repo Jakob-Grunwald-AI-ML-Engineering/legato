@@ -1,21 +1,27 @@
 import Foundation
 
-/// How a cleaned-up transcript reaches a text field that the raw text was streamed into while it was spoken.
+/// How the cleanup agent cleans a run that streams into a text field (#80).
 public enum CleanupDelivery: String, Sendable, Equatable, CaseIterable, Codable {
-    /// Swap the streamed text for the cleaned text in one edit; when the field no longer ends with the
-    /// streamed text, leave it and put the cleaned text on the clipboard.
+    /// Once, at stop: the whole text is rewritten through the cleanup session. It reads as a full rewrite, but lands
+    /// as minimal patches; when the field no longer shows the run's text, the cleaned text goes to the clipboard.
     case replace
-    /// The field keeps the streamed text; the cleaned text goes to the clipboard.
-    case clipboard
-    /// Nothing streams into the field while listening; the cleaned text is inserted when the run ends.
-    case hold
-    /// Rolling cleanup while speaking: after each finished phrase the whole dictated text so far is cleaned
-    /// again from the raw text (so a later "no wait, Thursday" can fix an earlier phrase) and replaces what
-    /// the field shows for the run, while the field still ends with it; a final pass runs at the end. Once
-    /// the user edits the run's text it stays as it is (the cleaned text goes to the clipboard); a cleared
-    /// field (a sent message) closes the text before it.
+    /// While speaking: each finished sentence is rewritten as it ends and lands as minimal patches; the rest at stop.
     case live
 
-    /// Whether the text streams into the field while it is spoken.
-    public var streamsIntoField: Bool { self != .hold }
+    /// A stored or sent value, older builds' included: the removed Hold and Clipboard modes (#80) read as Live;
+    /// nil for anything else.
+    public init?(stored raw: String) {
+        switch raw {
+        case "hold", "clipboard": self = .live
+        default: self.init(rawValue: raw)
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        guard let value = CleanupDelivery(stored: raw) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown delivery \(raw)"))
+        }
+        self = value
+    }
 }

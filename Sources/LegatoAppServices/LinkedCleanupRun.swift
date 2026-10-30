@@ -1,8 +1,7 @@
 import Foundation
 import LegatoFieldEdit
 
-/// One iOS dictation run with the experimental edit queue ("Experimental: edit queue and cleanup agent" on), on
-/// the app's side of the keyboard link. The keyboard owns the queue; this type reads its feed and sends edits.
+/// One iOS dictation run with cleanup on, on the app's side of the keyboard link. The keyboard owns the queue; this type reads its feed and sends edits.
 ///
 /// - **Feed.** The keyboard publishes its field events as `FeedBatch`es to `link.feed` (``Transport/read``), a few
 ///   per second at most. Every batch is folded into a ``FeedMirror`` at once (also while the agent is still
@@ -10,16 +9,16 @@ import LegatoFieldEdit
 ///   folded into one, so a pass plans on the newest field.
 /// - **Agent (Live).** Made in the background on the warm rolling session (``init(owner:agent:transport:agentWait:finalWait:)``);
 ///   the run never waits for it. Its calls run one at a time, in the order the run makes them: feed batches,
-///   the in-process ASR text (``heard(committed:volatile:)``: `hear` for newly committed text, the tentative
-///   length). Its transactions go to the keyboard over `link.edits` (cleanup lane), based on the newest batch's
+///   the tentative length of the in-process ASR text (``heard(committed:volatile:)``), and a replan when the agent
+///   saw the speaker pause. Its transactions go to the keyboard over `link.edits` (cleanup lane), based on the newest batch's
 ///   version and queue instance; their conflicts and supersedes come back in the feed, which the agent reads
 ///   itself (it re-plans in the same call).
 /// - **Stop (Live).** ``finish()`` waits (``agentWait`` at most) for the agent to exist: absent, the caller cleans
-///   the run with the stateless pass and writes it with ``deliver(raw:cleaned:)``. Present, it catches the agent
+///   the run with the session's rewrite and writes it with ``deliver(raw:cleaned:)``. Present, it catches the agent
 ///   up, takes its final pass, sends it, and waits (``finalWait`` at most) for every edit of the run still without
 ///   an outcome; what did not land is ``Outcome/unapplied`` (the caller's clipboard fallback,
 ///   ``fallbackText(unapplied:)``).
-/// - **Replace / absent agent.** ``deliver(raw:cleaned:)``: one stateless final pass's text as the smallest
+/// - **Replace / absent agent.** ``deliver(raw:cleaned:)``: the rewrite's text as the smallest
 ///   patches of the run's text (``FeedMirror/patches(from:to:owner:origin:)``), one transaction per patch (one failed
 ///   guard never stops the others), their outcomes waited for.
 /// - **Out of the window (iOS).** Only the patches inside the caret-relative window are written; when any is not
@@ -84,7 +83,6 @@ public final class LinkedCleanupRun {
     private var pumping: Task<Void, Never>?
     /// The agent is done with (finished, absent or cancelled): later agent work is dropped. The feed is still read.
     private var closed = false
-    private var heardCount = 0
     private var lastTentative = -1
     /// The agent's edits sent, by id, until their outcome.
     private var outstanding: [UUID: EditTransaction] = [:]
@@ -95,7 +93,7 @@ public final class LinkedCleanupRun {
     private var stats = StopStats()
     /// Why the last ``deliver(raw:cleaned:)`` found nothing to patch (``FeedMirror/Unpatchable``).
     public private(set) var notShownReason: String?
-    /// How the last ``stop(_:committed:text:finalText:applied:statelessPass:copy:)`` went (counts, no text).
+    /// How the last ``stop(_:committed:text:finalText:applied:rewrite:copy:)`` went (counts, no text).
     public private(set) var stopReport: StopReport?
     /// Why the last ``deliver(raw:cleaned:)`` was ``Delivery/partial``: outOfWindow, conflict (a patch handed back) or
     /// timedOut (a patch without an outcome).
@@ -113,20 +111,33 @@ public final class LinkedCleanupRun {
 
     private enum Work {
         case batch(FeedBatch)
-        case hear(String)
         case tentative(Int)
+        /// The agent saw the speaker pause: ask it again without a new batch.
+        case replan
     }
+
+    /// Makes the run's agent; `wake` is the agent's pause wake (``CleanupAgent/init(session:options:now:wake:)``).
+    public typealias MakeAgent = @Sendable (_ wake: @escaping @Sendable () async -> Void) async -> CleanupAgent?
 
     /// `agent`: makes the run's agent (nil: none, e.g. Replace); it runs in the background, never blocking the run.
     public init(
-        owner: String, agent: (@Sendable () async -> CleanupAgent?)?, transport: Transport,
+        owner: String, agent: MakeAgent?, transport: Transport,
         agentWait: Duration = .seconds(2), finalWait: Duration = .seconds(2)
     ) {
         self.owner = owner
         self.transport = transport
         self.agentWait = agentWait
         self.finalWait = finalWait
-        made = agent.map { make in Task { await make() } }
+        let box = WeakLinkedRun()
+        made = agent.map { make in Task { await make({ await box.wake() }) } }
+        box.run = self
+    }
+
+    /// The agent's pause wake: one replan, after whatever is queued.
+    fileprivate func pauseWake() {
+        guard !closed, made != nil else { return }
+        work.append(.replan)
+        pump()
     }
 
     /// Whether an agent works on this run (one was asked for; it may still turn out absent).
@@ -145,14 +156,10 @@ public final class LinkedCleanupRun {
         pump()
     }
 
-    /// The app's own recognized text (`DictationSession`): newly committed text is heard, the tentative tail is
-    /// left out of what the agent may edit.
+    /// The app's own recognized text (`DictationSession`): the tentative tail is left out of what the agent may
+    /// edit (the committed text reaches it through the feed, as the keyboard wrote it).
     public func heard(committed: String, volatile: String) {
         guard !closed, made != nil else { return }
-        if committed.count > heardCount {
-            work.append(.hear(String(committed.dropFirst(heardCount))))
-            heardCount = committed.count
-        }
         let tentative = volatile.isEmpty ? 0 : volatile.utf16.count + 1  // with the separator it may follow
         if tentative != lastTentative {
             work.append(.tentative(tentative))
@@ -194,11 +201,14 @@ public final class LinkedCleanupRun {
             while let self, !self.closed, !self.work.isEmpty {
                 let wake = Self.coalesced(self.work)
                 self.work = []
-                if !wake.heard.isEmpty { await agent.hear(wake.heard) }
                 if let length = wake.tentative { await agent.setTentative(length: length) }
                 for batch in wake.batches {
                     guard !self.closed else { break }
                     let edits = await agent.consume(batch)
+                    if !self.closed { self.send(edits, final: false) }
+                }
+                if wake.replan, wake.batches.isEmpty, !self.closed {
+                    let edits = await agent.replan()
                     if !self.closed { self.send(edits, final: false) }
                 }
             }
@@ -206,13 +216,13 @@ public final class LinkedCleanupRun {
         }
     }
 
-    /// The work of one wake: the heard text in order, the newest tentative length, and the batches with every run
-    /// of consecutive deltas (same queue instance, no resync between) folded into one batch.
-    private static func coalesced(_ work: [Work]) -> (heard: String, tentative: Int?, batches: [FeedBatch]) {
-        var heard = "", tentative: Int?, batches: [FeedBatch] = []
+    /// The work of one wake: the newest tentative length, whether a replan was asked for, and the batches with
+    /// every run of consecutive deltas (same queue instance, no resync between) folded into one batch.
+    private static func coalesced(_ work: [Work]) -> (tentative: Int?, replan: Bool, batches: [FeedBatch]) {
+        var replan = false, tentative: Int?, batches: [FeedBatch] = []
         for item in work {
             switch item {
-            case .hear(let text): heard += text
+            case .replan: replan = true
             case .tentative(let length): tentative = length
             case .batch(let batch):
                 if !batch.resync, let last = batches.last, !last.resync, last.session == batch.session {
@@ -224,7 +234,7 @@ public final class LinkedCleanupRun {
                 }
             }
         }
-        return (heard, tentative, batches)
+        return (tentative, replan, batches)
     }
 
     /// Whether `cleaned` is a text to give the user instead of `raw`: not empty, and not `raw` once trimmed.
@@ -254,7 +264,7 @@ public final class LinkedCleanupRun {
         guard await Self.exists(made, within: agentWait) == true, let agent = await made.value else {
             trace?("agent.absent")
             // An agent still being made holds the model (loading, prefilling): cancelled and settled before the
-            // caller's stateless pass, which a single-worker runtime would refuse.
+            // caller's rewrite, which a single-worker runtime would refuse.
             await settle()
             return Outcome(unapplied: [], agentAbsent: true)
         }
@@ -288,7 +298,7 @@ public final class LinkedCleanupRun {
         return Outcome(unapplied: unapplied)
     }
 
-    /// One stateless pass's text as patches of the run's text (Replace, or Live without an agent): the ones inside
+    /// One rewrite's text as patches of the run's text (Replace, or Live without an agent): the ones inside
     /// the window are written, the rest never (``Delivery/partial``).
     public func deliver(raw: String, cleaned: String) async -> Delivery {
         feedChanged()
@@ -346,7 +356,7 @@ public final class LinkedCleanupRun {
 
     /// How the run's cleaned text reaches the field.
     public enum Mode: String, Sendable, Equatable {
-        /// The cleanup agent edits the run as it goes (or, absent, the stop's stateless pass as patches).
+        /// The cleanup agent edits the run as it goes (or, absent, the stop's rewrite as patches).
         case live
         /// The session's final pass, written as patches at the stop.
         case replace
@@ -389,7 +399,7 @@ public final class LinkedCleanupRun {
             case noKeyboard
             /// Replace: the session's text is its raw text (the pass changed nothing, failed or timed out).
             case noFinalText
-            /// Live: no agent at the stop; `reason` says how its stateless pass went.
+            /// Live: no agent at the stop; `reason` says how its rewrite went.
             case agentAbsent
             /// Live: some of the agent's edits did not land (`reason`: how many); the clipboard has the text.
             case unapplied
@@ -425,10 +435,10 @@ public final class LinkedCleanupRun {
     /// The whole stop of the run. `text`: the session's text (Live with the agent: the raw text; its own final
     /// pass was off); `finalText`: the session's cleaned text when it differs from the trimmed `committed`.
     /// `applied`: waits for the keyboard to confirm the streamed text; nil when no visible keyboard can.
-    /// `statelessPass`: today's stateless final cleanup; `copy`: puts a text on the clipboard (false: unchanged).
+    /// `rewrite`: the whole text rewritten on the rolling session (``PassageRewriter``); `copy`: puts a text on the clipboard (false: unchanged).
     public func stop(
         _ mode: Mode, committed: String, text: String, finalText: String?, applied: (@MainActor () async -> Bool)?,
-        statelessPass: @MainActor (String) async -> String?, copy: @MainActor (String) -> Bool
+        rewrite: @MainActor (String) async -> String?, copy: @MainActor (String) -> Bool
     ) async -> Stop {
         stats = StopStats()
         notShownReason = nil
@@ -444,12 +454,12 @@ public final class LinkedCleanupRun {
         }
         guard let applied else {
             // An agent call still in flight holds the model (a single-worker runtime refuses a second caller):
-            // it is cancelled and settled before the stateless pass.
+            // it is cancelled and settled before the rewrite.
             await settle()
             // The agent was to clean this run, so the session's own final pass was off and `text` is raw: the
-            // stateless pass cleans it for the clipboard (as for an absent agent). Without an agent the session's
+            // rewrite cleans it for the clipboard (as for an absent agent). Without an agent the session's
             // text is already its cleaned text.
-            guard mode == .live, hasAgent, let pass = await statelessPass(text), Self.changes(pass, text) else {
+            guard hasAgent, let pass = await rewrite(text), Self.changes(pass, text) else {
                 return done(Stop(landed: false), .noKeyboard)
             }
             let copied = copy(pass)
@@ -458,7 +468,7 @@ public final class LinkedCleanupRun {
             return done(Stop(landed: copied, cleaned: copied ? pass : nil), .noKeyboard, copied: copied)
         }
         let confirmed = await applied()
-        if mode == .replace {
+        if mode == .replace, !hasAgent {
             guard let finalText else {
                 return done(Stop(landed: confirmed), .noFinalText, reason: confirmed ? nil : "unconfirmed")
             }
@@ -490,8 +500,12 @@ public final class LinkedCleanupRun {
         var shownInField = false
         if outcome.agentAbsent {
             branch = .agentAbsent
-            if let pass = await statelessPass(text) {
-                let delivery = await deliver(raw: committed, cleaned: pass)
+            // After a send (the field was cleared mid-run) only what the field shows of the run since is cleaned:
+            // the sent text is gone from the field and never comes back, not even on the clipboard.
+            let scope = mirror.wasCleared ? mirror.runText : text
+            let raw = mirror.wasCleared ? scope : committed
+            if let scope, let raw, let pass = await rewrite(scope) {
+                let delivery = await deliver(raw: raw, cleaned: pass)
                 reason = delivery == .notShown ? notShownReason : delivery == .partial ? partialReason : Self.describe(delivery)
                 partial = delivery == .partial
                 switch delivery {
@@ -502,14 +516,14 @@ public final class LinkedCleanupRun {
                     shownInField = true
                 }
             } else {
-                reason = "noPass"
+                reason = scope == nil ? "sent" : "noPass"
             }
         } else if mirror.runText == nil, !mirror.wasCleared, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // The run's spans are unknown (the keyboard restarted: another queue's window is not searched): where
-            // the agent's edits are cannot be told. The whole text cleaned by the stateless pass goes to the
+            // the agent's edits are cannot be told. The whole text cleaned by the rewrite goes to the
             // clipboard, or the session's own text: never nothing.
             trace?("link.spans unknown")
-            guard let pass = await statelessPass(text), Self.changes(pass, text) else {
+            guard let pass = await rewrite(text), Self.changes(pass, text) else {
                 return done(Stop(landed: false), .spansUnknown, reason: "noPass")
             }
             let copied = copy(pass)
@@ -522,9 +536,9 @@ public final class LinkedCleanupRun {
         } else if outcome.unapplied.isEmpty {
             cleaned = mirror.runText
             // The agent edits only the window: a sentence of the run that scrolled out (or is cut by the window's
-            // edge) was never reviewed, or could not be written. As Replace does: when the stateless pass over the
+            // edge) was never reviewed, or could not be written. As Replace does: when the rewrite over the
             // whole run still changes it, the whole cleaned text goes to the clipboard with the notice.
-            if mirror.runLeftWindow || mirror.lostRunText, let pass = await statelessPass(text),
+            if mirror.runLeftWindow || mirror.lostRunText, let pass = await rewrite(text),
                 Self.changes(pass, mirror.runText ?? text)
             {
                 branch = .partial
@@ -643,4 +657,10 @@ private final class FirstAnswer: @unchecked Sendable {
         done = true
         continuation?.resume(returning: value)
     }
+}
+
+/// Lets the agent's pause wake reach its run (the agent is made before the run is fully set up).
+private final class WeakLinkedRun: @unchecked Sendable {
+    @MainActor weak var run: LinkedCleanupRun?
+    func wake() async { await MainActor.run { run?.pauseWake() } }
 }

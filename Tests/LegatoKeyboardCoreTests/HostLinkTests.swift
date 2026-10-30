@@ -357,7 +357,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     /// the stop is done, and the retention window starts only then.
     @Test func aHeldStopIsScrubbedOnlyAfterItsRelease() async {
         let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live, fieldEdits: true)
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
         r.link.update(committed: "secret words ", volatile: "")
         r.link.runEnded(committed: "secret words ", holdingScrub: true)
         for _ in 0..<20 { await Task.yield() }
@@ -372,7 +372,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     /// A release that comes after the next run began does not scrub that run.
     @Test func aLateReleaseLeavesTheNextRunAlone() async {
         let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live, fieldEdits: true)
+        r.link.runStarted(id: "run-1", target: .keyboard, delivery: .live)
         r.link.runEnded(committed: "a ", holdingScrub: true)
         r.link.runStarted(id: "run-2", target: .keyboard)
         r.link.update(committed: "second ", volatile: "")

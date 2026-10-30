@@ -5,30 +5,30 @@ import LegatoPostProcessing
 import Testing
 @testable import LegatoAppServices
 
-/// A scripted rolling session: replies in order (`[]` once they run out); a reply may wait first.
+/// A scripted rolling session: replies in order (the request echoed once they run out: no change); a reply may wait first.
 private actor ScriptedSession: LLMSession {
     nonisolated let tokenBudget = 4_000
-    private var replies: [(delay: Duration, json: String)]
+    private var replies: [(delay: Duration, text: String)]
     private(set) var requests: [String] = []
-    private(set) var appended: [String] = []
 
-    init(_ replies: [(Duration, String)]) { self.replies = replies.map { (delay: $0.0, json: $0.1) } }
+    init(_ replies: [(Duration, String)]) { self.replies = replies.map { (delay: $0.0, text: $0.1) } }
 
     func usage() async throws -> LLMTokenUsage { LLMTokenUsage(head: 0, history: 0) }
-    func append(_ chunk: LLMSessionChunk) async throws { if case .text(let text) = chunk { appended.append(text) } }
-    func respond(to request: String) async throws -> String { "" }
-    func respondStructured<Output: LLMStructuredOutput>(_ type: Output.Type, to request: String) async throws -> Output {
+    func append(_ chunk: LLMSessionChunk) async throws {}
+    func respond(to request: String) async throws -> String {
         requests.append(request)
-        let reply = replies.isEmpty ? (delay: Duration.zero, json: "[]") : replies.removeFirst()
+        let reply = replies.isEmpty ? (delay: Duration.zero, text: request) : replies.removeFirst()
         if reply.delay > .zero { try await Task.sleep(for: reply.delay) }
-        return try LLMStructuredDecoding.decode(Output.self, from: reply.json)
+        return reply.text
+    }
+    func respondStructured<Output: LLMStructuredOutput>(_ type: Output.Type, to request: String) async throws -> Output {
+        throw LLMSessionError.invalidStructuredOutput("the agent asks for plain text")
     }
     func trim(keepingSuffix tokens: Int) async throws {}
     func warm() async throws {}
     func close() async {}
 }
 
-private func edit(_ sentence: Int, _ text: String) -> String { #"[{"sentence":\#(sentence),"text":"\#(text)"}]"# }
 
 /// The keyboard of an iOS run, in memory: its queue over the caret-relative window, the feed it publishes, the
 /// edits it takes from the link (each written and confirmed at once).
@@ -39,6 +39,8 @@ private final class Keyboard {
     var caret: Int
     private var published: Int?
     var inbox: [EditTransaction] = []
+    /// Every edit taken from the link, in order.
+    var received: [EditTransaction] = []
 
     init(_ text: String = "") {
         field = text
@@ -72,6 +74,7 @@ private final class Keyboard {
 
     func receive(_ transactions: [EditTransaction]) {
         guard !deaf else { return }
+        received += transactions
         for transaction in transactions { queue.submit(transaction) }
         drain()
     }
@@ -104,11 +107,11 @@ private final class Keyboard {
 
 @MainActor
 private func run(_ keyboard: Keyboard, session: ScriptedSession?, agentDelay: Duration = .zero) -> LinkedCleanupRun {
-    var agent: (@Sendable () async -> CleanupAgent?)?
+    var agent: LinkedCleanupRun.MakeAgent?
     if let session {
-        agent = { @Sendable () async -> CleanupAgent? in
+        agent = { wake in
             if agentDelay > .zero { try? await Task.sleep(for: agentDelay) }
-            return CleanupAgent(session: session, options: .init(owner: "run", timeout: .seconds(5)))
+            return CleanupAgent(session: session, options: .init(owner: "run", timeout: .seconds(5)), wake: wake)
         }
     }
     return LinkedCleanupRun(
@@ -187,7 +190,7 @@ struct LinkedCleanupRunTests {
     /// and nothing is left unapplied.
     @Test func theAgentsEditsLandOverTheLink() async {
         let keyboard = Keyboard()
-        let session = ScriptedSession([(.zero, edit(1, "I saw the dog."))])
+        let session = ScriptedSession([(.zero, "I saw the dog.")])
         let run = run(keyboard, session: session)
         run.feedChanged()  // the keyboard's first batch: the field before the run's text
         keyboard.asr("I saw teh dog.")
@@ -196,16 +199,15 @@ struct LinkedCleanupRunTests {
         #expect(ready1)
         let outcome = await run.finish()
         #expect(outcome == .init(unapplied: []))
-        let appended = await session.appended
-        #expect(appended.contains { $0.contains("I saw teh dog.") })  // heard
+        #expect(await session.requests == ["I saw teh dog."])  // one turn: the sentence
     }
 
     /// The user types into the sentence the agent is rewriting while it thinks: the edit comes back as a conflict
-    /// with the user's note, the agent writes the note into its context and goes on with the next sentence; the
+    /// with the user's note, the agent never asks about that sentence again and goes on with the next one; the
     /// user's text stays.
     @Test func aUserEditMidRunConflictsWithANoteAndTheAgentReplans() async {
         let keyboard = Keyboard()
-        let session = ScriptedSession([(.milliseconds(300), edit(1, "the cat sat.")), (.zero, edit(2, "A dog ran."))])
+        let session = ScriptedSession([(.milliseconds(300), "the cat sat."), (.zero, "A dog ran.")])
         let run = run(keyboard, session: session)
         var lines: [String] = []
         run.trace = { lines.append($0) }
@@ -221,10 +223,8 @@ struct LinkedCleanupRunTests {
         #expect(ready3, "\(keyboard.field)")
         let outcome = await run.finish()
         #expect(lines.contains("agent.outcome result=conflict reason=overlap byUser=1 note=1"))
-        let notes = await session.appended
-        #expect(notes.contains { $0.contains(Conflict.userNote) })
         let requests = await session.requests
-        #expect(requests.count == 2 && requests[1].contains("Locked: 1"))
+        #expect(requests == ["teh cat sat.", "A dgo ran."])
         #expect(outcome.unapplied.isEmpty)  // the conflicted one was re-planned during the run
         #expect(keyboard.field == "texh cat sat. A dog ran.")
     }
@@ -232,7 +232,7 @@ struct LinkedCleanupRunTests {
     /// The final pass's edit gets no outcome within the wait: it is unapplied, and the fallback text carries it.
     @Test func aFinalEditThatDoesNotLandIsLeftForTheClipboard() async {
         let keyboard = Keyboard()
-        let session = ScriptedSession([(.zero, edit(1, "I saw the dog"))])
+        let session = ScriptedSession([(.zero, "I saw the dog")])
         let run = run(keyboard, session: session)
         run.feedChanged()
         keyboard.asr("I saw teh dog")  // unfinished: only the final pass reviews it
@@ -248,7 +248,7 @@ struct LinkedCleanupRunTests {
     @Test func anAbsentAgentLeavesTheStatelessPassToTheStop() async {
         let keyboard = Keyboard()
         let run = LinkedCleanupRun(
-            owner: "run", agent: { nil }, transport: keyboard.transport, agentWait: .milliseconds(300),
+            owner: "run", agent: { _ in nil }, transport: keyboard.transport, agentWait: .milliseconds(300),
             finalWait: .milliseconds(500))
         run.feedChanged()
         keyboard.asr("teh cat sat")
@@ -262,7 +262,7 @@ struct LinkedCleanupRunTests {
     /// An agent still warming past the cap is absent, and once it arrives it changes nothing.
     @Test func aLateAgentIsRetired() async {
         let keyboard = Keyboard()
-        let session = ScriptedSession([(.zero, edit(1, "I saw the dog."))])
+        let session = ScriptedSession([(.zero, "I saw the dog.")])
         let run = run(keyboard, session: session, agentDelay: .milliseconds(600))
         run.feedChanged()
         keyboard.asr("I saw teh dog.")
@@ -313,11 +313,11 @@ struct LinkedCleanupRunTests {
 
     // MARK: Coalescing (review L6 #1)
 
-    /// Batches that arrive while a pass is in flight are taken in together once it is done: one pass over the
-    /// newest field (based on the newest version), not one per batch, each based further back.
+    /// Batches that arrive while a turn is in flight are taken in together once it is done: the next turns plan on
+    /// the newest field (based on the newest version), not one batch at a time, each based further back.
     @Test func batchesArrivingDuringAPassAreConsumedTogether() async {
         let keyboard = Keyboard()
-        let session = ScriptedSession([(.milliseconds(300), edit(1, "I saw the dog."))])
+        let session = ScriptedSession([(.milliseconds(300), "I saw the dog."), (.zero, "It ran."), (.zero, "It sat down.")])
         let run = run(keyboard, session: session)
         run.feedChanged()
         keyboard.asr("I saw teh dog.")
@@ -328,12 +328,14 @@ struct LinkedCleanupRunTests {
             keyboard.asr(sentence)
             run.feedChanged()
         }
-        let landed = await linkSettles { @MainActor in keyboard.field.hasPrefix("I saw the dog.") }
-        #expect(landed)
-        try? await Task.sleep(for: .milliseconds(200))
+        let newest = keyboard.queue.feed.version
+        let landed = await linkSettles { @MainActor in keyboard.field == "I saw the dog. It ran. It sat down. It slept." }
+        #expect(landed, "\(keyboard.field)")
         let requests = await session.requests
-        #expect(requests.count == 2, "\(requests.count) passes")
-        #expect(requests.last.map { $0.contains("It ran.") && $0.contains("It slept.") } == true)
+        #expect(requests.prefix(3) == ["I saw teh dog.", "It ran.", "It sat."])
+        // The edit planned after the slow turn is based on the newest batch, not on the one that came first.
+        #expect(keyboard.received.count == 2)
+        #expect(keyboard.received.last?.base == newest)
         _ = await run.finish()
     }
 
@@ -379,7 +381,7 @@ struct LinkedCleanupRunTests {
         var copied: [String] = []
         let stop = await run.stop(
             .live, committed: "teh cat sat ", text: "teh cat sat", finalText: nil, applied: nil,
-            statelessPass: { _ in "The cat sat." }, copy: { copied.append($0); return true })
+            rewrite: { _ in "The cat sat." }, copy: { copied.append($0); return true })
         #expect(copied == ["The cat sat."])
         #expect(stop == .init(landed: true, cleaned: "The cat sat."))
     }
@@ -392,7 +394,7 @@ struct LinkedCleanupRunTests {
         var copied: [String] = []
         let stop = await run.stop(
             .replace, committed: "teh cat ", text: "The cat.", finalText: "The cat.", applied: nil,
-            statelessPass: { _ in passes += 1; return "x" }, copy: { copied.append($0); return true })
+            rewrite: { _ in passes += 1; return "x" }, copy: { copied.append($0); return true })
         #expect(stop == .init(landed: false, cleaned: nil))
         #expect(passes == 0 && copied.isEmpty)
     }
@@ -402,7 +404,7 @@ struct LinkedCleanupRunTests {
     /// instead, never nothing.
     @Test func unknownSpansFallBackToTheWholeCleanedText() async {
         let keyboard = Keyboard()
-        let run = run(keyboard, session: ScriptedSession([(.zero, edit(1, "I saw the dog"))]))
+        let run = run(keyboard, session: ScriptedSession([(.zero, "I saw the dog")]))
         run.feedChanged()
         keyboard.asr("I saw teh dog")  // unfinished: only the final pass reviews it
         run.feedChanged()
@@ -411,7 +413,7 @@ struct LinkedCleanupRunTests {
         let stopping = Task { @MainActor in
             await run.stop(
                 .live, committed: "I saw teh dog ", text: "I saw teh dog", finalText: nil, applied: { true },
-                statelessPass: { _ in "I saw the dog." }, copy: { copied.append($0); return true })
+                rewrite: { _ in "I saw the dog." }, copy: { copied.append($0); return true })
         }
         try? await Task.sleep(for: .milliseconds(100))
         keyboard.restart()
@@ -432,7 +434,7 @@ struct LinkedCleanupRunTests {
         var copied: [String] = []
         let stop = await run.stop(
             .live, committed: "I saw teh dog ", text: "I saw teh dog", finalText: nil, applied: { true },
-            statelessPass: { _ in "I saw the dog." }, copy: { copied.append($0); return true })
+            rewrite: { _ in "I saw the dog." }, copy: { copied.append($0); return true })
         #expect(copied == ["I saw the dog."])
         #expect(stop.landed)
     }
@@ -447,7 +449,7 @@ struct LinkedCleanupRunTests {
         var copied: [String] = []
         let stop = await run.stop(
             .replace, committed: "teh cat", text: "teh cat ", finalText: "teh cat ", applied: { true },
-            statelessPass: { _ in nil }, copy: { copied.append($0); return true })
+            rewrite: { _ in nil }, copy: { copied.append($0); return true })
         #expect(stop.landed)
         #expect(copied.isEmpty)
     }

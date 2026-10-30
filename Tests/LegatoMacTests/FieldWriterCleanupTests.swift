@@ -23,7 +23,7 @@ import Testing
         let field = FakeTextTarget("Dear ")
         let writer = streamed(field)
         #expect(field.string == "Dear hello world")
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .done)
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .done)
         #expect(field.string == "Dear Hello, world.")
     }
 
@@ -31,7 +31,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = streamed(field)
         let before = field.writes.count
-        _ = writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace)
+        _ = writer.finish(rawText: raw, cleanedText: cleaned)
         #expect(field.writes.count == before + 1)
     }
 
@@ -39,7 +39,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = FieldWriter(target: field)
         writer.apply(.commit(delta: "hello world "))
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .done)
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .done)
         #expect(field.string == "Hello, world. ")
     }
 
@@ -47,7 +47,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = FieldWriter(target: field)
         writer.apply(.commit(delta: "hello"))
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .done)
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .done)
         #expect(field.string == "Hello, world.")
     }
 
@@ -55,7 +55,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = streamed(field)
         field.externalEdit(UTF16Range(location: 0, length: 1), with: "J")
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .copy(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .copy(cleaned))
         #expect(field.string == "Jello world")
     }
 
@@ -63,7 +63,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = streamed(field)
         field.userTypes(" again")
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .copy(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .copy(cleaned))
         #expect(field.string == "hello world again")
     }
 
@@ -71,7 +71,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = streamed(field)
         field.moveCaret(to: 0)
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .copy(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .copy(cleaned))
         #expect(field.string == "hello world")
     }
 
@@ -79,7 +79,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = streamed(field)
         field.focused = false
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .copy(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .copy(cleaned))
         #expect(field.string == "hello world")
     }
 
@@ -87,7 +87,7 @@ import Testing
         let field = FakeTextTarget()
         let writer = streamed(field)
         field.failWritesAfter = 2
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .copy(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .copy(cleaned))
         #expect(field.string == "hello world")
     }
 
@@ -95,14 +95,14 @@ import Testing
         let field = FakeTextTarget()
         let writer = streamed(field)
         field.ignoreWrites = true
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .copy(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .copy(cleaned))
         #expect(field.string == "hello world")
     }
 
     @Test func nothingStreamedYetWritesTheCleanedTextOnce() {
         let field = FakeTextTarget("abc")
         let writer = FieldWriter(target: field)
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .done)
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .done)
         #expect(field.string == "abcHello, world.")
         #expect(field.writes.count == 1)
     }
@@ -110,37 +110,23 @@ import Testing
     @Test func noTargetPastesTheCleanedText() {
         let writer = FieldWriter(target: nil)
         writer.apply(.commit(delta: raw))
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .paste(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .paste(cleaned))
     }
 
     @Test func firstWriteIgnoredPastesTheCleanedText() {
         let field = FakeTextTarget()
         field.ignoreWrites = true
         let writer = streamed(field)
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace) == .paste(cleaned))
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .paste(cleaned))
     }
 
-    // MARK: Clipboard
+    // MARK: Insert on stop
 
-    @Test func clipboardKeepsTheRawTextAndCopiesTheCleanedText() {
-        let field = FakeTextTarget()
-        let writer = streamed(field)
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .clipboard) == .copy(cleaned))
-        #expect(field.string == "hello world")
-    }
-
-    @Test func clipboardWithNothingInTheFieldPastesTheCleanedText() {
-        let writer = FieldWriter(target: nil)
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .clipboard) == .paste(cleaned))
-    }
-
-    // MARK: Hold
-
-    @Test func holdWritesOnlyTheCleanedTextAtTheEnd() {
+    @Test func insertOnStopWritesOnlyTheCleanedTextAtTheEnd() {
         let field = FakeTextTarget()
         let writer = streamed(field, mode: .insertOnStop)
         #expect(field.string == "")
-        #expect(writer.finish(rawText: raw, cleanedText: cleaned, delivery: .hold) == .done)
+        #expect(writer.finish(rawText: raw, cleanedText: cleaned) == .done)
         #expect(field.string == "Hello, world.")
         #expect(field.writes.count == 1)
     }
@@ -150,7 +136,7 @@ import Testing
     @Test func swapWrittenGoesBackToTheRawTextAndForwardAgain() {
         let field = FakeTextTarget("Dear ")
         let writer = streamed(field)
-        _ = writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace)
+        _ = writer.finish(rawText: raw, cleanedText: cleaned)
         #expect(writer.swapWritten(for: raw) == .swapped)
         #expect(field.string == "Dear hello world")
         #expect(writer.swapWritten(for: "Hello world!") == .swapped)

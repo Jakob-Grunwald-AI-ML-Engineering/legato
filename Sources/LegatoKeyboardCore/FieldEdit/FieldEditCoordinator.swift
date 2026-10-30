@@ -16,7 +16,7 @@ public protocol FieldEditDocument: AnyObject {
     func execute(_ calls: [ProxyCall])
 }
 
-/// The keyboard's field edit queue (the experimental setting), for one keyboard appearance: every edit the
+/// The keyboard's field edit queue, for one keyboard appearance: every edit the
 /// keyboard makes goes through one `FieldEditQueue` over the caret-relative window
 /// (`documentContextBefore/AfterInput`) and is carried out by this type on the document.
 ///
@@ -105,6 +105,8 @@ public final class FieldEditCoordinator {
     /// Written, not yet confirmed or failed.
     private var issued: Set<UUID> = []
     private var executing = false
+    /// The host reported a clear while our calls ran: taken once they returned.
+    private var clearPending = false
     private var dispatching = false
     private var driveAgain = false
     private var cancelTimer: (() -> Void)?
@@ -484,7 +486,13 @@ public final class FieldEditCoordinator {
     /// handed back with the field empty (their sources take that as the boundary, not a failed write) and
     /// edits based before it are out of window. Nothing when the prediction is empty already.
     public func fieldCleared() {
-        guard !closed, !executing, !queue.document.window.isEmpty else { return }
+        guard !closed else { return }
+        guard !executing, depth == 0 else {
+            clearPending = true  // A clear reported from inside a write is a boundary all the same.
+            return
+        }
+        clearPending = false
+        guard !queue.document.window.isEmpty else { return }
         enter()
         defer { leave() }
         cancelTimer?()
@@ -503,6 +511,7 @@ public final class FieldEditCoordinator {
     private func leave() {
         depth -= 1
         guard depth == 0 else { return }
+        defer { if clearPending { fieldCleared() } }
         // Why owned text became the user's (a later automatic edit there is refused as `ownerTainted`).
         for taint in queue.takeTaints() {
             trace?("fe.taint source=\(taint.source.rawValue) at=\(taint.span.location) len=\(taint.span.length)")
@@ -577,6 +586,7 @@ public final class FieldEditCoordinator {
                 cancelTimer = schedule(settleTimeout) { [weak self] in self?.expireEchoes() }
             }
         }
+        if clearPending, depth == 0 { fieldCleared() }  // A clear reported while a timer's write ran.
     }
 
     /// The lane of the write issued last.

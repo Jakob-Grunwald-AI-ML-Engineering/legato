@@ -47,30 +47,6 @@ private func state(
     private let raw = "um hello world this is the raw text "
     private let cleaned = "Hello, world. This is the cleaned text."
 
-    // MARK: hold
-
-    @Test func aHeldRunTypesNothingWhileListeningAndNeedsNoTicks() {
-        var rig = Rig()
-        rig.feed(state(phase: .listening, committed: raw, delivery: .hold))
-        #expect(rig.field.isEmpty)
-        #expect(!rig.reveal.needsTicks)
-        rig.feed(state(phase: .finishing, committed: raw, delivery: .hold), elapsedMs: 33)
-        #expect(rig.field.isEmpty)
-    }
-
-    @Test func aHeldRunInsertsTheCleanedTextOnceAndTicksDoNotInsertItAgain() {
-        var rig = Rig()
-        rig.feed(state(phase: .listening, committed: raw, delivery: .hold))
-        let final = state(phase: .idle, committed: raw, delivery: .hold, finalText: cleaned)
-        rig.feed(final)
-        #expect(rig.field == cleaned)
-        #expect(rig.cursor?.finalApplied == true)
-        #expect(!rig.reveal.needsTicks)
-        for _ in 0..<10 { rig.feed(final, elapsedMs: 33) }
-        #expect(rig.field == cleaned)
-        #expect(rig.inserts == [cleaned])
-    }
-
     // MARK: replace
 
     @Test func aReplacedRunTypesTheRawTextThenSwapsInTheCleanedTextOnce() {
@@ -136,98 +112,23 @@ private func state(
         #expect(!rig.reveal.needsTicks)
     }
 
-    // MARK: clipboard
-
-    @Test func aClipboardRunKeepsTheStreamedTextAndConfirmsItAfterTheReveal() {
-        var rig = Rig()
-        let final = state(phase: .idle, committed: raw, delivery: .clipboard, finalText: cleaned)
-        rig.feed(final)
-        rig.drain(final)
-        #expect(rig.field == raw)
-        #expect(rig.cursor?.finalApplied == true)
-        #expect(rig.cursor?.finalReplaced == nil)
-    }
-
     // MARK: live
 
     private let liveRaw = "hello world how are you "
-    private let liveRevision = HostRevision(n: 1, start: 0, raw: "hello world ", text: "Hello world. ")
-    private let liveFinal = "Hello world. how are you "
 
-    private func live(phase: HostPhase = .listening, revision: HostRevision? = nil) -> HostState {
-        var host = state(phase: phase, committed: liveRaw, delivery: .live)
-        host.revision = revision
-        return host
-    }
-
-    @Test func aRevisionWaitsUntilTheRevealCoversItsRawSpan() {
+    @Test func aLiveRunsFinalStateIsConfirmedOnlyOnceAllOfItIsRevealed() {
         var rig = Rig()
-        let host = live(revision: liveRevision)
-        rig.feed(host)
-        var ticks = 0
-        while rig.reveal.needsTicks, ticks < 400 {
-            rig.feed(host, elapsedMs: 33)
-            ticks += 1
-            if rig.field.count < liveRevision.raw.count {
-                #expect(liveRaw.hasPrefix(rig.field), "no revision fires on a span that is still being typed")
-                #expect(rig.cursor?.revisionHandled == 0)
-            }
-        }
-        #expect(rig.field == liveFinal)
-        #expect(rig.cursor?.revisionHandled == 1)
-        #expect(rig.cursor?.revisionSkipped != true)
-        #expect(ticks > 3)
-    }
-
-    @Test func aRevisionIsNotSkippedBecauseTheFieldHasNotCaughtUpWithTheReveal() {
-        var rig = Rig()
-        let host = live(revision: liveRevision)
-        rig.feed(host)
-        while rig.field.isEmpty, rig.reveal.needsTicks { rig.feed(host, elapsedMs: 33) }
-        #expect(!rig.field.isEmpty && rig.field.count < liveRevision.raw.count)
-        // The field still reports the context from before the last inserts: the revision would find
-        // nothing to replace there, and a skip is for good, so it waits instead.
-        var stale = 0
-        while rig.cursor?.revisionHandled == 0, stale < 3 {
-            rig.feed(host, elapsedMs: 33, context: "")
-            stale += 1
-        }
-        #expect(rig.cursor?.revisionSkipped != true)
-        #expect(rig.cursor?.revisionHandled == 0)
-        #expect(rig.reveal.needsTicks)
-        // The field settles: the revision applies.
-        rig.drain(host)
-        #expect(rig.field == liveFinal)
-        #expect(rig.cursor?.revisionHandled == 1)
-        #expect(rig.cursor?.revisionSkipped != true)
-    }
-
-    @Test func aRevisionIsSkippedForGoodWhenTheUserTypedAroundTheRevealedText() {
-        var rig = Rig()
-        let host = live(revision: liveRevision)
-        rig.feed(host)
-        while rig.field.isEmpty, rig.reveal.needsTicks { rig.feed(host, elapsedMs: 33) }
-        rig.field += "!" // the user types into the dictation
-        rig.drain(host)
-        #expect(rig.cursor?.revisionHandled == 1)
-        #expect(rig.cursor?.revisionSkipped == true)
-        #expect(!rig.field.contains("Hello"))
-        #expect(!rig.reveal.needsTicks)
-    }
-
-    @Test func theFinalStateIsConfirmedOnlyOnceEveryRevisionLanded() {
-        var rig = Rig()
-        let host = live(phase: .idle, revision: liveRevision)
+        let host = state(phase: .idle, committed: liveRaw, delivery: .live)
         var early = false
         rig.feed(host)
         var ticks = 0
         while rig.reveal.needsTicks, ticks < 400 {
             rig.feed(host, elapsedMs: 33)
-            if rig.cursor?.finalApplied == true, rig.field != liveFinal { early = true }
+            if rig.cursor?.finalApplied == true, rig.field != liveRaw { early = true }
             ticks += 1
         }
         #expect(!early)
-        #expect(rig.field == liveFinal)
+        #expect(rig.field == liveRaw)
         #expect(rig.cursor?.finalApplied == true)
     }
 }

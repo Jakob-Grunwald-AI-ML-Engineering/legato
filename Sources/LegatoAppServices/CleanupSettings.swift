@@ -41,7 +41,7 @@ public struct CleanupOptions: Sendable, Equatable {
 }
 
 /// The cleanup settings in an injected `UserDefaults` (the App Group's on the phone, the app's on the Mac).
-/// Off by default; delivery Replace, style Verbatim, explicit Foundation Models, ITN off (#22).
+/// Off by default; delivery Live, style Verbatim, explicit Foundation Models, ITN off (#22).
 /// Core ML defaults to 8 seconds and Foundation Models to 4 unless the user chose a time limit.
 public struct CleanupSettingsStore: Sendable {
     // UserDefaults is documented thread-safe but not annotated Sendable.
@@ -59,6 +59,11 @@ public struct CleanupSettingsStore: Sendable {
 
     public init(defaults: UserDefaults) {
         CleanupSelectionMigration.migrate(defaults)
+        // #80 removed Hold and Clipboard: an older build's value is stored again as Live.
+        if let raw = defaults.string(forKey: Key.delivery), CleanupDelivery(rawValue: raw) == nil,
+           let migrated = CleanupDelivery(stored: raw) {
+            defaults.set(migrated.rawValue, forKey: Key.delivery)
+        }
         self.defaults = defaults
     }
 
@@ -67,9 +72,9 @@ public struct CleanupSettingsStore: Sendable {
         nonmutating set { defaults.set(newValue, forKey: Key.enabled) }
     }
 
-    /// How a cleaned text reaches a field the raw text streamed into.
+    /// How the cleanup agent cleans a run in a field: Live (the default) or Replace.
     public var delivery: CleanupDelivery {
-        get { defaults.string(forKey: Key.delivery).flatMap(CleanupDelivery.init(rawValue:)) ?? .replace }
+        get { defaults.string(forKey: Key.delivery).flatMap(CleanupDelivery.init(stored:)) ?? .live }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.delivery) }
     }
 

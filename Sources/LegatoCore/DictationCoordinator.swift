@@ -654,18 +654,13 @@ public final class DictationCoordinator {
         return finishRun(.stopped(entry.text))
     }
 
-    /// The field run `runID` streams into was cleared while it showed the run's raw text up to `upTo`
-    /// (shown as revision `shownRevision`, 0 for raw) and the tentative text the sink reports for it
-    /// (`TranscriptSink.sentTentative`): the user sent it (a chat app's Send). The session cleans only what
-    /// comes after it; the run's text is never put on the clipboard, also when the report arrives after the
-    /// session finished, while the stop still waits for the sink. Ignored for any other run, or once the run
-    /// is over.
-    public func liveTextSent(runID: String, upTo boundary: Int, shownRevision: Int) {
+    /// The field run `runID` streams into was cleared (the user sent what it showed, as in a chat app's Send): the
+    /// run's text is never put on the clipboard, also when the report arrives after the session finished, while
+    /// the stop still waits for the sink. Ignored for any other run, or once the run is over.
+    public func runTextSent(runID: String) {
         guard let run, run.id.uuidString == runID, phase == .listening || phase == .stopping || phase == .aborting
         else { return }
         runWasSent = true
-        let tentative = sink?.sentTentative(runID: runID, boundary: boundary) ?? ""
-        session?.liveTextSent(upTo: boundary, shownRevision: shownRevision, tentative: tentative)
     }
 
     // MARK: Pieces
@@ -818,16 +813,11 @@ public final class DictationCoordinator {
     private func startFeed(of s: DictationSession) -> EditFeed {
         let sessionFeed = EditFeed()
         let edits = s.edits
-        s.onLiveTrace = { [weak self] in self?.sink?.liveTraced($0) }
         sessionFeed.task = Task { [weak self, sessionFeed] in
             for await edit in edits {
                 guard let self else { return }
                 live.apply(edit)
-                if case .revise(let revision) = edit {
-                    sink?.revised(revision)
-                } else {
-                    sink?.update(committed: live.committed, volatile: live.volatile)
-                }
+                sink?.update(committed: live.committed, volatile: live.volatile)
                 sessionFeed.noteConsumed()
                 await publishListening(force: false)
             }

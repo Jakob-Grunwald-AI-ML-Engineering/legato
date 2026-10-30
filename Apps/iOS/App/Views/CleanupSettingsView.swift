@@ -43,10 +43,8 @@ struct CleanupSettingsView: View {
 
             Section {
                 Picker("Delivery", selection: $delivery) {
-                    Text("Replace").tag(CleanupDelivery.replace)
-                    Text("Clipboard").tag(CleanupDelivery.clipboard)
-                    Text("Hold").tag(CleanupDelivery.hold)
                     Text("Live").tag(CleanupDelivery.live)
+                    Text("Replace").tag(CleanupDelivery.replace)
                 }
                 .accessibilityIdentifier("cleanup.delivery")
             } header: {
@@ -209,13 +207,9 @@ struct CleanupSettingsView: View {
     static func explain(_ delivery: CleanupDelivery) -> String {
         switch delivery {
         case .replace:
-            "Replace: the raw text streams in while you speak and is swapped for the cleaned text when you stop. If you typed after it meanwhile, the field is left alone and the cleaned text goes to the clipboard."
-        case .clipboard:
-            "Clipboard: the field keeps the raw text; the cleaned text goes to the clipboard."
-        case .hold:
-            "Hold: nothing is typed while you speak (the keyboard's top bar shows the live text); the cleaned text is inserted when you stop."
+            "Replace: the raw text streams in while you speak; when you stop, the whole text is cleaned once and only what changed is rewritten. Text you edited yourself stays; what could not be written goes to the clipboard."
         case .live:
-            "Live: after each phrase the whole text so far is cleaned again and replaces what you see, so a later \"no wait, Thursday\" can fix an earlier phrase; a last pass runs when you stop. Once you edit the text it stays as you left it. Sending the message (the field clears) keeps going with a fresh text."
+            "Live: each sentence is cleaned as soon as you finish it, while you keep speaking; the rest is cleaned when you stop. Text you edit yourself is never changed again."
         }
     }
 }

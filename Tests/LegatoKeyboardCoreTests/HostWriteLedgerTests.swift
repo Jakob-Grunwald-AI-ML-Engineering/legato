@@ -36,22 +36,6 @@ struct HostWriteLedgerTests {
         #expect(ledger.failed(a, cursor: cursor(3)) == HostWriteLedger.Failure(cursor: cursor(3), withdraw: []))
     }
 
-    @Test func failedRevisionIsMarkedSkippedNotRetried() {
-        var ledger = HostWriteLedger()
-        let a = UUID()
-        let previous = cursor(9)
-        var planned = previous
-        planned.revisionHandled = 1
-        planned.shownRevision = 1
-        planned.revisedEnd = 9
-        planned.revisedText = "the cat"
-        ledger.record(a, previous: previous, planned: planned)
-        var expected = previous
-        expected.revisionHandled = 1
-        expected.revisionSkipped = true
-        #expect(ledger.failed(a, cursor: planned) == HostWriteLedger.Failure(cursor: expected, withdraw: []))
-    }
-
     @Test func failedFinalSwapIsMarkedNotReplaced() {
         var ledger = HostWriteLedger()
         let a = UUID()

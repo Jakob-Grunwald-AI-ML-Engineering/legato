@@ -2,18 +2,25 @@ import Foundation
 import LegatoCore
 import Synchronization
 
-/// The dictation session's post-processor with an off switch for the run's own cleanup: while ``agentRuns`` is
-/// set (the cleanup agent works on the run through the field edit queue) the session runs no rolling passes and
-/// no final pass, so the agent is the only one that cleans (either live or final replace, never both). Cleared,
-/// it is `base` exactly. The run's resources (`runStarts`/`runEnds`) are always `base`'s.
+/// The dictation session's post-processor (#80): the cleanup agent is the only cleanup, so the session never cleans
+/// live, and its one cleanup at stop is the rolling session's whole-text rewrite (``PassageRewriter``, through
+/// `rewrite`), never a separate pass on another session. While ``agentRuns`` is set (the agent cleans the run
+/// through the field edit queue) the session cleans nothing at all. The run's resources (`runStarts`/`runEnds`)
+/// are always `base`'s.
 ///
-/// The switch is read when a run starts (`cleansSegmentsLive`) and at its stop (`process`): set it before the run
-/// starts, clear it when the run is over.
+/// The switch is read at the stop (`process`): set it before the run starts, clear it when the run is over.
 public final class AgentGatedPostProcessor: TranscriptPostProcessor {
+    /// Rewrites a whole text on the rolling session; nil when it changed nothing or could not run.
+    public typealias Rewrite = @Sendable (_ text: String, _ locale: Locale) async -> String?
+
     private let base: any TranscriptPostProcessor
+    private let rewrite: Rewrite
     private let gate = Mutex(false)
 
-    public init(_ base: any TranscriptPostProcessor) { self.base = base }
+    public init(_ base: any TranscriptPostProcessor, rewrite: @escaping Rewrite) {
+        self.base = base
+        self.rewrite = rewrite
+    }
 
     /// Whether the agent cleans the current run (the session's own cleanup stays out of it).
     public var agentRuns: Bool {
@@ -28,19 +35,10 @@ public final class AgentGatedPostProcessor: TranscriptPostProcessor {
             CleanupCallTrace.emit("cleanup.skip", ["kind": "session", "reason": "agent"])
             return text
         }
-        return try await CleanupCallTrace.$kind.withValue("session") { try await base.process(text, locale: locale) }
+        let rewrite = rewrite
+        return await CleanupCallTrace.$kind.withValue("session") { await rewrite(text, locale) } ?? text
     }
 
     public func runStarts() async throws { try await base.runStarts() }
     public func runEnds() async { await base.runEnds() }
-    public var cleansSegmentsLive: Bool { agentRuns ? false : base.cleansSegmentsLive }
-
-    public func cleanLivePass(_ text: String, context: String, locale: Locale, atStop: Bool) async throws -> LivePassResult {
-        try await CleanupCallTrace.$kind.withValue("sessionLive") {
-            try await base.cleanLivePass(text, context: context, locale: locale, atStop: atStop)
-        }
-    }
-
-    public var liveStopTimeLimit: Duration? { base.liveStopTimeLimit }
-    public func liveRunStarts() { base.liveRunStarts() }
 }

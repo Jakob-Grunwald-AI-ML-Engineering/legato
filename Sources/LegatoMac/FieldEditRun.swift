@@ -66,12 +66,11 @@ public struct FieldRunAgent: Sendable {
     }
 }
 
-/// The edit queue's wiring for one dictation run on the Mac (the setting "Experimental: edit queue and cleanup
-/// agent" on): a ``FieldEditQueue`` driven by an ``AXFieldExecutor`` behind a ``TypingGuard``, the
-/// ``QueuedFieldWriteChannel`` the run's ``FieldWriter`` writes through, and, in Live mode, the run's agent.
+/// The edit queue's wiring for one dictation run on the Mac: a ``FieldEditQueue`` driven by an ``AXFieldExecutor`` behind a ``TypingGuard``, the
+/// ``QueuedFieldWriteChannel`` the run's ``FieldWriter`` writes through, and, with cleanup on, the run's agent.
 ///
 /// - **Owner per run.** The controller creates one per run for the focused field, gives its ``channel`` to the
-///   `FieldWriter` and calls ``attach(writer:)``. Replace and Hold have no agent: the writer's one swap or
+///   `FieldWriter` and calls ``attach(writer:)``. A run without cleanup has no agent: the writer's one
 ///   insert goes through the channel, and ``wait(_:)`` is the pause its held-swap retry uses.
 /// - **Feed.** With an agent, the queue's feed is read in-process: every wake (the writer put text in
 ///   (``textChanged()``), the field changed (the activity source), a held edit may run) is one pump that
@@ -118,6 +117,8 @@ public final class FieldEditRun {
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var retrying = false
     private var closed = false
+    /// A nudge is waiting: the next pump asks the agent again even without a new batch.
+    private var nudged = false
     /// The last feed entry handed to the agent / folded into the writer.
     private var fedThrough: Int?
     private var absorbedThrough = 0
@@ -194,6 +195,13 @@ public final class FieldEditRun {
         wakes.yield()
     }
 
+    /// The agent saw the speaker pause: it asks again without a new batch (its pause wake).
+    public func nudge() {
+        guard agent != nil, !closed else { return }
+        nudged = true
+        textChanged()
+    }
+
     /// Returns once every wake so far has been handled.
     public func idle() async {
         while wakeQueued || pumping { await withCheckedContinuation { idleWaiters.append($0) } }
@@ -267,7 +275,7 @@ public final class FieldEditRun {
         }
     }
 
-    /// The stop of a run whose agent was absent: `clean` (today's stateless final cleanup pass) turns the run's
+    /// The stop of a run whose agent was absent: `clean` (the rolling session's rewrite of the whole text) turns the run's
     /// raw text into the cleaned one, which goes into the field as patches, as Replace does (a swap held back by
     /// typing waits for a pause, a little). Without a cleaned text the raw text stays.
     public func deliverWithoutAgent(raw: String, clean: (String) async -> String?) async -> FinishAction {
@@ -277,7 +285,7 @@ public final class FieldEditRun {
             return writer.finish(finalText: nil)
         }
         return await writer.finish(
-            rawText: raw, cleanedText: cleaned, delivery: .replace, retryingFor: Self.finalHoldBudget,
+            rawText: raw, cleanedText: cleaned, retryingFor: Self.finalHoldBudget,
             wait: { [pause] in await pause($0) })
     }
 
@@ -429,7 +437,8 @@ public final class FieldEditRun {
             if batch.resync || !batch.entries.isEmpty {
                 fedThrough = batch.lastSeq
                 made = await agent.consume(batch)
-            } else if handedBack {
+            } else if handedBack || nudged {
+                nudged = false
                 made = await agent.replan()
             }
             if closed { return }

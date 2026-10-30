@@ -1,62 +1,92 @@
 import Foundation
+import LegatoCore
 import Testing
 @testable import LegatoPostProcessing
 
+/// The sentence-rewrite agent's prompt (spike #95, prompt v2): a checklist head, few-shot pairs, one sentence per
+/// user turn, and the whole dictation with a closing request at stop.
 @Suite struct CleanupAgentPromptTests {
-    private let sentences: [CleanupPrompt.Agent.Sentence] = [
-        .init(number: 1, text: "Hello there.", role: .keep),
-        .init(number: 2, text: "Teh fox.", role: .review),
-        .init(number: 3, text: "Mine now.", role: .locked),
-    ]
+    private let en = Locale(identifier: "en")
 
-    @Test func requestNumbersSentencesAndNamesReviewAndLocked() {
-        let request = CleanupPrompt.Agent.request(sentences: sentences, locale: Locale(identifier: "en"), vocabulary: ["Legato"])
-        #expect(request.contains("1. Hello there.\n2. Teh fox.\n3. Mine now."))
-        #expect(request.contains("Review: 2."))
-        #expect(request.contains("Locked: 3."))
-        #expect(request.contains("<terms>Legato</terms>"))
+    private func head(_ style: CleanupStyle, emoji: MessageEmojiStyle = .off, itn: Bool = false) -> String {
+        CleanupPrompt.Agent.instructions(locale: en, style: style, emoji: emoji, itn: itn)
     }
 
-    @Test func requestWithoutLockedOrReviewSaysSo() {
-        let request = CleanupPrompt.Agent.request(
-            sentences: [.init(number: 1, text: "Done.", role: .keep)], locale: Locale(identifier: "de"), vocabulary: [])
-        #expect(request.contains("Review: none."))
-        #expect(!request.contains("Locked:"))
-        #expect(!request.contains("<terms>"))
+    @Test func theHeadAsksForTheCorrectedSentenceOnlyWithTheChecklist() {
+        let text = head(.message)
+        #expect(text.contains("reply with the corrected sentence only"))
+        #expect(text.contains("homophones"))
+        #expect(text.contains("self-correction"))
+        #expect(text.contains("Each user turn is the next dictated sentence"))
+        #expect(text.contains(CleanupPrompt.Agent.finalRequestLine))
+        #expect(!text.contains("JSON"))
     }
 
-    @Test func statelessPromptIsUnchanged() {
-        let instructions = CleanupPrompt.standard.instructions(Locale(identifier: "en"), [])
-        #expect(!instructions.contains("numbered sentences"))
-        #expect(CleanupPrompt.standard.userMessage("x", Locale(identifier: "en"), []) == "<text>\nx\n</text>")
+    @Test func theSessionHeadIsTheInstructionsThenTheExamples() {
+        let chunks = CleanupPrompt.Agent.sessionHead(locale: en, style: .message, emoji: .off)
+        guard case .instructions(let text) = chunks.first else { Issue.record("no instructions first"); return }
+        #expect(text == head(.message))
+        let examples = chunks.dropFirst().compactMap { chunk -> LLMExample? in
+            if case .example(let example) = chunk { return example }
+            return nil
+        }
+        #expect(examples.count == chunks.count - 1)
+        #expect(examples.count >= 8)
+        // One sentence that needs nothing stays as it is.
+        #expect(examples.contains { $0.user == $0.assistant })
+        // Plain sentences in and out: no tags, labels or JSON.
+        #expect(examples.allSatisfy { !$0.user.contains("<") && !$0.assistant.contains("{") })
     }
 
-    @Test func theSessionHeadLeavesTheReplyFormatToEachRequest() {
-        let head = CleanupPrompt.Agent.sessionHead(locale: Locale(identifier: "en"))
-        #expect(!head.contains("<text>"))
-        #expect(head.contains("Every request states the reply format"))
-        #expect(CleanupPrompt.sessionRequest("<text>\nx\n</text>").hasSuffix("Reply only in <text></text>, nothing else."))
+    @Test func eachStyleGetsItsOwnWritingRules() {
+        #expect(head(.message).contains("ready-to-send"))
+        #expect(head(.markdown).contains("Markdown"))
+        #expect(head(.verbatim).contains("Keep the speaker's wording"))
+        #expect(!head(.verbatim).contains("ready-to-send"))
+        #expect(head(.verbatim, itn: true).contains("as digits"))
+        #expect(!head(.verbatim).contains("as digits"))
     }
 
-    @Test func requestCarriesStyleEmojiAndNumberSettings() {
-        let en = Locale(identifier: "en")
-        let one = [CleanupPrompt.Agent.Sentence(number: 1, text: "Hi.", role: .review)]
-        let markdown = CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: [], style: .markdown)
-        #expect(markdown.contains("Markdown"))
-        let message = CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: [], style: .message, emoji: .expressive)
-        #expect(message.contains("ready-to-send"))
-        #expect(message.contains("expressive emoji"))
-        let digits = CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: [], itn: true)
-        #expect(digits.contains("as digits"))
-        #expect(!CleanupPrompt.Agent.request(sentences: one, locale: en, vocabulary: []).contains("as digits"))
+    @Test func automaticEmojiFollowTheMessageSettingOnly() {
+        #expect(head(.message, emoji: .expressive).contains("expressive emoji"))
+        #expect(head(.message).contains("Do not add automatic emoji"))
+        #expect(head(.markdown, emoji: .expressive).contains("Do not add automatic emoji"))
+        #expect(head(.verbatim, emoji: .subtle).contains("Do not add automatic emoji"))
     }
 
     /// Apple's dictation writes spoken filler as hashtags ("#um", "#ah", "#hm"): a style that removes filler
     /// removes those too; one that keeps the wording is not told to.
     @Test func fillerRemovingStylesDeleteHashtagFillerArtefacts() {
-        let en = Locale(identifier: "en")
-        let message = CleanupPrompt.Agent.instructions(locale: en, style: .message)
+        let message = head(.message)
         #expect(message.contains("\"#um\"") && message.contains("\"#ah\"") && message.contains("\"#hm\""))
-        #expect(!CleanupPrompt.Agent.instructions(locale: en, style: .verbatim).contains("#um"))
+        #expect(!head(.verbatim).contains("#um"))
+        // Verbatim's examples keep the filler.
+        let verbatim = CleanupPrompt.Agent.examples(locale: en, style: .verbatim)
+        #expect(verbatim.contains { $0.assistant.hasPrefix("Um,") })
+        #expect(!CleanupPrompt.Agent.examples(locale: en, style: .message).contains { $0.assistant.hasPrefix("Um,") })
+    }
+
+    @Test func theLanguageRuleFollowsTheLocale() {
+        #expect(CleanupPrompt.Agent.instructions(locale: Locale(identifier: "de"), style: .message).contains("Nie übersetzen"))
+        #expect(head(.message).contains("Never translate"))
+    }
+
+    @Test func theFinalRequestFollowsTheWholeDictation() {
+        let message = CleanupPrompt.Agent.finalRequest("one two. three")
+        #expect(message.hasPrefix("one two. three\n\n"))
+        #expect(message.hasSuffix(CleanupPrompt.Agent.finalRequestLine))
+    }
+
+    @Test func theSessionHeadDiffersByStyleAndEmojiOnly() {
+        let a = CleanupPrompt.Agent.sessionHead(locale: en, style: .message, emoji: .off)
+        #expect(a == CleanupPrompt.Agent.sessionHead(locale: en, style: .message, emoji: .off))
+        #expect(a != CleanupPrompt.Agent.sessionHead(locale: en, style: .verbatim, emoji: .off))
+        #expect(a != CleanupPrompt.Agent.sessionHead(locale: en, style: .message, emoji: .subtle))
+    }
+
+    @Test func statelessPromptIsUnchanged() {
+        let instructions = CleanupPrompt.standard.instructions(en, [])
+        #expect(!instructions.contains("corrected sentence only"))
+        #expect(CleanupPrompt.standard.userMessage("x", en, []) == "<text>\nx\n</text>")
     }
 }

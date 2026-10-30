@@ -49,6 +49,8 @@ public actor SelectedModelWarmup {
         var failure: (any Error)?
         /// Opens the rolling session once the resource is ready; its value is the session (nil: none).
         var session: Task<(any LLMSession)?, Never>?
+        /// The head `session` was opened with when a caller asked for one (nil: the source's own).
+        var sessionHead: [LLMSessionChunk]?
     }
     private var entries: [String: Entry] = [:]
     private var requests: [Role: Set<String>] = [:]
@@ -167,11 +169,17 @@ public actor SelectedModelWarmup {
                 // The rolling session's head prefills before the resource counts as ready, so no run admitted
                 // on it meets that prefill on a single-worker runtime.
                 var session: (any LLMSession)?
-                if let source = resource.session { session = await Self.open(source) }
+                var head: [LLMSessionChunk]?
+                if let source = resource.session {
+                    let chunks = await source.head()
+                    head = chunks
+                    session = await Self.open(source, head: chunks)
+                }
                 if self.entries[key]?.token == token {
                     self.entries[key]?.ready = true
                     self.entries[key]?.task = nil
                     self.entries[key]?.session = Task { session }
+                    self.entries[key]?.sessionHead = head
                 } else {
                     await session?.close()
                 }
@@ -189,30 +197,42 @@ public actor SelectedModelWarmup {
     // MARK: Rolling session
 
     /// The one rolling session of a prepared resource, warm (its head prefilled) and kept for the app's
-    /// lifetime: every run appends to it and it scrolls by ``LLMSession/trim(keepingSuffix:)`` at the budget.
+    /// lifetime: every run appends to it and it scrolls by ``LLMSession/trim(keepingSuffix:)``.
     /// Runs neither open nor close it; the entry owns it, so it ends only when the resource is released
     /// (memory pressure, a model change or deletion, teardown) and a later preparation opens a new one.
+    /// `head`: the head the caller needs (instructions and examples for its style); a session opened with another
+    /// head is closed and one with this head opened in its place (nil: whatever head it has).
     /// Nil when the resource is not ready, has no session, or opening it failed (the next call retries).
-    public func rollingSession(key: String) async -> (any LLMSession)? {
-        guard let entry = entries[key], entry.ready, entry.resource.session != nil else { return nil }
-        if entry.session == nil { openSession(key) }
-        guard let task = entries[key]?.session else { return nil }
+    public func rollingSession(key: String, head: [LLMSessionChunk]? = nil) async -> (any LLMSession)? {
+        guard let entry = entries[key], entry.ready, let source = entry.resource.session else { return nil }
         let token = entry.token
+        if let head, let open = entry.session, entry.sessionHead != head {
+            // Another style: the head is fixed for a session's life, so it is opened again with this one.
+            entries[key]?.session = nil
+            entries[key]?.sessionHead = nil
+            await open.value?.close()
+            guard entries[key]?.token == token else { return nil }
+        }
+        if entries[key]?.session == nil {
+            let chunks: [LLMSessionChunk]
+            if let head { chunks = head } else { chunks = await source.head() }
+            guard entries[key]?.token == token else { return nil }
+            if entries[key]?.session == nil {
+                entries[key]?.sessionHead = chunks
+                entries[key]?.session = Task { await Self.open(source, head: chunks) }
+            }
+        }
+        guard let task = entries[key]?.session else { return nil }
         let session = await task.value
         guard entries[key]?.token == token else { return nil }  // released meanwhile
         if session == nil, entries[key]?.session == task { entries[key]?.session = nil }  // retry next time
         return session
     }
 
-    private func openSession(_ key: String) {
-        guard let entry = entries[key], entry.ready, entry.session == nil, let source = entry.resource.session else { return }
-        entries[key]?.session = Task { await Self.open(source) }
-    }
-
-    private nonisolated static func open(_ source: SessionSource) async -> (any LLMSession)? {
+    private nonisolated static func open(_ source: SessionSource, head: [LLMSessionChunk]) async -> (any LLMSession)? {
         guard let session = try? await source.make() else { return nil }
         do {
-            for chunk in await source.head() { try await session.append(chunk) }
+            for chunk in head { try await session.append(chunk) }
             try await session.warm()
             return session
         } catch {

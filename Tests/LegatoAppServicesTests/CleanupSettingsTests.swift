@@ -39,7 +39,7 @@ private final class Recorder: Sendable {
     @Test func defaultsAreOffReplaceVerbatimFoundationModelsNoITNFourSeconds() {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         #expect(store.enabled == false)
-        #expect(store.delivery == .replace)
+        #expect(store.delivery == .live)  // #80: the continuous agent is the default cleanup
         #expect(store.style == .verbatim)
         #expect(store.backend == .foundationModels)
         #expect(store.itn == false)
@@ -50,14 +50,39 @@ private final class Recorder: Sendable {
         let defaults = freshDefaults()
         let store = CleanupSettingsStore(defaults: defaults)
         store.enabled = true
-        store.delivery = .hold
+        store.delivery = .replace
         store.style = .message
         store.backend = .foundationModels
         store.itn = true
         store.timeoutSeconds = 7
         let again = CleanupSettingsStore(defaults: defaults)
         #expect(again.options == CleanupOptions(
-            enabled: true, delivery: .hold, style: .message, backend: .foundationModels, itn: true, timeoutSeconds: 7))
+            enabled: true, delivery: .replace, style: .message, backend: .foundationModels, itn: true, timeoutSeconds: 7))
+    }
+
+    /// #80 removed Hold and Clipboard: a setting saved by an older build reads as Live, and is stored as Live.
+    @Test(arguments: ["hold", "clipboard"])
+    func aRemovedDeliveryModeReadsAsLive(stored: String) {
+        let defaults = freshDefaults()
+        defaults.set(stored, forKey: "cleanup.delivery")
+        let store = CleanupSettingsStore(defaults: defaults)
+        #expect(store.delivery == .live)
+        #expect(defaults.string(forKey: "cleanup.delivery") == "live")
+    }
+
+    @Test func anUnknownDeliveryReadsAsTheDefault() {
+        let defaults = freshDefaults()
+        defaults.set("someday", forKey: "cleanup.delivery")
+        #expect(CleanupSettingsStore(defaults: defaults).delivery == .live)
+    }
+
+    @Test(arguments: ["hold", "clipboard", "live"])
+    func aRemovedDeliveryModeDecodesAsLive(raw: String) throws {
+        let decoded = try JSONDecoder().decode(CleanupDelivery.self, from: Data("\"\(raw)\"".utf8))
+        #expect(decoded == .live)
+        #expect(CleanupDelivery(stored: raw) == .live)
+        #expect(CleanupDelivery(stored: "replace") == .replace)
+        #expect(CleanupDelivery.allCases == [.replace, .live])
     }
 
     @Test func timeLimitIsClampedToOneThroughTen() {
@@ -272,113 +297,11 @@ private final class EchoingFoundationModels: LLMBackend {
 }
 
 /// Answers "How are you?" after a fixed delay, so a run's time is measurable.
-private struct SlowFoundationModels: LLMBackend {
-    static let delayMs = 40
-    let id = "fm"
-    let maxPromptCharacters: Int? = nil
-    var availability: LLMAvailability { get async { .available } }
-    func respond(instructions: String, prompt: String) async throws -> String {
-        try await Task.sleep(for: .milliseconds(Self.delayMs))
-        return "<text>How are you?</text>"
-    }
-}
-
-@Suite struct LiveCleanupProcessorTests {
+@Suite struct CleanupProcessorSessionTests {
     private func processor(_ store: CleanupSettingsStore, fm: EchoingFoundationModels, recorder: Recorder) -> CleanupProcessor {
         CleanupProcessor(
             registry: CleanupRegistry(models: emptyManager(), foundationModels: fm), settings: store,
             willRun: { recorder.started() }, report: { recorder.record($0) })
-    }
-
-    @Test func theLiveStopIsLimitedToTheSettingsTimeLimitWhileCleanupIsOn() {
-        let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.timeoutSeconds = 7
-        let p = processor(store, fm: EchoingFoundationModels(), recorder: Recorder())
-        #expect(p.liveStopTimeLimit == nil, "cleanup off: the stop has nothing to limit")
-        store.enabled = true
-        #expect(p.liveStopTimeLimit == .seconds(7))
-    }
-
-    @Test func onlyTheLiveDeliveryCleansSegmentsLive() {
-        let store = CleanupSettingsStore(defaults: freshDefaults())
-        let p = processor(store, fm: EchoingFoundationModels(), recorder: Recorder())
-        store.delivery = .live
-        #expect(!p.cleansSegmentsLive, "cleanup off")
-        store.enabled = true
-        #expect(p.cleansSegmentsLive)
-        for other in [CleanupDelivery.replace, .clipboard, .hold] {
-            store.delivery = other
-            #expect(!p.cleansSegmentsLive)
-        }
-    }
-
-    @Test func aPassIsCleanedWithItsContextAndWithoutTheCleaningUpPhase() async throws {
-        let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.enabled = true
-        store.delivery = .live
-        let fm = EchoingFoundationModels()
-        let recorder = Recorder()
-        let out = try await processor(store, fm: fm, recorder: recorder)
-            .cleanLivePass("how are you", context: "Hello world.", locale: Locale(identifier: "en_US"), atStop: false)
-        #expect(out.text == "How are you?")
-        #expect(out.backend == "Apple Foundation Models")
-        #expect(!out.guardRejected && !out.timedOut)
-        #expect(fm.sent.first?.hasPrefix("<before>\nHello world.\n</before>\n") == true)
-        #expect(recorder.starts == 0, "the run is still listening")
-        #expect(recorder.reports.count == 1)
-    }
-
-    @Test func theReadoutOfALiveRunCoversAllItsPasses() async throws {
-        let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.enabled = true
-        store.delivery = .live
-        let recorder = Recorder()
-        let p = CleanupProcessor(
-            registry: CleanupRegistry(models: emptyManager(), foundationModels: SlowFoundationModels()), settings: store,
-            report: { recorder.record($0) })
-        let en = Locale(identifier: "en_US")
-        p.liveRunStarts()
-        _ = try await p.cleanLivePass("how are you", context: "", locale: en, atStop: false) // changed
-        _ = try await p.cleanLivePass("How are you?", context: "How are you?", locale: en, atStop: false) // unchanged
-        let last = try #require(recorder.reports.last)
-        #expect(last.changed, "a pass changed, so the run did")
-        #expect(last.milliseconds >= 2 * SlowFoundationModels.delayMs, "the time of both passes")
-        #expect(last.backend == "Apple Foundation Models")
-        #expect(last.refine == false)
-    }
-
-    @Test func aNewLiveRunStartsAFreshReadout() async throws {
-        let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.enabled = true
-        store.delivery = .live
-        let recorder = Recorder()
-        let p = CleanupProcessor(
-            registry: CleanupRegistry(models: emptyManager(), foundationModels: SlowFoundationModels()), settings: store,
-            report: { recorder.record($0) })
-        let en = Locale(identifier: "en_US")
-        p.liveRunStarts()
-        _ = try await p.cleanLivePass("how are you", context: "", locale: en, atStop: false)
-        p.liveRunStarts()
-        let clock = ContinuousClock()
-        let started = clock.now
-        _ = try await p.cleanLivePass("How are you?", context: "", locale: en, atStop: false)
-        let elapsed = started.duration(to: clock.now)
-        let last = try #require(recorder.reports.last)
-        #expect(!last.changed, "only this run's pass counts")
-        // The readout fits inside this pass's own wall time, so the first run's pass (at least delayMs) is not in it.
-        // Relative to the measured pass, not a fixed bound, so a slow runner can't fail it.
-        let elapsedMs = Int((Double(elapsed.components.attoseconds) / 1e15).rounded(.up)) + Int(elapsed.components.seconds) * 1000
-        #expect(last.milliseconds <= elapsedMs, "this pass took \(elapsedMs) ms")
-    }
-
-    @Test func theStopPassAnnouncesItself() async throws {
-        let store = CleanupSettingsStore(defaults: freshDefaults())
-        store.enabled = true
-        store.delivery = .live
-        let recorder = Recorder()
-        _ = try await processor(store, fm: EchoingFoundationModels(), recorder: recorder)
-            .cleanLivePass("how are you", context: "", locale: Locale(identifier: "en_US"), atStop: true)
-        #expect(recorder.starts == 1)
     }
 
     @Test func aContextualCorrectionIsDeliveredWithoutLexicalVeto() async throws {
@@ -394,18 +317,15 @@ private struct SlowFoundationModels: LLMBackend {
             registry: CleanupRegistry(
                 models: emptyManager(), foundationModels: AnsweringFoundationModels(reply: corrected)),
             settings: store, report: { _ in })
-        let out = try await p.cleanLivePass(
-            source, context: "", locale: Locale(identifier: "en_US"), atStop: false)
-        #expect(out.text == corrected)
-        #expect(!out.guardRejected)
-        #expect(!out.timedOut)
+        let out = try await p.process(source, locale: Locale(identifier: "en_US"))
+        #expect(out == corrected)
     }
 
-    @Test func withCleanupOffAPassChangesNothing() async throws {
+    @Test func withCleanupOffTheSessionChangesNothing() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         let out = try await processor(store, fm: EchoingFoundationModels(), recorder: Recorder())
-            .cleanLivePass("how are you", context: "", locale: Locale(identifier: "en_US"), atStop: false)
-        #expect(out == LivePassResult(text: "how are you"))
+            .process("how are you", locale: Locale(identifier: "en_US"))
+        #expect(out == "how are you")
     }
 }
 
@@ -465,7 +385,7 @@ private struct AnsweringFoundationModels: LLMBackend {
         #expect(await pipeline.process("Friday no wait Thursday", locale: Locale(identifier: "en")) == "Thursday.")
     }
 
-    @Test func liveRunFreezesStyleAndEnabledUntilNextRun() async throws {
+    @Test func aRunFreezesStyleAndEnabledUntilNextRun() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         store.enabled = true
         store.style = .message
@@ -474,8 +394,8 @@ private struct AnsweringFoundationModels: LLMBackend {
         try await processor.runStarts()
         store.style = .verbatim
         store.enabled = false
-        let first = try await processor.cleanLivePass("Friday no wait Thursday", context: "", locale: Locale(identifier: "en"), atStop: false)
-        #expect(first.text == "Thursday.")
+        let first = try await processor.process("Friday no wait Thursday", locale: Locale(identifier: "en"))
+        #expect(first == "Thursday.")
         #expect(recorder.reports.last?.style == .message)
         await processor.runEnds()
         try await processor.runStarts()
@@ -520,7 +440,7 @@ private struct AnsweringFoundationModels: LLMBackend {
         }
     }
 
-    @Test func leaseAndAllLivePassesUseSameCapturedOptionsUntilNextRun() async throws {
+    @Test func leaseAndAllPassesUseSameCapturedOptionsUntilNextRun() async throws {
         let store = CleanupSettingsStore(defaults: freshDefaults())
         store.enabled = true; store.delivery = .live; store.style = .message; store.emoji = .expressive
         let backend = PromptBackend()
@@ -533,10 +453,9 @@ private struct AnsweringFoundationModels: LLMBackend {
             return CleanupRunLease(resolution: await registry.resolve(preference: options.backend.preference), release: {})
         }, report: { _ in })
         try await processor.runStarts()
-        for atStop in [false, true] {
-            _ = try await processor.cleanLivePass("thanks", context: "", locale: Locale(identifier: "en"), atStop: atStop)
+        for _ in 0..<2 {
+            _ = try await processor.process("thanks", locale: Locale(identifier: "en"))
         }
-        #expect(processor.liveStopTimeLimit == .seconds(4))
         #expect(leased.withLock { $0.first?.style } == .message)
         #expect(leased.withLock { $0.first?.emoji } == .expressive)
         #expect(backend.sent.count == 2)

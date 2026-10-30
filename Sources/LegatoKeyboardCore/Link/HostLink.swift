@@ -72,9 +72,9 @@ public final class HostLink {
 
     // MARK: Publishing
 
-    /// `delivery`: how the run's cleaned text reaches the field (nil without cleanup); the keyboard needs
-    /// it from the start, because `.hold` keeps the field free while listening.
-    public func runStarted(id: String, target: HostTarget, delivery: HostDelivery? = nil, fieldEdits: Bool? = nil) {
+    /// `delivery`: how the run's cleaned text reaches the field (nil without cleanup); the keyboard needs it
+    /// from the start, to follow the run on the link.
+    public func runStarted(id: String, target: HostTarget, delivery: HostDelivery? = nil) {
         cancelScrub()
         state.preparingRequestID = nil
         state.runID = id
@@ -83,34 +83,20 @@ public final class HostLink {
         state.committed = ""
         state.volatile = ""
         state.delivery = delivery
-        state.fieldEdits = fieldEdits
         state.finalText = nil
         state.insertAt = nil
-        state.revision = nil
         state.notice = nil
         reportedSentBase = 0
         reportedSentCount = 0
-        reportedSent = nil
-        publish()
-    }
-
-    /// Live cleanup's newest cleaned version of the run's text (`HostDelivery.live`): replaces the one
-    /// before (a keyboard needs only the newest), published at once.
-    public func revise(_ revision: HostRevision) {
-        guard state.runID != nil, revision.n > (state.revision?.n ?? 0) else { return }
-        state.revision = revision
         publish()
     }
 
     /// The keyboard reported a sent boundary for the current run (`AppliedCursor.sentBase`: its field was
-    /// cleared, as by sending a message): the run ID, the boundary in `committed`, and the revision the field
-    /// showed for the text before it (0: raw). Called once per boundary, from `appliedDidChange()`, also after
+    /// cleared, as by sending a message): the run ID and the boundary in `committed`. Called once per boundary, from `appliedDidChange()`, also after
     /// the run's final state went out (a report on its way then still keeps the run off the clipboard).
-    public var onSent: (@MainActor (_ runID: String, _ boundary: Int, _ shownRevision: Int) -> Void)?
+    public var onSent: (@MainActor (_ runID: String, _ boundary: Int) -> Void)?
     private var reportedSentBase = 0
     private var reportedSentCount = 0
-    /// The last boundary reported, with the tentative text that went with it (`sentTentative(runID:boundary:)`).
-    private var reportedSent: (runID: String, boundary: Int, tentative: String)?
 
     /// A stop began: published at once. Updates that still arrive while the engine finalizes keep the phase.
     public func runFinishing() {
@@ -132,10 +118,8 @@ public final class HostLink {
         state.phase = .idle
         state.committed = text
         state.volatile = ""
-        state.fieldEdits = nil
-        state.delivery = nil // an insert is typed as it is: no cleanup swap, no hold
+        state.delivery = nil // an insert is typed as it is: no cleanup swap
         state.finalText = nil
-        state.revision = nil
         state.notice = nil
         state.insertAt = now()
         publish()
@@ -207,9 +191,7 @@ public final class HostLink {
         state.volatile = ""
         state.finalText = nil
         state.delivery = nil
-        state.fieldEdits = nil
         state.insertAt = nil
-        state.revision = nil
         state.notice = nil
         publish()
     }
@@ -470,15 +452,7 @@ public final class HostLink {
         else { return }
         reportedSentBase = cursor.sentBase
         reportedSentCount = cursor.sentCount
-        reportedSent = (runID, cursor.sentBase, cursor.sentTentative)
-        onSent?(runID, cursor.sentBase, cursor.sentShownRevision)
-    }
-
-    /// The tentative text that went with the boundary at `boundary` of run `runID` (`AppliedCursor.sentTentative`),
-    /// as last reported through `onSent`; "" for any other.
-    public func sentTentative(runID: String, boundary: Int) -> String {
-        guard let sent = reportedSent, sent.runID == runID, sent.boundary == boundary else { return "" }
-        return sent.tentative
+        onSent?(runID, cursor.sentBase)
     }
 
     /// What the keyboard last reported it applied (`link.applied`), whichever run it was for.

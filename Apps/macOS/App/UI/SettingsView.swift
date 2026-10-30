@@ -48,7 +48,6 @@ private struct GeneralSettingsView: View {
                     ForEach(FieldWriter.Mode.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 Toggle("Restore the clipboard after pasting", isOn: $settings.restoreClipboard)
-                Toggle("Experimental: edit queue and cleanup agent", isOn: $settings.experimentalEditQueue)
             }
             Section("General") {
                 Toggle("Launch at login", isOn: Binding(

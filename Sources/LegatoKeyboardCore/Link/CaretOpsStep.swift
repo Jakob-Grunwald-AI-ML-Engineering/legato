@@ -4,7 +4,7 @@ import LegatoFieldEdit
 /// The planner's edits at the caret (``ProxyOp``: deletes and inserts, as ``ProxyEditPlanner``,
 /// ``TypewriterReveal`` and ``DictationVersions/swapOps(to:contextBefore:)`` make them) as one edit queue step:
 /// the smallest range replace (``ContiguousPatch``) that turns the text before the caret into what the ops leave.
-/// A whole-span Live revision that changes two letters becomes a two-letter patch.
+/// A swap that changes two letters becomes a two-letter patch.
 public enum CaretOpsStep {
     public struct Edit: Sendable, Equatable {
         /// UTF-16 offsets into the window that `before` starts.
