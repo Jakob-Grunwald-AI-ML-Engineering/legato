@@ -1,34 +1,22 @@
-# iOS composer appearance and resize UAT
+# iOS composer presets and native strip
 
-The composer now shares the native `UIInputView(.keyboard)` surface with iOS's rounded cap and bottom tray. The grabber adjusts the whole extension, leaving the tool strip visible. The empty legacy prediction row is removed. Height defaults to 420 pt, is remembered locally, and is bounded to 260–600 pt on this portrait phone; a short screen lowers the maximum to preserve host space.
+The keyboard has three remembered sizes: **Low** is the grabber and one native tool row (82 pt); **Medium** matches the native keyboard's measured content height (243 pt portrait); **Full** covers approximately 85% of the screen including iOS's cap and bottom tray (651 pt owned content on this 874 pt iPhone). A vertical swipe on the grabber, strip buttons, or gaps advances exactly one preset on release. The document viewport retains scrolling. Tapping the grabber cycles sizes; accessibility adjustment steps up/down.
 
-Initial continuous-resize baseline (superseded by release-only refinement below), on the physical iPhone 17 (`00008150-000E60360245401C`), 2026-10-30:
+The single row contains Mode, Undo, Redo, Insert, Cancel, Mute, and the existing start/stop mic. All use native key faces; Mode shows the current icon. Tap Mode to cycle, hold for the native icon/name list. Bottom Undo routes to Composer when it owns the document; Composer has no Redo contract, so Redo is disabled during those sessions. Mute uses the merged backend's same-session transcription gate while agents remain active.
+
+Native validation on the physical iPhone 17, 2026-10-30:
 
 | Check | Result |
 | --- | --- |
-| Native light appearance | PASS: continuous native gray material, native white key faces, no white composer sheet or QWERTY grid |
-| Native downward handle drag | PASS: requested height 420 → 271 pt |
-| Native upward handle drag | PASS: 271 → 512 pt, a meaningful 241 pt expansion across the old extension boundary |
-| Persistence after full host app relaunch | PASS: 512 pt retained, grabber frame `{{0,286.7},{402,28}}` |
-| Native dark appearance | PASS: dark material, legible text/grabber, native dark key faces, matching bottom tray |
-| Resize/keyboard geometry checks | PASS: 12 checks in two suites |
-| Signed generic iOS build and physical installation | PASS, including merged prompt resources from `0ea100a` |
+| Low / Medium / Full geometry | PASS: owned heights 82 / 243 / approximately 651 pt; Full cap starts at 131 pt, leaving approximately 15% host space |
+| Swipe across the right mic button | PASS: Low → Medium, exactly one preset; mic remained labelled Start dictation |
+| Mode hold | PASS: native four-row icon/name picker visible without clipping in Medium |
+| Native palette / one row | PASS: matching system material and key faces; no duplicate upper controls or QWERTY |
+| Preset contracts and existing geometry | PASS: 13 focused checks, including screen bounds, thresholds, one-step swipes and stored enum values |
+| Final signed iOS build and physical installation | PASS, including merged mute backend and final mode icon |
 
-The dedicated grabber has a nontransparent hit surface, updates a preview during movement, commits the actual keyboard height once on normal release, resets its drag anchor and preview after cancellation, and exposes an accessibility adjustable action. Unit checks cover bounded heights, reduced landscape space, and upward/downward movement. VoiceOver interaction itself was not exercised. The current UAT used an empty composer; this leg does not add new populated-document scrolling or native Insert proof.
+The final transition restores the original Legato mechanism: a 0.2-second UIKit layout animation coordinated with SwiftUI ease-in-out on the selected preset and composer opacity. The manual display-link resize was removed after poor hands-on feedback. **Final animation feel has not been confirmed by the user.** A successful build is not smoothness proof; physical screen recording is unsupported on this device.
 
-During the expanded native capture, the app unexpectedly showed Email mode and a failed microphone start (`com.apple.coreaudio.avfaudio error 560226676`). No microphone tap was intended in the resize sequence. Cancel returned idle/dictating false but retained a microphone lease in debug state; a full app relaunch cleared the error and visual recording indicator. This incidental audio behavior is outside the resize change and is not counted as a passed microphone test. No debug transcript injection or intentional paid provider calls were used in this leg.
+Mode selection across separate native-test launches was not confirmed, because reactivation can dismiss the popup; no passed selection claim is made. Native Mute/Unmute button UAT and real microphone startup were handed to the voice-repair leg. The backend has separate focused mute tests. This UI leg did not add new paid provider calls, populated-document scroll proof, or a native Composer Redo feature.
 
-Screenshots cover the entire device screen and a synthetic native host form. [Before](artifacts/ios-resize/before.png), [native light](artifacts/ios-resize/native-light.png), [compact](artifacts/ios-resize/compact.png), [expanded dark after relaunch](artifacts/ios-resize/dark-expanded.png). Native accessibility evidence: [compact](artifacts/ios-resize/compact-tree.txt), [expanded](artifacts/ios-resize/expanded-tree.txt), [reopened](artifacts/ios-resize/reopened-tree.txt).
-
-Final bridge state after relaunch: `status: idle`, `mode: message`, `busy: false`, `dictating: false`, `microphoneLeaseActive: false`, `pendingLineIDs: []`, `error: ""`. The device was left in the light native host harness with the remembered 512 pt composer height.
-
-
-## Final release-only refinement
-
-The visible pill now sits 2 pt below the extension's owned top, 10 pt higher than the first implementation. iOS owns the rounded cap above this view, so the extension does not draw there. While dragging, only a translucent guide and height label update inside the existing keyboard bounds; the host keyboard height remains unchanged until one resize call on normal release. Cancellation clears the preview without committing. No oversized transparent extension reserves host touch space. Tap toggles compact/expanded as another route; accessibility height adjustment remains available.
-
-Native physical results on the refined build (`54872f6`): downward drag **512 → 352 pt**, upward drag **352 → 502 pt**. Both ordinary native releases completed. Upward boundary cancellation was not reproduced with this large pane. The source has a single resize callback in `onEnded`; `onChanged` changes only local preview state. Motion smoothness was not independently quantified: Apple's recording capability returned CoreDevice error1001 (unsupported on this device), while full-device screenshots worked. The 12 affected checks and signed iOS build passed again after this refinement; no second full suite or Mac build was run.
-
-Final screenshots: [higher handle](artifacts/ios-resize/higher-handle.png), [released compact](artifacts/ios-resize/release-compact.png), [released expanded](artifacts/ios-resize/release-expanded.png). Exact native geometry: [352 pt](artifacts/ios-resize/release-compact-tree.txt), [502 pt](artifacts/ios-resize/release-expanded-tree.txt). These supersede the earlier continuous-drag geometry as current gesture proof.
-
-The final grabber tap changed **502 → 260 pt**, and a full app relaunch retained **260 pt**. [Tap tree](artifacts/ios-resize/release-tap-tree.txt), [reopened tree](artifacts/ios-resize/release-reopened-tree.txt), [final full screen](artifacts/ios-resize/release-final.png). Final refined-build bridge state again confirmed idle Message, busy/dictating false, microphone lease false, empty error and no pending lines. Device released in the light native field harness, ready for hands-on use at compact height.
+[Final mode-icon strip](artifacts/ios-presets/final-icon-strip.png). Preset geometry captures taken before the final icon-only tweak: [Full](artifacts/ios-presets/full-geometry.png), [Low](artifacts/ios-presets/low-geometry.png), [Medium](artifacts/ios-presets/medium-geometry.png). [Native mode picker](artifacts/ios-presets/native-mode-picker.png), [mic-button swipe tree](artifacts/ios-presets/mic-swipe-tree.txt), [Low tree](artifacts/ios-presets/low-tree.txt). Screens show a synthetic native host form.

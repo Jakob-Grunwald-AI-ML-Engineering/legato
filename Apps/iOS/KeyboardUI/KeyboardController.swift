@@ -120,11 +120,13 @@ final class KeyboardController {
 
     var fullAccess: Bool { hasFullAccess() }
 
-    private(set) var composerHeight = UserDefaults.standard.object(forKey: "composerKeyboardHeight") as? Double ?? 420
+    private(set) var composerSize = ComposerKeyboardSize(
+        rawValue: UserDefaults.standard.string(forKey: "composerKeyboardSize") ?? "") ?? .medium
 
-    func resizeComposer(to height: Double) {
-        composerHeight = height
-        UserDefaults.standard.set(height, forKey: "composerKeyboardHeight")
+    func setComposerSize(_ size: ComposerKeyboardSize) {
+        guard size != composerSize else { return }
+        composerSize = size
+        UserDefaults.standard.set(size.rawValue, forKey: "composerKeyboardSize")
         onLayoutChange?("composer-resize")
     }
 
@@ -666,8 +668,10 @@ final class KeyboardController {
     // MARK: Undo and redo
 
     /// ↶ ↷ undo and redo the keyboard's own edits; dimmed while a run is active.
-    var canUndo: Bool { undoAvailable && !runActive }
-    var canRedo: Bool { redoAvailable && !runActive }
+    private var composerOwnsHistory: Bool { composer.sessionID != nil }
+    var canUndo: Bool { composerOwnsHistory ? !composer.snapshot.lines.isEmpty : undoAvailable && !runActive }
+    // Composer currently supports Undo only; never send host Redo while editing its document.
+    var canRedo: Bool { !composerOwnsHistory && redoAvailable && !runActive }
 
     private func syncHistory() {
         if undoAvailable != history.canUndo { undoAvailable = history.canUndo }
@@ -676,6 +680,7 @@ final class KeyboardController {
 
     func undo() {
         guard canUndo else { return }
+        if composerOwnsHistory { composerIntent("undo"); return }
         prepareHistoryStep(discardingTyped: true)
         guard let step = history.undo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
