@@ -5,6 +5,32 @@ import LegatoRoom
 @testable import LegatoSoniox
 
 @Suite(.timeLimit(.minutes(1))) struct SonioxTests {
+    @Test func muteGatesAudioButKeepsSocketAndDrainsProviderBacklog() async throws {
+        let room = Room()
+        let socket = FakeSocket()
+        let tails = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded)
+        var events = tails.makeAsyncIterator()
+        let client = SonioxClient(room: room, socket: socket, keepaliveInterval: .milliseconds(5))
+        try await client.start(apiKey: "test")
+        let before = Data([1, 2]), muted = Data([3, 4]), after = Data([5, 6])
+        try await client.sendAudio(before)
+        try await client.setMuted(true)
+        try await client.setMuted(true)
+        try await client.sendAudio(muted)
+        await socket.feed(#"{"tokens":[{"text":"Backlog","is_final":true},{"text":"<fin>","is_final":true}]}"#)
+        _ = await events.next()
+        #expect(await room.documentSnapshot.lines.first?.text == "Backlog")
+        #expect(await room.state == .listening)
+        try await Task.sleep(for: .milliseconds(25))
+        #expect(await socket.sent().contains(.text(#"{"type":"keepalive"}"#)))
+        try await client.setMuted(false)
+        try await client.sendAudio(after)
+        let sent = await socket.sent()
+        #expect(sent.filter { $0 == .text(#"{"type":"finalize"}"#) }.count == 1)
+        #expect(sent.filter { if case .binary = $0 { true } else { false } } == [.binary(before), .binary(after)])
+        #expect(!sent.contains(.text("")), "Muting cannot send end-of-stream or close the provider")
+        await client.cancel()
+    }
     @Test func wordsAndSegmentsNeverCommitThePartialTail() {
         var pipeline = Segmenter()
         let first = pipeline.ingest([

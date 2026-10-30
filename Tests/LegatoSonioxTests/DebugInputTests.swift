@@ -5,6 +5,23 @@ import LegatoComposerDoc
 @testable import LegatoSoniox
 
 @Suite(.timeLimit(.minutes(1))) struct DebugInputTests {
+    @Test func muteDrainsCommittedWordsAndResumesSameRoom() async throws {
+        let room = Room()
+        let client = SonioxClient(room: room)
+        try await client.startDebug()
+        try await client.injectDebugFrame(#"{"tokens":[{"text":"Before","is_final":true}]}"#)
+        try await client.setMuted(true)
+        #expect(await room.documentSnapshot.lines.first?.text == "Before")
+        await #expect(throws: SonioxError.inputMuted) {
+            try await client.injectDebugFrame(#"{"tokens":[{"text":" Discarded.","is_final":true},{"text":"<end>","is_final":true}]}"#)
+        }
+        #expect(await room.documentSnapshot.lines.map(\.text) == ["Before"])
+        try await client.setMuted(true)
+        try await client.setMuted(false)
+        try await client.injectDebugFrame(#"{"tokens":[{"text":"After.","is_final":true},{"text":"<end>","is_final":true}]}"#)
+        #expect(await room.documentSnapshot.lines.map(\.text) == ["Before", "After."])
+        try await client.finish()
+    }
     @Test func cancellingDebugInputRejectsFramesAndProductionStillRequiresKey() async throws {
         let client = SonioxClient(room: Room())
         try await client.startDebug()

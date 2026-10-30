@@ -44,3 +44,23 @@ import LegatoRoom
     #expect(session.renderedText == "Ready to insert")
     #expect(session.error == nil)
 }
+
+@MainActor @Test func composerMuteKeepsAgentWorkAndRoomAliveThenResetsOnCancel() async throws {
+    let room = Room()
+    let session = ComposerSession(room: room)
+    await session.receive(try await room.publish(channel: .session, participant: .ui, payload: .object(["state": .string("listening")])))
+    await session.receive(try await room.publish(channel: .agentStatus, participant: .liveAgent, payload: .object(["busy": .bool(true)])))
+    await session.setMuted(true)
+    #expect(session.isMuted)
+    #expect(session.isListening)
+    #expect(session.busy, "Muting cannot cancel the pending agent work")
+    #expect(await room.state == .listening)
+    await session.setMuted(true)
+    await session.setMuted(false)
+    #expect(!session.isMuted)
+    #expect(await room.state == .listening)
+    await session.setMuted(true)
+    await session.cancel()
+    #expect(!session.isMuted)
+    #expect(session.status == "idle")
+}
