@@ -146,7 +146,10 @@ actor CoreMLSession: LLMSessionMetrics {
         try checkOpen()  // close() may have invalidated this session while the driver was suspended.
         guard !generated.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw LLMError.emptyResponse }
         lastTurn = CoreMLTurnStats(prompt: tokens, prefilled: generated.prefilled, prefillSeconds: generated.prefillSeconds)
-        committed = tokens + generated.tokens
+        // A head appended during the first generation was accepted without blocking it. These tokens
+        // still describe the old head; rebuild next turn with the new head and this completed exchange.
+        committed = plan.instructions == transcript.instructions && plan.examples == transcript.examples
+            ? tokens + generated.tokens : nil
         transcript.record(user: message, assistant: generated.text, consumed: consumed)
         return generated.text
     }

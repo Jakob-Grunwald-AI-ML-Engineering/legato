@@ -303,6 +303,35 @@ struct CoreMLSessionTests {
         #expect(last.hasSuffix(CoreMLPrompt.continuation(user: "streamed in mid-turn\n\nTwo.", family: .qwen3)))
     }
 
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func headAppendedDuringFirstTurnRebuildsWithThatCompletedTurn(example: Bool) async throws {
+        let driver = SessionDriver()
+        let backend = try await preparedBackend(driver)
+        let session = try await backend.makeSession()
+        if example { try await session.append(.instructions("Keep the instructions.")) }
+        let hold = driver.holdNext()
+        let first = Task { try await session.respond(to: "First request.") }
+        await hold.entered()
+        if example {
+            try await session.append(.example(LLMExample(user: "Concurrent example.", assistant: "Example reply.")))
+        } else {
+            try await session.append(.instructions("Concurrent instructions."))
+        }
+        try await session.append(.text("Next text."))
+        hold.release()
+        #expect(try await first.value == "Reply one")
+        #expect(try await session.respond(to: "Second request.") == "Reply two")
+        let native = Self.text(try #require(driver.calls.last).tokens)
+        #expect(native.contains(example ? "Concurrent example." : "Concurrent instructions."))
+        if example {
+            #expect(native.contains("Keep the instructions."))
+            #expect(native.contains("Example reply."))
+        }
+        #expect(native.contains("First request."))
+        #expect(native.contains("Reply one"))
+        #expect(native.hasSuffix(CoreMLPrompt.continuation(user: "Next text.\n\nSecond request.", family: .qwen3)))
+    }
+
     @Test func aTrimRequestedDuringATurnIsNotUndoneByIt() async throws {
         let driver = SessionDriver()
         let backend = try await preparedBackend(driver)
@@ -424,4 +453,3 @@ struct CoreMLSessionTests {
             == "<end_of_turn>\n<start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\n")
     }
 }
-
