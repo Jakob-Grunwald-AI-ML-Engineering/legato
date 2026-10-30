@@ -189,7 +189,13 @@ import LegatoVocabulary
     }
     /// The surface inserts its currently rendered value synchronously, then calls this to cancel work.
     public func insert() async { generation = UUID(); _ = try? await room?.insert(); await cleanup(); status = "done"; onChange?() }
-    public func cancel() async { generation = UUID(); try? await room?.cancel(); await cleanup(); status = "idle"; onChange?() }
+    /// Discard the composition; Stop and Insert deliberately retain the rendered text.
+    public func cancel() async {
+        generation = UUID(); try? await room?.cancel(); await cleanup()
+        room = nil; sessionID = nil; audioOrigin = nil
+        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil
+        busyParticipants = []; status = "idle"; onChange?()
+    }
     public func setMode(_ value: ComposerMode) async { mode = value; UserDefaults.standard.set(value.rawValue, forKey: "composer.mode"); try? await writer?.setMode(value); onChange?() }
     public func tap(lineID: String, wordID: String, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
