@@ -53,7 +53,7 @@ public enum ComposerKeyboardSize: String, CaseIterable, Sendable {
     public func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false) -> Double {
         let maximum = max(0, min(screenHeight - 60, screenHeight * 0.85 - systemOverhead))
         switch self {
-        case .low: return min(136, maximum)
+        case .low: return min(82, maximum)
         case .medium:
             let native = KeyboardHeights.height(landscape: landscape) - (landscape ? 35.33 : 54)
             return min(native, maximum)

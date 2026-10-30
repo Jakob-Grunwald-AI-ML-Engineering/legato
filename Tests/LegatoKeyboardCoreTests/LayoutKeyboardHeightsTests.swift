@@ -84,7 +84,7 @@ import Testing
 
 @Suite struct ComposerKeyboardSizeTests {
     @Test func threeHeightsIncludeNativeTrayWithinFullScreenBudget() {
-        #expect(ComposerKeyboardSize.low.height(screenHeight: 874, systemOverhead: 92) == 136)
+        #expect(ComposerKeyboardSize.low.height(screenHeight: 874, systemOverhead: 92) == 82)
         #expect(ComposerKeyboardSize.medium.height(screenHeight: 874, systemOverhead: 92) == 243)
         #expect(abs(ComposerKeyboardSize.full.height(screenHeight: 874, systemOverhead: 92) - 650.9) < 0.01)
         #expect(ComposerKeyboardSize.full.height(screenHeight: 402, systemOverhead: 21, landscape: true) < 342)
