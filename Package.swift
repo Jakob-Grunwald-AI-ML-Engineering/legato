@@ -23,7 +23,7 @@ let package = Package(
         .package(url: "https://github.com/EmergeTools/Pow.git", exact: "1.0.5"),
     ],
     targets: [
-        .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
+        .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc", "LegatoVocabulary"]),
         .target(name: "LegatoSoniox", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
         .testTarget(name: "LegatoSonioxTests", dependencies: ["LegatoSoniox", "LegatoRoom", "LegatoComposerDoc"]),
         .target(name: "LegatoComposerDoc"),

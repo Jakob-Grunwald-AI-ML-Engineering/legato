@@ -26,7 +26,7 @@ public enum WordAlternatives {
     ///
     /// The word itself never appears (compared case-insensitively), and a text offered more than once
     /// counts once at its best score. Ties keep the order of `sources`, then of their candidates.
-    public static func rank(word: String, context: AlternativeContext, sources: [any AlternativeSource]) async -> [RankedAlternative] {
+    public static func rank(word: String, context: AlternativeContext, sources: [any AlternativeSource], wordPairs: WordPairModel? = nil) async -> [RankedAlternative] {
         let own = key(word)
         var best: [String: (alt: RankedAlternative, order: Int)] = [:]
         var order = 0
@@ -35,7 +35,9 @@ public enum WordAlternatives {
                 let k = key(candidate.text)
                 order += 1
                 guard !k.isEmpty, k != own else { continue }
-                let alt = RankedAlternative(text: candidate.text, score: candidate.score + prior(candidate.source), source: candidate.source)
+                let previous = context.sentence[..<context.wordRange.lowerBound].split(whereSeparator: \.isWhitespace).last.map(String.init)
+                let boost = previous.flatMap { wordPairs?.weight(of: candidate.text, after: $0, now: Date()) }.map { min(0.15, $0 * 0.03) } ?? 0
+                let alt = RankedAlternative(text: candidate.text, score: candidate.score + prior(candidate.source) + boost, source: candidate.source)
                 if let seen = best[k], seen.alt.score >= alt.score { continue }
                 best[k] = (alt, best[k]?.order ?? order)
             }
