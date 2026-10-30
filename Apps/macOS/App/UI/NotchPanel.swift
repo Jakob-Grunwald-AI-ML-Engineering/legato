@@ -109,7 +109,7 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
 }
 
 private func modeIcon(_ mode: ComposerMode) -> String {
-    switch mode { case .message: "message"; case .email: "envelope"; case .prompt: "sparkles"; case .note: "note.text"; @unknown default: "wand.and.stars" }
+    switch mode { case .message: "message"; case .email: "envelope"; case .prompt: "sparkles"; case .note: "note.text"; case .auto: "wand.and.stars"; @unknown default: "wand.and.stars" }
 }
 
 @MainActor private enum ComposerShortcut {

@@ -35,7 +35,9 @@ import XCTest
             }
             let popup = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
             popup.name = "keyboard-mode-picker"; popup.lifetime = .keepAlways; add(popup)
-            picker.buttons[parts[1]].tap()
+            let choice = picker.buttons[parts[1]]
+            if !choice.isHittable { picker.swipeUp() }
+            choice.tap()
             XCTAssertFalse(picker.exists, "Selecting a mode must close the picker")
             XCTAssertTrue(app.buttons[parts[1]].waitForExistence(timeout: 5), "Selected mode must reach the keyboard")
         case "tap": try coordinate(1).tap()

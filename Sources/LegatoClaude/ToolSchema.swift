@@ -16,10 +16,15 @@ public struct ToolSchema: Codable, Sendable {
         public let required: [String]?
         public let additionalProperties: Bool?
         public let items: Schema?
+        public let enumValues: [String]?
+        private enum CodingKeys: String, CodingKey {
+            case type, properties, required, additionalProperties, items
+            case enumValues = "enum"
+        }
         public init(type: String, properties: [String: Schema]? = nil, required: [String]? = nil,
-                    additionalProperties: Bool? = nil, items: Schema? = nil) {
+                    additionalProperties: Bool? = nil, items: Schema? = nil, enumValues: [String]? = nil) {
             self.type = type; self.properties = properties; self.required = required
-            self.additionalProperties = additionalProperties; self.items = items
+            self.additionalProperties = additionalProperties; self.items = items; self.enumValues = enumValues
         }
     }
 }

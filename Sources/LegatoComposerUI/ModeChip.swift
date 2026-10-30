@@ -3,7 +3,7 @@ public struct ModeChip: View {
     public var mode: String
     public var onChange: (String) -> Void
     public init(mode: String, onChange: @escaping (String) -> Void) { self.mode = mode; self.onChange = onChange }
-    private let modes = ["message", "email", "prompt", "note"]
+    private let modes = ["message", "email", "prompt", "note", "auto"]
     public var body: some View {
         Button(mode.capitalized) { advance(1) }.font(.caption.bold()).buttonStyle(.bordered)
             .gesture(DragGesture(minimumDistance: 15).onEnded { value in if abs(value.translation.width) > abs(value.translation.height) { advance(value.translation.width < 0 ? 1 : -1) } })

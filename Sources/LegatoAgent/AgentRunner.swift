@@ -87,8 +87,8 @@ public actor AgentRunner {
         restructureTask = Task { [weak self] in await self?.run(participant: .restructureAgent, events: [], final: final, generation: generation) }
     }
     public static func shouldReseed(tokens: Int, idle: Double) -> Bool { tokens > 50_000 || idle > 300 }
-    public static func request(model: ModelChoice, system: String, messages: [JSONValue], live: Bool) throws -> Data {
-        let tools = try JSONValue.encoding(ToolExecutor.schemas(live: live))
+    public static func request(model: ModelChoice, system: String, messages: [JSONValue], live: Bool, mode: ComposerMode = .message) throws -> Data {
+        let tools = try JSONValue.encoding(ToolExecutor.schemas(live: live, mode: mode))
         var fields: [String: JSONValue] = ["model": .string(model.rawValue), "max_tokens": .number(8192),
             "stream": .bool(true), "thinking": model.thinking, "system": .string(system), "messages": .array(messages),
             "tools": tools, "tool_choice": .object(["type": .string("auto")]), "cache_control": .object(["type": .string("ephemeral")])]
@@ -109,15 +109,16 @@ public actor AgentRunner {
             let eventText = String(data: try JSONEncoder().encode(context), encoding: .utf8) ?? "[]"
             let input = "Current mode: \(configuration.mode.rawValue)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n" + (final ? "Final whole-document pass: decide whether any changes help; finish when satisfied." : "Compose from the new events. " + (live ? "You are the live agent." : "You are the restructure agent."))
             conversation.messages.append(.object(["role": .string("user"), "content": .string(input)]))
+            let turnMode = configuration.mode
             let terms = await configuration.vocabulary(snapshot.text)
-            let system = PromptLayers.build(mode: configuration.mode, personal: configuration.personalPrompt, vocabulary: terms)
+            let system = PromptLayers.build(mode: turnMode, personal: configuration.personalPrompt, vocabulary: terms)
             let group = UUID().uuidString
-            if reseed { await log(participant, ["event": .string("conversation.seed"), "system": .string(system), "tools": try .encoding(ToolExecutor.schemas(live: live))]) }
+            if reseed { await log(participant, ["event": .string("conversation.seed"), "system": .string(system), "tools": try .encoding(ToolExecutor.schemas(live: live, mode: turnMode))]) }
             // A turn may perform several tools and inspect their results before it finishes.
             for _ in 0..<24 {
                 try Task.checkCancellation()
                 let request = try Self.request(model: live ? configuration.liveModel : configuration.restructureModel,
-                    system: system, messages: conversation.messages, live: live)
+                    system: system, messages: conversation.messages, live: live, mode: turnMode)
                 await log(participant, ["event": .string("request"), "request_hash": .string(SHA256.hash(data: request).map { String(format: "%02x", $0) }.joined()), "messages": .array(Array(conversation.messages.suffix(1)))])
                 var blocks: [Int: JSONValue] = [:], partial: [Int: String] = [:]
                 var usage: JSONValue = .null, first = true
