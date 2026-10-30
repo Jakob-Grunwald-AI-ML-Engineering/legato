@@ -15,9 +15,14 @@ import UIKit
         guard UserDefaults.standard.bool(forKey: "LegatoDebugBridge") else { return }
         #endif
         started = true
-        harness.register("state") { _ in ["status": "Composer coming", "dictating": false] }
-        harness.register("toggle") { _ in _ = await AppController.shared.toggle(); return ["status": "Composer coming"] }
-        harness.register("stop") { _ in return ["status": "idle"] }
+        harness.register("state") { _ in
+            let composer = AppController.shared.composer
+            return ["status": composer.status, "dictating": composer.isListening, "armed": composer.isArmed,
+                    "revision": composer.snapshot.revision, "text": composer.renderedText, "mode": composer.mode.rawValue,
+                    "error": composer.error ?? ""]
+        }
+        harness.register("toggle") { _ in _ = await AppController.shared.toggle(); return ["status": AppController.shared.notice] }
+        harness.register("stop") { _ in await AppController.shared.stopIfRunning(); return ["status": AppController.shared.composer.status] }
         harness.register("session-probe") { _ in try SessionProbe.start(); return nil }
         harness.register("say") { command in
             guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }

@@ -56,7 +56,8 @@ final class AppController {
     func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
         if composer.isListening { await composer.stop() } else { await composer.start() }
         lastTranscript = composer.renderedText
-        return .failed(composer.error ?? "")
+        if let error = composer.error { return .failed(error) }
+        return composer.isListening ? .started : .stopped(composer.renderedText)
     }
     func copy(_ text: String) { UIPasteboard.general.string = text }
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
