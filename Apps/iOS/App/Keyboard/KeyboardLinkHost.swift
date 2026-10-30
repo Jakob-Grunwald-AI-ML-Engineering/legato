@@ -45,6 +45,16 @@ final class KeyboardLinkHost: TranscriptSink {
     func attach(_ composer: ComposerSession) {
         guard let backing = UserDefaultsLinkStore() else { return }
         let channel = ComposerLink(store: LinkStore(backing)); composerChannel = channel
+        composer.onChange = { [weak self, weak composer] in
+            guard let self, let composer else { return }
+            if composer.sessionID != self.composerSessionID {
+                self.composerSessionID = composer.sessionID; self.composerHistory = ComposerLinkHistory(); self.composerRevision = -1
+            }
+            if composer.snapshot.revision != self.composerRevision {
+                self.composerHistory.record(composer.snapshot, hunks: composer.hunks)
+                self.composerRevision = composer.snapshot.revision
+            }
+        }
         composerTask = Task { [weak self, weak composer] in
             while !Task.isCancelled {
                 guard let self, let composer else { return }

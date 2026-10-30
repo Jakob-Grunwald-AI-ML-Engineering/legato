@@ -85,8 +85,8 @@ import LegatoVocabulary
                 restructureModel: ModelChoice(rawValue: defaults.string(forKey: "composer.restructureModel") ?? "") ?? .sonnet,
                 mode: mode, personalPrompt: prompt, vocabulary: { _ in terms }))
             self.agents = agents; await agents.start(); try requireGeneration(generation)
-            let stream = await room.subscribe(participant: .ui, channels: Set(Channel.allCases), buffering: .unbounded)
-            eventsTask = Task { [weak self] in for await event in stream { guard !Task.isCancelled else { break }; await self?.receive(event) } }
+            let eventStream = await room.subscribe(participant: .ui, channels: Set(Channel.allCases), buffering: .unbounded)
+            eventsTask = Task { [weak self] in for await event in eventStream { guard !Task.isCancelled else { break }; await self?.receive(event) } }
             #if os(iOS)
             guard await AVAudioApplication.requestRecordPermission() else { throw NSError(domain: "Composer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings."]) }
             let audioSession = AVAudioSession.sharedInstance()
