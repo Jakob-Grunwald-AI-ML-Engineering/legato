@@ -97,6 +97,7 @@ public struct SessionProbeBackend: Sendable {
     private var cancellationOutcome = SessionProbeOutcome.cancelled
     public init(measurements: SessionProbeMeasurements = .init()) { self.measurements = measurements }
     public var isRunning: Bool { owner != nil }
+    public func owns(_ id: UUID?) -> Bool { guard let id else { return false }; return owner == id }
 
     /// Reserve synchronously, before the task can suspend or another ingress can request a run.
     public func start(mode: SessionProbeMode, hooks: Hooks) throws -> UUID? {

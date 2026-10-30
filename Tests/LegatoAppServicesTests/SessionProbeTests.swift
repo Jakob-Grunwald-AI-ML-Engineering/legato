@@ -7,6 +7,17 @@ import Testing
 @testable import LegatoAppServices
 
 @Suite(.timeLimit(.minutes(1))) struct SessionProbeTests {
+    @Test @MainActor func ownershipTokenAllowsOnlyTheProbeAdmission() async throws {
+        let coordinator = SessionProbeCoordinator()
+        let hooks = SessionProbeCoordinator.Hooks(prepare: { _ in [] }, emit: { _ in })
+        let id = try #require(try coordinator.start(mode: .foreground, hooks: hooks))
+        #expect(coordinator.owns(id))
+        #expect(!coordinator.owns(nil))
+        #expect(!coordinator.owns(UUID()))
+        await coordinator.waitUntilFinished()
+        #expect(!coordinator.owns(id))
+    }
+
     @Test @MainActor func coordinatorReservesBeforeSpawnAndTerminalFollowsCleanup() async throws {
         let coordinator = SessionProbeCoordinator(measurements: .init(sleep: { _ in }))
         let backend = ProbeBackend(), gate = ProbeSignal()

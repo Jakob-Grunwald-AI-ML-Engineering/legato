@@ -57,6 +57,9 @@ targets:
         PRODUCT_NAME: Legato
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.mac
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LEGATO_INTERNAL"
     entitlements:
       path: Gen/App.entitlements
       properties:

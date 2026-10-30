@@ -2,6 +2,7 @@
 import Foundation
 import LegatoKeyboardCore
 import LegatoDevHarness
+import LegatoAppServices
 import UIKit
 
 typealias BridgeCommand = LegatoDevHarness.BridgeCommand
@@ -64,6 +65,17 @@ enum DebugBridge {
     // MARK: Built-ins
 
     private static func registerBuiltins() {
+        register("session-probe") { command in
+            let args = command.args
+            guard args.count <= 2,
+                  let mode = SessionProbeMode(rawValue: args.first ?? "foreground"),
+                  args.count < 2 || args[1] == "--ignore-memory-warnings" else {
+                throw BridgeError.usage("session-probe [foreground|background|background-audio] [--ignore-memory-warnings]")
+            }
+            guard let id = try SessionProbe.start(commandID: command.id, mode: mode,
+                ignoreMemoryWarnings: args.contains("--ignore-memory-warnings")) else { throw SessionProbeError.busy }
+            return ["accepted": true, "probeID": id.uuidString, "waitFor": "session.probe.done"]
+        }
         register("state") { _ in state() }
         register("say") { command in
             guard let p = DebugMessages.parse(command.args, takesChoices: false) else { throw BridgeError.usage("say <text>") }

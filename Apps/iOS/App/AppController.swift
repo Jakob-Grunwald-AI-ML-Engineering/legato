@@ -264,7 +264,7 @@ final class AppController {
             #if ANE_CLEANUP_SPIKE
             return !coordinator.isIdle || isDictating || keyboardRunActive || spike.admission.isPreparing || resolvingEngine
             #else
-            return !coordinator.isIdle || isDictating || keyboardRunActive || modelAdmission.isPreparing || resolvingEngine
+            return probeActive || !coordinator.isIdle || isDictating || keyboardRunActive || modelAdmission.isPreparing || resolvingEngine
             #endif
         }
         meetings.releaseKeptMicrophone = { [weak self] in await self?.endKeepAlive() }
@@ -296,6 +296,39 @@ final class AppController {
         Task { await meetings.recoverAtLaunch() }
     }
 
+    #if LEGATO_INTERNAL
+    var probeAdmissionBusy: Bool {
+        !coordinator.isIdle || isDictating || keyboardRunActive || keyboardActivations > 0 || resolvingEngine || modelAdmission.isPreparing || modelAdmission.isResetting || meetings.isActive
+    }
+    func releaseModelsForProbe(owner: UUID) async throws {
+        guard SessionProbe.owns(owner) else { throw SessionProbeError.invalidOwner }
+        await releaseModelsForMemoryPressure(probeOwner: owner)
+    }
+    func armMicrophoneForProbe(owner: UUID) async throws -> Bool {
+        guard SessionProbe.owns(owner), models.isProbeReserved else { throw SessionProbeError.invalidOwner }
+        guard !meetings.isActive, coordinator.isIdle else { throw SessionProbeError.busy }
+        let result = await coordinator.arm(keepAlive: .indefinite)
+        try Task.checkCancellation()
+        return result == .armed
+    }
+    func restoreModelsAfterProbe(owner: UUID) async throws {
+        guard SessionProbe.owns(owner) else { throw SessionProbeError.invalidOwner }
+        // Deliberate internal restoration under the probe's lifetime, without downloads or user admission.
+        try await models.restoreProbeResources(owner: owner, options: Settings.cleanupStore.options, inBackground: false)
+        readiness.selectedResourcesReady = true
+        recognitionPreparing = false; recognitionFailure = nil
+        await refreshReadiness()
+    }
+    func probeDidFinish() { Task { await refreshEngine(releasingKeptMicrophone: false) } }
+    #endif
+    private var probeActive: Bool {
+        #if LEGATO_INTERNAL
+        SessionProbe.isRunning
+        #else
+        false
+        #endif
+    }
+
     // MARK: Models
 
     /// Resolves the live engine from the pick and the engine settings, for the sessions built from now on.
@@ -303,6 +336,7 @@ final class AppController {
     /// released and the next start builds one with the new engine. During a run, the run's session is
     /// released when the run ends instead of being kept.
     func refreshEngine(releasingKeptMicrophone: Bool = true) async {
+        guard !probeActive else { return }
         await finishEngineRefresh(beginEngineResolution(releasingKeptMicrophone: releasingKeptMicrophone))
     }
 
@@ -361,6 +395,7 @@ final class AppController {
 
     /// Settings change resource ownership, independently of the microphone's keep-ready duration.
     func cleanupSettingsChanged() {
+        guard !probeActive else { return }
         modelRevision += 1
         readiness.selectedResourcesReady = false
         recognitionPreparing = true
@@ -374,6 +409,7 @@ final class AppController {
 
     /// Meeting preferences change retention without superseding dictation admission.
     func meetingSettingsChanged() {
+        guard !probeActive else { return }
         Task { [weak self] in
             guard let self else { return }
             await models.reconcileSelectedModels(options: Settings.cleanupStore.options, inBackground: startEnvironment.current().inBackground)
@@ -382,11 +418,13 @@ final class AppController {
     }
 
     private func scheduleResourcePreparation() {
+        guard !probeActive else { return }
         resourcePreparation?.cancel()
         resourcePreparation = Task { [weak self] in await self?.warmSelectedResources() }
     }
 
     private func warmSelectedResources() async {
+        guard !probeActive else { return }
         #if !ANE_CLEANUP_SPIKE
         guard !resolvingEngine, !modelAdmission.isResetting, !startEnvironment.current().inBackground else { return }
         let revision = modelRevision
@@ -402,6 +440,7 @@ final class AppController {
 
     /// Retain/start selected resources without waiting for recognition or cleanup before a mic-only lease.
     private func prepareMicrophoneResources() async throws {
+        guard !probeActive else { throw ModelAdmission.AdmissionError.busy }
         #if DEBUG
         if E2E.fakeEngine != nil { return }
         #endif
@@ -414,6 +453,7 @@ final class AppController {
     }
 
     private func prepareSelectedResources() async throws {
+        guard !probeActive else { throw ModelAdmission.AdmissionError.busy }
         let revision = modelRevision
         #if DEBUG
         if E2E.fakeEngine != nil {
@@ -446,7 +486,13 @@ final class AppController {
     }
 
     /// Revoke held readiness before relinquishing model ownership; active runs keep their own resources.
-    private func releaseModelsForMemoryPressure() async {
+    private func releaseModelsForMemoryPressure(probeOwner owner: UUID? = nil) async {
+        #if LEGATO_INTERNAL
+        if probeActive, !SessionProbe.owns(owner) {
+            if !SessionProbe.ignoresMemoryWarnings { SessionProbe.cancel() }
+            return
+        }
+        #endif
         #if LEGATO_INTERNAL
         AudioDiagnostics.log("microphone.invalidation-request", ["cause": "memory pressure", "leaseHeld": micReadyUntil != nil])
         #endif
@@ -470,6 +516,7 @@ final class AppController {
 
     /// Refines `text` in the selected mode (Voice uses Message), or returns nil when unchanged.
     func refine(_ text: String) async -> String? {
+        guard !probeActive else { return nil }
         #if ANE_CLEANUP_SPIKE
         return await spike.refine(text, locale: ModelServices.singleLocale(models.engineSettings) ?? Locale.current)
         #else
@@ -576,6 +623,7 @@ final class AppController {
     /// keyboard is told to open the app.
     @discardableResult
     func perform(_ command: RequestCommand) async -> Bool {
+        guard !probeActive else { return false }
         #if DEBUG
         E2E.log("keyboard.command \(command.rawValue)")
         #endif
@@ -612,7 +660,7 @@ final class AppController {
             do {
                 outcome = try await modelAdmission.admit(
                     isIdle: { self.coordinator.isIdle },
-                    canStart: { !self.meetings.isActive && !self.resolvingEngine },
+                    canStart: { !self.meetings.isActive && !self.resolvingEngine && !self.probeActive },
                     onAdmitted: { self.coordinator.microphonePreparationBegan() },
                     resolve: { try await self.joinEngineResolution() },
                     prepare: { try await self.prepareMicrophoneResources() },
@@ -699,7 +747,10 @@ final class AppController {
     }
 
     /// Releases the microphone kept ready between dictations.
-    func endKeepAlive() async {
+    func endKeepAlive(probeOwner owner: UUID? = nil) async {
+        #if LEGATO_INTERNAL
+        guard !probeActive || SessionProbe.owns(owner) else { return }
+        #endif
         keyboardLink?.link.cancelPreparingStart()
         modelAdmission.cancel()
         #if ANE_CLEANUP_SPIKE
@@ -711,12 +762,14 @@ final class AppController {
     /// The audio policy changed: a held microphone (lease, or a session kept by the internal switch) is
     /// released so the next start activates under the new policy.
     func audioPolicySettingChanged() async {
+        guard !probeActive else { return }
         await coordinator.audioPolicyChanged()
         releaseHeldSession()
     }
 
     /// The keep-ready setting changed: a held microphone follows it (released for Off, re-armed otherwise).
     func keepAliveSettingChanged(_ linger: Linger) async {
+        guard !probeActive else { return }
         await coordinator.updateKeepAlive(linger)
     }
 
@@ -728,6 +781,7 @@ final class AppController {
     private func run(
         _ options: StartOptions, hopReason reason: ForegroundReason? = nil, startOnly: Bool = false, source: String
     ) async -> DictationCoordinator.Outcome? {
+        guard !probeActive else { return .busy }
         // A stop never waits for model preparation, including a second toggle during a cold start.
         if !startOnly, modelAdmission.isPreparing || !coordinator.isIdle {
             return await stopIfRunning() ?? .busy
@@ -758,7 +812,7 @@ final class AppController {
             }
             outcome = try await modelAdmission.admit(
                 isIdle: { self.coordinator.isIdle },
-                canStart: { !self.meetings.isActive && !self.resolvingEngine },
+                canStart: { !self.meetings.isActive && !self.resolvingEngine && !self.probeActive },
                 onAdmitted: { self.coordinator.microphonePreparationBegan() },
                 resolve: { try await self.joinEngineResolution() },
                 prepare: { try await self.prepareSelectedResources() },
@@ -998,6 +1052,9 @@ final class AppController {
         event: DictationCoordinator.SystemEventToken? = nil,
         ifCurrent: @escaping @Sendable () -> Bool = { true }
     ) {
+        #if LEGATO_INTERNAL
+        if probeActive { SessionProbe.cancel(); return }
+        #endif
         let event = event ?? coordinator.captureSystemEvent()
         Task {
             guard coordinator.isCurrent(event), ifCurrent() else { return }
@@ -1099,6 +1156,7 @@ final class AppController {
 
     /// The "keep session active" debug switch went off: end a session that was being held.
     func releaseHeldSession() {
+        guard !probeActive else { return }
         #if LEGATO_INTERNAL
         sessionControl.releaseIfHeld()
         #endif

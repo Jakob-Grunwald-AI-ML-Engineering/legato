@@ -190,7 +190,17 @@ final class MeetingController {
 
     // MARK: Start and stop
 
+    #if LEGATO_INTERNAL
+    var probeAdmissionBusy: Bool { phase != .idle || startTask != nil }
+    #endif
+
     func start() async {
+        #if LEGATO_INTERNAL
+        guard !SessionProbe.isRunning else {
+            notices.post("A session probe is running. Try again when it finishes.", kind: .start, meeting: nil)
+            return
+        }
+        #endif
         guard phase == .idle else { return }
         guard startTask == nil else {
             notices.post("Still cancelling the last start. Try again in a moment.", kind: .start, meeting: nil)
