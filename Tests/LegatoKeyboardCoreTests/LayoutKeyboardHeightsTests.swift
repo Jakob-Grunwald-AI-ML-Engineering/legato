@@ -82,15 +82,29 @@ import Testing
     }
 }
 
-@Suite struct ComposerKeyboardHeightTests {
-    @Test func resizingKeepsToolbarAndReadableComposerWithinScreen() {
-        #expect(ComposerKeyboardHeight.resolve(100, screenHeight: 874) == 260)
-        #expect(ComposerKeyboardHeight.resolve(1000, screenHeight: 874) == 600)
-        #expect(ComposerKeyboardHeight.resolve(420, screenHeight: 874) == 420)
-        #expect(ComposerKeyboardHeight.resolve(600, screenHeight: 402) == 222)
+@Suite struct ComposerKeyboardSizeTests {
+    @Test func threeHeightsIncludeNativeTrayWithinFullScreenBudget() {
+        #expect(ComposerKeyboardSize.low.height(screenHeight: 874, systemOverhead: 92) == 82)
+        #expect(ComposerKeyboardSize.medium.height(screenHeight: 874, systemOverhead: 92) == 243)
+        #expect(abs(ComposerKeyboardSize.full.height(screenHeight: 874, systemOverhead: 92) - 650.9) < 0.01)
+        #expect(ComposerKeyboardSize.full.height(screenHeight: 402, systemOverhead: 21, landscape: true) < 342)
+        #expect(ComposerKeyboardSize.full.height(screenHeight: 100, systemOverhead: 92) == 0)
     }
-    @Test func upwardDragExpandsAndDownwardDragContractsFromOriginalHeight() {
-        #expect(ComposerKeyboardHeight.resized(start: 420, translation: -100, screenHeight: 874) == 520)
-        #expect(ComposerKeyboardHeight.resized(start: 420, translation: 100, screenHeight: 874) == 320)
+
+    @Test func eachSwipeMovesExactlyOnePresetAndClampsAtBothEnds() {
+        #expect(ComposerKeyboardSize.low.swiped(dx: 0, dy: -300) == .medium)
+        #expect(ComposerKeyboardSize.medium.swiped(dx: 0, dy: -300) == .full)
+        #expect(ComposerKeyboardSize.full.swiped(dx: 0, dy: -300) == .full)
+        #expect(ComposerKeyboardSize.full.swiped(dx: 0, dy: 300) == .medium)
+        #expect(ComposerKeyboardSize.medium.swiped(dx: 0, dy: 300) == .low)
+        #expect(ComposerKeyboardSize.low.swiped(dx: 0, dy: 300) == .low)
+        #expect(ComposerKeyboardSize.medium.swiped(dx: 40, dy: -30) == .medium)
+        #expect(ComposerKeyboardSize.medium.swiped(dx: 0, dy: -15) == .medium)
+    }
+
+    @Test func tapCyclesAndStoredPresetRestores() {
+        #expect(ComposerKeyboardSize.full.cycled == .low)
+        #expect(ComposerKeyboardSize.low.cycled == .medium)
+        #expect(ComposerKeyboardSize(rawValue: "full") == .full)
     }
 }
