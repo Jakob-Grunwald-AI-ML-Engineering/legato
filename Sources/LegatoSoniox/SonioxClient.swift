@@ -45,11 +45,12 @@ public actor URLSessionSonioxSocket: SonioxSocket {
 }
 
 public enum SonioxError: Error, Sendable, Equatable, LocalizedError {
-    case missingKey, notConnected, invalidResponse, network, timeout, cancelled, provider(Int)
+    case missingKey, notConnected, inputMuted, invalidResponse, network, timeout, cancelled, provider(Int)
     public var errorDescription: String? {
         switch self {
         case .missingKey: "Add a Soniox API key in Settings."
         case .notConnected: "Soniox is not connected."
+        case .inputMuted: "Voice input is muted."
         case .invalidResponse: "Soniox returned an invalid response."
         case .network: "Soniox connection failed. Check your internet connection."
         case .timeout: "Soniox did not finish in time. The session log has been kept."
@@ -81,6 +82,7 @@ public actor SonioxClient {
     private var failure: SonioxError?
     private var lastSend = ContinuousClock.now
     private var debugInput = false
+    private var muted = false
     private var latestTail = ""
     private var audioOrigin: Double?
     public init(room: Room, config: SonioxConfig = SonioxConfig(), socket: any SonioxSocket = URLSessionSonioxSocket(),
@@ -119,6 +121,7 @@ public actor SonioxClient {
     }
     public func injectDebugFrame(_ json: String) async throws {
         guard debugInput, state == .streaming else { throw SonioxError.notConnected }
+        guard !muted else { throw SonioxError.inputMuted }
         // Validate before logging/applying; arbitrary provider errors/finished flags are not an injection API.
         let response = try JSONDecoder().decode(Response.self, from: Data(json.utf8))
         guard response.finished != true, response.error_code == nil,
@@ -128,10 +131,25 @@ public actor SonioxClient {
         try await receiveFrame(.text(json))
     }
     #endif
+    /// Finalize buffered speech without ending the provider stream or the Room's listening phase.
+    /// The receiver remains active so finals from audio sent before mute can still reach agents.
+    public func setMuted(_ value: Bool) async throws {
+        guard state == .streaming else { throw failure ?? .notConnected }
+        guard muted != value else { return }
+        muted = value
+        guard value else { return }
+        do {
+            if debugInput {
+                try await receiveFrame(.text("{\"tokens\":[{\"text\":\"<fin>\",\"is_final\":true}]}"))
+            } else {
+                try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now
+            }
+        } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
+    }
     public func setAudioOrigin(_ origin: Double) { audioOrigin = origin }
     public func sendAudio(_ pcm16: Data) async throws {
         guard state == .streaming else { throw failure ?? .notConnected }
-        guard !pcm16.isEmpty else { return }
+        guard !muted, !pcm16.isEmpty else { return }
         if audioOrigin == nil { audioOrigin = ProcessInfo.processInfo.systemUptime }
         do { try await socket.send(.binary(pcm16)); lastSend = .now }
         catch { await fail(.network); throw SonioxError.network }
