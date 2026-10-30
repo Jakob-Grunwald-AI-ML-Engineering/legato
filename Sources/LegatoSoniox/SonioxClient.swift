@@ -150,8 +150,10 @@ public actor SonioxClient {
     /// Flush the current provider hypothesis without stopping microphone/session input.
     @discardableResult public func finalizeChunk() async throws -> Bool {
         if state == .finished { return false }
+        if state == .finalizing || state == .ending { return true }
         guard state == .streaming else { throw failure ?? .notConnected }
-        if debugInput { try await flushDebugHypothesis()        } else { try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now }
+        if debugInput { try await flushDebugHypothesis() }
+        else { try await socket.send(.text("{\"type\":\"finalize\"}")); lastSend = .now }
         return true
     }
     private func flushDebugHypothesis() async throws {
