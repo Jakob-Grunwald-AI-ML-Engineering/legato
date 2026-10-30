@@ -9,7 +9,27 @@ public struct SSEEvent: Sendable, Equatable {
 public struct SSEParser: Sendable {
     private var event = "message"
     private var data: [String] = []
+    private var lineBytes: [UInt8] = []
+    private var previousWasCR = false
     public init() {}
+
+    /// Preserve empty SSE lines; AsyncBytes.lines omits the frame delimiters.
+    /// Decode only complete lines so split UTF-8 code points remain intact.
+    public mutating func consume(byte: UInt8) -> SSEEvent? {
+        if previousWasCR && byte == 10 {
+            previousWasCR = false
+            return nil
+        }
+        previousWasCR = byte == 13
+        if byte == 10 || byte == 13 {
+            let line = String(decoding: lineBytes, as: UTF8.self)
+            lineBytes.removeAll(keepingCapacity: true)
+            return consume(line: line)
+        }
+        lineBytes.append(byte)
+        return nil
+    }
+
     public mutating func consume(line: String) -> SSEEvent? {
         if line.isEmpty {
             defer { event = "message"; data = [] }
