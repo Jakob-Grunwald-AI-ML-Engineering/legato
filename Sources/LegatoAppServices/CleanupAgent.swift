@@ -429,7 +429,10 @@ public actor CleanupAgent: FieldAgent {
         if options.mode == .replace { return await rewriteRun() }
         var made: [EditTransaction] = []
         var tried: Set<String> = []
+        let started = ContinuousClock.now
         while let segment = nextReady(final: final, tried: tried) {
+            // The stop does not wait for a backlog without end: past the stop budget the rest stays as heard.
+            if final, ContinuousClock.now - started >= Self.stopBudget(options) { break }
             tried.insert(segment.text)
             made += await turn(segment, final: final)
             if Task.isCancelled { return [] }
@@ -472,8 +475,9 @@ public actor CleanupAgent: FieldAgent {
         let base = version
         let rewriter = PassageRewriter(session: session, options: options)
         var made: [EditTransaction] = []
+        let deadline = ContinuousClock.now + Self.stopBudget(options)
         for region in runRegions() {
-            for group in await rewriter.groups(region.text, at: region.location) {
+            for group in await rewriter.groups(region.text, at: region.location, until: deadline) {
                 guard !group.steps.contains(where: { step in touched.contains { Self.touches($0, step.span) } }) else { continue }
                 let transaction = EditTransaction(origin: .agent, owner: options.owner, base: base, steps: group.steps, session: sessionID)
                 pending[transaction.id] = Planned(old: group.reference, settled: [])
@@ -503,6 +507,9 @@ public actor CleanupAgent: FieldAgent {
     private func ask(_ request: String, kind: String, final: Bool) async -> String? {
         await PassageRewriter(session: session, options: options).ask(request, kind: kind, final: final)
     }
+
+    /// How long the stop may start new turns: one turn's timeout (the turn started last may take another).
+    static func stopBudget(_ options: Options) -> Duration { options.timeout }
 
     // MARK: Text helpers
 
@@ -558,9 +565,9 @@ public struct PassageRewriter: Sendable {
         self.options = options
     }
 
-    /// `text` cleaned, or nil when nothing changed or no turn answered.
+    /// `text` cleaned, or nil when nothing changed or no turn answered. No chunk starts after twice the turn timeout.
     public func cleaned(_ text: String) async -> String? {
-        let groups = await groups(text, at: 0)
+        let groups = await groups(text, at: 0, until: ContinuousClock.now + options.timeout * 2)
         guard !groups.isEmpty else { return nil }
         var units = Array(text.utf16)
         for step in groups.flatMap(\.steps).sorted(by: { $0.span.location > $1.span.location }) {
@@ -570,10 +577,12 @@ public struct PassageRewriter: Sendable {
         return out == text ? nil : out
     }
 
-    /// The accepted patch groups for `text`, which starts at UTF-16 offset `location` of the field.
-    public func groups(_ text: String, at location: Int) async -> [Group] {
+    /// The accepted patch groups for `text`, which starts at UTF-16 offset `location` of the field. No chunk is
+    /// started after `deadline` (the rest stays as it is).
+    public func groups(_ text: String, at location: Int, until deadline: ContinuousClock.Instant? = nil) async -> [Group] {
         var out: [Group] = []
         for chunk in chunks(text) {
+            if let deadline, ContinuousClock.now >= deadline { break }
             guard let reply = await ask(CleanupPrompt.Agent.finalRequest(chunk.text), kind: "final", final: true),
                   let rewrite = RewriteReply.clean(reply, keepLineBreaks: true)
             else { continue }

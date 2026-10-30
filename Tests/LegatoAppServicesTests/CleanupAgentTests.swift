@@ -531,6 +531,29 @@ struct CleanupAgentTests {
         #expect(requests.allSatisfy { RewriteContext.estimatedTokens($0) < PassageRewriter.chunkTokens + 60 })
     }
 
+    /// The stop does not wait for a backlog without end: once the turn timeout is spent, no new turn starts and the
+    /// rest stays as heard.
+    @Test func theStopStartsNoTurnPastItsBudget() async throws {
+        let replies = (0..<6).map { FakeSession.Script.slow(.milliseconds(80), "Sentence \($0) is fine.") }
+        let rig = await Rig(scripts: replies, timeout: .milliseconds(150))
+        rig.write((0..<6).map { "Sentence \($0) is fine." }.joined(separator: " "))
+        await rig.agent.setTentative(length: rig.field.utf16.count)  // nothing is final while listening
+        _ = await rig.feed()
+        await rig.agent.setTentative(length: 0)
+        _ = await rig.agent.finish()
+        let asked = await rig.session.requests.count
+        #expect(asked >= 1 && asked < 6)
+    }
+
+    @Test func aLongReplaceStopStartsNoChunkPastItsBudget() async throws {
+        let sentence = "This sentence has a number of plain words in it to make the text long enough."
+        let rig = await Rig(scripts: Array(repeating: .slow(.milliseconds(80), "x"), count: 10), timeout: .milliseconds(150), mode: .replace)
+        _ = await rig.dictate(Array(repeating: sentence, count: 20).joined(separator: " "))
+        _ = await rig.agent.finish()
+        let asked = await rig.session.requests.count
+        #expect(asked >= 1 && asked < 3)
+    }
+
     @Test func thePassageRewriterCleansAWholeText() async throws {
         let session = FakeSession(budget: 4_000, scripts: [.reply("I saw the dog. It ran away.")])
         let rewriter = PassageRewriter(session: session, options: .init(owner: "run"))
