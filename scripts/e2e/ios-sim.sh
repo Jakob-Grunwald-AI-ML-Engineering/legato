@@ -229,7 +229,7 @@ if [ "$mode" = release-check ]; then
     harness-mic-hop-retry foreign-engine-change E2EFakeMeetingMic meeting-start meeting-stop meeting-mute meeting-unmute meeting-pause meeting-resume meeting-discard meeting-export meeting-route-change interrupt-end
     "meeting.started" "meeting.refused" "meeting.pipeline.done" "meeting.export" "meeting.session.activate" "meeting.mic.restart"
     "meeting.discarded" "meeting.list count" "meeting.bgtask"
-    E2EFakeCleanup E2EFakeAgentSession LegatoFakeCleanup LegatoFakeAgentDelayMs LegatoCleanupDelivery LegatoFieldEditsSetting
+    E2EFakeCleanup E2EFakeAgentSession LegatoFakeCleanup LegatoFakeAgentDelayMs LegatoCleanupDelivery
     harness-agent-edit harness-host-send)
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
@@ -1654,55 +1654,38 @@ assert_count_after() {
 }
 
 scenario_fe() {
-  # The experimental field edit queue in the keyboard (forced on by -LegatoFieldEdits YES; the real setting is
-  # off by default): every edit goes through FieldEditQueue as a patch, verified against the field's later reads
-  # at the shipped 250 ms settle timeout. The harness document lags like a real textDocumentProxy: its reads and
-  # change callbacks trail the calls (60 ms, 400 ms on the revision steps: past the timeout), one state per call.
-  # The harness's scripted host streams a Live run; its revision, the word row, ↶ ↷ and a version swap each land
-  # as patch-sized proxy calls with the field's caret put back; keys typed while a revision waits run at once and
-  # the revision lands after them; deleting into the word a waiting revision rewrites hands it back as the
-  # user's; a write the field never shows fails once and is typed again once. Then the fake keyboard follows a
-  # real dictation through the queue, and the keystroke/tap latency is measured with the queue off and on.
-  begin "fe. field edits: harness sources through the queue" -LegatoKeyboardHarness YES -LegatoFieldEdits YES \
+  # The field edit queue in the keyboard (always on): every edit goes through FieldEditQueue as a patch, verified
+  # against the field's later reads at the shipped 250 ms settle timeout. The harness document lags like a real
+  # textDocumentProxy: its reads and change callbacks trail the calls (60 ms, 400 ms on the last stream chunk: past
+  # the timeout), one state per call. The harness's scripted host streams a Live run; the stream, the word row and
+  # ↶ ↷ each land as patch-sized proxy calls with the field's caret put back; a write the field never shows fails
+  # once and is typed again once. Then the fake keyboard follows a real dictation through the queue, and the
+  # keystroke/tap latency is measured.
+  begin "fe. field edits: harness sources through the queue" -LegatoKeyboardHarness YES \
     -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
   wait_log "e2e harness ready" 10
   assert_log "the queue is on for this appearance" "harness fe.on"
   trigger harness-fieldedits
   wait_log "e2e fe.done" 60
   assert_no_log "no scripted step timed out" "fe.timeout"
-  assert_no_log_before "nothing was handed back before the same-word step" "fe.step name=before-same-word" "result=conflict"
+  assert_no_log_before "nothing was handed back before the dropped write" "fe.step name=redo-row" "result=conflict"
   assert_log "a read lagging past the timeout was waited for once more" "extended=0"
   assert_log "reads showed our writes in progress (echoes), not news" "harness fe.echo"
-  assert_eq "stream + revision: field" "the cat sat on" "$(log_field "fe.step name=stream " doc)"
+  assert_eq "stream: field" "teh cat sat on" "$(log_field "fe.step name=stream " doc)"
   assert_log "the stream went through the ASR lane" "harness fe.write origin=asr lane=asr"
-  fe_write_ok "Live revision teh→the is a 2/2 patch, caret restored" "harness fe.write origin=liveCleanup lane=cleanup del=2 ins=2" 2 2 stream
-  assert_eq "word row: field" "the cat sat only " "$(log_field "fe.step name=row " doc)"
+  assert_eq "word row: field" "teh cat sat only " "$(log_field "fe.step name=row " doc)"
   fe_write_ok "word-row completion is a 0/3 patch, caret after it" "harness fe.write origin=wordRow lane=user" 0 3 row
-  assert_eq "↶ completion: field" "the cat sat on" "$(log_field "fe.step name=undo-row " doc)"
+  assert_eq "↶ completion: field" "teh cat sat on" "$(log_field "fe.step name=undo-row " doc)"
   fe_write_ok "↶ completion is a 3/0 patch, caret at the end" "harness fe.write origin=history lane=user del=3" 3 0 undo-row
-  assert_eq "↶ version swap: field shows the raw text" "teh cat sat on" "$(log_field "fe.step name=undo-version " doc)"
-  fe_write_ok "version swap is a 2/2 patch, caret at the end" "harness fe.write origin=versions lane=user" 2 2 undo-version
-  assert_eq "↷ version swap: field" "the cat sat on" "$(log_field "fe.step name=redo-version " doc)"
-  assert_eq "↷ completion: field" "the cat sat only " "$(log_field "fe.step name=redo-row " doc)"
-  assert_log "revision 2 waited in the cleanup lane behind an unverified write" "harness fe.queued origin=liveCleanup"
-  assert_log "the harness saw it waiting" "fe.pending waiting=1"
-  assert_eq "keys typed while it waited landed at the caret" "the cat sat only a dog ran is" "$(log_field "fe.step name=typed-while-pending " doc)"
-  assert_order "the keys ran while the revision waited" "harness fe.queued origin=liveCleanup" "harness fe.write origin=keystroke"
-  assert_order "the waiting revision ran after the keys" "fe.step name=typed-while-pending" "harness fe.write origin=liveCleanup lane=cleanup del=1 ins=1"
-  fe_write_ok "the waiting revision is a 1/1 patch, caret back after the keys" "harness fe.write origin=liveCleanup lane=cleanup del=1 ins=1" 1 1 pending
-  assert_eq "after it: field" "the cat sat only A dog ran is" "$(log_field "fe.step name=pending " doc)"
-  assert_eq "deleting into the waiting revision's word: the user's text" "the cat sat only A dog ran is The di" "$(log_field "fe.step name=typed-into-pending " doc)"
-  assert_count_after "the waiting revision was handed back once, as the user's" "fe.step name=before-same-word" "origin=liveCleanup result=conflict reason=overlap byUser=1" 1
-  assert_eq "after it: the user's text stays" "the cat sat only A dog ran is The di" "$(log_field "fe.step name=same-word " doc)"
-  assert_eq "after it: caret at the end" "$(log_kv_first "fe.step name=same-word " end)" "$(log_kv_first "fe.step name=same-word " caret)"
+  assert_eq "↷ completion: field" "teh cat sat only " "$(log_field "fe.step name=redo-row " doc)"
   assert_log "a write was lost by the field" "harness fe.dropped"
-  assert_count_after "the lost write failed once, after the extended wait" "fe.step name=same-word" "result=conflict reason=verifyFailed" 1
-  assert_count_after "its chunk was rewound once" "fe.step name=same-word" "fe.mapped rewound=1" 1
-  assert_eq "the lost chunk was typed again, exactly once" "the cat sat only A dog ran is The di one two three" "$(log_field "fe.step name=dropped " doc)"
+  assert_count_after "the lost write failed once, after the extended wait" "fe.step name=redo-row" "result=conflict reason=verifyFailed" 1
+  assert_count_after "its chunk was rewound once" "fe.step name=redo-row" "fe.mapped rewound=1" 1
+  assert_eq "the lost chunk was typed again, exactly once" "teh cat sat only one two three" "$(log_field "fe.step name=dropped " doc)"
   assert_eq "after it: caret at the end" "$(log_kv_first "fe.step name=dropped " end)" "$(log_kv_first "fe.step name=dropped " caret)"
 
   SCENARIO="fe. field edits: fake keyboard follows a dictation"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 -LegatoFieldEdits YES || return
+  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
   trigger kbd-visible
   wait_log "e2e kbd.visible value=1" 10
   run_once 1
@@ -1719,30 +1702,20 @@ scenario_fe() {
   assert_no_log "every queued write was confirmed" "outcome=diverged"
   assert_no_log "no queued write was refused" "kbd.fieldedit result=refused"
 
-  # Latency: how long a key press, a word-row tap or ↶ takes until it returns, queue off then on: median, p95 and
-  # max each within off + 16 ms (one frame). Then keys over the lagging document while the host sends and clears
-  # the field after each Return before it reports it (a read none of the queue's states is): the keys after it
-  # are in the field when their press returns, within the same bound.
-  local off on offsend onsend kind stat a b
-  SCENARIO="fe. field edits: latency off vs on"
+  # Latency: how long a key press, a word-row tap or ↶ takes until it returns (printed; no bound). Then keys over the
+  # lagging document while the host sends and clears the field after each Return before it reports it (a read none
+  # of the queue's states is): the keys after it are in the field when their press returns.
+  local lag lagsend
+  SCENARIO="fe. field edits: latency"
   relaunch -LegatoKeyboardHarness YES -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
   wait_log "e2e harness ready" 10
   trigger harness-fe-lag
-  wait_log "e2e fe.lag on=0" 15
-  off="$(last_line "fe.lag on=0")"
-  wait_log "e2e fe.lagsend on=0" 30
-  offsend="$(last_line "fe.lagsend on=0")"
-  relaunch -LegatoKeyboardHarness YES -LegatoFieldEdits YES -LegatoHarnessAutocap NO -LegatoHarnessSuggestions only,on,one || return
-  wait_log "e2e harness ready" 10
-  trigger harness-fe-lag
-  wait_log "e2e fe.lag on=1" 15
-  on="$(last_line "fe.lag on=1")"
-  wait_log "e2e fe.lagsend on=1" 30
-  onsend="$(last_line "fe.lagsend on=1")"
-  echo "fe latency off: ${off#*fe.lag }"
-  echo "fe latency on:  ${on#*fe.lag }"
-  echo "fe send-clear latency off: ${offsend#*fe.lagsend }"
-  echo "fe send-clear latency on:  ${onsend#*fe.lagsend }"
+  wait_log "e2e fe.lag keys=" 15
+  lag="$(last_line "fe.lag keys=")"
+  wait_log "e2e fe.lagsend keys=" 30
+  lagsend="$(last_line "fe.lagsend keys=")"
+  echo "fe latency: ${lag#*fe.lag }"
+  echo "fe send-clear latency: ${lagsend#*fe.lagsend }"
   assert_no_log "no lag step timed out" "fe.timeout"
   assert_log "the host's clear contradicted the prediction" "harness fe.settle final=0 outcome=notYet"
   # The edit queue takes the host's clear as a run boundary (ClearWatch: `fieldCleared`, a `reset(cleared)`): the
@@ -1751,22 +1724,6 @@ scenario_fe() {
   assert_no_log "no key went around the queue" "fe.key direct=1"
   assert_eq "the keys typed after the clear are in the field at once" "ok" "$(log_field "fe.step name=send-cleared " doc)"
   assert_eq "after the reads caught up: field" "ok" "$(log_field "fe.step name=sent " doc)"
-  assert_eq "same field with the queue on as off (send-clear)" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$offsend")" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$onsend")"
-  assert_eq "same field with the queue on as off" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$off")" "$(sed -n 's/.* doc="\([^"]*\)".*/\1/p' <<< "$on")"
-  for kind in key tap undo; do
-    for stat in Ms P95Ms MaxMs; do
-      a="$(sed -n "s/.* $kind$stat=\([0-9.]*\).*/\1/p" <<< "$off")"; b="$(sed -n "s/.* $kind$stat=\([0-9.]*\).*/\1/p" <<< "$on")"
-      if [ -n "$a" ] && [ -n "$b" ] && python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[2]) <= float(sys.argv[1]) + 16 else 1)' "$a" "$b"; then
-        record PASS "$kind$stat on ($b) <= off ($a) + 16 ms"
-      else record FAIL "$kind$stat on <= off + 16 ms" "off <$a> on <$b>"; fi
-    done
-  done
-  for stat in Ms P95Ms MaxMs; do
-    a="$(sed -n "s/.* key$stat=\([0-9.]*\).*/\1/p" <<< "$offsend")"; b="$(sed -n "s/.* key$stat=\([0-9.]*\).*/\1/p" <<< "$onsend")"
-    if [ -n "$a" ] && [ -n "$b" ] && python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[2]) <= float(sys.argv[1]) + 16 else 1)' "$a" "$b"; then
-      record PASS "send-clear key$stat on ($b) <= off ($a) + 16 ms"
-    else record FAIL "send-clear key$stat on <= off + 16 ms" "off <$a> on <$b>"; fi
-  done
 }
 
 # ------------------------------------------------------------------- edit queue + cleanup agent on the link (L6)
@@ -1785,15 +1742,14 @@ fa_start() { trigger harness-mic; wait_log_n "e2e outcome kind=started" "$1" 10;
 fa_stop() { trigger harness-mic; wait_log_n "e2e outcome kind=stopped" "$1" 30; }
 
 scenario_fa() {
-  # The setting "Experimental: edit queue and cleanup agent" on, end to end over the link: the real app dictates
-  # (fake engine) into the harness keyboard (the real KeyboardController, its queue on through the App Group
-  # setting). The keyboard publishes its field events to link.feed; the app's side (LinkedCleanupRun) folds them,
+  # Cleanup on, end to end over the link: the real app dictates (fake engine) into the harness keyboard (the real
+  # KeyboardController, its queue always on). The keyboard publishes its field events to link.feed; the app's side (LinkedCleanupRun) folds them,
   # runs the cleanup agent on a scripted rolling session (teh→the, dgo→dog, sentence by sentence) and sends its
   # edits over link.edits, which the keyboard executes through its queue. The session's own cleanup is the same
-  # scripted rules (the stateless pass). A Live run with a user edit mid-run, a field the host clears mid-run, a
-  # Live run without a rolling session, Replace and Hold.
+  # scripted rules (the rewrite at stop). A Live run with a user edit mid-run, a field the host clears mid-run, a
+  # Live run without a rolling session, and Replace (one final agent call at the stop).
   local common=(-LegatoFakeEngine "$AGENT_TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 -LegatoKeyboardHarness YES
-    -LegatoHarnessAutocap NO -LegatoFakeCleanup "teh=the,dgo=dog" -LegatoFieldEditsSetting YES)
+    -LegatoHarnessAutocap NO -LegatoFakeCleanup "teh=the,dgo=dog")
   local doc
 
   begin "fa. agent: Live, user edits mid-run" "${common[@]}" -LegatoCleanupDelivery live -LegatoFakeAgentDelayMs 2500 || return
@@ -1808,13 +1764,15 @@ scenario_fa() {
   fa_stop 2
   wait_log "link agent.finish" 20
   sleep 0.5
-  assert_log "the setting reached the keyboard: its queue is on" "harness fe.on"
+  assert_log "the keyboard's queue is on" "harness fe.on"
   assert_log "the run is on the link, with the agent" "link link.run delivery=live agent=1"
   assert_log "the keyboard follows the run on the link" "harness fe.link follow"
   assert_count "the session ran no cleanup of its own for it (only the Action Button run's)" "cleanup.pass" 1
+  assert_log "the session skipped its own pass for the agent" "cleanup.skip kind=session reason=agent"
+  assert_log "the agent's first turn asked for the first sentence while listening" "agent.ask n=1 final=0"
+  assert_log "and the rolling session answered it with a change" "agent.reply n=1 changed=1"
   assert_eq "the user's key landed in the first word" "texh cat sat. A dgo ran. " "$(log_field "fe.step name=agent-user-edit " doc)"
   assert_log "the agent's edit of that sentence came back as the user's, with the note" "link agent.outcome result=conflict reason=overlap byUser=1 note=1"
-  assert_log "the agent's session got the user's note" "agent.note conflict=1 user=1"
   assert_order "the agent went on after the conflict: its next edit landed" "link agent.outcome result=conflict" "link agent.outcome result=applied"
   assert_count "it never wrote into the user's sentence again" "harness fe.write origin=agent" 1
   assert_log "its fix of the next sentence is a 2/2 patch in the cleanup lane" "harness fe.write origin=agent lane=cleanup del=2 ins=2"
@@ -1841,7 +1799,7 @@ scenario_fa() {
   wait_log "link agent.finish" 20
   sleep 0.5
   assert_eq "the host emptied the field" "" "$(log_field "fe.step name=host-sent " doc)"
-  assert_log "the agent's context was closed at the clear (reset cleared)" "agent.note reset=cleared"
+  assert_log "the keyboard took the clear as a run boundary" "harness fe.reset reason=cleared"
   doc="$(harness_doc)"
   assert_eq "the sent sentence is not typed again" "" "$(grep -o 'sat\.' <<< "$doc")"
   assert_eq "the rest of the run is in the field once" "1" "$(grep -o 'ran\.' <<< "$doc" | wc -l | tr -d ' ')"
@@ -1867,7 +1825,7 @@ scenario_fa() {
   assert_no_log "no stream chunk was refused as the user's" "reason=ownerTainted"
   assert_eq "the next run's text is in the field" "1" "$(grep -o 'sat\.' <<< "$doc" | wc -l | tr -d ' ')"
 
-  SCENARIO="fa. agent absent: stateless pass as patches"
+  SCENARIO="fa. agent absent: the session rewrite as patches"
   relaunch "${common[@]}" -LegatoCleanupDelivery live -LegatoFakeAgent NO || return
   wait_log "e2e harness visible value=1" 10
   run_once 1
@@ -1877,32 +1835,35 @@ scenario_fa() {
   wait_log "link final.patch result=" 20
   sleep 0.5
   assert_log "no rolling session: the agent is absent at the stop" "link agent.absent"
-  assert_log "the stateless pass ran at the stop" "cleanup.pass changed=1"
+  assert_log "the session's rewrite ran at the stop" "cleanup.pass changed=1"
+  assert_log "as one cleanup call on the e2e backend" "cleanup.call backend=e2e-fake"
+  assert_no_log "no agent turn was asked" "agent.ask"
   assert_log "its text went over the link as two patches" "link final.patch steps=2"
   assert_log "they landed" "link final.patch result=applied"
   assert_eq "field: cleaned" "the cat sat. A dog ran. " "$(harness_doc)"
   assert_eq "history holds the cleaned text" "the cat sat. A dog ran." "$(history_texts | tail -1)"
 
-  SCENARIO="fa. Replace: stateless final pass as patches"
+  SCENARIO="fa. Replace: one final agent call at the stop"
   relaunch "${common[@]}" -LegatoCleanupDelivery replace || return
   wait_log "e2e harness visible value=1" 10
   run_once 1
   fa_start 2
   sleep 2
   fa_stop 2
-  wait_log "link final.patch result=" 20
+  wait_log "link linked.stop mode=replace" 20
   sleep 0.5
-  assert_log "the run is on the link, without an agent" "link link.run delivery=replace agent=0"
-  assert_log "its patches went over the link: two steps" "link final.patch steps=2"
-  assert_log "they landed" "link final.patch result=applied"
-  assert_count "the keyboard wrote them in the cleanup lane, one write per patch, 2 letters out, 2 in each" "harness fe.write origin=finalSwap lane=cleanup del=2 ins=2" 2
-  assert_log "and confirmed them as the swap" "harness fe.link outcome origin=finalSwap result=applied"
+  assert_log "the run is on the link, with an agent" "link link.run delivery=replace agent=1"
+  assert_count "the agent asked once, for the whole text at the stop" "agent.ask " 1
+  assert_log "and it was the final request" "agent.ask n=1 final=1"
+  assert_log "the rolling session changed it" "agent.reply n=1 changed=1"
+  assert_log "the session's own pass was skipped for the agent" "cleanup.skip kind=session reason=agent"
+  assert_log "none of the agent's final edits stayed unapplied" "unapplied=0"
+  assert_count "the keyboard wrote them in the cleanup lane, one write per sentence, 2 letters out, 2 in each" "harness fe.write origin=agent lane=cleanup del=2 ins=2" 2
+  assert_log "and confirmed them" "harness fe.link outcome origin=agent result=applied"
   assert_eq "field: cleaned" "the cat sat. A dog ran. " "$(harness_doc)"
   assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
   assert_log "the stop says it landed" "link linked.stop mode=replace branch=applied reason=- "
-  assert_count "one cleanup call per run: the session's own pass (the Action Button run's and this one)" "cleanup.call backend=e2e-fake kind=session" 2
-  assert_no_log "the stop made no second pass" "kind=stateless"
-  assert_no_log "and no agent call" "cleanup.call backend=E2EFakeAgentSession"
+  assert_count "the session's own cleanup call is the Action Button run's only" "cleanup.call backend=e2e-fake kind=session" 1
 
   # The device defect (iPhone, WhatsApp): the host's before-context loses the run's head as the text grows. The
   # patches inside the window are written, the one in the head is not (a step outside the window never is): the
@@ -1917,10 +1878,9 @@ scenario_fa() {
   fa_stop 2
   wait_log "link linked.stop mode=replace" 20
   sleep 0.5
-  assert_log "the visible patch was sent, the head's was not" "link final.patch steps=1 outOfWindow=1"
-  assert_log "the visible patch landed" "harness fe.link outcome origin=finalSwap result=applied"
+  assert_log "the run's head was out of the window: the rewrite covers the whole text" "link link.outOfWindow pass=1"
+  assert_log "the visible edit landed" "harness fe.link outcome origin=agent result=applied"
   assert_log "the stop says why" "link linked.stop mode=replace branch=partial reason=outOfWindow"
-  assert_log "and how much landed" "patched=1/2 outOfWindow=1"
   assert_eq "field: the visible part cleaned, the head raw, typed once" "teh cat sat. A dog ran. " "$(harness_doc)"
   assert_eq "clipboard: the whole cleaned text" "the cat sat. A dog ran." "$(pasteboard)"
   assert_log "the app published the partial notice" "link link.notice partial=1"
@@ -1929,20 +1889,6 @@ scenario_fa() {
   assert_eq "history: the cleaned text (the clipboard's) as its other version" "the cat sat. A dog ran." "$(history_others | tail -1)"
   assert_no_log "nothing was typed twice" "fe.duplicate"
   xcrun simctl pbcopy "$UDID" <<< "sentinel"  # the next scenario expects the clipboard as the first one left it
-
-  SCENARIO="fa. Hold: the end-of-run insert through the queue"
-  relaunch "${common[@]}" -LegatoCleanupDelivery hold || return
-  wait_log "e2e harness visible value=1" 10
-  run_once 1
-  fa_start 2
-  sleep 2
-  fa_stop 2
-  sleep 1
-  assert_no_log "Hold is not on the link" "link link.run"
-  assert_no_log "the keyboard publishes no feed for Hold" "harness fe.link follow"
-  assert_log "the insert went through the queue (Hold, ASR lane)" "harness fe.write origin=hold lane=asr"
-  assert_eq "field: the cleaned text" "the cat sat. A dog ran." "$(harness_doc)"
-  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
 }
 
 t_run=$SECONDS
