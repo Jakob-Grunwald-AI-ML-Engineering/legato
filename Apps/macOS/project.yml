@@ -59,6 +59,9 @@ targets:
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.device.audio-input: true
+        # Required by the Data Protection Keychain used for provider credentials.
+        com.apple.application-identifier: "$(DEVELOPMENT_TEAM).$(PRODUCT_BUNDLE_IDENTIFIER)"
+        com.apple.developer.team-identifier: "$(DEVELOPMENT_TEAM)"
     info:
       path: Gen/App-Info.plist
       properties:
