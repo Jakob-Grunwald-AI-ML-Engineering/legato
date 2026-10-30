@@ -20,7 +20,7 @@ let package = Package(
         .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/EmergeTools/Pow.git", exact: "1.0.5"),
+        .package(path: "Vendor/Pow"),
     ],
     targets: [
         .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc", "LegatoVocabulary"]),
