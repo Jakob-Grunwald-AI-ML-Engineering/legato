@@ -16,7 +16,11 @@ struct KeyboardRootView: View {
             Group {
                 ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
                              pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
-                             onWordTap: { controller.composerIntent("tap", lineID: $0, wordID: $1) },
+                             correctionDraft: controller.composer.correctionDraft,
+                correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,
+                             onSelect: { controller.composerIntent("tap", lineID: $0.lineID, wordID: $0.wordID, endLineID: $0.endLineID, endWordID: $0.endWordID) },
+                             onDeselect: { controller.composerIntent("deselect") },
+                             onSendCorrection: { controller.composerIntent("send-correction") },
                              onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
                     .frame(maxHeight: .infinity)
                     .transition(.opacity)

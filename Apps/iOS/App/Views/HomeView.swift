@@ -8,7 +8,11 @@ struct HomeView: View {
         VStack(spacing: 12) {
             ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
                          pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
-                         onWordTap: { line, word in Task { await controller.composer.tap(lineID: line, wordID: word) } },
+                correctionDraft: controller.composer.correctionDraft,
+                correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,
+                         onSelect: { selection in Task { await controller.composer.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
+                         onDeselect: { Task { await controller.composer.clearSelection() } },
+                         onSendCorrection: { Task { await controller.composer.sendCorrection() } },
                          onPick: { line, word, text in Task { await controller.composer.pick(lineID: line, wordID: word, text: text) } })
             Text(controller.notice).font(.caption).foregroundStyle(controller.composer.error == nil ? Color.secondary : .red)
             HStack {

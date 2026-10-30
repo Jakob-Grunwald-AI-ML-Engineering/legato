@@ -137,13 +137,14 @@ private struct NotchComposerView: View {
     let attached: Bool
     let resize: (CGFloat) -> Void
     @State private var showingModes = false
+    @State private var showingCorrection = false
     private var session: ComposerSession { controller.composer }
     private var contentHeight: CGFloat {
         let rows = session.snapshot.lines.reduce(0) { count, line in
             count + max(1, Int(ceil(Double(line.words.map(\.text).joined(separator: " ").count) / 58)))
         }
         let tailRows = session.tail.isEmpty ? 0 : max(1, Int(ceil(Double(session.tail.count) / 58)))
-        return min(440, max(200, 150 + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
+        return min(440, max(showingCorrection ? 300 : 200, 150 + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -156,7 +157,11 @@ private struct NotchComposerView: View {
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             }
             ComposerView(snapshot: session.snapshot, tail: session.tail, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
-                onWordTap: { line, word in Task { await session.tap(lineID: line, wordID: word) } },
+                correctionDraft: session.correctionDraft,
+                correctionCountdownStart: session.correctionCountdownStart, correctionCountdownDeadline: session.correctionCountdownDeadline,
+                onSelect: { selection in showingCorrection = true; Task { await session.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
+                onDeselect: { showingCorrection = false; Task { await session.clearSelection() } },
+                onSendCorrection: { Task { await session.sendCorrection() } },
                 onPick: { line, word, text in Task { await session.pick(lineID: line, wordID: word, text: text) } })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if let error = session.error { Text(error).font(.callout).foregroundStyle(.red).lineLimit(2).help(error).textSelection(.disabled) }
