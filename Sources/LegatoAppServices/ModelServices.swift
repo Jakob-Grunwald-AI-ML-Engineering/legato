@@ -126,11 +126,84 @@ public final class ModelServices {
         })
     }
 
+    private var probeOwner: UUID?
+    public var isProbeReserved: Bool { probeOwner != nil }
+
+    /// Main-actor ownership closes ordinary entry points before checking the actor's active leases.
+    public func reserveForProbe(_ owner: UUID) async throws {
+        guard probeOwner == nil, picks.isEmpty else { throw SessionProbeError.busy }
+        probeOwner = owner
+        do {
+            try await warmup.reserveForProbe(owner)
+            try Task.checkCancellation()
+        } catch {
+            await warmup.releaseProbeReservation(owner)
+            if probeOwner == owner { probeOwner = nil }
+            throw error
+        }
+    }
+    public func releaseProbeReservation(_ owner: UUID) async {
+        guard probeOwner == owner else { return }
+        await warmup.releaseProbeReservation(owner)
+        probeOwner = nil
+    }
+    private func checkProbeOwner(_ owner: UUID) throws {
+        guard probeOwner == owner else { throw SessionProbeError.invalidOwner }
+    }
+
+    /// Native preparation uses this instance's root and resource overrides. It never invokes an installer.
+    public func prepareProbeBackends(owner: UUID, report: @MainActor (String, String) -> Void = { _, _ in }) async throws -> [SessionProbeBackend] {
+        try checkProbeOwner(owner)
+        var prepared: [SessionProbeBackend] = []
+        var preparing: (any LLMBackend & ModelResourceLifecycle)?
+        do {
+            if await foundationResources.availability.isAvailable {
+                try checkProbeOwner(owner); try Task.checkCancellation()
+                preparing = foundationResources
+                try await foundationResources.prewarmResources()
+                try checkProbeOwner(owner); try Task.checkCancellation()
+                let foundation = foundationResources
+                prepared.append(.init(id: "foundation-models", backend: foundation, measuresKickstart: false,
+                                      release: { await foundation.releaseWarmResources() }))
+                preparing = nil
+            } else { report("foundation-models", "unavailable") }
+            if let id = selected(.cleanup), let spec = CoreMLModels.spec(id: id) {
+                let state = await manager.state(of: id)
+                try checkProbeOwner(owner); try Task.checkCancellation()
+                if case .installed = state {
+                    let backend: any LLMBackend & ModelResourceLifecycle
+                    if let resourceOverrides { backend = await resourceOverrides.coreML(id, modelRoot) }
+                    else { backend = await CoreMLModelStore.shared.backend(for: spec, root: modelRoot) }
+                    preparing = backend
+                    try checkProbeOwner(owner); try Task.checkCancellation()
+                    try await backend.prewarmResources()
+                    try checkProbeOwner(owner); try Task.checkCancellation()
+                    prepared.append(.init(id: "coreml:\(id)", backend: backend, measuresKickstart: true,
+                                          release: { await backend.releaseWarmResources() }))
+                    preparing = nil
+                } else { report("coreml:\(id)", "not-installed") }
+            } else { report("coreml", "not-selected") }
+            return prepared
+        } catch {
+            if let preparing { await preparing.releaseWarmResources() }
+            for descriptor in prepared { await descriptor.release() }
+            throw error
+        }
+    }
+
+    /// Restore the app's requested union while the probe still excludes ordinary leases and preparation.
+    public func restoreProbeResources(owner: UUID, options: CleanupOptions, inBackground: Bool) async throws {
+        try checkProbeOwner(owner)
+        try await prepareSelectedModels(options: options, inBackground: inBackground, probeOwner: owner)
+    }
+
     /// Reconciles retention for every selected consumer without waiting for their union.
-    public func reconcileSelectedModels(options: CleanupOptions, inBackground: Bool) async {
+    public func reconcileSelectedModels(options: CleanupOptions, inBackground: Bool, probeOwner owner: UUID? = nil) async {
+        guard probeOwner == nil || probeOwner == owner else { return }
         let requests = await selectedResourceRequests(options: options)
         for role in [SelectedModelWarmup.Role.dictation, .refine, .meetingSummary] {
-            await warmup.setRequested(requests[role] ?? [], for: role, inBackground: inBackground)
+            guard probeOwner == nil || probeOwner == owner else { return }
+            await warmup.setRequested(requests[role] ?? [], for: role, inBackground: inBackground, probeOwner: owner)
         }
     }
     func selectedResourceRequests(options: CleanupOptions) async -> [SelectedModelWarmup.Role: [SelectedModelWarmup.Resource]] {
@@ -145,16 +218,18 @@ public final class ModelServices {
     }
 
     /// Admission awaits only resources required by dictation; Refine and meetings prepare independently.
-    public func prepareSelectedModels(options: CleanupOptions, inBackground: Bool) async throws {
-        await reconcileSelectedModels(options: options, inBackground: inBackground)
+    public func prepareSelectedModels(options: CleanupOptions, inBackground: Bool, probeOwner owner: UUID? = nil) async throws {
+        guard probeOwner == nil || probeOwner == owner else { throw SessionProbeError.busy }
+        await reconcileSelectedModels(options: options, inBackground: inBackground, probeOwner: owner)
         let effective = await effectiveDictationBackend(options: options)
         if effective == .foundationModels && options.backend == .coreML && options.enabled {
             let speech = await speechResource(), local = await cleanupResource(backend: .coreML)
             let foundation = await cleanupResource(backend: .foundationModels)
-            await warmup.setRequested([speech, local, foundation], for: .dictation, inBackground: inBackground)
+            await warmup.setRequested([speech, local, foundation], for: .dictation, inBackground: inBackground, probeOwner: owner)
         }
         let keys = await dictationKeys(options: options, backend: effective)
-        try await warmup.prepare(keys: keys, inBackground: inBackground)
+        guard probeOwner == nil || probeOwner == owner else { throw SessionProbeError.busy }
+        try await warmup.prepare(keys: keys, inBackground: inBackground, probeOwner: owner)
     }
     public func selectedModelsAreWarm(options: CleanupOptions) async -> Bool {
         await warmup.isReady(for: dictationKeys(options: options, backend: effectiveDictationBackend(options: options)))
@@ -175,6 +250,7 @@ public final class ModelServices {
 
     /// A new dictation freezes the exact admitted backend object; later readiness affects the next run.
     public func acquireDictationCleanup(options: CleanupOptions, inBackground: Bool) async throws -> CleanupRunLease? {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
         guard options.enabled else { return nil }
         let selectedID = selected(.cleanup)
         try await prepareSelectedModels(options: options, inBackground: inBackground)
@@ -203,6 +279,7 @@ public final class ModelServices {
     private func dictationCleanupEnded() { cleanupPreparation.usingFoundationModels = false }
 
     public func retryCleanupPreparation(inBackground: Bool) async {
+        guard probeOwner == nil else { return }
         guard let id = selected(.cleanup), case .installed = await manager.state(of: id),
               case .failed = await warmup.state(for: "cleanup:" + id), !inBackground else { return }
         cleanupPreparation.message = nil
@@ -218,6 +295,7 @@ public final class ModelServices {
     public func cleanupChoice(for modelID: String) -> CleanupBackendChoice { .coreML }
 
     public func acquireSummaryBackend(backend: CleanupBackendChoice, inBackground: Bool) async throws -> SummaryBackendLease {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
         let id = selected(.cleanup)
         let resource = await cleanupResource(backend: backend)
         await warmup.setRequested([resource], for: .meetingSummary, inBackground: inBackground)
@@ -237,6 +315,7 @@ public final class ModelServices {
         return SummaryBackendLease(backend: model, release: { await lease.release() })
     }
     public func acquireRefine(options: CleanupOptions, inBackground: Bool) async throws -> SelectedModelWarmup.Lease {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
         let resource = await cleanupResource(backend: options.backend)
         await warmup.setRequested([resource], for: .refine, inBackground: inBackground)
         return try await warmup.acquire(keys: [resource.key], inBackground: inBackground)
@@ -333,6 +412,7 @@ public final class ModelServices {
     /// something else still waits for it, and its partial folder goes. A download cancelled by the user
     /// (``cancelDownload(_:)``, a delete) ends the pick without calling `done`: it is no failure.
     public func pick(_ id: String, role: ModelRole, done: @escaping @MainActor ((any Error)?) -> Void) {
+        guard probeOwner == nil else { done(SessionProbeError.busy); return }
         picks[role]?.cancel()
         let superseded = Self.supersededPick(inFlight: pickIDs[role]?.id, next: id)
         let manager = self.manager
@@ -393,12 +473,14 @@ public final class ModelServices {
 
     /// Makes `family` the live engine at its chosen tier. Only that tier downloads (see ``pick(_:role:done:)``).
     public func pick(family: ModelFamily, done: @escaping @MainActor ((any Error)?) -> Void) {
+        guard probeOwner == nil else { done(SessionProbeError.busy); return }
         guard let id = familySelection.activate(family, role: .liveDictation) else { return }
         pick(id, role: .liveDictation, done: done)
     }
 
     /// Makes `family` live at `tierMs`, downloading that tier first if it is missing.
     public func pick(family: ModelFamily, tierMs: Int, done: @escaping @MainActor ((any Error)?) -> Void) {
+        guard probeOwner == nil else { done(SessionProbeError.busy); return }
         guard let id = familySelection.choose(family, tierMs: tierMs, role: .liveDictation, activate: true) else { return }
         pick(id, role: .liveDictation, done: done)
     }
@@ -408,6 +490,7 @@ public final class ModelServices {
     /// only remembered for when the family is picked, and nothing downloads.
     @discardableResult
     public func setTier(_ tierMs: Int, of family: ModelFamily, done: @escaping @MainActor ((any Error)?) -> Void) -> Bool {
+        guard probeOwner == nil else { done(SessionProbeError.busy); return false }
         guard let id = familySelection.choose(family, tierMs: tierMs, role: .liveDictation, activate: false) else { return false }
         pick(id, role: .liveDictation, done: done)
         return true
@@ -430,6 +513,7 @@ public final class ModelServices {
 
     /// Returns the existing abandonment operation without changing the public fire-and-forget action.
     func clearPickOperation(_ role: ModelRole) -> Task<Void, Never>? {
+        guard probeOwner == nil else { return nil }
         var abandonment: Task<Void, Never>?
         picks[role]?.cancel()
         picks[role] = nil

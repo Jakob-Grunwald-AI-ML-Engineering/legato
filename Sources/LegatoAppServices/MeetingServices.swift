@@ -135,6 +135,30 @@ public final class MeetingServices {
         self.makeClaude = { claudeBackend ?? claudeSession.map { ClaudeBackend(keyStore: keyStore, session: $0) } ?? ClaudeBackend(keyStore: keyStore) }
     }
 
+    private var probeOwner: UUID?
+    private var audioWorkCount = 0
+    public var isProbeReserved: Bool { probeOwner != nil }
+
+    /// Reserve the idle heavy lane without cancelling user work or pretending a recording began.
+    public func reserveForProbe(_ owner: UUID) async throws {
+        guard probeOwner == nil, !isRecording, audioWorkCount == 0 else { throw SessionProbeError.busy }
+        probeOwner = owner
+        do {
+            try await scheduler.reserveForProbe(owner)
+            try Task.checkCancellation()
+        } catch {
+            await scheduler.releaseProbeReservation(owner)
+            if probeOwner == owner { probeOwner = nil }
+            throw error
+        }
+    }
+    public func releaseProbeReservation(_ owner: UUID) async {
+        guard probeOwner == owner else { return }
+        // Clear the service flag before waking the scheduler, while the scheduler's token still excludes work.
+        probeOwner = nil
+        await scheduler.releaseProbeReservation(owner)
+    }
+
     // MARK: Engines and session
 
     /// What a meeting on `platform` runs on: ONE live engine (in `locale` when the meeting has a language of
@@ -285,6 +309,7 @@ public final class MeetingServices {
         settle: @escaping @Sendable @MainActor (Result<T, any Error>) async -> Void = { _ in },
         _ work: @escaping @Sendable @MainActor () async throws -> T
     ) async throws -> T {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
         guard !isRecording else { throw MeetingServicesError.recording }
         return try await scheduler.perform(for: id) { @MainActor [weak self] in
             guard let self else { throw CancellationError() }
@@ -359,6 +384,9 @@ public final class MeetingServices {
     /// at once when idle processing is off.
     @discardableResult
     public func processAfterStop(_ id: UUID) async throws -> MeetingPipeline.Outcome {
+        guard probeOwner == nil else { throw SessionProbeError.busy }
+        audioWorkCount += 1
+        defer { audioWorkCount -= 1 }
         let outcome = try await pipeline().runAudio(meetingID: id)
         setStage(id, stages[id] ?? .queued)
         await queueDeferred(id)
