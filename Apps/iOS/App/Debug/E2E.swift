@@ -288,7 +288,7 @@ extension AppController {
         guard url.scheme == RuntimeIdentity.current.urlScheme, let command = url.host, command == "toggle" || command == "interrupt" else {
             return false
         }
-        await runE2E(command)
+        await DebugBridge.execute(BridgeCommand(id: "url-\(UUID().uuidString)", command: command))
         return true
     }
 
@@ -390,7 +390,9 @@ extension E2E {
                 { _, _, name, _, _ in
                     guard let raw = name?.rawValue as String?, let command = raw.split(separator: ".").last.map(String.init)
                     else { return }
-                    Task { @MainActor in await AppController.shared.runE2E(command) }
+                    Task { @MainActor in
+                        await DebugBridge.execute(BridgeCommand(id: "darwin-\(UUID().uuidString)", command: command))
+                    }
                 },
                 "\(RuntimeIdentity.current.notificationNamespace).e2e.\(command)" as CFString, nil, .deliverImmediately)
         }

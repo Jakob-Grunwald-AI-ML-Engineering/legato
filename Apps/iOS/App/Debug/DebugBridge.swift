@@ -1,32 +1,10 @@
 #if LEGATO_INTERNAL
 import Foundation
 import LegatoKeyboardCore
+import LegatoDevHarness
 import UIKit
-import os
 
-/// A command file the host drops into the inbox: `{"id": "...", "command": "...", "args": ["..."]}`.
-struct BridgeCommand: Decodable, Equatable {
-    var id: String
-    var command: String
-    var args: [String] = []
-
-    init(id: String, command: String, args: [String] = []) {
-        self.id = id
-        self.command = command
-        self.args = args
-    }
-
-    init(from decoder: any Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
-        command = try c.decode(String.self, forKey: .command)
-        args = try c.decodeIfPresent([String].self, forKey: .args) ?? []
-    }
-
-    private enum CodingKeys: String, CodingKey { case id, command, args }
-
-    static func decode(_ data: Data) -> BridgeCommand? { try? JSONDecoder().decode(BridgeCommand.self, from: data) }
-}
+typealias BridgeCommand = LegatoDevHarness.BridgeCommand
 
 /// Device debug bridge: drives the app on a physical iPhone without taps (`scripts/device/ctl.sh`).
 ///
@@ -47,27 +25,19 @@ struct BridgeCommand: Decodable, Equatable {
 /// Darwin-notification triggers use. Other code adds commands with `DebugBridge.register(_:handler:)`.
 @MainActor
 enum DebugBridge {
-    typealias Handler = @MainActor (BridgeCommand) async throws -> [String: Any]?
+    typealias Handler = DevHarness.Handler
+    private static let harness = DevHarness(root: root)
+    private static var started = false
 
-    private static var handlers: [String: Handler] = [:]
-    private static var task: Task<Void, Never>?
-    private static var badFiles: [String: Int] = [:]
-    /// Ids already run, so a retried `ctl.sh send` (same id, same file name) is not run twice.
-    private static var seenIDs: [String] = []
-    private static let logger = Logger(subsystem: "de.gruenwald.legato", category: "debug-bridge")
+    static let pollInterval = DevHarness.pollInterval
 
-    static let pollInterval: Duration = .milliseconds(500)
-
-    /// Adds (or replaces) a command.
-    static func register(_ name: String, handler: @escaping Handler) {
-        handlers[name] = handler
-    }
+    static func register(_ name: String, handler: @escaping Handler) { harness.register(name, handler: handler) }
 
     static var root: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("debug-bridge", isDirectory: true)
     }
-    static var inbox: URL { root.appendingPathComponent("inbox", isDirectory: true) }
-    static var logURL: URL { root.appendingPathComponent("log.jsonl") }
+    static var inbox: URL { harness.transport.inbox }
+    static var logURL: URL { harness.transport.logURL }
 
     static var isEnabled: Bool {
         #if DEBUG
@@ -78,106 +48,22 @@ enum DebugBridge {
     }
 
     static func start() {
-        guard task == nil, isEnabled else { return }
-        let fm = FileManager.default
-        try? fm.createDirectory(at: inbox, withIntermediateDirectories: true)
-        let stale = (try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? []
-        for file in stale { try? fm.removeItem(at: file) }
-        trimLog()
+        guard !started, isEnabled else { return }
+        // Register closures only: evaluating AppController.shared here would recurse into its initializer.
         registerBuiltins()
-        emit(id: "-", event: "started", ["dropped": stale.count, "pid": ProcessInfo.processInfo.processIdentifier, "generation": UUID().uuidString, "commands": handlers.keys.sorted()])
-        task = Task { @MainActor in
-            while !Task.isCancelled {
-                await drain()
-                try? await Task.sleep(for: pollInterval)
-            }
-        }
+        started = true
+        harness.start()
     }
 
-    /// Keeps the last `keepLines` lines once the log passes twice that.
-    private static func trimLog(keepLines: Int = 1000) {
-        guard let text = try? String(contentsOf: logURL, encoding: .utf8) else { return }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        guard lines.count > keepLines * 2 else { return }
-        try? (lines.suffix(keepLines).joined(separator: "\n") + "\n").write(to: logURL, atomically: true, encoding: .utf8)
-    }
-
-    /// For other code (a session probe): show a persistent banner line to Jakob; nil or empty removes it.
     static func status(_ text: String?) { DebugMessages.shared.setStatus(text) }
-
-    static func stop() {
-        task?.cancel()
-        task = nil
-    }
-
-    /// Runs every command file currently in the inbox, oldest name first.
-    static func drain() async {
-        let files = ((try? FileManager.default.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.pathExtension == "json" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        badFiles = badFiles.filter { name, _ in files.contains { $0.lastPathComponent == name } }
-        for file in files {
-            guard let data = try? Data(contentsOf: file), let command = BridgeCommand.decode(data) else {
-                // A copy may still be in flight: give it three polls before calling it garbage.
-                let n = (badFiles[file.lastPathComponent] ?? 0) + 1
-                badFiles[file.lastPathComponent] = n
-                if n >= 3 {
-                    emit(id: file.deletingPathExtension().lastPathComponent, event: "error", ["message": "undecodable command file"])
-                    try? FileManager.default.removeItem(at: file)
-                    badFiles[file.lastPathComponent] = nil
-                }
-                continue
-            }
-            try? FileManager.default.removeItem(at: file)
-            await execute(command)
-        }
-    }
-
-    static func execute(_ command: BridgeCommand) async {
-        if seenIDs.contains(command.id) {
-            emit(id: command.id, event: "duplicate", ["command": command.command])
-            return
-        }
-        seenIDs.append(command.id)
-        if seenIDs.count > 500 { seenIDs.removeFirst(100) }
-        emit(id: command.id, event: "received", ["command": command.command])
-        guard let handler = handlers[command.command] else {
-            emit(id: command.id, event: "error", ["message": "unknown command \(command.command)"])
-            return
-        }
-        do {
-            var fields = try await handler(command) ?? [:]
-            fields["command"] = command.command
-            emit(id: command.id, event: "done", fields)
-        } catch {
-            emit(id: command.id, event: "error", ["command": command.command, "message": String(describing: error)])
-        }
-    }
-
-    /// Appends one JSON line to the log.
-    static func emit(id: String, event: String, _ fields: [String: Any] = [:]) {
-        var line = fields
-        line["ts"] = Date().bridgeTimestamp
-        line["id"] = id
-        line["event"] = event
-        guard JSONSerialization.isValidJSONObject(line),
-              var data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]) else { return }
-        data.append(0x0A)
-        let fm = FileManager.default
-        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: logURL.path) { fm.createFile(atPath: logURL.path, contents: nil) }
-        if let handle = try? FileHandle(forWritingTo: logURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        }
-    }
+    static func stop() { harness.stop(); started = false }
+    static func drain() async { await harness.drain() }
+    static func execute(_ command: BridgeCommand) async { await harness.execute(command) }
+    static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
 
     // MARK: Built-ins
 
     private static func registerBuiltins() {
-        register("ping") { _ in ["pong": true] }
-        register("commands") { _ in ["commands": handlers.keys.sorted()] }
         register("state") { _ in state() }
         register("say") { command in
             guard let p = DebugMessages.parse(command.args, takesChoices: false) else { throw BridgeError.usage("say <text>") }
