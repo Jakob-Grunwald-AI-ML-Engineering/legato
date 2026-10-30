@@ -24,13 +24,16 @@ struct LegatoMacApp: App {
             OnboardingView()
                 .environment(controller)
         }
-        .windowResizability(.contentSize)
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 820, height: 640)
         .defaultLaunchBehavior(.suppressed)
 
         Settings {
             SettingsView()
                 .environment(controller)
         }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 820, height: 640)
     }
 }
 
