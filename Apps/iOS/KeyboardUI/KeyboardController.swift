@@ -649,9 +649,9 @@ final class KeyboardController {
     private var fieldHasText: Bool { !(document.contextBefore.isEmpty && document.contextAfter.isEmpty) }
 
     /// Follows the app's linked run (`LinkedRunFollower`): a Live or Replace run with cleanup follows (only while the
-    /// host's state applies here: visible, for the keyboard); its feed goes to `link.feed` (a resync of the field first, before any of the run's text is typed,
-    /// so the app's agent can tell the run's text from what was there), throttled, its final state at once; the
-    /// app's edits are taken from `link.edits`. Another run ends it; the app's scrub ends it without a last batch
+    /// host's state applies here: visible, for the keyboard); its feed goes to `link.feed` (a resync of the field
+    /// first, before any of the run's text is typed, so the app's agent can tell the run's text from what was
+    /// there), throttled, its final state at once; the app's edits are taken from `link.edits`. Another run ends it; the app's scrub ends it without a last batch
     /// and drops the ring, so the field's text does not come back into the App Group.
     private func updateLinkedRun(_ host: HostState?, applies: Bool) {
         guard let host, let feed = link.fieldFeed else { return }
