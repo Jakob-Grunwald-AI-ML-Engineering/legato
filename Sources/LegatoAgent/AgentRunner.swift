@@ -183,6 +183,7 @@ public actor AgentRunner {
             await log(participant, ["event": .string("error"), "message": .string(String(describing: error))])
         }
         guard generation == (live ? liveGeneration : restructureGeneration) else { return }
+        await log(participant, ["event": .string("pending.edit"), "lines": .array([])])
         if live {
             livePolicy.finish(); await scheduleLive()
             if !livePolicy.running { await room.setAgentBusy(participant, busy: false) }

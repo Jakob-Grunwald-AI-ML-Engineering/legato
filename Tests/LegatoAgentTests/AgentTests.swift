@@ -18,6 +18,7 @@ import LegatoRoom
 }
 
 @Test func modelRequestsAndPrompts() throws {
+    #expect(ModelChoice.opus.thinking == .object(["type": .string("adaptive")]))
     for model in ModelChoice.allCases {
         for live in [true, false] {
             let data = try AgentRunner.request(model: model, system: "instructions", messages: [], live: live)
