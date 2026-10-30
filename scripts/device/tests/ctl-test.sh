@@ -20,10 +20,13 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+[ -n "$timeout" ] && [ "$timeout" -ge 5 ] || { echo 'Please specify a timeout value between 5 and 9223372036854775807' >&2; exit 64; }
 if [[ "$args" == *' list devices '* ]]; then
   if [ "$SCENARIO" = discovery ]; then
     [ -n "$timeout" ] || { echo 'discovery has no timeout' >&2; exit 70; }
-    sleep "$timeout"; echo 'discovery timed out' >&2; exit 1
+    echo "$$" >> "$FIXTURE/children"
+    sleep "$timeout" & sleeper=$!; echo "$sleeper" >> "$FIXTURE/children"
+    wait "$sleeper"; echo 'discovery timed out' >&2; exit 1
   fi
   echo 'Test phone 00008150-000E60360245401C (UDID) available (paired) iPhone'
 elif [[ "$args" == *' process launch '* ]]; then
@@ -36,7 +39,9 @@ elif [[ "$args" == *' copy from '* ]]; then
     failed) echo 'fixture transfer unavailable' >&2; exit 1 ;;
     stalled)
       [ -n "$timeout" ] || { echo 'pull has no timeout' >&2; exit 70; }
-      sleep "$timeout"; echo 'fixture transfer timed out' >&2; exit 1 ;;
+      echo "$$" >> "$FIXTURE/children"
+      sleep "$timeout" & sleeper=$!; echo "$sleeper" >> "$FIXTURE/children"
+      wait "$sleeper"; echo 'fixture transfer timed out' >&2; exit 1 ;;
     later) [ ! -e "$dest" ] || { echo 'destination exists' >&2; exit 1; }; if [ "$n" -eq 1 ]; then echo '{"id":"c-test","event":"received"}' > "$dest"; else cp "$FIXTURE/done" "$dest"; fi ;;
     startup)
       if [ -f "$FIXTURE/launched" ] && [ "$n" -gt 2 ]; then
@@ -76,8 +81,14 @@ bounded() {
   local began=$SECONDS
   ! run_ctl wait c-test 1 || return 1
   [ "$((SECONDS - began))" -le 2 ] || return 1
-  grep -q -- '--timeout 1' "$FIXTURE/calls" || return 1
-  ! grep -q 'has no timeout' "$FIXTURE/err"
+  grep -q -- '--timeout 5' "$FIXTURE/calls" || return 1
+  ! grep -q 'Please specify a timeout' "$FIXTURE/err" || return 1
+  [ -s "$FIXTURE/children" ] || return 1
+  local child
+  while read -r child; do
+    if kill -0 "$child" 2> /dev/null; then echo "leaked child $child" >&2; return 1; fi
+  done < "$FIXTURE/children"
+  ! compgen -G "$LEGATO_DEVICE_STATE/devicectl.*" > /dev/null
 }
 setup discovery; check bounded
 setup stalled; check bounded

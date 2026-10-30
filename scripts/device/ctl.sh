@@ -56,6 +56,45 @@ positive_seconds() {
   [ "$1" -gt 0 ] || die "$2 must be a positive integer"
 }
 
+# CoreDevice requires a native timeout of at least five seconds. Enforce shorter host budgets
+# ourselves, with a private process group so a timed-out tool cannot leave descendants behind.
+run_devicectl() (
+  local budget="$1" native="$1" child="" output rc=0 end grace
+  shift
+  [ "$native" -ge 5 ] || native=5
+  output="$(mktemp "$STATE/devicectl.XXXXXX")"
+  trap 'if [ -n "$child" ]; then kill -KILL -- "-$child" 2> /dev/null || true; wait "$child" 2> /dev/null || true; fi; rm -f "$output"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  end=$((SECONDS + 10#$budget))
+  # Enable job control only while creating this child, giving it a separate, captured group ID.
+  set -m
+  xcrun devicectl --timeout "$native" "$@" > "$output" 2>&1 &
+  child=$!
+  set +m
+  while kill -0 "$child" 2> /dev/null; do
+    if [ "$SECONDS" -ge "$end" ]; then
+      kill -TERM -- "-$child" 2> /dev/null || true
+      grace=0
+      while kill -0 "$child" 2> /dev/null && [ "$grace" -lt 5 ]; do
+        sleep 0.02
+        grace=$((grace + 1))
+      done
+      kill -KILL -- "-$child" 2> /dev/null || true
+      wait "$child" 2> /dev/null || true
+      child=""
+      cat "$output"
+      echo "ctl.sh: device operation timed out after ${budget}s (host deadline)" >&2
+      exit 124
+    fi
+    sleep 0.02
+  done
+  wait "$child" || rc=$?
+  child=""
+  cat "$output"
+  exit "$rc"
+)
+
 # devicectl wrapper: on failure explains the usual causes (locked, unplugged) instead of the raw dump.
 dc() {
   local out rc=0 limit="${DC_TIMEOUT:-${LEGATO_DEVICE_TIMEOUT:-10}}" remaining
@@ -65,7 +104,7 @@ dc() {
     [ "$remaining" -gt 0 ] || { echo "ctl.sh: device operation deadline expired" >&2; return 124; }
     [ "$limit" -le "$remaining" ] || limit="$remaining"
   fi
-  out="$(xcrun devicectl --timeout "$limit" "$@" 2>&1)" || rc=$?
+  out="$(run_devicectl "$limit" "$@" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     if grep -qiE 'locked|passcode' <<< "$out"; then
       echo "ctl.sh: the iPhone is locked: unlock it and retry." >&2
