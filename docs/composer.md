@@ -13,6 +13,7 @@ Composer is a developer spike on `epic/composer` (#108), separate from `main` an
 | `asr.tail` | Uncommitted display text; never agent input. |
 | `asr.segment` | Final words and segment timing/boundary metadata. |
 | `user.intent`, `hint` | Mode changes, taps, picks and bound spoken corrections. |
+| `correction.draft` | Captured correction preview and host countdown timestamps; not writer context. |
 | `doc.ops`, `doc.snapshot` | Applied transaction and resulting document. |
 | `agent.status` | Busy state, pending targets and agent diagnostics. |
 | `alternatives` | Candidate alternatives. |
