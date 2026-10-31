@@ -178,7 +178,7 @@ private struct NotchComposerView: View {
                 key("Undo", symbol: "arrow.uturn.backward", shortcut: "⌘Z", enabled: session.canUndo) { Task { await session.undo() } }
                 key("Redo", symbol: "arrow.uturn.forward", shortcut: "⇧⌘Z", enabled: false) {}
                     .help("Redo is not available yet")
-                key("Insert", symbol: "paperplane.fill", shortcut: "⌘↩", enabled: !session.renderedText.isEmpty || !session.tail.isEmpty, prominent: true) { controller.insertComposer() }
+                key("Insert", symbol: "paperplane.fill", shortcut: "⌘↩", enabled: !controller.inserting && (!session.renderedText.isEmpty || !session.tail.isEmpty), prominent: true) { controller.insertComposer() }
                 key("Cancel", symbol: "xmark", shortcut: "esc") { controller.cancelComposer() }
                 key(session.isMuted ? "Unmute" : "Mute", symbol: session.isMuted ? "mic.slash.fill" : "mic.slash", shortcut: "⇧⌘M", enabled: session.isListening, selected: session.isMuted) {
                     Task { await session.setMuted(!session.isMuted) }

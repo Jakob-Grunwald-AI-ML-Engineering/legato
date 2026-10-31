@@ -21,7 +21,7 @@ import Observation
     private var targetPID: pid_t?
     private var secureField = false
     private var starting = false
-    private var inserting = false
+    private(set) var inserting = false
     private var sessionTask: Task<Void, Never>?
     var notice: String { composer.error ?? composer.status.capitalized }
     var isDictating: Bool { starting || composer.isListening }
@@ -118,8 +118,7 @@ import Observation
         sessionTask?.cancel(); starting = false
         let requestedSessionID = composer.sessionID
         let pid = targetPID, secure = secureField, restore = settings.restoreClipboard
-        // Release the panel's key focus before the verified AX write or paste fallback.
-        notch.hide(); gesture.runEnded()
+        gesture.runEnded()
         Task {
             defer { inserting = false }
             let text: String
@@ -131,6 +130,8 @@ import Observation
                 return
             }
             let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
+            // Keep authoring visible, then release key focus for the verified write or paste.
+            notch.hide()
             let action = writer?.finish(finalText: text) ?? .paste(text)
             var delivered = false
             switch action {
