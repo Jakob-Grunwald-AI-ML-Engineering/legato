@@ -7,6 +7,8 @@ struct LineView: View {
     var pending: Bool
     var selected: Set<String>
     var animateInsertion = false
+    var continuation = false
+    var paragraphEdit: WordEditPresentation?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var edit = WordEditPresentation(old: [], new: [])
     @State private var progress = 1.0
@@ -14,8 +16,8 @@ struct LineView: View {
     @State private var measured: [String: [CGRect]] = [:]
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            if line.kind == .li { Text("•") }
-            if line.kind == .oli { Text("\(ordinal).") }
+            if line.kind == .li { Text("•").opacity(continuation ? 0 : 1).accessibilityHidden(continuation) }
+            if line.kind == .oli { Text("\(ordinal).").opacity(continuation ? 0 : 1).accessibilityHidden(continuation) }
             if line.kind == .quote { Rectangle().fill(.secondary).frame(width: 3) }
             text
                 .font(line.kind == .h1 ? .title2.bold() : line.kind == .h2 || line.kind == .h3 ? .headline : .body)
@@ -35,7 +37,7 @@ struct LineView: View {
     }
     private func animate(old: [Word], new: [Word]) {
         // A newer update replaces this plan immediately; no delayed per-word work survives it.
-        edit = WordEditPresentation(old: old, new: new)
+        edit = paragraphEdit ?? WordEditPresentation(old: old, new: new)
         guard !reduceMotion, !edit.isEmpty else { progress = 1; return }
         progress = 0
         withAnimation(.linear(duration: WordEditPresentation.duration)) { progress = 1 }

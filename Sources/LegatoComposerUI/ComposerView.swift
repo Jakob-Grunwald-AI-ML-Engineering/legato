@@ -92,19 +92,22 @@ public struct ComposerView: View {
         let previous = snapshot.revision < presentedRevision ? [] : presentedParagraphs
         // Reuse the existing lazy viewport; do not create a second tree or rasterize a long draft.
         let paragraphs = holdsSentViewport ? presentedParagraphs : ParagraphPresentation.reconcile(previous: previous, lines: snapshot.lines, animateInsertions: hasPresented)
+        let renderBlocks = ParagraphRenderBlocks.make(paragraphs, previous: holdsSentViewport ? paragraphs : previous)
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 if reservesSpace || showsGlobalComment { Color.clear.frame(height: reservedHeight).allowsHitTesting(false) }
                 ScrollView {
                     let selectedWords = selected?.wordIDs(in: snapshot) ?? []
-                    let content = LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(paragraphs) { paragraph in
-                            LineView(line: paragraph.line, ordinal: paragraph.ordinal, pending: pendingLineIDs.contains(paragraph.line.id),
-                                     selected: selectedWords, animateInsertion: paragraph.animateInsertion)
-                                .id(paragraph.id)
+                    let content = LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(renderBlocks) { block in
+                            LineView(line: block.line, ordinal: block.ordinal, pending: pendingLineIDs.contains(block.line.id),
+                                     selected: selectedWords, animateInsertion: block.animateInsertion,
+                                     continuation: block.continuation, paragraphEdit: block.edit)
+                                .id(block.id)
+                                .padding(.top, !block.continuation && block.ordinal > 1 ? 12 : 0)
                                 .transition(.opacity)
                         }
-                        if !tail.isEmpty { Text(tail).foregroundStyle(.secondary).italic().transition(.opacity) }
+                        if !tail.isEmpty { Text(tail).foregroundStyle(.secondary).italic().padding(.top, paragraphs.isEmpty ? 0 : 12).transition(.opacity) }
                         if snapshot.lines.isEmpty && tail.isEmpty && !holdsSentViewport { Text("Speak to compose…").foregroundStyle(.secondary) }
                         Color.clear.frame(height: 1).id("composer-dictation-tail")
                     }.frame(maxWidth: .infinity, alignment: .leading).padding()
