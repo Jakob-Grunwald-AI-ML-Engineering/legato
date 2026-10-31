@@ -23,7 +23,12 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var correctionCountdownStart: Double?
     public var correctionCountdownDeadline: Double?
     public var muted: Bool?
+    /// Legacy Dictation/Instructions toggle; no longer published (the surface decides the mode).
     public var inputMode: String?
+    /// Where microphone audio goes now (`idle`, `dictation`, `agent`); nil before keyboard sessions.
+    public var audioRoute: String?
+    /// The dictation route's uncommitted words, for the typing surface.
+    public var dictationTail: String?
     public var instructionDraft: String?
     public var instructionStatus: String?
     /// The last keyboard insertion consumed by the host (including a stale-session rejection).

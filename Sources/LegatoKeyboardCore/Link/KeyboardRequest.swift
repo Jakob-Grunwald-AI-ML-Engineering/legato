@@ -39,16 +39,23 @@ public struct KeyboardAck: Codable, Sendable, Equatable {
     }
 }
 
+/// The keyboard surface on screen. It decides the mode: typing dictates into the field, the composer
+/// talks to the agent.
+public enum KeyboardSurface: String, Codable, Sendable, Equatable { case typing, composer }
+
 /// keyboard -> app (`link.presence`): the keyboard is on screen, refreshed while it is.
 public struct KeyboardPresence: Codable, Sendable, Equatable {
     public var visible: Bool
     public var at: Date
     public var documentID: String?
+    /// nil decodes presences written before surfaces were reported (the composer).
+    public var surface: KeyboardSurface?
 
-    public init(visible: Bool, at: Date, documentID: String? = nil) {
+    public init(visible: Bool, at: Date, documentID: String? = nil, surface: KeyboardSurface? = nil) {
         self.visible = visible
         self.at = at
         self.documentID = documentID
+        self.surface = surface
     }
 
     public func isFresh(now: Date) -> Bool {
