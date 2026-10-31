@@ -14,41 +14,47 @@ struct AlternativesPopover: View {
     var dismissLabel = "Cancel correction"
     var showsSendButton = true
     var applying = false
+    var sendLabel = "Apply correction"
+    var accessibilityPrefix = "composer.correction"
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(headerTitle).font(.caption).foregroundStyle(.primary.opacity(0.75))
-                    Spacer(minLength: 4)
-                    if applying { ProgressView().controlSize(.mini) }
-                    Button(action: dismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)) }
-                        .buttonStyle(.plain).accessibilityLabel(dismissLabel)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Text(headerTitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 2)
+                if applying { ProgressView().controlSize(.mini) }
+                if showsSendButton {
+                    Button { send?() } label: {
+                        Image(systemName: "wand.and.stars").foregroundStyle(.purple).frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain).disabled(send == nil || capturedText.isEmpty || applying)
+                    .accessibilityLabel(sendLabel).accessibilityIdentifier(accessibilityPrefix + ".send")
                 }
-                HStack(alignment: .bottom, spacing: 10) {
-                    Text(capturedText.isEmpty ? "…" : capturedText).font(.callout).foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if showsSendButton { TimelineView(.animation(minimumInterval: 1.0 / 30, paused: countdownDeadline == nil)) { _ in
-                        Button { send?() } label: {
-                            Image(systemName: "wand.and.stars").foregroundStyle(.purple).frame(width: 28, height: 28)
-                                .overlay {
-                                    if let start = countdownStart, let deadline = countdownDeadline {
-                                        let progress = min(1, max(0, (ProcessInfo.processInfo.systemUptime - start) / max(0.001, deadline - start)))
-                                        RoundedRectangle(cornerRadius: 8).trim(from: 0, to: progress)
-                                            .stroke(AngularGradient(colors: [.purple, .blue, .pink, .purple], center: .center), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                                            .shadow(color: .purple.opacity(0.6), radius: 4)
-                                    }
-                                }
-                        }
-                        .buttonStyle(.plain).disabled(send == nil || capturedText.isEmpty).accessibilityLabel("Apply correction")
-                    } }
+                Button(action: dismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)).frame(width: 24, height: 24) }
+                    .buttonStyle(.plain).accessibilityLabel(dismissLabel)
+                    .accessibilityIdentifier(accessibilityPrefix + ".discard")
+            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(capturedText.isEmpty ? "…" : capturedText).font(.callout).foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityIdentifier(accessibilityPrefix + ".speech")
+                        Color.clear.frame(height: 1).id("spoken-end")
+                    }
                 }
-            }.padding(11)
+                .scrollIndicators(.hidden)
+                .task(id: capturedText) {
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    proxy.scrollTo("spoken-end", anchor: .bottom)
+                }
+            }
         }
-        .scrollIndicators(.hidden)
-        .frame(height: min(maximumHeight, capturedText.isEmpty ? 68 : 100))
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .frame(height: min(maximumHeight, capturedText.isEmpty ? 54 : 96))
         .background(.regularMaterial, in: CorrectionBubble(pointX: pointX, pointsDown: pointsDown))
         .overlay { CorrectionBubble(pointX: pointX, pointsDown: pointsDown).stroke(.purple.opacity(0.28), lineWidth: 0.7).allowsHitTesting(false) }
-        .shadow(color: .purple.opacity(0.14), radius: 12, y: 3)
+        .shadow(color: .purple.opacity(0.14), radius: 8, y: 2)
         .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
     }
 }

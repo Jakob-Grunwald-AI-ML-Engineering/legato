@@ -130,3 +130,57 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     #expect(instructions.first?.payload["text"] == .string("shorten"))
     await binder.stop()
 }
+
+@Test func manualInstructionsStageThroughPauseSubmitOnceAndKeepLaterSpeechSeparate() async throws {
+    let room = Room(segmentRouting: .intercepted, resumable: true)
+    _ = try await room.appendSegment(words: [.init(text: "Original draft")])
+    let binder = HintBinder(room: room, requiresExplicitSubmission: true)
+    await binder.start(); await binder.setInputMode(.instructions, timestamp: 100)
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await inputSegment(room, ["Make", "it"], origin: 101)
+    try await inputBoundary(room, at: 103)
+    try await settleInstructionRouting()
+    try await room.micOff(); try await room.finishFinalPass()
+    #expect(await room.state == .paused)
+    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty)
+    #expect(await binder.requestInstructionSend(timestamp: 105))
+    #expect(!(await binder.requestInstructionSend(timestamp: 105)))
+    try await inputSegment(room, ["clearer.", "Next"], origin: 104, times: [0, 4])
+    try await settleInstructionRouting()
+    await binder.completeInstructionSend(); await binder.completeInstructionSend()
+    try await settleInstructionRouting()
+    let sent = await events.values.filter { $0.channel == .writingInstruction }
+    #expect(sent.count == 1 && sent.first?.payload["text"] == .string("Make it clearer."))
+    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["text"] == .string("Next"))
+    await binder.discardInstruction(timestamp: 110)
+    try await inputSegment(room, ["Late"], origin: 109)
+    try await settleInstructionRouting()
+    #expect(!(await binder.requestInstructionSend(timestamp: 111)))
+    #expect(await room.documentSnapshot.text == "Original draft")
+    await binder.stop()
+}
+
+@Test func manualQuoteWaitsForWandAndDoesNotHoldPauseOpen() async throws {
+    let room = Room(segmentRouting: .intercepted, resumable: true)
+    _ = try await room.appendSegment(words: [.init(text: "Original")])
+    let binder = HintBinder(room: room, quietDelay: .milliseconds(5), countdown: .milliseconds(5), requiresExplicitSubmission: true)
+    await binder.start()
+    let line = try #require(await room.documentSnapshot.lines.first)
+    try await binder.select(lineID: line.id, wordID: line.words[0].id, timestamp: 100)
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await inputSegment(room, ["Use", "better", "wording"], origin: 101)
+    try await inputBoundary(room, at: 103)
+    try await settleInstructionRouting()
+    #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
+    try await room.micOff(); try await room.finishFinalPass()
+    #expect(await room.state == .paused)
+    #expect(await binder.requestSend(timestamp: 105))
+    #expect(!(await binder.requestSend(timestamp: 105)))
+    await binder.completeSend(); await binder.completeSend()
+    try await settleInstructionRouting()
+    #expect(await events.values.filter { $0.channel == .hint }.count == 1)
+    #expect(await room.documentSnapshot.text == "Original")
+    await binder.stop()
+}

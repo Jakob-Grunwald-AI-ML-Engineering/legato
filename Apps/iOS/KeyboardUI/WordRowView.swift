@@ -279,6 +279,9 @@ private struct AutoFillSwitchKey: UIViewRepresentable {
         button.accessibilityHint = "Switches to the next keyboard. Touch and hold to choose a keyboard."
         if let target {
             button.addTarget(target, action: #selector(UIInputViewController.handleInputModeList(from:with:)), for: .allTouchEvents)
+            #if DEBUG
+            button.addAction(UIAction { _ in NSLog("kbd.system-switch request=autofill-picker-touch") }, for: .touchDown)
+            #endif
         }
         return button
     }

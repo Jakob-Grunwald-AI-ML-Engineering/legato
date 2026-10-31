@@ -288,7 +288,7 @@ struct KeyboardHarness: View {
         .onDisappear { model.controller.disappeared() }
     }
 
-    /// The strip asks for its own height (`StripHeight.requested`), the full keyboard for the portrait one.
+    /// The harness uses the same fixed portrait composer/typing height as the extension.
     private var portraitHeight: CGFloat {
         ComposerKeyboardLayout.typingHeight(landscape: false) + ComposerKeyboardLayout.utilityRowHeight
     }

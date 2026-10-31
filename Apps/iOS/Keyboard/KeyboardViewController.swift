@@ -124,7 +124,9 @@ final class KeyboardViewController: UIInputViewController {
             targetAvailable: controller.inputModeTarget === self
         ) {
             #if DEBUG
-            NSLog("kbd.autofill automatic-handoff")
+            NSLog("kbd.system-switch request=automatic-autofill field=%@ keyboard=%ld secure=%d",
+                  AutoFillContentType.semanticName(for: controller.document.textContentType) ?? "none",
+                  controller.document.keyboardType.rawValue, controller.document.isSecureTextEntry ? 1 : 0)
             #endif
             advanceToNextInputMode()
         }
