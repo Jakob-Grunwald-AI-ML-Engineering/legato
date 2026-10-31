@@ -25,13 +25,18 @@ public struct WordFX: TextRenderer, Animatable {
                 if id.map(selected.contains) == true { copy.stroke(path, with: .color(.purple.opacity(0.28)), lineWidth: 0.6) }
             }
             let local = id.map { edit.progress(for: $0, overall: progress) } ?? 1
-            if !reduceMotion, local < 1, animatedRuns < 64 {
+            let effectBounds = WordEffectSurface.bounds(for: rect)
+            if !reduceMotion, local < 1, animatedRuns < 64, let effectBounds {
+                // Bound the offscreen filter BEFORE installing it. A copied context otherwise
+                // retains the entire Text canvas as its filter surface, even for one glyph run.
+                copy.clip(to: Path(effectBounds))
                 animatedRuns += 1
                 copy.addFilter(.blur(radius: (1 - local) * 4))
                 copy.opacity = 0.3 + local * 0.7
                 copy.addFilter(.shadow(color: .purple.opacity((1 - local) * 0.6), radius: 5))
                 copy.translateBy(x: 0, y: (1 - local) * 2)
-            } else if !reduceMotion, progress < 1, animatedRuns < 64, id.map(edit.deletionBoundary.contains) == true {
+            } else if !reduceMotion, progress < 1, animatedRuns < 64, id.map(edit.deletionBoundary.contains) == true, let effectBounds {
+                copy.clip(to: Path(effectBounds))
                 animatedRuns += 1
                 // A deletion has no new glyphs: mark only its surviving boundary.
                 copy.addFilter(.shadow(color: .purple.opacity(sin(progress * .pi) * 0.45), radius: 4))
@@ -39,5 +44,20 @@ public struct WordFX: TextRenderer, Animatable {
             copy.draw(run)
         } }
         measure?(bounds)
+    }
+}
+
+/// Effects are optional presentation: an oversized run always draws normally rather than
+/// requesting a paragraph-sized GPU texture. At 3x this caps a filter surface at 1.125 MiB.
+enum WordEffectSurface {
+    static let halo: CGFloat = 8
+    static let maximumSide: CGFloat = 512
+    static let maximumArea: CGFloat = 32_768
+    static func bounds(for run: CGRect) -> CGRect? {
+        guard !run.isNull, !run.isInfinite, run.width > 0, run.height > 0 else { return nil }
+        let bounds = run.insetBy(dx: -halo, dy: -halo)
+        guard bounds.width <= maximumSide, bounds.height <= maximumSide,
+              bounds.width * bounds.height <= maximumArea else { return nil }
+        return bounds
     }
 }

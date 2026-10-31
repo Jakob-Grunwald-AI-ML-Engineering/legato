@@ -105,13 +105,12 @@ public struct ComposerView: View {
                                      continuation: block.continuation, paragraphEdit: block.edit)
                                 .id(block.id)
                                 .padding(.top, !block.continuation && block.ordinal > 1 ? 12 : 0)
-                                .transition(.opacity)
+                                .transition(animatesDraftChanges ? .opacity : .identity)
                         }
                         if !tail.isEmpty { Text(tail).foregroundStyle(.secondary).italic().padding(.top, paragraphs.isEmpty ? 0 : 12).transition(.opacity) }
                         if snapshot.lines.isEmpty && tail.isEmpty && !holdsSentViewport { Text("Speak to compose…").foregroundStyle(.secondary) }
                         Color.clear.frame(height: 1).id("composer-dictation-tail")
                     }.frame(maxWidth: .infinity, alignment: .leading).padding()
-                        .background(Color.black.opacity(0.001))
                         .contentShape(Rectangle())
                         .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named("composerViewport")).onEnded { value in
                             let hit = word(at: value.location)
@@ -133,7 +132,11 @@ public struct ComposerView: View {
                     #else
                     content.simultaneousGesture(quoteGesture)
                     #endif
-                }.background(Color.black.opacity(0.001)).scrollDisabled(isSelecting || holdsSentViewport)
+                }
+                    // Clip the finite viewport before any send opacity/transform can flatten
+                    // the scroll content into a single document-height offscreen layer.
+                    .clipped()
+                    .background(Color.black.opacity(0.001)).scrollDisabled(isSelecting || holdsSentViewport)
                     .allowsHitTesting(!holdsSentViewport)
                     .offset(y: holdsSentViewport && !reduceMotion ? -min(120, max(48, viewportSize.height * 0.6)) * sendFlightProgress : 0)
                     .opacity(holdsSentViewport ? 1 - sendFlightProgress : 1)
