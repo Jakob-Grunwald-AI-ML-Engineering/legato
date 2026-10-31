@@ -47,7 +47,10 @@ final class KeyboardLinkHost: TranscriptSink {
     private var insertedComposerIntentID: String?
     private var composerSessionID: String?
     private var composerChannel: ComposerLink?
-    func attach(_ composer: ComposerSession) {
+    /// Open while the keyboard is on screen; its surface decides where a mic tap routes audio.
+    private(set) var keyboardSession: KeyboardSession?
+    func attach(_ composer: ComposerSession, keyboardSession: KeyboardSession? = nil) {
+        self.keyboardSession = keyboardSession
         guard let backing = UserDefaultsLinkStore() else { return }
         let channel = ComposerLink(store: LinkStore(backing)); composerChannel = channel
         composer.hostInsertionTarget = { [weak self] in self?.link.keyboardDocumentID() }
@@ -70,6 +73,11 @@ final class KeyboardLinkHost: TranscriptSink {
         composerTask = Task { [weak self, weak composer] in
             while !Task.isCancelled {
                 guard let self, let composer else { return }
+                // Presence drives the keyboard session: appear opens and pre-warms, disappear closes.
+                if let session = self.keyboardSession {
+                    let presence = self.link.keyboardPresence()
+                    session.update(visible: presence != nil, surface: presence?.surface == .typing ? .dictation : .agent)
+                }
                 for intent in channel.drainIntents() {
                     switch intent.action {
                     case "insert":
@@ -81,13 +89,11 @@ final class KeyboardLinkHost: TranscriptSink {
                             let result = await self.insertComposerDraft(composer, expectedDocumentID: self.link.keyboardDocumentID(), origin: .keyboardButton)
                             self.composerInsertionNotice = result.succeeded ? nil : result.message
                         }
-                    case "cancel": await composer.cancel()
-                    case "new-topic": await composer.startNewTopic()
+                    case "cancel": await composer.cancel(); await self.keyboardSession?.rewarm()
+                    case "new-topic": await composer.startNewTopic(); await self.keyboardSession?.rewarm()
                     case "undo": await composer.undo()
-                    case "stop": await composer.stop()
-                    case "input-mode":
-                        let value = intent.text.flatMap(ComposerInputMode.init(rawValue:)) ?? composer.inputMode.toggled
-                        await composer.setInputMode(value, timestamp: intent.timestamp)
+                    case "stop":
+                        if let session = self.keyboardSession, session.isOpen { await session.closeGate() } else { await composer.stop() }
                     case "mute":
                         let muted = intent.text.flatMap(Bool.init) ?? !composer.isMuted
                         await composer.setMuted(muted)
@@ -122,7 +128,9 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.correctionSubmitting = composer.correctionSubmitting
                 value.correctionCountdownStart = composer.correctionCountdownStart
                 value.correctionCountdownDeadline = composer.correctionCountdownDeadline
-                value.inputMode = composer.inputMode.rawValue; value.instructionDraft = composer.instructionPreview; value.instructionStatus = composer.instructionStatus
+                value.instructionDraft = composer.instructionPreview; value.instructionStatus = composer.instructionStatus
+                value.audioRoute = (self.keyboardSession?.isOpen == true ? self.keyboardSession?.route : nil)?.rawValue ?? composer.route.rawValue
+                value.dictationTail = self.keyboardSession?.dictationTail
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 if self.composerPublisher.publish(value, through: channel) {
                     DarwinObserver.post(LinkChannel.Note.composer)
@@ -204,7 +212,8 @@ final class KeyboardLinkHost: TranscriptSink {
             await composer.traceInsertion(delivered ? "acknowledged" : "undelivered", origin: origin,
                 detail: delivered ? ["ack": "keyboard.finalApplied"] : ["reason": "no.keyboard.ack"])
             if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
-                await composer.insert()
+                // Within one keyboard appearance the draft and conversation continue after Insert.
+                await composer.insert(retainingComposition: keyboardSession?.isOpen == true)
                 return .init(succeeded: true, message: "Draft inserted into the bound text field.")
             }
             return .init(succeeded: delivered, message: delivered ? "Inserted. Draft changed during insertion; latest edits kept." : "Couldn't insert into the text field. Draft kept.")

@@ -27,6 +27,11 @@ import UIKit
         for name in ComposerSession.debugCommands {
             harness.register(name) { command in try await AppController.shared.composer.debugControl(name, args: command.args) }
         }
+        // The keyboard mic key's gate on the current surface (the typing surface has no mic key yet).
+        harness.register("keyboard-tap") { _ in
+            _ = await AppController.shared.keyboardSession.tap()
+            return AppController.shared.composer.debugState
+        }
         harness.register("composer-import-keys") { command in
             guard command.args == ["credentials.json"] else { throw Usage.invalid }
             return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))

@@ -45,8 +45,8 @@ final class LinkClient {
     }
 
     /// `notify`: also post the note (on a change of visibility; the 1 s refreshes stay quiet).
-    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil) {
-        store?.write(KeyboardPresence(visible: visible, at: Date(), documentID: documentID), forKey: LinkChannel.Key.presence)
+    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil) {
+        store?.write(KeyboardPresence(visible: visible, at: Date(), documentID: documentID, surface: surface), forKey: LinkChannel.Key.presence)
         if notify { DarwinObserver.post(LinkChannel.Note.presence) }
     }
 

@@ -195,6 +195,16 @@ final class KeyboardController {
     var meetingNotice: String? { host?.meetingNotice(now: Date()) }
 
     private(set) var composer = ComposerPublication()
+    /// The surface on screen; it decides the mode (typing dictates, the composer instructs the agent).
+    private(set) var surface = KeyboardSurface.composer
+    /// The host routes the mic by surface, so it learns of a switch at once (presence plus its note).
+    func show(_ value: KeyboardSurface) {
+        guard value != surface else { return }
+        surface = value
+        if isVisible { link.writePresence(visible: true, notify: true, documentID: document.documentID, surface: surface) }
+    }
+    /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
+    var routeOpen: Bool { (composer.audioRoute ?? "idle") != "idle" }
     private(set) var pendingComposerInsert: String?
     private var pendingComposerDocumentID: String?
     @ObservationIgnored private var composerPoll: Task<Void, Never>?
@@ -243,7 +253,7 @@ final class KeyboardController {
         refreshTraits()
         typing.appeared()
         wordRow.appeared()
-        link.writePresence(visible: true, notify: true, documentID: document.documentID)
+        link.writePresence(visible: true, notify: true, documentID: document.documentID, surface: surface)
         trace?("visible value=1")
         heartbeat?.cancel()
         heartbeat = Task { [weak self] in
@@ -292,14 +302,14 @@ final class KeyboardController {
     }
 
     private func beat() {
-        link.writePresence(visible: true, notify: false, documentID: document.documentID)
+        link.writePresence(visible: true, notify: false, documentID: document.documentID, surface: surface)
         reloadHost()
     }
 
     /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
     /// extension's `textDidChange` and `selectionDidChange` both come here.
     func documentDidChange() {
-        if isVisible { link.writePresence(visible: true, notify: false, documentID: document.documentID) }
+        if isVisible { link.writePresence(visible: true, notify: false, documentID: document.documentID, surface: surface) }
         refreshTraits()
         typing.documentChanged()
         if let versions, versions.documentID != document.documentID { self.versions = nil }
@@ -759,7 +769,7 @@ final class KeyboardController {
 
     /// Whether the app is listening right now, rather than preparing resources or starting capture.
     var isCapturing: Bool {
-        if composer.status == "listening" { return true }
+        if composer.status == "listening" || routeOpen { return true }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
         return host.phase == .listening
     }
@@ -779,7 +789,7 @@ final class KeyboardController {
     /// The mic key was tapped. In `.openApp` mode the key is a `Link` that opens the app by itself; this
     /// sends the same request over the link, for an app that is already running.
     func micTapped() {
-        if composer.status == "listening" { composerIntent("stop"); return }
+        if composer.status == "listening" || routeOpen { composerIntent("stop"); return }
         reloadHost()
         let mode = micMode
         switch mode {
