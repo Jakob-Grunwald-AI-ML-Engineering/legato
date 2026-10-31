@@ -68,6 +68,37 @@ import XCTest
             }
             app.tabBars.buttons["Compose"].tap()
             XCTAssertTrue(app.buttons["Compose"].exists)
+        case "typing-fallback":
+            // Prepare the DEBUG keyboard harness with an empty target field and
+            // composer-debug-seed "Typing fallback retained draft" before this command.
+            let retainedDraft = app.staticTexts["Typing fallback retained draft"]
+            XCTAssertTrue(retainedDraft.waitForExistence(timeout: 5), "Seeded voice draft must be visible before switching")
+            let field = app.textViews["harness.document"]
+            XCTAssertTrue(field.exists, "This bounded check requires the DEBUG keyboard harness")
+            XCTAssertEqual(field.value as? String ?? "", "", "Use an empty disposable external field")
+            let abc = app.buttons["composer.typingKeyboard"]
+            XCTAssertTrue(abc.isHittable, "ABC must be reachable from the composer")
+            abc.tap()
+            func typingKey(_ identifier: String) -> XCUIElement {
+                app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+            }
+            for key in ["key.a", "key.b", "key.c"] {
+                let button = typingKey(key)
+                XCTAssertTrue(button.isHittable, "Typing key must be reachable: \(key)")
+                button.tap()
+            }
+            XCTAssertEqual((field.value as? String)?.lowercased(), "abc")
+            typingKey("key.delete").tap()
+            XCTAssertEqual((field.value as? String)?.lowercased(), "ab")
+            typingKey("key.space").tap()
+            typingKey("key.return").tap()
+            XCTAssertEqual((field.value as? String)?.lowercased(), "ab \n")
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = "typing-fallback-native-grid"; shot.lifetime = .keepAlways; add(shot)
+            app.buttons["typing.composer"].tap()
+            XCTAssertTrue(retainedDraft.waitForExistence(timeout: 5), "Typing must retain the voice draft when returning")
+            XCTAssertTrue(abc.isHittable)
+            XCTAssertEqual((field.value as? String)?.lowercased(), "ab \n", "Returning must preserve external typing")
         case "tree": break
         case "keyboard":
             app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 42, dy: 820)).press(forDuration: 1.2)
