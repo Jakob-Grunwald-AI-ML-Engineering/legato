@@ -161,3 +161,31 @@ import LegatoComposerDoc
     #expect(try String(contentsOf: log.finalURL, encoding: .utf8) == "content")
     #expect(await room.loggingError == nil)
 }
+
+@Test func resumableRoomPreservesDocumentSubscriptionsAndFinalLogAcrossTakes() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try SessionLog(rootDirectory: root)
+    let room = Room(log: log, resumable: true)
+    let events = await room.subscribe(participant: .logger, channels: [.session])
+    _ = try await room.publishSegment(words: [Word(text: "First draft")])
+    try await room.micOff(transcriberDraining: true)
+    await #expect(throws: RoomError.invalidLifecycleTransition) { try await room.resume() }
+    #expect(await room.state == .trailing)
+    await room.finishTranscription()
+    try await room.finishFinalPass()
+    #expect(await room.state == .paused)
+    #expect(try String(contentsOf: log.finalURL, encoding: .utf8) == "First draft")
+    try await room.resume()
+    _ = try await room.publishSegment(words: [Word(text: "Continue editing")])
+    #expect(await room.documentSnapshot.lines.map(\.text) == ["First draft", "Continue editing"])
+    try await room.micOff()
+    try await room.finishFinalPass()
+    #expect(await room.state == .paused)
+    try await room.cancel()
+    var names: [String] = []
+    for await event in events {
+        if case .string(let name) = event.payload["event"] { names.append(name) }
+    }
+    #expect(names == ["mic.off", "final.pass", "paused", "mic.on", "mic.off", "final.pass", "paused", "cancel.work", "done"])
+}
