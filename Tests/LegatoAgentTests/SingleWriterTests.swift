@@ -322,3 +322,32 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
     #expect(client.state.withLock { $0.maxActive } == 1)
     await runner.stop()
 }
+
+// Tool-path proof only: semantic continuation recognition is checked with actual provider replay.
+@Test func sentenceContinuationJoinUsesCapturedVersionsAndPreservesOtherStructure() async throws {
+    for (prefix, continuation, joined) in [
+        ("Please investigate why.", "The keyboard disappears.", "Please investigate why the keyboard disappears."),
+        ("Ich möchte.", "Einen kurzen Bericht schreiben.", "Ich möchte einen kurzen Bericht schreiben.")
+    ] {
+        let room = Room()
+        for text in [prefix, continuation, "Intentional list item.", "An independent complete sentence."] {
+            _ = try await room.publishSegment(words: [.init(text: text)])
+        }
+        let initial = await room.documentSnapshot
+        let list = initial.lines[2]
+        _ = try await room.applyDocument([.setKind(ids: [list.id], kind: .li)], origin: .user, versions: [list.id: list.version])
+        let captured = await room.documentSnapshot
+        _ = try await room.publishSegment(words: [.init(text: "New speech after capture.")])
+        let before = await room.documentSnapshot
+        let first = captured.lines[0], second = captured.lines[1]
+        let versions: [JSONValue] = [first, second].map { .object(["line": .string($0.id), "version": .number(Double($0.version))]) }
+        let result = await ToolExecutor(room: room).execute(name: "replace_lines", input: .object([
+            "from": .string(first.id), "to": .string(second.id), "lines": .array([.string(joined)]), "versions": .array(versions)
+        ]), groupID: "sentence-join", live: true, phase: .sentence, allowedLineIDs: Set(captured.lines.map(\.id)))
+        #expect(!result.isError)
+        let after = await room.documentSnapshot
+        #expect(after.lines[0].words.map(\.text).joined(separator: " ") == joined)
+        #expect(Array(after.lines.dropFirst()) == Array(before.lines.dropFirst(2)))
+        #expect(after.lines[1].kind == .li)
+    }
+}
