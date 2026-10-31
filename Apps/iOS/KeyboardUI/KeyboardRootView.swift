@@ -72,8 +72,8 @@ struct KeyboardRootView: View {
             Button { controller.insertComposer() } label: {
                 Image(systemName: "paperplane.fill").font(.system(size: 17))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .opacity(controller.composer.snapshot.lines.isEmpty ? 0.35 : 1)
-            }.disabled(controller.composer.snapshot.lines.isEmpty).accessibilityLabel("Insert")
+                    .opacity(controller.composer.snapshot.lines.isEmpty && controller.composer.tail.isEmpty ? 0.35 : 1)
+            }.disabled((controller.composer.snapshot.lines.isEmpty && controller.composer.tail.isEmpty) || controller.pendingComposerInsert != nil).accessibilityLabel("Insert")
             key("Cancel composition", symbol: "xmark", action: { controller.composerIntent("cancel") })
             key(controller.composer.muted == true ? "Unmute transcription" : "Mute transcription",
                 symbol: controller.composer.muted == true ? "mic.slash.fill" : "mic.slash",

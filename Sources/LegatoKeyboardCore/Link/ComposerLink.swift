@@ -17,6 +17,8 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var correctionCountdownStart: Double?
     public var correctionCountdownDeadline: Double?
     public var muted: Bool?
+    /// The last keyboard insertion consumed by the host (including a stale-session rejection).
+    public var insertedIntentID: String?
     public init(snapshot: DocumentSnapshot = .init(revision: 0, lines: []), hunks: [AnimationHunk] = [], requiresSnapshot: Bool = false) {
         self.snapshot = snapshot; self.hunks = hunks; self.requiresSnapshot = requiresSnapshot
     }
@@ -47,12 +49,16 @@ public struct ComposerIntent: Codable, Equatable, Sendable {
     public var text: String?
     public var endLineID: String?
     public var endWordID: String?
+    public var sessionID: String?
     public var timestamp: Double
-    public init(action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
+    public init(action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil, sessionID: String? = nil) {
         id = UUID().uuidString; self.action = action; self.lineID = lineID; self.wordID = wordID; self.text = text
         self.endLineID = endLineID; self.endWordID = endWordID
+        self.sessionID = sessionID
         timestamp = ProcessInfo.processInfo.systemUptime
     }
+
+
 }
 
 public struct ComposerLink: Sendable {

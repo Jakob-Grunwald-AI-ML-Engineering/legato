@@ -27,11 +27,11 @@ struct MicKey: View {
     private var capturing: Bool { controller.isCapturing }
     private var canStop: Bool { controller.micMode == .remote(.stop) }
 
-    /// A native key face; while capturing, filled red with a pulsing stop glyph.
+    /// A native key face; while capturing, filled red with a pulsing pause glyph.
     private var label: some View {
         ZStack {
             RoundedRectangle(cornerRadius: KeyGeometry.keyRadius).fill(capturing ? Color.red : Color(uiColor: KeyColors.key))
-            Image(systemName: canStop ? "stop.fill" : "mic.fill")
+            Image(systemName: canStop ? "pause.fill" : "mic.fill")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(capturing ? Color.white : Color.primary)
                 .symbolEffect(.pulse, isActive: capturing)
@@ -39,6 +39,6 @@ struct MicKey: View {
         .padding(hitInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .accessibilityLabel(canStop ? (capturing ? "Stop dictation" : "Cancel dictation") : "Start dictation")
+        .accessibilityLabel(canStop ? (capturing ? "Pause dictation" : "Cancel dictation") : "Start dictation")
     }
 }
