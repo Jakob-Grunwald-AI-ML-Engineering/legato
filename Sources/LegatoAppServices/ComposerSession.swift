@@ -18,6 +18,7 @@ import LegatoVocabulary
     public private(set) var snapshot = DocumentSnapshot(revision: 0, lines: [])
     public private(set) var tail = ""
     public private(set) var correctionDraft: String?
+    public private(set) var correctionSubmitting = false
     public private(set) var correctionCountdownStart: Double?
     public private(set) var correctionCountdownDeadline: Double?
     public private(set) var status = "idle"
@@ -29,12 +30,14 @@ import LegatoVocabulary
     public private(set) var instructionDraft = ""
     public private(set) var lastInstruction = ""
     public private(set) var instructionApplying = false
+    public private(set) var instructionSubmitting = false
     private var lastInstructionID: String?
     private var instructionCompleted = false
     public var instructionPreview: String { instructionDraft.isEmpty ? lastInstruction : instructionDraft }
     public var instructionStatus: String {
         if let hostActionNotice { return hostActionNotice }
         if instructionCompleted { return "Done" }
+        if instructionSubmitting { return "Sending" }
         if !instructionDraft.isEmpty { return "Listening" }
         if instructionApplying { return "Applying" }
         if !lastInstruction.isEmpty { return "Done" }
@@ -104,7 +107,8 @@ import LegatoVocabulary
         self.mic = microphone
         self.activateAudioSession = activateAudioSession
     }
-    init(room: Room, log: SessionLog? = nil) {
+    init(room: Room, log: SessionLog? = nil, binder: HintBinder? = nil) {
+        self.binder = binder
         self.room = room
         self.sessionLog = log
         self.sessionID = log?.directory.lastPathComponent
@@ -192,7 +196,7 @@ import LegatoVocabulary
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let binder = HintBinder(room: room, learner: learner, onSend: { [weak self] in await self?.sendCorrection() },
                 onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() },
-                onDictation: { [weak self] sentence in await self?.sentencePipeline?.enqueue(sentence) })
+                onDictation: { [weak self] sentence in await self?.sentencePipeline?.enqueue(sentence) }, requiresExplicitSubmission: true)
             self.binder = binder
             sentencePipeline = OrderedSentencePipeline(cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), onUsage: { id, sequence, usage in
                 _ = try? await room.publish(channel: .sentenceCleanup, participant: .sentenceAgent, payload: .object([
@@ -441,7 +445,7 @@ import LegatoVocabulary
             try requireGeneration(token)
             if let error { throw insertionFailure(error) }
             let state = await room.state
-            if state == .paused || state == .done { break }
+            if (state == .paused || state == .done) && !busy && !instructionApplying && !instructionSubmitting { break }
             // Offline debug seeds intentionally have no writer or provider.
             if writer == nil, state == .finalPass { try await room.finishFinalPass(); continue }
             guard ContinuousClock.now < deadline else { throw insertionFailure("Writing is still finishing. Try Insert again.") }
@@ -463,6 +467,18 @@ import LegatoVocabulary
         let requests = await writer?.recentTopicInstructions() ?? (lastInstruction.isEmpty ? [] : [lastInstruction])
         guard generation == token else { return }
         if let context = TopicContext(deliveredText: delivered, recentInstructions: requests) { topicContext = context }
+        if let room, await room.state == .paused, await binder?.hasUnsentInstruction == true {
+            // Keep the explicit unsent comment usable without recording or dispatching it.
+            await binder?.clearSelection(timestamp: ProcessInfo.processInfo.systemUptime)
+            let deliveredSnapshot = await room.documentSnapshot
+            if !deliveredSnapshot.lines.isEmpty {
+                _ = try? await room.applyDocument([.deleteLines(ids: deliveredSnapshot.lines.map(\.id))], origin: .system,
+                    versions: Dictionary(uniqueKeysWithValues: deliveredSnapshot.lines.map { ($0.id, $0.version) }))
+            }
+            snapshot = await room.documentSnapshot; tail = ""; hunks = []; lastTransactionID = nil
+            pendingLineIDs = []; error = nil; hostActionNotice = nil; status = "paused"; onChange?()
+            return
+        }
         _ = try? await room?.insert(); await cleanup()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
         pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
@@ -525,6 +541,18 @@ import LegatoVocabulary
     public func clearSelection(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         await binder?.clearSelection(timestamp: timestamp)
     }
+    public func sendInstruction() async {
+        guard await binder?.requestInstructionSend(timestamp: ProcessInfo.processInfo.systemUptime) == true else { return }
+        instructionSubmitting = true; instructionApplying = true; lastInstruction = instructionDraft; onChange?()
+        do {
+            if try await transcriber?.finalizeChunk() != true { await binder?.completeInstructionSend() }
+        } catch { await binder?.cancelInstructionSend(); instructionSubmitting = false; instructionApplying = false; fail(error) }
+    }
+    public func discardInstruction(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
+        await binder?.discardInstruction(timestamp: timestamp)
+        instructionDraft = ""; lastInstruction = ""; instructionSubmitting = false; instructionCompleted = true
+        hostActionNotice = nil; onChange?()
+    }
     public func sendCorrection() async {
         guard await binder?.requestSend(timestamp: ProcessInfo.processInfo.systemUptime) == true else { return }
         do {
@@ -572,8 +600,10 @@ import LegatoVocabulary
         case .instructionDraft:
             if case .string(let draft) = event.payload["text"], !draft.isEmpty { instructionCompleted = false; hostActionNotice = nil }
             instructionDraft = (try? event.payload["text"]?.decode(String.self)) ?? ""
+            instructionSubmitting = (try? event.payload["submitting"]?.decode(Bool.self)) ?? false
         case .correctionDraft:
             correctionDraft = try? event.payload["text"]?.decode(String.self)
+            correctionSubmitting = (try? event.payload["submitting"]?.decode(Bool.self)) ?? false
             correctionCountdownStart = try? event.payload["countdownStart"]?.decode(Double.self)
             correctionCountdownDeadline = try? event.payload["countdownDeadline"]?.decode(Double.self)
         case .agentStatus:
@@ -582,11 +612,11 @@ import LegatoVocabulary
             if event.payload["event"] == .string("host.action.result") {
                 instructionApplying = false
                 if event.payload["succeeded"] == .bool(false) { hostActionNotice = try? event.payload["message"]?.decode(String.self) }
-                else { instructionCompleted = true; hostActionNotice = nil; lastInstruction = ""; instructionDraft = "" }
+                else { instructionCompleted = instructionDraft.isEmpty; hostActionNotice = nil; lastInstruction = "" }
             }
             if event.payload["event"] == .string("turn.phase"), event.payload["phase"] == .string("instruction") { instructionApplying = true }
             if event.payload["event"] == .string("instruction.completed"),
-               (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = true }
+               (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = instructionDraft.isEmpty }
             if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty || sentenceCleanupPending > 0 }
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
             if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }
@@ -623,8 +653,8 @@ import LegatoVocabulary
         await sentencePipeline?.cancel(); sentencePipeline = nil; sentenceCleanupPending = 0; sentenceCleanupFailed = false
         await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
-        isMuted = false; inputMode = .dictation; instructionDraft = ""; lastInstruction = ""; instructionApplying = false
-        correctionDraft = nil; correctionCountdownStart = nil; correctionCountdownDeadline = nil
+        isMuted = false; inputMode = .dictation; instructionDraft = ""; lastInstruction = ""; instructionApplying = false; instructionSubmitting = false
+        correctionDraft = nil; correctionSubmitting = false; correctionCountdownStart = nil; correctionCountdownDeadline = nil
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }
 }

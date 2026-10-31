@@ -76,11 +76,13 @@ struct HomeView: View {
     private var composer: some View {
         ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail, dictationRevision: controller.composer.dictationRevision,
             pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
-            correctionDraft: controller.composer.correctionDraft,
+            correctionDraft: controller.composer.correctionDraft, correctionSubmitting: controller.composer.correctionSubmitting,
             correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,
             onSelect: { selection in Task { await controller.composer.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
             onDeselect: { Task { await controller.composer.clearSelection() } },
             onSendCorrection: { Task { await controller.composer.sendCorrection() } },
+            onSendInstruction: { Task { await controller.composer.sendInstruction() } },
+            onDiscardInstruction: { Task { await controller.composer.discardInstruction() } },
             onPick: { line, word, text in Task { await controller.composer.pick(lineID: line, wordID: word, text: text) } })
     }
 }

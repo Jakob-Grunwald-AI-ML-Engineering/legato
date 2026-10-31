@@ -12,11 +12,14 @@ public struct ComposerView: View {
     public var instructionStatus: String
     public var instructionInputActive: Bool
     public var correctionDraft: String?
+    public var correctionSubmitting: Bool
     public var correctionCountdownStart: Double?
     public var correctionCountdownDeadline: Double?
     public var onSelect: (QuoteSelection) -> Void
     public var onDeselect: () -> Void
     public var onSendCorrection: (() -> Void)?
+    public var onSendInstruction: (() -> Void)?
+    public var onDiscardInstruction: () -> Void
     public var onPick: (String, String, String) -> Void
     @State private var presentedParagraphs: [PresentedParagraph] = []
     @State private var presentedRevision = -1
@@ -32,20 +35,21 @@ public struct ComposerView: View {
     @State private var reservesSpace = false
     public init(snapshot: DocumentSnapshot, tail: String = "", dictationRevision: Int = 0, pendingLineIDs: Set<String> = [], busy: Bool = false,
                 instructionText: String = "", instructionStatus: String = "Ready", instructionInputActive: Bool = false,
-                correctionDraft: String? = nil, correctionCountdownStart: Double? = nil, correctionCountdownDeadline: Double? = nil,
+                correctionDraft: String? = nil, correctionSubmitting: Bool = false, correctionCountdownStart: Double? = nil, correctionCountdownDeadline: Double? = nil,
                 onSelect: @escaping (QuoteSelection) -> Void = { _ in },
                 onDeselect: @escaping () -> Void = {}, onSendCorrection: (() -> Void)? = nil,
+                onSendInstruction: (() -> Void)? = nil, onDiscardInstruction: @escaping () -> Void = {},
                 onPick: @escaping (String, String, String) -> Void = { _, _, _ in }) {
         self.snapshot = snapshot; self.tail = tail; self.dictationRevision = dictationRevision; self.pendingLineIDs = pendingLineIDs; self.busy = busy
         self.instructionText = instructionText; self.instructionStatus = instructionStatus; self.instructionInputActive = instructionInputActive
-        self.correctionDraft = correctionDraft; self.correctionCountdownStart = correctionCountdownStart; self.correctionCountdownDeadline = correctionCountdownDeadline; self.onSelect = onSelect; self.onDeselect = onDeselect
-        self.onSendCorrection = onSendCorrection; self.onPick = onPick
+        self.correctionDraft = correctionDraft; self.correctionSubmitting = correctionSubmitting; self.correctionCountdownStart = correctionCountdownStart; self.correctionCountdownDeadline = correctionCountdownDeadline; self.onSelect = onSelect; self.onDeselect = onDeselect
+        self.onSendCorrection = onSendCorrection; self.onSendInstruction = onSendInstruction; self.onDiscardInstruction = onDiscardInstruction; self.onPick = onPick
     }
-    private var preferredBubbleHeight: CGFloat { correctionDraft?.isEmpty == false ? 100 : 68 }
+    private var preferredBubbleHeight: CGFloat { correctionDraft?.isEmpty == false ? 96 : 54 }
     private var showsGlobalComment: Bool { showsInstructionComment && selected == nil }
-    private var instructionBubbleHeight: CGFloat { instructionText.isEmpty || instructionStatus == "Done" ? 68 : 100 }
+    private var instructionBubbleHeight: CGFloat { instructionText.isEmpty || instructionStatus == "Done" ? 54 : 96 }
     private var reservedHeight: CGFloat {
-        if showsGlobalComment { return min(instructionBubbleHeight + 12, viewportSize.height * 0.6) }
+        if showsGlobalComment { return min(instructionBubbleHeight + 8, viewportSize.height * 0.6) }
         return reservesSpace ? min(100, viewportSize.height * 0.6) : 0
     }
     // Large snapshots skip implicit whole-layout animation. Local changed-word effects
@@ -136,7 +140,7 @@ public struct ComposerView: View {
                     if available >= 30 {
                         AlternativesPopover(capturedText: correctionDraft ?? "",
                             pointX: min(width - 4, max(4, anchor.midX - x + width / 2)), pointsDown: above,
-                            maximumHeight: available, countdownStart: correctionCountdownStart, countdownDeadline: correctionCountdownDeadline, dismiss: dismissSelection, send: onSendCorrection)
+                            maximumHeight: available, dismiss: dismissSelection, send: onSendCorrection, applying: correctionSubmitting)
                             .frame(width: width)
                             .position(x: x, y: above ? selection.extent.minY - height / 2 - 10 : selection.extent.maxY + height / 2 + 10)
                             .transition(AnyTransition.scale(scale: 0.92, anchor: above ? .bottom : .top).combined(with: .opacity).combined(with: .movingParts.blur(radius: 4)))
@@ -150,12 +154,13 @@ public struct ComposerView: View {
                     let anchor = (working.isEmpty ? bounds.flatMap(\.rects) : working).last
                     let anchorX = anchor?.midX ?? geometry.size.width / 2
                     let x = min(max(anchorX, width / 2 + 8), geometry.size.width - width / 2 - 8)
-                    let height = max(30, reservedHeight - 12)
+                    let height = max(30, reservedHeight - 8)
                     AlternativesPopover(capturedText: instructionStatus == "Done" ? "" : instructionText,
                         pointX: min(width - 4, max(4, anchorX - x + width / 2)), pointsDown: true,
-                        maximumHeight: height, dismiss: { showsInstructionComment = false }, send: nil,
-                        headerTitle: instructionStatus == "Applying" ? "Applying instructions" : "Speak an instruction",
-                        dismissLabel: "Hide instruction comment", showsSendButton: false, applying: instructionStatus == "Applying")
+                        maximumHeight: height, dismiss: { showsInstructionComment = false; onDiscardInstruction() }, send: onSendInstruction,
+                        headerTitle: instructionStatus == "Applying" ? "Applying instruction" : "Speak an instruction",
+                        dismissLabel: "Discard instruction", applying: instructionStatus == "Applying" || instructionStatus == "Sending",
+                        sendLabel: "Apply instruction", accessibilityPrefix: "composer.instruction")
                         .frame(width: width).position(x: x, y: height / 2)
                         .transition(.scale(scale: 0.94, anchor: .bottom).combined(with: .opacity))
                         .accessibilityIdentifier("composer-instruction-popover")

@@ -27,7 +27,12 @@ struct GlobeKey: UIViewRepresentable {
         button.accessibilityIdentifier = emoji ? "key.emoji" : "key.globe"
         button.accessibilityLabel = "Next keyboard"
         button.accessibilityHint = "Touch and hold to choose a keyboard, including Emoji if enabled."
-        button.addAction(UIAction { [weak typing] _ in typing?.feedback.tick() }, for: .touchDown)
+        button.addAction(UIAction { [weak typing] _ in
+            #if DEBUG
+            NSLog("kbd.system-switch request=%@-picker-touch", emoji ? "emoji" : "globe")
+            #endif
+            typing?.feedback.tick()
+        }, for: .touchDown)
         return button
     }
 

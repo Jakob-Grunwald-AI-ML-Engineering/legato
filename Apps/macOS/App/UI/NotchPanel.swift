@@ -172,11 +172,13 @@ private struct NotchComposerView: View {
             ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
                 instructionText: session.instructionPreview, instructionStatus: session.instructionStatus,
                 instructionInputActive: session.inputMode == .instructions,
-                correctionDraft: session.correctionDraft,
+                correctionDraft: session.correctionDraft, correctionSubmitting: session.correctionSubmitting,
                 correctionCountdownStart: session.correctionCountdownStart, correctionCountdownDeadline: session.correctionCountdownDeadline,
                 onSelect: { selection in showingCorrection = true; Task { await session.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
                 onDeselect: { showingCorrection = false; Task { await session.clearSelection() } },
                 onSendCorrection: { Task { await session.sendCorrection() } },
+                onSendInstruction: { Task { await session.sendInstruction() } },
+                onDiscardInstruction: { Task { await session.discardInstruction() } },
                 onPick: { line, word, text in Task { await session.pick(lineID: line, wordID: word, text: text) } })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if let error = session.error { Text(error).font(.callout).foregroundStyle(.red).lineLimit(2).help(error).textSelection(.disabled) }

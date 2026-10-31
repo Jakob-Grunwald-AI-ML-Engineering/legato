@@ -3,7 +3,7 @@ import LegatoComposerUI
 import SwiftUI
 import UIKit
 
-/// A composer above one native keyboard tool row, with Medium and Full heights.
+/// A fixed-height composer with native actions and a bottom typing utility key.
 struct KeyboardRootView: View {
     let controller: KeyboardController
     @Environment(\.colorScheme) private var systemScheme
@@ -12,33 +12,26 @@ struct KeyboardRootView: View {
     private let modes = [("message", "message"), ("email", "envelope"), ("prompt", "sparkles"), ("note", "note.text"), ("auto", "wand.and.stars")]
 
     var body: some View {
-        Group {
+        GeometryReader { geometry in
             if showsTypingKeyboard { TypingFallbackView(controller: controller) { showsTypingKeyboard = false } }
-            else { composerBody }
+            else { composerBody(landscape: KeyGeometry.isLandscape(width: geometry.size.width)) }
         }
     }
-    private var composerBody: some View {
+    private func composerBody(landscape: Bool) -> some View {
         VStack(spacing: 0) {
-            resizeHandle
-            HStack {
-                DraftInputHeader(active: controller.composer.inputMode != "instructions") {
-                    controller.composerIntent("input-mode", text: "dictation")
-                }
-                Button("ABC") { showsModePicker = false; showsTypingKeyboard = true }
-                    .font(.caption.weight(.medium)).frame(width: 44, height: 25)
-                    .buttonStyle(KeyButtonStyle()).accessibilityLabel("Typing keyboard")
-                    .accessibilityIdentifier("composer.typingKeyboard")
-            }.padding(.horizontal, 12).padding(.bottom, 2)
             Group {
                 ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
+                             dictationRevision: controller.composer.dictationRevision ?? 0,
                              pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
                              instructionText: controller.composer.instructionDraft ?? "", instructionStatus: controller.composer.instructionStatus ?? "Ready",
                              instructionInputActive: controller.composer.inputMode == "instructions",
-                             correctionDraft: controller.composer.correctionDraft,
+                             correctionDraft: controller.composer.correctionDraft, correctionSubmitting: controller.composer.correctionSubmitting ?? false,
                 correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,
                              onSelect: { controller.composerIntent("tap", lineID: $0.lineID, wordID: $0.wordID, endLineID: $0.endLineID, endWordID: $0.endWordID) },
                              onDeselect: { controller.composerIntent("deselect") },
                              onSendCorrection: { controller.composerIntent("send-correction") },
+                             onSendInstruction: { controller.composerIntent("send-instruction") },
+                             onDiscardInstruction: { controller.composerIntent("discard-instruction") },
                              onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
                     .frame(maxHeight: .infinity)
                     .transition(.opacity)
@@ -46,12 +39,20 @@ struct KeyboardRootView: View {
                     Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).padding(.horizontal)
                 }
             }
-            toolRow
+            toolRow(landscape: landscape)
+            HStack {
+                Button("ABC") { showsModePicker = false; showsTypingKeyboard = true }
+                    .font(.system(size: 13, weight: .medium)).frame(width: 44, height: 22)
+                    .buttonStyle(KeyButtonStyle()).accessibilityLabel("Typing keyboard")
+                    .accessibilityIdentifier("composer.typingKeyboard")
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Color(uiColor: KeyColors.ink))
+            .padding(.horizontal, 6.33).frame(height: ComposerKeyboardLayout.utilityRowHeight)
         }
         // UIInputView(.keyboard) supplies the system cap/tray material. Nonzero alpha keeps blank pixels touchable.
         .background(Color.black.opacity(0.001))
         .environment(\.colorScheme, scheme)
-        .animation(.easeInOut(duration: 0.2), value: controller.composerSize)
         .overlay {
             if showsModePicker {
                 GeometryReader { geometry in
@@ -70,7 +71,7 @@ struct KeyboardRootView: View {
                             showsModePicker = false
                         })
                         .frame(width: min(232, geometry.size.width - 12.66))
-                        .padding(.leading, 6.33).padding(.bottom, 42)
+                        .padding(.leading, 6.33).padding(.bottom, 42 + ComposerKeyboardLayout.utilityRowHeight)
                     }
                     .accessibilityAction(.escape) { showsModePicker = false }
                 }
@@ -79,7 +80,7 @@ struct KeyboardRootView: View {
         .onDisappear { showsModePicker = false }
     }
 
-    private var toolRow: some View {
+    private func toolRow(landscape: Bool) -> some View {
         HStack(spacing: 6) {
             Button { showsModePicker.toggle() } label: {
                 Image(systemName: modes.first(where: { $0.0 == controller.composer.mode })?.1 ?? "message")
@@ -105,9 +106,8 @@ struct KeyboardRootView: View {
         .font(.system(size: 17))
         .foregroundStyle(Color(uiColor: KeyColors.ink))
         .buttonStyle(KeyButtonStyle())
-        .padding(.horizontal, 6.33).padding(.top, 8).padding(.bottom, 3).frame(height: 54)
+        .padding(.horizontal, 6.33).padding(.top, landscape ? 6 : 8).padding(.bottom, landscape ? 2 : 3).frame(height: landscape ? 35.33 : 54)
         .background(Color.black.opacity(0.001)).contentShape(Rectangle())
-        .highPriorityGesture(heightSwipe)
     }
 
     private func key(_ label: String, symbol: String, enabled: Bool = true, selected: Bool = false,
@@ -118,28 +118,6 @@ struct KeyboardRootView: View {
         }
         .buttonStyle(KeyButtonStyle(selected: selected))
         .disabled(!enabled).accessibilityLabel(label)
-    }
-
-    private var resizeHandle: some View {
-        Capsule().fill(.secondary.opacity(0.5))
-            .frame(width: 36, height: 5)
-            .frame(maxWidth: .infinity, alignment: .top).padding(.top, 2)
-            .frame(height: 28, alignment: .top)
-            .background(Color.black.opacity(0.001)).contentShape(Rectangle())
-            .gesture(heightSwipe)
-            .onTapGesture { controller.setComposerSize(controller.composerSize.cycled) }
-            .accessibilityElement().accessibilityLabel("Composer size")
-            .accessibilityValue(controller.composerSize.rawValue.capitalized)
-            .accessibilityHint("Swipe up or down to change size. Tap to switch between Medium and Full")
-            .accessibilityAdjustableAction { direction in
-                controller.setComposerSize(controller.composerSize.stepped(up: direction == .increment))
-            }
-    }
-
-    private var heightSwipe: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .global).onEnded { value in
-            controller.setComposerSize(controller.composerSize.swiped(dx: value.translation.width, dy: value.translation.height))
-        }
     }
 
     private var scheme: ColorScheme {

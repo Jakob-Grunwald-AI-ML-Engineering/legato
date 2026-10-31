@@ -62,7 +62,7 @@ final class KeyboardViewController: UIInputViewController {
         let screenHeight = view.window?.windowScene?.screen.bounds.height ?? 874
         let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
         // The observed native tray ends 75 pt below our portrait view (21 pt landscape).
-        // Once laid out, measure that gap instead of adding the tray on top of an 85% request.
+        // Once laid out, measure that gap so the fixed layout stays inside the available screen.
         var bottomTray: CGFloat = landscape ? 21 : 75
         if let window = view.window, view.bounds.height > 0 {
             let bottom = view.convert(view.bounds, to: window).maxY + window.frame.minY
@@ -70,7 +70,7 @@ final class KeyboardViewController: UIInputViewController {
             if (0...150).contains(gap) { bottomTray = gap }
         }
         let overhead = bottomTray + (landscape ? 0 : WordRowHeight.portraitSystemTop)
-        return CGFloat((controller?.composerSize ?? .medium).height(
+        return CGFloat(ComposerKeyboardLayout.height(
             screenHeight: screenHeight, systemOverhead: overhead, landscape: landscape))
     }
 
@@ -124,7 +124,9 @@ final class KeyboardViewController: UIInputViewController {
             targetAvailable: controller.inputModeTarget === self
         ) {
             #if DEBUG
-            NSLog("kbd.autofill automatic-handoff")
+            NSLog("kbd.system-switch request=automatic-autofill field=%@ keyboard=%ld secure=%d",
+                  AutoFillContentType.semanticName(for: controller.document.textContentType) ?? "none",
+                  controller.document.keyboardType.rawValue, controller.document.isSecureTextEntry ? 1 : 0)
             #endif
             advanceToNextInputMode()
         }

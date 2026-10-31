@@ -5,15 +5,13 @@ import SwiftUI
 /// `WordRowLayout`), each a button that applies its word (`KeyboardController.suggestionTapped`). A hint, the
 /// meeting notice or the dictation status takes the row over while it is active, and the row shows no words then.
 /// A slot's word changes as the system's bar does it: letter by letter (`MorphingWord`). While a slot is pressed a
-/// capsule fills it and its neighbouring dividers go. It fills the frame it is given; the parent adds the swipe
-/// that toggles the strip.
-struct WordRowView<Swipe: Gesture>: View {
+/// capsule fills it and its neighbouring dividers go. It fills the native prediction frame it is given.
+struct WordRowView: View {
     let controller: KeyboardController
     /// How many slots the width allows (`WordRowLayout.visibleSlots`).
     let slots: Int
     var fontSize: CGFloat = 17
     var contentOffset: CGFloat = 0
-    let swipe: Swipe
 
     /// The slot being pressed (its position in the row), if any: its pill shows and the dividers beside it hide.
     @State private var pressed: Int?
@@ -35,7 +33,6 @@ struct WordRowView<Swipe: Gesture>: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.black.opacity(0.001))
                     .contentShape(Rectangle())
-                    .simultaneousGesture(swipe)
                     .accessibilityIdentifier("keyboard.hint")
                     .transition(.opacity)
             } else {
@@ -54,7 +51,7 @@ struct WordRowView<Swipe: Gesture>: View {
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
                 SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
                                rank: rank, fontSize: fontSize, highlighted: highlighted == position, contentOffset: contentOffset,
-                               swipe: swipe, onPressChange: { isPressed in
+                               onPressChange: { isPressed in
                     if isPressed { pressed = position } else if pressed == position { pressed = nil }
                 })
                     .overlay(alignment: .trailing) {
@@ -76,14 +73,13 @@ struct WordRowView<Swipe: Gesture>: View {
 }
 
 /// Keeps the touch-down proposal while asynchronous results may update the same visual slot.
-private struct SuggestionSlot<Swipe: Gesture>: View {
+private struct SuggestionSlot: View {
     let controller: KeyboardController
     let word: String?
     let rank: Int
     let fontSize: CGFloat
     let highlighted: Bool
     let contentOffset: CGFloat
-    let swipe: Swipe
     let onPressChange: (Bool) -> Void
     @State private var press = SuggestionPress()
 
@@ -102,7 +98,6 @@ private struct SuggestionSlot<Swipe: Gesture>: View {
             onPressChange(isPressed)
         }))
         .disabled(word == nil)
-        .simultaneousGesture(swipe)
         .accessibilityHidden(word == nil)
         .accessibilityLabel(word ?? "")
         .accessibilityHint(highlighted ? "Spelling correction. Tap to replace the word being typed." : "Tap to insert suggestion.")
@@ -284,6 +279,9 @@ private struct AutoFillSwitchKey: UIViewRepresentable {
         button.accessibilityHint = "Switches to the next keyboard. Touch and hold to choose a keyboard."
         if let target {
             button.addTarget(target, action: #selector(UIInputViewController.handleInputModeList(from:with:)), for: .allTouchEvents)
+            #if DEBUG
+            button.addAction(UIAction { _ in NSLog("kbd.system-switch request=autofill-picker-touch") }, for: .touchDown)
+            #endif
         }
         return button
     }

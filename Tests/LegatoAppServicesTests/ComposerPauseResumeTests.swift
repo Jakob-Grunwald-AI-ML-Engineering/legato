@@ -126,3 +126,34 @@ import LegatoRoom
     #expect(session.inputMode == .dictation)
     #expect(session.instructionPreview.isEmpty)
 }
+
+@MainActor @Test func insertKeepsUnsentInstructionPausedWithoutApplyingOrRecording() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try SessionLog(rootDirectory: root), room = Room(segmentRouting: .intercepted, resumable: true)
+    let binder = HintBinder(room: room, requiresExplicitSubmission: true)
+    let session = ComposerSession(room: room, log: log, binder: binder)
+    let stream = await room.subscribe(participant: .ui, channels: [.instructionDraft, .writingInstruction])
+    let receiver = Task { for await event in stream { await session.receive(event) } }
+    defer { receiver.cancel() }
+    await binder.start()
+    _ = try await room.appendSegment(words: [.init(text: "Delivered draft")])
+    await binder.setInputMode(.instructions, timestamp: 100)
+    _ = try await room.publishSegment(words: [.init(text: "Keep this pending comment")], tOrigin: 101)
+    for _ in 0..<100 { if !session.instructionDraft.isEmpty { break }; try await Task.sleep(for: .milliseconds(5)) }
+    #expect(!session.instructionDraft.isEmpty)
+    try await room.micOff(); try await room.finishFinalPass()
+    await session.refreshDebugState()
+    let id = session.sessionID, comment = session.instructionDraft
+    #expect(try await session.prepareForInsertion() == "Delivered draft")
+    await session.insert()
+    #expect(session.renderedText.isEmpty && session.status == "paused")
+    #expect(session.sessionID == id && session.instructionDraft == comment)
+    #expect(!session.isListening && !session.isArmed && !session.instructionApplying)
+    #expect(await room.state == .paused)
+    #expect(await binder.hasUnsentInstruction)
+    await session.discardInstruction()
+    #expect(session.instructionPreview.isEmpty)
+    #expect(!(await binder.hasUnsentInstruction))
+    await session.cancel()
+}

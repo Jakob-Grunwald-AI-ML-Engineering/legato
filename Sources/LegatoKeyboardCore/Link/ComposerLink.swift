@@ -16,6 +16,7 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var busy = false
     /// nil decodes legacy publications written before voice mute was available.
     public var correctionDraft: String?
+    public var correctionSubmitting: Bool?
     public var correctionCountdownStart: Double?
     public var correctionCountdownDeadline: Double?
     public var muted: Bool?
