@@ -8,6 +8,8 @@ import AppKit
 /// What the writer is doing with the spoken instruction on the strip.
 public enum InstructionStripState: Equatable, Sendable {
     case idle, listening, applying, applied
+    /// The writer could not apply the instruction.
+    case failed
     /// A host notice (for example "No bound text field. Draft kept.") in place of the status.
     case notice(String)
 
@@ -18,6 +20,7 @@ public enum InstructionStripState: Equatable, Sendable {
         case "Listening": self = .listening
         case "Applying", "Sending": self = .applying
         case "Done": self = .applied
+        case "Failed": self = .failed
         default: self = .notice(status)
         }
     }
@@ -92,6 +95,7 @@ public struct InstructionStrip: View {
         case .listening: "Listening"
         case .applying: "Applying"
         case .applied: "Applied"
+        case .failed: "Not applied"
         case .notice(let value): value
         }
     }
@@ -115,6 +119,11 @@ public struct InstructionStrip: View {
                 Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold))
                 Text("Applied").font(.caption2)
             }.foregroundStyle(.secondary)
+        case .failed:
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11, weight: .semibold))
+                Text("Not applied").font(.caption2)
+            }.foregroundStyle(.orange)
         case .notice(let value):
             Text(value).font(.caption2).foregroundStyle(.orange).lineLimit(3).multilineTextAlignment(.trailing)
                 .frame(maxWidth: 110, alignment: .trailing)

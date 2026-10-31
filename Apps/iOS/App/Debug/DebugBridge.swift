@@ -32,6 +32,17 @@ import UIKit
             _ = await AppController.shared.keyboardSession.tap()
             return AppController.shared.composer.debugState
         }
+        // ABC dictation route without speech: a finalized line (or live partial) enters where Soniox lines do.
+        harness.register("dictation-debug-line") { command in
+            guard command.args.count == 1 else { throw Usage.invalid }
+            try await AppController.shared.keyboardSession.debugDictationLine(command.args[0])
+            return AppController.shared.composer.debugState
+        }
+        harness.register("dictation-debug-tail") { command in
+            guard command.args.count <= 1 else { throw Usage.invalid }
+            try AppController.shared.keyboardSession.debugDictationTail(command.args.first ?? "")
+            return AppController.shared.composer.debugState
+        }
         harness.register("composer-import-keys") { command in
             guard command.args == ["credentials.json"] else { throw Usage.invalid }
             return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))

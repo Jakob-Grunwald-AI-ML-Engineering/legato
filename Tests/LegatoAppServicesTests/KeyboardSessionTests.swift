@@ -49,6 +49,16 @@ import LegatoSoniox
         return (composer, keyboard)
     }
 
+    @Test func debugDictationLineEntersTheSinkOnTheTypingSurface() async throws {
+        let (_, keyboard) = try await openOnTyping()
+        try await keyboard.debugDictationLine("Hallo Welt")
+        #expect(sink.lines.map(\.text) == ["Hallo Welt"])
+        try keyboard.debugDictationTail("und dann")
+        #expect(keyboard.dictationTail == "und dann")
+        keyboard.update(visible: true, surface: .agent); await keyboard.settle()
+        await #expect(throws: KeyboardSession.DebugDictationError.self) { try await keyboard.debugDictationLine("x") }
+    }
+
     @Test func appearancePrewarmsAndIdleAudioIsDiscarded() async throws {
         let (composer, keyboard) = try await openOnTyping()
         try await until { sink.warms == 1 } // the cleanup connection and prompt cache are warmed on the dictation surface

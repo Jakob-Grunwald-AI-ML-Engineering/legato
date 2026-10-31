@@ -41,9 +41,13 @@ public enum ComposerInsertOrigin: String, Sendable {
     public private(set) var instructionApplying = false
     private var lastInstructionID: String?
     private var instructionCompleted = false
+    private var instructionFailed = false
+    /// Raw provider/transport error behind `error`, kept for logs and `composer-state`; never shown.
+    public private(set) var errorDetail: String?
     public var instructionPreview: String { instructionDraft.isEmpty ? lastInstruction : instructionDraft }
     public var instructionStatus: String {
         if let hostActionNotice { return hostActionNotice }
+        if instructionFailed { return "Failed" }
         if instructionCompleted { return "Done" }
         if !instructionDraft.isEmpty { return "Listening" }
         if instructionApplying { return "Applying" }
@@ -530,7 +534,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         onChange?()
     }
     public var debugState: [String: Any] {
-        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus,
+        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus, "errorDetail": errorDetail ?? NSNull(),
          "sessionID": sessionID ?? "", "successfulInsertionID": successfulInsertionID as Any? ?? NSNull(), "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
@@ -824,7 +828,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     }
     public func discardInstruction(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         await binder?.discardInstruction(timestamp: timestamp)
-        instructionDraft = ""; lastInstruction = ""; instructionCompleted = true
+        instructionDraft = ""; lastInstruction = ""; instructionCompleted = true; instructionFailed = false
         hostActionNotice = nil; onChange?()
     }
     public func sendCorrection() async {
@@ -868,12 +872,12 @@ public enum ComposerInsertOrigin: String, Sendable {
             if let words = try? event.payload["words"]?.decode([Word].self) { acceptedASRWords += words.count }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value; onTail?(value) }
         case .writingInstruction:
-            hostActionNotice = nil; instructionCompleted = false
+            hostActionNotice = nil; instructionCompleted = false; instructionFailed = false
             lastInstructionID = try? event.payload["captureID"]?.decode(String.self)
             lastInstruction = (try? event.payload["text"]?.decode(String.self)) ?? ""
             instructionApplying = true
         case .instructionDraft:
-            if case .string(let draft) = event.payload["text"], !draft.isEmpty { instructionCompleted = false; hostActionNotice = nil }
+            if case .string(let draft) = event.payload["text"], !draft.isEmpty { instructionCompleted = false; instructionFailed = false; hostActionNotice = nil }
             instructionDraft = (try? event.payload["text"]?.decode(String.self)) ?? ""
             // The live instruction is this route's tail; the tap-to-first-words probe reads it.
             if !instructionDraft.isEmpty { onTail?(instructionDraft) }
@@ -892,10 +896,13 @@ public enum ComposerInsertOrigin: String, Sendable {
             }
             if event.payload["event"] == .string("turn.phase"), event.payload["phase"] == .string("instruction") { instructionApplying = true }
             if event.payload["event"] == .string("instruction.completed"),
-               (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = instructionDraft.isEmpty }
+               (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = instructionDraft.isEmpty && !instructionFailed }
             if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty }
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
-            if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }
+            if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] {
+                error = Self.writerFailureMessage(message); errorDetail = message
+                if instructionApplying || !lastInstruction.isEmpty { instructionFailed = true; instructionApplying = false; instructionCompleted = false }
+            }
         case .session:
             if case .string(let value) = event.payload["state"] {
                 // Room reopens before the new provider connects. Expose listening
@@ -909,6 +916,15 @@ public enum ComposerInsertOrigin: String, Sendable {
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { self.mode = mode }
         onChange?()
+    }
+    /// Short, human wording for a writer failure; the raw text stays in `errorDetail` and the room log.
+    public nonisolated static func writerFailureMessage(_ raw: String) -> String {
+        let lower = raw.lowercased()
+        if raw.contains("http(401") || raw.contains("http(403") || lower.contains("authentication_error") { return "Claude key rejected" }
+        if raw.contains("missingKey") { return "Add your Claude key in Legato" }
+        if raw.contains("http(429") || lower.contains("rate_limit") { return "Claude is busy — try again" }
+        if raw.contains("NSURLErrorDomain") || raw.contains("URLError") || lower.contains("offline") || lower.contains("network connection") { return "Network unavailable" }
+        return "Writer failed — try again"
     }
     private func requireGeneration(_ expected: UUID) throws { try Task.checkCancellation(); if generation != expected { throw CancellationError() } }
     private func fail(_ failure: any Error) {
@@ -934,7 +950,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         await transcriber?.cancel(); transcriber = nil
         await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
-        isMuted = false; instructionDraft = ""; lastInstruction = ""; instructionApplying = false
+        isMuted = false; instructionDraft = ""; lastInstruction = ""; instructionApplying = false; instructionFailed = false; errorDetail = nil
         correctionDraft = nil; correctionSubmitting = false; correctionCountdownStart = nil; correctionCountdownDeadline = nil
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }

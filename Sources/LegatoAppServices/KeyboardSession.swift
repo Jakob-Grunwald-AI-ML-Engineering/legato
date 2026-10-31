@@ -285,6 +285,35 @@ import LegatoVocabulary
         }
     }
 
+    #if DEBUG || LEGATO_INTERNAL
+    /// Debug bridge: a finalized line enters the dictation route exactly where a Soniox segment does
+    /// (the sink), so cleanup, the link and keyboard typing run for real. Requires the open dictation surface.
+    public func debugDictationLine(_ text: String) async throws {
+        guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        let words = text.split(whereSeparator: \.isWhitespace).map { Word(text: String($0), confidence: 0.95, language: "de") }
+        guard !words.isEmpty else { throw DebugDictationError.empty }
+        let line = DictationRouteLine(sequence: lineSequence, text: words.map(\.text).joined(separator: " "), words: words, reason: "debug")
+        lineSequence += 1
+        dictationTail = ""
+        await sink.receive(line)
+    }
+    /// Debug bridge: sets (or with empty text clears) the dictation route's live partial.
+    public func debugDictationTail(_ text: String) throws {
+        guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        dictationTail = text
+        observeTail(text, route: .dictation)
+    }
+    public enum DebugDictationError: Error, CustomStringConvertible, Sendable {
+        case notOnDictationSurface, empty
+        public var description: String {
+            switch self {
+            case .notOnDictationSurface: "Keyboard session is not open on the ABC dictation surface."
+            case .empty: "Empty dictation text."
+            }
+        }
+    }
+    #endif
+
     // MARK: Probe
 
     private func observeTail(_ text: String, route: AudioRoute) {
