@@ -17,16 +17,13 @@ public actor Room {
     private let log: SessionLog?
     private let segmentRouting: SegmentRouting
     private let resumable: Bool
-    private let validateDictation: Bool
     private let drainOnly: Bool
-    private var pendingSentences: [String: String] = [:]
-    private var acceptedSentences: Set<String> = []
     public private(set) var loggingError: String?
     public var state: SessionState { lifecycle.state }
     public var documentSnapshot: DocumentSnapshot { document.snapshot }
-    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic, resumable: Bool = false, validateDictation: Bool = false, drainOnly: Bool = false,
+    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic, resumable: Bool = false, drainOnly: Bool = false,
                 clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
-        self.log = log; self.segmentRouting = segmentRouting; self.resumable = resumable; self.validateDictation = validateDictation; self.drainOnly = drainOnly; self.clock = clock
+        self.log = log; self.segmentRouting = segmentRouting; self.resumable = resumable; self.drainOnly = drainOnly; self.clock = clock
     }
 
     public func subscribe(participant: Participant, channels: Set<Channel>, buffering: SubscriptionBuffer? = nil) -> AsyncStream<Envelope> {
@@ -92,42 +89,12 @@ public actor Room {
 
     @discardableResult public func appendSegment(words: [Word], causedBy: String? = nil, resolve: Bool = true) throws -> Transaction {
         try requireActive()
-        guard !validateDictation, !words.isEmpty else { throw RoomError.invalidSegment }
+        guard !words.isEmpty else { throw RoomError.invalidSegment }
         let transaction = try document.appendSegment(words: words)
         publishTransaction(transaction, causedBy: causedBy)
         if resolve, let causedBy { resolveSegment(causedBy) }
         return transaction
     }
-
-    public func holdSentence(_ sentence: DictationSentence) throws {
-        try requireActive()
-        guard !acceptedSentences.contains(sentence.id), pendingSentences[sentence.id] == nil else { return }
-        pendingSentences[sentence.id] = sentence.sourceSegmentID
-        _ = emit(channel: .sentenceCleanup, participant: .hintBinder, payload: .object([
-            "event": .string("sentence.queued"), "sentenceID": .string(sentence.id), "sequence": .number(Double(sentence.sequence)),
-            "sourceSegmentID": .string(sentence.sourceSegmentID), "sourceWordIDs": .array(sentence.words.map { .string($0.id) })]))
-    }
-    /// The binder is the only admission path. Repeated/late completions cannot
-    /// append twice or replace text already edited by the writing agent.
-    @discardableResult public func appendValidatedSentence(_ value: ValidatedDictation) throws -> Transaction? {
-        try requireActive()
-        guard !acceptedSentences.contains(value.sentenceID) else { return nil }
-        guard let source = pendingSentences[value.sentenceID], !value.words.isEmpty else { throw RoomError.invalidSegment }
-        let transaction = try document.appendSegment(words: value.words)
-        acceptedSentences.insert(value.sentenceID); pendingSentences[value.sentenceID] = nil
-        _ = emit(channel: .sentenceCleanup, participant: .hintBinder, payload: .object([
-            "event": .string("sentence.validated"), "sentenceID": .string(value.sentenceID), "sequence": .number(Double(value.sequence)),
-            "sourceSegmentID": .string(source), "sourceWordIDs": .array(value.sourceWordIDs.map(JSONValue.string)),
-            "validatedWordIDs": .array(value.words.map { .string($0.id) })]))
-        _ = emit(channel: .validatedSentence, participant: .document, payload: .object([
-            "event": .string("validated.sentence"), "sentenceID": .string(value.sentenceID), "sequence": .number(Double(value.sequence)),
-            "continuation": .bool(value.continuation),
-            "instruction": .string("This is a validated input work unit, not a paragraph break. A continuation continues the previous bounded fragment; combine related content naturally for the writing mode.")]))
-        publishTransaction(transaction, causedBy: source)
-        return transaction
-    }
-
-    public func discardSentence(_ id: String) { pendingSentences[id] = nil }
 
     /// A routed hint consumes an ASR segment without appending it to the document.
     public func resolveSegment(_ envelopeID: String) {
@@ -192,7 +159,7 @@ public actor Room {
     }
 
     private func advanceToFinalPass() {
-        guard !transcriberDraining, pendingSegments.isEmpty, pendingSentences.isEmpty, lifecycle.beginFinalPassIfReady() else { return }
+        guard !transcriberDraining, pendingSegments.isEmpty, lifecycle.beginFinalPassIfReady() else { return }
         sessionEvent("final.pass", fields: ["drainOnly": .bool(drainOnly)])
     }
 

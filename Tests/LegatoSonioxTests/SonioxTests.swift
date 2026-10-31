@@ -65,7 +65,8 @@ import LegatoRoom
         _ = await tail.next()
         try await client.injectDebugFrame(#"{"tokens":[{"text":"ordinary.","is_final":true,"start_ms":2000,"end_ms":2100}]}"#)
         _ = await tail.next()
-        #expect(await room.documentSnapshot.text == "Alex\nordinary.")
+        #expect(await room.documentSnapshot.text == "Alex", "Speech outside the quote is an instruction, never draft text")
+        #expect(await binder.hasUnsentInstruction)
         await client.cancel()
         await binder.stop()
     }
@@ -165,10 +166,12 @@ actor FakeSocket: SonioxSocket {
     var messages: [SonioxFrame] = []
     var inbox: [SonioxFrame] = []
     var waiter: CheckedContinuation<SonioxFrame, any Error>?
+    var dropped = false
     func connect(request: URLRequest) async throws {}
     func send(_ frame: SonioxFrame) async throws { messages.append(frame) }
     func receive() async throws -> SonioxFrame {
         if !inbox.isEmpty { return inbox.removeFirst() }
+        if dropped { throw SonioxError.network }
         return try await withCheckedThrowingContinuation { waiter = $0 }
     }
     func close() async { waiter?.resume(throwing: SonioxError.cancelled); waiter = nil }

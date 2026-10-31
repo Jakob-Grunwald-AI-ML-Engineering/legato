@@ -10,9 +10,6 @@ public struct ComposerView: View {
     public var successfulInsertionID: String?
     public var pendingLineIDs: Set<String>
     public var busy: Bool
-    public var instructionText: String
-    public var instructionStatus: String
-    public var instructionInputActive: Bool
     public var correctionDraft: String?
     public var correctionSubmitting: Bool
     public var correctionCountdownStart: Double?
@@ -20,8 +17,6 @@ public struct ComposerView: View {
     public var onSelect: (QuoteSelection) -> Void
     public var onDeselect: () -> Void
     public var onSendCorrection: (() -> Void)?
-    public var onSendInstruction: (() -> Void)?
-    public var onDiscardInstruction: () -> Void
     public var onPick: (String, String, String) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sendFlight = SendFlightPresentation()
@@ -30,7 +25,6 @@ public struct ComposerView: View {
     @State private var presentedParagraphs: [PresentedParagraph] = []
     @State private var presentedRevision = -1
     @State private var hasPresented = false
-    @State private var showsInstructionComment = false
     @State private var selected: QuoteSelection?
     @State private var committedSelection: QuoteSelection?
     @State private var dragStart: QuoteSelection?
@@ -40,24 +34,18 @@ public struct ComposerView: View {
     @State private var viewportSize: CGSize = .zero
     @State private var reservesSpace = false
     public init(snapshot: DocumentSnapshot, tail: String = "", dictationRevision: Int = 0, dictationCommit: DictationCommit? = nil, successfulInsertionID: String? = nil, pendingLineIDs: Set<String> = [], busy: Bool = false,
-                instructionText: String = "", instructionStatus: String = "Ready", instructionInputActive: Bool = false,
                 correctionDraft: String? = nil, correctionSubmitting: Bool = false, correctionCountdownStart: Double? = nil, correctionCountdownDeadline: Double? = nil,
                 onSelect: @escaping (QuoteSelection) -> Void = { _ in },
                 onDeselect: @escaping () -> Void = {}, onSendCorrection: (() -> Void)? = nil,
-                onSendInstruction: (() -> Void)? = nil, onDiscardInstruction: @escaping () -> Void = {},
                 onPick: @escaping (String, String, String) -> Void = { _, _, _ in }) {
         self.snapshot = snapshot; self.tail = tail; self.dictationRevision = dictationRevision; self.dictationCommit = dictationCommit; self.successfulInsertionID = successfulInsertionID; self.pendingLineIDs = pendingLineIDs; self.busy = busy
-        self.instructionText = instructionText; self.instructionStatus = instructionStatus; self.instructionInputActive = instructionInputActive
         self.correctionDraft = correctionDraft; self.correctionSubmitting = correctionSubmitting; self.correctionCountdownStart = correctionCountdownStart; self.correctionCountdownDeadline = correctionCountdownDeadline; self.onSelect = onSelect; self.onDeselect = onDeselect
-        self.onSendCorrection = onSendCorrection; self.onSendInstruction = onSendInstruction; self.onDiscardInstruction = onDiscardInstruction; self.onPick = onPick
+        self.onSendCorrection = onSendCorrection; self.onPick = onPick
     }
     private var preferredBubbleHeight: CGFloat { correctionDraft?.isEmpty == false ? 96 : 54 }
-    private var showsGlobalComment: Bool { showsInstructionComment && selected == nil }
-    private var instructionBubbleHeight: CGFloat { instructionText.isEmpty || instructionStatus == "Done" ? 54 : 96 }
     private var reservedHeight: CGFloat {
         // Keep at least one readable draft line, but never shrink the comment to its header alone.
         let available = max(0, viewportSize.height - 44)
-        if showsGlobalComment { return min(instructionBubbleHeight + 8, available) }
         return reservesSpace ? min(preferredBubbleHeight + 12, available) : 0
     }
     // Large snapshots skip implicit whole-layout animation. Local changed-word effects
@@ -71,10 +59,10 @@ public struct ComposerView: View {
         return snapshot.lines.count <= 24
     }
     private func followDictation(using proxy: ScrollViewProxy) {
-        guard selected == nil, !isSelecting, !nativeSelecting, !instructionInputActive else { return }
+        guard selected == nil, !isSelecting, !nativeSelecting else { return }
         Task { @MainActor in
             await Task.yield()
-            guard selected == nil, !isSelecting, !nativeSelecting, !instructionInputActive else { return }
+            guard selected == nil, !isSelecting, !nativeSelecting else { return }
             // Only speech progress requests this scroll. An agent rewrite does not pull the
             // reader away from another paragraph, and an active quote keeps its anchor.
             withAnimation(.easeOut(duration: 0.16)) { proxy.scrollTo("composer-dictation-tail", anchor: .bottom) }
@@ -97,7 +85,7 @@ public struct ComposerView: View {
         let renderBlocks = ParagraphRenderBlocks.make(paragraphs, previous: holdsSentViewport ? paragraphs : previous)
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
-                if reservesSpace || showsGlobalComment { Color.clear.frame(height: reservedHeight).allowsHitTesting(false) }
+                if reservesSpace { Color.clear.frame(height: reservedHeight).allowsHitTesting(false) }
                 ScrollView {
                     let selectedWords = selected?.wordIDs(in: snapshot) ?? []
                     let content = LazyVStack(alignment: .leading, spacing: 0) {
@@ -208,37 +196,9 @@ public struct ComposerView: View {
                             .transition(AnyTransition.scale(scale: 0.92, anchor: above ? .bottom : .top).combined(with: .opacity).combined(with: .movingParts.blur(radius: 4)))
                             .accessibilityIdentifier("composer-correction-popover")
                     }
-                } else if showsGlobalComment, reservedHeight >= 30 {
-                    // Use the same magic bubble as quote correction, in reserved text-free space.
-                    // Its stem follows the working range or the end of the visible draft.
-                    let width = min(280, max(100, geometry.size.width - 16))
-                    let working = bounds.filter { pendingLineIDs.contains($0.lineID) }.flatMap(\.rects)
-                    let anchor = (working.isEmpty ? bounds.flatMap(\.rects) : working).last
-                    let anchorX = anchor?.midX ?? geometry.size.width / 2
-                    let x = min(max(anchorX, width / 2 + 8), geometry.size.width - width / 2 - 8)
-                    let height = max(30, reservedHeight - 8)
-                    AlternativesPopover(capturedText: instructionStatus == "Done" ? "" : instructionText,
-                        pointX: min(width - 4, max(4, anchorX - x + width / 2)), pointsDown: true,
-                        maximumHeight: height, dismiss: { showsInstructionComment = false; onDiscardInstruction() }, send: onSendInstruction,
-                        headerTitle: instructionStatus == "Applying" ? "Applying instruction" : "Speak an instruction",
-                        dismissLabel: "Discard instruction", applying: instructionStatus == "Applying" || instructionStatus == "Sending",
-                        sendLabel: "Apply instruction", accessibilityPrefix: "composer.instruction")
-                        .frame(width: width).position(x: x, y: height / 2)
-                        .transition(.scale(scale: 0.94, anchor: .bottom).combined(with: .opacity))
-                        .accessibilityIdentifier("composer-instruction-popover")
                 }
             } }
-            .onAppear { showsInstructionComment = !instructionText.isEmpty && instructionStatus != "Done" }
-            .onChange(of: instructionText) { _, text in
-                if !text.isEmpty && instructionStatus != "Done" { showsInstructionComment = true }
-                else if instructionStatus != "Applying" { showsInstructionComment = false }
-            }
-            .onChange(of: instructionStatus) { _, status in
-                if status == "Done" || status == "Ready" { showsInstructionComment = false }
-                else if status == "Applying" || (status == "Listening" && !instructionText.isEmpty) { showsInstructionComment = true }
-            }
-            .animation(.smooth(duration: 0.22), value: showsInstructionComment)
-            .overlay(alignment: .topTrailing) { if busy && !showsGlobalComment { AgentStatusGlyph().padding(8).allowsHitTesting(false) } }
+            .overlay(alignment: .topTrailing) { if busy { AgentStatusGlyph().padding(8).allowsHitTesting(false) } }
             .animation(animatesDraftChanges ? .smooth(duration: 0.3) : nil, value: snapshot)
             .animation(.spring(response: 0.28, dampingFraction: 0.82), value: selected)
             .onChange(of: isSelecting) { _, active in

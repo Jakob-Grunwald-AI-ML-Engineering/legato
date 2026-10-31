@@ -36,7 +36,7 @@ private actor HintEvents {
 }
 
 private func observeHints(_ room: Room, _ values: HintEvents) async -> Task<Void, Never> {
-    let stream = await room.subscribe(participant: .logger, channels: [.hint, .asrTail, .correctionDraft])
+    let stream = await room.subscribe(participant: .logger, channels: [.hint, .asrTail, .correctionDraft, .writingInstruction])
     return Task { for await event in stream { await values.add(event) } }
 }
 
@@ -82,9 +82,11 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     let words = try #require(hint.payload["words"]).decode([Word].self)
     #expect(words[4].confidence == 0.42 && words[5].language == "de")
     #expect(await room.documentSnapshot.lines.first?.words.first?.pinned == false)
+    // Speech after the correction is the next instruction, not draft text.
     try await segment(room, words: [Word(text: "ordinary")], at: 113, reason: "punctuation")
-    let snapshot = try await settled(room) { $0.lines.count == 2 }
-    #expect(snapshot.text == "wrong\nordinary")
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(await binder.hasUnsentInstruction)
+    #expect(await room.documentSnapshot.text == "wrong")
     await binder.stop()
 }
 
@@ -109,12 +111,15 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     let hint = try #require(await waitForHint(events))
     #expect(hint.payload["wordID"] == .string("b"))
     #expect(hint.payload["text"] == .string("replacement"))
-    #expect(await room.documentSnapshot.text == "first second\nold")
+    #expect(await room.documentSnapshot.text == "first second")
+    let instructions = await events.values.filter { $0.channel == .writingInstruction }
+    #expect(instructions.map { $0.payload["text"] } == [.string("old")], "The delayed pre-tap speech is a general instruction")
     await binder.stop()
     await binder.start()
     try await segment(room, words: [Word(text: "after-stop")], at: 104, reason: "punctuation")
-    let after = try await settled(room) { $0.lines.count == 3 }
-    #expect(after.text == "first second\nold\nafter-stop")
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(await binder.hasUnsentInstruction)
+    #expect(await room.documentSnapshot.text == "first second")
     await binder.stop()
 }
 
@@ -132,7 +137,8 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
                            .object(["t0": .number(1), "t1": .number(1.2)])]), "reason": .string("punctuation")])
     try await room.publish(channel: .asrSegment, participant: .segmenter,
         payload: .object(["words": try .encoding([Word(text: "earlier"), Word(text: "Morgan")]), "metadata": metadata]), tOrigin: 100)
-    _ = try await settled(room) { $0.lines.count == 2 }
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(await binder.hasUnsentInstruction)
     try await room.micOff(transcriberDraining: true)
     await room.finishTranscription()
     #expect(await room.state == .trailing, "Appending the ordinary prefix must not resolve the targeted remainder")
@@ -143,7 +149,8 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     #expect(hint.payload["text"] == .string("Morgan"))
     #expect(hint.payload["speechStart"] == .number(101))
     #expect(hint.payload["speechEnd"] == .number(101.2))
-    #expect(await room.documentSnapshot.text == "Alex\nearlier")
+    #expect(await room.documentSnapshot.text == "Alex", "The ordinary prefix is an instruction, sent on the same boundary")
+    #expect(!(await binder.hasUnsentInstruction))
     for _ in 0..<100 {
         if await room.state == .finalPass { break }
         try await Task.sleep(for: .milliseconds(2))
@@ -297,8 +304,9 @@ private struct NoEntities: EntityTagging {
                            payload: .object(["reason": .string("endpoint")]), tOrigin: 101.9)
     try await segment(room, words: [Word(text: "late after endpoint")], at: 101.7, reason: "punctuation")
     try await segment(room, words: [Word(text: "ordinary")], at: 103, reason: "punctuation")
-    let final = try await settled(room) { $0.lines.count == 2 }
-    #expect(final.text == "Alex\nordinary")
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(await room.documentSnapshot.text == "Alex")
+    #expect(await binder.hasUnsentInstruction, "Only the speech after the dismissal remains, as a general instruction")
     #expect(await events.values.filter { $0.channel == .hint }.isEmpty)
     #expect(await events.values.filter { $0.channel == .asrTail && $0.payload["text"] == .string("old partial") }.isEmpty)
     await binder.stop()

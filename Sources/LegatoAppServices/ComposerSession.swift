@@ -36,22 +36,23 @@ public enum ComposerInsertOrigin: String, Sendable {
     public private(set) var pendingLineIDs: Set<String> = []
     public private(set) var busy = false
     public private(set) var isMuted = false
-    public private(set) var inputMode = ComposerInputMode.dictation
     public private(set) var instructionDraft = ""
     public private(set) var lastInstruction = ""
     public private(set) var instructionApplying = false
-    public private(set) var instructionSubmitting = false
     private var lastInstructionID: String?
     private var instructionCompleted = false
+    private var instructionFailed = false
+    /// Raw provider/transport error behind `error`, kept for logs and `composer-state`; never shown.
+    public private(set) var errorDetail: String?
     public var instructionPreview: String { instructionDraft.isEmpty ? lastInstruction : instructionDraft }
     public var instructionStatus: String {
         if let hostActionNotice { return hostActionNotice }
+        if instructionFailed { return "Failed" }
         if instructionCompleted { return "Done" }
-        if instructionSubmitting { return "Sending" }
         if !instructionDraft.isEmpty { return "Listening" }
         if instructionApplying { return "Applying" }
         if !lastInstruction.isEmpty { return "Done" }
-        return isListening && inputMode == .instructions ? "Listening" : "Ready"
+        return isListening ? "Listening" : "Ready"
     }
     public private(set) var mode = ComposerMode.message
     public private(set) var sessionID: String?
@@ -76,6 +77,26 @@ public enum ComposerInsertOrigin: String, Sendable {
     }.joined(separator: "\n") }
     public private(set) var isArmed = false
     public var isListening: Bool { status == "listening" }
+    /// Where microphone chunks go while a keyboard session holds the warm input (`holdWarmInput`).
+    public private(set) var route = AudioRoute.idle
+    /// One microphone stream held for a whole keyboard appearance; `route` picks each chunk's destination.
+    @ObservationIgnored private var warmInput: Task<Void, Never>?
+    @ObservationIgnored private var warmInputToken: UUID?
+    public var holdsWarmInput: Bool { warmInput != nil }
+    /// The keyboard session's dictation stream; dictation-route chunks never reach this composition.
+    @ObservationIgnored var dictationAudio: (@MainActor (Data) async -> Void)?
+    /// Every live tail the composition shows (the keyboard session's latency probe).
+    @ObservationIgnored var onTail: (@MainActor (String) -> Void)?
+    /// The first chunk routed since the gate last opened (host uptime).
+    @ObservationIgnored private(set) var routedAudioAt: Double?
+    @ObservationIgnored private var agentRecorder: ComposerAudioRecorder?
+    @ObservationIgnored private var agentWarm: WarmStream?
+    /// A finalized take's stream, ending in the background once its last words are final.
+    @ObservationIgnored private var retiring: Task<Void, Never>?
+    /// Built ahead of the first tap (keyboard pre-warm): Room and participants exist, no take has begun.
+    private var prepared = false
+    @ObservationIgnored var keyboardDiagnostics: (@MainActor () -> [String: Any])?
+    @ObservationIgnored var makeSocket: @Sendable () -> any SonioxSocket = { URLSessionSonioxSocket() }
     public var canUndo: Bool { lastTransactionID != nil }
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var room: Room?
@@ -94,9 +115,6 @@ public enum ComposerInsertOrigin: String, Sendable {
     private var keepMicrophoneActive = true
     @ObservationIgnored private var eventsTask: Task<Void, Never>?
     @ObservationIgnored private var audioTask: Task<Void, Never>?
-    @ObservationIgnored private var sentencePipeline: OrderedSentencePipeline?
-    public private(set) var sentenceCleanupPending = 0
-    private var sentenceCleanupFailed = false
     @ObservationIgnored private var binder: HintBinder?
     @ObservationIgnored private var alternatives: AlternativesParticipant?
     @ObservationIgnored private var lastTransactionID: String?
@@ -108,7 +126,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     private var historyID = UUID()
     private var historyDate = Date()
     private var historyQueuedText: String?
-    private let vocabularyURL: URL
+    let vocabularyURL: URL
     public init(vocabularyURL: URL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json"), keepMicrophoneActive: Bool = true, history: (any HistoryStore)? = nil) {
         self.history = history
         self.vocabularyURL = vocabularyURL
@@ -206,6 +224,15 @@ public enum ComposerInsertOrigin: String, Sendable {
         for (key, value) in detail { fields[key] = .string(value) }
         _ = try? await room.publish(channel: .session, participant: .ui, payload: .object(fields))
     }
+    /// Keyboard latency probe results also land in the composition's session log, when there is one.
+    func traceProbe(_ result: TapLatencyProbe.Result) {
+        guard let room else { return }
+        var fields: [String: JSONValue] = ["event": .string("probe.tap.tail"), "route": .string(result.route.rawValue), "warm": .bool(result.warm),
+            "tapToGateMs": .number(Double(result.tapToGateMs)), "tapToTailMs": .number(Double(result.tapToTailMs))]
+        if let idle = result.idleS { fields["idleS"] = .number(idle) }
+        if let audio = result.tapToAudioMs { fields["tapToAudioMs"] = .number(Double(audio)) }
+        Task { _ = try? await room.publish(channel: .session, participant: .ui, payload: .object(fields)) }
+    }
     private func beginHistoryComposition() {
         historyID = UUID(); historyDate = Date(); historyQueuedText = nil
     }
@@ -254,15 +281,19 @@ public enum ComposerInsertOrigin: String, Sendable {
         if isListening { await stop() }
         isArmed = false; await mic.stop(); onChange?()
     }
-    public func releaseMicrophone() async { isArmed = false; await cancel() }
+    public func releaseMicrophone() async { isArmed = false; await releaseWarmInput(); await cancel() }
     public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
-    private func startSession(debugMode: ComposerMode?, microphoneLease: Bool) async {
-        if let sentencePipeline, await sentencePipeline.hasFailure {
-            error = nil; sentenceCleanupFailed = false
-            await sentencePipeline.retryFailed()
-        }
+    /// Keyboard pre-warm: build the composition (Room, cleanup pipeline, writer) without starting a take,
+    /// then open its Soniox stream so the first tap only opens the gate.
+    func prepareComposition() async {
+        if room == nil { await startSession(debugMode: nil, microphoneLease: false, beginsInput: false) }
+        warmAgentStream()
+    }
+    private func startSession(debugMode: ComposerMode?, microphoneLease: Bool, beginsInput: Bool = true) async {
         guard !isListening, status != "starting", !resuming, !preparingInsertion else { return }
         if let room, sessionLog != nil, await room.state != .done {
+            guard beginsInput else { return }
+            if prepared, debugMode == nil { await beginPreparedInput(room: room); return }
             await resumeSession(debug: debugMode != nil)
             return
         }
@@ -281,7 +312,7 @@ public enum ComposerInsertOrigin: String, Sendable {
             let soniox = debugMode == nil ? (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "") : ""
             let claude = try KeychainKeyStore().apiKey() ?? ""
             let log = try SessionLog(rootDirectory: URL.documentsDirectory.appending(path: "sessions"), sessionID: id, secrets: [soniox, claude])
-            let room = Room(log: log, segmentRouting: .intercepted, resumable: true, validateDictation: true, drainOnly: true); self.room = room; sessionLog = log; recordingTake = 0
+            let room = Room(log: log, segmentRouting: .intercepted, resumable: true, drainOnly: true); self.room = room; sessionLog = log; recordingTake = 0
             _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("input.source"), "inputSource": .string(inputSource), "microphoneLeaseActive": .bool(isArmed)]))
             guard (debugMode != nil || !soniox.isEmpty), !claude.isEmpty else {
                 throw NSError(domain: "Composer", code: 1, userInfo: [NSLocalizedDescriptionKey: debugMode == nil ? "Add Claude and Soniox API keys in Settings." : "Add a Claude API key in Settings for debug transcriber UAT."])
@@ -290,26 +321,9 @@ public enum ComposerInsertOrigin: String, Sendable {
             let learner = VocabularyLearner(store: store, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), languages: ["de", "en"])
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let binder = HintBinder(room: room, learner: learner, onSend: { [weak self] in await self?.sendCorrection() },
-                onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() },
-                onDictation: { [weak self] sentence in await self?.sentencePipeline?.enqueue(sentence) }, requiresExplicitSubmission: true)
+                onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() }, requiresExplicitSubmission: true)
             self.binder = binder
-            sentencePipeline = OrderedSentencePipeline(cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), onUsage: { id, sequence, usage in
-                _ = try? await room.publish(channel: .sentenceCleanup, participant: .sentenceAgent, payload: .object([
-                    "event": .string("sentence.usage"), "sentenceID": .string(id), "sequence": .number(Double(sequence)),
-                    "model": .string(ModelChoice.haiku.rawValue), "usage": usage]))
-            }), vocabulary: terms,
-                accept: { [weak binder] value in
-                    guard let binder else { throw CancellationError() }
-                    try await binder.acceptValidatedDictation(value)
-                }, status: { value in
-                    _ = try? await room.publish(channel: .sentenceCleanup, participant: .sentenceAgent, payload: .object([
-                        "event": .string("sentence.status"), "pending": .number(Double(value.pending)), "inFlight": .number(Double(value.inFlight)),
-                        "failed": .bool(value.failed), "message": value.message.map(JSONValue.string) ?? .null]))
-                }, diagnostic: { fields in
-                    _ = try? await room.publish(channel: .sentenceCleanup, participant: .sentenceAgent, payload: .object(fields))
-                })
             await binder.start()
-            if inputMode != .dictation { await binder.setInputMode(inputMode, timestamp: ProcessInfo.processInfo.systemUptime) }
             try requireGeneration(generation)
             let alternatives = AlternativesParticipant(room: room, store: store, learner: learner); self.alternatives = alternatives; await alternatives.start(); try requireGeneration(generation)
             let defaults = UserDefaults.standard
@@ -317,7 +331,7 @@ public enum ComposerInsertOrigin: String, Sendable {
             mode = debugMode ?? ComposerMode(rawValue: defaults.string(forKey: "composer.mode") ?? "message") ?? .message
             let writer = AgentRunner(room: room, client: MessagesStream(keyStore: KeychainKeyStore()), configuration: .init(
                 liveModel: ModelChoice(rawValue: defaults.string(forKey: "composer.liveModel") ?? "") ?? .haiku,
-                mode: mode, personalPrompt: prompt, topicContext: topicContext, vocabulary: { _ in terms }, validatedSentenceInput: true,
+                mode: mode, personalPrompt: prompt, topicContext: topicContext, vocabulary: { _ in terms }, validatedSentenceInput: true, // instructions only: speech never reaches the draft, so no pause turns
                 hostActionContext: { [weak self] in await self?.captureHostActionContext() },
                 performHostAction: { [weak self] action in
                     guard let self else { return .init(succeeded: false, message: "Composition closed. Action discarded.") }
@@ -327,15 +341,45 @@ public enum ComposerInsertOrigin: String, Sendable {
             let eventStream = await room.subscribe(participant: .ui, channels: Set(Channel.allCases), buffering: .unbounded)
             eventsTask = Task { [weak self] in for await event in eventStream { guard !Task.isCancelled else { break }; await self?.receive(event) } }
             inputConfig = .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms)
+            guard beginsInput else { prepared = true; status = "ready"; onChange?(); return }
             try await beginInput(room: room, log: log, debug: debugMode != nil, soniox: soniox, generation: generation)
         } catch {
             if self.generation == generation {
                 fail(error)
-                isArmed = false
+                // A pre-warm that cannot build (missing keys) keeps the lease; the tap reports it again.
+                if beginsInput { isArmed = false }
                 try? await room?.cancel(); await cleanup()
             }
         }
     }
+    private func beginPreparedInput(room: Room) async {
+        guard let log = sessionLog else { return }
+        let token = generation
+        prepared = false; status = "starting"; onChange?()
+        do {
+            let soniox = try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? ""
+            guard !soniox.isEmpty else { throw SonioxError.missingKey }
+            try await beginInput(room: room, log: log, debug: false, soniox: soniox, generation: token)
+        } catch {
+            if generation == token { route = .idle; fail(error); if await room.state == .listening { try? await room.micOff(); await room.finishTranscription() } }
+        }
+    }
+    /// Holds the next take's Soniox connection ahead of the tap (no start request, so nothing is billed),
+    /// only while a keyboard session holds the input.
+    func warmAgentStream() {
+        guard warmInput != nil, let room, agentWarm == nil else { return }
+        let config = inputConfig, socket = makeSocket
+        let warm = WarmStream { onDrop in
+            let soniox = try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? ""
+            let client = SonioxClient(room: room, config: config, socket: socket(), quietFailure: .untilAudio, onDrop: onDrop)
+            try await client.open(apiKey: soniox); try await client.hold()
+            return client
+        }
+        agentWarm = warm; warm.warm()
+    }
+    /// The agent stream's warm age at a tap: nil when the next take would connect cold.
+    var agentWarmSince: Double? { agentWarm?.liveSince }
+    func closeAgentStream() async { let warm = agentWarm; agentWarm = nil; await warm?.close() }
     private func beginInput(room: Room, log: SessionLog, debug: Bool, soniox: String, generation: UUID) async throws {
         inputSource = debug ? "debug.transcriber" : "microphone.soniox"
         #if DEBUG || LEGATO_INTERNAL
@@ -348,6 +392,28 @@ public enum ComposerInsertOrigin: String, Sendable {
         #endif
         deliveredAudioChunks = 0; deliveredAudioFrames = 0; acceptedASRWords = 0
         let audioOrigin = ProcessInfo.processInfo.systemUptime; self.audioOrigin = audioOrigin
+        if warmInput != nil {
+            // The held input loop forwards agent chunks once the gate opens; the warm stream skips the connect.
+            let warm = agentWarm; agentWarm = nil
+            var transcriber = await warm?.take()
+            // The start request goes out on the held connection; audio follows without waiting for a reply.
+            if let held = transcriber, (try? await held.begin()) == nil { await held.close(); transcriber = nil }
+            if transcriber == nil {
+                let fresh = SonioxClient(room: room, config: inputConfig, socket: makeSocket(), audioOrigin: nil)
+                try await fresh.start(apiKey: soniox); transcriber = fresh
+            }
+            await warm?.close()
+            guard let transcriber else { throw SonioxError.notConnected }
+            self.transcriber = transcriber; try requireGeneration(generation)
+            await transcriber.setAudioOrigin(audioOrigin)
+            recordingTake += 1
+            let audioURL = recordingTake == 1 ? log.audioURL : log.directory.appending(path: "audio-\(recordingTake).m4a")
+            agentRecorder = try ComposerAudioRecorder(url: audioURL)
+            _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("audio.take"), "file": .string(audioURL.lastPathComponent), "warm": .bool(warm != nil)]))
+            routedAudioAt = nil; route = .agent
+            status = "listening"; onChange?()
+            return
+        }
         let stream = try await prepareMicrophoneStream()
         try requireGeneration(generation)
         let transcriber = SonioxClient(room: room, config: inputConfig, audioOrigin: nil)
@@ -387,6 +453,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         defer { resuming = false }
         do {
             if await room.state == .listening, !isListening {
+                route = .idle; agentRecorder = nil
                 audioTask?.cancel(); await audioTask?.value; audioTask = nil
                 await transcriber?.cancel(); transcriber = nil
                 try requireGeneration(token)
@@ -398,7 +465,6 @@ public enum ComposerInsertOrigin: String, Sendable {
                 let state = await room.state
                 if state != .trailing && state != .finalPass { break }
                 try requireGeneration(token)
-                if sentenceCleanupFailed { throw insertionFailure("Sentence cleanup failed. Pending speech is kept; tap the microphone to retry.") }
                 try await Task.sleep(for: .milliseconds(30))
             }
             try requireGeneration(token)
@@ -468,28 +534,24 @@ public enum ComposerInsertOrigin: String, Sendable {
         onChange?()
     }
     public var debugState: [String: Any] {
-        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "inputMode": inputMode.rawValue, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus,
+        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus, "errorDetail": errorDetail ?? NSNull(),
          "sessionID": sessionID ?? "", "successfulInsertionID": successfulInsertionID as Any? ?? NSNull(), "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
          "correctionCountdownStart": correctionCountdownStart as Any? ?? NSNull(),
          "correctionCountdownDeadline": correctionCountdownDeadline as Any? ?? NSNull(),
-         "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "sentenceCleanupPending": sentenceCleanupPending, "sentenceCleanupFailed": sentenceCleanupFailed, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
+         "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
         state["audioPlatform"] = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(AutomaticInputSource.platformStatus()))) ?? [:]
         if let automatic = mic as? AutomaticInputSource {
             state["audioInput"] = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(automatic.diagnostics))) ?? [:]
         }
         state["audioDelivery"] = ["chunks": deliveredAudioChunks, "frames": deliveredAudioFrames, "acceptedFinalWords": acceptedASRWords]
+        state["audioRoute"] = route.rawValue; state["holdsWarmInput"] = warmInput != nil; state["prepared"] = prepared
+        state["agentStreamWarm"] = agentWarm?.isLive ?? false
+        if let keyboardDiagnostics { state["keyboardSession"] = keyboardDiagnostics() }
         return state
     }
     #endif
-    public func setInputMode(_ value: ComposerInputMode, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
-        guard value != inputMode else { return }
-        inputMode = value; instructionCompleted = false; onChange?()
-        await binder?.setInputMode(value, timestamp: timestamp)
-        // Finalize the old acoustic chunk without reconnecting or stopping microphone input.
-        if isListening { try? await transcriber?.finalizeChunk() }
-    }
     private func finalizeInstructionChunk() async {
         guard isListening else { return }
         do { _ = try await transcriber?.finalizeChunk() } catch { fail(error) }
@@ -509,7 +571,8 @@ public enum ComposerInsertOrigin: String, Sendable {
         let room = self.room
         status = "trailing"; onChange?()
         try? await room?.micOff(transcriberDraining: true)
-        if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
+        if warmInput != nil { route = .idle; agentRecorder = nil }
+        else { if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil }
         guard generation == token else { return }
         do {
             if let transcriber { try await transcriber.finish() }
@@ -520,6 +583,40 @@ public enum ComposerInsertOrigin: String, Sendable {
             // A failed socket must not leave continuation waiting forever for drain.
             await room?.finishTranscription()
         }
+        // The next take within this keyboard appearance starts on a stream opened now.
+        if generation == token { warmAgentStream() }
+    }
+    /// Keyboard tap-again: stop routing and finalize. The composition stays listening for the next tap;
+    /// the stream ends in the background once its words are final, and a held connection replaces it.
+    func finalizeTake() async {
+        guard isListening, warmInput != nil, let transcriber else { await stop(); return }
+        route = .idle; agentRecorder = nil
+        self.transcriber = nil
+        prepared = true; status = "ready"; onChange?()
+        // Soniox advises ~200 ms of silence before finalize.
+        try? await transcriber.sendAudio(Data(count: 6400))
+        let previous = retiring
+        retiring = Task {
+            await previous?.value
+            try? await transcriber.finish(micOff: false)
+        }
+        warmAgentStream()
+    }
+    /// Surface switch mid-take: stop routing, drop the provider's unfinished words, and drain only what
+    /// was already final, so nothing spoken here reaches another route.
+    func abandonTake() async {
+        guard isListening, let room else { route = .idle; return }
+        let token = generation
+        route = .idle; agentRecorder = nil
+        status = "trailing"; onChange?()
+        try? await room.micOff(transcriberDraining: true)
+        let transcriber = self.transcriber; self.transcriber = nil
+        await transcriber?.close()
+        guard generation == token else { return }
+        // Half an instruction is not an instruction: drop it rather than send it on the closing boundary.
+        await binder?.discardInstruction(timestamp: ProcessInfo.processInfo.systemUptime)
+        _ = try? await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]))
+        await room.finishTranscription()
     }
     /// Drain voice and authoring before the surface captures text for external delivery.
     /// A failed delivery can leave this paused composition available for continuation.
@@ -538,11 +635,18 @@ public enum ComposerInsertOrigin: String, Sendable {
         if isListening { await stop() }
         try requireGeneration(token)
         guard let room else { throw insertionFailure("There is no composition to insert.") }
+        if prepared, await room.state == .listening {
+            // Between finalized keyboard takes the Room still listens: let the last stream retire, then drain.
+            await retiring?.value; retiring = nil
+            try requireGeneration(token)
+            prepared = false
+            try? await room.micOff()
+        }
         while true {
             try requireGeneration(token)
             if let error, !error.hasPrefix(Self.historyErrorPrefix) { throw insertionFailure(error) }
             let state = await room.state
-            if (state == .paused || state == .done) && !busy && !instructionApplying && !instructionSubmitting { break }
+            if (state == .paused || state == .done) && !busy && !instructionApplying { break }
             // Offline debug seeds intentionally have no writer or provider.
             if writer == nil, state == .finalPass { try await room.finishFinalPass(); continue }
             guard ContinuousClock.now < deadline else { throw insertionFailure("Writing is still finishing. Try Insert again.") }
@@ -558,8 +662,15 @@ public enum ComposerInsertOrigin: String, Sendable {
     private func insertionFailure(_ message: String) -> NSError {
         NSError(domain: "Composer", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
     }
-    /// Call only after the surface has successfully delivered its rendered value.
-    public func insert() async {
+    /// Call only after the surface has successfully delivered its rendered value. A keyboard session
+    /// retains the composition: the draft, writer conversation and History entry continue until it closes.
+    public func insert(retainingComposition: Bool = false) async {
+        if retainingComposition, room != nil {
+            if !renderedText.isEmpty { successfulInsertionID = UUID().uuidString }
+            hostActionNotice = nil; error = nil; onChange?()
+            warmAgentStream()
+            return
+        }
         // The caller acknowledges external delivery before reaching this boundary.
         let token = UUID(); generation = token
         let delivered = renderedText
@@ -599,6 +710,75 @@ public enum ComposerInsertOrigin: String, Sendable {
     public func startNewTopic() async {
         await cancel()
         if room == nil { topicContext = nil }
+    }
+    /// Keyboard sessions hold one microphone stream for the whole appearance. Never starts a microphone:
+    /// without a lease the keyboard's hop path applies. False when no input could be held.
+    func holdWarmInput() async -> Bool {
+        if warmInput != nil { return true }
+        guard isArmed, !isListening, status != "starting", !resuming else { return false }
+        do {
+            let stream = try await prepareMicrophoneStream()
+            let token = UUID(); warmInputToken = token; route = .idle
+            warmInput = Task { [weak self] in
+                var converter = PCM16Converter()
+                for await chunk in stream {
+                    guard !Task.isCancelled, let self else { return }
+                    await self.routeChunk(chunk, converter: &converter)
+                }
+                self?.warmInputEnded(token)
+            }
+            return true
+        } catch { return false }
+    }
+    /// The gate. Opening `agent` happens through `start`, which begins the take; `idle` only stops routing.
+    func setRoute(_ value: AudioRoute) {
+        guard warmInput != nil || value == .idle else { return }
+        if value != route { routedAudioAt = nil }
+        route = value; onChange?()
+    }
+    private func routeChunk(_ chunk: AudioChunk, converter: inout PCM16Converter) async {
+        switch route {
+        case .idle: return
+        case .dictation:
+            guard let pcm = try? converter.convert(chunk) else { return }
+            if routedAudioAt == nil { routedAudioAt = ProcessInfo.processInfo.systemUptime }
+            await dictationAudio?(pcm)
+        case .agent:
+            // Keep the lease, but never record/forward muted speech.
+            guard !isMuted, let transcriber, let recorder = agentRecorder else { return }
+            do {
+                try recorder.append(chunk)
+                try await transcriber.sendAudio(converter.convert(chunk))
+                if routedAudioAt == nil { routedAudioAt = ProcessInfo.processInfo.systemUptime }
+                deliveredAudioChunks += 1; deliveredAudioFrames += chunk.samples.count / max(1, chunk.format.channelCount)
+            } catch { route = .idle; agentRecorder = nil; fail(error) }
+        }
+    }
+    private func warmInputEnded(_ token: UUID) {
+        guard warmInputToken == token else { return }
+        warmInput = nil; warmInputToken = nil
+        let wasRouting = route != .idle
+        route = .idle; agentRecorder = nil
+        if wasRouting, isListening { fail(AutomaticInputError.noPCM) }
+        onChange?()
+    }
+    func releaseWarmInput() async {
+        route = .idle; agentRecorder = nil
+        await closeAgentStream()
+        guard let task = warmInput else { return }
+        warmInput = nil; warmInputToken = nil
+        task.cancel()
+        if isListening { return }
+        if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }
+    }
+    /// The keyboard went away: end the composition (History keeps it), its writer conversation, cleanup
+    /// context and delivered-topic reference, and release the held input.
+    func endKeyboardSession() async {
+        route = .idle
+        await cancel()
+        if room == nil { topicContext = nil }
+        await releaseWarmInput()
+        onChange?()
     }
     func captureHostActionContext() -> ComposerHostActionContext? {
         guard room != nil else { return nil }
@@ -646,16 +826,9 @@ public enum ComposerInsertOrigin: String, Sendable {
     public func clearSelection(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         await binder?.clearSelection(timestamp: timestamp)
     }
-    public func sendInstruction() async {
-        guard await binder?.requestInstructionSend(timestamp: ProcessInfo.processInfo.systemUptime) == true else { return }
-        instructionSubmitting = true; instructionApplying = true; lastInstruction = instructionDraft; onChange?()
-        do {
-            if try await transcriber?.finalizeChunk() != true { await binder?.completeInstructionSend() }
-        } catch { await binder?.cancelInstructionSend(); instructionSubmitting = false; instructionApplying = false; fail(error) }
-    }
     public func discardInstruction(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         await binder?.discardInstruction(timestamp: timestamp)
-        instructionDraft = ""; lastInstruction = ""; instructionSubmitting = false; instructionCompleted = true
+        instructionDraft = ""; lastInstruction = ""; instructionCompleted = true; instructionFailed = false
         hostActionNotice = nil; onChange?()
     }
     public func sendCorrection() async {
@@ -673,14 +846,6 @@ public enum ComposerInsertOrigin: String, Sendable {
     }
     func receive(_ event: Envelope) async {
         switch event.channel {
-        case .sentenceCleanup:
-            if case .number(let count) = event.payload["pending"] { sentenceCleanupPending = Int(count) }
-            if case .bool(let failed) = event.payload["failed"] {
-                sentenceCleanupFailed = failed
-                if failed { error = (try? event.payload["message"]?.decode(String.self)) ?? "Sentence cleanup failed. Pending speech kept." }
-                else if sentenceCleanupPending == 0, error?.hasPrefix("Sentence cleanup") == true { error = nil }
-            }
-            busy = !busyParticipants.isEmpty || sentenceCleanupPending > 0
         case .docSnapshot:
             if let value = try? event.payload.decode(DocumentSnapshot.self) {
                 snapshot = value
@@ -705,16 +870,17 @@ public enum ComposerInsertOrigin: String, Sendable {
             }
         case .asrSegment:
             if let words = try? event.payload["words"]?.decode([Word].self) { acceptedASRWords += words.count }
-        case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
+        case .asrTail: if case .string(let value) = event.payload["text"] { tail = value; onTail?(value) }
         case .writingInstruction:
-            hostActionNotice = nil; instructionCompleted = false
+            hostActionNotice = nil; instructionCompleted = false; instructionFailed = false
             lastInstructionID = try? event.payload["captureID"]?.decode(String.self)
             lastInstruction = (try? event.payload["text"]?.decode(String.self)) ?? ""
             instructionApplying = true
         case .instructionDraft:
-            if case .string(let draft) = event.payload["text"], !draft.isEmpty { instructionCompleted = false; hostActionNotice = nil }
+            if case .string(let draft) = event.payload["text"], !draft.isEmpty { instructionCompleted = false; instructionFailed = false; hostActionNotice = nil }
             instructionDraft = (try? event.payload["text"]?.decode(String.self)) ?? ""
-            instructionSubmitting = (try? event.payload["submitting"]?.decode(Bool.self)) ?? false
+            // The live instruction is this route's tail; the tap-to-first-words probe reads it.
+            if !instructionDraft.isEmpty { onTail?(instructionDraft) }
         case .correctionDraft:
             correctionDraft = try? event.payload["text"]?.decode(String.self)
             correctionSubmitting = (try? event.payload["submitting"]?.decode(Bool.self)) ?? false
@@ -730,10 +896,13 @@ public enum ComposerInsertOrigin: String, Sendable {
             }
             if event.payload["event"] == .string("turn.phase"), event.payload["phase"] == .string("instruction") { instructionApplying = true }
             if event.payload["event"] == .string("instruction.completed"),
-               (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = instructionDraft.isEmpty }
-            if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty || sentenceCleanupPending > 0 }
+               (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = instructionDraft.isEmpty && !instructionFailed }
+            if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty }
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
-            if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }
+            if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] {
+                error = Self.writerFailureMessage(message); errorDetail = message
+                if instructionApplying || !lastInstruction.isEmpty { instructionFailed = true; instructionApplying = false; instructionCompleted = false }
+            }
         case .session:
             if case .string(let value) = event.payload["state"] {
                 // Room reopens before the new provider connects. Expose listening
@@ -747,6 +916,15 @@ public enum ComposerInsertOrigin: String, Sendable {
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { self.mode = mode }
         onChange?()
+    }
+    /// Short, human wording for a writer failure; the raw text stays in `errorDetail` and the room log.
+    public nonisolated static func writerFailureMessage(_ raw: String) -> String {
+        let lower = raw.lowercased()
+        if raw.contains("http(401") || raw.contains("http(403") || lower.contains("authentication_error") { return "Claude key rejected" }
+        if raw.contains("missingKey") { return "Add your Claude key in Legato" }
+        if raw.contains("http(429") || lower.contains("rate_limit") { return "Claude is busy — try again" }
+        if raw.contains("NSURLErrorDomain") || raw.contains("URLError") || lower.contains("offline") || lower.contains("network connection") { return "Network unavailable" }
+        return "Writer failed — try again"
     }
     private func requireGeneration(_ expected: UUID) throws { try Task.checkCancellation(); if generation != expected { throw CancellationError() } }
     private func fail(_ failure: any Error) {
@@ -762,12 +940,17 @@ public enum ComposerInsertOrigin: String, Sendable {
         status = "error"; onChange?()
     }
     private func cleanup() async {
-        audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
+        route = .idle; agentRecorder = nil; prepared = false
+        retiring?.cancel(); retiring = nil
+        await closeAgentStream()
+        // A held keyboard input outlives compositions; only the keyboard session releases it.
+        if warmInput == nil {
+            audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
+        }
         await transcriber?.cancel(); transcriber = nil
-        await sentencePipeline?.cancel(); sentencePipeline = nil; sentenceCleanupPending = 0; sentenceCleanupFailed = false
         await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
-        isMuted = false; inputMode = .dictation; instructionDraft = ""; lastInstruction = ""; instructionApplying = false; instructionSubmitting = false
+        isMuted = false; instructionDraft = ""; lastInstruction = ""; instructionApplying = false; instructionFailed = false; errorDetail = nil
         correctionDraft = nil; correctionSubmitting = false; correctionCountdownStart = nil; correctionCountdownDeadline = nil
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }

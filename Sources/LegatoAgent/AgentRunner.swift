@@ -44,7 +44,7 @@ public actor AgentRunner {
     }
     public func start() async {
         guard subscription == nil else { return }; stopped = false
-        let events = await room.subscribe(participant: .liveAgent, channels: [.validatedSentence, .asrRawTail, .asrTail, .asrSegment, .hint, .writingInstruction, .userIntent, .docOps, .session])
+        let events = await room.subscribe(participant: .liveAgent, channels: [.asrRawTail, .asrTail, .asrSegment, .hint, .writingInstruction, .userIntent, .docOps, .session])
         subscription = Task { [weak self] in
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
