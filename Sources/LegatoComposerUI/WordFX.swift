@@ -8,8 +8,13 @@ public struct WordFX: TextRenderer, Animatable {
     var selected: Set<String> = []
     var edit = WordEditPresentation(old: [], new: [])
     var reduceMotion = false
+    var shine: DictationShinePlan?
+    var shineProgress = 1.0
     var measure: (@Sendable ([String: [CGRect]]) -> Void)?
-    public var animatableData: Double { get { progress } set { progress = newValue } }
+    public var animatableData: AnimatablePair<Double, Double> {
+        get { .init(progress, shineProgress) }
+        set { progress = newValue.first; shineProgress = newValue.second }
+    }
     public init(progress: Double = 1, pending: Bool = false) { self.progress = progress; self.pending = pending }
     public func draw(layout: Text.Layout, in context: inout GraphicsContext) {
         var bounds: [String: [CGRect]] = [:]
@@ -25,23 +30,42 @@ public struct WordFX: TextRenderer, Animatable {
                 if id.map(selected.contains) == true { copy.stroke(path, with: .color(.purple.opacity(0.28)), lineWidth: 0.6) }
             }
             let local = id.map { edit.progress(for: $0, overall: progress) } ?? 1
+            let gleam = id.flatMap { shine?.progress(for: $0, overall: shineProgress) }
+            let isShining = gleam.map { $0 > 0 && $0 < 1 } == true
+            let deletion = progress < 1 && id.map(edit.deletionBoundary.contains) == true
             let effectBounds = WordEffectSurface.bounds(for: rect)
-            if !reduceMotion, local < 1, animatedRuns < 64, let effectBounds {
-                // Bound the offscreen filter BEFORE installing it. A copied context otherwise
-                // retains the entire Text canvas as its filter surface, even for one glyph run.
+            let boundedEffect = !reduceMotion && animatedRuns < 64 && effectBounds != nil
+                && (local < 1 || deletion || isShining)
+            if boundedEffect, let effectBounds {
+                // Clip BEFORE either filters or drawLayer: both otherwise inherit the full
+                // Text canvas and can allocate an enormous paragraph-sized GPU texture.
                 copy.clip(to: Path(effectBounds))
                 animatedRuns += 1
-                copy.addFilter(.blur(radius: (1 - local) * 4))
-                copy.opacity = 0.3 + local * 0.7
-                copy.addFilter(.shadow(color: .purple.opacity((1 - local) * 0.6), radius: 5))
-                copy.translateBy(x: 0, y: (1 - local) * 2)
-            } else if !reduceMotion, progress < 1, animatedRuns < 64, id.map(edit.deletionBoundary.contains) == true, let effectBounds {
-                copy.clip(to: Path(effectBounds))
-                animatedRuns += 1
-                // A deletion has no new glyphs: mark only its surviving boundary.
-                copy.addFilter(.shadow(color: .purple.opacity(sin(progress * .pi) * 0.45), radius: 4))
-            }
-            copy.draw(run)
+                if local < 1 {
+                    copy.addFilter(.blur(radius: (1 - local) * 4))
+                    copy.opacity = 0.3 + local * 0.7
+                    copy.addFilter(.shadow(color: .purple.opacity((1 - local) * 0.6), radius: 5))
+                    copy.translateBy(x: 0, y: (1 - local) * 2)
+                } else if deletion {
+                    copy.addFilter(.shadow(color: .purple.opacity(sin(progress * .pi) * 0.45), radius: 4))
+                }
+                if isShining, let gleam {
+                    // Pow's familiar diagonal white glint and source-atop blend, isolated
+                    // to ONE bounded glyph run rather than a whole-content compositingGroup.
+                    let width = max(12, min(40, rect.width * 0.55))
+                    let center = rect.minX - width + (rect.width + width * 2) * gleam
+                    let strength = sin(gleam * .pi)
+                    copy.drawLayer { layer in
+                        layer.draw(run)
+                        var beam = layer
+                        beam.blendMode = .sourceAtop
+                        beam.fill(Path(rect), with: .linearGradient(Gradient(colors: [
+                            .clear, .purple.opacity(strength * 0.35), .white.opacity(strength * 0.98), .clear
+                        ]), startPoint: CGPoint(x: center - width / 2, y: rect.minY),
+                            endPoint: CGPoint(x: center + width / 2, y: rect.maxY)))
+                    }
+                } else { copy.draw(run) }
+            } else { copy.draw(run) }
         } }
         measure?(bounds)
     }

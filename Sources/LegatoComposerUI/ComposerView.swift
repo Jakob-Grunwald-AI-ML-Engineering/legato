@@ -6,6 +6,7 @@ public struct ComposerView: View {
     public let snapshot: DocumentSnapshot
     public var tail: String
     public var dictationRevision: Int
+    public var dictationCommit: DictationCommit?
     public var successfulInsertionID: String?
     public var pendingLineIDs: Set<String>
     public var busy: Bool
@@ -25,6 +26,7 @@ public struct ComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sendFlight = SendFlightPresentation()
     @State private var sendFlightProgress = 0.0
+    @State private var dictationShine = DictationShineAdmission()
     @State private var presentedParagraphs: [PresentedParagraph] = []
     @State private var presentedRevision = -1
     @State private var hasPresented = false
@@ -37,14 +39,14 @@ public struct ComposerView: View {
     @State private var bounds: [WordBounds] = []
     @State private var viewportSize: CGSize = .zero
     @State private var reservesSpace = false
-    public init(snapshot: DocumentSnapshot, tail: String = "", dictationRevision: Int = 0, successfulInsertionID: String? = nil, pendingLineIDs: Set<String> = [], busy: Bool = false,
+    public init(snapshot: DocumentSnapshot, tail: String = "", dictationRevision: Int = 0, dictationCommit: DictationCommit? = nil, successfulInsertionID: String? = nil, pendingLineIDs: Set<String> = [], busy: Bool = false,
                 instructionText: String = "", instructionStatus: String = "Ready", instructionInputActive: Bool = false,
                 correctionDraft: String? = nil, correctionSubmitting: Bool = false, correctionCountdownStart: Double? = nil, correctionCountdownDeadline: Double? = nil,
                 onSelect: @escaping (QuoteSelection) -> Void = { _ in },
                 onDeselect: @escaping () -> Void = {}, onSendCorrection: (() -> Void)? = nil,
                 onSendInstruction: (() -> Void)? = nil, onDiscardInstruction: @escaping () -> Void = {},
                 onPick: @escaping (String, String, String) -> Void = { _, _, _ in }) {
-        self.snapshot = snapshot; self.tail = tail; self.dictationRevision = dictationRevision; self.successfulInsertionID = successfulInsertionID; self.pendingLineIDs = pendingLineIDs; self.busy = busy
+        self.snapshot = snapshot; self.tail = tail; self.dictationRevision = dictationRevision; self.dictationCommit = dictationCommit; self.successfulInsertionID = successfulInsertionID; self.pendingLineIDs = pendingLineIDs; self.busy = busy
         self.instructionText = instructionText; self.instructionStatus = instructionStatus; self.instructionInputActive = instructionInputActive
         self.correctionDraft = correctionDraft; self.correctionSubmitting = correctionSubmitting; self.correctionCountdownStart = correctionCountdownStart; self.correctionCountdownDeadline = correctionCountdownDeadline; self.onSelect = onSelect; self.onDeselect = onDeselect
         self.onSendCorrection = onSendCorrection; self.onSendInstruction = onSendInstruction; self.onDiscardInstruction = onDiscardInstruction; self.onPick = onPick
@@ -102,7 +104,7 @@ public struct ComposerView: View {
                         ForEach(renderBlocks) { block in
                             LineView(line: block.line, ordinal: block.ordinal, pending: pendingLineIDs.contains(block.line.id),
                                      selected: selectedWords, animateInsertion: block.animateInsertion,
-                                     continuation: block.continuation, paragraphEdit: block.edit)
+                                     continuation: block.continuation, paragraphEdit: block.edit, dictationCommit: dictationShine.active)
                                 .id(block.id)
                                 .padding(.top, !block.continuation && block.ordinal > 1 ? 12 : 0)
                                 .transition(animatesDraftChanges ? .opacity : .identity)
@@ -150,6 +152,7 @@ public struct ComposerView: View {
                 // its new delivery acknowledgement as though this were a fresh mount.
                 guard !hasPresented else { return }
                 sendFlight.reset(acknowledgement: successfulInsertionID)
+                dictationShine.baseline(dictationCommit)
                 presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true
             }
             .onChange(of: successfulInsertionID) { _, _ in beginSendFlightIfNeeded() }
@@ -178,6 +181,9 @@ public struct ComposerView: View {
                 }
             }
             .onChange(of: dictationRevision) { _, _ in followDictation(using: proxy) }
+            .onChange(of: dictationCommit) { _, commit in
+                if hasPresented { dictationShine.accept(commit) }
+            }
             .onChange(of: committedSelection) { _, value in
                 if reservesSpace, let value {
                     Task { @MainActor in await Task.yield(); proxy.scrollTo(paragraphs.first(where: { $0.line.id == value.lineID })?.id ?? value.lineID, anchor: .top) }

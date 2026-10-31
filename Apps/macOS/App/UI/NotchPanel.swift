@@ -191,7 +191,7 @@ private struct NotchComposerView: View {
             DraftInputHeader(active: session.inputMode == .dictation) {
                 Task { await session.setInputMode(.dictation) }
             }
-            ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, successfulInsertionID: session.successfulInsertionID, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
+            ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, dictationCommit: session.dictationCommit, successfulInsertionID: session.successfulInsertionID, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
                 instructionText: session.instructionPreview, instructionStatus: session.instructionStatus,
                 instructionInputActive: session.inputMode == .instructions,
                 correctionDraft: session.correctionDraft, correctionSubmitting: session.correctionSubmitting,

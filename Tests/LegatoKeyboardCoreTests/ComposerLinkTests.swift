@@ -51,9 +51,11 @@ struct ComposerLinkTests {
         let link = ComposerLink(store: LinkStore(MemoryLinkStore()))
         var value = ComposerPublication(snapshot: .init(revision: 4, lines: [Line(words: [Word(text: "Spoken")])]))
         value.dictationRevision = 2
+        value.dictationCommit = .init(sequence: 2, wordIDs: value.snapshot.lines.flatMap(\.words).map(\.id), uptime: 10)
         value.successfulInsertionID = "actual-delivery"
         link.publish(value)
         #expect(link.read()?.dictationRevision == 2)
+        #expect(link.read()?.dictationCommit == value.dictationCommit)
         #expect(link.read()?.successfulInsertionID == "actual-delivery")
         #expect(link.read()?.snapshot == value.snapshot)
     }
