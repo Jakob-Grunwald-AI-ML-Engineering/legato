@@ -283,12 +283,18 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
 
 @Test func explicitInstructionsUseSameConversationAndFullToolsWithCapturedScope() async throws {
     let room = Room(), client = WriterMessages()
+    let retired = Mutex(false)
+    let statuses = await room.subscribe(participant: .logger, channels: [.agentStatus])
+    let observation = Task {
+        for await event in statuses where event.payload["busy"] == .bool(false) { retired.withLock { $0 = true } }
+    }
+    defer { observation.cancel() }
     let runner = AgentRunner(room: room, client: client, configuration: .init(mode: .prompt), pauseDelay: .seconds(20))
     await runner.start()
     _ = try await room.publishSegment(words: [.init(text: "Original rough draft")])
     #expect(try await waitForWriter { client.calls().count == 1 })
     client.finish(0)
-    #expect(try await waitForWriter { client.state.withLock { $0.active.isEmpty } })
+    #expect(try await waitForWriter { retired.withLock { $0 } })
     let captured = await room.documentSnapshot
     _ = try await room.publish(channel: .writingInstruction, participant: .hintBinder, payload: .object([
         "event": .string("global.instruction"), "text": .string("Turn this into a concise prompt"),
