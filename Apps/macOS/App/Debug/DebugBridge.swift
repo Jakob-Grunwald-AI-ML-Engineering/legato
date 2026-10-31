@@ -29,6 +29,7 @@ import AppKit
         #if DEBUG
         for name in ComposerSession.debugCommands {
             harness.register(name) { command in
+                if name == "composer-debug-seed" { return try await MacAppController.shared.seedDebugComposer(command.args) }
                 if name == "composer-debug-start" { return try await MacAppController.shared.startDebugComposer(command.args) }
                 return try await MacAppController.shared.composer.debugControl(name, args: command.args)
             }

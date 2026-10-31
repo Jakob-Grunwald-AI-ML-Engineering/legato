@@ -33,6 +33,20 @@ struct ComposerLinkTests {
         #expect(host.publication(acknowledged: -1).requiresSnapshot)
         #expect(host.publication(acknowledged: 2).snapshot == b)
     }
+    @Test func insertionAcknowledgementCarriesSessionIdentity() throws {
+        let link = ComposerLink(store: LinkStore(MemoryLinkStore()))
+        let intent = ComposerIntent(action: "insert", sessionID: "session-before-send")
+        link.send(intent)
+        let received = try #require(link.drainIntents().first)
+        #expect(received.sessionID == "session-before-send")
+        var cleared = ComposerPublication()
+        cleared.insertedIntentID = received.id
+        link.publish(cleared)
+        #expect(link.read()?.insertedIntentID == intent.id)
+        #expect(link.read()?.snapshot.lines.isEmpty == true)
+        #expect(link.drainIntents().isEmpty)
+    }
+
     @Test func intentsHaveIndependentInboxKeys() {
         let store = LinkStore(MemoryLinkStore())
         let link = ComposerLink(store: store)

@@ -40,6 +40,9 @@ final class KeyboardLinkHost: TranscriptSink {
     private var composerTask: Task<Void, Never>?
     private var composerHistory = ComposerLinkHistory()
     private var composerRevision = -1
+    private var composerInsertTask: Task<Void, Never>?
+    private var composerInsertionNotice: String?
+    private var insertedComposerIntentID: String?
     private var composerSessionID: String?
     private var composerChannel: ComposerLink?
     func attach(_ composer: ComposerSession) {
@@ -48,6 +51,7 @@ final class KeyboardLinkHost: TranscriptSink {
         composer.onChange = { [weak self, weak composer] in
             guard let self, let composer else { return }
             if composer.sessionID != self.composerSessionID {
+                self.composerInsertionNotice = nil
                 self.composerSessionID = composer.sessionID; self.composerHistory = ComposerLinkHistory(); self.composerRevision = -1
             }
             if composer.snapshot.revision != self.composerRevision {
@@ -60,7 +64,30 @@ final class KeyboardLinkHost: TranscriptSink {
                 guard let self, let composer else { return }
                 for intent in channel.drainIntents() {
                     switch intent.action {
-                    case "insert": await composer.insert()
+                    case "insert":
+                        guard self.composerInsertTask == nil else { continue }
+                        self.composerInsertTask = Task { [weak self, weak composer] in
+                            guard let self, let composer else { return }
+                            defer { self.composerInsertTask = nil; self.insertedComposerIntentID = intent.id }
+                            guard intent.sessionID == composer.sessionID else { return }
+                            do {
+                                let text = try await composer.prepareForInsertion()
+                                let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
+                                guard !text.isEmpty else { return }
+                                let delivered = await self.insert(text)
+                                if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
+                                    self.composerInsertionNotice = nil
+                                    await composer.insert()
+                                } else if delivered {
+                                    self.composerInsertionNotice = "Inserted. Draft changed during insertion; latest edits kept."
+                                } else {
+                                    self.composerInsertionNotice = "Couldn't insert into the text field. Draft kept."
+                                }
+                            } catch {
+                                guard composer.sessionID == intent.sessionID else { return }
+                                self.composerInsertionNotice = "Couldn't finish preparing the text. Draft kept. Try Insert again."
+                            }
+                        }
                     case "cancel": await composer.cancel()
                     case "undo": await composer.undo()
                     case "stop": await composer.stop()
@@ -80,17 +107,19 @@ final class KeyboardLinkHost: TranscriptSink {
                     }
                 }
                 if composer.sessionID != self.composerSessionID {
+                    self.composerInsertionNotice = nil
                     self.composerSessionID = composer.sessionID; self.composerHistory = ComposerLinkHistory(); self.composerRevision = -1
                 }
                 if composer.snapshot.revision != self.composerRevision {
                     self.composerHistory.record(composer.snapshot, hunks: composer.hunks); self.composerRevision = composer.snapshot.revision
                 }
                 var value = self.composerHistory.publication(acknowledged: channel.acknowledged)
+                value.insertedIntentID = self.insertedComposerIntentID
                 value.sessionID = composer.sessionID; value.tail = composer.tail; value.mode = composer.mode.rawValue
                 value.correctionDraft = composer.correctionDraft
                 value.correctionCountdownStart = composer.correctionCountdownStart
                 value.correctionCountdownDeadline = composer.correctionCountdownDeadline
-                value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
+                value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 channel.publish(value)
                 DarwinObserver.post(LinkChannel.Note.composer)
                 self.link.leaseChanged(until: composer.isArmed || composer.isListening ? Date().addingTimeInterval(60) : nil)

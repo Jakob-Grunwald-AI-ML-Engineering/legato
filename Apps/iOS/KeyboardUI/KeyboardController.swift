@@ -205,6 +205,8 @@ final class KeyboardController {
     var meetingNotice: String? { host?.meetingNotice(now: Date()) }
 
     private(set) var composer = ComposerPublication()
+    private(set) var pendingComposerInsert: String?
+    private var pendingComposerDocumentID: String?
     @ObservationIgnored private var composerPoll: Task<Void, Never>?
     private var composerLink: ComposerLink? { UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) } }
     func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
@@ -213,12 +215,15 @@ final class KeyboardController {
         DarwinObserver.post(LinkChannel.Note.composerIntent)
     }
     func insertComposer() {
-        let text = composer.snapshot.lines.enumerated().map { i, line in
-            switch line.kind { case .li: "• " + line.text; case .oli: "\(i + 1). " + line.text; case .quote: "> " + line.text; case .h1: "# " + line.text; case .h2: "## " + line.text; case .h3: "### " + line.text; default: line.text }
-        }.joined(separator: "\n")
-        guard !text.isEmpty else { return }
-        type(text); composerIntent("insert")
-        composer = ComposerPublication()
+        guard pendingComposerInsert == nil, fullAccess, let documentID = document.documentID,
+              let channel = composerLink, !composer.snapshot.lines.isEmpty || !composer.tail.isEmpty else { return }
+        // The host flushes transcription and finishes authoring before publishing the insertion.
+        // Reuse the acknowledged keyboard delivery path; never type the pre-authoring snapshot.
+        let intent = ComposerIntent(action: "insert", sessionID: composer.sessionID)
+        pendingComposerInsert = intent.id
+        pendingComposerDocumentID = documentID
+        channel.send(intent)
+        DarwinObserver.post(LinkChannel.Note.composerIntent)
     }
     // MARK: Visibility
 
@@ -231,6 +236,11 @@ final class KeyboardController {
             while !Task.isCancelled {
                 guard let self else { return }
                 if let value = self.composerLink?.read(), value != self.composer {
+                    if let pending = self.pendingComposerInsert,
+                       value.insertedIntentID == pending || value.sessionID != self.composer.sessionID {
+                        self.pendingComposerInsert = nil
+                        self.pendingComposerDocumentID = nil
+                    }
                     self.composer = value; self.composerLink?.acknowledge(value.snapshot.revision)
                 }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -451,6 +461,10 @@ final class KeyboardController {
     /// `elapsedMs`, the time since its last tick) reveals it. `flush` (and Reduce Motion) types it all now.
     private func applyHost(elapsedMs: Double = 0, flush: Bool = false) {
         guard !isTornDown else { return }
+        // Authoring can take a moment. A field switch during that wait must not send into
+        // whichever field happens to be focused when the final text arrives.
+        if host?.insertAt != nil, let requestedDocument = pendingComposerDocumentID,
+           document.documentID != requestedDocument { return }
         let decision = HostApplyDecision.decide(
             host: host, cursor: cursor, visible: isVisible, documentID: document.documentID, now: Date())
         guard case .apply = decision, let host, checkForClear() != .held else {
@@ -465,7 +479,7 @@ final class KeyboardController {
         let before = cursor
         let plan = reveal.plan(
             state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID,
-            animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs)
+            animated: !flush && !(pendingComposerInsert != nil && host.insertAt != nil) && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs)
         perform(plan.ops)
         startTickerIfNeeded()
         if let updated = plan.cursor, updated != before {

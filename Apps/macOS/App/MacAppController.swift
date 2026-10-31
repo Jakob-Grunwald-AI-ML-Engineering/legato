@@ -21,6 +21,7 @@ import Observation
     private var targetPID: pid_t?
     private var secureField = false
     private var starting = false
+    private(set) var inserting = false
     private var sessionTask: Task<Void, Never>?
     var notice: String { composer.error ?? composer.status.capitalized }
     var isDictating: Bool { starting || composer.isListening }
@@ -92,6 +93,10 @@ import Observation
         notch.show(controller: self, targetPID: targetPID)
     }
     #if DEBUG
+    func seedDebugComposer(_ args: [String]) async throws -> [String: Any] {
+        prepareComposerTarget()
+        return try await composer.debugControl("composer-debug-seed", args: args)
+    }
     func startDebugComposer(_ args: [String]) async throws -> [String: Any] {
         prepareComposerTarget()
         return try await composer.debugControl("composer-debug-start", args: args)
@@ -108,20 +113,47 @@ import Observation
         Task { await composer.cancel() }
     }
     func insertComposer() {
-        let text = composer.renderedText
-        guard !text.isEmpty else { return }
+        guard !inserting, !composer.renderedText.isEmpty || !composer.tail.isEmpty else { return }
+        inserting = true
         sessionTask?.cancel(); starting = false
+        let requestedSessionID = composer.sessionID
         let pid = targetPID, secure = secureField, restore = settings.restoreClipboard
-        let action = writer?.finish(finalText: text) ?? .paste(text)
-        writer = nil; notch.hide(); gesture.runEnded()
+        gesture.runEnded()
         Task {
-            Task { await composer.insert() }
+            defer { inserting = false }
+            let text: String
+            do { text = try await composer.prepareForInsertion() }
+            catch {
+                guard composer.sessionID == requestedSessionID else { return }
+                hud.show(toast: "Couldn't finish preparing the text. Draft kept. Try Insert again.")
+                notch.show(controller: self, targetPID: pid)
+                return
+            }
+            let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
+            // Keep authoring visible, then release key focus for the verified write or paste.
+            notch.hide()
+            let action = writer?.finish(finalText: text) ?? .paste(text)
+            var delivered = false
             switch action {
-            case .done: break
-            case .copy(let text): paster.copy(text); hud.show(toast: "Copied — paste with ⌘V.")
+            case .done: delivered = true
+            case .copy(let text):
+                paster.copy(text); hud.show(toast: "Copied — paste with ⌘V. Draft kept.")
             case .paste(let text):
                 let result = await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure)
-                if case .copied(let reason) = result { hud.show(toast: reason.toast) }
+                switch result {
+                case .pasted: delivered = true
+                case .copied(let reason): hud.show(toast: reason.toast + " Draft kept.")
+                }
+            }
+            writer = nil
+            if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
+                await composer.insert()
+            } else if delivered {
+                hud.show(toast: "Inserted. Draft changed during insertion; latest edits kept.")
+                notch.show(controller: self, targetPID: pid)
+            } else {
+                // Clipboard-only delivery is not an insertion: leave the draft available to retry.
+                notch.show(controller: self, targetPID: pid)
             }
         }
     }
