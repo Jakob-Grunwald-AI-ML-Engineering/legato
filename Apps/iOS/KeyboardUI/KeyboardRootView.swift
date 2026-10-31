@@ -21,7 +21,7 @@ struct KeyboardRootView: View {
         VStack(spacing: 0) {
             Group {
                 ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
-                             dictationRevision: controller.composer.dictationRevision ?? 0, successfulInsertionID: controller.composer.successfulInsertionID,
+                             dictationRevision: controller.composer.dictationRevision ?? 0, dictationCommit: controller.composer.dictationCommit, successfulInsertionID: controller.composer.successfulInsertionID,
                              pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
                              instructionText: controller.composer.instructionDraft ?? "", instructionStatus: controller.composer.instructionStatus ?? "Ready",
                              instructionInputActive: controller.composer.inputMode == "instructions",

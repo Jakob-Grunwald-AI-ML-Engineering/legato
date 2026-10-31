@@ -9,9 +9,12 @@ struct LineView: View {
     var animateInsertion = false
     var continuation = false
     var paragraphEdit: WordEditPresentation?
+    var dictationCommit: DictationCommit?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var edit = WordEditPresentation(old: [], new: [])
     @State private var progress = 1.0
+    @State private var shine: DictationShinePlan?
+    @State private var shineProgress = 1.0
     @State private var appeared = false
     @State private var measured: [String: [CGRect]] = [:]
     var body: some View {
@@ -30,9 +33,11 @@ struct LineView: View {
                 .onAppear {
                     if animateInsertion && !appeared { animate(old: [], new: line.words) }
                     appeared = true
+                    startShine()
                 }
-                .onChange(of: line.words) { old, new in animate(old: old, new: new) }
-                .onChange(of: reduceMotion) { _, enabled in if enabled { progress = 1 } }
+                .onChange(of: line.words) { old, new in animate(old: old, new: new); startShine() }
+                .onChange(of: dictationCommit) { _, _ in startShine() }
+                .onChange(of: reduceMotion) { _, enabled in if enabled { progress = 1; shineProgress = 1 } }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private func animate(old: [Word], new: [Word]) {
@@ -42,10 +47,20 @@ struct LineView: View {
         progress = 0
         withAnimation(.linear(duration: WordEditPresentation.duration)) { progress = 1 }
     }
+    private func startShine() {
+        guard !reduceMotion, let plan = DictationShinePlan(dictationCommit, words: line.words) else {
+            shine = nil; shineProgress = 1; return
+        }
+        guard shine?.sequence != plan.sequence else { return }
+        shine = plan; shineProgress = 0
+        withAnimation(.easeInOut(duration: DictationShinePlan.duration)) { shineProgress = 1 }
+    }
     private var renderer: WordFX {
         var renderer = WordFX(progress: progress, pending: pending)
         renderer.selected = selected
         renderer.edit = edit
+        renderer.shine = shine
+        renderer.shineProgress = shineProgress
         renderer.reduceMotion = reduceMotion
         renderer.measure = { bounds in
             Task { @MainActor in

@@ -10,13 +10,18 @@ import LegatoRoom
     var events = stream.makeAsyncIterator()
     _ = try await room.appendSegment(words: [Word(text: "Spoken")])
     await session.receive(try #require(await events.next()))
+    #expect(session.dictationCommit == nil)
     #expect(session.dictationRevision == 0) // Wait until the matching snapshot is visible.
     await session.receive(try #require(await events.next()))
     #expect(session.dictationRevision == 1)
     let line = try #require(session.snapshot.lines.first)
+    let committed = try #require(session.dictationCommit)
+    #expect(committed.wordIDs == line.words.map(\.id))
+    #expect(committed.sequence == session.dictationRevision)
     _ = try await room.applyDocument([.replaceInLine(lineID: line.id, old: "Spoken", new: "Edited")], origin: .agent, versions: [line.id: line.version])
     await session.receive(try #require(await events.next()))
     await session.receive(try #require(await events.next()))
     #expect(session.snapshot.text == "Edited")
+    #expect(session.dictationCommit == committed)
     #expect(session.dictationRevision == 1) // Rewrites must not steal the user's scroll position.
 }

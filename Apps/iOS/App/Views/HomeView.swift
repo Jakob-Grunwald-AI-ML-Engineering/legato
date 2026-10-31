@@ -74,7 +74,7 @@ struct HomeView: View {
             .accessibilityLabel("Clear composition")
     }
     private var composer: some View {
-        ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail, dictationRevision: controller.composer.dictationRevision, successfulInsertionID: controller.composer.successfulInsertionID,
+        ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail, dictationRevision: controller.composer.dictationRevision, dictationCommit: controller.composer.dictationCommit, successfulInsertionID: controller.composer.successfulInsertionID,
             pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
             correctionDraft: controller.composer.correctionDraft, correctionSubmitting: controller.composer.correctionSubmitting,
             correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,

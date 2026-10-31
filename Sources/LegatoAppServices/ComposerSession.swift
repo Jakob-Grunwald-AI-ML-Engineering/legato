@@ -22,6 +22,8 @@ public enum ComposerInsertOrigin: String, Sendable {
     public private(set) var successfulInsertionID: String?
     public private(set) var topicContext: TopicContext?
     public private(set) var dictationRevision = 0
+    public private(set) var dictationCommit: DictationCommit?
+    private var pendingDictationWordIDs: [String] = []
     private var pendingDictationRevision: Int?
     public private(set) var snapshot = DocumentSnapshot(revision: 0, lines: [])
     public private(set) var tail = ""
@@ -273,7 +275,7 @@ public enum ComposerInsertOrigin: String, Sendable {
             else if !isArmed { await arm(); guard isArmed else { return } }
         }
         let generation = UUID(); self.generation = generation
-        pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; error = nil; status = "starting"; hunks = []; pendingLineIDs = []; busyParticipants = []; busy = false
+        pendingDictationRevision = nil; pendingDictationWordIDs = []; dictationCommit = nil; snapshot = .init(revision: 0, lines: []); tail = ""; error = nil; status = "starting"; hunks = []; pendingLineIDs = []; busyParticipants = []; busy = false
         let id = UUID().uuidString; sessionID = id; historyID = UUID(uuidString: id)!
         do {
             let soniox = debugMode == nil ? (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "") : ""
@@ -581,7 +583,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         _ = try? await room?.insert(); await cleanup()
         beginHistoryComposition()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
-        pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
+        pendingDictationRevision = nil; pendingDictationWordIDs = []; dictationCommit = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
     /// Discard the composition; Pause deliberately retains the rendered text.
@@ -590,7 +592,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         generation = UUID(); try? await room?.cancel(); await cleanup()
         beginHistoryComposition()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
-        pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
+        pendingDictationRevision = nil; pendingDictationWordIDs = []; dictationCommit = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
     /// Explicitly discard both this draft and the volatile reference from earlier delivered work.
@@ -685,12 +687,20 @@ public enum ComposerInsertOrigin: String, Sendable {
                 _ = enqueueCheckpoint()
                 if pendingDictationRevision == value.revision {
                     dictationRevision += 1; pendingDictationRevision = nil
+                    dictationCommit = .init(sequence: dictationRevision, wordIDs: pendingDictationWordIDs)
+                    pendingDictationWordIDs = []
                 }
             }
         case .docOps:
             if let value = try? event.payload.decode(Transaction.self) {
                 hunks = value.hunks
-                if value.origin == .asr { pendingDictationRevision = value.revision }
+                if value.origin == .asr {
+                    pendingDictationRevision = value.revision
+                    pendingDictationWordIDs = value.hunks.flatMap { hunk -> [String] in
+                        if case .lineInserted(let line, _) = hunk { return line.words.map(\.id) }
+                        return []
+                    }
+                }
                 if value.origin != .undo { lastTransactionID = value.id }
             }
         case .asrSegment:
