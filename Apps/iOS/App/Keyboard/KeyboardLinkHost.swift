@@ -91,6 +91,9 @@ final class KeyboardLinkHost: TranscriptSink {
                     case "cancel": await composer.cancel()
                     case "undo": await composer.undo()
                     case "stop": await composer.stop()
+                    case "input-mode":
+                        let value = intent.text.flatMap(ComposerInputMode.init(rawValue:)) ?? composer.inputMode.toggled
+                        await composer.setInputMode(value, timestamp: intent.timestamp)
                     case "mute":
                         let muted = intent.text.flatMap(Bool.init) ?? !composer.isMuted
                         await composer.setMuted(muted)
@@ -119,6 +122,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.correctionDraft = composer.correctionDraft
                 value.correctionCountdownStart = composer.correctionCountdownStart
                 value.correctionCountdownDeadline = composer.correctionCountdownDeadline
+                value.inputMode = composer.inputMode.rawValue; value.instructionDraft = composer.instructionPreview; value.instructionStatus = composer.instructionStatus
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 channel.publish(value)
                 DarwinObserver.post(LinkChannel.Note.composer)

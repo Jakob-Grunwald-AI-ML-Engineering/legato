@@ -17,6 +17,9 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var correctionCountdownStart: Double?
     public var correctionCountdownDeadline: Double?
     public var muted: Bool?
+    public var inputMode: String?
+    public var instructionDraft: String?
+    public var instructionStatus: String?
     /// The last keyboard insertion consumed by the host (including a stale-session rejection).
     public var insertedIntentID: String?
     public init(snapshot: DocumentSnapshot = .init(revision: 0, lines: []), hunks: [AnimationHunk] = [], requiresSnapshot: Bool = false) {

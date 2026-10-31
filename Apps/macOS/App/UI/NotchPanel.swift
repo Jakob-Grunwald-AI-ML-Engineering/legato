@@ -125,7 +125,7 @@ private func modeIcon(_ mode: ComposerMode) -> String {
         if key == "z", flags == .command { Task { await session.undo() }; return true }
         if key == "z", flags == [.command, .shift] { return true } // Redo is not supported by the document yet.
         if key == "m", flags == [.command, .shift] {
-            Task { await session.setMuted(!session.isMuted) }; return true
+            Task { await session.setInputMode(session.inputMode.toggled) }; return true
         }
         if key == "d", flags == [.command, .shift] { controller.toggle(); return true }
         return false
@@ -144,7 +144,7 @@ private struct NotchComposerView: View {
             count + max(1, Int(ceil(Double(line.words.map(\.text).joined(separator: " ").count) / 58)))
         }
         let tailRows = session.tail.isEmpty ? 0 : max(1, Int(ceil(Double(session.tail.count) / 58)))
-        return min(440, max(showingCorrection ? 300 : 200, 150 + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
+        return min(440, max(showingCorrection ? 300 : 200, 170 + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -153,10 +153,15 @@ private struct NotchComposerView: View {
                 Text("Composer").font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Circle().fill(session.isListening && !session.isMuted ? Color.red : Color.secondary.opacity(0.6)).frame(width: 5, height: 5)
-                Text(session.isMuted ? "Muted" : session.status.capitalized)
+                Text(session.isListening && session.inputMode == .instructions ? "Instructions" : session.status.capitalized)
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             }
+            DraftInputHeader(active: session.inputMode == .dictation) {
+                Task { await session.setInputMode(.dictation) }
+            }
             ComposerView(snapshot: session.snapshot, tail: session.tail, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
+                instructionText: session.instructionPreview, instructionStatus: session.instructionStatus,
+                instructionInputActive: session.inputMode == .instructions,
                 correctionDraft: session.correctionDraft,
                 correctionCountdownStart: session.correctionCountdownStart, correctionCountdownDeadline: session.correctionCountdownDeadline,
                 onSelect: { selection in showingCorrection = true; Task { await session.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
@@ -180,8 +185,8 @@ private struct NotchComposerView: View {
                     .help("Redo is not available yet")
                 key("Insert", symbol: "paperplane.fill", shortcut: "⌘↩", enabled: !controller.inserting && (!session.renderedText.isEmpty || !session.tail.isEmpty), prominent: true) { controller.insertComposer() }
                 key("Cancel", symbol: "xmark", shortcut: "esc") { controller.cancelComposer() }
-                key(session.isMuted ? "Unmute" : "Mute", symbol: session.isMuted ? "mic.slash.fill" : "mic.slash", shortcut: "⇧⌘M", enabled: session.isListening, selected: session.isMuted) {
-                    Task { await session.setMuted(!session.isMuted) }
+                key(session.inputMode == .instructions ? "Instructions" : "Dictation", symbol: session.inputMode == .instructions ? "text.bubble.fill" : "waveform", shortcut: "⇧⌘M", selected: session.inputMode == .instructions) {
+                    Task { await session.setInputMode(session.inputMode.toggled) }
                 }
                 key(controller.isDictating ? "Pause" : (session.status == "paused" ? "Resume" : "Dictate"), symbol: controller.isDictating ? "pause.fill" : "mic.fill", shortcut: "⇧⌘D", selected: session.isListening && !session.isMuted) { controller.toggle() }
             }

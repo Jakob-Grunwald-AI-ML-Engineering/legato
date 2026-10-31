@@ -10,19 +10,24 @@ struct AlternativesPopover: View {
     var countdownDeadline: Double?
     var dismiss: () -> Void
     var send: (() -> Void)?
+    var headerTitle = "Speak a correction"
+    var dismissLabel = "Cancel correction"
+    var showsSendButton = true
+    var applying = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("Speak a correction").font(.caption).foregroundStyle(.primary.opacity(0.75))
+                    Text(headerTitle).font(.caption).foregroundStyle(.primary.opacity(0.75))
                     Spacer(minLength: 4)
+                    if applying { ProgressView().controlSize(.mini) }
                     Button(action: dismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)) }
-                        .buttonStyle(.plain).accessibilityLabel("Cancel correction")
+                        .buttonStyle(.plain).accessibilityLabel(dismissLabel)
                 }
                 HStack(alignment: .bottom, spacing: 10) {
                     Text(capturedText.isEmpty ? "…" : capturedText).font(.callout).foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    TimelineView(.animation(minimumInterval: 1.0 / 30, paused: countdownDeadline == nil)) { _ in
+                    if showsSendButton { TimelineView(.animation(minimumInterval: 1.0 / 30, paused: countdownDeadline == nil)) { _ in
                         Button { send?() } label: {
                             Image(systemName: "wand.and.stars").foregroundStyle(.purple).frame(width: 28, height: 28)
                                 .overlay {
@@ -35,7 +40,7 @@ struct AlternativesPopover: View {
                                 }
                         }
                         .buttonStyle(.plain).disabled(send == nil || capturedText.isEmpty).accessibilityLabel("Apply correction")
-                    }
+                    } }
                 }
             }.padding(11)
         }
