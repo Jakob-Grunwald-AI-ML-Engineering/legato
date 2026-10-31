@@ -60,6 +60,10 @@ public struct LinkStore: Sendable {
         return try? decoder.decode(type, from: data)
     }
 
+    // Internal wire access supports change detection without a second decode or preference read.
+    func encodedData(forKey key: String) -> Data? { backing.data(forKey: key) }
+    func writeEncodedData(_ data: Data, forKey key: String) { backing.set(data, forKey: key) }
+
     public func remove(forKey key: String) { backing.set(nil, forKey: key) }
 
     public func keys(withPrefix prefix: String) -> [String] { backing.keys(withPrefix: prefix) }

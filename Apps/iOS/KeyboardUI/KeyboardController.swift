@@ -198,7 +198,8 @@ final class KeyboardController {
     private(set) var pendingComposerInsert: String?
     private var pendingComposerDocumentID: String?
     @ObservationIgnored private var composerPoll: Task<Void, Never>?
-    private var composerLink: ComposerLink? { UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) } }
+    private let composerLink = UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) }
+    @ObservationIgnored private var composerReader = ComposerPublicationReader()
     func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
         guard fullAccess else { show("Allow Full Access to connect to the composer."); return }
         composerLink?.send(.init(action: action, lineID: lineID, wordID: wordID, endLineID: endLineID, endWordID: endWordID, text: text))
@@ -225,7 +226,7 @@ final class KeyboardController {
         composerPoll = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if let value = self.composerLink?.read(), value != self.composer {
+                if let channel = self.composerLink, let value = self.composerReader.read(from: channel), value != self.composer {
                     if let pending = self.pendingComposerInsert,
                        value.insertedIntentID == pending || value.sessionID != self.composer.sessionID {
                         self.pendingComposerInsert = nil

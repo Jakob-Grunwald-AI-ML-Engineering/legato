@@ -39,6 +39,7 @@ final class KeyboardLinkHost: TranscriptSink {
     private var observers: [DarwinObserver] = []
     private var composerTask: Task<Void, Never>?
     private var composerHistory = ComposerLinkHistory()
+    private var composerPublisher = ComposerPublicationPublisher()
     private var composerRevision = -1
     private var preparingComposerInsert = false
     private var composerInsertTask: Task<Void, Never>?
@@ -122,8 +123,9 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.correctionCountdownDeadline = composer.correctionCountdownDeadline
                 value.inputMode = composer.inputMode.rawValue; value.instructionDraft = composer.instructionPreview; value.instructionStatus = composer.instructionStatus
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
-                channel.publish(value)
-                DarwinObserver.post(LinkChannel.Note.composer)
+                if self.composerPublisher.publish(value, through: channel) {
+                    DarwinObserver.post(LinkChannel.Note.composer)
+                }
                 self.link.leaseChanged(until: composer.isArmed || composer.isListening ? Date().addingTimeInterval(60) : nil)
                 try? await Task.sleep(for: .milliseconds(100))
             }
