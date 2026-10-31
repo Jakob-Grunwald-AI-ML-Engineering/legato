@@ -7,6 +7,7 @@ public enum ModelChoice: String, Codable, CaseIterable, Sendable {
 }
 public enum ComposerMode: String, Codable, CaseIterable, Sendable { case message, email, prompt, note, auto }
 public struct AgentConfiguration: Sendable {
+    public var validatedSentenceInput: Bool
     public var liveModel: ModelChoice
     public var mode: ComposerMode
     public var personalPrompt: String
@@ -17,8 +18,10 @@ public struct AgentConfiguration: Sendable {
     public init(liveModel: ModelChoice = .haiku,
                 mode: ComposerMode = .message, personalPrompt: String = "", topicContext: TopicContext? = nil,
                 vocabulary: @escaping @Sendable (String) async -> [String] = { _ in [] },
+                validatedSentenceInput: Bool = false,
                 hostActionContext: (@Sendable () async -> ComposerHostActionContext?)? = nil,
                 performHostAction: (@Sendable (ComposerHostAction) async -> ComposerHostActionResult)? = nil) {
+        self.validatedSentenceInput = validatedSentenceInput
         self.liveModel = liveModel; self.mode = mode
         self.personalPrompt = personalPrompt; self.topicContext = topicContext; self.vocabulary = vocabulary
         self.hostActionContext = hostActionContext; self.performHostAction = performHostAction
