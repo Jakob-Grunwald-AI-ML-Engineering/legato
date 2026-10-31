@@ -17,7 +17,8 @@ struct TypingFallbackView: View {
             let top = geometry.size.height - height
             let gridOffset = top - removedToolRow
             let layout = controller.typing.layout
-            let frames = layout.frames(in: CGSize(width: geometry.size.width, height: nativeHeight))
+            let frames = layout.frames(in: CGSize(width: geometry.size.width, height: nativeHeight),
+                                       landscapeScreenWidth: KeyGeometry.screenWidth(in: controller.inputModeTarget?.view.window))
             ZStack(alignment: .topLeading) {
                 if controller.typing.showsEmojiPanel {
                     EmojiPickerView(typing: controller.typing, controller: controller)
