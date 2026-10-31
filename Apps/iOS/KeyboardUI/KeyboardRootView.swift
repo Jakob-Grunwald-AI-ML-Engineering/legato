@@ -62,10 +62,13 @@ struct KeyboardRootView: View {
                             .accessibilityAddTraits(.isButton)
                         KeyboardModePicker(modes: modes, selected: controller.composer.mode,
                                            keyWidth: (geometry.size.width - 12.66 - 36) / 7,
-                                           maximumHeight: max(0, geometry.size.height - 66)) { mode in
+                                           maximumHeight: max(0, geometry.size.height - 66), onSelect: { mode in
                             controller.composerIntent("mode", text: mode)
                             showsModePicker = false
-                        }
+                        }, onNewTopic: {
+                            controller.composerIntent("new-topic")
+                            showsModePicker = false
+                        })
                         .frame(width: min(232, geometry.size.width - 12.66))
                         .padding(.leading, 6.33).padding(.bottom, 42)
                     }

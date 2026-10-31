@@ -52,6 +52,13 @@ public actor AgentRunner {
         stopped = true; generation = UUID(); pauseGeneration = UUID()
         subscription?.cancel(); subscription = nil; pauseTask?.cancel(); writerTask?.cancel()
     }
+    /// Only finalized explicit writing requests, stripped of all envelope/tool metadata.
+    public func recentTopicInstructions() -> [String] {
+        history.filter { $0.channel == .writingInstruction && $0.participant == .hintBinder && $0.payload["event"] == .string("global.instruction") }
+            .suffix(4).compactMap { event in
+                if case .string(let text) = event.payload["text"] { return text }; return nil
+            }
+    }
     public func setMode(_ mode: ComposerMode) async throws {
         configuration.mode = mode
         _ = try await room.publish(channel: .userIntent, participant: .ui,
@@ -215,7 +222,8 @@ public actor AgentRunner {
             pendingContext = []
             let eventText = String(data: try JSONEncoder().encode(context), encoding: .utf8) ?? "[]"
             let activeEvents = String(data: try JSONEncoder().encode(events), encoding: .utf8) ?? "[]"
-            let input = "App action context: \(actionContext?.prompt ?? "App actions unavailable for this turn; only explicit finalized Instructions can authorize them.")\nWriting phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nActive events for this turn:\n\(activeEvents)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
+            let background = reseed ? (configuration.topicContext?.referencePrompt ?? "") : ""
+            let input = "\(background)App action context: \(actionContext?.prompt ?? "App actions unavailable for this turn; only explicit finalized Instructions can authorize them.")\nWriting phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nActive events for this turn:\n\(activeEvents)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
             await log(participant, ["event": .string("turn.phase"), "phase": .string(phase.rawValue)])
             conversation.messages.append(.object(["role": .string("user"), "content": .string(input)]))
             let turnMode = configuration.mode
@@ -228,7 +236,14 @@ public actor AgentRunner {
                 try Task.checkCancellation()
                 let request = try Self.request(model: configuration.liveModel,
                     system: system, messages: conversation.messages, live: true, mode: turnMode, hostActionsAllowed: hostActionsAllowed)
-                await log(participant, ["event": .string("request"), "request_hash": .string(SHA256.hash(data: request).map { String(format: "%02x", $0) }.joined()), "messages": .array(Array(conversation.messages.suffix(1)))])
+                let loggedMessages = conversation.messages.suffix(1).map { message -> JSONValue in
+                    guard !background.isEmpty, case .object(var fields) = message,
+                          case .string(let content) = fields["content"], content.hasPrefix(background) else { return message }
+                    // The volatile topic reference is sent to the writer but not copied into diagnostics.
+                    fields["content"] = .string("[Previous topic background omitted from log]\n" + content.dropFirst(background.count))
+                    return .object(fields)
+                }
+                await log(participant, ["event": .string("request"), "request_hash": .string(SHA256.hash(data: request).map { String(format: "%02x", $0) }.joined()), "messages": .array(loggedMessages)])
                 var blocks: [Int: JSONValue] = [:], partial: [Int: String] = [:]
                 var usage: JSONValue = .null, first = true
                 let started = ProcessInfo.processInfo.systemUptime

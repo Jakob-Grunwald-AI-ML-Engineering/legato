@@ -12,6 +12,7 @@ import LegatoVocabulary
 
 /// Host-only session shared by the phone app and Mac panel. The keyboard receives value snapshots.
 @MainActor @Observable public final class ComposerSession {
+    public private(set) var topicContext: TopicContext?
     public private(set) var snapshot = DocumentSnapshot(revision: 0, lines: [])
     public private(set) var tail = ""
     public private(set) var correctionDraft: String?
@@ -187,7 +188,7 @@ import LegatoVocabulary
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let writer = AgentRunner(room: room, client: MessagesStream(keyStore: KeychainKeyStore()), configuration: .init(
                 liveModel: ModelChoice(rawValue: defaults.string(forKey: "composer.liveModel") ?? "") ?? .haiku,
-                mode: mode, personalPrompt: prompt, vocabulary: { _ in terms },
+                mode: mode, personalPrompt: prompt, topicContext: topicContext, vocabulary: { _ in terms },
                 hostActionContext: { [weak self] in await self?.captureHostActionContext() },
                 performHostAction: { [weak self] action in
                     guard let self else { return .init(succeeded: false, message: "Composition closed. Action discarded.") }
@@ -319,7 +320,7 @@ import LegatoVocabulary
     }
     public var debugState: [String: Any] {
         ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "inputMode": inputMode.rawValue, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus,
-         "sessionID": sessionID ?? "", "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
+         "sessionID": sessionID ?? "", "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
          "correctionCountdownStart": correctionCountdownStart as Any? ?? NSNull(),
@@ -402,7 +403,13 @@ import LegatoVocabulary
     }
     /// Call only after the surface has successfully delivered its rendered value.
     public func insert() async {
-        generation = UUID(); _ = try? await room?.insert(); await cleanup()
+        // The caller acknowledges external delivery before reaching this boundary.
+        let token = UUID(); generation = token
+        let delivered = renderedText
+        let requests = await writer?.recentTopicInstructions() ?? (lastInstruction.isEmpty ? [] : [lastInstruction])
+        guard generation == token else { return }
+        if let context = TopicContext(deliveredText: delivered, recentInstructions: requests) { topicContext = context }
+        _ = try? await room?.insert(); await cleanup()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
         snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
@@ -413,6 +420,11 @@ import LegatoVocabulary
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
         snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
+    }
+    /// Explicitly discard both this draft and the volatile reference from earlier delivered work.
+    public func startNewTopic() async {
+        topicContext = nil
+        await cancel()
     }
     func captureHostActionContext() -> ComposerHostActionContext? {
         guard room != nil else { return nil }
