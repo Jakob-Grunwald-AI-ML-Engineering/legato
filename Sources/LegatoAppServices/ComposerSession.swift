@@ -334,6 +334,17 @@ import LegatoVocabulary
         try await room.micOff(); try await room.finishFinalPass()
         snapshot = await room.documentSnapshot; status = "paused"; onChange?()
     }
+    /// Provider-free visual fixtures may edit only their own seeded Room, never a live draft.
+    public func applyDebugDocumentEdits(_ json: String) async throws {
+        guard inputSource == "debug.seed", let room else { throw SonioxError.notConnected }
+        let ops = try JSONDecoder().decode([DocOp].self, from: Data(json.utf8))
+        let before = await room.documentSnapshot
+        let versions = Dictionary(uniqueKeysWithValues: before.lines.map { ($0.id, $0.version) })
+        let transaction = try await room.applyDocument(ops, origin: .agent, versions: versions)
+        hunks = transaction.hunks; lastTransactionID = transaction.id
+        snapshot = await room.documentSnapshot
+        onChange?()
+    }
     public func startDebug(mode: ComposerMode = .message, microphoneLease: Bool = false) async {
         await startSession(debugMode: mode, microphoneLease: microphoneLease)
     }
