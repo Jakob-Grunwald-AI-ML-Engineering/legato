@@ -68,7 +68,8 @@ public actor HintBinder {
     }
     private struct InstructionCapture {
         let id = UUID().uuidString
-        let snapshot: DocumentSnapshot
+        var snapshot: DocumentSnapshot
+        var pendingSentences: Set<String> = []
         var words: [Word] = []
         var segments: Set<String> = []
         var sources: [JSONValue] = []
@@ -79,6 +80,13 @@ public actor HintBinder {
     private var untimedMode: ComposerInputMode?
     private var segmentHolds: [String: Int] = [:]
     private var instructionCapture: InstructionCapture?
+    private var deferredInstructions: [(InstructionCapture, Envelope)] = []
+    private var pendingDictation: [String: DictationSentence] = [:]
+    private var rawProviderTail = ""
+    private var dictationBuffer: [(word: Word, segmentID: String, start: Double, end: Double)] = []
+    private var sentenceSequence = 0
+    private var nextDictationContinuation = false
+    private let onDictation: (@Sendable (DictationSentence) async -> Void)?
     private var instructionTail = ""
     private var instructionQuietTask: Task<Void, Never>?
     private let onInstructionQuiet: (@Sendable () async -> Void)?
@@ -96,9 +104,10 @@ public actor HintBinder {
     private let onSend: (@Sendable () async -> Void)?
     public init(room: Room, learner: VocabularyLearner? = nil, quietDelay: Duration = .milliseconds(500),
                 countdown: Duration = .seconds(1), onSend: (@Sendable () async -> Void)? = nil,
-                onInstructionQuiet: (@Sendable () async -> Void)? = nil) {
+                onInstructionQuiet: (@Sendable () async -> Void)? = nil,
+                onDictation: (@Sendable (DictationSentence) async -> Void)? = nil) {
         self.room = room; self.learner = learner; self.quietDelay = quietDelay
-        self.countdown = countdown; self.onSend = onSend; self.onInstructionQuiet = onInstructionQuiet
+        self.countdown = countdown; self.onSend = onSend; self.onInstructionQuiet = onInstructionQuiet; self.onDictation = onDictation
     }
     /// Record a monotonic audio boundary; delayed final tokens retain their original speech channel.
     public func setInputMode(_ mode: ComposerInputMode, timestamp: Double) async {
@@ -134,6 +143,14 @@ public actor HintBinder {
         instructionTail = ""
         guard let current = instructionCapture else { await publishInstructionDraft(); return }
         instructionCapture = nil
+        if !current.pendingSentences.isDisjoint(with: Set(pendingDictation.keys)) {
+            deferredInstructions.append((current, boundary))
+        } else { await publishInstruction(current, boundary: boundary) }
+        await publishInstructionDraft()
+    }
+    private func publishInstruction(_ capture: InstructionCapture, boundary: Envelope) async {
+        var current = capture
+        if !current.pendingSentences.isEmpty { current.snapshot = await room.documentSnapshot }
         if !current.words.isEmpty {
             let payload: JSONValue = .object([
                 "event": .string("global.instruction"), "captureID": .string(current.id),
@@ -148,7 +165,52 @@ public actor HintBinder {
                 tOrigin: current.start, baseRev: current.snapshot.revision, causedBy: boundary.id)
         }
         for id in current.segments { await releaseSegment(id) }
-        await publishInstructionDraft()
+    }
+    private func flushDeferredInstructions() async {
+        while let first = deferredInstructions.first,
+              first.0.pendingSentences.isDisjoint(with: Set(pendingDictation.keys)) {
+            deferredInstructions.removeFirst()
+            await publishInstruction(first.0, boundary: first.1)
+        }
+    }
+    private func publishVisibleTail(activity: Bool = false) async {
+        let pending = pendingDictation.values.sorted { $0.sequence < $1.sequence }.map(\.text).joined(separator: " ")
+        let unfinished = dictationBuffer.map { $0.word.text }.joined(separator: " ")
+        let text = [pending, unfinished, rawProviderTail].filter { !$0.isEmpty }.joined(separator: " ")
+        _ = try? await room.publish(channel: .asrTail, participant: .hintBinder,
+            payload: .object(["text": .string(text), "activity": .bool(activity)]))
+    }
+    /// Called only by the host's validating sentence pipeline, never by a model tool.
+    public func acceptValidatedDictation(_ value: ValidatedDictation) async throws {
+        guard let source = pendingDictation[value.sentenceID], source.sequence == value.sequence else { return }
+        _ = try await room.appendValidatedSentence(value)
+        pendingDictation[value.sentenceID] = nil
+        await flushDeferredInstructions()
+        for id in source.sourceSegmentIDs { await releaseSegment(id) }
+        await publishVisibleTail()
+    }
+    private func bufferDictation(_ words: [(word: Word, start: Double, end: Double, mode: ComposerInputMode)], envelope: Envelope) async {
+        for value in words {
+            segmentHolds[envelope.id, default: 0] += 1
+            dictationBuffer.append((value.word, envelope.id, value.start, value.end))
+            let punctuation = value.word.text.last.map { ".!?。！？".contains($0) } ?? false
+            let duration = value.end - (dictationBuffer.first?.start ?? value.start)
+            if punctuation || dictationBuffer.count >= 120 || duration >= 30 { await flushDictationBuffer(forced: !punctuation) }
+        }
+        rawProviderTail = ""; await publishVisibleTail()
+    }
+    /// Acoustic gap/endpoint chunks are not document sentences. Only punctuation,
+    /// an explicit input boundary, or a bounded long-speech fragment submits work.
+    private func flushDictationBuffer(forced: Bool = false) async {
+        guard let onDictation, let first = dictationBuffer.first else { return }
+        let buffered = dictationBuffer; dictationBuffer = []
+        let sentence = DictationSentence(sequence: sentenceSequence, sourceSegmentID: first.segmentID,
+            words: buffered.map { $0.word }, origin: first.start, sourceSegmentIDs: buffered.map { $0.segmentID }, continuation: nextDictationContinuation)
+        nextDictationContinuation = forced
+        sentenceSequence += 1; pendingDictation[sentence.id] = sentence
+        try? await room.holdSentence(sentence)
+        await publishVisibleTail()
+        await onDictation(sentence)
     }
     public func requestSend(timestamp: Double) async -> Bool {
         guard var current = capture, !current.submitting, !draftText(current).isEmpty else { return false }
@@ -211,7 +273,17 @@ public actor HintBinder {
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
     }
-    public func stop() async { await discardInstructionCapture(); task?.cancel(); task = nil; dismissed = []; suppressUntimedTail = false; await discardCapture(); await publishDraft() }
+    public func stop() async {
+        task?.cancel(); task = nil
+        let pending = pendingDictation.values; pendingDictation = [:]; rawProviderTail = ""
+        let unfinished = dictationBuffer; dictationBuffer = []
+        for item in unfinished { await releaseSegment(item.segmentID) }
+        for sentence in pending { await room.discardSentence(sentence.id); for id in sentence.sourceSegmentIDs { await releaseSegment(id) } }
+        for (instruction, _) in deferredInstructions { for id in instruction.segments { await releaseSegment(id) } }
+        deferredInstructions = []
+        await discardInstructionCapture(); dismissed = []; suppressUntimedTail = false
+        await discardCapture(); await publishDraft()
+    }
     public func tap(lineID: String, wordID: String, timestamp: Double) async throws {
         try await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
     }
@@ -219,6 +291,7 @@ public actor HintBinder {
     public func select(lineID: String, wordID: String, endLineID: String? = nil,
                        endWordID: String? = nil, timestamp: Double) async throws {
         instructionQuietTask?.cancel()
+        await flushDictationBuffer()
         let discardFrom = min(capture?.discardFrom ?? timestamp, timestamp)
         await discardCapture()
         let snapshot = await room.documentSnapshot
@@ -323,9 +396,12 @@ public actor HintBinder {
                 await publishInstructionDraft()
                 if !instructionTail.isEmpty, envelope.payload["activity"] == .bool(true) { instructionActivity() }
             }
-            _ = try? await room.publish(channel: .asrTail, participant: .hintBinder,
-                                       payload: payload, tOrigin: envelope.tOrigin, causedBy: envelope.id)
+            rawProviderTail = (try? payload["text"]?.decode(String.self)) ?? ""
+            await publishVisibleTail(activity: envelope.payload["activity"] == .bool(true))
         case .asrBoundary:
+            if envelope.payload["reason"] == .string("finalize") || envelope.payload["reason"] == .string("finished") {
+                await flushDictationBuffer()
+            }
             await flushInstruction(envelope)
             untimedMode = nil
             // Keep audio-time tombstones: late finals may arrive after an endpoint or UI dismissal.
@@ -413,12 +489,18 @@ public actor HintBinder {
             while index < words.count, words[index].mode == mode { index += 1 }
             let group = words[start..<index]
             if mode == .dictation {
-                _ = try? await room.appendSegment(words: group.map(\.word), causedBy: envelope.id, resolve: false)
+                if onDictation != nil {
+                    await bufferDictation(Array(group), envelope: envelope)
+                } else {
+                    _ = try? await room.appendSegment(words: group.map(\.word), causedBy: envelope.id, resolve: false)
+                }
             } else {
+                await flushDictationBuffer()
                 hasInstructions = true
                 if instructionCapture == nil {
                     instructionCapture = InstructionCapture(snapshot: await room.documentSnapshot,
                         start: group.first!.start, end: group.last!.end)
+                    instructionCapture?.pendingSentences = Set(pendingDictation.keys)
                 }
                 instructionCapture?.words += group.map(\.word)
                 instructionCapture?.end = group.last!.end
@@ -429,6 +511,6 @@ public actor HintBinder {
                 instructionTail = ""; await publishInstructionDraft(); instructionActivity()
             }
         }
-        if !hasInstructions && !heldByQuote { await room.resolveSegment(envelope.id) }
+        if !hasInstructions && !heldByQuote && segmentHolds[envelope.id] == nil { await room.resolveSegment(envelope.id) }
     }
 }

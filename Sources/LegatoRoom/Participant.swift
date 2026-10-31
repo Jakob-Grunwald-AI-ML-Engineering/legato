@@ -1,5 +1,5 @@
 public enum Participant: String, Codable, CaseIterable, Sendable {
-    case transcriber, segmenter, document, liveAgent, restructureAgent, alternatives, hintBinder, ui, logger
+    case sentenceAgent, transcriber, segmenter, document, liveAgent, restructureAgent, alternatives, hintBinder, ui, logger
 }
 
 public enum SubscriptionBuffer: Sendable {
