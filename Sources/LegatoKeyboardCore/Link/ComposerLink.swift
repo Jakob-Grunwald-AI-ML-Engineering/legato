@@ -84,3 +84,46 @@ public struct ComposerLink: Sendable {
         }.sorted { $0.timestamp < $1.timestamp }
     }
 }
+
+/// A logical equality check happens before JSON encoding or touching preferences. The exact bytes
+/// are retained so an unexpectedly removed/changed backing value can be restored without encoding.
+public struct ComposerPublicationPublisher: Sendable {
+    private var previous: ComposerPublication?
+    private var encoded: Data?
+    public init() {}
+    @discardableResult public mutating func publish(_ value: ComposerPublication, through link: ComposerLink) -> Bool {
+        let data: Data
+        if value == previous, let encoded {
+            if link.encodedPublication == encoded { return false }
+            data = encoded
+        } else {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .secondsSince1970
+            guard let next = try? encoder.encode(value) else { return false }
+            data = next
+        }
+        link.store.writeEncodedData(data, forKey: LinkChannel.Key.composer)
+        guard link.encodedPublication == data else { return false }
+        previous = value; encoded = data
+        return true
+    }
+}
+
+/// Read fresh bytes, but decode a publication only when those bytes change. Invalid values are
+/// negative-cached until changed, so a malformed publication cannot burn the keyboard's main thread.
+public struct ComposerPublicationReader: Sendable {
+    private var encoded: Data?
+    public init() {}
+    public mutating func read(from link: ComposerLink) -> ComposerPublication? {
+        guard let data = link.encodedPublication else { encoded = nil; return nil }
+        guard data != encoded else { return nil }
+        encoded = data
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return try? decoder.decode(ComposerPublication.self, from: data)
+    }
+}
+
+private extension ComposerLink {
+    var encodedPublication: Data? { store.encodedData(forKey: LinkChannel.Key.composer) }
+}
