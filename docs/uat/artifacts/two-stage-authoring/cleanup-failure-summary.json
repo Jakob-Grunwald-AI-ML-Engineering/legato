@@ -1,0 +1,65 @@
+{
+  "observedDate": "2026-10-31",
+  "sourceAtPhoneObservation": "9a2f6e04511c6669f7fe6e201df032ea63e7e9fe",
+  "diagnosticBuildSource": "cf8a6e6963f80c26f8d26c862cae9dea968f3c16",
+  "containsSpeechContent": false,
+  "paidRequestsInitiatedByThisInvestigation": 0,
+  "microphonesStartedOrStoppedByThisInvestigation": false,
+  "failedSession": {
+    "id": "8C828D33-6142-44AA-9330-401124DFB452",
+    "cleanupResponses": 11,
+    "failures": 1,
+    "asrErrors": 0,
+    "sentenceSequence": 2,
+    "failedAttempt": {
+      "requestRoomSeq": 388,
+      "requestMono": 584755.28109125,
+      "responseRoomSeq": 497,
+      "responseMono": 584758.4639195,
+      "seconds": 3.182109833229333,
+      "inputTokens": 1114,
+      "outputTokens": 112,
+      "cacheTokens": 0,
+      "model": "claude-haiku-5-5"
+    },
+    "successfulExplicitRetry": {
+      "requestRoomSeq": 685,
+      "requestMono": 584787.07462325,
+      "responseRoomSeq": 689,
+      "responseMono": 584788.4383405417,
+      "seconds": 1.3624011250212789,
+      "inputTokens": 1115,
+      "outputTokens": 112,
+      "cacheTokens": 0
+    }
+  },
+  "nextSession": {
+    "id": "F297774A-BD20-4DDB-9A78-6D38F85B003A",
+    "cleanupResponses": 6,
+    "failures": 0,
+    "asrErrors": 0
+  },
+  "observedCurrentPhoneAudio": {
+    "composerStatus": "idle",
+    "backgroundLeaseActive": true,
+    "selectedKind": "builtIn",
+    "selectedSampleRate": 48000,
+    "bluetoothCandidateAvailable": true,
+    "convertedSampleRate": 16000,
+    "convertedChannels": 1,
+    "buffers": 4654,
+    "frames": 7446400,
+    "recoveries": 0,
+    "clippedFraction": 0,
+    "latestDeliveryChunks": 59,
+    "latestDeliveryFrames": 94400,
+    "latestAcceptedFinalWords": 7,
+    "speechAccuracy": "not evaluated"
+  },
+  "cause": "unknown; old logs omit the sentence-stage exception and provider response",
+  "signedBuilds": {
+    "mac": "passed; isolated app installed and queried idle, lease false",
+    "ios": "passed; installation held pending explicit background-mic interruption approval"
+  },
+  "offlineVerification": "Implementation owner reported eight focused checks passed; no additional native forced-failure UAT or suite rerun"
+}
