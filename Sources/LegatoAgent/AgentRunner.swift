@@ -258,7 +258,15 @@ public actor AgentRunner {
             let eventText = String(data: try JSONEncoder().encode(context), encoding: .utf8) ?? "[]"
             let activeEvents = String(data: try JSONEncoder().encode(events), encoding: .utf8) ?? "[]"
             let background = reseed ? (configuration.topicContext?.referencePrompt ?? "") : ""
-            let input = "\(background)App action context: \(actionContext?.prompt ?? "App actions unavailable for this turn; only explicit finalized Instructions can authorize them.")\nWriting phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nActive events for this turn:\n\(activeEvents)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
+            let admittedIDs = Set(events.filter(AgentAdmission.isAcceptedContent).flatMap { event in
+                (try? event.payload.decode(Transaction.self))?.ops.flatMap { op -> [String] in
+                    if case .insertLines(_, let lines) = op { return lines.map(\.id) }
+                    return []
+                } ?? []
+            })
+            let boundaryReview = phase == .sentence && configuration.validatedSentenceInput
+                ? DocPresenter.sentenceBoundaryReview(snapshot, admittedLineIDs: admittedIDs) : ""
+            let input = "\(background)App action context: \(actionContext?.prompt ?? "App actions unavailable for this turn; only explicit finalized Instructions can authorize them.")\nWriting phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nActive events for this turn:\n\(activeEvents)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n\(boundaryReview)"
             await log(participant, ["event": .string("turn.phase"), "phase": .string(phase.rawValue)])
             conversation.messages.append(.object(["role": .string("user"), "content": .string(input)]))
             let turnMode = configuration.mode

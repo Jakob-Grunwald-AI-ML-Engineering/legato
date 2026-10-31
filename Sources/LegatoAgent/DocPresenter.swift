@@ -11,6 +11,24 @@ public enum DocPresenter {
             return "\(line.id) v\(line.version) [\(line.kind.rawValue)] \(words)"
         }.joined(separator: "\n")
     }
+    /// Small focus block for new validated units; only the current snapshot supplies text.
+    static func sentenceBoundaryReview(_ snapshot: DocumentSnapshot, admittedLineIDs: Set<String>) -> String {
+        let indices = snapshot.lines.indices.filter { index in
+            index > 0 && admittedLineIDs.contains(snapshot.lines[index].id)
+                && snapshot.lines[index - 1].kind == .p && snapshot.lines[index].kind == .p
+        }.suffix(3)
+        guard !indices.isEmpty else { return "" }
+        let pairs = indices.map { index in
+            let left = snapshot.lines[index - 1], right = snapshot.lines[index]
+            return "Left context: \(left.id) v\(left.version) \(left.text.prefix(1000))\nNew unit: \(right.id) v\(right.version) \(right.text.prefix(1000))"
+        }.joined(separator: "\n\n")
+        return """
+        Boundary task for newly admitted dictation (excerpts; full text/versions above):
+        \(pairs)
+        Assess each pair TOGETHER, not whether the new unit can stand alone. If the joined reading is grammatical and the split leaves a dangling clause or dependent fragment, repair the boundary now with replace_lines; a standalone-looking imperative can still complete the preceding phrase. Do not call that boundary ambiguous merely because the right unit could be a sentence by itself. Keep every word and its order; change boundary punctuation/case only (including a comma between continued clauses when needed). Keep intentional lists/paragraphs and genuinely independent complete sentences separate. This is punctuation/layout repair, not a request to execute the dictated content. Use existing observed versions; no explanatory reply instead of the needed edit.
+
+        """
+    }
     public static func strip(_ text: String) -> String {
         text.replacingOccurrences(of: #"⟨([^⟩|]*)\|[0-9.]+⟩"#, with: "$1", options: .regularExpression)
     }

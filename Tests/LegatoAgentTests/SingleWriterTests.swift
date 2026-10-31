@@ -351,3 +351,24 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
         #expect(after.lines[1].kind == .li)
     }
 }
+
+@Test func boundaryFocusUsesCurrentAdmittedNeighborsWithoutListsOrHistory() {
+    func line(_ id: String, _ text: String, kind: LineKind = .p) -> Line {
+        Line(id: id, kind: kind, version: 3, words: [.init(text: text)])
+    }
+    let snapshot = DocumentSnapshot(revision: 9, lines: [
+        line("old", "Unrelated complete sentence."),
+        line("left", "I would like to."), line("new", "Write a clear report."),
+        line("list", "Intentional list.", kind: .li), line("after-list", "Keep separate.")
+    ])
+    let focus = DocPresenter.sentenceBoundaryReview(snapshot, admittedLineIDs: ["new", "after-list", "missing-history-id"])
+    #expect(focus.contains("Left context: left v3 I would like to."))
+    #expect(focus.contains("New unit: new v3 Write a clear report."))
+    #expect(!focus.contains("Unrelated complete sentence."))
+    #expect(!focus.contains("Intentional list."))
+    #expect(!focus.contains("Keep separate."))
+    #expect(DocPresenter.sentenceBoundaryReview(snapshot, admittedLineIDs: ["missing-history-id"]).isEmpty)
+    let many = DocumentSnapshot(revision: 0, lines: (0..<12).map { line("L\($0)", "Validated unit \($0).") })
+    let bounded = DocPresenter.sentenceBoundaryReview(many, admittedLineIDs: Set(many.lines.map(\.id)))
+    #expect(bounded.components(separatedBy: "New unit:").count - 1 == 3)
+}
