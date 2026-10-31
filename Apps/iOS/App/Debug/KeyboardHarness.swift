@@ -263,7 +263,7 @@ struct KeyboardHarness: View {
                     let length = geometry.size.height
                     VStack(spacing: 0) {
                         HarnessTextView(textView: model.document.textView).padding(8)
-                        keyboard.frame(height: ComposerKeyboardLayout.typingHeight(landscape: true) + ComposerKeyboardLayout.utilityRowHeight).background(Self.backdrop)
+                        keyboard.frame(height: ComposerKeyboardLayout.typingHeight(landscape: true) + ComposerKeyboardLayout.additionalComposerHeight).background(Self.backdrop)
                     }
                     .frame(width: length, height: geometry.size.width)
                     .background(.background)
@@ -290,7 +290,7 @@ struct KeyboardHarness: View {
 
     /// The harness uses the same fixed portrait composer/typing height as the extension.
     private var portraitHeight: CGFloat {
-        ComposerKeyboardLayout.typingHeight(landscape: false) + ComposerKeyboardLayout.utilityRowHeight
+        ComposerKeyboardLayout.typingHeight(landscape: false) + ComposerKeyboardLayout.additionalComposerHeight
     }
 
     private var keyboard: some View {

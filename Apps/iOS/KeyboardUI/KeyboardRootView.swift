@@ -40,15 +40,7 @@ struct KeyboardRootView: View {
                 }
             }
             toolRow(landscape: landscape)
-            HStack {
-                Button("ABC") { showsModePicker = false; showsTypingKeyboard = true }
-                    .font(.system(size: 13, weight: .medium)).frame(width: 44, height: 22)
-                    .buttonStyle(KeyButtonStyle()).accessibilityLabel("Typing keyboard")
-                    .accessibilityIdentifier("composer.typingKeyboard")
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(Color(uiColor: KeyColors.ink))
-            .padding(.horizontal, 6.33).frame(height: ComposerKeyboardLayout.utilityRowHeight)
+
         }
         // UIInputView(.keyboard) supplies the system cap/tray material. Nonzero alpha keeps blank pixels touchable.
         .background(Color.black.opacity(0.001))
@@ -62,7 +54,7 @@ struct KeyboardRootView: View {
                             .accessibilityLabel("Dismiss writing modes")
                             .accessibilityAddTraits(.isButton)
                         KeyboardModePicker(modes: modes, selected: controller.composer.mode,
-                                           keyWidth: (geometry.size.width - 12.66 - 36) / 7,
+                                           keyWidth: (geometry.size.width - 12.66 - 30) / 6,
                                            maximumHeight: max(0, geometry.size.height - 66), onSelect: { mode in
                             controller.composerIntent("mode", text: mode)
                             showsModePicker = false
@@ -71,7 +63,7 @@ struct KeyboardRootView: View {
                             showsModePicker = false
                         })
                         .frame(width: min(232, geometry.size.width - 12.66))
-                        .padding(.leading, 6.33).padding(.bottom, 42 + ComposerKeyboardLayout.utilityRowHeight)
+                        .padding(.leading, 6.33).padding(.bottom, 42)
                     }
                     .accessibilityAction(.escape) { showsModePicker = false }
                 }
@@ -89,8 +81,10 @@ struct KeyboardRootView: View {
             .buttonStyle(KeyboardModeKeyStyle(expanded: showsModePicker))
             .accessibilityLabel(controller.composer.mode.capitalized)
             .accessibilityHint("Choose a writing mode")
-            key("Undo", symbol: "arrow.uturn.backward", enabled: controller.canUndo, action: controller.undo)
-            key("Redo", symbol: "arrow.uturn.forward", enabled: controller.canRedo, action: controller.redo)
+            Button("ABC") { showsModePicker = false; showsTypingKeyboard = true }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("Typing keyboard")
+                .accessibilityIdentifier("composer.typingKeyboard")
             Button { controller.insertComposer() } label: {
                 Image(systemName: "paperplane.fill").font(.system(size: 17))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

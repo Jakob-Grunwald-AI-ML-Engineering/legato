@@ -36,8 +36,8 @@ struct LayoutRow: Equatable {
 
 /// The rows of the page being shown, laid out like the system keyboard (see `KeyboardMetrics.swift`).
 /// `LegatoKeyboardCore.KeyboardLayout` provides the keys of the three upper rows; the bottom row, the
-/// extra keys of email and URL fields and the numpad are built here (the core's bottom row has the mic
-/// key, which lives in the top bar now, and its widths are not the system's).
+/// extra keys of email and URL fields and the numpad are built here with native widths.
+/// The optional composer return reuses the core microphone action as an overlay key.
 struct TypingLayout: Equatable {
     var rows: [LayoutRow]
 
@@ -49,6 +49,16 @@ struct TypingLayout: Equatable {
         }
         rows.append(LayoutRow(keys: bottomKeys(page: page, field: field, showsGlobe: showsGlobe), kind: .bottom))
         return TypingLayout(rows: rows)
+    }
+
+    /// Reuse the native microphone key slot to return from direct typing to the draft.
+    func includingComposerReturn() -> TypingLayout {
+        var layout = self
+        guard let last = layout.rows.indices.last,
+              !layout.rows[last].keys.contains(where: { $0.action == .mic }) else { return layout }
+        let index = layout.rows[last].keys.firstIndex(where: { $0.action == .space }) ?? 0
+        layout.rows[last].keys.insert(.special(.mic, width: 1), at: index)
+        return layout
     }
 
     private static func bottomKeys(page: KeyboardPage, field: KeyboardField, showsGlobe: Bool) -> [Key] {
@@ -122,17 +132,22 @@ struct TypingLayout: Equatable {
                     }
                 }
                 let fixed = row.keys.compactMap(width).reduce(0, +)
-                let rest = size.width - 2 * g.marginX - fixed - CGFloat(row.keys.count - 1) * g.gap
+                let available = size.width - 2 * g.marginX - CGFloat(row.keys.count - 1) * g.gap
+                // Email/URL fields retain their extra keys and a usable space key.
+                let scale = row.keys.contains(where: { $0.action == .mic })
+                    ? min(1, max(0, (available - g.smallKeyWidth) / fixed)) : 1
+                let rest = available - fixed * scale
                 var x = g.marginX
                 for key in row.keys {
-                    let w = width(key) ?? rest
+                    let w = width(key).map { $0 * scale } ?? rest
                     add(key, row: r, x: x, w: w, y: y, h: g.keyHeight)
                     x += w + g.gap
                 }
             case .numpad:
-                // Three columns, or two keys of a column when the left slot is blank (number pad).
+                // Keep three native columns, allowing a fourth bottom utility key for decimal/phone pads.
                 let margin: CGFloat = 4.67
-                let w = (size.width - 2 * margin - 2 * g.gap) / 3
+                let columns = CGFloat(max(3, row.keys.count))
+                let w = (size.width - 2 * margin - (columns - 1) * g.gap) / columns
                 let blank = row.keys.count == 2
                 var x = margin + (blank ? w + g.gap : 0)
                 for key in row.keys {

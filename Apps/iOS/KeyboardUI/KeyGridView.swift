@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 final class KeyGridView: UIView {
     static let holdDelay: Duration = .milliseconds(400)
-    private var overlayKeys: Set<String> = ["globe"]
+    private var overlayKeys: Set<String> = ["globe", "mic"]
 
     weak var typing: TypingModel?
 
@@ -69,7 +69,7 @@ final class KeyGridView: UIView {
     }
 
     func apply(layout: TypingLayout, presentation: KeyPresentation, emojiSystemSwitcher: Bool) {
-        let overlays: Set<String> = emojiSystemSwitcher ? ["globe", "emoji"] : ["globe"]
+        let overlays: Set<String> = emojiSystemSwitcher ? ["globe", "emoji", "mic"] : ["globe", "mic"]
         let overlaysChanged = overlays != overlayKeys
         overlayKeys = overlays
         let layoutChanged = layout != self.layout
@@ -381,12 +381,12 @@ final class KeyGridView: UIView {
             if let symbol = KeyLabels.returnSymbol(for: p.returnLabel) {
                 drawSymbol(symbol.name, in: frame, color: inkColor, weight: symbol.weight)
             } else {
-                drawText(p.returnLabel, centerX: frame.midX, baseline: frame.minY + g.labelBaseline, size: 17, weight: .regular, color: inkColor)
+                drawText(p.returnLabel, centerX: frame.midX, baseline: frame.minY + g.labelBaseline, size: fittedLabelSize(p.returnLabel, preferred: 17, width: frame.width), weight: .regular, color: inkColor)
             }
         case .modeSwitch(let target):
             let label = target == .letters ? "ABC" : key.label
             let small = label == "#+="
-            drawText(label, centerX: frame.midX, baseline: frame.minY + g.labelBaseline, size: small ? g.labelSize - 3 : g.labelSize, weight: .regular, color: inkColor)
+            drawText(label, centerX: frame.midX, baseline: frame.minY + g.labelBaseline, size: fittedLabelSize(label, preferred: small ? g.labelSize - 3 : g.labelSize, width: frame.width), weight: .regular, color: inkColor)
         case .shift:
             drawSymbol(p.shift == .capsLock ? "capslock.fill" : p.shift == .once ? "shift.fill" : "shift", in: frame, color: inkColor)
         case .delete:
@@ -396,6 +396,11 @@ final class KeyGridView: UIView {
         case .space, .globe, .mic:
             break
         }
+    }
+
+    private func fittedLabelSize(_ text: String, preferred: CGFloat, width: CGFloat) -> CGFloat {
+        let measured = (text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: preferred)]).width
+        return min(preferred, max(11, preferred * max(1, width - 6) / max(1, measured)))
     }
 
     /// Draws `text` centered on `centerX` with its baseline at `baseline`.
