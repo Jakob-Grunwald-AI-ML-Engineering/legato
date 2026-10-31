@@ -67,6 +67,9 @@ import LegatoVocabulary
     @ObservationIgnored private var sessionLog: SessionLog?
     private var inputConfig = SonioxConfig()
     private var recordingTake = 0
+    private var deliveredAudioChunks = 0
+    private var deliveredAudioFrames = 0
+    private var acceptedASRWords = 0
     private var resuming = false
     private var preparingInsertion = false
     @ObservationIgnored private var writer: AgentRunner?
@@ -91,7 +94,7 @@ import LegatoVocabulary
         #else
         self.keepMicrophoneActive = false
         #endif
-        self.mic = MicSource()
+        self.mic = AutomaticInputSource()
         self.activateAudioSession = Self.activateMicrophoneSession
     }
     init(microphone: any AudioSource, activateAudioSession: @escaping @MainActor () async throws -> Void) {
@@ -103,7 +106,7 @@ import LegatoVocabulary
         self.room = room
         self.sessionLog = log
         self.sessionID = log?.directory.lastPathComponent
-        self.mic = MicSource()
+        self.mic = AutomaticInputSource()
         self.activateAudioSession = Self.activateMicrophoneSession
         self.vocabularyURL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")
     }
@@ -189,7 +192,11 @@ import LegatoVocabulary
                 onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() },
                 onDictation: { [weak self] sentence in await self?.sentencePipeline?.enqueue(sentence) })
             self.binder = binder
-            sentencePipeline = OrderedSentencePipeline(cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore())), vocabulary: terms,
+            sentencePipeline = OrderedSentencePipeline(cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), onUsage: { id, sequence, usage in
+                _ = try? await room.publish(channel: .sentenceCleanup, participant: .sentenceAgent, payload: .object([
+                    "event": .string("sentence.usage"), "sentenceID": .string(id), "sequence": .number(Double(sequence)),
+                    "model": .string(ModelChoice.haiku.rawValue), "usage": usage]))
+            }), vocabulary: terms,
                 accept: { [weak binder] value in
                     guard let binder else { throw CancellationError() }
                     try await binder.acceptValidatedDictation(value)
@@ -238,6 +245,7 @@ import LegatoVocabulary
             status = "listening"; onChange?(); return
         }
         #endif
+        deliveredAudioChunks = 0; deliveredAudioFrames = 0; acceptedASRWords = 0
         let audioOrigin = ProcessInfo.processInfo.systemUptime; self.audioOrigin = audioOrigin
         let stream = try await prepareMicrophoneStream()
         try requireGeneration(generation)
@@ -258,6 +266,11 @@ import LegatoVocabulary
                     guard let self, !self.isMuted else { continue }
                     try recorder.append(chunk)
                     try await transcriber.sendAudio(converter.convert(chunk))
+                    self.deliveredAudioChunks += 1; self.deliveredAudioFrames += chunk.samples.count / max(1, chunk.format.channelCount)
+                }
+                if !Task.isCancelled, let self, self.generation == generation, self.isListening {
+                    self.fail(AutomaticInputError.noPCM); self.isArmed = false
+                    await self.mic.stop()
                 }
             } catch is CancellationError {} catch {
                 self?.fail(error)
@@ -341,13 +354,19 @@ import LegatoVocabulary
         onChange?()
     }
     public var debugState: [String: Any] {
-        ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "inputMode": inputMode.rawValue, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus,
+        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "inputMode": inputMode.rawValue, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus,
          "sessionID": sessionID ?? "", "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
          "correctionCountdownStart": correctionCountdownStart as Any? ?? NSNull(),
          "correctionCountdownDeadline": correctionCountdownDeadline as Any? ?? NSNull(),
          "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "sentenceCleanupPending": sentenceCleanupPending, "sentenceCleanupFailed": sentenceCleanupFailed, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
+        state["audioPlatform"] = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(AutomaticInputSource.platformStatus()))) ?? [:]
+        if let automatic = mic as? AutomaticInputSource {
+            state["audioInput"] = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(automatic.diagnostics))) ?? [:]
+        }
+        state["audioDelivery"] = ["chunks": deliveredAudioChunks, "frames": deliveredAudioFrames, "acceptedFinalWords": acceptedASRWords]
+        return state
     }
     #endif
     public func setInputMode(_ value: ComposerInputMode, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
@@ -518,6 +537,8 @@ import LegatoVocabulary
             busy = !busyParticipants.isEmpty || sentenceCleanupPending > 0
         case .docSnapshot: if let value = try? event.payload.decode(DocumentSnapshot.self) { snapshot = value }
         case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; if value.origin != .undo { lastTransactionID = value.id } }
+        case .asrSegment:
+            if let words = try? event.payload["words"]?.decode([Word].self) { acceptedASRWords += words.count }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
         case .writingInstruction:
             hostActionNotice = nil; instructionCompleted = false

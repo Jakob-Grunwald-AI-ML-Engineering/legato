@@ -129,3 +129,19 @@ private final class HangingSentenceMessages: MessagesStreaming {
     catch { #expect(error is CancellationError) }
     #expect(fixture.cancelled.withLock { $0 })
 }
+
+@Test func sentenceCleanupReportsMergedUsageOnceWithoutSourceContent() async throws {
+    var events = try sentenceToolEvents(sentencePayload())
+    events.insert(try sentenceEvent("message_start", .object(["message": .object(["usage": .object([
+        "input_tokens": .number(123), "cache_read_input_tokens": .number(400), "cache_creation_input_tokens": .number(80)])])])), at: 0)
+    events.insert(try sentenceEvent("message_delta", .object(["usage": .object(["output_tokens": .number(21), "untrusted_text": .string("PRIVATE_SOURCE")])])), at: events.count - 1)
+    let reports = Mutex<[JSONValue]>([])
+    let client = SentenceCleanupClient(client: SentenceFixtureMessages(events), onUsage: { id, sequence, usage in
+        #expect(id == "sentence-a" && sequence == 7)
+        reports.withLock { $0.append(usage) }
+    })
+    _ = try await client.clean(.init(sentenceID: "sentence-a", sequence: 7, text: "PRIVATE_SOURCE", vocabulary: []))
+    #expect(reports.withLock { $0.count } == 1)
+    let usage = try #require(reports.withLock { $0.first })
+    #expect(usage == .object(["input_tokens": .number(123), "output_tokens": .number(21), "cache_read_input_tokens": .number(400), "cache_creation_input_tokens": .number(80)]))
+}
