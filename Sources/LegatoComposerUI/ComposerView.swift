@@ -96,8 +96,12 @@ public struct ComposerView: View {
                         .background(Color.black.opacity(0.001))
                         .contentShape(Rectangle())
                         .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named("composerViewport")).onEnded { value in
-                            guard let word = word(at: value.location) else { dismissSelection(); return }
-                            select(word, commit: true)
+                            let hit = word(at: value.location)
+                            #if DEBUG || LEGATO_INTERNAL
+                            NSLog("composer.hit x=%.1f y=%.1f rects=%ld hit=%d", Double(value.location.x), Double(value.location.y), bounds.reduce(0) { $0 + $1.rects.count }, hit == nil ? 0 : 1)
+                            #endif
+                            guard let hit else { dismissSelection(); return }
+                            select(hit, commit: true)
                         })
                     #if canImport(UIKit)
                     content.background(QuoteGestureBridge(reservedHeight: reservedHeight,
