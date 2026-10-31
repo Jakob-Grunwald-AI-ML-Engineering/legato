@@ -31,8 +31,11 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
 
 @MainActor final class NotchPanelController: NSObject {
     private var panel: ComposerPanel?
+    private var presentationGeneration = 0
+    private var sending = false
     private var screen: NSScreen?
     func show(controller: MacAppController, targetPID: pid_t?) {
+        presentationGeneration += 1; sending = false
         let screen = targetScreen(pid: targetPID) ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         self.screen = screen
@@ -63,7 +66,23 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
             panel.animator().alphaValue = 1
         }
     }
-    func hide() { panel?.orderOut(nil) }
+    func hide() { presentationGeneration += 1; sending = false; panel?.orderOut(nil) }
+    /// Preserve the same hosting view so its acknowledged draft can fly out after focus handoff.
+    func revealForSend() -> Int? {
+        guard let panel else { return nil }
+        sending = true
+        panel.orderFrontRegardless()
+        return presentationGeneration
+    }
+    func finishSend(_ generation: Int, ifUnchanged: @escaping @MainActor () -> Bool) {
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(420))
+            guard let self, generation == presentationGeneration else { return }
+            sending = false
+            guard panel?.isKeyWindow != true, ifUnchanged() else { return }
+            hide()
+        }
+    }
     private weak var modeController: MacAppController?
     func showModes(controller: MacAppController) {
         guard let panel else { return }
@@ -96,6 +115,7 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
         Task { await controller.composer.setMode(mode) }
     }
     private func resize(_ height: CGFloat) {
+        guard !sending else { return }
         guard let panel, let screen else { return }
         let frame = NotchGeometry.frame(screen: screen.frame, visible: screen.visibleFrame, safeTop: screen.safeAreaInsets.top, height: height)
         NSAnimationContext.runAnimationGroup { context in
@@ -171,7 +191,7 @@ private struct NotchComposerView: View {
             DraftInputHeader(active: session.inputMode == .dictation) {
                 Task { await session.setInputMode(.dictation) }
             }
-            ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
+            ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, successfulInsertionID: session.successfulInsertionID, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
                 instructionText: session.instructionPreview, instructionStatus: session.instructionStatus,
                 instructionInputActive: session.inputMode == .instructions,
                 correctionDraft: session.correctionDraft, correctionSubmitting: session.correctionSubmitting,

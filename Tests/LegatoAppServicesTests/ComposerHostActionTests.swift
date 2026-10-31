@@ -13,6 +13,7 @@ import LegatoRoom
     let insert = ComposerHostAction(id: "insert-1", instructionID: "instruction-1", kind: .insertDraft, context: context)
     let failed = await session.performHostAction(insert)
     #expect(!failed.succeeded)
+    #expect(session.successfulInsertionID == nil)
     #expect(session.renderedText == "Keep this draft")
     #expect(session.hostActionNotice?.contains("Draft kept") == true)
     var delivered = 0

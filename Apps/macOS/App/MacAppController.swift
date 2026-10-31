@@ -168,7 +168,18 @@ import Observation
         }
         writer = nil; composerTargetToken = nil
         if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
+            // Delivery has already succeeded. Reuse the existing nonactivating panel for
+            // its flight instead of recreating the view or delaying the target insertion.
+            let presentation = notch.revealForSend()
             await composer.insert()
+            let acknowledgement = composer.successfulInsertionID, remainingSession = composer.sessionID
+            if let presentation {
+                notch.finishSend(presentation) { [weak self] in
+                    guard let self else { return false }
+                    return composer.successfulInsertionID == acknowledgement && composer.sessionID == remainingSession
+                        && composer.renderedText.isEmpty && composer.tail.isEmpty && !isDictating
+                }
+            }
             return .init(succeeded: true, message: "Draft inserted into the bound text field.")
         }
         if delivered { failure = "Inserted. Draft changed during insertion; latest edits kept."; hud.show(toast: failure) }

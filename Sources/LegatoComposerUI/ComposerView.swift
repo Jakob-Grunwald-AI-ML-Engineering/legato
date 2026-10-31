@@ -6,6 +6,7 @@ public struct ComposerView: View {
     public let snapshot: DocumentSnapshot
     public var tail: String
     public var dictationRevision: Int
+    public var successfulInsertionID: String?
     public var pendingLineIDs: Set<String>
     public var busy: Bool
     public var instructionText: String
@@ -21,6 +22,9 @@ public struct ComposerView: View {
     public var onSendInstruction: (() -> Void)?
     public var onDiscardInstruction: () -> Void
     public var onPick: (String, String, String) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sendFlight = SendFlightPresentation()
+    @State private var sendFlightProgress = 0.0
     @State private var presentedParagraphs: [PresentedParagraph] = []
     @State private var presentedRevision = -1
     @State private var hasPresented = false
@@ -33,14 +37,14 @@ public struct ComposerView: View {
     @State private var bounds: [WordBounds] = []
     @State private var viewportSize: CGSize = .zero
     @State private var reservesSpace = false
-    public init(snapshot: DocumentSnapshot, tail: String = "", dictationRevision: Int = 0, pendingLineIDs: Set<String> = [], busy: Bool = false,
+    public init(snapshot: DocumentSnapshot, tail: String = "", dictationRevision: Int = 0, successfulInsertionID: String? = nil, pendingLineIDs: Set<String> = [], busy: Bool = false,
                 instructionText: String = "", instructionStatus: String = "Ready", instructionInputActive: Bool = false,
                 correctionDraft: String? = nil, correctionSubmitting: Bool = false, correctionCountdownStart: Double? = nil, correctionCountdownDeadline: Double? = nil,
                 onSelect: @escaping (QuoteSelection) -> Void = { _ in },
                 onDeselect: @escaping () -> Void = {}, onSendCorrection: (() -> Void)? = nil,
                 onSendInstruction: (() -> Void)? = nil, onDiscardInstruction: @escaping () -> Void = {},
                 onPick: @escaping (String, String, String) -> Void = { _, _, _ in }) {
-        self.snapshot = snapshot; self.tail = tail; self.dictationRevision = dictationRevision; self.pendingLineIDs = pendingLineIDs; self.busy = busy
+        self.snapshot = snapshot; self.tail = tail; self.dictationRevision = dictationRevision; self.successfulInsertionID = successfulInsertionID; self.pendingLineIDs = pendingLineIDs; self.busy = busy
         self.instructionText = instructionText; self.instructionStatus = instructionStatus; self.instructionInputActive = instructionInputActive
         self.correctionDraft = correctionDraft; self.correctionSubmitting = correctionSubmitting; self.correctionCountdownStart = correctionCountdownStart; self.correctionCountdownDeadline = correctionCountdownDeadline; self.onSelect = onSelect; self.onDeselect = onDeselect
         self.onSendCorrection = onSendCorrection; self.onSendInstruction = onSendInstruction; self.onDiscardInstruction = onDiscardInstruction; self.onPick = onPick
@@ -74,9 +78,20 @@ public struct ComposerView: View {
             withAnimation(.easeOut(duration: 0.16)) { proxy.scrollTo("composer-dictation-tail", anchor: .bottom) }
         }
     }
+    private var hasCanonicalDraft: Bool { !snapshot.lines.isEmpty || !tail.isEmpty }
+    private func beginSendFlightIfNeeded() {
+        if sendFlight.observe(acknowledgement: successfulInsertionID, hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty) {
+            var transaction = SwiftUI.Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { sendFlightProgress = 0 }
+        }
+    }
     public var body: some View {
+        let holdsSentViewport = sendFlight.retainsViewport(acknowledgement: successfulInsertionID,
+            hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty)
         let previous = snapshot.revision < presentedRevision ? [] : presentedParagraphs
-        let paragraphs = ParagraphPresentation.reconcile(previous: previous, lines: snapshot.lines, animateInsertions: hasPresented)
+        // Reuse the existing lazy viewport; do not create a second tree or rasterize a long draft.
+        let paragraphs = holdsSentViewport ? presentedParagraphs : ParagraphPresentation.reconcile(previous: previous, lines: snapshot.lines, animateInsertions: hasPresented)
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 if reservesSpace || showsGlobalComment { Color.clear.frame(height: reservedHeight).allowsHitTesting(false) }
@@ -90,7 +105,7 @@ public struct ComposerView: View {
                                 .transition(.opacity)
                         }
                         if !tail.isEmpty { Text(tail).foregroundStyle(.secondary).italic().transition(.opacity) }
-                        if snapshot.lines.isEmpty && tail.isEmpty { Text("Speak to compose…").foregroundStyle(.secondary) }
+                        if snapshot.lines.isEmpty && tail.isEmpty && !holdsSentViewport { Text("Speak to compose…").foregroundStyle(.secondary) }
                         Color.clear.frame(height: 1).id("composer-dictation-tail")
                     }.frame(maxWidth: .infinity, alignment: .leading).padding()
                         .background(Color.black.opacity(0.001))
@@ -115,17 +130,43 @@ public struct ComposerView: View {
                     #else
                     content.simultaneousGesture(quoteGesture)
                     #endif
-                }.background(Color.black.opacity(0.001)).scrollDisabled(isSelecting)
+                }.background(Color.black.opacity(0.001)).scrollDisabled(isSelecting || holdsSentViewport)
+                    .allowsHitTesting(!holdsSentViewport)
+                    .offset(y: holdsSentViewport && !reduceMotion ? -min(120, max(48, viewportSize.height * 0.6)) * sendFlightProgress : 0)
+                    .opacity(holdsSentViewport ? 1 - sendFlightProgress : 1)
             }
+            .clipped()
             .coordinateSpace(name: "composerViewport")
             .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportSize = $0 }
             .onPreferenceChange(WordBoundsKey.self) { bounds = $0 }
-            .onAppear { presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true }
+            .onAppear {
+                sendFlight.reset(acknowledgement: successfulInsertionID)
+                presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true
+            }
+            .onChange(of: successfulInsertionID) { _, _ in beginSendFlightIfNeeded() }
             .onChange(of: snapshot) { _, next in
-                presentedParagraphs = paragraphs; presentedRevision = next.revision
+                beginSendFlightIfNeeded()
+                if !holdsSentViewport { presentedParagraphs = paragraphs; presentedRevision = next.revision }
+            }
+            .task(id: sendFlight.activeAcknowledgement) {
+                guard let acknowledgement = sendFlight.activeAcknowledgement else { return }
+                let duration = reduceMotion ? 0.12 : 0.36
+                withAnimation(.easeIn(duration: duration)) { sendFlightProgress = 1 }
+                do { try await Task.sleep(for: .seconds(duration)) } catch { return }
+                guard !Task.isCancelled else { return }
+                var transaction = SwiftUI.Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    sendFlight.finish(acknowledgement)
+                    sendFlightProgress = 0
+                    if !hasCanonicalDraft { presentedParagraphs = []; presentedRevision = snapshot.revision }
+                }
             }
             .onChange(of: tail) { _, next in
-                if !next.isEmpty { followDictation(using: proxy) }
+                if !next.isEmpty {
+                    sendFlight.reset(acknowledgement: successfulInsertionID)
+                    followDictation(using: proxy)
+                }
             }
             .onChange(of: dictationRevision) { _, _ in followDictation(using: proxy) }
             .onChange(of: committedSelection) { _, value in
