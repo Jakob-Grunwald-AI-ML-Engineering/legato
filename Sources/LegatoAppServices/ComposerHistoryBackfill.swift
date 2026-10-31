@@ -8,7 +8,8 @@ import LegatoCore
 /// event (`final.md` alone also exists for a paused, still-resumable session) and `final.md` has text. IDs are the
 /// directory UUIDs, so they match the live composition IDs; existing entries, excluded (current) sessions,
 /// debug/UAT and unknown sources are skipped. Reads are bounded, nothing outside `sessions/` is touched, and a
-/// marker file stops later runs so entries the user deleted do not return.
+/// marker file stops later runs so entries the user deleted do not return. Callers version the marker name;
+/// bump it when the selection rules change so the improved pass runs once more.
 public enum ComposerHistoryBackfill {
     public static let maxSessions = 50
     static let headBytes = 64 * 1024

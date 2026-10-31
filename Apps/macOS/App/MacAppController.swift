@@ -65,7 +65,7 @@ import Observation
         guard !bootstrapped else { return }; bootstrapped = true
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
         Task {
-            await composer.backfillHistory(markerURL: URL.applicationSupportDirectory.appending(path: "Legato/history-backfill.done"))
+            await composer.backfillHistory(markerURL: URL.applicationSupportDirectory.appending(path: "Legato/history-backfill.v1.done"))
             await refreshRecent()
         }
         eventTask = Task { for await sample in tap.samples { handle(sample) } }
