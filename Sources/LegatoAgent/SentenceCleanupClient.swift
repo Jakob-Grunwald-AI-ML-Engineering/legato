@@ -32,9 +32,14 @@ public enum SentenceCleanupError: Error, Sendable, Equatable {
 /// Independent, local copyediting only. This client has no document or application capability.
 public struct SentenceCleanupClient: SentenceCleaning {
     private let client: any MessagesStreaming
+    private let onUsage: @Sendable (String, Int, JSONValue) async -> Void
     private static let maximumTextBytes = 8192
     private static let maximumToolBytes = 65_536
-    public init(client: any MessagesStreaming) { self.client = client }
+    /// Reports cumulative numeric token metadata once for each attempted provider request,
+    /// including partial counters on failure. Empty counters mean unavailable, not zero cost.
+    public init(client: any MessagesStreaming, onUsage: @escaping @Sendable (String, Int, JSONValue) async -> Void = { _, _, _ in }) {
+        self.client = client; self.onUsage = onUsage
+    }
 
     public func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
         try Task.checkCancellation()
@@ -46,42 +51,55 @@ public struct SentenceCleanupClient: SentenceCleaning {
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
         let request = try Self.request(input)
         var index: Int?, initial: JSONValue?, fragments = "", closed = false, stopped = false
-        for try await event in client.stream(request: request) {
-            try Task.checkCancellation()
-            if stopped { throw SentenceCleanupError.unexpectedResponse }
-            if event.event == "error" { throw SentenceCleanupError.providerError }
-            guard event.data.utf8.count <= Self.maximumToolBytes,
-                  let value = try? JSONDecoder().decode(JSONValue.self, from: Data(event.data.utf8)) else {
-                throw SentenceCleanupError.unexpectedResponse
-            }
-            switch event.event {
-            case "content_block_start":
-                guard index == nil, let i = Self.blockIndex(value),
-                      value["content_block"]?["type"] == .string("tool_use"),
-                      value["content_block"]?["name"] == .string("submit_sentence"),
-                      case .string(let id) = value["content_block"]?["id"], !id.isEmpty,
-                      case .object = value["content_block"]?["input"] else { throw SentenceCleanupError.unexpectedResponse }
-                index = i; initial = value["content_block"]?["input"]
-            case "content_block_delta":
-                guard !closed, let index, Self.blockIndex(value) == index,
-                      value["delta"]?["type"] == .string("input_json_delta"),
-                      case .string(let fragment) = value["delta"]?["partial_json"],
-                      fragments.utf8.count + fragment.utf8.count <= Self.maximumToolBytes else { throw SentenceCleanupError.unexpectedResponse }
-                fragments += fragment
-            case "content_block_stop":
-                guard !closed, let index, Self.blockIndex(value) == index else { throw SentenceCleanupError.unexpectedResponse }
-                closed = true
-            case "message_delta":
-                if let reason = value["delta"]?["stop_reason"], reason != .null, reason != .string("tool_use") {
-                    throw SentenceCleanupError.incomplete
+        var usageFields: [String: JSONValue] = [:]
+        do {
+            for try await event in client.stream(request: request) {
+                try Task.checkCancellation()
+                if stopped { throw SentenceCleanupError.unexpectedResponse }
+                if event.event == "error" { throw SentenceCleanupError.providerError }
+                guard event.data.utf8.count <= Self.maximumToolBytes,
+                      let value = try? JSONDecoder().decode(JSONValue.self, from: Data(event.data.utf8)) else {
+                    throw SentenceCleanupError.unexpectedResponse
                 }
-            case "message_stop":
-                guard index != nil, closed else { throw SentenceCleanupError.incomplete }
-                stopped = true
-            case "message_start", "ping": break
-            default: throw SentenceCleanupError.unexpectedResponse
+                if case .object(let usage) = value["usage"] ?? value["message"]?["usage"] {
+                    let keys: Set<String> = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+                    for (key, counter) in usage where keys.contains(key) {
+                        if case .number(let count) = counter, count.isFinite, count >= 0 { usageFields[key] = counter }
+                    }
+                }
+                switch event.event {
+                case "content_block_start":
+                    guard index == nil, let i = Self.blockIndex(value),
+                          value["content_block"]?["type"] == .string("tool_use"),
+                          value["content_block"]?["name"] == .string("submit_sentence"),
+                          case .string(let id) = value["content_block"]?["id"], !id.isEmpty,
+                          case .object = value["content_block"]?["input"] else { throw SentenceCleanupError.unexpectedResponse }
+                    index = i; initial = value["content_block"]?["input"]
+                case "content_block_delta":
+                    guard !closed, let index, Self.blockIndex(value) == index,
+                          value["delta"]?["type"] == .string("input_json_delta"),
+                          case .string(let fragment) = value["delta"]?["partial_json"],
+                          fragments.utf8.count + fragment.utf8.count <= Self.maximumToolBytes else { throw SentenceCleanupError.unexpectedResponse }
+                    fragments += fragment
+                case "content_block_stop":
+                    guard !closed, let index, Self.blockIndex(value) == index else { throw SentenceCleanupError.unexpectedResponse }
+                    closed = true
+                case "message_delta":
+                    if let reason = value["delta"]?["stop_reason"], reason != .null, reason != .string("tool_use") {
+                        throw SentenceCleanupError.incomplete
+                    }
+                case "message_stop":
+                    guard index != nil, closed else { throw SentenceCleanupError.incomplete }
+                    stopped = true
+                case "message_start", "ping": break
+                default: throw SentenceCleanupError.unexpectedResponse
+                }
             }
+        } catch {
+            await onUsage(input.sentenceID, input.sequence, .object(usageFields))
+            throw error
         }
+        await onUsage(input.sentenceID, input.sequence, .object(usageFields))
         try Task.checkCancellation()
         guard stopped, closed else { throw SentenceCleanupError.incomplete }
         let submitted: JSONValue
