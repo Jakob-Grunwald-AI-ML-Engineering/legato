@@ -34,7 +34,6 @@ struct KeyboardRootView: View {
                              onDiscardInstruction: { controller.composerIntent("discard-instruction") },
                              onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
                     .frame(maxHeight: .infinity)
-                    .transition(.opacity)
                 if let error = controller.composer.error {
                     Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).padding(.horizontal)
                 }
