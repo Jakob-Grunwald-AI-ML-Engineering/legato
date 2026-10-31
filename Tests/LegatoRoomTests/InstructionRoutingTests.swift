@@ -102,3 +102,31 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     #expect(await room.documentSnapshot.lines.isEmpty)
     await binder.stop()
 }
+
+@Test func untimedPendingSpeechKeepsItsLatchedChannelAcrossAFlip() async throws {
+    let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
+    await binder.start()
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await room.publish(channel: .asrTail, participant: .transcriber,
+        payload: .object(["text": .string("old dictation"), "activity": .bool(true)]), tOrigin: 100)
+    try await settleInstructionRouting()
+    await binder.setInputMode(.instructions, timestamp: 101)
+    try await room.publish(channel: .asrSegment, participant: .segmenter,
+        payload: .object(["words": try .encoding([Word(text: "old dictation")])]), tOrigin: 102)
+    try await inputBoundary(room, at: 103)
+    try await settleInstructionRouting()
+    try await room.publish(channel: .asrTail, participant: .transcriber,
+        payload: .object(["text": .string("shorten"), "activity": .bool(true)]), tOrigin: 104)
+    try await settleInstructionRouting()
+    await binder.setInputMode(.dictation, timestamp: 105)
+    try await room.publish(channel: .asrSegment, participant: .segmenter,
+        payload: .object(["words": try .encoding([Word(text: "shorten")])]), tOrigin: 106)
+    try await inputBoundary(room, at: 107)
+    try await settleInstructionRouting()
+    #expect(await room.documentSnapshot.text == "old dictation")
+    let instructions = await events.values.filter { $0.channel == .writingInstruction }
+    #expect(instructions.count == 1)
+    #expect(instructions.first?.payload["text"] == .string("shorten"))
+    await binder.stop()
+}

@@ -24,7 +24,7 @@ struct KeyboardRootView: View {
                 DraftInputHeader(active: controller.composer.inputMode != "instructions") {
                     controller.composerIntent("input-mode", text: "dictation")
                 }
-                Button("ABC") { showsTypingKeyboard = true }
+                Button("ABC") { showsModePicker = false; showsTypingKeyboard = true }
                     .font(.caption.weight(.medium)).frame(width: 44, height: 25)
                     .buttonStyle(KeyButtonStyle()).accessibilityLabel("Typing keyboard")
                     .accessibilityIdentifier("composer.typingKeyboard")

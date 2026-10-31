@@ -123,6 +123,12 @@ public actor HintBinder {
         _ = try? await room.publish(channel: .instructionDraft, participant: .hintBinder,
             payload: .object(["text": .string(text)]))
     }
+    private func discardInstructionCapture() async {
+        instructionQuietTask?.cancel(); instructionQuietTask = nil
+        let ids = instructionCapture?.segments ?? []
+        instructionCapture = nil; instructionTail = ""
+        for id in ids { await releaseSegment(id) }
+    }
     private func flushInstruction(_ boundary: Envelope) async {
         instructionQuietTask?.cancel(); instructionQuietTask = nil
         instructionTail = ""
@@ -205,7 +211,7 @@ public actor HintBinder {
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
     }
-    public func stop() async { instructionQuietTask?.cancel(); instructionCapture = nil; instructionTail = ""; task?.cancel(); task = nil; dismissed = []; suppressUntimedTail = false; await discardCapture(); await publishDraft() }
+    public func stop() async { await discardInstructionCapture(); task?.cancel(); task = nil; dismissed = []; suppressUntimedTail = false; await discardCapture(); await publishDraft() }
     public func tap(lineID: String, wordID: String, timestamp: Double) async throws {
         try await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
     }
@@ -349,7 +355,7 @@ public actor HintBinder {
         case .session:
             if case .string(let event) = envelope.payload["event"],
                ["asr.error", "cancel.work", "done"].contains(event) {
-                instructionQuietTask?.cancel(); instructionCapture = nil; instructionTail = ""
+                await discardInstructionCapture()
                 await discardCapture(); await publishDraft(); await publishInstructionDraft()
             }
         default: break

@@ -125,15 +125,17 @@ public struct ComposerView: View {
                         .accessibilityIdentifier("composer-instruction-popover")
                 }
             } }
-            .onAppear { showsInstructionComment = instructionInputActive && instructionStatus != "Done" }
-            .onChange(of: instructionInputActive) { _, active in showsInstructionComment = active }
-            .onChange(of: instructionText) { _, text in if !text.isEmpty && instructionStatus != "Done" { showsInstructionComment = true } }
+            .onAppear { showsInstructionComment = !instructionText.isEmpty && instructionStatus != "Done" }
+            .onChange(of: instructionText) { _, text in
+                if !text.isEmpty && instructionStatus != "Done" { showsInstructionComment = true }
+                else if instructionStatus != "Applying" { showsInstructionComment = false }
+            }
             .onChange(of: instructionStatus) { _, status in
-                if status == "Done" { showsInstructionComment = false }
-                else if status == "Applying" || (status == "Listening" && instructionInputActive) { showsInstructionComment = true }
+                if status == "Done" || status == "Ready" { showsInstructionComment = false }
+                else if status == "Applying" || (status == "Listening" && !instructionText.isEmpty) { showsInstructionComment = true }
             }
             .animation(.smooth(duration: 0.22), value: showsInstructionComment)
-            .overlay(alignment: .topTrailing) { if busy { AgentStatusGlyph().padding(8).allowsHitTesting(false) } }
+            .overlay(alignment: .topTrailing) { if busy && !showsGlobalComment { AgentStatusGlyph().padding(8).allowsHitTesting(false) } }
             .animation(.smooth(duration: 0.3), value: snapshot)
             .animation(.spring(response: 0.28, dampingFraction: 0.82), value: selected)
             .onChange(of: isSelecting) { _, active in
