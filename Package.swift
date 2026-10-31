@@ -37,6 +37,7 @@ let package = Package(
         .testTarget(name: "LegatoCoreTests", dependencies: ["LegatoCore"]),
         .target(name: "LegatoKeyboardCore", dependencies: ["LegatoComposerDoc"]),
         .target(name: "LegatoComposerUI", dependencies: ["LegatoComposerDoc", .product(name: "Pow", package: "Pow")]),
+        .testTarget(name: "LegatoComposerUITests", dependencies: ["LegatoComposerUI", "LegatoComposerDoc"]),
         .testTarget(name: "LegatoKeyboardCoreTests", dependencies: ["LegatoKeyboardCore"]),
         .target(name: "LegatoVocabulary"),
         .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),

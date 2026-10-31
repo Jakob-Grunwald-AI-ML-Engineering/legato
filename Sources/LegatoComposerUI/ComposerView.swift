@@ -18,6 +18,9 @@ public struct ComposerView: View {
     public var onDeselect: () -> Void
     public var onSendCorrection: (() -> Void)?
     public var onPick: (String, String, String) -> Void
+    @State private var presentedParagraphs: [PresentedParagraph] = []
+    @State private var presentedRevision = -1
+    @State private var hasPresented = false
     @State private var showsInstructionComment = false
     @State private var selected: QuoteSelection?
     @State private var committedSelection: QuoteSelection?
@@ -45,8 +48,8 @@ public struct ComposerView: View {
         if showsGlobalComment { return min(instructionBubbleHeight + 12, viewportSize.height * 0.6) }
         return reservesSpace ? min(100, viewportSize.height * 0.6) : 0
     }
-    // Particle/blur removal holds the old text and allocates layers for its entire height.
-    // Keep it for small edits; a large rewrite/Insert must release the old draft promptly.
+    // Large snapshots skip implicit whole-layout animation. Local changed-word effects
+    // remain independently bounded in the text renderer.
     private var animatesDraftChanges: Bool {
         var words = 0
         for line in snapshot.lines {
@@ -66,19 +69,19 @@ public struct ComposerView: View {
         }
     }
     public var body: some View {
+        let previous = snapshot.revision < presentedRevision ? [] : presentedParagraphs
+        let paragraphs = ParagraphPresentation.reconcile(previous: previous, lines: snapshot.lines, animateInsertions: hasPresented)
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 if reservesSpace || showsGlobalComment { Color.clear.frame(height: reservedHeight).allowsHitTesting(false) }
                 ScrollView {
                     let selectedWords = selected?.wordIDs(in: snapshot) ?? []
                     let content = LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(snapshot.lines.enumerated()), id: \.element.id) { index, line in
-                            LineView(line: line, ordinal: index + 1, pending: pendingLineIDs.contains(line.id),
-                                     selected: selectedWords, animatesEdits: animatesDraftChanges)
-                                .id(line.id)
-                                .transition(animatesDraftChanges && line.words.count <= 120
-                                    ? AnyTransition.asymmetric(insertion: .opacity.combined(with: .movingParts.blur(radius: 6)), removal: .movingParts.vanish(Color.secondary))
-                                    : .opacity)
+                        ForEach(paragraphs) { paragraph in
+                            LineView(line: paragraph.line, ordinal: paragraph.ordinal, pending: pendingLineIDs.contains(paragraph.line.id),
+                                     selected: selectedWords, animateInsertion: paragraph.animateInsertion)
+                                .id(paragraph.id)
+                                .transition(.opacity)
                         }
                         if !tail.isEmpty { Text(tail).foregroundStyle(.secondary).italic().transition(.opacity) }
                         if snapshot.lines.isEmpty && tail.isEmpty { Text("Speak to compose…").foregroundStyle(.secondary) }
@@ -107,13 +110,17 @@ public struct ComposerView: View {
             .coordinateSpace(name: "composerViewport")
             .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportSize = $0 }
             .onPreferenceChange(WordBoundsKey.self) { bounds = $0 }
+            .onAppear { presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true }
+            .onChange(of: snapshot) { _, next in
+                presentedParagraphs = paragraphs; presentedRevision = next.revision
+            }
             .onChange(of: tail) { _, next in
                 if !next.isEmpty { followDictation(using: proxy) }
             }
             .onChange(of: dictationRevision) { _, _ in followDictation(using: proxy) }
             .onChange(of: committedSelection) { _, value in
                 if reservesSpace, let value {
-                    Task { @MainActor in await Task.yield(); proxy.scrollTo(value.lineID, anchor: .top) }
+                    Task { @MainActor in await Task.yield(); proxy.scrollTo(paragraphs.first(where: { $0.line.id == value.lineID })?.id ?? value.lineID, anchor: .top) }
                 }
             }
             .overlay { GeometryReader { geometry in

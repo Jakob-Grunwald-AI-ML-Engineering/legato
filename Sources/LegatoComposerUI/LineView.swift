@@ -6,8 +6,11 @@ struct LineView: View {
     var ordinal: Int
     var pending: Bool
     var selected: Set<String>
-    var animatesEdits = true
+    var animateInsertion = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var edit = WordEditPresentation(old: [], new: [])
     @State private var progress = 1.0
+    @State private var appeared = false
     @State private var measured: [String: [CGRect]] = [:]
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -22,16 +25,26 @@ struct LineView: View {
                         WordBounds(lineID: line.id, wordID: id, rects: rects.map { $0.offsetBy(dx: geometry.frame(in: .named("composerViewport")).minX, dy: geometry.frame(in: .named("composerViewport")).minY) })
                     })
                 } }
-                .onChange(of: line.version) { _, _ in
-                    guard animatesEdits, line.words.count <= 120 else { progress = 1; return }
-                    progress = 0
-                    withAnimation(.easeOut(duration: 0.42)) { progress = 1 }
+                .onAppear {
+                    if animateInsertion && !appeared { animate(old: [], new: line.words) }
+                    appeared = true
                 }
+                .onChange(of: line.words) { old, new in animate(old: old, new: new) }
+                .onChange(of: reduceMotion) { _, enabled in if enabled { progress = 1 } }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    private func animate(old: [Word], new: [Word]) {
+        // A newer update replaces this plan immediately; no delayed per-word work survives it.
+        edit = WordEditPresentation(old: old, new: new)
+        guard !reduceMotion, !edit.isEmpty else { progress = 1; return }
+        progress = 0
+        withAnimation(.linear(duration: WordEditPresentation.duration)) { progress = 1 }
     }
     private var renderer: WordFX {
         var renderer = WordFX(progress: progress, pending: pending)
         renderer.selected = selected
+        renderer.edit = edit
+        renderer.reduceMotion = reduceMotion
         renderer.measure = { bounds in
             Task { @MainActor in
                 if measured != bounds { measured = bounds }
