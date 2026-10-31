@@ -41,7 +41,7 @@ import AppKit
         #endif
         harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "starting"] }
         harness.register("stop") { _ in MacAppController.shared.stopComposer(); return ["status": "stopping"] }
-        harness.register("composer-insert") { _ in MacAppController.shared.insertComposer(); return nil }
+        harness.register("composer-insert") { _ in MacAppController.shared.insertComposer(origin: .debugBridge); return nil }
         harness.register("composer-cancel") { _ in MacAppController.shared.cancelComposer(); return nil }
         harness.register("session-probe") { _ in try SessionProbe.start(); return nil }
         harness.register("say") { command in

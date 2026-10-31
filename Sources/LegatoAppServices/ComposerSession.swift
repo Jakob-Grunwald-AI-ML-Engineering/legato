@@ -10,6 +10,12 @@ import LegatoRoom
 import LegatoSoniox
 import LegatoVocabulary
 
+/// Which caller asked for an Insert; recorded in the session log so a disappearing draft can be traced.
+public enum ComposerInsertOrigin: String, Sendable {
+    case keyboardButton = "keyboard.button", instruction = "host.instruction"
+    case macPanelButton = "mac.panel.button", macShortcut = "mac.panel.shortcut", debugBridge = "debug.bridge"
+}
+
 /// Host-only session shared by the phone app and Mac panel. The keyboard receives value snapshots.
 @MainActor @Observable public final class ComposerSession {
     /// Emitted only by the successful external-delivery acknowledgement boundary.
@@ -93,8 +99,16 @@ import LegatoVocabulary
     @ObservationIgnored private var alternatives: AlternativesParticipant?
     @ObservationIgnored private var lastTransactionID: String?
     @ObservationIgnored private var busyParticipants: Set<Participant> = []
+    @ObservationIgnored private let history: (any HistoryStore)?
+    @ObservationIgnored private var historyWrite: Task<Bool, Never>?
+    /// Bumped after every successful History write or import, so views can refresh without polling.
+    public private(set) var historyRevision = 0
+    private var historyID = UUID()
+    private var historyDate = Date()
+    private var historyQueuedText: String?
     private let vocabularyURL: URL
-    public init(vocabularyURL: URL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json"), keepMicrophoneActive: Bool = true) {
+    public init(vocabularyURL: URL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json"), keepMicrophoneActive: Bool = true, history: (any HistoryStore)? = nil) {
+        self.history = history
         self.vocabularyURL = vocabularyURL
         #if os(iOS)
         self.keepMicrophoneActive = keepMicrophoneActive
@@ -105,11 +119,13 @@ import LegatoVocabulary
         self.activateAudioSession = Self.activateMicrophoneSession
     }
     init(microphone: any AudioSource, activateAudioSession: @escaping @MainActor () async throws -> Void) {
+        self.history = nil
         self.vocabularyURL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")
         self.mic = microphone
         self.activateAudioSession = activateAudioSession
     }
-    init(room: Room, log: SessionLog? = nil, binder: HintBinder? = nil) {
+    init(room: Room, log: SessionLog? = nil, binder: HintBinder? = nil, history: (any HistoryStore)? = nil) {
+        self.history = history
         self.binder = binder
         self.room = room
         self.sessionLog = log
@@ -117,6 +133,79 @@ import LegatoVocabulary
         self.mic = AutomaticInputSource()
         self.activateAudioSession = Self.activateMicrophoneSession
         self.vocabularyURL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")
+    }
+    /// Every accepted edit checkpoints to the existing History store; empty UI resets never erase it.
+    @discardableResult public func flushHistory() async -> Bool {
+        let token = generation
+        if let room {
+            let current = await room.documentSnapshot
+            guard generation == token else { return false }
+            if current.revision >= snapshot.revision { snapshot = current }
+        }
+        return await checkpointHistory()
+    }
+    private func checkpointHistory() async -> Bool { await enqueueCheckpoint()?.value ?? true }
+    /// Queues one ordered write of the current text; identical text is never written twice, so event
+    /// bursts and polling cannot duplicate writes. A blank draft queues nothing and cannot fail.
+    private func enqueueCheckpoint() -> Task<Bool, Never>? {
+        guard let history else { return nil }
+        let text = renderedText
+        let previous = historyWrite
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard let previous else { return nil }
+            return Task { _ = await previous.value; return true }
+        }
+        if historyQueuedText == text { return previous }
+        let id = historyID
+        let entry = DictationEntry(id: id, date: historyDate, text: text,
+            localeIdentifier: Locale.current.identifier, engineID: "composer", duration: max(0, Date().timeIntervalSince(historyDate)))
+        historyQueuedText = text
+        let write = Task { @MainActor [weak self] in
+            // Serialize across actor suspension and composition changes: an older checkpoint
+            // cannot finish after, and overwrite, a newer accepted edit.
+            _ = await previous?.value
+            do {
+                try await history.upsert(entry)
+                if let self {
+                    self.historyRevision += 1
+                    if self.historyID == id, self.error?.hasPrefix(Self.historyErrorPrefix) == true { self.error = nil; self.onChange?() }
+                }
+                return true
+            }
+            catch {
+                // Only the failing composition may report; a rotated ID means its draft was already handled.
+                if let self, self.historyID == id {
+                    if self.historyQueuedText == text { self.historyQueuedText = nil }
+                    self.error = Self.historyErrorPrefix + " Draft kept. Check available storage and try again."
+                    self.onChange?()
+                }
+                return false
+            }
+        }
+        historyWrite = write
+        return write
+    }
+    private static let historyErrorPrefix = "Couldn’t save composition to History."
+    /// Imports completed microphone sessions missing from History (once per install; see ``ComposerHistoryBackfill``).
+    public func backfillHistory(sessionsRoot: URL = URL.documentsDirectory.appending(path: "sessions"), markerURL: URL?) async {
+        guard let history else { return }
+        let current = Set([sessionID, historyID.uuidString].compactMap { $0.flatMap(UUID.init(uuidString:)) })
+        if await ComposerHistoryBackfill.run(sessionsRoot: sessionsRoot, history: history, excluding: current, markerURL: markerURL) > 0 {
+            historyRevision += 1
+        }
+    }
+    /// Appends an Insert trace event to the session log. Origin and acknowledgement kind only, never text.
+    /// An acknowledgement reflects the delivery mechanism's own report (for the keyboard, executed UIKit proxy
+    /// operations), not independently confirmed visible text in the target app.
+    public func traceInsertion(_ stage: String, origin: ComposerInsertOrigin, detail: [String: String] = [:]) async {
+        guard let room else { return }
+        var fields: [String: JSONValue] = ["event": .string("insert." + stage), "origin": .string(origin.rawValue),
+            "characters": .number(Double(renderedText.count))]
+        for (key, value) in detail { fields[key] = .string(value) }
+        _ = try? await room.publish(channel: .session, participant: .ui, payload: .object(fields))
+    }
+    private func beginHistoryComposition() {
+        historyID = UUID(); historyDate = Date(); historyQueuedText = nil
     }
     public func arm() async {
         guard !isArmed else { return }
@@ -158,6 +247,7 @@ import LegatoVocabulary
     }
     /// Opting out stops new input on backgrounding, preserving the draft and final agent work.
     public func prepareForBackground() async {
+        _ = await flushHistory()
         guard !keepMicrophoneActive else { return }
         if isListening { await stop() }
         isArmed = false; await mic.stop(); onChange?()
@@ -175,6 +265,7 @@ import LegatoVocabulary
             return
         }
         await cancel()
+        guard room == nil else { return }
         inputSource = debugMode == nil ? "microphone.soniox" : "debug.transcriber"
         audioOrigin = nil
         if debugMode != nil {
@@ -183,7 +274,7 @@ import LegatoVocabulary
         }
         let generation = UUID(); self.generation = generation
         pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; error = nil; status = "starting"; hunks = []; pendingLineIDs = []; busyParticipants = []; busy = false
-        let id = UUID().uuidString; sessionID = id
+        let id = UUID().uuidString; sessionID = id; historyID = UUID(uuidString: id)!
         do {
             let soniox = debugMode == nil ? (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "") : ""
             let claude = try KeychainKeyStore().apiKey() ?? ""
@@ -332,13 +423,14 @@ import LegatoVocabulary
     /// Deterministic local draft for native UI acceptance; no provider, key or microphone.
     public func seedDebugDraft(_ text: String) async throws {
         await cancel()
+        guard room == nil else { throw insertionFailure(error ?? "Could not preserve the current composition.") }
         let room = Room(resumable: true)
-        self.room = room; sessionID = UUID().uuidString; inputSource = "debug.seed"
+        self.room = room; historyID = UUID(); sessionID = historyID.uuidString; inputSource = "debug.seed"
         for line in text.components(separatedBy: "\n") where !line.isEmpty {
             _ = try await room.appendSegment(words: line.split(whereSeparator: \.isWhitespace).map { .init(text: String($0)) })
         }
         try await room.micOff(); try await room.finishFinalPass()
-        snapshot = await room.documentSnapshot; status = "paused"; onChange?()
+        snapshot = await room.documentSnapshot; status = "paused"; _ = await checkpointHistory(); onChange?()
     }
     /// Provider-free visual fixtures may edit only their own seeded Room, never a live draft.
     public func applyDebugDocumentEdits(_ json: String) async throws {
@@ -349,6 +441,7 @@ import LegatoVocabulary
         let transaction = try await room.applyDocument(ops, origin: .agent, versions: versions)
         hunks = transaction.hunks; lastTransactionID = transaction.id
         snapshot = await room.documentSnapshot
+        _ = await checkpointHistory()
         onChange?()
     }
     public func startDebug(mode: ComposerMode = .message, microphoneLease: Bool = false) async {
@@ -445,7 +538,7 @@ import LegatoVocabulary
         guard let room else { throw insertionFailure("There is no composition to insert.") }
         while true {
             try requireGeneration(token)
-            if let error { throw insertionFailure(error) }
+            if let error, !error.hasPrefix(Self.historyErrorPrefix) { throw insertionFailure(error) }
             let state = await room.state
             if (state == .paused || state == .done) && !busy && !instructionApplying && !instructionSubmitting { break }
             // Offline debug seeds intentionally have no writer or provider.
@@ -455,6 +548,8 @@ import LegatoVocabulary
         }
         try requireGeneration(token)
         snapshot = await room.documentSnapshot
+        guard await checkpointHistory() else { throw insertionFailure(error ?? "Could not save composition to History. Draft kept.") }
+        try requireGeneration(token)
         onChange?()
         return renderedText
     }
@@ -479,25 +574,29 @@ import LegatoVocabulary
                     versions: Dictionary(uniqueKeysWithValues: deliveredSnapshot.lines.map { ($0.id, $0.version) }))
             }
             snapshot = await room.documentSnapshot; tail = ""; hunks = []; lastTransactionID = nil
+            beginHistoryComposition()
             pendingLineIDs = []; error = nil; hostActionNotice = nil; status = "paused"; onChange?()
             return
         }
         _ = try? await room?.insert(); await cleanup()
+        beginHistoryComposition()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
         pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
     /// Discard the composition; Pause deliberately retains the rendered text.
     public func cancel() async {
+        guard await flushHistory() else { return }
         generation = UUID(); try? await room?.cancel(); await cleanup()
+        beginHistoryComposition()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
         pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
     /// Explicitly discard both this draft and the volatile reference from earlier delivered work.
     public func startNewTopic() async {
-        topicContext = nil
         await cancel()
+        if room == nil { topicContext = nil }
     }
     func captureHostActionContext() -> ComposerHostActionContext? {
         guard room != nil else { return nil }
@@ -516,6 +615,7 @@ import LegatoVocabulary
         case .clearComposer:
             if let clear = hostClearComposer { await clear() } else { await cancel() }
             instructionCompleted = true; onChange?()
+            guard room == nil else { return .init(succeeded: false, message: error ?? "Couldn’t clear composition. Draft kept.") }
             return .init(succeeded: true, message: "Composer cleared.")
         case .insertDraft:
             guard let target = action.context.targetToken, target == hostInsertionTarget?(), let insert = hostInsertDraft else {
@@ -582,6 +682,7 @@ import LegatoVocabulary
         case .docSnapshot:
             if let value = try? event.payload.decode(DocumentSnapshot.self) {
                 snapshot = value
+                _ = enqueueCheckpoint()
                 if pendingDictationRevision == value.revision {
                     dictationRevision += 1; pendingDictationRevision = nil
                 }

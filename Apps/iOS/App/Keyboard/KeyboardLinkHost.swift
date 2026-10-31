@@ -54,7 +54,7 @@ final class KeyboardLinkHost: TranscriptSink {
         composer.hostInsertionUnavailableReason = { "No visible Legato keyboard text field is bound." }
         composer.hostInsertDraft = { [weak self, weak composer] documentID in
             guard let self, let composer else { return .init(succeeded: false, message: "Composer closed. Draft kept.") }
-            return await self.insertComposerDraft(composer, expectedDocumentID: documentID)
+            return await self.insertComposerDraft(composer, expectedDocumentID: documentID, origin: .instruction)
         }
         composer.onChange = { [weak self, weak composer] in
             guard let self, let composer else { return }
@@ -78,7 +78,7 @@ final class KeyboardLinkHost: TranscriptSink {
                             guard let self, let composer else { return }
                             defer { self.composerInsertTask = nil; self.insertedComposerIntentID = intent.id }
                             guard intent.sessionID == composer.sessionID else { return }
-                            let result = await self.insertComposerDraft(composer, expectedDocumentID: self.link.keyboardDocumentID())
+                            let result = await self.insertComposerDraft(composer, expectedDocumentID: self.link.keyboardDocumentID(), origin: .keyboardButton)
                             self.composerInsertionNotice = result.succeeded ? nil : result.message
                         }
                     case "cancel": await composer.cancel()
@@ -182,26 +182,33 @@ final class KeyboardLinkHost: TranscriptSink {
     var keyboardIsVisible: Bool { link.keyboardIsVisible() }
 
     /// Both the visible Insert key and explicit Instructions use this same guarded delivery.
-    private func insertComposerDraft(_ composer: ComposerSession, expectedDocumentID: String?) async -> ComposerHostActionResult {
+    private func insertComposerDraft(_ composer: ComposerSession, expectedDocumentID: String?, origin: ComposerInsertOrigin) async -> ComposerHostActionResult {
         guard !preparingComposerInsert else { return .init(succeeded: false, message: "Insertion already in progress. Draft kept.") }
         preparingComposerInsert = true
         defer { preparingComposerInsert = false }
         let requestedSessionID = composer.sessionID
+        await composer.traceInsertion("requested", origin: origin)
         do {
             let text = try await composer.prepareForInsertion()
             guard requestedSessionID == composer.sessionID else { return .init(succeeded: false, message: "Composition changed. Insertion discarded.") }
             guard expectedDocumentID == nil || link.keyboardDocumentID() == expectedDocumentID else {
+                await composer.traceInsertion("undelivered", origin: origin, detail: ["reason": "target.changed"])
                 return .init(succeeded: false, message: "The target text field changed. Draft kept.")
             }
             let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
             guard !text.isEmpty else { return .init(succeeded: false, message: "The composer is empty.") }
             let delivered = await insert(text, documentID: expectedDocumentID)
+            // The acknowledgement is the keyboard's `finalApplied`: UIKit proxy operations ran. It does not
+            // independently prove the target app shows the text.
+            await composer.traceInsertion(delivered ? "acknowledged" : "undelivered", origin: origin,
+                detail: delivered ? ["ack": "keyboard.finalApplied"] : ["reason": "no.keyboard.ack"])
             if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
                 await composer.insert()
                 return .init(succeeded: true, message: "Draft inserted into the bound text field.")
             }
             return .init(succeeded: delivered, message: delivered ? "Inserted. Draft changed during insertion; latest edits kept." : "Couldn't insert into the text field. Draft kept.")
         } catch {
+            await composer.traceInsertion("undelivered", origin: origin, detail: ["reason": "prepare.failed"])
             return .init(succeeded: false, message: "Couldn't finish preparing the text. Draft kept. Try Insert again.")
         }
     }

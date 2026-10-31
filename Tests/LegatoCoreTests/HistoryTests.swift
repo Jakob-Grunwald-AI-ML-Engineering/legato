@@ -75,3 +75,36 @@ import Testing
         #expect(try await store.recent(limit: 10) == [b])
     }
 }
+
+extension JSONLHistoryStoreTests {
+    @Test func upsertPreservesOtherRecordsCorruptLinesAndCreatedTimestamp() async throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONLHistoryStore(fileURL: url)
+        let original = entry("First draft", t: 1), other = entry("Unrelated", t: 2)
+        try await store.append(original); try await store.append(other)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd(); try handle.write(contentsOf: Data("unreadable record\n".utf8)); try handle.close()
+        var revised = original; revised.text = "Edited draft"
+        try await store.upsert(revised)
+        #expect(try await store.recent(limit: 10) == [other, revised])
+        #expect(try String(contentsOf: url, encoding: .utf8).contains("unreadable record"))
+        #expect(revised.date == original.date)
+    }
+}
+
+extension JSONLHistoryStoreTests {
+    @Test func upsertKeepsTheStoredCreatedDateAndRecentOrdersByDate() async throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONLHistoryStore(fileURL: url)
+        let old = entry("old", t: 1), newer = entry("newer", t: 5)
+        try await store.append(newer)
+        try await store.upsert(old)
+        var edited = old; edited.text = "old edited"; edited.date = Date(timeIntervalSince1970: 99)
+        try await store.upsert(edited)
+        let recent = try await store.recent(limit: 10)
+        #expect(recent.map(\.text) == ["newer", "old edited"])
+        #expect(recent[1].date == old.date)
+    }
+}

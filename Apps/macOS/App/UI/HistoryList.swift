@@ -7,6 +7,9 @@ struct HistoryList: View {
     let onCopy: (DictationEntry) -> Void
     let onDelete: (DictationEntry) -> Void
 
+    /// Measured row stack height; a bare ScrollView has no ideal height and collapses in the menu-bar window.
+    @State private var contentHeight: CGFloat = 0
+
     var body: some View {
         if entries.isEmpty {
             Text("Nothing dictated yet.")
@@ -20,8 +23,9 @@ struct HistoryList: View {
                         HistoryRow(entry: entry, onCopy: onCopy, onDelete: onDelete)
                     }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
             }
-            .frame(maxHeight: 300)
+            .frame(height: min(max(contentHeight, 44), 300))
         }
     }
 }

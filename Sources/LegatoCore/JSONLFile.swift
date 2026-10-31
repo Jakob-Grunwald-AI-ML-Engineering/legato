@@ -80,6 +80,17 @@ public actor JSONLFile<Element: Codable & Sendable> {
         try write(lines: kept)
     }
 
+    /// Replace matching records in one atomic rewrite, preserving unrelated and corrupt lines.
+    public func upsert(_ element: Element, matching matches: (Element) -> Bool) throws {
+        let decoder = Self.makeDecoder()
+        var lines = try rawLines().filter { line in
+            guard let decoded = try? decoder.decode(Element.self, from: line) else { return true }
+            return !matches(decoded)
+        }
+        lines.append(try Self.makeEncoder().encode(element))
+        try write(lines: lines)
+    }
+
     /// Atomically replaces the file's contents with `elements` (corrupt lines are dropped).
     public func replaceAll(_ elements: [Element]) throws {
         let encoder = Self.makeEncoder()

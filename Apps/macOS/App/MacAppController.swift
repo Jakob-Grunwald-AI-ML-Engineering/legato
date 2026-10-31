@@ -16,7 +16,7 @@ import Observation
     let vocabulary: VocabularyService
     let history: any HistoryStore
     var recent: [DictationEntry] = []
-    let composer = ComposerSession()
+    let composer: ComposerSession
     let notch = NotchPanelController()
     private var writer: FieldWriter?
     private var composerTargetToken: String?
@@ -50,19 +50,24 @@ import Observation
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(engine) })
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        composer = ComposerSession(history: history)
         composer.hostInsertionTarget = { [weak self] in self?.composerTargetToken }
         composer.hostInsertionUnavailableReason = { [weak self] in
             self?.secureField == true ? "The bound field is secure." : "No external text field is bound."
         }
         composer.hostInsertDraft = { [weak self] target in
             guard let self else { return .init(succeeded: false, message: "Composer closed. Draft kept.") }
-            return await self.performComposerInsertion(expectedTarget: target)
+            return await self.performComposerInsertion(expectedTarget: target, origin: .instruction)
         }
         composer.hostClearComposer = { [weak self] in await self?.clearComposer() }
     }
     func bootstrap() {
         guard !bootstrapped else { return }; bootstrapped = true
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
+        Task {
+            await composer.backfillHistory(markerURL: URL.applicationSupportDirectory.appending(path: "Legato/history-backfill.v1.done"))
+            await refreshRecent()
+        }
         eventTask = Task { for await sample in tap.samples { handle(sample) } }
         pollTask = Task {
             while !Task.isCancelled {
@@ -122,11 +127,12 @@ import Observation
     func cancelComposer() { Task { await clearComposer() } }
     private func clearComposer() async {
         sessionTask?.cancel(); sessionTask = nil; starting = false
-        notch.hide(); writer = nil; composerTargetToken = nil; gesture.runEnded()
         await composer.cancel()
+        guard composer.snapshot.lines.isEmpty, composer.status == "idle" else { return }
+        notch.hide(); writer = nil; composerTargetToken = nil; gesture.runEnded()
     }
-    func insertComposer() { Task { _ = await performComposerInsertion() } }
-    private func performComposerInsertion(expectedTarget: String? = nil) async -> ComposerHostActionResult {
+    func insertComposer(origin: ComposerInsertOrigin = .macPanelButton) { Task { _ = await performComposerInsertion(origin: origin) } }
+    private func performComposerInsertion(expectedTarget: String? = nil, origin: ComposerInsertOrigin) async -> ComposerHostActionResult {
         guard !inserting else { return .init(succeeded: false, message: "Insertion already in progress. Draft kept.") }
         guard !composer.renderedText.isEmpty || !composer.tail.isEmpty else { return .init(succeeded: false, message: "The composer is empty.") }
         if let expectedTarget, expectedTarget != composerTargetToken {
@@ -139,9 +145,11 @@ import Observation
         let requestedTarget = composerTargetToken, requestedWriter = writer
         let pid = targetPID, secure = secureField, restore = settings.restoreClipboard
         gesture.runEnded()
+        await composer.traceInsertion("requested", origin: origin)
         let text: String
         do { text = try await composer.prepareForInsertion() }
         catch {
+            await composer.traceInsertion("undelivered", origin: origin, detail: ["reason": "prepare.failed"])
             guard composer.sessionID == requestedSessionID else { return .init(succeeded: false, message: "Composition changed; insertion discarded.") }
             let message = "Couldn't finish preparing the text. Draft kept. Try Insert again."
             hud.show(toast: message); notch.show(controller: self, targetPID: pid)
@@ -153,6 +161,8 @@ import Observation
         let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
         notch.hide()
         let action = requestedWriter?.finish(finalText: text) ?? .paste(text)
+        let route: String
+        switch action { case .done: route = "fieldwriter"; case .paste: route = "paste"; case .copy: route = "clipboard" }
         var delivered = false
         var failure = "Couldn't insert into the bound text field. Draft kept."
         switch action {
@@ -167,6 +177,9 @@ import Observation
             }
         }
         writer = nil; composerTargetToken = nil
+        // FieldWriter/paste report their own completion; neither proves the target app shows the text.
+        await composer.traceInsertion(delivered ? "acknowledged" : "undelivered", origin: origin,
+            detail: delivered ? ["ack": route] : ["reason": route + ".not.delivered"])
         if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
             // Delivery has already succeeded. Reuse the existing nonactivating panel for
             // its flight instead of recreating the view or delaying the target insertion.

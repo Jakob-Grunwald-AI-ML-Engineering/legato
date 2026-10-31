@@ -18,11 +18,15 @@ struct MenuContent: View {
             Label(controller.settings.hotkey?.displayName ?? "Set a shortcut in Settings", systemImage: "command")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
+            HistoryList(entries: controller.recent, onCopy: { controller.copy($0) }, onDelete: { controller.delete($0) })
+            Divider()
             HStack {
                 Button("Settings…") { NSApp.activate(); openSettings() }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
             }
         }.padding(20).frame(width: 300)
+            // Reloads on open and whenever the composer or backfill stores a new revision.
+            .task(id: controller.composer.historyRevision) { await controller.refreshRecent() }
     }
 }

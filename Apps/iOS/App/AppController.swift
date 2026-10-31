@@ -23,13 +23,13 @@ final class AppController {
     private init() {
         let root = AppGroup.containerURL
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
-        composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
-            keepMicrophoneActive: ComposerMicrophonePreference.keepActive())
         let settings = EngineSettings(defaults: AppGroup.defaults)
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(settings) },
             pairsFileURL: root.appending(path: "wordpairs-dictated.json"))
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
+            keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
         keyboardHost = KeyboardLinkHost()
         keyboardHost?.onChoices = { [weak self] choices in
             for choice in choices {
@@ -49,6 +49,7 @@ final class AppController {
             return true
         }
         keyboardHost?.startListening()
+        Task { [composer] in await composer.backfillHistory(markerURL: root.appending(path: "history-backfill.v1.done")) }
         #if LEGATO_INTERNAL
         DebugBridge.start()
         #endif
