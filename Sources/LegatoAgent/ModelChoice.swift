@@ -10,16 +10,17 @@ public struct AgentConfiguration: Sendable {
     public var liveModel: ModelChoice
     public var mode: ComposerMode
     public var personalPrompt: String
+    public var topicContext: TopicContext?
     public var hostActionContext: (@Sendable () async -> ComposerHostActionContext?)?
     public var performHostAction: (@Sendable (ComposerHostAction) async -> ComposerHostActionResult)?
     public var vocabulary: @Sendable (String) async -> [String]
     public init(liveModel: ModelChoice = .haiku,
-                mode: ComposerMode = .message, personalPrompt: String = "",
+                mode: ComposerMode = .message, personalPrompt: String = "", topicContext: TopicContext? = nil,
                 vocabulary: @escaping @Sendable (String) async -> [String] = { _ in [] },
                 hostActionContext: (@Sendable () async -> ComposerHostActionContext?)? = nil,
                 performHostAction: (@Sendable (ComposerHostAction) async -> ComposerHostActionResult)? = nil) {
         self.liveModel = liveModel; self.mode = mode
-        self.personalPrompt = personalPrompt; self.vocabulary = vocabulary
+        self.personalPrompt = personalPrompt; self.topicContext = topicContext; self.vocabulary = vocabulary
         self.hostActionContext = hostActionContext; self.performHostAction = performHostAction
     }
 }

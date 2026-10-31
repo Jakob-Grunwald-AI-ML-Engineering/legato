@@ -81,6 +81,7 @@ final class KeyboardLinkHost: TranscriptSink {
                             self.composerInsertionNotice = result.succeeded ? nil : result.message
                         }
                     case "cancel": await composer.cancel()
+                    case "new-topic": await composer.startNewTopic()
                     case "undo": await composer.undo()
                     case "stop": await composer.stop()
                     case "input-mode":

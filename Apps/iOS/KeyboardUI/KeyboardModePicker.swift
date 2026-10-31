@@ -7,8 +7,9 @@ struct KeyboardModePicker: View {
     let keyWidth: CGFloat
     let maximumHeight: CGFloat
     let onSelect: (String) -> Void
+    let onNewTopic: () -> Void
 
-    private var cardHeight: CGFloat { min(CGFloat(modes.count) * 40 + 8, maximumHeight) }
+    private var cardHeight: CGFloat { min(CGFloat(modes.count) * 40 + 65, maximumHeight) }
 
     var body: some View {
         ScrollView {
@@ -30,6 +31,23 @@ struct KeyboardModePicker: View {
                     .accessibilityLabel(mode.capitalized)
                     .accessibilityAddTraits(selected == mode ? .isSelected : [])
                 }
+                Divider().padding(.horizontal, 12)
+                Button(action: onNewTopic) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "sparkles.rectangle.stack").frame(width: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("New topic").font(.system(size: 16))
+                            Text("Clear draft and context").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(Color(uiColor: KeyColors.ink))
+                    .padding(.horizontal, 12).frame(height: 56).contentShape(Rectangle())
+                }
+                .buttonStyle(KeyboardModeRowStyle())
+                .accessibilityLabel("New topic")
+                .accessibilityHint("Clear draft and context")
+                .accessibilityIdentifier("composer.new-topic")
             }.padding(.vertical, 4)
         }
         .scrollIndicators(.hidden)

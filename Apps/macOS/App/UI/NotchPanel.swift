@@ -79,7 +79,17 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
             item.image = NSImage(systemSymbolName: modeIcon(mode), accessibilityDescription: nil)
             menu.addItem(item)
         }
+        menu.addItem(.separator())
+        let topic = NSMenuItem(title: "New topic", action: #selector(startNewTopic(_:)), keyEquivalent: "")
+        topic.subtitle = "Clear draft and context"
+        topic.image = NSImage(systemSymbolName: "sparkles.rectangle.stack", accessibilityDescription: nil)
+        topic.target = self
+        menu.addItem(topic)
         menu.popUp(positioning: nil, at: NSPoint(x: panel.frame.minX + 14, y: panel.frame.minY + 12), in: nil)
+    }
+    @objc private func startNewTopic(_ item: NSMenuItem) {
+        guard let controller = modeController else { return }
+        Task { await controller.composer.startNewTopic() }
     }
     @objc private func pickMode(_ item: NSMenuItem) {
         guard let raw = item.representedObject as? String, let mode = ComposerMode(rawValue: raw), let controller = modeController else { return }
