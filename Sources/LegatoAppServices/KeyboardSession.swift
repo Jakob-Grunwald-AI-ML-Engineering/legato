@@ -36,6 +36,8 @@ import LegatoVocabulary
     @ObservationIgnored private var queue: Task<Void, Never>?
     @ObservationIgnored private var dictationRoom: Room?
     @ObservationIgnored private var dictationStream: WarmStream?
+    /// The started stream of the current dictation take; nil while idle (only a held connection exists).
+    @ObservationIgnored private var dictationActive: SonioxClient?
     @ObservationIgnored private var dictationEvents: Task<Void, Never>?
     /// Audio routed while the dictation stream reconnects, sent once it is live (bounded to ~3 s).
     @ObservationIgnored private var dictationBacklog: [Data] = []
@@ -159,15 +161,15 @@ import LegatoVocabulary
             await composer.start()
             guard composer.isListening else { _ = gate.close(); probe.cancel(); return composer.error == nil }
         case .dictation:
-            if dictationStream == nil { openDictation() }
+            await activateDictation()
             composer.setRoute(.dictation)
         case .idle: break
         }
         probe.gateOpened(at: now())
         return true
     }
-    /// Tap again: stop routing and finalize. Agent takes finish as before (and re-warm); dictation keeps
-    /// its stream and only finalizes, after ~200 ms of silence as Soniox recommends.
+    /// Tap again: stop routing and finalize (after ~200 ms of silence, as Soniox recommends). The finalized
+    /// stream ends in the background once its words are final; a held, unbilled connection waits for the next tap.
     public func closeGate() async {
         await serial { [weak self] in
             guard let self else { return }
@@ -180,16 +182,20 @@ import LegatoVocabulary
         routeClosedAt = now()
         switch action {
         case .open: break
-        case .finalize(.agent): await composer.stop()
+        case .finalize(.agent): await composer.finalizeTake()
         case .finalize(.dictation):
             composer.setRoute(.idle)
-            if let stream = await dictationStream?.current() {
+            await flushDictationBacklog()
+            if let stream = dictationActive {
+                dictationActive = nil
                 try? await stream.sendAudio(Data(count: 6400))
-                _ = try? await stream.finalizeChunk()
+                Task { try? await stream.finish(micOff: false) }
             }
         case .abandon(.agent): await composer.abandonTake()
         case .abandon(.dictation):
             composer.setRoute(.idle); dictationBacklog = []
+            let active = dictationActive; dictationActive = nil
+            await active?.close()
             // Drop half-spoken words: close without finalizing. Delivered lines stay with the sink.
             await closeDictation()
         case .finalize(.idle), .abandon(.idle): composer.setRoute(.idle)
@@ -216,14 +222,23 @@ import LegatoVocabulary
             let terms = (try? await VocabularyStore(fileURL: vocabulary).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let config = SonioxConfig(mode: "Dictation", personalPrompt: prompt, terms: terms)
             let client = SonioxClient(room: room, config: config, socket: socket(), quietFailure: .always, onDrop: onDrop)
-            try await client.start(apiKey: key())
+            try await client.open(apiKey: key()); try await client.hold()
             return client
         }, now: now)
         dictationStream = stream; stream.warm()
     }
+    /// Starts the take on the held connection (or a fresh one) and holds the next connection right away.
+    private func activateDictation() async {
+        if dictationStream == nil { openDictation() }
+        guard dictationActive == nil, let stream = dictationStream else { return }
+        guard let held = await stream.take() else { stream.warm(); return }
+        stream.warm()
+        do { try await held.begin(); dictationActive = held } catch { await held.close() }
+    }
     private func closeDictation() async {
-        let stream = dictationStream, room = dictationRoom
-        dictationStream = nil; dictationRoom = nil; dictationBacklog = []
+        let stream = dictationStream, room = dictationRoom, active = dictationActive
+        dictationStream = nil; dictationRoom = nil; dictationBacklog = []; dictationActive = nil
+        await active?.close()
         await stream?.close()
         dictationEvents?.cancel(); dictationEvents = nil
         try? await room?.cancel()
@@ -250,15 +265,19 @@ import LegatoVocabulary
         guard gate.route == .dictation else { return }
         dictationBacklog.append(pcm)
         if dictationBacklog.count > 100 { dictationBacklog.removeFirst(dictationBacklog.count - 100) }
+        if let rate = composer.routedAudioAt { probe.audioRouted(at: rate) }
+        await flushDictationBacklog()
+    }
+    /// Audio goes out in order; a take whose stream dropped continues on the next held connection.
+    private func flushDictationBacklog() async {
         guard !dictationSending else { return }
         dictationSending = true
         defer { dictationSending = false }
-        if dictationStream == nil { openDictation() }
-        if let rate = composer.routedAudioAt { probe.audioRouted(at: rate) }
-        // A dropped stream reconnects in the background; audio waits for it, in order.
-        while !dictationBacklog.isEmpty, gate.route == .dictation, let stream = await dictationStream?.current() {
+        while !dictationBacklog.isEmpty, dictationStream != nil {
+            if dictationActive == nil { await activateDictation() }
+            guard let stream = dictationActive else { return }
             let chunk = dictationBacklog.removeFirst()
-            do { try await stream.sendAudio(chunk) } catch { dictationBacklog.insert(chunk, at: 0); return }
+            do { try await stream.sendAudio(chunk) } catch { dictationBacklog.insert(chunk, at: 0); dictationActive = nil; return }
         }
     }
 

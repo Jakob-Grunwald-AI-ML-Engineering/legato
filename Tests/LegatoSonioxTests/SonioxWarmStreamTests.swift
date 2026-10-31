@@ -54,6 +54,28 @@ import LegatoRoom
     }
 }
 
+extension SonioxWarmStreamTests {
+    @Test func heldConnectionSendsNoStartRequestUntilBegin() async throws {
+        let room = Room()
+        let socket = FakeSocket()
+        let client = SonioxClient(room: room, socket: socket, keepaliveInterval: .milliseconds(5))
+        try await client.open(apiKey: "test")
+        try await client.hold()
+        try await Task.sleep(for: .milliseconds(20))
+        let held = await socket.sent()
+        #expect(held.allSatisfy { $0 == .text(#"{"type":"keepalive"}"#) } && !held.isEmpty, "Only keepalives before the start request")
+        let open = await client.isOpen, streaming = await client.isStreaming
+        #expect(open && !streaming)
+        await #expect(throws: SonioxError.self) { try await client.sendAudio(Data([1])) }
+        try await client.begin()
+        try await client.sendAudio(Data([1]))
+        let sent = await socket.sent()
+        let config = try #require(sent.firstIndex { if case .text(let text) = $0 { text.contains("stt-rt") } else { false } })
+        #expect(sent.last == .binary(Data([1])) && config < sent.count - 1)
+        await client.cancel()
+    }
+}
+
 private actor DropCounter {
     var count = 0
     func hit() { count += 1 }

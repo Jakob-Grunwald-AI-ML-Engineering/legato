@@ -1,7 +1,8 @@
 import Foundation
 import LegatoSoniox
 
-/// One pre-opened Soniox stream, configured and kept alive by the client's keepalive while no audio flows.
+/// One held Soniox connection: authenticated and upgraded, no start request (Soniox bills streams, not held
+/// connections), kept alive by keepalive. A take sends the start request and its audio on it.
 /// A quiet drop reconnects in the background with backoff; a missing or rejected key stops retrying
 /// (the next take then connects visibly and reports it).
 @MainActor final class WarmStream {
@@ -34,6 +35,8 @@ import LegatoSoniox
                 let created = try await connect({ [weak self] in await self?.dropped(id) })
                 pending = nil
                 guard !closed else { await created.close(); return }
+                // A drop during the connect reached no slot yet: reconnect now.
+                guard await created.isOpen else { reconnects += 1; warm(); return }
                 client = created; clientID = id; liveSince = now(); failures = 0
             } catch {
                 pending = nil
@@ -53,7 +56,7 @@ import LegatoSoniox
     /// The live stream, kept in the slot (the dictation route reuses one stream across taps).
     func current() async -> SonioxClient? {
         if client == nil, let pending { await pending.value }
-        guard let client, await client.isStreaming else { return nil }
+        guard let client, await client.isOpen else { return nil }
         return client
     }
     func close() async {

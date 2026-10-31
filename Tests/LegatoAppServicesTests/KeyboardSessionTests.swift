@@ -45,7 +45,7 @@ import LegatoSoniox
                                        makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
-        try await until { await sockets.last?.configured == true }
+        try await until { await sockets.last?.held == true }
         return (composer, keyboard)
     }
 
@@ -56,6 +56,7 @@ import LegatoSoniox
         await mic.emit()
         try await Task.sleep(for: .milliseconds(20))
         #expect(await sockets.last?.audioFrames == 0, "The idle gate discards audio; the stream only sees keepalives")
+        #expect(await sockets.last?.configured == false, "Idle keyboards hold the connection without a billed stream")
         #expect(sockets.count == 1)
     }
 
@@ -64,8 +65,10 @@ import LegatoSoniox
         let socket = try #require(sockets.last)
         #expect(await keyboard.openGate(tapAt: Date()))
         #expect(composer.route == .dictation)
+        #expect(await socket.configured, "The start request goes out on tap")
         await mic.emit()
         try await until { await socket.audioFrames > 0 }
+        #expect(await socket.configuredBeforeAudio)
         await socket.feed(#"{"tokens":[{"text":"Hallo","is_final":false}]}"#)
         try await until { keyboard.dictationTail == "Hallo" }
         #expect(keyboard.probes.count == 1 && keyboard.probes.first?.route == .dictation && keyboard.probes.first?.warm == true)
@@ -75,8 +78,14 @@ import LegatoSoniox
         #expect(composer.snapshot.lines.isEmpty && composer.tail.isEmpty, "Dictation audio never reaches the composition")
         await keyboard.closeGate()
         #expect(composer.route == .idle)
-        #expect(await socket.sent.contains(.text(#"{"type":"finalize"}"#)), "Tap again finalizes")
-        #expect(await socket.closed == false, "The dictation stream stays open for the next tap")
+        try await until { await socket.sent.contains(.text(#"{"type":"finalize"}"#)) }
+        await socket.feed(#"{"tokens":[{"text":"<fin>","is_final":true}]}"#)
+        try await until { await socket.sent.contains(.text("")) }
+        await socket.feed(#"{"finished":true}"#)
+        try await until { await socket.closed }
+        #expect(sockets.count == 2, "A held, unbilled connection waits for the next tap")
+        try await until { await sockets.last?.held == true }
+        #expect(await sockets.last?.configured == false)
         #expect(composer.holdsWarmInput, "The microphone keeps running between taps")
     }
 
@@ -100,11 +109,12 @@ import LegatoSoniox
         let (composer, keyboard) = try await openOnTyping()
         await sockets.last?.drop()
         try await until { sockets.count == 2 }
-        try await until { await sockets.last?.configured == true }
+        try await until { await sockets.last?.held == true }
         #expect(composer.error == nil && keyboard.isOpen)
         #expect(await keyboard.openGate())
         await mic.emit()
-        try await until { await sockets.last?.audioFrames ?? 0 > 0 }
+        let active = try #require(sockets.at(1))
+        try await until { await active.audioFrames > 0 }
     }
 }
 
@@ -140,6 +150,7 @@ final class SocketBox: Sendable {
     func make() -> TestSocket { let socket = TestSocket(); sockets.withLock { $0.append(socket) }; return socket }
     var last: TestSocket? { sockets.withLock { $0.last } }
     var count: Int { sockets.withLock { $0.count } }
+    func at(_ index: Int) -> TestSocket? { sockets.withLock { $0.indices.contains(index) ? $0[index] : nil } }
 }
 
 actor TestSocket: SonioxSocket {
@@ -148,7 +159,13 @@ actor TestSocket: SonioxSocket {
     private var dropped = false
     private var inbox: [SonioxFrame] = []
     private var waiter: CheckedContinuation<SonioxFrame, any Error>?
-    var configured: Bool { sent.contains { if case .text(let text) = $0 { text.contains("stt-rt") } else { false } } }
+    var configured: Bool { sent.contains(where: Self.isConfig) }
+    var held: Bool { sent.contains(.text(#"{"type":"keepalive"}"#)) }
+    var configuredBeforeAudio: Bool {
+        guard let config = sent.firstIndex(where: Self.isConfig) else { return false }
+        return !sent[..<config].contains { if case .binary = $0 { true } else { false } }
+    }
+    private static func isConfig(_ frame: SonioxFrame) -> Bool { if case .text(let text) = frame { text.contains("stt-rt") } else { false } }
     var audioFrames: Int { sent.filter { if case .binary = $0 { true } else { false } }.count }
     func connect(request: URLRequest) async throws {}
     func send(_ frame: SonioxFrame) async throws { guard !closed else { throw SonioxError.network }; sent.append(frame) }
