@@ -1,0 +1,205 @@
+{
+  "productSource": "67f6a848c93e11f29d818901f700d5a1d41fd3c5",
+  "syntheticOnly": true,
+  "microphonesStarted": false,
+  "priorControlledUpperUSD": 0.3839864,
+  "globalControlledClaudeUpperUSD": 0.6157753000000002,
+  "approvedClaudeCapUSD": 2,
+  "conservativeRatesPerMillion": {
+    "input": 0.5,
+    "cacheCreation": 1,
+    "cacheRead": 0.05,
+    "output": 2.5
+  },
+  "sentenceConfiguredModel": "claude-haiku-5-5",
+  "sentenceLatencySeconds": {
+    "min": 2.5023374583252007,
+    "max": 3.5811542500014184
+  },
+  "sessions": [
+    {
+      "source": "3bc70b8",
+      "sessionID": "5CF687E1-E81F-4339-8B90-B525A8808B53",
+      "requests": {
+        "sentenceRequests": 2,
+        "writerRequests": 4
+      },
+      "maxSentenceInFlight": 2,
+      "maxWriterInFlight": 1,
+      "sentenceSeconds": [
+        3.29233766667312,
+        3.5811542500014184
+      ],
+      "usage": {
+        "input_tokens": 2128,
+        "cache_creation_input_tokens": 28184,
+        "output_tokens": 686,
+        "cache_read_input_tokens": 25043
+      },
+      "missingUsageRecords": 0,
+      "writerReportedModels": [
+        "claude-haiku-5-5"
+      ]
+    },
+    {
+      "source": "3bc70b8",
+      "sessionID": "6B5EF8A1-3D4D-48B2-9D45-E2A0558FF0BA",
+      "requests": {
+        "sentenceRequests": 2,
+        "writerRequests": 2
+      },
+      "maxSentenceInFlight": 2,
+      "maxWriterInFlight": 1,
+      "sentenceSeconds": [
+        3.110546041658381,
+        3.370970291667618
+      ],
+      "usage": {
+        "output_tokens": 278,
+        "cache_read_input_tokens": 8469,
+        "cache_creation_input_tokens": 10230,
+        "input_tokens": 2110
+      },
+      "missingUsageRecords": 0,
+      "writerReportedModels": [
+        "claude-haiku-5-5"
+      ]
+    },
+    {
+      "source": "3bc70b8",
+      "sessionID": "9ED22509-EB08-4A80-9831-7747FDD6848D",
+      "requests": {
+        "sentenceRequests": 8,
+        "writerRequests": 8
+      },
+      "maxSentenceInFlight": 2,
+      "maxWriterInFlight": 1,
+      "sentenceSeconds": [
+        2.8935649166669464,
+        2.84475833333272,
+        2.5023374583252007,
+        2.983396666662884,
+        2.799084791666246,
+        2.821373124999809,
+        3.1603181249956833,
+        3.3538695000024745
+      ],
+      "usage": {
+        "input_tokens": 8401,
+        "cache_read_input_tokens": 90927,
+        "output_tokens": 1328,
+        "cache_creation_input_tokens": 27721
+      },
+      "missingUsageRecords": 0,
+      "writerReportedModels": [
+        "claude-haiku-5-5"
+      ]
+    },
+    {
+      "source": "6ddf49c",
+      "sessionID": "0D0EA7A4-6749-4B02-AEE9-8DBB7AA1637B",
+      "requests": {
+        "sentenceRequests": 2,
+        "writerRequests": 4
+      },
+      "maxSentenceInFlight": 2,
+      "maxWriterInFlight": 1,
+      "sentenceSeconds": [
+        3.2392016666708514,
+        3.268214875002741
+      ],
+      "usage": {
+        "cache_creation_input_tokens": 29929,
+        "output_tokens": 692,
+        "cache_read_input_tokens": 27913,
+        "input_tokens": 2129
+      },
+      "missingUsageRecords": 0,
+      "writerReportedModels": [
+        "claude-haiku-5-5"
+      ]
+    },
+    {
+      "source": "6ddf49c",
+      "sessionID": "6352CA65-F2AF-4537-B319-59A8F2D41E86",
+      "requests": {
+        "sentenceRequests": 8,
+        "writerRequests": 9
+      },
+      "maxSentenceInFlight": 2,
+      "maxWriterInFlight": 1,
+      "sentenceSeconds": [
+        3.2610241250076797,
+        2.7613361666735727,
+        2.660994000005303,
+        2.774926875004894,
+        3.1463839166681282,
+        2.9658554583293153,
+        2.9398397083277814,
+        2.96383391667041
+      ],
+      "usage": {
+        "cache_read_input_tokens": 120789,
+        "cache_creation_input_tokens": 32144,
+        "output_tokens": 1773,
+        "input_tokens": 8381
+      },
+      "missingUsageRecords": 0,
+      "writerReportedModels": [
+        "claude-haiku-5-5"
+      ]
+    },
+    {
+      "source": "67f6a84",
+      "sessionID": "0EEABD7F-4F90-40DB-83D5-B86C6C37DB21",
+      "requests": {
+        "sentenceRequests": 8,
+        "writerRequests": 12
+      },
+      "maxSentenceInFlight": 2,
+      "maxWriterInFlight": 1,
+      "sentenceSeconds": [
+        3.230909583333414,
+        2.926192250000895,
+        2.6745935833314434,
+        3.1931676249951124,
+        2.650854708335828,
+        3.4609177083329996,
+        3.18340945833188,
+        2.818380624987185
+      ],
+      "usage": {
+        "cache_read_input_tokens": 233857,
+        "cache_creation_input_tokens": 43512,
+        "input_tokens": 8399,
+        "output_tokens": 2821
+      },
+      "missingUsageRecords": 0,
+      "writerReportedModels": [
+        "claude-haiku-5-5"
+      ]
+    }
+  ],
+  "soniox": {
+    "model": "stt-rt-v5",
+    "streams": 2,
+    "secondsPerStream": 22.2233125,
+    "defaultEndpoints": 7,
+    "lessEagerEndpoints": 5,
+    "lessEagerSettings": {
+      "endpoint_latency_adjustment_level": 0,
+      "endpoint_sensitivity": -0.3,
+      "max_endpoint_delay_ms": 3000
+    },
+    "sameActualTokenStreamReplay": {
+      "transportSegments": 8,
+      "finalDraftLines": 4,
+      "allWordsRetained": true,
+      "residualDependentClause": true
+    }
+  },
+  "native": {
+    "mac": "signed isolated composer-debug; hotkeys disabled; paused; no mic lease",
+    "iphone": "signed final source installed; normal launch blocked Locked; physical UAT untested"
+  }
+}
