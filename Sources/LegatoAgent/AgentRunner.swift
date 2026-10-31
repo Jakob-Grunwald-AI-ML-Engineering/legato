@@ -39,7 +39,7 @@ public actor AgentRunner {
     }
     public func start() async {
         guard subscription == nil else { return }; stopped = false
-        let events = await room.subscribe(participant: .liveAgent, channels: [.asrRawTail, .asrTail, .asrSegment, .hint, .userIntent, .docOps, .session])
+        let events = await room.subscribe(participant: .liveAgent, channels: [.asrRawTail, .asrTail, .asrSegment, .hint, .writingInstruction, .userIntent, .docOps, .session])
         subscription = Task { [weak self] in
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
@@ -87,8 +87,8 @@ public actor AgentRunner {
             }
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { configuration.mode = mode }
-        if AgentAdmission.isAcceptedContent(event) || AgentAdmission.isUserEdit(event) || event.channel == .hint || event.channel == .userIntent {
-            if AgentAdmission.isAcceptedContent(event) || event.channel == .hint || event.payload["event"] == .string("mode.changed") {
+        if AgentAdmission.isAcceptedContent(event) || AgentAdmission.isUserEdit(event) || event.channel == .hint || event.channel == .writingInstruction || event.channel == .userIntent {
+            if AgentAdmission.isAcceptedContent(event) || event.channel == .hint || event.channel == .writingInstruction || event.payload["event"] == .string("mode.changed") {
                 await speechActivity()
             } else if phase == .pause { await cancelCurrentTurn() }
             let targets = Set(["line", "lineID"].compactMap { key -> String? in
@@ -135,6 +135,8 @@ public actor AgentRunner {
             events = pending
             if pending.contains(where: { $0.channel == .hint }) {
                 next = .targeted
+            } else if pending.contains(where: { $0.channel == .writingInstruction }) {
+                next = .instruction
             } else if pauseDue && !finalPending {
                 // Speech stopped while the previous quick request was still running.
                 // Compose these queued notes now instead of paying for a redundant quick turn.
@@ -177,11 +179,16 @@ public actor AgentRunner {
             let reseed = !conversation.seeded || Self.shouldReseed(tokens: conversation.tokens, idle: now - conversation.lastTurn)
             if reseed { conversation = Conversation() }
             let snapshot = await room.documentSnapshot
-            var allowedLineIDs: Set<String>? = phase == .sentence ? Set(snapshot.lines.map(\.id)) : nil
+            let instructionSnapshot = events.last(where: { $0.channel == .writingInstruction })
+                .flatMap { try? $0.payload["snapshot"]?.decode(DocumentSnapshot.self) }
+            var allowedLineIDs: Set<String>? = phase == .instruction
+                ? Set((instructionSnapshot ?? snapshot).lines.map(\.id))
+                : (phase == .sentence ? Set(snapshot.lines.map(\.id)) : nil)
             let context = reseed ? history : pendingContext
             pendingContext = []
             let eventText = String(data: try JSONEncoder().encode(context), encoding: .utf8) ?? "[]"
-            let input = "Writing phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
+            let activeEvents = String(data: try JSONEncoder().encode(events), encoding: .utf8) ?? "[]"
+            let input = "Writing phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nActive events for this turn:\n\(activeEvents)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
             await log(participant, ["event": .string("turn.phase"), "phase": .string(phase.rawValue)])
             conversation.messages.append(.object(["role": .string("user"), "content": .string(input)]))
             let turnMode = configuration.mode

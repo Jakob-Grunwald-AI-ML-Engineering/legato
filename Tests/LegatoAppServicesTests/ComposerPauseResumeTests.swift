@@ -106,3 +106,23 @@ import LegatoRoom
     await session.insert()
     #expect(session.renderedText.isEmpty)
 }
+
+@MainActor @Test func inputChannelSurvivesPauseResumeAndResetsAfterInsertAndCancel() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let room = Room(resumable: true), log = try SessionLog(rootDirectory: root)
+    let session = ComposerSession(room: room, log: log)
+    _ = try await room.appendSegment(words: [.init(text: "Retain this draft")])
+    await session.refreshDebugState()
+    await session.setInputMode(.instructions)
+    try await room.micOff(); try await room.finishFinalPass()
+    await session.resumeSession(debug: true)
+    #expect(session.inputMode == .instructions)
+    #expect(session.renderedText == "Retain this draft")
+    await session.insert()
+    #expect(session.inputMode == .dictation)
+    await session.setInputMode(.instructions)
+    await session.cancel()
+    #expect(session.inputMode == .dictation)
+    #expect(session.instructionPreview.isEmpty)
+}
