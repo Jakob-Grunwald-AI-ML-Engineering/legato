@@ -49,11 +49,13 @@ private func pipelineWait(_ predicate: () async -> Bool) async -> Bool {
     for _ in 0..<200 { if await predicate() { return true }; try? await Task.sleep(for: .milliseconds(10)) }
     return false
 }
-private func pipelineFixture(room: Room, cleaner: ControlledSentenceCleaner) async -> (HintBinder, OrderedSentencePipeline) {
+private func pipelineFixture(room: Room, cleaner: ControlledSentenceCleaner,
+    status: @escaping @Sendable (SentencePipelineStatus) async -> Void = { _ in },
+    diagnostic: @escaping @Sendable ([String: JSONValue]) async -> Void = { _ in }) async -> (HintBinder, OrderedSentencePipeline) {
     // The box resolves the deliberate binder/pipeline cycle without copying raw speech into Room docs.
     let box = PipelineBox()
     let binder = HintBinder(room: room, onDictation: { sentence in await box.enqueue(sentence) })
-    let pipeline = OrderedSentencePipeline(cleaner: cleaner, accept: { value in try await binder.acceptValidatedDictation(value) })
+    let pipeline = OrderedSentencePipeline(cleaner: cleaner, accept: { value in try await binder.acceptValidatedDictation(value) }, status: status, diagnostic: diagnostic)
     await box.set(pipeline)
     await binder.start()
     return (binder, pipeline)
@@ -88,11 +90,17 @@ private actor PipelineBox {
     let room = Room(segmentRouting: .intercepted, resumable: true, validateDictation: true, drainOnly: true), cleaner = ControlledSentenceCleaner()
     let events = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded), captured = PipelineEvents()
     let collect = Task { for await event in events { await captured.add(event) } }
-    let (binder, pipeline) = await pipelineFixture(room: room, cleaner: cleaner)
+    let statuses = Mutex<[SentencePipelineStatus]>([]), diagnostics = Mutex<[[String: JSONValue]]>([])
+    let (binder, pipeline) = await pipelineFixture(room: room, cleaner: cleaner,
+        status: { value in statuses.withLock { $0.append(value) } },
+        diagnostic: { value in diagnostics.withLock { $0.append(value) } })
     _ = try await room.publishSegment(words: [.init(text: "PENDING_RAW_ONLY.")])
     #expect(await pipelineWait { await cleaner.count == 1 })
     await cleaner.fail(0)
     #expect(await pipelineWait { await pipeline.hasFailure })
+    #expect(statuses.withLock { $0.last?.message?.contains("provider stream failed") == true })
+    #expect(diagnostics.withLock { $0.contains { $0["failureCode"] == .string("provider_error") && $0["failureStage"] == .string("provider") } })
+    #expect(!String(decoding: try JSONEncoder().encode(diagnostics.withLock { $0 }), as: UTF8.self).contains("PENDING_RAW_ONLY"))
     try await room.micOff()
     #expect(await room.state == .trailing)
     #expect(await room.documentSnapshot.lines.isEmpty)
