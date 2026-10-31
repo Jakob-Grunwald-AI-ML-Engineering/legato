@@ -49,8 +49,10 @@ public struct ComposerView: View {
     private var showsGlobalComment: Bool { showsInstructionComment && selected == nil }
     private var instructionBubbleHeight: CGFloat { instructionText.isEmpty || instructionStatus == "Done" ? 54 : 96 }
     private var reservedHeight: CGFloat {
-        if showsGlobalComment { return min(instructionBubbleHeight + 8, viewportSize.height * 0.6) }
-        return reservesSpace ? min(100, viewportSize.height * 0.6) : 0
+        // Keep at least one readable draft line, but never shrink the comment to its header alone.
+        let available = max(0, viewportSize.height - 44)
+        if showsGlobalComment { return min(instructionBubbleHeight + 8, available) }
+        return reservesSpace ? min(preferredBubbleHeight + 12, available) : 0
     }
     // Large snapshots skip implicit whole-layout animation. Local changed-word effects
     // remain independently bounded in the text renderer.
@@ -187,7 +189,18 @@ public struct ComposerView: View {
                     }
                 }
             }
-            .onChange(of: correctionDraft) { old, next in if old != nil && next == nil { dismissSelection() } }
+            .onChange(of: correctionDraft) { old, next in
+                if old != nil && next == nil { dismissSelection() }
+                else if let selected {
+                    reserveForSelection(selected)
+                    if reservesSpace {
+                        Task { @MainActor in
+                            await Task.yield()
+                            proxy.scrollTo(paragraphs.first(where: { $0.line.id == selected.lineID })?.id ?? selected.lineID, anchor: .top)
+                        }
+                    }
+                }
+            }
             .onChange(of: snapshot) { _, next in if let selected, selected.resolved(in: next) == nil { dismissSelection() } }
         }
     }
@@ -214,9 +227,12 @@ public struct ComposerView: View {
         guard selected != nil else { return }
         selected = nil; committedSelection = nil; dragStart = nil; reservesSpace = false; onDeselect()
     }
-    private func commit(_ selection: QuoteSelection) {
+    private func reserveForSelection(_ selection: QuoteSelection) {
         if let rect = selectionGeometry(selection)?.extent,
            max(rect.minY - 12, viewportSize.height - rect.maxY - 12) < preferredBubbleHeight { reservesSpace = true }
+    }
+    private func commit(_ selection: QuoteSelection) {
+        reserveForSelection(selection)
         committedSelection = selection; onSelect(selection)
     }
     private func select(_ value: QuoteSelection, commit: Bool) {

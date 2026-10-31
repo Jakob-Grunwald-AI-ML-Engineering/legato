@@ -154,7 +154,9 @@ private struct NotchComposerView: View {
             count + max(1, Int(ceil(Double(line.words.map(\.text).joined(separator: " ").count) / 58)))
         }
         let tailRows = session.tail.isEmpty ? 0 : max(1, Int(ceil(Double(session.tail.count) / 58)))
-        return min(440, max(showingCorrection ? 300 : 200, 170 + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
+        let showsInstruction = !session.instructionPreview.isEmpty && session.instructionStatus != "Done"
+        let commentSpace: CGFloat = showingCorrection || showsInstruction ? 104 : 0
+        return min(440, max(showingCorrection || showsInstruction ? 300 : 200, 170 + commentSpace + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

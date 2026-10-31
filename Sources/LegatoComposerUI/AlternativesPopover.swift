@@ -33,22 +33,26 @@ struct AlternativesPopover: View {
                     .buttonStyle(.plain).accessibilityLabel(dismissLabel)
                     .accessibilityIdentifier(accessibilityPrefix + ".discard")
             }
+            .frame(height: 24)
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(capturedText.isEmpty ? "…" : capturedText).font(.callout).foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .accessibilityIdentifier(accessibilityPrefix + ".speech")
                         Color.clear.frame(height: 1).id("spoken-end")
                     }
                 }
                 .scrollIndicators(.hidden)
+                .frame(maxHeight: .infinity)
                 .task(id: capturedText) {
                     await Task.yield()
                     guard !Task.isCancelled else { return }
                     proxy.scrollTo("spoken-end", anchor: .bottom)
                 }
             }
+            .layoutPriority(1)
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
         .frame(height: min(maximumHeight, capturedText.isEmpty ? 54 : 96))
