@@ -22,7 +22,7 @@ public struct ToolExecutor: Sendable {
             return ToolResult(content: "Queued: the host will perform \(action.rawValue) after this writer turn retires. Finish now; do not request another app action.", isError: false, hostAction: action)
         }
         if phase == .quick, ["replace_lines", "insert_lines", "delete_lines", "move_lines", "set_kind"].contains(name) {
-            return ToolResult(content: "Deferred: this quick pass only makes local corrections. Leave broader changes for the quiet-pause or final turn; do not retry them now.", isError: true)
+            return ToolResult(content: "Deferred: this quick pass only makes local corrections. Leave broader changes for the next captured composing turn; do not retry them now.", isError: true)
         }
         do {
             let snapshot = await room.documentSnapshot
