@@ -1,5 +1,7 @@
 # Two-stage composer acceptance
 
+Latest policy follow-up: signed source `9a2f6e04511c6669f7fe6e201df032ea63e7e9fe` is installed on both devices, and the iPhone now launched normally and reported idle without a microphone lease. Meaning, facts and uncertainty are protected; useful style, word choice and formatting are welcome. The earlier strict wording-preservation results below are historical.
+
 Product source: `67f6a848c93e11f29d818901f700d5a1d41fd3c5`, 31 October 2026. Signed Mac and iPhone builds passed and both were installed. Mac UAT used isolated `de.gruenwald.legato.mac.composer-debug` with hotkeys disabled; production Mac was untouched. The physical iPhone received `de.gruenwald.legato`, but normal launch was blocked by **Locked**. Installation does not establish that the new iPhone app is running.
 
 ## Observed behavior
@@ -42,3 +44,15 @@ The last clause still remains on its own line instead of attaching to the preced
 Physical transcription with the broken AirPods microphone still connected is **untested on both platforms**. Current Mac metadata showed a built-in candidate and no armed microphone; the phone was locked. Inventory, PCM fixtures and signed builds do not prove speech clarity, best-source ranking or recovery on real hardware. No background microphone preference was changed. The iPhone native ABC/type/delete/Return/Insert walk also remains untested: earlier bounded XCTest attempts never reached observable test-body assertions, and were not repeated.
 
 Human UAT remains pending: unlock the updated phone; confirm actual built-in transcription while the broken AirPods remain connected; compare short hesitations against complete thoughts; try ABC and return to the retained composition; verify default edits stay minimal and explicit instructions transform only as requested. The new audio selection measures PCM health, not semantic speech clarity, and does not establish universal best-input selection.
+
+## Meaning-preserving style follow-up
+
+Source `9a2f6e04511c6669f7fe6e201df032ea63e7e9fe` supersedes the earlier overstrict wording policy. Signed Mac and generic iOS builds passed. The isolated Mac app was updated; after the user reconnected and unlocked the phone, the same iOS build installed and launched normally. Its directly queried state was idle, not busy or dictating, with no microphone lease, no draft, and zero audio-delivery chunks. No microphone or new Soniox stream was started for this follow-up.
+
+Three synthetic cases exercised the actual two-stage provider flow:
+
+- **Style and word choice improved proactively.** Rough tentative speech about joining a Thursday-at-three call became: “I might be able to join the call on Thursday at three, but I'm not sure yet because I still need to check with Morgan. I'll let you know as soon as I do.” The time, Morgan, uncertainty and promise to follow up survived; the result did not commit to attending.
+- **Paragraph flow and explicit concise rewriting passed.** Default Prompt combined the uncertain keyboard observation into one paragraph. The same explicit concise instruction then produced: “Investigate why the keyboard may disappear when switching apps. The cause is uncertain, and it may be something else.” That reduced the 20-word source to 19 words, retained uncertainty, and added no cause, heading or investigation checklist.
+- **Bullet formatting was not demonstrated.** Auto input introduced three team updates plus a tentative plan. The final draft removed verbal clutter and preserved all facts and uncertainty, but kept five plain sentence-lines rather than a bullet list. This does not establish proactive list formatting.
+
+All cases drained and ended paused without a microphone lease. The cumulative controlled Claude upper estimate is now **$0.7118** against the authorized $2 cap; this follow-up made eight sentence-cleanup requests and eleven writer requests. [Synthetic cases and metadata](artifacts/two-stage-authoring/meaning-policy-summary.json) contain the exact inputs and outputs. Physical transcription, native iPhone keyboard interaction and the earlier residual sentence-grouping gap remain unverified by this policy-only check; no further full-stream replay was run.
