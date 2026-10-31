@@ -66,6 +66,22 @@ public actor HintBinder {
         var countdownStart: Double?
         var countdownDeadline: Double?
     }
+    private struct InstructionCapture {
+        let id = UUID().uuidString
+        let snapshot: DocumentSnapshot
+        var words: [Word] = []
+        var segments: Set<String> = []
+        var sources: [JSONValue] = []
+        var start: Double
+        var end: Double
+    }
+    private var inputModes: [(time: Double, mode: ComposerInputMode)] = [(-Double.infinity, .dictation)]
+    private var untimedMode: ComposerInputMode?
+    private var segmentHolds: [String: Int] = [:]
+    private var instructionCapture: InstructionCapture?
+    private var instructionTail = ""
+    private var instructionQuietTask: Task<Void, Never>?
+    private let onInstructionQuiet: (@Sendable () async -> Void)?
     private struct Timing: Decodable { let t0: Double?; let t1: Double? }
     private let room: Room
     private let learner: VocabularyLearner?
@@ -79,9 +95,54 @@ public actor HintBinder {
     private let countdown: Duration
     private let onSend: (@Sendable () async -> Void)?
     public init(room: Room, learner: VocabularyLearner? = nil, quietDelay: Duration = .milliseconds(500),
-                countdown: Duration = .seconds(1), onSend: (@Sendable () async -> Void)? = nil) {
+                countdown: Duration = .seconds(1), onSend: (@Sendable () async -> Void)? = nil,
+                onInstructionQuiet: (@Sendable () async -> Void)? = nil) {
         self.room = room; self.learner = learner; self.quietDelay = quietDelay
-        self.countdown = countdown; self.onSend = onSend
+        self.countdown = countdown; self.onSend = onSend; self.onInstructionQuiet = onInstructionQuiet
+    }
+    /// Record a monotonic audio boundary; delayed final tokens retain their original speech channel.
+    public func setInputMode(_ mode: ComposerInputMode, timestamp: Double) async {
+        inputModes.append((timestamp, mode)); inputModes.sort { $0.time < $1.time }
+        _ = try? await room.publish(channel: .session, participant: .hintBinder,
+            payload: .object(["event": .string("input.mode.changed"), "inputMode": .string(mode.rawValue)]), tOrigin: timestamp)
+    }
+    private func inputMode(at time: Double) -> ComposerInputMode {
+        inputModes.last(where: { $0.time <= time })?.mode ?? .dictation
+    }
+    private func instructionActivity() {
+        instructionQuietTask?.cancel()
+        guard capture == nil, onInstructionQuiet != nil else { return }
+        instructionQuietTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(700)); await self?.finalizeInstructionChunk() } catch {}
+        }
+    }
+    private func finalizeInstructionChunk() async { guard capture == nil else { return }; await onInstructionQuiet?() }
+    private func publishInstructionDraft() async {
+        let text = [instructionCapture?.words.map(\.text).joined(separator: " ") ?? "", instructionTail]
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        _ = try? await room.publish(channel: .instructionDraft, participant: .hintBinder,
+            payload: .object(["text": .string(text)]))
+    }
+    private func flushInstruction(_ boundary: Envelope) async {
+        instructionQuietTask?.cancel(); instructionQuietTask = nil
+        instructionTail = ""
+        guard let current = instructionCapture else { await publishInstructionDraft(); return }
+        instructionCapture = nil
+        if !current.words.isEmpty {
+            let payload: JSONValue = .object([
+                "event": .string("global.instruction"), "captureID": .string(current.id),
+                "text": .string(current.words.map(\.text).joined(separator: " ")),
+                "words": (try? .encoding(current.words)) ?? .array([]),
+                "snapshot": (try? .encoding(current.snapshot)) ?? .null,
+                "documentRevision": .number(Double(current.snapshot.revision)),
+                "speechStart": .number(current.start), "speechEnd": .number(current.end),
+                "boundary": boundary.payload, "sources": .array(current.sources),
+                "instruction": .string("This finalized speech is an explicit instruction about the captured draft, never dictation to append. Apply its meaning with document tools using the full conversation and current writing mode. If the draft is empty, compose what the instruction requests. Preserve facts and pins; do not edit lines added after the captured snapshot. No keyword matching or second writer is involved.")])
+            _ = try? await room.publish(channel: .writingInstruction, participant: .hintBinder, payload: payload,
+                tOrigin: current.start, baseRev: current.snapshot.revision, causedBy: boundary.id)
+        }
+        for id in current.segments { await releaseSegment(id) }
+        await publishInstructionDraft()
     }
     public func requestSend(timestamp: Double) async -> Bool {
         guard var current = capture, !current.submitting, !draftText(current).isEmpty else { return false }
@@ -144,13 +205,14 @@ public actor HintBinder {
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
     }
-    public func stop() async { task?.cancel(); task = nil; dismissed = []; suppressUntimedTail = false; await discardCapture(); await publishDraft() }
+    public func stop() async { instructionQuietTask?.cancel(); instructionCapture = nil; instructionTail = ""; task?.cancel(); task = nil; dismissed = []; suppressUntimedTail = false; await discardCapture(); await publishDraft() }
     public func tap(lineID: String, wordID: String, timestamp: Double) async throws {
         try await select(lineID: lineID, wordID: wordID, timestamp: timestamp)
     }
     /// Inclusive endpoints in one document snapshot. A word tap is the same range with equal ends.
     public func select(lineID: String, wordID: String, endLineID: String? = nil,
                        endWordID: String? = nil, timestamp: Double) async throws {
+        instructionQuietTask?.cancel()
         let discardFrom = min(capture?.discardFrom ?? timestamp, timestamp)
         await discardCapture()
         let snapshot = await room.documentSnapshot
@@ -204,7 +266,7 @@ public actor HintBinder {
         cancelTimer()
         let ids = capture?.segments ?? []
         capture = nil
-        for id in ids { await room.resolveSegment(id) }
+        for id in ids { await releaseSegment(id) }
     }
     private func receive(_ envelope: Envelope) async {
         switch envelope.channel {
@@ -217,6 +279,9 @@ public actor HintBinder {
             if intent.event == "deselect" { await clearSelection(timestamp: intent.timestamp) }
             if intent.event == "pick", let text = intent.text { try? await pick(lineID: intent.lineID, wordID: intent.wordID, text: text) }
         case .asrRawTail:
+            if untimedMode == nil, envelope.payload["activity"] == .bool(true) {
+                untimedMode = inputMode(at: envelope.tOrigin)
+            }
             if var current = capture {
                 if case .array(let parts) = envelope.payload["parts"] {
                     current.tail = parts.filter { part in
@@ -231,15 +296,32 @@ public actor HintBinder {
             let payload: JSONValue
             if capture != nil { payload = .object(["text": .string("")]) }
             else if case .array(let parts) = envelope.payload["parts"] {
-                let text = parts.filter { part in
+                let kept = parts.filter { part in
                     guard case .number(let time) = part["tOrigin"] else { return !suppressUntimedTail }
                     return !dismissed.contains { $0.contains(time) }
+                }
+                instructionTail = kept.filter { part in
+                    let time = (try? part["tOrigin"]?.decode(Double.self)) ?? envelope.tOrigin
+                    return (part["timed"] == .bool(false) ? untimedMode : inputMode(at: time)) == .instructions
+                }.compactMap { if case .string(let text) = $0["text"] { return text }; return nil }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = kept.filter { part in
+                    let time = (try? part["tOrigin"]?.decode(Double.self)) ?? envelope.tOrigin
+                    return (part["timed"] == .bool(false) ? untimedMode : inputMode(at: time)) != .instructions
                 }.compactMap { if case .string(let text) = $0["text"] { return text }; return nil }.joined()
                 payload = .object(["text": .string(text)])
+            } else if capture == nil, (untimedMode ?? inputMode(at: envelope.tOrigin)) == .instructions {
+                instructionTail = (try? envelope.payload["text"]?.decode(String.self)) ?? ""
+                payload = .object(["text": .string("")])
             } else { payload = suppressUntimedTail ? .object(["text": .string("")]) : envelope.payload }
+            if capture == nil {
+                await publishInstructionDraft()
+                if !instructionTail.isEmpty, envelope.payload["activity"] == .bool(true) { instructionActivity() }
+            }
             _ = try? await room.publish(channel: .asrTail, participant: .hintBinder,
                                        payload: payload, tOrigin: envelope.tOrigin, causedBy: envelope.id)
         case .asrBoundary:
+            await flushInstruction(envelope)
+            untimedMode = nil
             // Keep audio-time tombstones: late finals may arrive after an endpoint or UI dismissal.
             suppressUntimedTail = false
             guard let current = capture, current.submitting,
@@ -262,11 +344,14 @@ public actor HintBinder {
                 _ = try? await room.publish(channel: .hint, participant: .hintBinder, payload: .encoding(hint),
                                             tOrigin: current.start, baseRev: current.revision, causedBy: envelope.id)
             }
-            for id in current.segments { await room.resolveSegment(id) }
+            for id in current.segments { await releaseSegment(id) }
         case .asrSegment: await routeSegment(envelope)
         case .session:
             if case .string(let event) = envelope.payload["event"],
-               ["asr.error", "cancel.work", "done"].contains(event) { await discardCapture(); await publishDraft() }
+               ["asr.error", "cancel.work", "done"].contains(event) {
+                instructionQuietTask?.cancel(); instructionCapture = nil; instructionTail = ""
+                await discardCapture(); await publishDraft(); await publishInstructionDraft()
+            }
         default: break
         }
     }
@@ -275,22 +360,22 @@ public actor HintBinder {
         let metadata = envelope.payload["metadata"] ?? .null
         let t0 = (try? metadata["t0"]?.decode(Double.self)) ?? 0
         let timings = (try? metadata["timings"]?.decode([Timing].self)) ?? []
-        let remaining: [(word: Word, start: Double, end: Double)] = words.enumerated().compactMap { index, word in
+        let remaining: [(word: Word, start: Double, end: Double, mode: ComposerInputMode)] = words.enumerated().compactMap { index, word in
             let timing = timings.indices.contains(index) ? timings[index] : nil
             let start = envelope.tOrigin + max(0, (timing?.t0 ?? t0) - t0)
             let end = envelope.tOrigin + max(0, (timing?.t1 ?? t0) - t0)
             guard !dismissed.contains(where: { $0.contains(start) }) else { return nil }
-            return (word, start, end)
+            let mode = timing?.t0 != nil ? inputMode(at: start) : (untimedMode ?? inputMode(at: start))
+            return (word, start, end, mode)
         }
         guard var current = capture else {
-            if remaining.isEmpty { await room.resolveSegment(envelope.id) }
-            else { _ = try? await room.appendSegment(words: remaining.map(\.word), causedBy: envelope.id) }
+            await routeOrdinary(remaining, envelope: envelope)
             return
         }
-        var ordinary: [Word] = [], targeted: [Word] = []
-        for (word, start, end) in remaining {
-            if start < current.discardFrom { ordinary.append(word) }
-            else if let sent = current.sendAt, start > sent { ordinary.append(word) }
+        var ordinary: [(word: Word, start: Double, end: Double, mode: ComposerInputMode)] = [], targeted: [Word] = []
+        for (word, start, end, mode) in remaining {
+            if start < current.discardFrom { ordinary.append((word, start, end, mode)) }
+            else if let sent = current.sendAt, start > sent { ordinary.append((word, start, end, mode)) }
             else if start >= current.intent.timestamp {
                 targeted.append(word); current.start = current.start ?? start; current.end = end
             }
@@ -298,12 +383,46 @@ public actor HintBinder {
         }
         if !targeted.isEmpty {
             current.words += targeted; current.tail = ""; current.segments.append(envelope.id)
+            segmentHolds[envelope.id, default: 0] += 1
             current.sources.append(.object(["segmentID": .string(envelope.id), "tOrigin": .number(envelope.tOrigin), "metadata": metadata]))
         }
         capture = current
         if !targeted.isEmpty { await activity() }
-        if !ordinary.isEmpty {
-            _ = try? await room.appendSegment(words: ordinary, causedBy: envelope.id, resolve: targeted.isEmpty)
-        } else if targeted.isEmpty { await room.resolveSegment(envelope.id) }
+        await routeOrdinary(ordinary, envelope: envelope, heldByQuote: !targeted.isEmpty)
+    }
+    private func releaseSegment(_ id: String) async {
+        let remaining = (segmentHolds[id] ?? 1) - 1
+        if remaining <= 0 { segmentHolds[id] = nil; await room.resolveSegment(id) }
+        else { segmentHolds[id] = remaining }
+    }
+    private func routeOrdinary(_ words: [(word: Word, start: Double, end: Double, mode: ComposerInputMode)],
+                               envelope: Envelope, heldByQuote: Bool = false) async {
+        // Preserve acoustic order across a channel flip inside one provider segment. Dictation
+        // preceding an instruction belongs to its captured draft; later dictation does not.
+        var index = 0
+        var hasInstructions = false
+        while index < words.count {
+            let mode = words[index].mode
+            let start = index
+            while index < words.count, words[index].mode == mode { index += 1 }
+            let group = words[start..<index]
+            if mode == .dictation {
+                _ = try? await room.appendSegment(words: group.map(\.word), causedBy: envelope.id, resolve: false)
+            } else {
+                hasInstructions = true
+                if instructionCapture == nil {
+                    instructionCapture = InstructionCapture(snapshot: await room.documentSnapshot,
+                        start: group.first!.start, end: group.last!.end)
+                }
+                instructionCapture?.words += group.map(\.word)
+                instructionCapture?.end = group.last!.end
+                if instructionCapture?.segments.insert(envelope.id).inserted == true {
+                    segmentHolds[envelope.id, default: 0] += 1
+                    instructionCapture?.sources.append(.object(["segmentID": .string(envelope.id), "tOrigin": .number(envelope.tOrigin), "metadata": envelope.payload["metadata"] ?? .null]))
+                }
+                instructionTail = ""; await publishInstructionDraft(); instructionActivity()
+            }
+        }
+        if !hasInstructions && !heldByQuote { await room.resolveSegment(envelope.id) }
     }
 }
