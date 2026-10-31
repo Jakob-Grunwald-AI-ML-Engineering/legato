@@ -21,6 +21,11 @@ public struct LearningHistoryStore: HistoryStore {
         vocabulary.learnFromDictation(text: entry.rawText ?? entry.text, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
     }
 
+    public func upsert(_ entry: DictationEntry) async throws {
+        try await base.upsert(entry)
+        vocabulary.learnFromDictation(text: entry.rawText ?? entry.text, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
+    }
+
     public func recent(limit: Int) async throws -> [DictationEntry] { try await base.recent(limit: limit) }
 
     public func delete(id: UUID) async throws {

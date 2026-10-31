@@ -26,9 +26,18 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
 
 public protocol HistoryStore: Sendable {
     func append(_ entry: DictationEntry) async throws
+    /// Update one composition without creating a second visible entry.
+    func upsert(_ entry: DictationEntry) async throws
     /// Newest first.
     func recent(limit: Int) async throws -> [DictationEntry]
     func delete(id: UUID) async throws
+}
+
+public extension HistoryStore {
+    func upsert(_ entry: DictationEntry) async throws {
+        try await delete(id: entry.id)
+        try await append(entry)
+    }
 }
 
 /// One JSON object per line, on top of ``JSONLFile`` (which documents the file conventions and the
@@ -44,6 +53,10 @@ public actor JSONLHistoryStore: HistoryStore {
 
     public func append(_ entry: DictationEntry) async throws {
         try await file.append(entry)
+    }
+
+    public func upsert(_ entry: DictationEntry) async throws {
+        try await file.upsert(entry, matching: { $0.id == entry.id })
     }
 
     public func recent(limit: Int) async throws -> [DictationEntry] {

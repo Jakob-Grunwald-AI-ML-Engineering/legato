@@ -16,7 +16,7 @@ import Observation
     let vocabulary: VocabularyService
     let history: any HistoryStore
     var recent: [DictationEntry] = []
-    let composer = ComposerSession()
+    let composer: ComposerSession
     let notch = NotchPanelController()
     private var writer: FieldWriter?
     private var composerTargetToken: String?
@@ -50,6 +50,7 @@ import Observation
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(engine) })
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        composer = ComposerSession(history: history)
         composer.hostInsertionTarget = { [weak self] in self?.composerTargetToken }
         composer.hostInsertionUnavailableReason = { [weak self] in
             self?.secureField == true ? "The bound field is secure." : "No external text field is bound."
@@ -122,8 +123,9 @@ import Observation
     func cancelComposer() { Task { await clearComposer() } }
     private func clearComposer() async {
         sessionTask?.cancel(); sessionTask = nil; starting = false
-        notch.hide(); writer = nil; composerTargetToken = nil; gesture.runEnded()
         await composer.cancel()
+        guard composer.snapshot.lines.isEmpty, composer.status == "idle" else { return }
+        notch.hide(); writer = nil; composerTargetToken = nil; gesture.runEnded()
     }
     func insertComposer() { Task { _ = await performComposerInsertion() } }
     private func performComposerInsertion(expectedTarget: String? = nil) async -> ComposerHostActionResult {

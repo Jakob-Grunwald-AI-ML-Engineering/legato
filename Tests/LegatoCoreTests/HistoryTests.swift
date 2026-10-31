@@ -75,3 +75,20 @@ import Testing
         #expect(try await store.recent(limit: 10) == [b])
     }
 }
+
+extension JSONLHistoryStoreTests {
+    @Test func upsertPreservesOtherRecordsCorruptLinesAndCreatedTimestamp() async throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONLHistoryStore(fileURL: url)
+        let original = entry("First draft", t: 1), other = entry("Unrelated", t: 2)
+        try await store.append(original); try await store.append(other)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd(); try handle.write(contentsOf: Data("unreadable record\n".utf8)); try handle.close()
+        var revised = original; revised.text = "Edited draft"
+        try await store.upsert(revised)
+        #expect(try await store.recent(limit: 10) == [revised, other])
+        #expect(try String(contentsOf: url, encoding: .utf8).contains("unreadable record"))
+        #expect(revised.date == original.date)
+    }
+}
