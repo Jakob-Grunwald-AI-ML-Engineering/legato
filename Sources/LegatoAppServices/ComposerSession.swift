@@ -12,6 +12,8 @@ import LegatoVocabulary
 
 /// Host-only session shared by the phone app and Mac panel. The keyboard receives value snapshots.
 @MainActor @Observable public final class ComposerSession {
+    /// Emitted only by the successful external-delivery acknowledgement boundary.
+    public private(set) var successfulInsertionID: String?
     public private(set) var topicContext: TopicContext?
     public private(set) var dictationRevision = 0
     private var pendingDictationRevision: Int?
@@ -372,7 +374,7 @@ import LegatoVocabulary
     }
     public var debugState: [String: Any] {
         var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "inputMode": inputMode.rawValue, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus,
-         "sessionID": sessionID ?? "", "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
+         "sessionID": sessionID ?? "", "successfulInsertionID": successfulInsertionID as Any? ?? NSNull(), "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
          "correctionCountdownStart": correctionCountdownStart as Any? ?? NSNull(),
@@ -467,6 +469,7 @@ import LegatoVocabulary
         let requests = await writer?.recentTopicInstructions() ?? (lastInstruction.isEmpty ? [] : [lastInstruction])
         guard generation == token else { return }
         if let context = TopicContext(deliveredText: delivered, recentInstructions: requests) { topicContext = context }
+        if !delivered.isEmpty { successfulInsertionID = UUID().uuidString }
         if let room, await room.state == .paused, await binder?.hasUnsentInstruction == true {
             // Keep the explicit unsent comment usable without recording or dispatching it.
             await binder?.clearSelection(timestamp: ProcessInfo.processInfo.systemUptime)

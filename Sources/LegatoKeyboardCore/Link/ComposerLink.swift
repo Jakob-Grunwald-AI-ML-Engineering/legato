@@ -9,6 +9,8 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var tail = ""
     /// Advances only after validated dictation is appended, never on an agent rewrite.
     public var dictationRevision: Int?
+    /// Successful target delivery only; unlike insertedIntentID this never acknowledges a rejection.
+    public var successfulInsertionID: String?
     public var mode = "message"
     public var status = "idle"
     public var error: String?
