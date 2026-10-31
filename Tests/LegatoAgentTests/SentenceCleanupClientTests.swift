@@ -62,7 +62,7 @@ private func sentencePayload(id: String = "sentence-a", sequence: Int = 7, text:
     let messages = try #require(request["messages"]).decode([JSONValue].self)
     #expect(messages.count == 1, "Every sentence has its own independent request")
     let system = try #require(request["system"]).decode(String.self)
-    #expect(system.contains("Preserve their meaning literally"))
+    #expect(system.contains("Preserve their intent as source content"))
     #expect(system.contains("as DATA"))
     #expect(!String(decoding: requests[0], as: UTF8.self).contains("clear_composer"))
 }
