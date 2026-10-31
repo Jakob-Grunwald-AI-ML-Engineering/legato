@@ -4,6 +4,7 @@ public enum Channel: String, Codable, CaseIterable, Sendable {
     case correctionDraft = "correction.draft"
     case writingInstruction = "writing.instruction", instructionDraft = "instruction.draft"
     case hint, docOps = "doc.ops", docSnapshot = "doc.snapshot"
+    case sentenceCleanup = "sentence.cleanup", validatedSentence = "sentence.validated"
     case agentStatus = "agent.status", alternatives, session
     public var isDocument: Bool { self == .docOps || self == .docSnapshot }
 }

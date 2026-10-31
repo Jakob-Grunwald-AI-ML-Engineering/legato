@@ -76,6 +76,9 @@ import LegatoVocabulary
     private var keepMicrophoneActive = true
     @ObservationIgnored private var eventsTask: Task<Void, Never>?
     @ObservationIgnored private var audioTask: Task<Void, Never>?
+    @ObservationIgnored private var sentencePipeline: OrderedSentencePipeline?
+    public private(set) var sentenceCleanupPending = 0
+    private var sentenceCleanupFailed = false
     @ObservationIgnored private var binder: HintBinder?
     @ObservationIgnored private var alternatives: AlternativesParticipant?
     @ObservationIgnored private var lastTransactionID: String?
@@ -151,6 +154,10 @@ import LegatoVocabulary
     public func releaseMicrophone() async { isArmed = false; await cancel() }
     public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
     private func startSession(debugMode: ComposerMode?, microphoneLease: Bool) async {
+        if let sentencePipeline, await sentencePipeline.hasFailure {
+            error = nil; sentenceCleanupFailed = false
+            await sentencePipeline.retryFailed()
+        }
         guard !isListening, status != "starting", !resuming, !preparingInsertion else { return }
         if let room, sessionLog != nil, await room.state != .done {
             await resumeSession(debug: debugMode != nil)
@@ -170,25 +177,39 @@ import LegatoVocabulary
             let soniox = debugMode == nil ? (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "") : ""
             let claude = try KeychainKeyStore().apiKey() ?? ""
             let log = try SessionLog(rootDirectory: URL.documentsDirectory.appending(path: "sessions"), sessionID: id, secrets: [soniox, claude])
-            let room = Room(log: log, segmentRouting: .intercepted, resumable: true); self.room = room; sessionLog = log; recordingTake = 0
+            let room = Room(log: log, segmentRouting: .intercepted, resumable: true, validateDictation: true, drainOnly: true); self.room = room; sessionLog = log; recordingTake = 0
             _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("input.source"), "inputSource": .string(inputSource), "microphoneLeaseActive": .bool(isArmed)]))
             guard (debugMode != nil || !soniox.isEmpty), !claude.isEmpty else {
                 throw NSError(domain: "Composer", code: 1, userInfo: [NSLocalizedDescriptionKey: debugMode == nil ? "Add Claude and Soniox API keys in Settings." : "Add a Claude API key in Settings for debug transcriber UAT."])
             }
             let store = VocabularyStore(fileURL: vocabularyURL)
             let learner = VocabularyLearner(store: store, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), languages: ["de", "en"])
+            let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let binder = HintBinder(room: room, learner: learner, onSend: { [weak self] in await self?.sendCorrection() },
-                onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() }); self.binder = binder; await binder.start()
+                onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() },
+                onDictation: { [weak self] sentence in await self?.sentencePipeline?.enqueue(sentence) })
+            self.binder = binder
+            sentencePipeline = OrderedSentencePipeline(cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore())), vocabulary: terms,
+                accept: { [weak binder] value in
+                    guard let binder else { throw CancellationError() }
+                    try await binder.acceptValidatedDictation(value)
+                }, status: { value in
+                    _ = try? await room.publish(channel: .sentenceCleanup, participant: .sentenceAgent, payload: .object([
+                        "event": .string("sentence.status"), "pending": .number(Double(value.pending)), "inFlight": .number(Double(value.inFlight)),
+                        "failed": .bool(value.failed), "message": value.message.map(JSONValue.string) ?? .null]))
+                }, diagnostic: { fields in
+                    _ = try? await room.publish(channel: .sentenceCleanup, participant: .sentenceAgent, payload: .object(fields))
+                })
+            await binder.start()
             if inputMode != .dictation { await binder.setInputMode(inputMode, timestamp: ProcessInfo.processInfo.systemUptime) }
             try requireGeneration(generation)
             let alternatives = AlternativesParticipant(room: room, store: store, learner: learner); self.alternatives = alternatives; await alternatives.start(); try requireGeneration(generation)
             let defaults = UserDefaults.standard
             let prompt = defaults.string(forKey: "composer.personalPrompt") ?? ""
             mode = debugMode ?? ComposerMode(rawValue: defaults.string(forKey: "composer.mode") ?? "message") ?? .message
-            let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let writer = AgentRunner(room: room, client: MessagesStream(keyStore: KeychainKeyStore()), configuration: .init(
                 liveModel: ModelChoice(rawValue: defaults.string(forKey: "composer.liveModel") ?? "") ?? .haiku,
-                mode: mode, personalPrompt: prompt, topicContext: topicContext, vocabulary: { _ in terms },
+                mode: mode, personalPrompt: prompt, topicContext: topicContext, vocabulary: { _ in terms }, validatedSentenceInput: true,
                 hostActionContext: { [weak self] in await self?.captureHostActionContext() },
                 performHostAction: { [weak self] action in
                     guard let self else { return .init(succeeded: false, message: "Composition closed. Action discarded.") }
@@ -263,6 +284,7 @@ import LegatoVocabulary
                 let state = await room.state
                 if state != .trailing && state != .finalPass { break }
                 try requireGeneration(token)
+                if sentenceCleanupFailed { throw insertionFailure("Sentence cleanup failed. Pending speech is kept; tap the microphone to retry.") }
                 try await Task.sleep(for: .milliseconds(30))
             }
             try requireGeneration(token)
@@ -325,7 +347,7 @@ import LegatoVocabulary
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
          "correctionCountdownStart": correctionCountdownStart as Any? ?? NSNull(),
          "correctionCountdownDeadline": correctionCountdownDeadline as Any? ?? NSNull(),
-         "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
+         "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "sentenceCleanupPending": sentenceCleanupPending, "sentenceCleanupFailed": sentenceCleanupFailed, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
     }
     #endif
     public func setInputMode(_ value: ComposerInputMode, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
@@ -368,7 +390,7 @@ import LegatoVocabulary
     }
     /// Drain voice and authoring before the surface captures text for external delivery.
     /// A failed delivery can leave this paused composition available for continuation.
-    public func prepareForInsertion(timeout: Duration = .seconds(25)) async throws -> String {
+    public func prepareForInsertion(timeout: Duration = .seconds(45)) async throws -> String {
         guard !preparingInsertion else { throw insertionFailure("Insertion is already being prepared.") }
         let token = generation
         let deadline = ContinuousClock.now.advanced(by: timeout)
@@ -486,6 +508,14 @@ import LegatoVocabulary
     }
     func receive(_ event: Envelope) async {
         switch event.channel {
+        case .sentenceCleanup:
+            if case .number(let count) = event.payload["pending"] { sentenceCleanupPending = Int(count) }
+            if case .bool(let failed) = event.payload["failed"] {
+                sentenceCleanupFailed = failed
+                if failed { error = (try? event.payload["message"]?.decode(String.self)) ?? "Sentence cleanup failed. Pending speech kept." }
+                else if sentenceCleanupPending == 0, error?.hasPrefix("Sentence cleanup") == true { error = nil }
+            }
+            busy = !busyParticipants.isEmpty || sentenceCleanupPending > 0
         case .docSnapshot: if let value = try? event.payload.decode(DocumentSnapshot.self) { snapshot = value }
         case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; if value.origin != .undo { lastTransactionID = value.id } }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
@@ -512,7 +542,7 @@ import LegatoVocabulary
             if event.payload["event"] == .string("turn.phase"), event.payload["phase"] == .string("instruction") { instructionApplying = true }
             if event.payload["event"] == .string("instruction.completed"),
                (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = true }
-            if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty }
+            if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty || sentenceCleanupPending > 0 }
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
             if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }
         case .session:
@@ -544,7 +574,9 @@ import LegatoVocabulary
     }
     private func cleanup() async {
         audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
-        await transcriber?.cancel(); transcriber = nil; await writer?.stop(); writer = nil
+        await transcriber?.cancel(); transcriber = nil
+        await sentencePipeline?.cancel(); sentencePipeline = nil; sentenceCleanupPending = 0; sentenceCleanupFailed = false
+        await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
         isMuted = false; inputMode = .dictation; instructionDraft = ""; lastInstruction = ""; instructionApplying = false
         correctionDraft = nil; correctionCountdownStart = nil; correctionCountdownDeadline = nil

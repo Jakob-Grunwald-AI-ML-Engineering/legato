@@ -31,6 +31,7 @@ public actor AgentRunner {
     private var acceptedSinceCompose = 0
     private var sentenceDue = false
     private var finalPending = false
+    private var drainingOnly = false
     private var retiring = false
     private var stopped = false
     private var instructionTurnIDs: [UUID: String] = [:]
@@ -43,7 +44,7 @@ public actor AgentRunner {
     }
     public func start() async {
         guard subscription == nil else { return }; stopped = false
-        let events = await room.subscribe(participant: .liveAgent, channels: [.asrRawTail, .asrTail, .asrSegment, .hint, .writingInstruction, .userIntent, .docOps, .session])
+        let events = await room.subscribe(participant: .liveAgent, channels: [.validatedSentence, .asrRawTail, .asrTail, .asrSegment, .hint, .writingInstruction, .userIntent, .docOps, .session])
         subscription = Task { [weak self] in
             for await event in events { guard !Task.isCancelled else { break }; await self?.receive(event) }
         }
@@ -68,7 +69,7 @@ public actor AgentRunner {
         guard !stopped else { return }
         // Partials keep the quiet-period clock honest, including hidden targeted speech, but never enter model context.
         if event.channel == .asrRawTail || event.channel == .asrTail {
-            if case .string(let text) = event.payload["text"], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if event.payload["activity"] != .bool(false), case .string(let text) = event.payload["text"], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 await speechActivity()
             }
             return
@@ -77,7 +78,10 @@ public actor AgentRunner {
         if event.channel == .asrSegment { return }
         if event.channel == .session, event.payload["event"] == .string("debug.transcriber.frame") { return }
         if event.channel == .userIntent, event.payload["event"] == .string("tap") { return }
-        history.append(event); pendingContext.append(event)
+        guard let event = Self.modelEvent(event) else { return }
+        // Lifecycle controls never carry model input. In particular, future raw
+        // diagnostics/replay payloads cannot leak through history or reseeding.
+        if event.channel != .session { history.append(event); pendingContext.append(event) }
         if AgentAdmission.isAcceptedContent(event) {
             acceptedSinceCompose += 1
             let transaction = try? event.payload.decode(Transaction.self)
@@ -88,13 +92,18 @@ public actor AgentRunner {
             } ?? false
             // Provider sentence punctuation is useful but not guaranteed. The segmenter
             // already bounds chunks at 25 words / 8 seconds, so two chunks guarantee progress.
-            sentenceDue = sentenceDue || complete || acceptedSinceCompose >= 2
+            sentenceDue = sentenceDue || configuration.validatedSentenceInput || complete || acceptedSinceCompose >= 2
         }
         if AgentAdmission.isUserEdit(event) { sentenceDue = true }
         if event.channel == .session {
+            if event.payload["event"] == .string("mic.off"), event.payload["drainOnly"] == .bool(true) {
+                drainingOnly = true; pauseDue = false; pauseTask?.cancel()
+            }
+            if event.payload["event"] == .string("mic.on") { drainingOnly = false }
             if event.payload["event"] == .string("cancel.work") { stop(); return }
             if event.payload["event"] == .string("final.pass") {
                 finalPending = true; pauseDue = false; pauseTask?.cancel()
+                drainingOnly = event.payload["drainOnly"] == .bool(true)
             }
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { configuration.mode = mode }
@@ -109,8 +118,26 @@ public actor AgentRunner {
         }
         await schedule()
     }
+    /// Acoustic alternatives/provenance remain in the private Room log and UI
+    /// model. The author receives only validated text, document identity/version
+    /// metadata, and explicit writing instructions, including on a reseed.
+    private static func modelEvent(_ event: Envelope) -> Envelope? {
+        func sanitized(_ value: JSONValue) -> JSONValue {
+            switch value {
+            case .object(let fields):
+                let omitted: Set<String> = ["alternatives", "sources", "sourceWordIDs", "raw", "rawText", "rawWords", "frame"]
+                return .object(fields.filter { !omitted.contains($0.key) }.mapValues(sanitized))
+            case .array(let values): return .array(values.map(sanitized))
+            default: return value
+            }
+        }
+        guard let encoded = try? JSONValue.encoding(event) else { return nil }
+        return try? sanitized(encoded).decode(Envelope.self)
+    }
     private func speechActivity() async {
-        guard !finalPending, phase != .final else { return }
+        // Validated sentences already trigger a full authoring turn. Raw partials
+        // must not buy an empty/redundant maintenance request while cleanup runs.
+        guard !configuration.validatedSentenceInput, !drainingOnly, !finalPending, phase != .final else { return }
         pauseTask?.cancel(); pauseDue = false
         let token = UUID(); pauseGeneration = token
         if phase == .pause { await cancelCurrentTurn() }
@@ -121,7 +148,7 @@ public actor AgentRunner {
         }
     }
     private func pauseElapsed(_ token: UUID) async {
-        guard !stopped, token == pauseGeneration, !finalPending else { return }
+        guard !stopped, token == pauseGeneration, !finalPending, !drainingOnly else { return }
         pauseDue = true; await schedule()
     }
     private func cancelCurrentTurn() async {
@@ -140,9 +167,17 @@ public actor AgentRunner {
     }
     private func schedule() async {
         guard !stopped, !retiring, phase == nil else { return }
+        // The production composer drains existing work on Pause/Insert. It does
+        // not buy another automatic rewrite request after the queue retires.
+        if finalPending, drainingOnly, policy.pending.isEmpty {
+            finalPending = false; pauseDue = false; sentenceDue = false
+            await room.setAgentBusy(.liveAgent, busy: false)
+            try? await room.finishFinalPass()
+            return
+        }
         let events: [Envelope]
         let next: WritingPhase
-        if executingHostAction {
+        if executingHostAction && !drainingOnly {
             // Insert may need the normal final pass, but no ordinary turn or recursive action.
             guard finalPending else { return }
             events = []; next = .final; finalPending = false
