@@ -81,9 +81,8 @@ struct KeyboardRootView: View {
             .buttonStyle(KeyboardModeKeyStyle(expanded: showsModePicker))
             .accessibilityLabel(controller.composer.mode.capitalized)
             .accessibilityHint("Choose a writing mode")
-            Button("ABC") { showsModePicker = false; showsTypingKeyboard = true }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityLabel("Typing keyboard")
+            key("ABC", action: { showsModePicker = false; showsTypingKeyboard = true })
+                .accessibilityHint("Typing keyboard")
                 .accessibilityIdentifier("composer.typingKeyboard")
             Button { controller.insertComposer() } label: {
                 Image(systemName: "paperplane.fill").font(.system(size: 17))
@@ -104,11 +103,15 @@ struct KeyboardRootView: View {
         .background(Color.black.opacity(0.001)).contentShape(Rectangle())
     }
 
-    private func key(_ label: String, symbol: String, enabled: Bool = true, selected: Bool = false,
+    private func key(_ label: String, symbol: String? = nil, enabled: Bool = true, selected: Bool = false,
                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).opacity(enabled ? 1 : 0.35)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if let symbol { Image(systemName: symbol) }
+                else { Text(label) }
+            }
+            .opacity(enabled ? 1 : 0.35)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(KeyButtonStyle(selected: selected))
         .disabled(!enabled).accessibilityLabel(label)
