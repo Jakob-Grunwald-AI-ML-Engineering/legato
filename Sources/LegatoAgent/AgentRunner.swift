@@ -33,6 +33,10 @@ public actor AgentRunner {
     private var finalPending = false
     private var retiring = false
     private var stopped = false
+    private var instructionTurnIDs: [UUID: String] = [:]
+    private var queuedHostActions: [UUID: ComposerHostAction] = [:]
+    private var completedInstructionActions: Set<String> = []
+    private var executingHostAction = false
 
     public init(room: Room, client: any MessagesStreaming, configuration: AgentConfiguration = .init(), pauseDelay: Duration = .seconds(1)) {
         self.room = room; self.client = client; self.configuration = configuration; self.pauseDelay = pauseDelay
@@ -131,7 +135,11 @@ public actor AgentRunner {
         guard !stopped, !retiring, phase == nil else { return }
         let events: [Envelope]
         let next: WritingPhase
-        if let pending = policy.begin() {
+        if executingHostAction {
+            // Insert may need the normal final pass, but no ordinary turn or recursive action.
+            guard finalPending else { return }
+            events = []; next = .final; finalPending = false
+        } else if let pending = policy.begin() {
             events = pending
             if pending.contains(where: { $0.channel == .hint }) {
                 next = .targeted
@@ -159,11 +167,16 @@ public actor AgentRunner {
         let token = UUID(); generation = token; phase = next
         await room.setAgentBusy(.liveAgent, busy: true)
         guard !stopped, generation == token else { return }
-        writerTask = Task { [weak self] in await self?.run(events: events, phase: next, generation: token) }
+        let task = Task<Void, Never> { [weak self] in await self?.run(events: events, phase: next, generation: token) }
+        writerTask = task
+        Task { [weak self] in
+            await task.value
+            await self?.turnRetired(phase: next, generation: token)
+        }
     }
     public static func shouldReseed(tokens: Int, idle: Double) -> Bool { tokens > 50_000 || idle > 300 }
-    public static func request(model: ModelChoice, system: String, messages: [JSONValue], live: Bool, mode: ComposerMode = .message) throws -> Data {
-        let tools = try JSONValue.encoding(ToolExecutor.schemas(live: live, mode: mode))
+    public static func request(model: ModelChoice, system: String, messages: [JSONValue], live: Bool, mode: ComposerMode = .message, hostActionsAllowed: Bool = false) throws -> Data {
+        let tools = try JSONValue.encoding(ToolExecutor.schemas(live: live, mode: mode, hostActionsAllowed: hostActionsAllowed))
         var fields: [String: JSONValue] = ["model": .string(model.rawValue), "max_tokens": .number(8192),
             "stream": .bool(true), "thinking": model.thinking, "system": .string(system), "messages": .array(messages),
             "tools": tools, "tool_choice": .object(["type": .string("auto")]), "cache_control": .object(["type": .string("ephemeral")])]
@@ -173,6 +186,20 @@ public actor AgentRunner {
     }
     private func run(events: [Envelope], phase: WritingPhase, generation: UUID) async {
         let participant = Participant.liveAgent
+        var queuedAction: ComposerHostAction?
+        let activeInstruction = phase == .instruction ? events.first(where: {
+            $0.channel == .writingInstruction && $0.participant == .hintBinder
+                && $0.payload["event"] == .string("global.instruction")
+        }) : nil
+        let instructionID: String? = {
+            guard case .string(let id) = activeInstruction?.payload["captureID"], !id.isEmpty,
+                  case .string(let text) = activeInstruction?.payload["text"], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return id
+        }()
+        if let instructionID { instructionTurnIDs[generation] = instructionID }
+        let actionContext = instructionID != nil && !executingHostAction && configuration.performHostAction != nil
+            ? await configuration.hostActionContext?() : nil
+        let hostActionsAllowed = instructionID.map { !completedInstructionActions.contains($0) } == true && actionContext != nil
         do {
             var conversation = self.conversation
             let now = ProcessInfo.processInfo.systemUptime
@@ -188,19 +215,19 @@ public actor AgentRunner {
             pendingContext = []
             let eventText = String(data: try JSONEncoder().encode(context), encoding: .utf8) ?? "[]"
             let activeEvents = String(data: try JSONEncoder().encode(events), encoding: .utf8) ?? "[]"
-            let input = "Writing phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nActive events for this turn:\n\(activeEvents)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
+            let input = "App action context: \(actionContext?.prompt ?? "App actions unavailable for this turn; only explicit finalized Instructions can authorize them.")\nWriting phase: \(phase.rawValue)\n\(PromptLayers.instruction(for: phase))\nCurrent mode: \(configuration.mode.rawValue)\nActive events for this turn:\n\(activeEvents)\nCurrent document:\n\(DocPresenter.present(snapshot))\nEvents:\n\(eventText)\n"
             await log(participant, ["event": .string("turn.phase"), "phase": .string(phase.rawValue)])
             conversation.messages.append(.object(["role": .string("user"), "content": .string(input)]))
             let turnMode = configuration.mode
             let terms = await configuration.vocabulary(snapshot.text)
             let system = PromptLayers.build(mode: turnMode, personal: configuration.personalPrompt, vocabulary: terms)
             let group = UUID().uuidString
-            if reseed { await log(participant, ["event": .string("conversation.seed"), "system": .string(system), "tools": try .encoding(ToolExecutor.schemas(live: true, mode: turnMode))]) }
+            if reseed { await log(participant, ["event": .string("conversation.seed"), "system": .string(system), "tools": try .encoding(ToolExecutor.schemas(live: true, mode: turnMode, hostActionsAllowed: hostActionsAllowed))]) }
             // A turn may perform several tools and inspect their results before it finishes.
             for _ in 0..<24 {
                 try Task.checkCancellation()
                 let request = try Self.request(model: configuration.liveModel,
-                    system: system, messages: conversation.messages, live: true, mode: turnMode)
+                    system: system, messages: conversation.messages, live: true, mode: turnMode, hostActionsAllowed: hostActionsAllowed)
                 await log(participant, ["event": .string("request"), "request_hash": .string(SHA256.hash(data: request).map { String(format: "%02x", $0) }.joined()), "messages": .array(Array(conversation.messages.suffix(1)))])
                 var blocks: [Int: JSONValue] = [:], partial: [Int: String] = [:]
                 var usage: JSONValue = .null, first = true
@@ -254,11 +281,24 @@ public actor AgentRunner {
                     if case .number(let tokens) = usage[key] { conversation.tokens += Int(tokens) }
                 }
                 var results: [JSONValue] = []
+                var actionAttempted = false
                 for block in content where block["type"] == .string("tool_use") {
                     try Task.checkCancellation()
                     guard case .string(let id) = block["id"], case .string(let name) = block["name"], let input = block["input"] else { throw MessagesStreamError.incomplete }
-                    let result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: true, phase: phase, allowedLineIDs: allowedLineIDs)
+                    let result: ToolResult
+                    if queuedAction != nil {
+                        result = ToolResult(content: "Rejected: one app action is already queued for this turn. No additional action or edit will run.", isError: true)
+                    } else {
+                        result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: true, phase: phase, allowedLineIDs: allowedLineIDs, hostActionsAllowed: hostActionsAllowed)
+                    }
+                    if ComposerHostActionKind(rawValue: name) != nil { actionAttempted = true }
+                    if let kind = result.hostAction, let instructionID, let actionContext {
+                        queuedAction = ComposerHostAction(id: instructionID + ":" + id, instructionID: instructionID, kind: kind, context: actionContext)
+                    }
                     allowedLineIDs?.formUnion(result.createdLineIDs)
+                    if phase == .instruction, name == "note", actionContext?.insertionUnavailableReason != nil {
+                        await log(participant, ["event": .string("instruction.notice"), "message": .string(result.content)])
+                    }
                     if result.requestCompose { sentenceDue = true }
                     if let mode = result.mode { configuration.mode = mode }
                     let value: JSONValue = .object(["type": .string("tool_result"), "tool_use_id": .string(id), "content": .string(result.content), "is_error": .bool(result.isError)])
@@ -268,24 +308,51 @@ public actor AgentRunner {
                 conversation.messages.append(.object(["role": .string("user"), "content": .array(results)]))
                 // Semantic directives escalate once after this stream retires, without an
                 // unnecessary acknowledgement request or a second concurrent writer.
-                if phase == .quick && sentenceDue { break }
+                if actionAttempted || (phase == .quick && sentenceDue) { break }
             }
             try Task.checkCancellation()
             conversation.lastTurn = ProcessInfo.processInfo.systemUptime; conversation.seeded = true
             self.conversation = conversation
+            if let queuedAction { queuedHostActions[generation] = queuedAction }
         } catch is CancellationError {} catch {
             await log(participant, ["event": .string("error"), "message": .string(String(describing: error))])
         }
-        guard generation == self.generation else { return }
+    }
+    /// Called by a separate watcher only after run() and its underlying stream have returned.
+    private func turnRetired(phase: WritingPhase, generation: UUID) async {
+        guard generation == self.generation else { queuedHostActions[generation] = nil; instructionTurnIDs[generation] = nil; return }
+        let completedInstruction = instructionTurnIDs.removeValue(forKey: generation)
+        var action = queuedHostActions.removeValue(forKey: generation)
+        if let candidate = action, !completedInstructionActions.insert(candidate.instructionID).inserted { action = nil }
+        // Claim the host action before yielding or clearing the writer slot. New
+        // events may enqueue, but cannot slip another writer request ahead of it.
+        if action != nil { executingHostAction = true }
         writerTask = nil; self.phase = nil; policy.finish()
-        await log(participant, ["event": .string("pending.edit"), "lines": .array([])])
+        await log(.liveAgent, ["event": .string("pending.edit"), "lines": .array([])])
         if phase == .final {
-            await room.setAgentBusy(participant, busy: false)
+            await room.setAgentBusy(.liveAgent, busy: false)
             try? await room.finishFinalPass()
-        } else {
-            await schedule()
-            if !policy.running { await room.setAgentBusy(participant, busy: false) }
         }
+        if let action, !stopped {
+            // The completed instruction no longer owns Room's writer-busy lease.
+            // Otherwise micOff cannot enter finalPass while Insert awaits it.
+            await room.setAgentBusy(.liveAgent, busy: false)
+            guard !stopped else { executingHostAction = false; return }
+            await room.recordHostAction(stage: "queued", actionID: action.id, instructionID: action.instructionID,
+                action: action.kind.rawValue, sessionToken: action.context.sessionToken)
+            guard !stopped else { executingHostAction = false; return }
+            let result = await configuration.performHostAction?(action)
+                ?? ComposerHostActionResult(succeeded: false, message: "App action is unavailable. Draft kept.")
+            await room.recordHostAction(stage: "result", actionID: action.id, instructionID: action.instructionID,
+                action: action.kind.rawValue, sessionToken: action.context.sessionToken, succeeded: result.succeeded, message: result.message)
+            executingHostAction = false
+        }
+        if action == nil, let completedInstruction {
+            await log(.liveAgent, ["event": .string("instruction.completed"), "instructionID": .string(completedInstruction)])
+        }
+        guard !stopped else { return }
+        await schedule()
+        if !policy.running { await room.setAgentBusy(.liveAgent, busy: false) }
     }
     private func log(_ participant: Participant, _ fields: [String: JSONValue]) async {
         _ = try? await room.publish(channel: .agentStatus, participant: participant, payload: .object(fields))

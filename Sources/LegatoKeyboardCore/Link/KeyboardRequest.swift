@@ -43,10 +43,12 @@ public struct KeyboardAck: Codable, Sendable, Equatable {
 public struct KeyboardPresence: Codable, Sendable, Equatable {
     public var visible: Bool
     public var at: Date
+    public var documentID: String?
 
-    public init(visible: Bool, at: Date) {
+    public init(visible: Bool, at: Date, documentID: String? = nil) {
         self.visible = visible
         self.at = at
+        self.documentID = documentID
     }
 
     public func isFresh(now: Date) -> Bool {

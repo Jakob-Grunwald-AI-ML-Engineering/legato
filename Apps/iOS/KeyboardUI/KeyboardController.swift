@@ -252,7 +252,7 @@ final class KeyboardController {
         refreshTraits()
         typing.appeared()
         wordRow.appeared()
-        link.writePresence(visible: true, notify: true)
+        link.writePresence(visible: true, notify: true, documentID: document.documentID)
         trace?("visible value=1")
         heartbeat?.cancel()
         heartbeat = Task { [weak self] in
@@ -301,13 +301,14 @@ final class KeyboardController {
     }
 
     private func beat() {
-        link.writePresence(visible: true, notify: false)
+        link.writePresence(visible: true, notify: false, documentID: document.documentID)
         reloadHost()
     }
 
     /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
     /// extension's `textDidChange` and `selectionDidChange` both come here.
     func documentDidChange() {
+        if isVisible { link.writePresence(visible: true, notify: false, documentID: document.documentID) }
         refreshTraits()
         typing.documentChanged()
         if let versions, versions.documentID != document.documentID { self.versions = nil }

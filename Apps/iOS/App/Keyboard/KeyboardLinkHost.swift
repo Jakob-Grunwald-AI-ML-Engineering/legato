@@ -40,6 +40,7 @@ final class KeyboardLinkHost: TranscriptSink {
     private var composerTask: Task<Void, Never>?
     private var composerHistory = ComposerLinkHistory()
     private var composerRevision = -1
+    private var preparingComposerInsert = false
     private var composerInsertTask: Task<Void, Never>?
     private var composerInsertionNotice: String?
     private var insertedComposerIntentID: String?
@@ -48,6 +49,12 @@ final class KeyboardLinkHost: TranscriptSink {
     func attach(_ composer: ComposerSession) {
         guard let backing = UserDefaultsLinkStore() else { return }
         let channel = ComposerLink(store: LinkStore(backing)); composerChannel = channel
+        composer.hostInsertionTarget = { [weak self] in self?.link.keyboardDocumentID() }
+        composer.hostInsertionUnavailableReason = { "No visible Legato keyboard text field is bound." }
+        composer.hostInsertDraft = { [weak self, weak composer] documentID in
+            guard let self, let composer else { return .init(succeeded: false, message: "Composer closed. Draft kept.") }
+            return await self.insertComposerDraft(composer, expectedDocumentID: documentID)
+        }
         composer.onChange = { [weak self, weak composer] in
             guard let self, let composer else { return }
             if composer.sessionID != self.composerSessionID {
@@ -70,23 +77,8 @@ final class KeyboardLinkHost: TranscriptSink {
                             guard let self, let composer else { return }
                             defer { self.composerInsertTask = nil; self.insertedComposerIntentID = intent.id }
                             guard intent.sessionID == composer.sessionID else { return }
-                            do {
-                                let text = try await composer.prepareForInsertion()
-                                let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
-                                guard !text.isEmpty else { return }
-                                let delivered = await self.insert(text)
-                                if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
-                                    self.composerInsertionNotice = nil
-                                    await composer.insert()
-                                } else if delivered {
-                                    self.composerInsertionNotice = "Inserted. Draft changed during insertion; latest edits kept."
-                                } else {
-                                    self.composerInsertionNotice = "Couldn't insert into the text field. Draft kept."
-                                }
-                            } catch {
-                                guard composer.sessionID == intent.sessionID else { return }
-                                self.composerInsertionNotice = "Couldn't finish preparing the text. Draft kept. Try Insert again."
-                            }
+                            let result = await self.insertComposerDraft(composer, expectedDocumentID: self.link.keyboardDocumentID())
+                            self.composerInsertionNotice = result.succeeded ? nil : result.message
                         }
                     case "cancel": await composer.cancel()
                     case "undo": await composer.undo()
@@ -181,13 +173,38 @@ final class KeyboardLinkHost: TranscriptSink {
 
     var keyboardIsVisible: Bool { link.keyboardIsVisible() }
 
+    /// Both the visible Insert key and explicit Instructions use this same guarded delivery.
+    private func insertComposerDraft(_ composer: ComposerSession, expectedDocumentID: String?) async -> ComposerHostActionResult {
+        guard !preparingComposerInsert else { return .init(succeeded: false, message: "Insertion already in progress. Draft kept.") }
+        preparingComposerInsert = true
+        defer { preparingComposerInsert = false }
+        let requestedSessionID = composer.sessionID
+        do {
+            let text = try await composer.prepareForInsertion()
+            guard requestedSessionID == composer.sessionID else { return .init(succeeded: false, message: "Composition changed. Insertion discarded.") }
+            guard expectedDocumentID == nil || link.keyboardDocumentID() == expectedDocumentID else {
+                return .init(succeeded: false, message: "The target text field changed. Draft kept.")
+            }
+            let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
+            guard !text.isEmpty else { return .init(succeeded: false, message: "The composer is empty.") }
+            let delivered = await insert(text, documentID: expectedDocumentID)
+            if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
+                await composer.insert()
+                return .init(succeeded: true, message: "Draft inserted into the bound text field.")
+            }
+            return .init(succeeded: delivered, message: delivered ? "Inserted. Draft changed during insertion; latest edits kept." : "Couldn't insert into the text field. Draft kept.")
+        } catch {
+            return .init(succeeded: false, message: "Couldn't finish preparing the text. Draft kept. Try Insert again.")
+        }
+    }
+
     /// How long an insert waits for the keyboard to confirm its text landed (it types the whole text out).
     static let insertTimeout: TimeInterval = 4
 
     /// The Live Activity's Insert button: publishes `text` for the keyboard on screen (flagged as asked for)
     /// and waits for it to confirm. False when no Legato keyboard is visible, a run is going on, or the
     /// keyboard did not confirm in time.
-    func insert(_ text: String) async -> Bool {
+    func insert(_ text: String, documentID: String? = nil) async -> Bool {
         let id = UUID().uuidString
         guard keyboardIsVisible else {
             #if DEBUG
@@ -195,7 +212,7 @@ final class KeyboardLinkHost: TranscriptSink {
             #endif
             return false
         }
-        guard link.publishInsert(runID: id, text: text) else {
+        guard link.publishInsert(runID: id, text: text, documentID: documentID) else {
             #if DEBUG
             WakeProbeLog.log("skip", "reason=runInProgress run=\(id.prefix(8))")
             #endif

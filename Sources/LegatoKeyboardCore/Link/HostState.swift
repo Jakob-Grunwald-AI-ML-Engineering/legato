@@ -97,6 +97,7 @@ public struct HostState: Codable, Sendable, Equatable {
     /// visible keyboard types it without having followed the run, while the request is fresh
     /// (`LinkChannel.insertMaxAge`). Nil for every other state.
     public var insertAt: Date?
+    public var insertDocumentID: String?
     /// `.live`: the newest revision of this run; nil before the first.
     public var revision: HostRevision?
     /// A meeting is recording: dictation is blocked. Absent (nil) otherwise, so older readers see the same state.
@@ -125,6 +126,7 @@ public struct HostState: Codable, Sendable, Equatable {
         self.delivery = delivery
         self.finalText = finalText
         self.insertAt = insertAt
+        self.insertDocumentID = nil
         self.revision = revision
     }
 
