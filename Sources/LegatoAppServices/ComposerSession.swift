@@ -22,6 +22,17 @@ import LegatoVocabulary
     public private(set) var pendingLineIDs: Set<String> = []
     public private(set) var busy = false
     public private(set) var isMuted = false
+    public private(set) var inputMode = ComposerInputMode.dictation
+    public private(set) var instructionDraft = ""
+    public private(set) var lastInstruction = ""
+    public private(set) var instructionApplying = false
+    public var instructionPreview: String { instructionDraft.isEmpty ? lastInstruction : instructionDraft }
+    public var instructionStatus: String {
+        if !instructionDraft.isEmpty { return "Listening" }
+        if instructionApplying { return "Applying" }
+        if !lastInstruction.isEmpty { return "Done" }
+        return isListening && inputMode == .instructions ? "Listening" : "Ready"
+    }
     public private(set) var mode = ComposerMode.message
     public private(set) var sessionID: String?
     public private(set) var inputSource = "microphone.soniox"
@@ -154,7 +165,10 @@ import LegatoVocabulary
             }
             let store = VocabularyStore(fileURL: vocabularyURL)
             let learner = VocabularyLearner(store: store, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), languages: ["de", "en"])
-            let binder = HintBinder(room: room, learner: learner, onSend: { [weak self] in await self?.sendCorrection() }); self.binder = binder; await binder.start(); try requireGeneration(generation)
+            let binder = HintBinder(room: room, learner: learner, onSend: { [weak self] in await self?.sendCorrection() },
+                onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() }); self.binder = binder; await binder.start()
+            if inputMode != .dictation { await binder.setInputMode(inputMode, timestamp: ProcessInfo.processInfo.systemUptime) }
+            try requireGeneration(generation)
             let alternatives = AlternativesParticipant(room: room, store: store, learner: learner); self.alternatives = alternatives; await alternatives.start(); try requireGeneration(generation)
             let defaults = UserDefaults.standard
             let prompt = defaults.string(forKey: "composer.personalPrompt") ?? ""
@@ -288,7 +302,7 @@ import LegatoVocabulary
         onChange?()
     }
     public var debugState: [String: Any] {
-        ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource,
+        ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "inputMode": inputMode.rawValue, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus,
          "sessionID": sessionID ?? "", "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
@@ -297,6 +311,17 @@ import LegatoVocabulary
          "tail": tail, "text": renderedText, "mode": mode.rawValue, "busy": busy, "pendingLineIDs": Array(pendingLineIDs), "error": error ?? ""]
     }
     #endif
+    public func setInputMode(_ value: ComposerInputMode, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
+        guard value != inputMode else { return }
+        inputMode = value; onChange?()
+        await binder?.setInputMode(value, timestamp: timestamp)
+        // Finalize the old acoustic chunk without reconnecting or stopping microphone input.
+        if isListening { try? await transcriber?.finalizeChunk() }
+    }
+    private func finalizeInstructionChunk() async {
+        guard isListening else { return }
+        do { _ = try await transcriber?.finalizeChunk() } catch { fail(error) }
+    }
     /// Logical voice mute: keep the mic lease, Room and agent work alive while dropping new input.
     public func setMuted(_ value: Bool) async {
         guard isListening, room != nil, isMuted != value else { return }
@@ -402,11 +427,18 @@ import LegatoVocabulary
         case .docSnapshot: if let value = try? event.payload.decode(DocumentSnapshot.self) { snapshot = value }
         case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; if value.origin != .undo { lastTransactionID = value.id } }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
+        case .writingInstruction:
+            lastInstruction = (try? event.payload["text"]?.decode(String.self)) ?? ""
+            instructionApplying = true
+        case .instructionDraft:
+            instructionDraft = (try? event.payload["text"]?.decode(String.self)) ?? ""
         case .correctionDraft:
             correctionDraft = try? event.payload["text"]?.decode(String.self)
             correctionCountdownStart = try? event.payload["countdownStart"]?.decode(Double.self)
             correctionCountdownDeadline = try? event.payload["countdownDeadline"]?.decode(Double.self)
         case .agentStatus:
+            if event.payload["event"] == .string("turn.phase"), event.payload["phase"] == .string("instruction") { instructionApplying = true }
+            if event.payload["busy"] == .bool(false) { instructionApplying = false }
             if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty }
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
             if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }
@@ -441,7 +473,7 @@ import LegatoVocabulary
         audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         await transcriber?.cancel(); transcriber = nil; await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
-        isMuted = false
+        isMuted = false; inputMode = .dictation; instructionDraft = ""; lastInstruction = ""; instructionApplying = false
         correctionDraft = nil; correctionCountdownStart = nil; correctionCountdownDeadline = nil
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }

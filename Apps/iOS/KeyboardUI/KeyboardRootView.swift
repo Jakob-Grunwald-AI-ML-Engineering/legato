@@ -8,14 +8,32 @@ struct KeyboardRootView: View {
     let controller: KeyboardController
     @Environment(\.colorScheme) private var systemScheme
     @State private var showsModePicker = false
+    @State private var showsTypingKeyboard = false
     private let modes = [("message", "message"), ("email", "envelope"), ("prompt", "sparkles"), ("note", "note.text"), ("auto", "wand.and.stars")]
 
     var body: some View {
+        Group {
+            if showsTypingKeyboard { TypingFallbackView(controller: controller) { showsTypingKeyboard = false } }
+            else { composerBody }
+        }
+    }
+    private var composerBody: some View {
         VStack(spacing: 0) {
             resizeHandle
+            HStack {
+                DraftInputHeader(active: controller.composer.inputMode != "instructions") {
+                    controller.composerIntent("input-mode", text: "dictation")
+                }
+                Button("ABC") { showsModePicker = false; showsTypingKeyboard = true }
+                    .font(.caption.weight(.medium)).frame(width: 44, height: 25)
+                    .buttonStyle(KeyButtonStyle()).accessibilityLabel("Typing keyboard")
+                    .accessibilityIdentifier("composer.typingKeyboard")
+            }.padding(.horizontal, 12).padding(.bottom, 2)
             Group {
                 ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
                              pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
+                             instructionText: controller.composer.instructionDraft ?? "", instructionStatus: controller.composer.instructionStatus ?? "Ready",
+                             instructionInputActive: controller.composer.inputMode == "instructions",
                              correctionDraft: controller.composer.correctionDraft,
                 correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,
                              onSelect: { controller.composerIntent("tap", lineID: $0.lineID, wordID: $0.wordID, endLineID: $0.endLineID, endWordID: $0.endWordID) },
@@ -75,11 +93,10 @@ struct KeyboardRootView: View {
                     .opacity(controller.composer.snapshot.lines.isEmpty && controller.composer.tail.isEmpty ? 0.35 : 1)
             }.disabled((controller.composer.snapshot.lines.isEmpty && controller.composer.tail.isEmpty) || controller.pendingComposerInsert != nil).accessibilityLabel("Insert")
             key("Cancel composition", symbol: "xmark", action: { controller.composerIntent("cancel") })
-            key(controller.composer.muted == true ? "Unmute transcription" : "Mute transcription",
-                symbol: controller.composer.muted == true ? "mic.slash.fill" : "mic.slash",
-                enabled: controller.composer.status == "listening",
-                selected: controller.composer.muted == true,
-                action: { controller.composerIntent("mute") })
+            key(controller.composer.inputMode == "instructions" ? "Instructions input" : "Dictation input",
+                symbol: controller.composer.inputMode == "instructions" ? "text.bubble.fill" : "waveform",
+                selected: controller.composer.inputMode == "instructions",
+                action: { controller.composerIntent("input-mode", text: controller.composer.inputMode == "instructions" ? "dictation" : "instructions") })
             MicKey(controller: controller)
         }
         .font(.system(size: 17))

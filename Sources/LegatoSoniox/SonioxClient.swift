@@ -261,7 +261,7 @@ public actor SonioxClient {
         }
         _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string(output.tail), "activity": .bool(activity),
                 "parts": .array(output.tailParts.map { part in .object(["text": .string(part.text),
-                    "tOrigin": .number(part.time.flatMap { time in audioOrigin.map { $0 + time } } ?? ProcessInfo.processInfo.systemUptime)]) })]))
+                    "timed": .bool(part.time != nil), "tOrigin": .number(part.time.flatMap { time in audioOrigin.map { $0 + time } } ?? ProcessInfo.processInfo.systemUptime)]) })]))
     }
     private func fail(_ error: SonioxError) async {
         guard state != .finished && state != .failed else { return }

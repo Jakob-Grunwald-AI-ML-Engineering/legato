@@ -28,7 +28,7 @@ private final class WriterMessages: MessagesStreaming {
         let text = messages.reversed().compactMap { message -> String? in
             if case .string(let content) = message["content"], content.contains("Writing phase:") { return content }; return nil
         }.first ?? ""
-        let phase = ["targeted", "final", "pause", "sentence", "quick"].first { text.contains("Writing phase: \($0)") } ?? "legacy"
+        let phase = ["instruction", "targeted", "final", "pause", "sentence", "quick"].first { text.contains("Writing phase: \($0)") } ?? "legacy"
         let pair = AsyncThrowingStream<SSEEvent, any Error>.makeStream()
         let id = state.withLock { s in
             let id = s.calls.count
@@ -277,6 +277,48 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
     #expect(try await waitForWriter { await room.documentSnapshot.lines.first?.text == "Investigate why the Legato keyboard sometimes disappears and iOS shows the native keyboard, while switching back reveals the session is still running." })
     #expect(await room.documentSnapshot.lines.last == later)
     #expect(await room.state == .listening)
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+@Test func explicitInstructionsUseSameConversationAndFullToolsWithCapturedScope() async throws {
+    let room = Room(), client = WriterMessages()
+    let retired = Mutex(false)
+    let statuses = await room.subscribe(participant: .logger, channels: [.agentStatus])
+    let observation = Task {
+        for await event in statuses where event.payload["busy"] == .bool(false) { retired.withLock { $0 = true } }
+    }
+    defer { observation.cancel() }
+    let runner = AgentRunner(room: room, client: client, configuration: .init(mode: .prompt), pauseDelay: .seconds(20))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "Original rough draft")])
+    #expect(try await waitForWriter { client.calls().count == 1 })
+    client.finish(0)
+    #expect(try await waitForWriter { retired.withLock { $0 } })
+    let captured = await room.documentSnapshot
+    _ = try await room.publish(channel: .writingInstruction, participant: .hintBinder, payload: .object([
+        "event": .string("global.instruction"), "text": .string("Turn this into a concise prompt"),
+        "snapshot": try .encoding(captured)]))
+    #expect(try await waitForWriter { client.calls().count == 2 })
+    let request = try #require(client.calls().last)
+    #expect(request.phase == "instruction")
+    let serialized = String(decoding: request.request, as: UTF8.self)
+    #expect(serialized.contains("No edit needed."), "The instruction retains the existing writer conversation")
+    #expect(serialized.contains("Turn this into a concise prompt"))
+    #expect(serialized.contains("replace_lines"))
+    let newer = try await room.appendSegment(words: [.init(text: "Newer spoken content")])
+    let createdIDs = newer.ops.compactMap { op -> String? in
+        if case .insertLines(_, let lines) = op { return lines.first?.id }; return nil
+    }
+    let newerID = try #require(createdIDs.first)
+    let current = await room.documentSnapshot
+    let currentNewer = try #require(current.lines.first { $0.id == newerID })
+    let denied = await ToolExecutor(room: room).execute(name: "delete_lines", input: .object([
+        "from": .string(newerID), "to": .string(newerID),
+        "versions": try .encoding([newerID: currentNewer.version])]), groupID: "instruction", live: true,
+        phase: .instruction, allowedLineIDs: Set(captured.lines.map(\.id)))
+    #expect(denied.isError)
+    #expect(await room.documentSnapshot.lines.contains { $0.id == newerID })
     #expect(client.state.withLock { $0.maxActive } == 1)
     await runner.stop()
 }
