@@ -195,7 +195,7 @@ private struct NotchComposerView: View {
                     .help("Redo is not available yet")
                 key("Insert", symbol: "paperplane.fill", shortcut: "⌘↩", enabled: !controller.inserting && (!session.renderedText.isEmpty || !session.tail.isEmpty), prominent: true) { controller.insertComposer() }
                 key("Cancel", symbol: "xmark", shortcut: "esc") { controller.cancelComposer() }
-                key(session.inputMode == .instructions ? "Instructions" : "Dictation", symbol: session.inputMode == .instructions ? "text.bubble.fill" : "waveform", shortcut: "⇧⌘M", selected: session.inputMode == .instructions) {
+                key(session.inputMode == .instructions ? "Instructions" : "Dictation", symbol: session.inputMode == .instructions ? "text.bubble.fill" : "waveform", shortcut: "⇧⌘M", selected: session.inputMode == .instructions, iconOnly: true) {
                     Task { await session.setInputMode(session.inputMode.toggled) }
                 }
                 key(controller.isDictating ? "Pause" : (session.status == "paused" ? "Resume" : "Dictate"), symbol: controller.isDictating ? "pause.fill" : "mic.fill", shortcut: "⇧⌘D", selected: session.isListening && !session.isMuted) { controller.toggle() }
@@ -213,8 +213,8 @@ private struct NotchComposerView: View {
     private var shape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(topLeadingRadius: attached ? 14 : 20, bottomLeadingRadius: 22, bottomTrailingRadius: 22, topTrailingRadius: attached ? 14 : 20)
     }
-    private func key(_ title: String, symbol: String, shortcut: String, enabled: Bool = true, prominent: Bool = false, selected: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) { ComposerKeyLabel(title: title, symbol: symbol, shortcut: shortcut) }
+    private func key(_ title: String, symbol: String, shortcut: String, enabled: Bool = true, prominent: Bool = false, selected: Bool = false, iconOnly: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) { ComposerKeyLabel(title: title, symbol: symbol, shortcut: shortcut, iconOnly: iconOnly) }
             .buttonStyle(ComposerKeyStyle(prominent: prominent, selected: selected))
             .disabled(!enabled).help("\(title) (\(shortcut))")
             .accessibilityLabel(title)
@@ -225,11 +225,12 @@ private struct ComposerKeyLabel: View {
     let title: String
     let symbol: String
     let shortcut: String
+    var iconOnly = false
     var body: some View {
         VStack(spacing: 5) {
             HStack(spacing: 4) {
                 Image(systemName: symbol).font(.system(size: 12, weight: .medium))
-                Text(title).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                if !iconOnly { Text(title).font(.system(size: 10, weight: .medium)).lineLimit(1) }
             }
             Text(shortcut).font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary).padding(.horizontal, 4).padding(.vertical, 1)
