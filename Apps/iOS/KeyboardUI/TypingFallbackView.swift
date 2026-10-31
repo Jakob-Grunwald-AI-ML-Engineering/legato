@@ -17,7 +17,8 @@ struct TypingFallbackView: View {
             let top = geometry.size.height - height
             let gridOffset = top - removedToolRow
             let layout = controller.typing.layout
-            let frames = layout.frames(in: CGSize(width: geometry.size.width, height: nativeHeight))
+            let frames = layout.frames(in: CGSize(width: geometry.size.width, height: nativeHeight),
+                                       landscapeScreenWidth: KeyGeometry.screenWidth(in: controller.inputModeTarget?.view.window))
             ZStack(alignment: .topLeading) {
                 if controller.typing.showsEmojiPanel {
                     EmojiPickerView(typing: controller.typing, controller: controller)
@@ -30,10 +31,11 @@ struct TypingFallbackView: View {
                         .frame(width: geometry.size.width, height: nativeHeight)
                         .offset(y: gridOffset)
                     ForEach(frames.filter { $0.id == "globe" || ($0.id == "emoji" && controller.emojiSystemSwitcher) }, id: \.id) { frame in
+                        let rect = frame.cgRect
                         GlobeKey(target: controller.inputModeTarget, typing: controller.typing, emoji: frame.id == "emoji")
-                            .frame(width: frame.rect.width, height: frame.rect.height)
-                            .position(x: frame.rect.x + frame.rect.width / 2,
-                                      y: gridOffset + frame.rect.y + frame.rect.height / 2)
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.minX + rect.width / 2,
+                                      y: gridOffset + rect.minY + rect.height / 2)
                     }
                 }
                 HStack {
