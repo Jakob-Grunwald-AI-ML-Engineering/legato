@@ -140,6 +140,9 @@ public struct ComposerView: View {
             .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportSize = $0 }
             .onPreferenceChange(WordBoundsKey.self) { bounds = $0 }
             .onAppear {
+                // A Mac focus handoff can hide/reveal the same host view. Do not consume
+                // its new delivery acknowledgement as though this were a fresh mount.
+                guard !hasPresented else { return }
                 sendFlight.reset(acknowledgement: successfulInsertionID)
                 presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true
             }
