@@ -9,8 +9,9 @@ public struct LiveAgentPolicy: Sendable {
     public var editing: Set<String> = []
     public init() {}
     @discardableResult public mutating func enqueue(_ event: Envelope, hintTargets: Set<String> = []) -> Bool {
-        guard [.hint, .userIntent].contains(event.channel) || AgentAdmission.isAcceptedContent(event) else { return false }
-        let preempt = running && event.channel == .hint && !editing.isDisjoint(with: hintTargets)
+        guard [.hint, .userIntent].contains(event.channel) || AgentAdmission.isAcceptedContent(event) || AgentAdmission.isUserEdit(event) else { return false }
+        let preempt = running && (event.channel == .hint || AgentAdmission.isUserEdit(event)
+            || (event.channel == .userIntent && event.participant == .ui && event.payload["event"] == .string("mode.changed")))
         if preempt { pending = active + pending }
         if event.channel == .hint { pending.insert(event, at: 0) } else { pending.append(event) }
         return preempt
@@ -28,6 +29,10 @@ public struct LiveAgentPolicy: Sendable {
 
 /// Raw ASR remains context, but only a binder-accepted append admits a content turn.
 enum AgentAdmission {
+    static func isUserEdit(_ event: Envelope) -> Bool {
+        guard event.channel == .docOps, let origin = try? event.payload.decode(Transaction.self).origin else { return false }
+        return origin == .user || origin == .undo
+    }
     static func isAcceptedContent(_ event: Envelope) -> Bool {
         event.channel == .docOps && (try? event.payload.decode(Transaction.self).origin) == .asr
     }
