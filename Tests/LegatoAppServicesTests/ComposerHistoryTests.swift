@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import LegatoCore
 import LegatoComposerDoc
+import LegatoRoom
 @testable import LegatoAppServices
 
 private actor FailableComposerHistory: HistoryStore {
@@ -78,5 +79,48 @@ private actor FailableComposerHistory: HistoryStore {
         await session.cancel()
         #expect(session.renderedText.isEmpty)
         #expect(await store.recent(limit: 10).map(\.text) == ["Never lose this draft"])
+    }
+}
+
+private actor CountingHistory: HistoryStore {
+    var entries: [DictationEntry] = []
+    var upserts = 0
+    func append(_ entry: DictationEntry) { entries.append(entry) }
+    func upsert(_ entry: DictationEntry) { upserts += 1; entries.removeAll { $0.id == entry.id }; entries.append(entry) }
+    func recent(limit: Int) -> [DictationEntry] { Array(entries.reversed().prefix(limit)) }
+    func delete(id: UUID) { entries.removeAll { $0.id == id } }
+}
+
+@MainActor extension ComposerHistoryTests {
+    @Test func repeatedFlushesDoNotRewriteUnchangedTextAndRevisionAdvancesOnce() async throws {
+        let store = CountingHistory()
+        let session = ComposerSession(history: store)
+        try await session.seedDebugDraft("Stable text")
+        for _ in 0..<3 { #expect(await session.flushHistory()) }
+        #expect(await store.upserts == 1)
+        #expect(session.historyRevision == 1)
+    }
+
+    @Test func pauseKeepsTheDraftAndItsHistoryEntryID() async throws {
+        let store = CountingHistory()
+        let session = ComposerSession(history: store)
+        try await session.seedDebugDraft("Paused draft")
+        let id = try #require(await store.recent(limit: 1).first?.id)
+        await session.stop()
+        #expect(await session.flushHistory())
+        #expect(session.renderedText == "Paused draft" && session.status == "paused")
+        #expect(await store.recent(limit: 5).map(\.id) == [id])
+    }
+
+    @Test func insertTraceNamesTheCallerWithoutDraftText() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let log = try SessionLog(rootDirectory: root)
+        let session = ComposerSession(room: Room(log: log, resumable: true), log: log)
+        await session.traceInsertion("requested", origin: .keyboardButton)
+        await session.traceInsertion("acknowledged", origin: .instruction, detail: ["ack": "keyboard.finalApplied"])
+        let text = try String(contentsOf: log.roomURL, encoding: .utf8)
+        #expect(text.contains("insert.requested") && text.contains("keyboard.button"))
+        #expect(text.contains("insert.acknowledged") && text.contains("host.instruction") && text.contains("keyboard.finalApplied"))
     }
 }

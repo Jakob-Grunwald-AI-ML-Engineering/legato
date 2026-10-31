@@ -147,7 +147,7 @@ private func modeIcon(_ mode: ComposerMode) -> String {
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
         let session = controller.composer
         if event.keyCode == 53, flags.isEmpty { controller.cancelComposer(); return true }
-        if event.keyCode == 36, flags == .command { controller.insertComposer(); return true }
+        if event.keyCode == 36, flags == .command { controller.insertComposer(origin: .macShortcut); return true }
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if flags == .command, let index = Int(key), (1...ComposerMode.allCases.count).contains(index) {
             Task { await session.setMode(ComposerMode.allCases[index - 1]) }; return true

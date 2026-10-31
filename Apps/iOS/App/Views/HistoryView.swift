@@ -46,6 +46,7 @@ struct HistoryView: View {
             if entries.isEmpty { ContentUnavailableView("No dictations yet", systemImage: "text.bubble") }
         }
         .navigationTitle("History")
-        .task { entries = await controller.recentEntries() }
+        // Reloads on appear and whenever the composer or backfill stores a new revision.
+        .task(id: controller.composer.historyRevision) { entries = await controller.recentEntries() }
     }
 }

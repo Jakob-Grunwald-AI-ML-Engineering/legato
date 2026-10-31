@@ -55,13 +55,19 @@ public actor JSONLHistoryStore: HistoryStore {
         try await file.append(entry)
     }
 
+    /// Replaces the entry with the same id, keeping the date it was first stored with.
     public func upsert(_ entry: DictationEntry) async throws {
+        var entry = entry
+        if let stored = try await file.elements().first(where: { $0.id == entry.id }) { entry.date = stored.date }
         try await file.upsert(entry, matching: { $0.id == entry.id })
     }
 
+    /// Newest by entry date; equal dates keep file order, so appended dictations read as before and an
+    /// older recovered composition does not jump above newer ones.
     public func recent(limit: Int) async throws -> [DictationEntry] {
         guard limit > 0 else { return [] }
-        return Array(try await file.elements().suffix(limit).reversed())
+        let ordered = try await file.elements().enumerated().sorted { ($0.element.date, $0.offset) > ($1.element.date, $1.offset) }
+        return ordered.prefix(limit).map(\.element)
     }
 
     public func delete(id: UUID) async throws {

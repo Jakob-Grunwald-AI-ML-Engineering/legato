@@ -49,6 +49,7 @@ final class AppController {
             return true
         }
         keyboardHost?.startListening()
+        Task { [composer] in await composer.backfillHistory(markerURL: root.appending(path: "history-backfill.done")) }
         #if LEGATO_INTERNAL
         DebugBridge.start()
         #endif
