@@ -28,7 +28,7 @@ private final class WriterMessages: MessagesStreaming {
         let text = messages.reversed().compactMap { message -> String? in
             if case .string(let content) = message["content"], content.contains("Writing phase:") { return content }; return nil
         }.first ?? ""
-        let phase = ["targeted", "final", "pause", "quick"].first { text.contains("Writing phase: \($0)") } ?? "legacy"
+        let phase = ["targeted", "final", "pause", "sentence", "quick"].first { text.contains("Writing phase: \($0)") } ?? "legacy"
         let pair = AsyncThrowingStream<SSEEvent, any Error>.makeStream()
         let id = state.withLock { s in
             let id = s.calls.count
@@ -47,6 +47,13 @@ private final class WriterMessages: MessagesStreaming {
     func finish(_ index: Int) {
         let c = state.withLock { $0.calls[index].continuation }
         c.yield(.init(event: "content_block_start", data: #"{"index":0,"content_block":{"type":"text","text":"No edit needed."}}"#))
+        c.yield(.init(event: "message_stop", data: #"{"type":"message_stop"}"#))
+        c.finish()
+    }
+    func finishTool(_ index: Int, name: String, input: JSONValue) throws {
+        let c = state.withLock { $0.calls[index].continuation }
+        let block: JSONValue = .object(["index": .number(0), "content_block": .object(["type": .string("tool_use"), "id": .string("tool-\(index)"), "name": .string(name), "input": input])])
+        c.yield(.init(event: "content_block_start", data: String(decoding: try JSONEncoder().encode(block), as: UTF8.self)))
         c.yield(.init(event: "message_stop", data: #"{"type":"message_stop"}"#))
         c.finish()
     }
@@ -92,7 +99,7 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
 
 @Test func continuedSpeechDefersAndPreemptsPauseWithoutASecondWriter() async throws {
     let room = Room(), client = WriterMessages()
-    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(90))
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(500))
     await runner.start()
     _ = try await room.publishSegment(words: [.init(text: "A draft")])
     #expect(try await waitForWriter { client.calls().count == 1 })
@@ -185,6 +192,91 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
     client.finish(0)
     #expect(try await waitForWriter { client.calls().count == 2 })
     #expect(client.calls().last?.phase == "targeted")
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+
+@Test func completedSentenceComposesThroughContinuedSpeechAndCoalescesFollowingInput() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client, configuration: .init(mode: .prompt), pauseDelay: .seconds(10))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "Um improve editing responsiveness.")])
+    #expect(try await waitForWriter { client.calls().first?.phase == "sentence" })
+    for _ in 0..<3 {
+        _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("I am still speaking")]))
+        _ = try await room.publishSegment(words: [.init(text: "Another thought.")])
+    }
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(client.calls().count == 1)
+    #expect(client.state.withLock { $0.canceledPhases.isEmpty })
+    client.finish(0)
+    #expect(try await waitForWriter { client.calls().count == 2 })
+    #expect(client.calls().last?.phase == "sentence")
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+@Test func punctuationlessSpeechGetsBoundedAuthoringProgress() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .seconds(10))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "first unpunctuated chunk")])
+    #expect(try await waitForWriter { client.calls().first?.phase == "quick" })
+    _ = try await room.publishSegment(words: [.init(text: "second unpunctuated chunk")])
+    client.finish(0)
+    #expect(try await waitForWriter { client.calls().last?.phase == "sentence" })
+    await runner.stop()
+}
+
+@Test func sentenceEditsCannotConsumeNewSpeechAndKeepTheirOwnReplacementInScope() async throws {
+    let room = Room()
+    _ = try await room.publishSegment(words: [.init(text: "Um improve editing.")])
+    let first = try #require(await room.documentSnapshot.lines.first)
+    let scope: Set<String> = [first.id]
+    _ = try await room.publishSegment(words: [.init(text: "A later fact.")])
+    let last = try #require(await room.documentSnapshot.lines.last)
+    let executor = ToolExecutor(room: room)
+    func input(_ to: String, _ versions: [Line]) -> JSONValue {
+        .object(["from": .string(first.id), "to": .string(to), "lines": .array([.string("Improve editing responsiveness.")]),
+            "versions": .array(versions.map { .object(["line": .string($0.id), "version": .number(Double($0.version))]) })])
+    }
+    #expect((await executor.execute(name: "replace_lines", input: input(last.id, [first, last]), groupID: "sentence", live: true, phase: .sentence, allowedLineIDs: scope)).isError)
+    let result = await executor.execute(name: "replace_lines", input: input(first.id, [first]), groupID: "sentence", live: true, phase: .sentence, allowedLineIDs: scope)
+    #expect(!result.isError)
+    #expect(result.createdLineIDs.count == 1)
+    #expect(!result.createdLineIDs.contains(last.id))
+    #expect(await room.documentSnapshot.lines.last == last)
+}
+
+
+@Test func semanticDirectiveEscalatesToSameWriterWithoutWaitingForQuiet() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .seconds(10))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "make it shorter")])
+    #expect(try await waitForWriter { client.calls().first?.phase == "quick" })
+    try client.finishTool(0, name: "request_compose", input: .object(["reason": .string("The user asked to shorten the existing draft")]))
+    #expect(try await waitForWriter { client.calls().count == 2 })
+    #expect(client.calls().last?.phase == "sentence")
+    #expect(client.state.withLock { $0.maxActive } == 1)
+    await runner.stop()
+}
+
+@Test func sentenceAppliesAuthoredPromptToolResultBeforeStopWhileNewSpeechArrives() async throws {
+    let room = Room(), client = WriterMessages()
+    let runner = AgentRunner(room: room, client: client, configuration: .init(mode: .prompt), pauseDelay: .seconds(10))
+    await runner.start()
+    _ = try await room.publishSegment(words: [.init(text: "Um, sometimes the keyboard just disappears and iOS shows the native keyboard. I switch back and my session is still running. I do not know why. Okay, rewrite this into a nice prompt, please.")])
+    #expect(try await waitForWriter { client.calls().first?.phase == "sentence" })
+    let first = try #require(await room.documentSnapshot.lines.first)
+    _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("another thought still in progress")]))
+    _ = try await room.publishSegment(words: [.init(text: "Preserve the original details.")])
+    let later = try #require(await room.documentSnapshot.lines.last)
+    try client.finishTool(0, name: "replace_lines", input: .object(["from": .string(first.id), "to": .string(first.id), "lines": .array([.string("Investigate why the Legato keyboard sometimes disappears and iOS shows the native keyboard, while switching back reveals the session is still running.")]), "versions": .array([.object(["line": .string(first.id), "version": .number(Double(first.version))])])]))
+    #expect(try await waitForWriter { await room.documentSnapshot.lines.first?.text == "Investigate why the Legato keyboard sometimes disappears and iOS shows the native keyboard, while switching back reveals the session is still running." })
+    #expect(await room.documentSnapshot.lines.last == later)
+    #expect(await room.state == .listening)
     #expect(client.state.withLock { $0.maxActive } == 1)
     await runner.stop()
 }

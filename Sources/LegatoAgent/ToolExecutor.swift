@@ -7,11 +7,13 @@ public struct ToolResult: Sendable {
     public let content: String
     public let isError: Bool
     public var mode: ComposerMode? = nil
+    public var createdLineIDs: Set<String> = []
+    public var requestCompose = false
 }
 public struct ToolExecutor: Sendable {
     public let room: Room
     public init(room: Room) { self.room = room }
-    public func execute(name: String, input: JSONValue, groupID: String, live: Bool, phase: WritingPhase = .pause) async -> ToolResult {
+    public func execute(name: String, input: JSONValue, groupID: String, live: Bool, phase: WritingPhase = .pause, allowedLineIDs: Set<String>? = nil) async -> ToolResult {
         if phase == .quick, ["replace_lines", "insert_lines", "delete_lines", "move_lines", "set_kind"].contains(name) {
             return ToolResult(content: "Deferred: this quick pass only makes local corrections. Leave broader changes for the quiet-pause or final turn; do not retry them now.", isError: true)
         }
@@ -47,7 +49,7 @@ public struct ToolExecutor: Sendable {
                     guard let a = snapshot.lines.firstIndex(where: { $0.id == from }), let b = snapshot.lines.firstIndex(where: { $0.id == to }), a <= b else { throw DocumentError.invalidOperation }
                     selected = Array(snapshot.lines[a...b])
                 } else { selected = snapshot.lines }
-                return ToolResult(content: DocPresenter.present(.init(revision: snapshot.revision, lines: selected)), isError: false)
+                return ToolResult(content: DocPresenter.present(.init(revision: snapshot.revision, lines: selected.filter { allowedLineIDs?.contains($0.id) ?? true })), isError: false)
             case "replace_lines": op = .replaceLines(ids: try ids(), lines: try newLines()); observed = try versions()
             case "insert_lines": op = .insertLines(after: optional("after"), lines: try newLines())
             case "delete_lines": op = .deleteLines(ids: try ids()); observed = try versions()
@@ -66,12 +68,35 @@ public struct ToolExecutor: Sendable {
                 _ = try await room.publish(channel: .userIntent, participant: live ? .liveAgent : .restructureAgent,
                     payload: .object(["event": .string("mode.changed"), "mode": .string(mode.rawValue)]))
                 return ToolResult(content: "Mode changed", isError: false, mode: mode)
+            case "request_compose":
+                let reason = try string("reason")
+                return ToolResult(content: phase == .quick ? "Composing queued: \(reason)" : "This turn already has composing tools; apply the instruction now.", isError: false, requestCompose: phase == .quick)
             case "note": return ToolResult(content: try string("text"), isError: false)
             default: throw DocumentError.invalidOperation
             }
+            if let allowedLineIDs {
+                let affected: Set<String>
+                switch op {
+                case .replaceLines(let ids, _), .deleteLines(let ids), .setKind(let ids, _): affected = Set(ids)
+                case .replaceInLine(let id, _, _): affected = [id]
+                case .insertLines(let after, _): affected = Set(after.map { [$0] } ?? [])
+                case .moveLines(let ids, let after): affected = Set(ids + (after.map { [$0] } ?? []))
+                default: throw DocumentError.invalidOperation
+                }
+                guard affected.isSubset(of: allowedLineIDs) else {
+                    return ToolResult(content: "Deferred: those lines arrived after this composing turn. Finish this captured draft; newer speech will be handled next.", isError: true)
+                }
+            }
             try Task.checkCancellation()
             let txn = try await room.applyDocument([op], origin: .agent, versions: observed, groupID: groupID)
-            return ToolResult(content: "Applied transaction \(txn.id)\n" + DocPresenter.present(await room.documentSnapshot), isError: false)
+            let updated = await room.documentSnapshot
+            let created: Set<String>
+            switch op {
+            case .replaceLines(_, let lines), .insertLines(_, let lines): created = Set(lines.map(\.id))
+            default: created = []
+            }
+            let visible = updated.lines.filter { allowedLineIDs == nil || allowedLineIDs!.contains($0.id) || created.contains($0.id) }
+            return ToolResult(content: "Applied transaction \(txn.id)\n" + DocPresenter.present(.init(revision: updated.revision, lines: visible)), isError: false, createdLineIDs: created)
         } catch { return ToolResult(content: "\(error). Call view to refresh line ids and versions before retrying.", isError: true) }
     }
     public static func schemas(live: Bool, mode: ComposerMode = .message) -> [ToolSchema] {
@@ -89,7 +114,8 @@ public struct ToolExecutor: Sendable {
             tool("replace_in_line", ["line": str,"old": str,"new": str,"version": S(type: "integer")]),
             tool("move_lines", ["from": str,"to": str,"after": str,"versions": versions], ["from","to","versions"]),
             tool("set_kind", ["lines": array,"kind": str,"versions": versions]),
-            tool("set_mode", ["mode": str]), tool("note", ["text": str])]
+            tool("set_mode", ["mode": str]), tool("note", ["text": str]),
+            ToolSchema(name: "request_compose", description: "During a quick turn only, recognize a clear writing/revision directive in any language and request immediate composing with full tools. Supply a brief reason. The host schedules the same writer; this tool never edits text. Do not use during an existing sentence, pause, targeted or final composing turn.", properties: ["reason": str], required: ["reason"])]
         if mode == .auto {
             // Specialization loads context without changing the Auto system prefix or UI mode.
             tools.removeAll { $0.name == "set_mode" }

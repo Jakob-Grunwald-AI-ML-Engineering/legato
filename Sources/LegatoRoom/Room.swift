@@ -5,7 +5,7 @@ public enum RoomError: Error, Equatable {
     case documentChannelRequiresCapability, sessionEnded, invalidSegment, invalidLifecycleTransition
 }
 
-/// One microphone activation. All envelope assignment and document mutations run on this actor.
+/// One composition, optionally spanning multiple microphone activations. All envelope assignment and document mutations run on this actor.
 public actor Room {
     private var sequence: Int64 = 0
     private var subscribers: [UUID: (Set<Channel>, AsyncStream<Envelope>.Continuation)] = [:]
@@ -16,12 +16,13 @@ public actor Room {
     private let clock: @Sendable () -> Double
     private let log: SessionLog?
     private let segmentRouting: SegmentRouting
+    private let resumable: Bool
     public private(set) var loggingError: String?
     public var state: SessionState { lifecycle.state }
     public var documentSnapshot: DocumentSnapshot { document.snapshot }
-    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic,
+    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic, resumable: Bool = false,
                 clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
-        self.log = log; self.segmentRouting = segmentRouting; self.clock = clock
+        self.log = log; self.segmentRouting = segmentRouting; self.resumable = resumable; self.clock = clock
     }
 
     public func subscribe(participant: Participant, channels: Set<Channel>, buffering: SubscriptionBuffer? = nil) -> AsyncStream<Envelope> {
@@ -150,7 +151,19 @@ public actor Room {
     public func finishFinalPass() throws {
         try requireActive()
         guard state == .finalPass else { throw RoomError.invalidLifecycleTransition }
-        finish(reason: "complete")
+        if resumable {
+            lifecycle.pause()
+            sessionEvent("paused")
+            do { try log?.finish(document.snapshot.text) } catch { loggingError = String(describing: error) }
+        } else { finish(reason: "complete") }
+    }
+
+    /// Resume the same composition after its final pass, retaining all subscribers and history.
+    public func resume() throws {
+        try requireActive()
+        guard resumable, state == .paused else { throw RoomError.invalidLifecycleTransition }
+        lifecycle.resume()
+        sessionEvent("mic.on")
     }
 
     /// Returns the current text immediately; cancellation is an event, never an awaited agent task.

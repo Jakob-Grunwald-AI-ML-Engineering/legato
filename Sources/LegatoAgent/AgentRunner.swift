@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import LegatoClaude
 import LegatoRoom
+import LegatoComposerDoc
 
 private struct Conversation: Sendable {
     var messages: [JSONValue] = []
@@ -10,7 +11,7 @@ private struct Conversation: Sendable {
     var seeded = false
 }
 
-/// One host-owned writer with quick, quiet-pause and final turns in the same conversation.
+/// One host-owned writer with quick, sentence, targeted, pause and final turns in one conversation.
 public actor AgentRunner {
     private let room: Room
     private let client: any MessagesStreaming
@@ -27,6 +28,8 @@ public actor AgentRunner {
     private var pendingContext: [Envelope] = []
     private var phase: WritingPhase?
     private var pauseDue = false
+    private var acceptedSinceCompose = 0
+    private var sentenceDue = false
     private var finalPending = false
     private var retiring = false
     private var stopped = false
@@ -64,6 +67,19 @@ public actor AgentRunner {
         if event.channel == .session, event.payload["event"] == .string("debug.transcriber.frame") { return }
         if event.channel == .userIntent, event.payload["event"] == .string("tap") { return }
         history.append(event); pendingContext.append(event)
+        if AgentAdmission.isAcceptedContent(event) {
+            acceptedSinceCompose += 1
+            let transaction = try? event.payload.decode(Transaction.self)
+            let complete = transaction?.ops.contains { op in
+                guard case .insertLines(_, let lines) = op,
+                      let end = lines.last?.words.last?.text.last else { return false }
+                return ".!?。！？".contains(end)
+            } ?? false
+            // Provider sentence punctuation is useful but not guaranteed. The segmenter
+            // already bounds chunks at 25 words / 8 seconds, so two chunks guarantee progress.
+            sentenceDue = sentenceDue || complete || acceptedSinceCompose >= 2
+        }
+        if AgentAdmission.isUserEdit(event) { sentenceDue = true }
         if event.channel == .session {
             if event.payload["event"] == .string("cancel.work") { stop(); return }
             if event.payload["event"] == .string("final.pass") {
@@ -71,7 +87,7 @@ public actor AgentRunner {
             }
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { configuration.mode = mode }
-        if AgentAdmission.isAcceptedContent(event) || event.channel == .hint || event.channel == .userIntent {
+        if AgentAdmission.isAcceptedContent(event) || AgentAdmission.isUserEdit(event) || event.channel == .hint || event.channel == .userIntent {
             if AgentAdmission.isAcceptedContent(event) || event.channel == .hint || event.payload["event"] == .string("mode.changed") {
                 await speechActivity()
             } else if phase == .pause { await cancelCurrentTurn() }
@@ -101,8 +117,10 @@ public actor AgentRunner {
         guard phase != nil else { return }
         retiring = true
         let old = writerTask
+        let canceledPhase = phase
         generation = UUID(); writerTask = nil; phase = nil; policy.finish()
         old?.cancel()
+        await log(.liveAgent, ["event": .string("turn.cancel"), "phase": .string(canceledPhase?.rawValue ?? "unknown")])
         // Do not open the next request until the canceled stream has actually retired.
         await old?.value
         await log(.liveAgent, ["event": .string("pending.edit"), "lines": .array([])])
@@ -121,14 +139,21 @@ public actor AgentRunner {
                 // Speech stopped while the previous quick request was still running.
                 // Compose these queued notes now instead of paying for a redundant quick turn.
                 next = .pause; pauseDue = false
+            } else if sentenceDue || pending.contains(where: { $0.payload["event"] == .string("mode.changed") }) {
+                next = .sentence
             } else {
                 next = .quick
             }
         } else if finalPending, policy.beginMaintenance() {
             events = []; next = .final; finalPending = false
+        } else if sentenceDue, policy.beginMaintenance() {
+            events = []; next = .sentence
         } else if pauseDue, policy.beginMaintenance() {
             events = []; next = .pause; pauseDue = false
         } else { return }
+        if next == .sentence || next == .pause || next == .final {
+            acceptedSinceCompose = 0; sentenceDue = false
+        }
         let token = UUID(); generation = token; phase = next
         await room.setAgentBusy(.liveAgent, busy: true)
         guard !stopped, generation == token else { return }
@@ -152,6 +177,7 @@ public actor AgentRunner {
             let reseed = !conversation.seeded || Self.shouldReseed(tokens: conversation.tokens, idle: now - conversation.lastTurn)
             if reseed { conversation = Conversation() }
             let snapshot = await room.documentSnapshot
+            var allowedLineIDs: Set<String>? = phase == .sentence ? Set(snapshot.lines.map(\.id)) : nil
             let context = reseed ? history : pendingContext
             pendingContext = []
             let eventText = String(data: try JSONEncoder().encode(context), encoding: .utf8) ?? "[]"
@@ -224,13 +250,18 @@ public actor AgentRunner {
                 for block in content where block["type"] == .string("tool_use") {
                     try Task.checkCancellation()
                     guard case .string(let id) = block["id"], case .string(let name) = block["name"], let input = block["input"] else { throw MessagesStreamError.incomplete }
-                    let result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: true, phase: phase)
+                    let result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: true, phase: phase, allowedLineIDs: allowedLineIDs)
+                    allowedLineIDs?.formUnion(result.createdLineIDs)
+                    if result.requestCompose { sentenceDue = true }
                     if let mode = result.mode { configuration.mode = mode }
                     let value: JSONValue = .object(["type": .string("tool_result"), "tool_use_id": .string(id), "content": .string(result.content), "is_error": .bool(result.isError)])
                     results.append(value); await log(participant, ["event": .string("tool.result"), "result": value])
                 }
                 if results.isEmpty { break }
                 conversation.messages.append(.object(["role": .string("user"), "content": .array(results)]))
+                // Semantic directives escalate once after this stream retires, without an
+                // unnecessary acknowledgement request or a second concurrent writer.
+                if phase == .quick && sentenceDue { break }
             }
             try Task.checkCancellation()
             conversation.lastTurn = ProcessInfo.processInfo.systemUptime; conversation.seeded = true
