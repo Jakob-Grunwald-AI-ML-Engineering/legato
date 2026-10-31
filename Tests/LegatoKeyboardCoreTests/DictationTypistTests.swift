@@ -149,3 +149,19 @@ private struct Field {
     let legacy = Data(#"{"visible":true,"at":1}"#.utf8)
     #expect((try? JSONDecoder().decode(KeyboardPresence.self, from: legacy))?.contextBefore == nil)
 }
+
+@Test func aMovedCursorIsNeverTypedAtWhileTheTypistWaits() {
+    var typist = DictationTypist()
+    typist.accept(publication(line(0, "a long line that the user interrupts by tapping elsewhere."), line(1, "next.")), acknowledged: nil)
+    let first = typist.step(contextBefore: "Note ", elapsedMs: 33, capitalization: .none)
+    #expect(!first.inserts.isEmpty)
+    // The field reports the real cursor: somewhere else. Not one more character may land there.
+    var typed = 0, acked: [Int] = []
+    for _ in 0..<20 {
+        let step = typist.step(contextBefore: "Elsewhere ", elapsedMs: 33, capitalization: .none)
+        if acked.isEmpty && step.acknowledged == nil { typed += step.inserts.count }
+        if let up = step.acknowledged { acked.append(up) }
+    }
+    #expect(typed == 0)
+    #expect(acked.first == 0, "The interrupted line is dropped once the echo fails to arrive")
+}

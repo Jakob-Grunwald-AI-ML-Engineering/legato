@@ -21,6 +21,10 @@ import LegatoVocabulary
     public var route: AudioRoute { gate.route }
     /// The dictation route's uncommitted words.
     public private(set) var dictationTail = ""
+    /// Why the last dictation tap could not start (shown in the keyboard's word row); `dictationNoticeID` changes
+    /// with every new notice so the same text can show again.
+    public private(set) var dictationNotice: String?
+    public private(set) var dictationNoticeID = 0
     /// Mic tap → first live tail, newest last (bounded).
     public private(set) var probes: [TapLatencyProbe.Result] = []
     @ObservationIgnored private let composer: ComposerSession
@@ -166,6 +170,15 @@ import LegatoVocabulary
             guard composer.isListening else { _ = gate.close(); probe.cancel(); return composer.error == nil }
         case .dictation:
             await activateDictation()
+            guard dictationActive != nil else {
+                // No stream to talk to (no or unreachable Soniox): do not pretend to listen.
+                _ = gate.close(); probe.cancel()
+                dictationNotice = sonioxKey().isEmpty
+                    ? "Add your Soniox key in the Legato app to dictate."
+                    : "Can't reach Soniox. Check your connection and key, then try again."
+                dictationNoticeID += 1
+                return true
+            }
             composer.setRoute(.dictation)
         case .idle: break
         }

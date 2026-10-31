@@ -59,6 +59,21 @@ import LegatoSoniox
         await #expect(throws: KeyboardSession.DebugDictationError.self) { try await keyboard.debugDictationLine("x") }
     }
 
+    @Test func aTapWithoutSonioxKeyStaysClosedAndSaysWhy() async throws {
+        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
+        await composer.arm()
+        let sockets = self.sockets
+        let keyboard = KeyboardSession(composer: composer, sink: sink, sonioxKey: { "" },
+                                       makeSocket: { sockets.make() }, warmConnection: {})
+        keyboard.update(visible: true, surface: .dictation)
+        await keyboard.settle()
+        let before = keyboard.dictationNoticeID
+        _ = await keyboard.openGate(tapAt: Date())
+        #expect(keyboard.route == .idle && composer.route == .idle, "No stream: the gate must not claim to listen")
+        #expect(keyboard.dictationNotice?.contains("Soniox key") == true)
+        #expect(keyboard.dictationNoticeID == before + 1)
+    }
+
     @Test func appearancePrewarmsAndIdleAudioIsDiscarded() async throws {
         let (composer, keyboard) = try await openOnTyping()
         try await until { sink.warms == 1 } // the cleanup connection and prompt cache are warmed on the dictation surface

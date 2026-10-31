@@ -203,6 +203,8 @@ final class KeyboardController {
     var meetingNotice: String? { host?.meetingNotice(now: Date()) }
 
     private(set) var composer = ComposerPublication()
+    /// The last dictation notice (`dictationNoticeID`) already shown; the first publication seen only sets it.
+    @ObservationIgnored private var seenDictationNoticeID: Int?
     /// The surface on screen; it decides the mode (typing dictates, the composer instructs the agent).
     private(set) var surface = KeyboardSurface.composer
     /// The presence the app follows: visibility, field, surface and, for the typing surface (dictation), the text
@@ -258,6 +260,10 @@ final class KeyboardController {
                         self.pendingComposerInsert = nil
                         self.pendingComposerDocumentID = nil
                     }
+                    if let id = value.dictationNoticeID, let seen = self.seenDictationNoticeID, id != seen, let text = value.dictationNotice {
+                        self.show(text)
+                    }
+                    self.seenDictationNoticeID = value.dictationNoticeID ?? self.seenDictationNoticeID
                     self.composer = value; self.composerLink?.acknowledge(value.snapshot.revision)
                     self.syncRowTakeover()
                 }
@@ -624,7 +630,9 @@ final class KeyboardController {
 
     private func dictationStep(elapsedMs: Double, flush: Bool = false) {
         guard !isTornDown, typist.needsTicks, document.documentID != nil else { return stopDictationTicker() }
-        let context = typing.contextBefore
+        // Unless flushing, the typist reads the field's own context, not the one tracked after our edits: that one
+        // would hide a cursor move behind the shadow of the last insert. The typist waits for the echo of each insert.
+        let context = flush ? typing.contextBefore : document.contextBefore
         let step = flush
             ? typist.flush(contextBefore: context, capitalization: autocapitalization)
             : typist.step(contextBefore: context, elapsedMs: elapsedMs, capitalization: autocapitalization,

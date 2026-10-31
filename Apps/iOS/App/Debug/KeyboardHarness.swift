@@ -284,8 +284,10 @@ struct KeyboardHarness: View {
             }
         }
         .preferredColorScheme(scheme)
-        .onAppear { model.appeared() }
-        .onDisappear { model.controller.disappeared() }
+        // In system-field mode the real extension is the keyboard; a second in-process controller would write
+        // its own (composer) presence over the extension's and flip the host's surface.
+        .onAppear { if !Self.flag("LegatoHarnessSystemField") { model.appeared() } }
+        .onDisappear { if !Self.flag("LegatoHarnessSystemField") { model.controller.disappeared() } }
     }
 
     /// The harness uses the extension's portrait heights: ABC's, or the composer's share of the screen.

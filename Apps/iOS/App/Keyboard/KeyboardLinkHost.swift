@@ -143,6 +143,8 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.instructionDraft = composer.instructionPreview; value.instructionStatus = composer.instructionStatus
                 value.audioRoute = (self.keyboardSession?.isOpen == true ? self.keyboardSession?.route : nil)?.rawValue ?? composer.route.rawValue
                 value.dictationTail = self.keyboardSession?.dictationTail
+                value.dictationNotice = self.keyboardSession?.dictationNotice
+                value.dictationNoticeID = self.keyboardSession?.dictationNoticeID
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 if self.composerPublisher.publish(value, through: channel) {
                     DarwinObserver.post(LinkChannel.Note.composer)
