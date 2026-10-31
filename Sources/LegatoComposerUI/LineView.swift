@@ -6,6 +6,7 @@ struct LineView: View {
     var ordinal: Int
     var pending: Bool
     var selected: Set<String>
+    var animatesEdits = true
     @State private var progress = 1.0
     @State private var measured: [String: [CGRect]] = [:]
     var body: some View {
@@ -22,6 +23,7 @@ struct LineView: View {
                     })
                 } }
                 .onChange(of: line.version) { _, _ in
+                    guard animatesEdits, line.words.count <= 120 else { progress = 1; return }
                     progress = 0
                     withAnimation(.easeOut(duration: 0.42)) { progress = 1 }
                 }
@@ -38,13 +40,20 @@ struct LineView: View {
         return renderer
     }
     private var text: Text {
-        line.words.enumerated().reduce(Text("")) { result, item in
-            let (index, word) = item
+        // A left-fold builds a deeply nested Text concatenation for long paragraphs.
+        // Pairwise composition keeps the view tree logarithmic in the word count.
+        var pieces = line.words.enumerated().map { index, word in
             var value = AttributedString(word.text)
             value.foregroundColor = ConfidenceTint.color(word.confidence)
             if word.pinned { value.underlineStyle = .single }
-            return result + Text(index == 0 ? "" : " ") + Text(value).customAttribute(ComposerWordAttribute(id: word.id))
+            return Text(index == 0 ? "" : " ") + Text(value).customAttribute(ComposerWordAttribute(id: word.id))
         }
+        while pieces.count > 1 {
+            pieces = stride(from: 0, to: pieces.count, by: 2).map { index in
+                index + 1 < pieces.count ? pieces[index] + pieces[index + 1] : pieces[index]
+            }
+        }
+        return pieces.first ?? Text("")
     }
 }
 struct WordBounds: Equatable, Sendable { var lineID: String; var wordID: String; var rects: [CGRect] }

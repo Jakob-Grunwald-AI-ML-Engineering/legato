@@ -7,6 +7,8 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var requiresSnapshot: Bool
     public var sessionID: String?
     public var tail = ""
+    /// Advances only after validated dictation is appended, never on an agent rewrite.
+    public var dictationRevision: Int?
     public var mode = "message"
     public var status = "idle"
     public var error: String?
