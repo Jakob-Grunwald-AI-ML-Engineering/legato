@@ -45,6 +45,7 @@ import LegatoVocabulary
     private var inputConfig = SonioxConfig()
     private var recordingTake = 0
     private var resuming = false
+    private var preparingInsertion = false
     @ObservationIgnored private var writer: AgentRunner?
     @ObservationIgnored private var transcriber: SonioxClient?
     @ObservationIgnored private let mic: any AudioSource
@@ -127,7 +128,7 @@ import LegatoVocabulary
     public func releaseMicrophone() async { isArmed = false; await cancel() }
     public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
     private func startSession(debugMode: ComposerMode?, microphoneLease: Bool) async {
-        guard !isListening, status != "starting", !resuming else { return }
+        guard !isListening, status != "starting", !resuming, !preparingInsertion else { return }
         if let room, sessionLog != nil, await room.state != .done {
             await resumeSession(debug: debugMode != nil)
             return
@@ -219,6 +220,12 @@ import LegatoVocabulary
         resuming = true
         defer { resuming = false }
         do {
+            if await room.state == .listening, !isListening {
+                audioTask?.cancel(); await audioTask?.value; audioTask = nil
+                await transcriber?.cancel(); transcriber = nil
+                try requireGeneration(token)
+                try await room.micOff()
+            }
             // A quick second tap queues continuation until ASR drain and the final
             // writing turn retire; never race a new stream against an old final pass.
             while true {
@@ -248,6 +255,17 @@ import LegatoVocabulary
         }
     }
     #if DEBUG || LEGATO_INTERNAL
+    /// Deterministic local draft for native UI acceptance; no provider, key or microphone.
+    public func seedDebugDraft(_ text: String) async throws {
+        await cancel()
+        let room = Room(resumable: true)
+        self.room = room; sessionID = UUID().uuidString; inputSource = "debug.seed"
+        for line in text.components(separatedBy: "\n") where !line.isEmpty {
+            _ = try await room.appendSegment(words: line.split(whereSeparator: \.isWhitespace).map { .init(text: String($0)) })
+        }
+        try await room.micOff(); try await room.finishFinalPass()
+        snapshot = await room.documentSnapshot; status = "paused"; onChange?()
+    }
     public func startDebug(mode: ComposerMode = .message, microphoneLease: Bool = false) async {
         await startSession(debugMode: mode, microphoneLease: microphoneLease)
     }
@@ -296,12 +314,50 @@ import LegatoVocabulary
         try? await room?.micOff(transcriberDraining: true)
         if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         guard generation == token else { return }
-        do { try await transcriber?.finish() } catch {
+        do {
+            if let transcriber { try await transcriber.finish() }
+            else { await room?.finishTranscription() }
+        } catch {
             guard generation == token else { return }
             fail(error)
             // A failed socket must not leave continuation waiting forever for drain.
             await room?.finishTranscription()
         }
+    }
+    /// Drain voice and authoring before the surface captures text for external delivery.
+    /// A failed delivery can leave this paused composition available for continuation.
+    public func prepareForInsertion(timeout: Duration = .seconds(25)) async throws -> String {
+        guard !preparingInsertion else { throw insertionFailure("Insertion is already being prepared.") }
+        let token = generation
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        preparingInsertion = true
+        defer { preparingInsertion = false }
+        while resuming {
+            try requireGeneration(token)
+            guard ContinuousClock.now < deadline else { throw insertionFailure("Writing is still finishing. Try Insert again.") }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        try requireGeneration(token)
+        if isListening { await stop() }
+        try requireGeneration(token)
+        guard let room else { throw insertionFailure("There is no composition to insert.") }
+        while true {
+            try requireGeneration(token)
+            if let error { throw insertionFailure(error) }
+            let state = await room.state
+            if state == .paused || state == .done { break }
+            // Offline debug seeds intentionally have no writer or provider.
+            if writer == nil, state == .finalPass { try await room.finishFinalPass(); continue }
+            guard ContinuousClock.now < deadline else { throw insertionFailure("Writing is still finishing. Try Insert again.") }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        try requireGeneration(token)
+        snapshot = await room.documentSnapshot
+        onChange?()
+        return renderedText
+    }
+    private func insertionFailure(_ message: String) -> NSError {
+        NSError(domain: "Composer", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
     }
     /// Call only after the surface has successfully delivered its rendered value.
     public func insert() async {
@@ -310,7 +366,7 @@ import LegatoVocabulary
         snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
-    /// Discard the composition; Stop and Insert deliberately retain the rendered text.
+    /// Discard the composition; Pause deliberately retains the rendered text.
     public func cancel() async {
         generation = UUID(); try? await room?.cancel(); await cleanup()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil

@@ -64,3 +64,45 @@ import LegatoRoom
     #expect(session.sessionID == nil)
     #expect(await room.state == .done)
 }
+
+@MainActor @Test func insertPreparationWaitsForDrainedAuthoringAndCapturesLatestDraft() async throws {
+    let room = Room(resumable: true)
+    let session = ComposerSession(room: room)
+    _ = try await room.appendSegment(words: [.init(text: "Rough notes")])
+    await session.refreshDebugState()
+    try await room.micOff(transcriberDraining: true)
+    let insertion = Task { try await session.prepareForInsertion() }
+    try await Task.sleep(for: .milliseconds(50))
+    let before = await room.documentSnapshot
+    let line = try #require(before.lines.first)
+    _ = try await room.applyDocument([.replaceInLine(lineID: line.id, old: "Rough notes", new: "A useful, authored prompt.")], origin: .agent, versions: [line.id: line.version])
+    await room.finishTranscription()
+    #expect(try await insertion.value == "A useful, authored prompt.")
+    #expect(session.renderedText == "A useful, authored prompt.")
+    #expect(await room.state == .paused)
+    await session.cancel()
+}
+
+@MainActor @Test func insertPreparationTimeoutRetainsDraftAndCanRetry() async throws {
+    let room = Room(resumable: true)
+    let session = ComposerSession(room: room)
+    _ = try await room.appendSegment(words: [.init(text: "Keep on timeout")])
+    await session.refreshDebugState()
+    try await room.micOff(transcriberDraining: true)
+    await #expect(throws: NSError.self) { _ = try await session.prepareForInsertion(timeout: .milliseconds(40)) }
+    #expect(session.renderedText == "Keep on timeout")
+    await room.finishTranscription()
+    #expect(try await session.prepareForInsertion() == "Keep on timeout")
+    await session.cancel()
+}
+
+@MainActor @Test func offlineDebugSeedInsertsWithoutMicrophoneOrWriter() async throws {
+    let session = ComposerSession()
+    let result = try await session.debugControl("composer-debug-seed", args: ["Native insertion fixture"])
+    #expect(result["inputSource"] as? String == "debug.seed")
+    #expect(!session.isArmed)
+    #expect(!session.isListening)
+    #expect(try await session.prepareForInsertion() == "Native insertion fixture")
+    await session.insert()
+    #expect(session.renderedText.isEmpty)
+}
