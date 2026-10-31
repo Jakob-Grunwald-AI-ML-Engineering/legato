@@ -104,7 +104,6 @@ final class KeyboardLinkHost: TranscriptSink {
                             self.composerInsertionNotice = result.succeeded ? nil : result.message
                         }
                     case "cancel": await composer.cancel(); await self.keyboardSession?.rewarm()
-                    case "new-topic": await composer.startNewTopic(); await self.keyboardSession?.rewarm()
                     case "undo": await composer.undo()
                     case "stop":
                         if let session = self.keyboardSession, session.isOpen { await session.closeGate() } else { await composer.stop() }
@@ -118,7 +117,6 @@ final class KeyboardLinkHost: TranscriptSink {
                                                   endWordID: intent.endWordID, timestamp: intent.timestamp)
                         }
                     case "send-correction": await composer.sendCorrection()
-                    case "send-instruction": await composer.sendInstruction()
                     case "discard-instruction": await composer.discardInstruction(timestamp: intent.timestamp)
                     case "deselect": await composer.clearSelection(timestamp: intent.timestamp)
                     case "pick": if let line = intent.lineID, let word = intent.wordID, let text = intent.text { await composer.pick(lineID: line, wordID: word, text: text) }

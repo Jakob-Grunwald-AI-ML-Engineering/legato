@@ -23,21 +23,22 @@ struct KeyboardRootView: View {
                 ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
                              dictationRevision: controller.composer.dictationRevision ?? 0, dictationCommit: controller.composer.dictationCommit, successfulInsertionID: controller.composer.successfulInsertionID,
                              pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
-                             instructionText: controller.composer.instructionDraft ?? "", instructionStatus: controller.composer.instructionStatus ?? "Ready",
-                             instructionInputActive: false,
                              correctionDraft: controller.composer.correctionDraft, correctionSubmitting: controller.composer.correctionSubmitting ?? false,
                 correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,
                              onSelect: { controller.composerIntent("tap", lineID: $0.lineID, wordID: $0.wordID, endLineID: $0.endLineID, endWordID: $0.endWordID) },
                              onDeselect: { controller.composerIntent("deselect") },
                              onSendCorrection: { controller.composerIntent("send-correction") },
-                             onSendInstruction: { controller.composerIntent("send-instruction") },
-                             onDiscardInstruction: { controller.composerIntent("discard-instruction") },
                              onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
                     .frame(maxHeight: .infinity)
                 if let error = controller.composer.error {
                     Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).padding(.horizontal)
                 }
             }
+            // The composer has no keyboard: the strip shows what was said, the tool row is all there is below.
+            InstructionStrip(text: controller.composer.instructionDraft ?? "",
+                             state: InstructionStripState(status: controller.composer.instructionStatus ?? "Ready"),
+                             onDiscard: { controller.composerIntent("discard-instruction") })
+                .padding(.bottom, 2)
             toolRow(landscape: landscape)
 
         }
@@ -56,9 +57,6 @@ struct KeyboardRootView: View {
                                            keyWidth: (geometry.size.width - 12.66 - 30) / 6,
                                            maximumHeight: max(0, geometry.size.height - 66), onSelect: { mode in
                             controller.composerIntent("mode", text: mode)
-                            showsModePicker = false
-                        }, onNewTopic: {
-                            controller.composerIntent("new-topic")
                             showsModePicker = false
                         })
                         .frame(width: min(232, geometry.size.width - 12.66))

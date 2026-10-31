@@ -25,11 +25,11 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
         payload: .object(["reason": .string("endpoint")]), tOrigin: time)
 }
 
-@Test func instructionChunksNeverAppendAndCoalescePunctuationUntilBoundary() async throws {
+@Test func everyUtteranceIsOneInstructionAtTheBoundaryAndNeverTouchesTheDraft() async throws {
     let room = Room(segmentRouting: .intercepted), binder: HintBinder
     _ = try await room.appendSegment(words: [.init(text: "Original draft")])
     binder = HintBinder(room: room)
-    await binder.start(); await binder.setInputMode(.instructions, timestamp: 100)
+    await binder.start()
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
     try await room.publish(channel: .asrTail, participant: .transcriber,
@@ -40,6 +40,7 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     #expect(await room.documentSnapshot.text == "Original draft")
     #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty)
     #expect(await events.values.filter { $0.channel == .asrTail }.allSatisfy { $0.payload["text"] == .string("") })
+    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["text"] == .string("Make it concise. Keep the facts."))
     try await inputBoundary(room, at: 105)
     try await settleInstructionRouting()
     let instructions = await events.values.filter { $0.channel == .writingInstruction }
@@ -48,26 +49,74 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     #expect(event.payload["text"] == .string("Make it concise. Keep the facts."))
     #expect(try event.payload["snapshot"]?.decode(DocumentSnapshot.self).text == "Original draft")
     #expect(try event.payload["sources"]?.decode([JSONValue].self).count == 2)
+    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["text"] == .string(""))
     try await room.micOff()
     #expect(await room.state == .finalPass, "Instruction segments must be resolved after their single event")
     await binder.stop()
 }
 
-@Test func delayedFinalsAcrossTwoChannelFlipsKeepAcousticModeAndCapturePriorDictation() async throws {
+@Test func contentRequestsOnAnEmptyDraftAreInstructionsToo() async throws {
     let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
     await binder.start()
-    await binder.setInputMode(.instructions, timestamp: 110)
-    await binder.setInputMode(.dictation, timestamp: 120)
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
-    // All arrive after both UI taps; absolute audio times, not arrival time, determine the channel.
-    try await inputSegment(room, ["Before", "Shorten", "After"], origin: 105, times: [5, 12, 22])
-    try await inputBoundary(room, at: 125)
+    try await inputSegment(room, ["Write", "a", "short", "email", "to", "Anna", "saying", "I'm", "late."], origin: 101)
+    try await inputBoundary(room, at: 103)
     try await settleInstructionRouting()
-    #expect(await room.documentSnapshot.text == "Before\nAfter")
+    #expect(await room.documentSnapshot.lines.isEmpty, "Speech is never dictated into the draft")
     let instruction = try #require(await events.values.first { $0.channel == .writingInstruction })
-    #expect(instruction.payload["text"] == .string("Shorten"))
-    #expect(try instruction.payload["snapshot"]?.decode(DocumentSnapshot.self).text == "Before")
+    #expect(instruction.payload["text"] == .string("Write a short email to Anna saying I'm late."))
+    #expect(try instruction.payload["snapshot"]?.decode(DocumentSnapshot.self).lines.isEmpty == true)
+    await binder.stop()
+}
+
+@Test func separateUtterancesAreSeparateInstructionsAndTheSnapshotIsTakenWhenSent() async throws {
+    let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
+    await binder.start()
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await inputSegment(room, ["Write", "a", "greeting."], origin: 101)
+    // The writer's edit lands while the user is still speaking the next instruction.
+    _ = try await room.applyDocument([.insertLines(after: nil, lines: [Line(words: [Word(text: "Hello")])])], origin: .agent, versions: [:])
+    try await inputBoundary(room, at: 102)
+    try await inputSegment(room, ["Make", "it", "warmer."], origin: 103)
+    try await inputBoundary(room, at: 104)
+    try await settleInstructionRouting()
+    let sent = await events.values.filter { $0.channel == .writingInstruction }
+    #expect(sent.map { $0.payload["text"] } == [.string("Write a greeting."), .string("Make it warmer.")])
+    #expect(try sent.last?.payload["snapshot"]?.decode(DocumentSnapshot.self).text == "Hello")
+    await binder.stop()
+}
+
+@Test func aQuietPauseSendsTheInstructionAndResumedSpeechJoinsIt() async throws {
+    let room = Room(segmentRouting: .intercepted)
+    // The host finalizes the stream when the pause elapses; the finalize is the boundary.
+    let binder = HintBinder(room: room, onInstructionQuiet: {
+        try? await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]))
+    })
+    await binder.start()
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await inputSegment(room, ["Make", "it"], origin: 101)
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty, "A short breath is not the end of the utterance")
+    try await inputSegment(room, ["shorter."], origin: 102)
+    try await Task.sleep(for: .milliseconds(1_000))
+    let sent = await events.values.filter { $0.channel == .writingInstruction }
+    #expect(sent.count == 1 && sent.first?.payload["text"] == .string("Make it shorter."))
+    await binder.stop()
+}
+
+@Test func liveTailOutsideAQuoteIsTheInstructionDraftNotDraftText() async throws {
+    let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
+    await binder.start()
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await room.publish(channel: .asrTail, participant: .transcriber,
+        payload: .object(["text": .string("make it shor"), "activity": .bool(true)]), tOrigin: 100)
+    try await settleInstructionRouting()
+    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["text"] == .string("make it shor"))
+    #expect(await events.values.filter { $0.channel == .asrTail }.allSatisfy { $0.payload["text"] == .string("") })
     await binder.stop()
 }
 
@@ -75,7 +124,7 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
     _ = try await room.appendSegment(words: [.init(id: "word", text: "wrong")])
     let line = try #require(await room.documentSnapshot.lines.first)
-    await binder.start(); await binder.setInputMode(.instructions, timestamp: 100)
+    await binder.start()
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
     try await binder.select(lineID: line.id, wordID: "word", timestamp: 101)
@@ -92,7 +141,7 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
 
 @Test func emptyInstructionBoundaryDoesNotEmitAnInstruction() async throws {
     let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
-    await binder.start(); await binder.setInputMode(.instructions, timestamp: 100)
+    await binder.start()
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
     try await inputBoundary(room, at: 101)
@@ -103,61 +152,21 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     await binder.stop()
 }
 
-@Test func untimedPendingSpeechKeepsItsLatchedChannelAcrossAFlip() async throws {
+@Test func discardedInstructionDropsItsWordsIncludingLateFinals() async throws {
     let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
     await binder.start()
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
-    try await room.publish(channel: .asrTail, participant: .transcriber,
-        payload: .object(["text": .string("old dictation"), "activity": .bool(true)]), tOrigin: 100)
-    try await settleInstructionRouting()
-    await binder.setInputMode(.instructions, timestamp: 101)
-    try await room.publish(channel: .asrSegment, participant: .segmenter,
-        payload: .object(["words": try .encoding([Word(text: "old dictation")])]), tOrigin: 102)
-    try await inputBoundary(room, at: 103)
-    try await settleInstructionRouting()
-    try await room.publish(channel: .asrTail, participant: .transcriber,
-        payload: .object(["text": .string("shorten"), "activity": .bool(true)]), tOrigin: 104)
-    try await settleInstructionRouting()
-    await binder.setInputMode(.dictation, timestamp: 105)
-    try await room.publish(channel: .asrSegment, participant: .segmenter,
-        payload: .object(["words": try .encoding([Word(text: "shorten")])]), tOrigin: 106)
-    try await inputBoundary(room, at: 107)
-    try await settleInstructionRouting()
-    #expect(await room.documentSnapshot.text == "old dictation")
-    let instructions = await events.values.filter { $0.channel == .writingInstruction }
-    #expect(instructions.count == 1)
-    #expect(instructions.first?.payload["text"] == .string("shorten"))
-    await binder.stop()
-}
-
-@Test func manualInstructionsStageThroughPauseSubmitOnceAndKeepLaterSpeechSeparate() async throws {
-    let room = Room(segmentRouting: .intercepted, resumable: true)
-    _ = try await room.appendSegment(words: [.init(text: "Original draft")])
-    let binder = HintBinder(room: room, requiresExplicitSubmission: true)
-    await binder.start(); await binder.setInputMode(.instructions, timestamp: 100)
-    let events = InstructionEvents(), observer = await observeInstructions(room, events)
-    defer { observer.cancel() }
     try await inputSegment(room, ["Make", "it"], origin: 101)
-    try await inputBoundary(room, at: 103)
     try await settleInstructionRouting()
-    try await room.micOff(); try await room.finishFinalPass()
-    #expect(await room.state == .paused)
-    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty)
-    #expect(await binder.requestInstructionSend(timestamp: 105))
-    #expect(!(await binder.requestInstructionSend(timestamp: 105)))
-    try await inputSegment(room, ["clearer.", "Next"], origin: 104, times: [0, 4])
-    try await settleInstructionRouting()
-    await binder.completeInstructionSend(); await binder.completeInstructionSend()
-    try await settleInstructionRouting()
-    let sent = await events.values.filter { $0.channel == .writingInstruction }
-    #expect(sent.count == 1 && sent.first?.payload["text"] == .string("Make it clearer."))
-    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["text"] == .string("Next"))
+    #expect(await binder.hasUnsentInstruction)
     await binder.discardInstruction(timestamp: 110)
     try await inputSegment(room, ["Late"], origin: 109)
+    try await inputBoundary(room, at: 111)
     try await settleInstructionRouting()
-    #expect(!(await binder.requestInstructionSend(timestamp: 111)))
-    #expect(await room.documentSnapshot.text == "Original draft")
+    #expect(!(await binder.hasUnsentInstruction))
+    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty)
+    #expect(await room.documentSnapshot.lines.isEmpty)
     await binder.stop()
 }
 

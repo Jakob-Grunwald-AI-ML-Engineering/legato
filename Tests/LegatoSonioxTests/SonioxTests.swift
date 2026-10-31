@@ -65,7 +65,8 @@ import LegatoRoom
         _ = await tail.next()
         try await client.injectDebugFrame(#"{"tokens":[{"text":"ordinary.","is_final":true,"start_ms":2000,"end_ms":2100}]}"#)
         _ = await tail.next()
-        #expect(await room.documentSnapshot.text == "Alex\nordinary.")
+        #expect(await room.documentSnapshot.text == "Alex", "Speech outside the quote is an instruction, never draft text")
+        #expect(await binder.hasUnsentInstruction)
         await client.cancel()
         await binder.stop()
     }

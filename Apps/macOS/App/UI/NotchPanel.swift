@@ -154,9 +154,6 @@ private func modeIcon(_ mode: ComposerMode) -> String {
         }
         if key == "z", flags == .command { Task { await session.undo() }; return true }
         if key == "z", flags == [.command, .shift] { return true } // Redo is not supported by the document yet.
-        if key == "m", flags == [.command, .shift] {
-            Task { await session.setInputMode(session.inputMode.toggled) }; return true
-        }
         if key == "d", flags == [.command, .shift] { controller.toggle(); return true }
         return false
     }
@@ -174,9 +171,8 @@ private struct NotchComposerView: View {
             count + max(1, Int(ceil(Double(line.words.map(\.text).joined(separator: " ").count) / 58)))
         }
         let tailRows = session.tail.isEmpty ? 0 : max(1, Int(ceil(Double(session.tail.count) / 58)))
-        let showsInstruction = !session.instructionPreview.isEmpty && session.instructionStatus != "Done"
-        let commentSpace: CGFloat = showingCorrection || showsInstruction ? 104 : 0
-        return min(440, max(showingCorrection || showsInstruction ? 300 : 200, 170 + commentSpace + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
+        let commentSpace: CGFloat = (showingCorrection ? 104 : 0) + InstructionStrip.height + 12
+        return min(440, max(showingCorrection ? 300 : 230, 170 + commentSpace + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -185,24 +181,20 @@ private struct NotchComposerView: View {
                 Text("Composer").font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Circle().fill(session.isListening && !session.isMuted ? Color.red : Color.secondary.opacity(0.6)).frame(width: 5, height: 5)
-                Text(session.isListening && session.inputMode == .instructions ? "Instructions" : session.status.capitalized)
+                Text(session.status.capitalized)
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             }
-            DraftInputHeader(active: session.inputMode == .dictation) {
-                Task { await session.setInputMode(.dictation) }
-            }
             ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, dictationCommit: session.dictationCommit, successfulInsertionID: session.successfulInsertionID, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
-                instructionText: session.instructionPreview, instructionStatus: session.instructionStatus,
-                instructionInputActive: session.inputMode == .instructions,
                 correctionDraft: session.correctionDraft, correctionSubmitting: session.correctionSubmitting,
                 correctionCountdownStart: session.correctionCountdownStart, correctionCountdownDeadline: session.correctionCountdownDeadline,
                 onSelect: { selection in showingCorrection = true; Task { await session.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
                 onDeselect: { showingCorrection = false; Task { await session.clearSelection() } },
                 onSendCorrection: { Task { await session.sendCorrection() } },
-                onSendInstruction: { Task { await session.sendInstruction() } },
-                onDiscardInstruction: { Task { await session.discardInstruction() } },
                 onPick: { line, word, text in Task { await session.pick(lineID: line, wordID: word, text: text) } })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            InstructionStrip(text: session.instructionPreview, state: InstructionStripState(status: session.instructionStatus),
+                             onDiscard: { Task { await session.discardInstruction() } })
+                .padding(.horizontal, -6)
             if let error = session.error { Text(error).font(.callout).foregroundStyle(.red).lineLimit(2).help(error).textSelection(.disabled) }
             HStack(spacing: 6) {
                 Button {
@@ -219,9 +211,6 @@ private struct NotchComposerView: View {
                     .help("Redo is not available yet")
                 key("Insert", symbol: "paperplane.fill", shortcut: "⌘↩", enabled: !controller.inserting && (!session.renderedText.isEmpty || !session.tail.isEmpty), prominent: true) { controller.insertComposer() }
                 key("Cancel", symbol: "xmark", shortcut: "esc") { controller.cancelComposer() }
-                key(session.inputMode == .instructions ? "Instructions" : "Dictation", symbol: session.inputMode == .instructions ? "text.bubble.fill" : "waveform", shortcut: "⇧⌘M", selected: session.inputMode == .instructions, iconOnly: true) {
-                    Task { await session.setInputMode(session.inputMode.toggled) }
-                }
                 key(controller.isDictating ? "Pause" : (session.status == "paused" ? "Resume" : "Dictate"), symbol: controller.isDictating ? "pause.fill" : "mic.fill", shortcut: "⇧⌘D", selected: session.isListening && !session.isMuted) { controller.toggle() }
             }
         }

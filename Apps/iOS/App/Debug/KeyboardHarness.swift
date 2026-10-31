@@ -288,9 +288,10 @@ struct KeyboardHarness: View {
         .onDisappear { model.controller.disappeared() }
     }
 
-    /// The harness uses the same fixed portrait composer/typing height as the extension.
+    /// The harness uses the extension's portrait heights: ABC's, or the composer's share of the screen.
     private var portraitHeight: CGFloat {
-        ComposerKeyboardLayout.typingHeight(landscape: false) + ComposerKeyboardLayout.additionalComposerHeight
+        if model.controller.surface == .typing { return CGFloat(KeyboardHeights.height(landscape: false)) }
+        return CGFloat(ComposerKeyboardLayout.height(screenHeight: Double(UIScreen.main.bounds.height), systemOverhead: 92))
     }
 
     private var keyboard: some View {

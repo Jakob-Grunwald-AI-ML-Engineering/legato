@@ -82,37 +82,26 @@ import Testing
     }
 }
 
-@Suite struct ComposerKeyboardSizeTests {
-    @Test func twoHeightsIncludeNativeTrayWithinFullScreenBudget() {
-        #expect(ComposerKeyboardSize.medium.height(screenHeight: 874, systemOverhead: 92) == 243)
-        #expect(abs(ComposerKeyboardSize.full.height(screenHeight: 874, systemOverhead: 92) - 650.9) < 0.01)
-        #expect(ComposerKeyboardSize.full.height(screenHeight: 402, systemOverhead: 21, landscape: true) < 342)
-        #expect(ComposerKeyboardSize.full.height(screenHeight: 100, systemOverhead: 92) == 0)
+@Suite struct ComposerKeyboardLayoutTests {
+    @Test func portraitComposerIsFiftyFivePercentOfTheScreen() {
+        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 874, systemOverhead: 92) - 480.7) < 0.01)
+        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 667, systemOverhead: 92) - 366.85) < 0.01)
     }
 
-    @Test func eachSwipeMovesExactlyOnePresetAndClampsAtBothEnds() {
-        #expect(ComposerKeyboardSize.medium.swiped(dx: 0, dy: -300) == .full)
-        #expect(ComposerKeyboardSize.full.swiped(dx: 0, dy: -300) == .full)
-        #expect(ComposerKeyboardSize.full.swiped(dx: 0, dy: 300) == .medium)
-        #expect(ComposerKeyboardSize.medium.swiped(dx: 0, dy: 300) == .medium)
-        #expect(ComposerKeyboardSize.medium.swiped(dx: 40, dy: -30) == .medium)
-        #expect(ComposerKeyboardSize.medium.swiped(dx: 0, dy: -15) == .medium)
+    @Test func requestedFractionIsClampedToFiftyToSixtyPercent() {
+        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 800, systemOverhead: 0, fraction: 0.2) - 400) < 0.01)
+        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 800, systemOverhead: 0, fraction: 0.9) - 480) < 0.01)
+        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 800, systemOverhead: 0, fraction: 0.58) - 464) < 0.01)
     }
 
-    @Test func tapCyclesAndStoredPresetRestores() {
-        #expect(ComposerKeyboardSize.full.cycled == .medium)
-        #expect(ComposerKeyboardSize.medium.cycled == .full)
-        #expect(ComposerKeyboardSize.restore("low") == .medium)
-        #expect(ComposerKeyboardSize.restore(nil) == .medium)
-        #expect(ComposerKeyboardSize(rawValue: "full") == .full)
+    @Test func composerNeverExceedsWhatTheSystemLeaves() {
+        #expect(ComposerKeyboardLayout.height(screenHeight: 500, systemOverhead: 300) == 140)
+        #expect(ComposerKeyboardLayout.height(screenHeight: 100, systemOverhead: 92) == 0)
     }
-}
 
-@Suite struct FixedComposerKeyboardLayoutTests {
-    @Test func fixedHeightKeepsExtraComposerSpaceWithoutUtilityRow() {
-        #expect(ComposerKeyboardLayout.height(screenHeight: 874, systemOverhead: 92) == 271)
+    @Test func landscapeKeepsTheCompactHeightAndAbcKeepsTheTypingHeight() {
         #expect(abs(ComposerKeyboardLayout.height(screenHeight: 402, systemOverhead: 21, landscape: true) - 215.32) < 0.01)
         #expect(ComposerKeyboardLayout.typingHeight(landscape: false) == 243)
-        #expect(ComposerKeyboardLayout.height(screenHeight: 100, systemOverhead: 92) == 0)
+        #expect(KeyboardHeights.height(landscape: false) == 297)
     }
 }
