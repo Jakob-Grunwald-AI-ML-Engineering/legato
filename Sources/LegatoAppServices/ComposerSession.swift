@@ -41,6 +41,10 @@ import LegatoVocabulary
     public var canUndo: Bool { lastTransactionID != nil }
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var room: Room?
+    @ObservationIgnored private var sessionLog: SessionLog?
+    private var inputConfig = SonioxConfig()
+    private var recordingTake = 0
+    private var resuming = false
     @ObservationIgnored private var writer: AgentRunner?
     @ObservationIgnored private var transcriber: SonioxClient?
     @ObservationIgnored private let mic: any AudioSource
@@ -68,8 +72,10 @@ import LegatoVocabulary
         self.mic = microphone
         self.activateAudioSession = activateAudioSession
     }
-    init(room: Room) {
+    init(room: Room, log: SessionLog? = nil) {
         self.room = room
+        self.sessionLog = log
+        self.sessionID = log?.directory.lastPathComponent
         self.mic = MicSource()
         self.activateAudioSession = Self.activateMicrophoneSession
         self.vocabularyURL = URL.applicationSupportDirectory.appending(path: "Legato/vocabulary.json")
@@ -121,6 +127,11 @@ import LegatoVocabulary
     public func releaseMicrophone() async { isArmed = false; await cancel() }
     public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
     private func startSession(debugMode: ComposerMode?, microphoneLease: Bool) async {
+        guard !isListening, status != "starting", !resuming else { return }
+        if let room, sessionLog != nil, await room.state != .done {
+            await resumeSession(debug: debugMode != nil)
+            return
+        }
         await cancel()
         inputSource = debugMode == nil ? "microphone.soniox" : "debug.transcriber"
         audioOrigin = nil
@@ -135,7 +146,7 @@ import LegatoVocabulary
             let soniox = debugMode == nil ? (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "") : ""
             let claude = try KeychainKeyStore().apiKey() ?? ""
             let log = try SessionLog(rootDirectory: URL.documentsDirectory.appending(path: "sessions"), sessionID: id, secrets: [soniox, claude])
-            let room = Room(log: log, segmentRouting: .intercepted); self.room = room
+            let room = Room(log: log, segmentRouting: .intercepted, resumable: true); self.room = room; sessionLog = log; recordingTake = 0
             _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("input.source"), "inputSource": .string(inputSource), "microphoneLeaseActive": .bool(isArmed)]))
             guard (debugMode != nil || !soniox.isEmpty), !claude.isEmpty else {
                 throw NSError(domain: "Composer", code: 1, userInfo: [NSLocalizedDescriptionKey: debugMode == nil ? "Add Claude and Soniox API keys in Settings." : "Add a Claude API key in Settings for debug transcriber UAT."])
@@ -154,45 +165,85 @@ import LegatoVocabulary
             self.writer = writer; await writer.start(); try requireGeneration(generation)
             let eventStream = await room.subscribe(participant: .ui, channels: Set(Channel.allCases), buffering: .unbounded)
             eventsTask = Task { [weak self] in for await event in eventStream { guard !Task.isCancelled else { break }; await self?.receive(event) } }
-            #if DEBUG || LEGATO_INTERNAL
-            if debugMode != nil {
-                let origin = ProcessInfo.processInfo.systemUptime; audioOrigin = origin
-                let transcriber = SonioxClient(room: room, config: .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms), audioOrigin: origin)
-                self.transcriber = transcriber; try await transcriber.startDebug(); try requireGeneration(generation)
-                status = "listening"; onChange?(); return
-            }
-            #endif
-            let audioOrigin = ProcessInfo.processInfo.systemUptime; self.audioOrigin = audioOrigin
-            let stream = try await prepareMicrophoneStream()
-            try requireGeneration(generation)
-            let transcriber = SonioxClient(room: room, config: .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms), audioOrigin: nil)
-            self.transcriber = transcriber; try await transcriber.start(apiKey: soniox); try requireGeneration(generation)
-            await transcriber.setAudioOrigin(audioOrigin)
-            let recorder = try ComposerAudioRecorder(url: log.audioURL)
-            status = "listening"; onChange?()
-            audioTask = Task { [weak self] in
-                var converter = PCM16Converter()
-                do {
-                    for await chunk in stream {
-                        try Task.checkCancellation()
-                        // Keep the iOS background mic lease, but never record/forward muted speech.
-                        guard let self, !self.isMuted else { continue }
-                        try recorder.append(chunk)
-                        try await transcriber.sendAudio(converter.convert(chunk))
-                    }
-                } catch is CancellationError {} catch {
-                    self?.fail(error)
-                    self?.isArmed = false
-                    await self?.mic.stop()
-                }
-            }
+            inputConfig = .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms)
+            try await beginInput(room: room, log: log, debug: debugMode != nil, soniox: soniox, generation: generation)
         } catch {
             if self.generation == generation {
                 fail(error)
-                // Startup did not establish a working session: never retain its new
-                // microphone lease after a socket, credentials or recorder failure.
                 isArmed = false
                 try? await room?.cancel(); await cleanup()
+            }
+        }
+    }
+    private func beginInput(room: Room, log: SessionLog, debug: Bool, soniox: String, generation: UUID) async throws {
+        inputSource = debug ? "debug.transcriber" : "microphone.soniox"
+        #if DEBUG || LEGATO_INTERNAL
+        if debug {
+            let origin = ProcessInfo.processInfo.systemUptime; audioOrigin = origin
+            let transcriber = SonioxClient(room: room, config: inputConfig, audioOrigin: origin)
+            self.transcriber = transcriber; try await transcriber.startDebug(); try requireGeneration(generation)
+            status = "listening"; onChange?(); return
+        }
+        #endif
+        let audioOrigin = ProcessInfo.processInfo.systemUptime; self.audioOrigin = audioOrigin
+        let stream = try await prepareMicrophoneStream()
+        try requireGeneration(generation)
+        let transcriber = SonioxClient(room: room, config: inputConfig, audioOrigin: nil)
+        self.transcriber = transcriber; try await transcriber.start(apiKey: soniox); try requireGeneration(generation)
+        await transcriber.setAudioOrigin(audioOrigin)
+        recordingTake += 1
+        let audioURL = recordingTake == 1 ? log.audioURL : log.directory.appending(path: "audio-\(recordingTake).m4a")
+        let recorder = try ComposerAudioRecorder(url: audioURL)
+        _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("audio.take"), "file": .string(audioURL.lastPathComponent)]))
+        status = "listening"; onChange?()
+        audioTask = Task { [weak self] in
+            var converter = PCM16Converter()
+            do {
+                for await chunk in stream {
+                    try Task.checkCancellation()
+                    // Keep the iOS background mic lease, but never record/forward muted speech.
+                    guard let self, !self.isMuted else { continue }
+                    try recorder.append(chunk)
+                    try await transcriber.sendAudio(converter.convert(chunk))
+                }
+            } catch is CancellationError {} catch {
+                self?.fail(error)
+                self?.isArmed = false
+                await self?.mic.stop()
+            }
+        }
+    }
+    func resumeSession(debug: Bool) async {
+        guard let room, let log = sessionLog else { return }
+        let token = generation
+        resuming = true
+        defer { resuming = false }
+        do {
+            // A quick second tap queues continuation until ASR drain and the final
+            // writing turn retire; never race a new stream against an old final pass.
+            while true {
+                let state = await room.state
+                if state != .trailing && state != .finalPass { break }
+                try requireGeneration(token)
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            try requireGeneration(token)
+            guard await room.state == .paused else { return }
+            await transcriber?.cancel(); transcriber = nil
+            try requireGeneration(token)
+            let soniox = debug ? "" : (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "")
+            guard debug || !soniox.isEmpty else { throw SonioxError.missingKey }
+            inputConfig = .init(mode: mode.rawValue, personalPrompt: UserDefaults.standard.string(forKey: "composer.personalPrompt") ?? "", terms: inputConfig.terms)
+            try await room.resume()
+            isMuted = false; error = nil; status = "starting"; onChange?()
+            try await beginInput(room: room, log: log, debug: debug, soniox: soniox, generation: token)
+        } catch is CancellationError {
+        } catch {
+            if generation == token {
+                fail(error); isArmed = false; await mic.stop()
+                // Retain the composition after a failed reconnect; its next Record
+                // tap can retry without discarding the draft or conversation.
+                if await room.state == .listening { try? await room.micOff(); await room.finishTranscription() }
             }
         }
     }
@@ -237,16 +288,32 @@ import LegatoVocabulary
         catch { if self.generation == generation { fail(error) } }
     }
     public func stop() async {
-        guard isListening else { return }; status = "trailing"; onChange?()
+        guard isListening else { return }
+        let token = generation
+        let transcriber = self.transcriber
+        let room = self.room
+        status = "trailing"; onChange?()
+        try? await room?.micOff(transcriberDraining: true)
         if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
-        do { try await transcriber?.finish() } catch { fail(error) }
+        guard generation == token else { return }
+        do { try await transcriber?.finish() } catch {
+            guard generation == token else { return }
+            fail(error)
+            // A failed socket must not leave continuation waiting forever for drain.
+            await room?.finishTranscription()
+        }
     }
-    /// The surface inserts its currently rendered value synchronously, then calls this to cancel work.
-    public func insert() async { generation = UUID(); _ = try? await room?.insert(); await cleanup(); status = "done"; onChange?() }
+    /// Call only after the surface has successfully delivered its rendered value.
+    public func insert() async {
+        generation = UUID(); _ = try? await room?.insert(); await cleanup()
+        room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
+        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil
+        busyParticipants = []; status = "idle"; onChange?()
+    }
     /// Discard the composition; Stop and Insert deliberately retain the rendered text.
     public func cancel() async {
         generation = UUID(); try? await room?.cancel(); await cleanup()
-        room = nil; sessionID = nil; audioOrigin = nil
+        room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
         snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
@@ -289,6 +356,9 @@ import LegatoVocabulary
             if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }
         case .session:
             if case .string(let value) = event.payload["state"] {
+                // Room reopens before the new provider connects. Expose listening
+                // only when beginInput has established its actual input stream.
+                if value == "listening", resuming { break }
                 status = value
                 if value == "done" { busyParticipants = []; busy = false; pendingLineIDs = [] }
             }

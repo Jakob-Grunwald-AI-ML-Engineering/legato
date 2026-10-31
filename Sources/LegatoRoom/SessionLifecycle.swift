@@ -1,4 +1,4 @@
-public enum SessionState: String, Codable, Sendable { case listening, trailing, finalPass, done }
+public enum SessionState: String, Codable, Sendable { case listening, trailing, finalPass, paused, done }
 
 public struct SessionLifecycle: Sendable {
     public private(set) var state: SessionState = .listening
@@ -14,5 +14,7 @@ public struct SessionLifecycle: Sendable {
         state = .finalPass
         return true
     }
+    mutating func pause() { state = .paused; busyAgents.removeAll() }
+    mutating func resume() { state = .listening }
     mutating func finish() { state = .done; busyAgents.removeAll() }
 }
