@@ -26,7 +26,7 @@ public protocol SentenceCleaning: Sendable {
 }
 
 public enum SentenceCleanupError: Error, Sendable, Equatable {
-    case invalidInput, unexpectedResponse, invalidIdentity, invalidText, incomplete, providerError
+    case invalidInput, unexpectedResponse, invalidIdentity, invalidText, incomplete, providerError, outputLimit, refused
 }
 
 /// Independent, local copyediting only. This client has no document or application capability.
@@ -86,6 +86,8 @@ public struct SentenceCleanupClient: SentenceCleaning {
                     closed = true
                 case "message_delta":
                     if let reason = value["delta"]?["stop_reason"], reason != .null, reason != .string("tool_use") {
+                        if reason == .string("max_tokens") { throw SentenceCleanupError.outputLimit }
+                        if reason == .string("refusal") { throw SentenceCleanupError.refused }
                         throw SentenceCleanupError.incomplete
                     }
                 case "message_stop":

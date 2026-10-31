@@ -145,3 +145,33 @@ private final class HangingSentenceMessages: MessagesStreaming {
     let usage = try #require(reports.withLock { $0.first })
     #expect(usage == .object(["input_tokens": .number(123), "output_tokens": .number(21), "cache_read_input_tokens": .number(400), "cache_creation_input_tokens": .number(80)]))
 }
+
+@Test func cleanupFailureDiagnosticsStaySanitizedAndDistinguishStopReasons() async throws {
+    let privateBody = "PRIVATE_PROVIDER_BODY_DO_NOT_LOG"
+    let errors: [(any Error, String)] = [
+        (URLError(.timedOut), "timeout"), (URLError(.networkConnectionLost), "connection"),
+        (MessagesStreamError.http(401, privateBody), "authentication"),
+        (MessagesStreamError.http(429, privateBody), "rate_limit"),
+        (MessagesStreamError.http(529, privateBody), "provider_unavailable"),
+        (MessagesStreamError.provider("{\"error\":{\"type\":\"overloaded_error\",\"message\":\"\(privateBody)\"}}"), "provider_unavailable"),
+        (SentenceCleanupError.invalidIdentity, "invalid_identity"),
+        (NSError(domain: privateBody, code: 7, userInfo: [NSLocalizedDescriptionKey: privateBody]), "unexpected_failure")
+    ]
+    for (error, code) in errors {
+        let failure = SentenceCleanupFailure.classify(error)
+        #expect(failure.code == code)
+        let encoded = String(decoding: try JSONEncoder().encode(failure.fields), as: UTF8.self)
+        #expect(!encoded.contains(privateBody) && !failure.summary.contains(privateBody))
+    }
+    for (reason, code) in [("max_tokens", "output_limit"), ("refusal", "refusal")] {
+        let event = try sentenceEvent("message_delta", .object(["delta": .object(["stop_reason": .string(reason)])]))
+        let fixture = SentenceFixtureMessages([event])
+        do {
+            _ = try await SentenceCleanupClient(client: fixture).clean(.init(sentenceID: "sentence-a", sequence: 7, text: "Synthetic input", vocabulary: []))
+            Issue.record("Unfinished provider response accepted")
+        } catch {
+            let failure = SentenceCleanupFailure.classify(error)
+            #expect(failure.code == code && failure.stopReason == reason)
+        }
+    }
+}
