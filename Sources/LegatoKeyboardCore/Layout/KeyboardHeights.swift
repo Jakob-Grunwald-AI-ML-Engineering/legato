@@ -48,12 +48,12 @@ public enum KeyboardSideMargins {
 
 /// One responsive composer/ABC layout; legacy saved size preferences are intentionally ignored.
 public enum ComposerKeyboardLayout {
-    public static let utilityRowHeight = 28.0
+    public static let additionalComposerHeight = 28.0
     public static func typingHeight(landscape: Bool) -> Double {
         KeyboardHeights.height(landscape: landscape) - (landscape ? 35.33 : 54)
     }
     public static func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false) -> Double {
-        min(typingHeight(landscape: landscape) + utilityRowHeight, max(0, screenHeight - systemOverhead - 60))
+        min(typingHeight(landscape: landscape) + additionalComposerHeight, max(0, screenHeight - systemOverhead - 60))
     }
 }
 

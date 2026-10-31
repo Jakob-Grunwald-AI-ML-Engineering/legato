@@ -109,7 +109,7 @@ import Testing
 }
 
 @Suite struct FixedComposerKeyboardLayoutTests {
-    @Test func fixedHeightFitsNativeTypingPredictionsAndBottomUtility() {
+    @Test func fixedHeightKeepsExtraComposerSpaceWithoutUtilityRow() {
         #expect(ComposerKeyboardLayout.height(screenHeight: 874, systemOverhead: 92) == 271)
         #expect(abs(ComposerKeyboardLayout.height(screenHeight: 402, systemOverhead: 21, landscape: true) - 215.32) < 0.01)
         #expect(ComposerKeyboardLayout.typingHeight(landscape: false) == 243)
