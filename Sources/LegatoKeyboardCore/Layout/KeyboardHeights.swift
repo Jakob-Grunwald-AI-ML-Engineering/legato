@@ -46,7 +46,18 @@ public enum KeyboardSideMargins {
     }
 }
 
-/// Two composer sizes. Heights exclude iOS's rounded cap and bottom system tray.
+/// One responsive composer/ABC layout; legacy saved size preferences are intentionally ignored.
+public enum ComposerKeyboardLayout {
+    public static let utilityRowHeight = 28.0
+    public static func typingHeight(landscape: Bool) -> Double {
+        KeyboardHeights.height(landscape: landscape) - (landscape ? 35.33 : 54)
+    }
+    public static func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false) -> Double {
+        min(typingHeight(landscape: landscape) + utilityRowHeight, max(0, screenHeight - systemOverhead - 60))
+    }
+}
+
+/// Legacy presets retained for old callers; the native composer uses ComposerKeyboardLayout.
 public enum ComposerKeyboardSize: String, CaseIterable, Sendable {
     case medium, full
 
