@@ -111,6 +111,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 }
                 var value = self.composerHistory.publication(acknowledged: channel.acknowledged)
                 value.insertedIntentID = self.insertedComposerIntentID
+                value.dictationRevision = composer.dictationRevision
                 value.sessionID = composer.sessionID; value.tail = composer.tail; value.mode = composer.mode.rawValue
                 value.correctionDraft = composer.correctionDraft
                 value.correctionCountdownStart = composer.correctionCountdownStart

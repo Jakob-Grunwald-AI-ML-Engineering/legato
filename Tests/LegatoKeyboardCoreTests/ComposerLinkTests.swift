@@ -47,6 +47,15 @@ struct ComposerLinkTests {
         #expect(link.drainIntents().isEmpty)
     }
 
+    @Test func dictationProgressRoundTripsWithoutChangingTheDraft() {
+        let link = ComposerLink(store: LinkStore(MemoryLinkStore()))
+        var value = ComposerPublication(snapshot: .init(revision: 4, lines: [Line(words: [Word(text: "Spoken")])]))
+        value.dictationRevision = 2
+        link.publish(value)
+        #expect(link.read()?.dictationRevision == 2)
+        #expect(link.read()?.snapshot == value.snapshot)
+    }
+
     @Test func intentsHaveIndependentInboxKeys() {
         let store = LinkStore(MemoryLinkStore())
         let link = ComposerLink(store: store)

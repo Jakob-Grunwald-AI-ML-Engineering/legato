@@ -5,6 +5,7 @@ import Pow
 public struct ComposerView: View {
     public let snapshot: DocumentSnapshot
     public var tail: String
+    public var dictationRevision: Int
     public var pendingLineIDs: Set<String>
     public var busy: Bool
     public var instructionText: String
@@ -26,13 +27,13 @@ public struct ComposerView: View {
     @State private var bounds: [WordBounds] = []
     @State private var viewportSize: CGSize = .zero
     @State private var reservesSpace = false
-    public init(snapshot: DocumentSnapshot, tail: String = "", pendingLineIDs: Set<String> = [], busy: Bool = false,
+    public init(snapshot: DocumentSnapshot, tail: String = "", dictationRevision: Int = 0, pendingLineIDs: Set<String> = [], busy: Bool = false,
                 instructionText: String = "", instructionStatus: String = "Ready", instructionInputActive: Bool = false,
                 correctionDraft: String? = nil, correctionCountdownStart: Double? = nil, correctionCountdownDeadline: Double? = nil,
                 onSelect: @escaping (QuoteSelection) -> Void = { _ in },
                 onDeselect: @escaping () -> Void = {}, onSendCorrection: (() -> Void)? = nil,
                 onPick: @escaping (String, String, String) -> Void = { _, _, _ in }) {
-        self.snapshot = snapshot; self.tail = tail; self.pendingLineIDs = pendingLineIDs; self.busy = busy
+        self.snapshot = snapshot; self.tail = tail; self.dictationRevision = dictationRevision; self.pendingLineIDs = pendingLineIDs; self.busy = busy
         self.instructionText = instructionText; self.instructionStatus = instructionStatus; self.instructionInputActive = instructionInputActive
         self.correctionDraft = correctionDraft; self.correctionCountdownStart = correctionCountdownStart; self.correctionCountdownDeadline = correctionCountdownDeadline; self.onSelect = onSelect; self.onDeselect = onDeselect
         self.onSendCorrection = onSendCorrection; self.onPick = onPick
@@ -44,20 +45,44 @@ public struct ComposerView: View {
         if showsGlobalComment { return min(instructionBubbleHeight + 12, viewportSize.height * 0.6) }
         return reservesSpace ? min(100, viewportSize.height * 0.6) : 0
     }
+    // Particle/blur removal holds the old text and allocates layers for its entire height.
+    // Keep it for small edits; a large rewrite/Insert must release the old draft promptly.
+    private var animatesDraftChanges: Bool {
+        var words = 0
+        for line in snapshot.lines {
+            words += line.words.count
+            if words > 240 { return false }
+        }
+        return snapshot.lines.count <= 24
+    }
+    private func followDictation(using proxy: ScrollViewProxy) {
+        guard selected == nil, !isSelecting, !nativeSelecting, !instructionInputActive else { return }
+        Task { @MainActor in
+            await Task.yield()
+            guard selected == nil, !isSelecting, !nativeSelecting, !instructionInputActive else { return }
+            // Only speech progress requests this scroll. An agent rewrite does not pull the
+            // reader away from another paragraph, and an active quote keeps its anchor.
+            withAnimation(.easeOut(duration: 0.16)) { proxy.scrollTo("composer-dictation-tail", anchor: .bottom) }
+        }
+    }
     public var body: some View {
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 if reservesSpace || showsGlobalComment { Color.clear.frame(height: reservedHeight).allowsHitTesting(false) }
                 ScrollView {
-                    let content = VStack(alignment: .leading, spacing: 12) {
+                    let selectedWords = selected?.wordIDs(in: snapshot) ?? []
+                    let content = LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(Array(snapshot.lines.enumerated()), id: \.element.id) { index, line in
                             LineView(line: line, ordinal: index + 1, pending: pendingLineIDs.contains(line.id),
-                                     selected: selected?.wordIDs(in: snapshot) ?? [])
+                                     selected: selectedWords, animatesEdits: animatesDraftChanges)
                                 .id(line.id)
-                                .transition(AnyTransition.asymmetric(insertion: .opacity.combined(with: .movingParts.blur(radius: 6)), removal: .movingParts.vanish(Color.secondary)))
+                                .transition(animatesDraftChanges && line.words.count <= 120
+                                    ? AnyTransition.asymmetric(insertion: .opacity.combined(with: .movingParts.blur(radius: 6)), removal: .movingParts.vanish(Color.secondary))
+                                    : .opacity)
                         }
                         if !tail.isEmpty { Text(tail).foregroundStyle(.secondary).italic().transition(.opacity) }
                         if snapshot.lines.isEmpty && tail.isEmpty { Text("Speak to compose…").foregroundStyle(.secondary) }
+                        Color.clear.frame(height: 1).id("composer-dictation-tail")
                     }.frame(maxWidth: .infinity, alignment: .leading).padding()
                         .background(Color.black.opacity(0.001))
                         .contentShape(Rectangle())
@@ -82,6 +107,10 @@ public struct ComposerView: View {
             .coordinateSpace(name: "composerViewport")
             .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportSize = $0 }
             .onPreferenceChange(WordBoundsKey.self) { bounds = $0 }
+            .onChange(of: tail) { _, next in
+                if !next.isEmpty { followDictation(using: proxy) }
+            }
+            .onChange(of: dictationRevision) { _, _ in followDictation(using: proxy) }
             .onChange(of: committedSelection) { _, value in
                 if reservesSpace, let value {
                     Task { @MainActor in await Task.yield(); proxy.scrollTo(value.lineID, anchor: .top) }
@@ -136,7 +165,7 @@ public struct ComposerView: View {
             }
             .animation(.smooth(duration: 0.22), value: showsInstructionComment)
             .overlay(alignment: .topTrailing) { if busy && !showsGlobalComment { AgentStatusGlyph().padding(8).allowsHitTesting(false) } }
-            .animation(.smooth(duration: 0.3), value: snapshot)
+            .animation(animatesDraftChanges ? .smooth(duration: 0.3) : nil, value: snapshot)
             .animation(.spring(response: 0.28, dampingFraction: 0.82), value: selected)
             .onChange(of: isSelecting) { _, active in
                 if !active {

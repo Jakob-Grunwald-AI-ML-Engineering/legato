@@ -13,6 +13,8 @@ import LegatoVocabulary
 /// Host-only session shared by the phone app and Mac panel. The keyboard receives value snapshots.
 @MainActor @Observable public final class ComposerSession {
     public private(set) var topicContext: TopicContext?
+    public private(set) var dictationRevision = 0
+    private var pendingDictationRevision: Int?
     public private(set) var snapshot = DocumentSnapshot(revision: 0, lines: [])
     public private(set) var tail = ""
     public private(set) var correctionDraft: String?
@@ -174,7 +176,7 @@ import LegatoVocabulary
             else if !isArmed { await arm(); guard isArmed else { return } }
         }
         let generation = UUID(); self.generation = generation
-        snapshot = .init(revision: 0, lines: []); tail = ""; error = nil; status = "starting"; hunks = []; pendingLineIDs = []; busyParticipants = []; busy = false
+        pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; error = nil; status = "starting"; hunks = []; pendingLineIDs = []; busyParticipants = []; busy = false
         let id = UUID().uuidString; sessionID = id
         do {
             let soniox = debugMode == nil ? (try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? "") : ""
@@ -452,14 +454,14 @@ import LegatoVocabulary
         if let context = TopicContext(deliveredText: delivered, recentInstructions: requests) { topicContext = context }
         _ = try? await room?.insert(); await cleanup()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
-        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
+        pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
     /// Discard the composition; Pause deliberately retains the rendered text.
     public func cancel() async {
         generation = UUID(); try? await room?.cancel(); await cleanup()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
-        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
+        pendingDictationRevision = nil; snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
     /// Explicitly discard both this draft and the volatile reference from earlier delivered work.
@@ -535,8 +537,19 @@ import LegatoVocabulary
                 else if sentenceCleanupPending == 0, error?.hasPrefix("Sentence cleanup") == true { error = nil }
             }
             busy = !busyParticipants.isEmpty || sentenceCleanupPending > 0
-        case .docSnapshot: if let value = try? event.payload.decode(DocumentSnapshot.self) { snapshot = value }
-        case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; if value.origin != .undo { lastTransactionID = value.id } }
+        case .docSnapshot:
+            if let value = try? event.payload.decode(DocumentSnapshot.self) {
+                snapshot = value
+                if pendingDictationRevision == value.revision {
+                    dictationRevision += 1; pendingDictationRevision = nil
+                }
+            }
+        case .docOps:
+            if let value = try? event.payload.decode(Transaction.self) {
+                hunks = value.hunks
+                if value.origin == .asr { pendingDictationRevision = value.revision }
+                if value.origin != .undo { lastTransactionID = value.id }
+            }
         case .asrSegment:
             if let words = try? event.payload["words"]?.decode([Word].self) { acceptedASRWords += words.count }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
