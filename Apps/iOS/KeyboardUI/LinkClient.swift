@@ -45,9 +45,19 @@ final class LinkClient {
     }
 
     /// `notify`: also post the note (on a change of visibility; the 1 s refreshes stay quiet).
-    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil) {
-        store?.write(KeyboardPresence(visible: visible, at: Date(), documentID: documentID, surface: surface), forKey: LinkChannel.Key.presence)
+    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil) {
+        store?.write(KeyboardPresence(visible: visible, at: Date(), documentID: documentID, surface: surface, contextBefore: contextBefore), forKey: LinkChannel.Key.presence)
         if notify { DarwinObserver.post(LinkChannel.Note.presence) }
+    }
+
+    /// The cleaned dictation lines the app has not yet had acknowledged (`link.dictation`).
+    func readDictation() -> DictationPublication? { store.map { DictationLink(store: $0).read() } ?? nil }
+    func readDictationAck() -> DictationAck? { store.map { DictationLink(store: $0).acknowledged() } ?? nil }
+    /// Every line up to `ack.upTo` is typed or dropped; the app stops sending it.
+    func writeDictationAck(_ ack: DictationAck) {
+        guard let store else { return }
+        DictationLink(store: store).acknowledge(ack)
+        DarwinObserver.post(LinkChannel.Note.dictationAck)
     }
 
     func send(_ command: RequestCommand, id: String) {

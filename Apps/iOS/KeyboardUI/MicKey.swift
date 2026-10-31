@@ -25,7 +25,7 @@ struct MicKey: View {
     }
 
     private var capturing: Bool { controller.isCapturing }
-    private var canStop: Bool { controller.micMode == .remote(.stop) }
+    private var canStop: Bool { controller.micMode == .remote(.stop) || controller.routeOpen }
 
     /// A native key face; while capturing, filled red with a pulsing pause glyph.
     private var label: some View {

@@ -59,6 +59,10 @@ final class KeyboardViewController: UIInputViewController {
     /// The height the current mode asks for: the native tool row plus the prediction row above it, or the full keyboard's for the orientation. By width, as `KeyGeometry` does: a portrait
     /// keyboard (402 x 297) is wider than tall too.
     private var requestedHeight: CGFloat {
+        // ABC: the pre-offshoot keyboard (word row, tool row, native grid), 297 pt in portrait.
+        if controller?.surface == .typing {
+            return KeyGeometry.isLandscape(width: view.bounds.width) ? Self.landscapeHeight : Self.portraitHeight
+        }
         let screenHeight = view.window?.windowScene?.screen.bounds.height ?? 874
         let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
         // The observed native tray ends 75 pt below our portrait view (21 pt landscape).

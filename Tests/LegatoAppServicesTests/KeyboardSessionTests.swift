@@ -51,6 +51,7 @@ import LegatoSoniox
 
     @Test func appearancePrewarmsAndIdleAudioIsDiscarded() async throws {
         let (composer, keyboard) = try await openOnTyping()
+        try await until { sink.warms == 1 } // the cleanup connection and prompt cache are warmed on the dictation surface
         #expect(keyboard.isOpen && composer.holdsWarmInput && composer.route == .idle)
         #expect(await mic.routes == 1, "The held input routes the leased microphone; it never starts one")
         await mic.emit()
@@ -128,7 +129,9 @@ import LegatoSoniox
     var lines: [DictationRouteLine] = []
     var resets = 0
     func receive(_ line: DictationRouteLine) async { lines.append(line) }
+    var warms = 0
     func reset() async { resets += 1 }
+    func warm() async { warms += 1 }
 }
 
 actor GateMicrophone: AudioSource {

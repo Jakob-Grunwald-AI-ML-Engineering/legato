@@ -5,6 +5,8 @@ public enum PromptLayers {
         return [read("base"), read(mode.rawValue), "Personal preferences:\n" + personal,
                 "Vocabulary spellings (use when context matches):\n" + vocabulary.joined(separator: ", ")].joined(separator: "\n\n")
     }
+    /// The cleanup-only prompt for line-by-line dictation into a field.
+    public static func dictationCleanup() -> String { read("dictation-cleanup") }
     public static func instruction(for phase: WritingPhase) -> String {
         switch phase {
         case .quick:

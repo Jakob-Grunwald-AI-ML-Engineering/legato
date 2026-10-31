@@ -126,7 +126,11 @@ import LegatoVocabulary
     private func warm(_ surface: AudioRoute) async {
         switch surface {
         case .agent: await composer.prepareComposition()
-        case .dictation: openDictation()
+        case .dictation:
+            openDictation()
+            // Cleanup's connection and prompt cache are warm before the first spoken line needs them.
+            let sink = self.sink
+            Task { await sink.warm() }
         case .idle: break
         }
     }

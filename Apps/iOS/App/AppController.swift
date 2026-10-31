@@ -17,6 +17,7 @@ final class AppController {
     let history: any HistoryStore
     let composer: ComposerSession
     let keyboardSession: KeyboardSession
+    let dictation: DictationPipeline
     var notice: String { composer.error ?? composer.status.capitalized }
     var lastTranscript: String?
     var isDictating: Bool { composer.isListening }
@@ -31,7 +32,8 @@ final class AppController {
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
-        keyboardSession = KeyboardSession(composer: composer)
+        dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"))
+        keyboardSession = KeyboardSession(composer: composer, sink: dictation)
         keyboardHost = KeyboardLinkHost()
         keyboardHost?.onChoices = { [weak self] choices in
             for choice in choices {
@@ -39,7 +41,7 @@ final class AppController {
                     fromVocabulary: choice.fromVocabulary)
             }
         }
-        keyboardHost?.attach(composer, keyboardSession: keyboardSession)
+        keyboardHost?.attach(composer, keyboardSession: keyboardSession, dictation: dictation)
         keyboardHost?.link.onRequest = { [weak self] request in
             guard let self else { return false }
             switch request.command {

@@ -50,12 +50,17 @@ public struct KeyboardPresence: Codable, Sendable, Equatable {
     public var documentID: String?
     /// nil decodes presences written before surfaces were reported (the composer).
     public var surface: KeyboardSurface?
+    /// The end of `documentContextBeforeInput` (at most `contextLimit` characters), context for cleaning the
+    /// dictated lines. nil for a secure field and before this was reported.
+    public var contextBefore: String?
+    public static let contextLimit = 400
 
-    public init(visible: Bool, at: Date, documentID: String? = nil, surface: KeyboardSurface? = nil) {
+    public init(visible: Bool, at: Date, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil) {
         self.visible = visible
         self.at = at
         self.documentID = documentID
         self.surface = surface
+        self.contextBefore = contextBefore.map { String($0.suffix(Self.contextLimit)) }
     }
 
     public func isFresh(now: Date) -> Bool {

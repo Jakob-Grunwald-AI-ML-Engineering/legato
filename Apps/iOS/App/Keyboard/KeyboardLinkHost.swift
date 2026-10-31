@@ -49,10 +49,13 @@ final class KeyboardLinkHost: TranscriptSink {
     private var composerChannel: ComposerLink?
     /// Open while the keyboard is on screen; its surface decides where a mic tap routes audio.
     private(set) var keyboardSession: KeyboardSession?
-    func attach(_ composer: ComposerSession, keyboardSession: KeyboardSession? = nil) {
+    private var dictationPublished: (sessionID: String, lines: [DictationDelivery])?
+    func attach(_ composer: ComposerSession, keyboardSession: KeyboardSession? = nil, dictation: DictationPipeline? = nil) {
         self.keyboardSession = keyboardSession
+        dictation?.contextBefore = { [weak self] in self?.link.keyboardPresence()?.contextBefore ?? "" }
         guard let backing = UserDefaultsLinkStore() else { return }
         let channel = ComposerLink(store: LinkStore(backing)); composerChannel = channel
+        let dictationChannel = DictationLink(store: LinkStore(backing))
         composer.hostInsertionTarget = { [weak self] in self?.link.keyboardDocumentID() }
         composer.hostInsertionUnavailableReason = { "No visible Legato keyboard text field is bound." }
         composer.hostInsertDraft = { [weak self, weak composer] documentID in
@@ -77,6 +80,17 @@ final class KeyboardLinkHost: TranscriptSink {
                 if let session = self.keyboardSession {
                     let presence = self.link.keyboardPresence()
                     session.update(visible: presence != nil, surface: presence?.surface == .typing ? .dictation : .agent)
+                }
+                if let dictation {
+                    if let ack = dictationChannel.acknowledged() { dictation.acknowledge(sessionID: ack.sessionID, upTo: ack.upTo) }
+                    // Cleaned lines wait here until the keyboard acknowledges having typed them.
+                    if dictationPublished?.sessionID != dictation.sessionID || dictationPublished?.lines != dictation.outbox {
+                        dictationPublished = (dictation.sessionID, dictation.outbox)
+                        dictationChannel.publish(.init(sessionID: dictation.sessionID, lines: dictation.outbox.map {
+                            .init(lineID: $0.lineID, seq: $0.sequence, raw: $0.raw, text: $0.text, status: $0.cleaned ? .cleaned : .raw)
+                        }))
+                        DarwinObserver.post(LinkChannel.Note.dictation)
+                    }
                 }
                 for intent in channel.drainIntents() {
                     switch intent.action {

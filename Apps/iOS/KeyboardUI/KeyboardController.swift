@@ -167,7 +167,15 @@ final class KeyboardController {
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        hint ?? meetingNotice ?? dictationStatus
+        hint ?? meetingNotice ?? dictatingStatus ?? dictationStatus
+    }
+
+    /// While the ABC surface dictates: the live tail of the current line takes the word row's place.
+    private var dictatingStatus: String? {
+        guard surface == .typing, routeOpen else { return nil }
+        let tail = (composer.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tail.isEmpty else { return "Listening…" }
+        return tail.count > 90 ? "…" + tail.suffix(90) : tail
     }
 
     /// A dictation or a Refine is running: the word row is taken over and ↶ ↷ are dimmed.
@@ -197,11 +205,19 @@ final class KeyboardController {
     private(set) var composer = ComposerPublication()
     /// The surface on screen; it decides the mode (typing dictates, the composer instructs the agent).
     private(set) var surface = KeyboardSurface.composer
+    /// The presence the app follows: visibility, field, surface and, for the typing surface (dictation), the text
+    /// before the cursor that the dictated lines are cleaned against. Never from a secure field.
+    private func writePresence(notify: Bool) {
+        let context = surface == .typing && fullAccess && !document.isSecureTextEntry ? typing.contextBefore : nil
+        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: surface, contextBefore: context)
+    }
     /// The host routes the mic by surface, so it learns of a switch at once (presence plus its note).
     func show(_ value: KeyboardSurface) {
         guard value != surface else { return }
         surface = value
-        if isVisible { link.writePresence(visible: true, notify: true, documentID: document.documentID, surface: surface) }
+        syncRowTakeover()
+        onLayoutChange?("surface")
+        if isVisible { writePresence(notify: true) }
     }
     /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
     var routeOpen: Bool { (composer.audioRoute ?? "idle") != "idle" }
@@ -243,7 +259,9 @@ final class KeyboardController {
                         self.pendingComposerDocumentID = nil
                     }
                     self.composer = value; self.composerLink?.acknowledge(value.snapshot.revision)
+                    self.syncRowTakeover()
                 }
+                self.receiveDictation()
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
@@ -253,7 +271,7 @@ final class KeyboardController {
         refreshTraits()
         typing.appeared()
         wordRow.appeared()
-        link.writePresence(visible: true, notify: true, documentID: document.documentID, surface: surface)
+        writePresence(notify: true)
         trace?("visible value=1")
         heartbeat?.cancel()
         heartbeat = Task { [weak self] in
@@ -274,6 +292,8 @@ final class KeyboardController {
         // rest is typed from the cursor when the keyboard (or the run's final state) is seen again.
         if reveal.needsTicks { applyHost(flush: true) }
         stopTicker()
+        dictationStep(elapsedMs: 0, flush: true)
+        stopDictationTicker()
         isVisible = false
         wordRow.interruptTyping()
         typing.disappeared()
@@ -293,6 +313,7 @@ final class KeyboardController {
         if isVisible { disappeared() }
         isTornDown = true
         stopTicker()
+        stopDictationTicker()
         link.stopObserving()
         heartbeat?.cancel()
         reapply?.cancel()
@@ -302,14 +323,14 @@ final class KeyboardController {
     }
 
     private func beat() {
-        link.writePresence(visible: true, notify: false, documentID: document.documentID, surface: surface)
+        writePresence(notify: false)
         reloadHost()
     }
 
     /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
     /// extension's `textDidChange` and `selectionDidChange` both come here.
     func documentDidChange() {
-        if isVisible { link.writePresence(visible: true, notify: false, documentID: document.documentID, surface: surface) }
+        if isVisible { writePresence(notify: false) }
         refreshTraits()
         typing.documentChanged()
         if let versions, versions.documentID != document.documentID { self.versions = nil }
@@ -572,11 +593,82 @@ final class KeyboardController {
         if !ops.isEmpty { typing.hostEdited() }
     }
 
+    // MARK: Dictation
+
+    /// Lines the app cleaned, typed one by one (`DictationTypist`); acknowledged on the link as they finish.
+    @ObservationIgnored private var typist = DictationTypist()
+    @ObservationIgnored private var lastDictation: DictationPublication?
+    @ObservationIgnored private var dictationTicker: Task<Void, Never>?
+
+    /// Called with the composer poll: a new publication of lines joins the queue.
+    private func receiveDictation() {
+        guard let publication = link.readDictation(), publication != lastDictation else { return }
+        lastDictation = publication
+        typist.accept(publication, acknowledged: link.readDictationAck())
+        dictationStep(elapsedMs: 0)
+    }
+
+    /// A key, a completion or a cursor pan: the user took over, so the rest of the line being typed is dropped and
+    /// the following lines go in at the new cursor.
+    private func interruptDictation() {
+        guard let upTo = typist.interrupt() else { return }
+        acknowledgeDictation(upTo: upTo)
+        if !typist.needsTicks { stopDictationTicker() }
+        trace?("dictation interrupted")
+    }
+
+    private func acknowledgeDictation(upTo: Int) {
+        guard let sessionID = typist.sessionID else { return }
+        link.writeDictationAck(.init(sessionID: sessionID, upTo: upTo))
+    }
+
+    private func dictationStep(elapsedMs: Double, flush: Bool = false) {
+        guard !isTornDown, typist.needsTicks, document.documentID != nil else { return stopDictationTicker() }
+        let context = typing.contextBefore
+        let step = flush
+            ? typist.flush(contextBefore: context, capitalization: autocapitalization)
+            : typist.step(contextBefore: context, elapsedMs: elapsedMs, capitalization: autocapitalization,
+                          animated: !UIAccessibility.isReduceMotionEnabled)
+        if !step.inserts.isEmpty {
+            let text = step.inserts.joined()
+            let expected = context + text
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            perform([.insert(text)])
+            // `perform` forgot the tracked context; these are the keyboard's own inserts, so the next tick reads them.
+            typing.ownEdit(contextBefore: expected)
+            versions = nil
+        }
+        if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
+        if typist.needsTicks, isVisible, !flush { startDictationTicker() } else { stopDictationTicker() }
+    }
+
+    private func startDictationTicker() {
+        guard dictationTicker == nil else { return }
+        dictationTicker = Task { [weak self] in
+            let clock = ContinuousClock()
+            var last = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.tickInterval)
+                guard !Task.isCancelled, let self else { return }
+                let now = clock.now
+                let parts = last.duration(to: now).components
+                last = now
+                self.dictationStep(elapsedMs: Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15)
+            }
+        }
+    }
+
+    private func stopDictationTicker() {
+        dictationTicker?.cancel()
+        dictationTicker = nil
+    }
+
     // MARK: Cursor control
 
     @ObservationIgnored private var cursorPanSession: SpaceCursorPan.Session?
 
     func cursorPanBegan() {
+        interruptDictation()
         // A selection omits its contents from the surrounding context; decline ambiguous movement.
         cursorPanSession = document.selectedText?.isEmpty == false ? nil :
             SpaceCursorPan.Session(before: document.contextBefore, after: document.contextAfter)
@@ -602,6 +694,7 @@ final class KeyboardController {
     /// `contextBefore`: the text before the cursor as the typing model tracks it (the field's own report lags).
     func type(_ text: String, contextBefore: String? = nil) {
         versions = nil // the user moved on from the dictation
+        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? document.contextBefore
@@ -622,6 +715,7 @@ final class KeyboardController {
 
     func deleteBackward(contextBefore: String? = nil) {
         versions = nil
+        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? document.contextBefore
@@ -647,6 +741,7 @@ final class KeyboardController {
     /// completion, which the row follows up with predictions and which counts as typed text. `record: false`
     /// is for undo and redo, which move the history themselves.
     func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) {
+        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
         let before = typing.contextBefore
@@ -684,7 +779,7 @@ final class KeyboardController {
     // MARK: Undo and redo
 
     /// ↶ ↷ undo and redo the keyboard's own edits; dimmed while a run is active.
-    private var composerOwnsHistory: Bool { composer.sessionID != nil }
+    private var composerOwnsHistory: Bool { surface == .composer && composer.sessionID != nil }
     var canUndo: Bool { composerOwnsHistory ? !composer.snapshot.lines.isEmpty : undoAvailable && !runActive }
     // Composer currently supports Undo only; never send host Redo while editing its document.
     var canRedo: Bool { !composerOwnsHistory && redoAvailable && !runActive }

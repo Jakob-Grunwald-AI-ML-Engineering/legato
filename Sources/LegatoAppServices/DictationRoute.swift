@@ -18,9 +18,14 @@ public struct DictationRouteLine: Sendable, Equatable {
 @MainActor public protocol DictationRouteSink: AnyObject {
     func receive(_ line: DictationRouteLine) async
     func reset() async
+    /// The dictation surface is about to be used: warm whatever cleaning needs (connection, prompt cache).
+    func warm() async
+}
+public extension DictationRouteSink {
+    func warm() async {}
 }
 
-/// Placeholder until cleaned lines are typed into the field: finalized lines are kept for diagnostics only.
+/// Counts finalized lines and does nothing else (the default for sessions without a keyboard link).
 @MainActor public final class DiscardingDictationSink: DictationRouteSink {
     public private(set) var received = 0
     public init() {}
