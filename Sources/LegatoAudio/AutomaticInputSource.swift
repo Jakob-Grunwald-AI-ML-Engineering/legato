@@ -139,7 +139,7 @@ public actor AutomaticInputSource: ResumableAudioSource {
         diagnosticState.withLock { $0.state = "idle" }
     }
     private func makeStream() -> AsyncStream<AudioChunk> {
-        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .bufferingNewest(32))
+        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .bufferingNewest(256))
         router.setSink(continuation); return stream
     }
     private var timeoutSeconds: Double { Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18 }
