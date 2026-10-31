@@ -26,8 +26,12 @@ import LegatoVocabulary
     public private(set) var instructionDraft = ""
     public private(set) var lastInstruction = ""
     public private(set) var instructionApplying = false
+    private var lastInstructionID: String?
+    private var instructionCompleted = false
     public var instructionPreview: String { instructionDraft.isEmpty ? lastInstruction : instructionDraft }
     public var instructionStatus: String {
+        if let hostActionNotice { return hostActionNotice }
+        if instructionCompleted { return "Done" }
         if !instructionDraft.isEmpty { return "Listening" }
         if instructionApplying { return "Applying" }
         if !lastInstruction.isEmpty { return "Done" }
@@ -38,6 +42,13 @@ import LegatoVocabulary
     public private(set) var inputSource = "microphone.soniox"
     public private(set) var audioOrigin: Double?
     public private(set) var hunks: [AnimationHunk] = []
+    /// Platform adapters bind these to the same guarded Insert flow as the visible key.
+    public var hostInsertionTarget: (@MainActor () -> String?)?
+    public var hostInsertionUnavailableReason: (@MainActor () -> String)?
+    public var hostClearComposer: (@MainActor () async -> Void)?
+    public var hostInsertDraft: (@MainActor (String) async -> ComposerHostActionResult)?
+    public private(set) var hostActionNotice: String?
+    @ObservationIgnored private var consumedHostActionInstructions: Set<String> = []
     public var onChange: (@MainActor () -> Void)?
     public var renderedText: String { snapshot.lines.enumerated().map { i, line in
         switch line.kind {
@@ -176,7 +187,12 @@ import LegatoVocabulary
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let writer = AgentRunner(room: room, client: MessagesStream(keyStore: KeychainKeyStore()), configuration: .init(
                 liveModel: ModelChoice(rawValue: defaults.string(forKey: "composer.liveModel") ?? "") ?? .haiku,
-                mode: mode, personalPrompt: prompt, vocabulary: { _ in terms }))
+                mode: mode, personalPrompt: prompt, vocabulary: { _ in terms },
+                hostActionContext: { [weak self] in await self?.captureHostActionContext() },
+                performHostAction: { [weak self] action in
+                    guard let self else { return .init(succeeded: false, message: "Composition closed. Action discarded.") }
+                    return await self.performHostAction(action)
+                }))
             self.writer = writer; await writer.start(); try requireGeneration(generation)
             let eventStream = await room.subscribe(participant: .ui, channels: Set(Channel.allCases), buffering: .unbounded)
             eventsTask = Task { [weak self] in for await event in eventStream { guard !Task.isCancelled else { break }; await self?.receive(event) } }
@@ -313,7 +329,7 @@ import LegatoVocabulary
     #endif
     public func setInputMode(_ value: ComposerInputMode, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         guard value != inputMode else { return }
-        inputMode = value; onChange?()
+        inputMode = value; instructionCompleted = false; onChange?()
         await binder?.setInputMode(value, timestamp: timestamp)
         // Finalize the old acoustic chunk without reconnecting or stopping microphone input.
         if isListening { try? await transcriber?.finalizeChunk() }
@@ -388,15 +404,49 @@ import LegatoVocabulary
     public func insert() async {
         generation = UUID(); _ = try? await room?.insert(); await cleanup()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
-        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil
+        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
     }
     /// Discard the composition; Pause deliberately retains the rendered text.
     public func cancel() async {
         generation = UUID(); try? await room?.cancel(); await cleanup()
         room = nil; sessionLog = nil; sessionID = nil; audioOrigin = nil
-        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil
+        snapshot = .init(revision: 0, lines: []); tail = ""; hunks = []; error = nil; hostActionNotice = nil
         busyParticipants = []; status = "idle"; onChange?()
+    }
+    func captureHostActionContext() -> ComposerHostActionContext? {
+        guard room != nil else { return nil }
+        let target = hostInsertionTarget?()
+        return ComposerHostActionContext(sessionToken: generation.uuidString, targetToken: target,
+            insertionUnavailableReason: target == nil ? (hostInsertionUnavailableReason?() ?? "No bound text field. Draft will be kept.") : nil)
+    }
+    func performHostAction(_ action: ComposerHostAction) async -> ComposerHostActionResult {
+        guard !Task.isCancelled, action.context.sessionToken == generation.uuidString, room != nil else {
+            return .init(succeeded: false, message: "Composition changed. Stale app action discarded.")
+        }
+        guard consumedHostActionInstructions.insert(action.instructionID).inserted else {
+            return .init(succeeded: false, message: "This instruction was already handled; action not repeated.")
+        }
+        switch action.kind {
+        case .clearComposer:
+            if let clear = hostClearComposer { await clear() } else { await cancel() }
+            instructionCompleted = true; onChange?()
+            return .init(succeeded: true, message: "Composer cleared.")
+        case .insertDraft:
+            guard let target = action.context.targetToken, target == hostInsertionTarget?(), let insert = hostInsertDraft else {
+                let reason = hostInsertionUnavailableReason?() ?? "No bound text field."
+                hostActionNotice = reason + " Draft kept."; instructionApplying = false; onChange?()
+                return .init(succeeded: false, message: hostActionNotice!)
+            }
+            let result = await insert(target)
+            if action.context.sessionToken == generation.uuidString {
+                hostActionNotice = result.succeeded ? nil : result.message
+                instructionApplying = false
+                if result.succeeded { lastInstruction = ""; instructionDraft = "" }
+                onChange?()
+            }
+            return result
+        }
     }
     public func setMode(_ value: ComposerMode) async { mode = value; UserDefaults.standard.set(value.rawValue, forKey: "composer.mode"); try? await writer?.setMode(value); onChange?() }
     public func tap(lineID: String, wordID: String, timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
@@ -428,17 +478,28 @@ import LegatoVocabulary
         case .docOps: if let value = try? event.payload.decode(Transaction.self) { hunks = value.hunks; if value.origin != .undo { lastTransactionID = value.id } }
         case .asrTail: if case .string(let value) = event.payload["text"] { tail = value }
         case .writingInstruction:
+            hostActionNotice = nil; instructionCompleted = false
+            lastInstructionID = try? event.payload["captureID"]?.decode(String.self)
             lastInstruction = (try? event.payload["text"]?.decode(String.self)) ?? ""
             instructionApplying = true
         case .instructionDraft:
+            if case .string(let draft) = event.payload["text"], !draft.isEmpty { instructionCompleted = false; hostActionNotice = nil }
             instructionDraft = (try? event.payload["text"]?.decode(String.self)) ?? ""
         case .correctionDraft:
             correctionDraft = try? event.payload["text"]?.decode(String.self)
             correctionCountdownStart = try? event.payload["countdownStart"]?.decode(Double.self)
             correctionCountdownDeadline = try? event.payload["countdownDeadline"]?.decode(Double.self)
         case .agentStatus:
+            if event.payload["event"] == .string("instruction.notice") { hostActionNotice = try? event.payload["message"]?.decode(String.self) }
+            if event.payload["event"] == .string("host.action.queued") { instructionApplying = true }
+            if event.payload["event"] == .string("host.action.result") {
+                instructionApplying = false
+                if event.payload["succeeded"] == .bool(false) { hostActionNotice = try? event.payload["message"]?.decode(String.self) }
+                else { instructionCompleted = true; hostActionNotice = nil; lastInstruction = ""; instructionDraft = "" }
+            }
             if event.payload["event"] == .string("turn.phase"), event.payload["phase"] == .string("instruction") { instructionApplying = true }
-            if event.payload["busy"] == .bool(false) { instructionApplying = false }
+            if event.payload["event"] == .string("instruction.completed"),
+               (try? event.payload["instructionID"]?.decode(String.self)) == lastInstructionID { instructionApplying = false; instructionCompleted = true }
             if case .bool(let value) = event.payload["busy"] { if value { busyParticipants.insert(event.participant) } else { busyParticipants.remove(event.participant) }; busy = !busyParticipants.isEmpty }
             if event.payload["event"] == .string("pending.edit"), let ids = try? event.payload["lines"]?.decode([String].self) { pendingLineIDs = Set(ids) }
             if event.payload["event"] == .string("error"), case .string(let message) = event.payload["message"] { error = message }

@@ -1,5 +1,6 @@
 import AppKit
 import LegatoAppServices
+import LegatoAgent
 import LegatoCore
 import LegatoMac
 import LegatoVocabulary
@@ -18,6 +19,7 @@ import Observation
     let composer = ComposerSession()
     let notch = NotchPanelController()
     private var writer: FieldWriter?
+    private var composerTargetToken: String?
     private var targetPID: pid_t?
     private var secureField = false
     private var starting = false
@@ -48,6 +50,15 @@ import Observation
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(engine) })
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        composer.hostInsertionTarget = { [weak self] in self?.composerTargetToken }
+        composer.hostInsertionUnavailableReason = { [weak self] in
+            self?.secureField == true ? "The bound field is secure." : "No external text field is bound."
+        }
+        composer.hostInsertDraft = { [weak self] target in
+            guard let self else { return .init(succeeded: false, message: "Composer closed. Draft kept.") }
+            return await self.performComposerInsertion(expectedTarget: target)
+        }
+        composer.hostClearComposer = { [weak self] in await self?.clearComposer() }
     }
     func bootstrap() {
         guard !bootstrapped else { return }; bootstrapped = true
@@ -89,6 +100,7 @@ import Observation
         case .none: target = nil
         case .secure: target = nil; secureField = true
         }
+        composerTargetToken = target != nil && targetPID != ProcessInfo.processInfo.processIdentifier ? UUID().uuidString : nil
         writer = FieldWriter(target: target, mode: .insertOnStop)
         notch.show(controller: self, targetPID: targetPID)
     }
@@ -107,55 +119,61 @@ import Observation
         if starting { cancelComposer(); return }
         Task { await composer.stop() }
     }
-    func cancelComposer() {
+    func cancelComposer() { Task { await clearComposer() } }
+    private func clearComposer() async {
         sessionTask?.cancel(); sessionTask = nil; starting = false
-        notch.hide(); writer = nil; gesture.runEnded()
-        Task { await composer.cancel() }
+        notch.hide(); writer = nil; composerTargetToken = nil; gesture.runEnded()
+        await composer.cancel()
     }
-    func insertComposer() {
-        guard !inserting, !composer.renderedText.isEmpty || !composer.tail.isEmpty else { return }
+    func insertComposer() { Task { _ = await performComposerInsertion() } }
+    private func performComposerInsertion(expectedTarget: String? = nil) async -> ComposerHostActionResult {
+        guard !inserting else { return .init(succeeded: false, message: "Insertion already in progress. Draft kept.") }
+        guard !composer.renderedText.isEmpty || !composer.tail.isEmpty else { return .init(succeeded: false, message: "The composer is empty.") }
+        if let expectedTarget, expectedTarget != composerTargetToken {
+            return .init(succeeded: false, message: "The target field changed. Draft kept.")
+        }
         inserting = true
+        defer { inserting = false }
         sessionTask?.cancel(); starting = false
         let requestedSessionID = composer.sessionID
+        let requestedTarget = composerTargetToken, requestedWriter = writer
         let pid = targetPID, secure = secureField, restore = settings.restoreClipboard
         gesture.runEnded()
-        Task {
-            defer { inserting = false }
-            let text: String
-            do { text = try await composer.prepareForInsertion() }
-            catch {
-                guard composer.sessionID == requestedSessionID else { return }
-                hud.show(toast: "Couldn't finish preparing the text. Draft kept. Try Insert again.")
-                notch.show(controller: self, targetPID: pid)
-                return
-            }
-            let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
-            // Keep authoring visible, then release key focus for the verified write or paste.
-            notch.hide()
-            let action = writer?.finish(finalText: text) ?? .paste(text)
-            var delivered = false
-            switch action {
-            case .done: delivered = true
-            case .copy(let text):
-                paster.copy(text); hud.show(toast: "Copied — paste with ⌘V. Draft kept.")
-            case .paste(let text):
-                let result = await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure)
-                switch result {
-                case .pasted: delivered = true
-                case .copied(let reason): hud.show(toast: reason.toast + " Draft kept.")
-                }
-            }
-            writer = nil
-            if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
-                await composer.insert()
-            } else if delivered {
-                hud.show(toast: "Inserted. Draft changed during insertion; latest edits kept.")
-                notch.show(controller: self, targetPID: pid)
-            } else {
-                // Clipboard-only delivery is not an insertion: leave the draft available to retry.
-                notch.show(controller: self, targetPID: pid)
+        let text: String
+        do { text = try await composer.prepareForInsertion() }
+        catch {
+            guard composer.sessionID == requestedSessionID else { return .init(succeeded: false, message: "Composition changed; insertion discarded.") }
+            let message = "Couldn't finish preparing the text. Draft kept. Try Insert again."
+            hud.show(toast: message); notch.show(controller: self, targetPID: pid)
+            return .init(succeeded: false, message: message)
+        }
+        guard requestedSessionID == composer.sessionID, requestedTarget == composerTargetToken else {
+            return .init(succeeded: false, message: "Composition or target changed. Draft kept.")
+        }
+        let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
+        notch.hide()
+        let action = requestedWriter?.finish(finalText: text) ?? .paste(text)
+        var delivered = false
+        var failure = "Couldn't insert into the bound text field. Draft kept."
+        switch action {
+        case .done: delivered = true
+        case .copy(let text):
+            paster.copy(text); failure = "Copied — paste with ⌘V. Draft kept."; hud.show(toast: failure)
+        case .paste(let text):
+            let result = await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure)
+            switch result {
+            case .pasted: delivered = true
+            case .copied(let reason): failure = reason.toast + " Draft kept."; hud.show(toast: failure)
             }
         }
+        writer = nil; composerTargetToken = nil
+        if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
+            await composer.insert()
+            return .init(succeeded: true, message: "Draft inserted into the bound text field.")
+        }
+        if delivered { failure = "Inserted. Draft changed during insertion; latest edits kept."; hud.show(toast: failure) }
+        notch.show(controller: self, targetPID: pid)
+        return .init(succeeded: delivered, message: failure)
     }
     func beginRecording() {
         guard tap.isActive else { permissions.requestAccessibility(); return }

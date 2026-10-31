@@ -74,7 +74,7 @@ public final class HostLink {
         state.volatile = ""
         state.delivery = delivery
         state.finalText = nil
-        state.insertAt = nil
+        state.insertAt = nil; state.insertDocumentID = nil
         state.revision = nil
         reportedSentBase = 0
         reportedSentCount = 0
@@ -112,7 +112,7 @@ public final class HostLink {
     /// the run. Wakes the keyboard with the usual note; `awaitFinalApplied(runID:timeout:)` tells whether it
     /// landed. Refused (false) while a run is going on: its text is the link's.
     @discardableResult
-    public func publishInsert(runID: String, text: String) -> Bool {
+    public func publishInsert(runID: String, text: String, documentID: String? = nil) -> Bool {
         guard !isRunning else { return false }
         cancelScrub()
         state.runID = runID
@@ -124,6 +124,7 @@ public final class HostLink {
         state.finalText = nil
         state.revision = nil
         state.insertAt = now()
+        state.insertDocumentID = documentID
         publish()
         scheduleScrub()
         return true
@@ -170,7 +171,7 @@ public final class HostLink {
         state.volatile = ""
         state.finalText = nil
         state.delivery = nil
-        state.insertAt = nil
+        state.insertAt = nil; state.insertDocumentID = nil
         state.revision = nil
         publish()
     }
@@ -398,6 +399,10 @@ public final class HostLink {
 
     // MARK: From the keyboard
 
+    public func keyboardDocumentID() -> String? {
+        guard let presence = store.read(KeyboardPresence.self, forKey: LinkChannel.Key.presence), presence.isFresh(now: now()) else { return nil }
+        return presence.documentID
+    }
     public func keyboardIsVisible() -> Bool {
         store.read(KeyboardPresence.self, forKey: LinkChannel.Key.presence)?.isFresh(now: now()) ?? false
     }

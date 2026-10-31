@@ -66,6 +66,20 @@ public actor Room {
                     tOrigin: tOrigin, baseRev: baseRev, causedBy: causedBy)
     }
 
+    /// Operational acknowledgement only: successful Clear/Insert may already have ended
+    /// subscriptions. Retain their terminal result in the owning session log without
+    /// reopening the Room or granting a document mutation capability.
+    public func recordHostAction(stage: String, actionID: String, instructionID: String, action: String,
+                                 sessionToken: String, succeeded: Bool? = nil, message: String? = nil) {
+        guard ["queued", "result"].contains(stage), ["clear_composer", "insert_draft"].contains(action) else { return }
+        var fields: [String: JSONValue] = ["event": .string("host.action." + stage),
+            "actionID": .string(actionID), "instructionID": .string(instructionID),
+            "action": .string(action), "sessionToken": .string(sessionToken)]
+        if let succeeded { fields["succeeded"] = .bool(succeeded) }
+        if let message { fields["message"] = .string(message) }
+        _ = emit(channel: .agentStatus, participant: .ui, payload: .object(fields))
+    }
+
     /// Payload: {"words":[Word]}. Extra segment timing/threshold fields may be sent via publish.
     @discardableResult public func publishSegment(words: [Word], tOrigin: Double? = nil, causedBy: String? = nil) throws -> Envelope {
         try publish(channel: .asrSegment, participant: .segmenter,
