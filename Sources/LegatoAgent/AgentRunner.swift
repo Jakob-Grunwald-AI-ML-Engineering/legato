@@ -17,6 +17,7 @@ public actor AgentRunner {
     private let client: any MessagesStreaming
     private var configuration: AgentConfiguration
     private let pauseDelay: Duration
+    private let clock: any Clock<Duration>
     private var subscription: Task<Void, Never>?
     private var pauseTask: Task<Void, Never>?
     private var writerTask: Task<Void, Never>?
@@ -39,8 +40,9 @@ public actor AgentRunner {
     private var completedInstructionActions: Set<String> = []
     private var executingHostAction = false
 
-    public init(room: Room, client: any MessagesStreaming, configuration: AgentConfiguration = .init(), pauseDelay: Duration = .seconds(1)) {
-        self.room = room; self.client = client; self.configuration = configuration; self.pauseDelay = pauseDelay
+    public init(room: Room, client: any MessagesStreaming, configuration: AgentConfiguration = .init(), pauseDelay: Duration = .seconds(1),
+                clock: any Clock<Duration> = ContinuousClock()) {
+        self.room = room; self.client = client; self.configuration = configuration; self.pauseDelay = pauseDelay; self.clock = clock
     }
     public func start() async {
         guard subscription == nil else { return }; stopped = false
@@ -142,9 +144,9 @@ public actor AgentRunner {
         let token = UUID(); pauseGeneration = token
         if phase == .pause { await cancelCurrentTurn() }
         guard !stopped, token == pauseGeneration else { return }
-        let delay = pauseDelay
+        let delay = pauseDelay, clock = clock
         pauseTask = Task { [weak self] in
-            do { try await Task.sleep(for: delay); await self?.pauseElapsed(token) } catch {}
+            do { try await clock.sleep(for: delay); await self?.pauseElapsed(token) } catch {}
         }
     }
     private func pauseElapsed(_ token: UUID) async {

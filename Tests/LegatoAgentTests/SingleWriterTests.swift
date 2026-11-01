@@ -68,23 +68,21 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
 }
 
 @Test func oneWriterUsesSelectedModelForQuickPauseAndFinalWithoutConcurrentRequests() async throws {
-    let room = Room(), client = WriterMessages()
+    let room = Room(), client = WriterMessages(), clock = VirtualClock()
     let runner = AgentRunner(room: room, client: client,
-        configuration: .init(liveModel: .haiku), pauseDelay: .milliseconds(80))
+        configuration: .init(liveModel: .haiku), pauseDelay: .milliseconds(80), clock: clock)
     await runner.start()
     for n in 1...4 { _ = try await room.publishSegment(words: [.init(text: "Fact \(n)")]) }
     #expect(try await waitForWriter { client.calls().count >= 1 })
-    try await Task.sleep(for: .milliseconds(30))
     #expect(client.state.withLock { $0.maxActive } == 1)
     #expect(client.calls().allSatisfy { $0.model == ModelChoice.haiku.rawValue })
-    // Drain batched quick work, then exactly one pause pass is eligible.
-    for _ in 0..<10 {
-        let calls = client.calls()
-        if calls.last?.phase == "pause" { break }
+    // Drain batched quick work (letting quiet elapse in virtual time), then exactly one pause pass is eligible.
+    await eventually("pause pass") {
+        if client.calls().last?.phase == "pause" { return true }
         for i in client.state.withLock({ $0.active.sorted() }) { client.finish(i) }
-        try await Task.sleep(for: .milliseconds(25))
+        clock.advance(by: .milliseconds(80))
+        return false
     }
-    #expect(try await waitForWriter { client.calls().last?.phase == "pause" })
     for i in client.state.withLock({ $0.active.sorted() }) { client.finish(i) }
     try await room.micOff()
     #expect(try await waitForWriter { client.calls().last?.phase == "final" })
@@ -98,22 +96,27 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
 }
 
 @Test func continuedSpeechDefersAndPreemptsPauseWithoutASecondWriter() async throws {
-    let room = Room(), client = WriterMessages()
-    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(500))
+    let room = Room(), client = WriterMessages(), clock = VirtualClock()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(500), clock: clock)
     await runner.start()
     _ = try await room.publishSegment(words: [.init(text: "A draft")])
     #expect(try await waitForWriter { client.calls().count == 1 })
     client.finish(0)
     for _ in 0..<3 {
-        try await Task.sleep(for: .milliseconds(40))
+        clock.advance(by: .milliseconds(200))
+        let armed = clock.armCount
         _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("continuing speech")]))
+        await eventually("quiet timer re-armed by speech") { clock.armCount > armed }
     }
     #expect(!client.calls().contains { $0.phase == "pause" })
-    #expect(try await waitForWriter { client.calls().last?.phase == "pause" })
+    clock.advance(by: .milliseconds(500))
+    await eventually("pause turn") { client.calls().last?.phase == "pause" }
+    let armed = clock.armCount
     _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("new speech")]))
-    #expect(try await waitForWriter { client.state.withLock { $0.canceledPhases.contains("pause") } })
+    await eventually("pause canceled by speech") { client.state.withLock { $0.canceledPhases.contains("pause") } }
+    await eventually("quiet timer re-armed") { clock.armCount > armed }
     _ = try await room.publishSegment(words: [.init(text: "Another fact")])
-    #expect(try await waitForWriter { client.calls().last?.phase == "quick" })
+    await eventually("quick turn") { client.calls().last?.phase == "quick" }
     #expect(client.state.withLock { $0.maxActive } == 1)
     await runner.stop()
 }
@@ -138,42 +141,49 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
 
 
 @Test func defaultWriterComposesAfterOneSecondQuietWithoutStopping() async throws {
-    let room = Room(), client = WriterMessages()
-    let runner = AgentRunner(room: room, client: client)
+    let room = Room(), client = WriterMessages(), clock = VirtualClock()
+    let runner = AgentRunner(room: room, client: client, clock: clock)
     await runner.start()
     _ = try await room.publishSegment(words: [.init(text: "Some rough notes")])
     #expect(try await waitForWriter { client.calls().count == 1 })
     client.finish(0)
+    await eventually("quiet timer armed") { clock.sleeperCount == 1 }
     // Continued partial speech must reset the actual quiet clock.
-    try await Task.sleep(for: .milliseconds(600))
+    clock.advance(by: .milliseconds(600))
+    let armed = clock.armCount
     _ = try await room.publish(channel: .asrTail, participant: .transcriber,
         payload: .object(["text": .string("still speaking")]))
-    try await Task.sleep(for: .milliseconds(600))
+    await eventually("quiet timer reset") { clock.armCount > armed }
+    clock.advance(by: .milliseconds(600))
     #expect(!client.calls().contains { $0.phase == "pause" })
-    try await Task.sleep(for: .milliseconds(650))
-    #expect(client.calls().last?.phase == "pause",
-        "A short natural pause should allow composing without waiting 2.5 seconds or Stop")
+    clock.advance(by: .milliseconds(400))
+    await eventually("pause turn after one second of quiet") { client.calls().last?.phase == "pause" }
     #expect(client.state.withLock { $0.maxActive } == 1)
     await runner.stop()
 }
 
 @Test func quietQueuedContentComposesInNextTurnInsteadOfAnotherQuickRoundTrip() async throws {
-    let room = Room(), client = WriterMessages()
-    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(80))
+    let room = Room(), client = WriterMessages(), clock = VirtualClock()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(80), clock: clock)
     await runner.start()
     _ = try await room.publishSegment(words: [.init(text: "First rough thought")])
     #expect(try await waitForWriter { client.calls().count == 1 })
+    var armed = clock.armCount
     _ = try await room.publishSegment(words: [.init(text: "Second rough thought")])
-    try await Task.sleep(for: .milliseconds(140))
+    await eventually("quiet timer re-armed by queued content") { clock.armCount > armed }
+    clock.advance(by: .milliseconds(80))
+    await eventually("quiet elapsed") { clock.sleeperCount == 0 }
     #expect(client.calls().count == 1)
     client.finish(0)
-    #expect(try await waitForWriter { client.calls().count == 2 })
+    await eventually("next turn") { client.calls().count == 2 }
     let next = try #require(client.calls().last)
     #expect(next.phase == "pause", "Quiet queued content needs full composing tools immediately")
     #expect(String(decoding: next.request, as: UTF8.self).contains("Second rough thought"))
     client.finish(1)
-    try await Task.sleep(for: .milliseconds(100))
-    #expect(client.calls().count == 2, "The folded composing turn consumes the quiet deadline")
+    await eventually("composing turn retired") { client.state.withLock { $0.active.isEmpty } }
+    clock.advance(by: .seconds(10))
+    #expect(clock.sleeperCount == 0, "The folded composing turn consumes the quiet deadline")
+    #expect(client.calls().count == 2)
     #expect(client.state.withLock { $0.maxActive } == 1)
     await runner.stop()
 }
@@ -181,16 +191,20 @@ private func waitForWriter(_ condition: () async -> Bool) async throws -> Bool {
 
 @Test func targetedCorrectionKeepsPriorityWhenOrdinaryContentIsQuiet() async throws {
     let room = Room(), client = WriterMessages()
-    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(80))
+    let clock = VirtualClock()
+    let runner = AgentRunner(room: room, client: client, pauseDelay: .milliseconds(80), clock: clock)
     await runner.start()
     _ = try await room.publishSegment(words: [.init(text: "First rough thought")])
     #expect(try await waitForWriter { client.calls().count == 1 })
     _ = try await room.publishSegment(words: [.init(text: "Second rough thought")])
+    let armed = clock.armCount
     _ = try await room.publish(channel: .hint, participant: .hintBinder,
         payload: .object(["instruction": .string("Correct the selected name")]))
-    try await Task.sleep(for: .milliseconds(140))
+    await eventually("quiet timer re-armed by hint") { clock.armCount > armed }
+    clock.advance(by: .milliseconds(80))
+    await eventually("quiet elapsed") { clock.sleeperCount == 0 }
     client.finish(0)
-    #expect(try await waitForWriter { client.calls().count == 2 })
+    await eventually("next turn") { client.calls().count == 2 }
     #expect(client.calls().last?.phase == "targeted")
     #expect(client.state.withLock { $0.maxActive } == 1)
     await runner.stop()
