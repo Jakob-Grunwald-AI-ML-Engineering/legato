@@ -558,7 +558,8 @@ public enum ComposerInsertOrigin: String, Sendable {
     #endif
     /// The automatic-send pause while the mic is live and unmuted; nil in manual mode or when listening is paused.
     private func automaticInstructionDelay() -> Double? {
-        guard isListening, !isMuted, route != .idle else { return nil }
+        // A held keyboard input listens only while its gate routes audio to the agent.
+        guard isListening, !isMuted, warmInput == nil || route == .agent else { return nil }
         return InstructionSendSetting.automaticDelay()
     }
     /// Logical voice mute: keep the mic lease, Room and agent work alive while dropping new input.
