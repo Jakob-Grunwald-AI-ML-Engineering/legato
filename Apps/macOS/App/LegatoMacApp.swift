@@ -46,7 +46,7 @@ private struct MenuBarLabel: View {
     var body: some View {
         Image(systemName: controller.setupAttention
             ? "exclamationmark.triangle.fill"
-            : controller.isDictating ? "waveform.circle.fill" : "waveform")
+            : controller.isDictating || controller.dictation.isActive ? "waveform.circle.fill" : "waveform")
             .onChange(of: controller.onboardingRequests, initial: true) { _, count in
                 guard count > 0 else { return }
                 NSApp.activate()

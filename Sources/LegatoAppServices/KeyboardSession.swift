@@ -20,7 +20,7 @@ import LegatoVocabulary
     public var surface: AudioRoute { gate.surface }
     public var route: AudioRoute { gate.route }
     /// The dictation route's uncommitted words.
-    public private(set) var dictationTail = ""
+    public var dictationTail: String { dictation.tail }
     /// Why the last dictation tap could not start (shown in the keyboard's word row); `dictationNoticeID` changes
     /// with every new notice so the same text can show again.
     public private(set) var dictationNotice: String?
@@ -38,15 +38,8 @@ import LegatoVocabulary
     @ObservationIgnored private var reconciling: Task<Void, Never>?
     /// Presence transitions and gate operations run strictly one after another, in arrival order.
     @ObservationIgnored private var queue: Task<Void, Never>?
-    @ObservationIgnored private var dictationRoom: Room?
-    @ObservationIgnored private var dictationStream: WarmStream?
-    /// The started stream of the current dictation take; nil while idle (only a held connection exists).
-    @ObservationIgnored private var dictationActive: SonioxClient?
-    @ObservationIgnored private var dictationEvents: Task<Void, Never>?
-    /// Audio routed while the dictation stream reconnects, sent once it is live (bounded to ~3 s).
-    @ObservationIgnored private var dictationBacklog: [Data] = []
-    @ObservationIgnored private var dictationSending = false
-    @ObservationIgnored private var lineSequence = 0
+    /// The dictation route's Soniox side (Room, held connection, take, lines into the sink).
+    @ObservationIgnored private let dictation: DictationEngine
     @ObservationIgnored private var probe = TapLatencyProbe()
     @ObservationIgnored private var routeClosedAt: Double?
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-session")
@@ -62,6 +55,8 @@ import LegatoVocabulary
         self.composer = composer; self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
         self.warmConnection = warmConnection; self.now = now
         composer.makeSocket = makeSocket
+        dictation = DictationEngine(sink: sink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: composer.vocabularyURL, now: now)
+        dictation.onTail = { [weak self] text in self?.observeTail(text, route: .dictation) }
         composer.onTail = { [weak self] text in self?.observeTail(text, route: .agent) }
         composer.keyboardDiagnostics = { [weak self] in self?.diagnostics ?? [:] }
     }
@@ -121,7 +116,7 @@ import LegatoVocabulary
         isOpen = false; probe.cancel()
         await closeDictation()
         await sink.reset()
-        lineSequence = 0
+        dictation.resetSequence()
         composer.dictationAudio = nil
         await composer.endKeyboardSession()
         Self.log.info("keyboard.session.close")
@@ -160,7 +155,7 @@ import LegatoVocabulary
         let tapped = now() - max(0, tapAt.map { Date().timeIntervalSince($0) } ?? 0)
         if !composer.holdsWarmInput, !(await composer.holdWarmInput()) { return false }
         let surface = gate.surface
-        let warmSince = surface == .agent ? composer.agentWarmSince : dictationStream?.liveSince
+        let warmSince = surface == .agent ? composer.agentWarmSince : dictation.liveSince
         probe.tapped(route: surface, at: tapped, warm: warmSince != nil,
                      idleS: warmSince.map { now() - max($0, routeClosedAt ?? $0) })
         _ = gate.tap()
@@ -169,8 +164,8 @@ import LegatoVocabulary
             await composer.start()
             guard composer.isListening else { _ = gate.close(); probe.cancel(); return composer.error == nil }
         case .dictation:
-            await activateDictation()
-            guard dictationActive != nil else {
+            await dictation.activate()
+            guard dictation.hasActiveTake else {
                 // No stream to talk to (no or unreachable Soniox): do not pretend to listen.
                 _ = gate.close(); probe.cancel()
                 dictationNotice = sonioxKey().isEmpty
@@ -202,19 +197,12 @@ import LegatoVocabulary
         case .finalize(.agent): await composer.finalizeTake()
         case .finalize(.dictation):
             composer.setRoute(.idle)
-            await flushDictationBacklog()
-            if let stream = dictationActive {
-                dictationActive = nil
-                try? await stream.sendAudio(Data(count: 6400))
-                Task { try? await stream.finish(micOff: false) }
-            }
+            await dictation.finalizeTake()
         case .abandon(.agent): await composer.abandonTake()
         case .abandon(.dictation):
-            composer.setRoute(.idle); dictationBacklog = []
-            let active = dictationActive; dictationActive = nil
-            await active?.close()
+            composer.setRoute(.idle)
             // Drop half-spoken words: close without finalizing. Delivered lines stay with the sink.
-            await closeDictation()
+            await dictation.abandonTake()
         case .finalize(.idle), .abandon(.idle): composer.setRoute(.idle)
         }
         probe.cancel()
@@ -222,80 +210,12 @@ import LegatoVocabulary
 
     // MARK: Dictation route
 
-    private func openDictation() {
-        guard dictationStream == nil else { dictationStream?.warm(); return }
-        let room = Room(segmentRouting: .intercepted)
-        dictationRoom = room
-        dictationEvents = Task { [weak self] in
-            let events = await room.subscribe(participant: .ui, channels: [.asrSegment, .asrRawTail], buffering: .unbounded)
-            for await event in events {
-                guard !Task.isCancelled, let self else { return }
-                await self.receiveDictation(event, room: room)
-            }
-        }
-        let socket = makeSocket, key = sonioxKey, vocabulary = composer.vocabularyURL
-        let prompt = UserDefaults.standard.string(forKey: "composer.personalPrompt") ?? ""
-        let stream = WarmStream(connect: { onDrop in
-            let terms = (try? await VocabularyStore(fileURL: vocabulary).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
-            let config = SonioxConfig(mode: "Dictation", personalPrompt: prompt, terms: terms)
-            let client = SonioxClient(room: room, config: config, socket: socket(), quietFailure: .always, onDrop: onDrop)
-            try await client.open(apiKey: key()); try await client.hold()
-            return client
-        }, now: now)
-        dictationStream = stream; stream.warm()
-    }
-    /// Starts the take on the held connection (or a fresh one) and holds the next connection right away.
-    private func activateDictation() async {
-        if dictationStream == nil { openDictation() }
-        guard dictationActive == nil, let stream = dictationStream else { return }
-        guard let held = await stream.take() else { stream.warm(); return }
-        stream.warm()
-        do { try await held.begin(); dictationActive = held } catch { await held.close() }
-    }
-    private func closeDictation() async {
-        let stream = dictationStream, room = dictationRoom, active = dictationActive
-        dictationStream = nil; dictationRoom = nil; dictationBacklog = []; dictationActive = nil
-        await active?.close()
-        await stream?.close()
-        dictationEvents?.cancel(); dictationEvents = nil
-        try? await room?.cancel()
-        if !dictationTail.isEmpty { dictationTail = "" }
-    }
-    private func receiveDictation(_ event: Envelope, room: Room) async {
-        guard room === dictationRoom else { return }
-        switch event.channel {
-        case .asrSegment:
-            await room.resolveSegment(event.id)
-            guard let words = try? event.payload["words"]?.decode([Word].self), !words.isEmpty else { return }
-            let reason = (try? event.payload["metadata"]?["reason"]?.decode(String.self)) ?? ""
-            let line = DictationRouteLine(sequence: lineSequence, text: words.map(\.text).joined(separator: " "), words: words, reason: reason)
-            lineSequence += 1
-            await sink.receive(line)
-        case .asrRawTail:
-            let text = (try? event.payload["text"]?.decode(String.self)) ?? ""
-            dictationTail = text
-            observeTail(text, route: .dictation)
-        default: break
-        }
-    }
+    private func openDictation() { dictation.open() }
+    private func closeDictation() async { await dictation.close() }
     private func sendDictation(_ pcm: Data) async {
         guard gate.route == .dictation else { return }
-        dictationBacklog.append(pcm)
-        if dictationBacklog.count > 100 { dictationBacklog.removeFirst(dictationBacklog.count - 100) }
         if let rate = composer.routedAudioAt { probe.audioRouted(at: rate) }
-        await flushDictationBacklog()
-    }
-    /// Audio goes out in order; a take whose stream dropped continues on the next held connection.
-    private func flushDictationBacklog() async {
-        guard !dictationSending else { return }
-        dictationSending = true
-        defer { dictationSending = false }
-        while !dictationBacklog.isEmpty, dictationStream != nil {
-            if dictationActive == nil { await activateDictation() }
-            guard let stream = dictationActive else { return }
-            let chunk = dictationBacklog.removeFirst()
-            do { try await stream.sendAudio(chunk) } catch { dictationBacklog.insert(chunk, at: 0); dictationActive = nil; return }
-        }
+        await dictation.send(pcm)
     }
 
     #if DEBUG || LEGATO_INTERNAL
@@ -303,18 +223,12 @@ import LegatoVocabulary
     /// (the sink), so cleanup, the link and keyboard typing run for real. Requires the open dictation surface.
     public func debugDictationLine(_ text: String) async throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
-        let words = text.split(whereSeparator: \.isWhitespace).map { Word(text: String($0), confidence: 0.95, language: "de") }
-        guard !words.isEmpty else { throw DebugDictationError.empty }
-        let line = DictationRouteLine(sequence: lineSequence, text: words.map(\.text).joined(separator: " "), words: words, reason: "debug")
-        lineSequence += 1
-        dictationTail = ""
-        await sink.receive(line)
+        guard await dictation.debugLine(text) else { throw DebugDictationError.empty }
     }
     /// Debug bridge: sets (or with empty text clears) the dictation route's live partial.
     public func debugDictationTail(_ text: String) throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
-        dictationTail = text
-        observeTail(text, route: .dictation)
+        dictation.debugTail(text)
     }
     public enum DebugDictationError: Error, CustomStringConvertible, Sendable {
         case notOnDictationSurface, empty
@@ -340,13 +254,13 @@ import LegatoVocabulary
 
     var diagnostics: [String: Any] {
         ["open": isOpen, "surface": gate.surface.rawValue, "route": gate.route.rawValue,
-         "dictationStreamLive": dictationStream?.isLive ?? false, "dictationReconnects": dictationStream?.reconnects ?? 0,
+         "dictationStreamLive": dictation.isLive, "dictationReconnects": dictation.reconnects,
          "probes": probes.map(\.fields)]
     }
 
     /// Establishes TLS/HTTP2 to the Messages API on the shared session the cleanup and writer clients use.
     /// A credential-free HEAD: no key leaves the device and nothing is billed.
-    nonisolated static func warmClaudeConnection() async {
+    public nonisolated static func warmClaudeConnection() async {
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!, timeoutInterval: 10)
         request.httpMethod = "HEAD"
         _ = try? await URLSession.shared.data(for: request)
