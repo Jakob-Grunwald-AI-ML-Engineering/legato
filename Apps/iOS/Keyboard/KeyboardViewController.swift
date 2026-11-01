@@ -15,6 +15,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private static let portraitHeight = KeyGeometry.height(landscape: false)
     private static let landscapeHeight = KeyGeometry.height(landscape: true)
+    /// ABC (297 pt) <-> composer (about 55 % of the screen) animates over this.
+    private static let resizeDuration = 0.28
 
     override func loadView() {
         let input = KeyboardInputView(frame: .zero, inputViewStyle: .keyboard)
@@ -59,6 +61,10 @@ final class KeyboardViewController: UIInputViewController {
     /// The height the current mode asks for: the native tool row plus the prediction row above it, or the full keyboard's for the orientation. By width, as `KeyGeometry` does: a portrait
     /// keyboard (402 x 297) is wider than tall too.
     private var requestedHeight: CGFloat {
+        // ABC: the pre-offshoot keyboard (word row, tool row, native grid), 297 pt in portrait.
+        if controller?.surface == .typing {
+            return KeyGeometry.isLandscape(width: view.bounds.width) ? Self.landscapeHeight : Self.portraitHeight
+        }
         let screenHeight = view.window?.windowScene?.screen.bounds.height ?? 874
         let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
         // The observed native tray ends 75 pt below our portrait view (21 pt landscape).
@@ -74,7 +80,7 @@ final class KeyboardViewController: UIInputViewController {
             screenHeight: screenHeight, systemOverhead: overhead, landscape: landscape))
     }
 
-    /// The mode or the strip height changed (the chevron, the debug height cycle, the setting): resize
+    /// The surface or the strip height changed (ABC <-> composer, the chevron, the setting): resize
     /// with the content's cross-fade, and log the height asked for against the one laid out.
     private func layoutChanged(reason: String) {
         #if DEBUG
@@ -83,13 +89,13 @@ final class KeyboardViewController: UIInputViewController {
         heightConstraint?.constant = requestedHeight
         let settle: UIView = view.superview ?? view
         #if DEBUG
-        UIView.animate(withDuration: 0.2, animations: { settle.layoutIfNeeded() }, completion: { [weak self] _ in
+        UIView.animate(withDuration: Self.resizeDuration, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState], animations: { settle.layoutIfNeeded() }, completion: { [weak self] _ in
             guard let self else { return }
             KeyboardGeometryLog.reportResize(
                 reason: reason, mode: modeName, requested: requestedHeight, view: view, inputView: inputView)
         })
         #else
-        UIView.animate(withDuration: 0.2) { settle.layoutIfNeeded() }
+        UIView.animate(withDuration: Self.resizeDuration, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) { settle.layoutIfNeeded() }
         #endif
     }
 

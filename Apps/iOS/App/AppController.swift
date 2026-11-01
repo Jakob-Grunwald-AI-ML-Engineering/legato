@@ -16,6 +16,8 @@ final class AppController {
     let keyboardHost: KeyboardLinkHost?
     let history: any HistoryStore
     let composer: ComposerSession
+    let keyboardSession: KeyboardSession
+    let dictation: DictationPipeline
     var notice: String { composer.error ?? composer.status.capitalized }
     var lastTranscript: String?
     var isDictating: Bool { composer.isListening }
@@ -30,6 +32,8 @@ final class AppController {
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
+        dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"))
+        keyboardSession = KeyboardSession(composer: composer, sink: dictation)
         keyboardHost = KeyboardLinkHost()
         keyboardHost?.onChoices = { [weak self] choices in
             for choice in choices {
@@ -37,10 +41,13 @@ final class AppController {
                     fromVocabulary: choice.fromVocabulary)
             }
         }
-        keyboardHost?.attach(composer)
+        keyboardHost?.attach(composer, keyboardSession: keyboardSession, dictation: dictation)
         keyboardHost?.link.onRequest = { [weak self] request in
             guard let self else { return false }
             switch request.command {
+            // With the keyboard on screen a tap only opens the pre-warmed gate on its surface's route.
+            case .start where self.keyboardSession.isOpen: return await self.keyboardSession.openGate(tapAt: request.at)
+            case .stop where self.keyboardSession.isOpen: await self.keyboardSession.closeGate()
             case .start: await self.composer.start()
             case .stop: await self.composer.stop()
             case .arm: await self.composer.arm(); self.keyboardHost?.link.leaseChanged(until: self.composer.isArmed ? Date().addingTimeInterval(3600) : nil)

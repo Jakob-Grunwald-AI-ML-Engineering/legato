@@ -403,6 +403,11 @@ public final class HostLink {
         guard let presence = store.read(KeyboardPresence.self, forKey: LinkChannel.Key.presence), presence.isFresh(now: now()) else { return nil }
         return presence.documentID
     }
+    /// The keyboard's presence while it is fresh; nil once it disappeared or stopped beating.
+    public func keyboardPresence() -> KeyboardPresence? {
+        guard let presence = store.read(KeyboardPresence.self, forKey: LinkChannel.Key.presence), presence.isFresh(now: now()) else { return nil }
+        return presence
+    }
     public func keyboardIsVisible() -> Bool {
         store.read(KeyboardPresence.self, forKey: LinkChannel.Key.presence)?.isFresh(now: now()) ?? false
     }

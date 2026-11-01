@@ -74,6 +74,13 @@ struct HomeView: View {
             .accessibilityLabel("Clear composition")
     }
     private var composer: some View {
+        VStack(spacing: 8) { composerDraft; instructionStrip }
+    }
+    private var instructionStrip: some View {
+        InstructionStrip(text: controller.composer.instructionPreview, state: InstructionStripState(status: controller.composer.instructionStatus),
+                         onDiscard: { Task { await controller.composer.discardInstruction() } })
+    }
+    private var composerDraft: some View {
         ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail, dictationRevision: controller.composer.dictationRevision, dictationCommit: controller.composer.dictationCommit, successfulInsertionID: controller.composer.successfulInsertionID,
             pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
             correctionDraft: controller.composer.correctionDraft, correctionSubmitting: controller.composer.correctionSubmitting,
@@ -81,8 +88,6 @@ struct HomeView: View {
             onSelect: { selection in Task { await controller.composer.select(lineID: selection.lineID, wordID: selection.wordID, endLineID: selection.endLineID, endWordID: selection.endWordID) } },
             onDeselect: { Task { await controller.composer.clearSelection() } },
             onSendCorrection: { Task { await controller.composer.sendCorrection() } },
-            onSendInstruction: { Task { await controller.composer.sendInstruction() } },
-            onDiscardInstruction: { Task { await controller.composer.discardInstruction() } },
             onPick: { line, word, text in Task { await controller.composer.pick(lineID: line, wordID: word, text: text) } })
     }
 }

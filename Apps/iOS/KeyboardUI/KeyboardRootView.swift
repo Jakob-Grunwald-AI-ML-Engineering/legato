@@ -3,17 +3,17 @@ import LegatoComposerUI
 import SwiftUI
 import UIKit
 
-/// A fixed-height composer with native actions and a bottom typing utility key.
+/// A fixed-height composer with native actions and a bottom typing utility key. The surface shown is the
+/// mode: typing dictates into the field, the composer instructs the agent (`KeyboardController.show`).
 struct KeyboardRootView: View {
     let controller: KeyboardController
     @Environment(\.colorScheme) private var systemScheme
     @State private var showsModePicker = false
-    @State private var showsTypingKeyboard = false
     private let modes = [("message", "message"), ("email", "envelope"), ("prompt", "sparkles"), ("note", "note.text"), ("auto", "wand.and.stars")]
 
     var body: some View {
         GeometryReader { geometry in
-            if showsTypingKeyboard { TypingFallbackView(controller: controller) { showsTypingKeyboard = false } }
+            if controller.surface == .typing { TypingFallbackView(controller: controller) { controller.show(.composer) } }
             else { composerBody(landscape: KeyGeometry.isLandscape(width: geometry.size.width)) }
         }
     }
@@ -23,21 +23,22 @@ struct KeyboardRootView: View {
                 ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail,
                              dictationRevision: controller.composer.dictationRevision ?? 0, dictationCommit: controller.composer.dictationCommit, successfulInsertionID: controller.composer.successfulInsertionID,
                              pendingLineIDs: controller.composer.pendingLineIDs, busy: controller.composer.busy,
-                             instructionText: controller.composer.instructionDraft ?? "", instructionStatus: controller.composer.instructionStatus ?? "Ready",
-                             instructionInputActive: controller.composer.inputMode == "instructions",
                              correctionDraft: controller.composer.correctionDraft, correctionSubmitting: controller.composer.correctionSubmitting ?? false,
                 correctionCountdownStart: controller.composer.correctionCountdownStart, correctionCountdownDeadline: controller.composer.correctionCountdownDeadline,
                              onSelect: { controller.composerIntent("tap", lineID: $0.lineID, wordID: $0.wordID, endLineID: $0.endLineID, endWordID: $0.endWordID) },
                              onDeselect: { controller.composerIntent("deselect") },
                              onSendCorrection: { controller.composerIntent("send-correction") },
-                             onSendInstruction: { controller.composerIntent("send-instruction") },
-                             onDiscardInstruction: { controller.composerIntent("discard-instruction") },
                              onPick: { controller.composerIntent("pick", lineID: $0, wordID: $1, text: $2) })
                     .frame(maxHeight: .infinity)
                 if let error = controller.composer.error {
                     Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).padding(.horizontal)
                 }
             }
+            // The composer has no keyboard: the strip shows what was said, the tool row is all there is below.
+            InstructionStrip(text: controller.composer.instructionDraft ?? "",
+                             state: InstructionStripState(status: controller.composer.instructionStatus ?? "Ready"),
+                             onDiscard: { controller.composerIntent("discard-instruction") })
+                .padding(.bottom, 2)
             toolRow(landscape: landscape)
 
         }
@@ -56,9 +57,6 @@ struct KeyboardRootView: View {
                                            keyWidth: (geometry.size.width - 12.66 - 30) / 6,
                                            maximumHeight: max(0, geometry.size.height - 66), onSelect: { mode in
                             controller.composerIntent("mode", text: mode)
-                            showsModePicker = false
-                        }, onNewTopic: {
-                            controller.composerIntent("new-topic")
                             showsModePicker = false
                         })
                         .frame(width: min(232, geometry.size.width - 12.66))
@@ -80,7 +78,7 @@ struct KeyboardRootView: View {
             .buttonStyle(KeyboardModeKeyStyle(expanded: showsModePicker))
             .accessibilityLabel(controller.composer.mode.capitalized)
             .accessibilityHint("Choose a writing mode")
-            key("ABC", action: { showsModePicker = false; showsTypingKeyboard = true })
+            key("ABC", action: { showsModePicker = false; controller.show(.typing) })
                 .accessibilityHint("Typing keyboard")
                 .accessibilityIdentifier("composer.typingKeyboard")
             Button { controller.insertComposer() } label: {
@@ -89,10 +87,6 @@ struct KeyboardRootView: View {
                     .opacity(controller.composer.snapshot.lines.isEmpty && controller.composer.tail.isEmpty ? 0.35 : 1)
             }.disabled((controller.composer.snapshot.lines.isEmpty && controller.composer.tail.isEmpty) || controller.pendingComposerInsert != nil).accessibilityLabel("Insert")
             key("Cancel composition", symbol: "xmark", action: { controller.composerIntent("cancel") })
-            key(controller.composer.inputMode == "instructions" ? "Instructions input" : "Dictation input",
-                symbol: controller.composer.inputMode == "instructions" ? "text.bubble.fill" : "waveform",
-                selected: controller.composer.inputMode == "instructions",
-                action: { controller.composerIntent("input-mode", text: controller.composer.inputMode == "instructions" ? "dictation" : "instructions") })
             MicKey(controller: controller)
         }
         .font(.system(size: 17))

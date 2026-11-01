@@ -46,46 +46,25 @@ public enum KeyboardSideMargins {
     }
 }
 
-/// One responsive composer/ABC layout; legacy saved size preferences are intentionally ignored.
+/// The composer's height. Portrait: 55 % of the screen, kept within 50-60 % and inside the room the
+/// system leaves; landscape keeps the compact height. The ABC surface keeps `KeyboardHeights.height`.
 public enum ComposerKeyboardLayout {
+    public static let portraitFraction = 0.55
+    public static let fractionRange = 0.5...0.6
+    /// What the compact (landscape) composer adds to the typing keyboard's height.
     public static let additionalComposerHeight = 28.0
+    /// The tool row at the bottom of the composer.
+    public static func toolRowHeight(landscape: Bool) -> Double { landscape ? 35.33 : 54 }
+
     public static func typingHeight(landscape: Bool) -> Double {
-        KeyboardHeights.height(landscape: landscape) - (landscape ? 35.33 : 54)
+        KeyboardHeights.height(landscape: landscape) - toolRowHeight(landscape: landscape)
     }
-    public static func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false) -> Double {
-        min(typingHeight(landscape: landscape) + additionalComposerHeight, max(0, screenHeight - systemOverhead - 60))
+    /// `fraction` is clamped to 50-60 %.
+    public static func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false,
+                              fraction: Double = portraitFraction) -> Double {
+        let room = max(0, screenHeight - systemOverhead - 60)
+        if landscape { return min(typingHeight(landscape: true) + additionalComposerHeight, room) }
+        let clamped = min(max(fraction, fractionRange.lowerBound), fractionRange.upperBound)
+        return min(screenHeight * clamped, room)
     }
-}
-
-/// Legacy presets retained for old callers; the native composer uses ComposerKeyboardLayout.
-public enum ComposerKeyboardSize: String, CaseIterable, Sendable {
-    case medium, full
-
-    public func height(screenHeight: Double, systemOverhead: Double, landscape: Bool = false) -> Double {
-        let maximum = max(0, min(screenHeight - 60, screenHeight * 0.85 - systemOverhead))
-        switch self {
-        case .medium:
-            let native = KeyboardHeights.height(landscape: landscape) - (landscape ? 35.33 : 54)
-            return min(native, maximum)
-        case .full: return maximum
-        }
-    }
-
-    public func stepped(up: Bool) -> Self {
-        switch (self, up) {
-        case (.medium, true): .full
-        case (.full, false): .medium
-        default: self
-        }
-    }
-
-    public func swiped(dx: Double, dy: Double) -> Self {
-        guard abs(dy) >= 24, abs(dy) > abs(dx) else { return self }
-        return stepped(up: dy < 0)
-    }
-
-    public var cycled: Self { self == .full ? .medium : .full }
-
-    /// Older installations may have retained the removed Low preset.
-    public static func restore(_ stored: String?) -> Self { Self(rawValue: stored ?? "") ?? .medium }
 }

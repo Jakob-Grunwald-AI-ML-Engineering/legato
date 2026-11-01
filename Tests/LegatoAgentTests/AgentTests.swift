@@ -37,6 +37,24 @@ import LegatoRoom
     #expect(!AgentRunner.shouldReseed(tokens: 50_000, idle: 300))
 }
 
+@Test func writerPromptTreatsEverySpokenWordAsAnInstructionWithoutTheDictationUnitContract() {
+    let prompt = PromptLayers.build(mode: .message, personal: "", vocabulary: [])
+    #expect(prompt.contains("everything they say is an instruction"))
+    #expect(prompt.contains("write a short email to Anna saying I'm late"))
+    #expect(prompt.contains("use tools immediately without a conversational preface"))
+    for stale in ["validated sentence", "validated", "work unit", "dictation", "ASR may add"] {
+        #expect(!prompt.localizedCaseInsensitiveContains(stale), "\(stale)")
+    }
+    for phase in [WritingPhase.quick, .sentence, .instruction, .targeted, .pause, .final] {
+        #expect(!PromptLayers.instruction(for: phase).localizedCaseInsensitiveContains("validated sentence"))
+        #expect(!PromptLayers.instruction(for: phase).localizedCaseInsensitiveContains("dictation"))
+    }
+    for mode in [ComposerMode.message, .email, .prompt, .note] {
+        let guidance = try? PromptLayers.writingGuidance(for: mode)
+        #expect(guidance?.isEmpty == false && PromptLayers.build(mode: mode, personal: "", vocabulary: []).contains(guidance ?? "?"))
+    }
+}
+
 @Test func toolTransactionConflictAndPin() async throws {
     let room = Room()
     _ = try await room.publishSegment(words: [Word(text: "helo", confidence: 0.42), Word(text: "world", confidence: 0.98)])

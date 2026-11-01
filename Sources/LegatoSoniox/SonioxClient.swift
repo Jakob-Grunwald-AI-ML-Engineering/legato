@@ -65,9 +65,14 @@ public enum SonioxError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
+/// When a failure stays out of the Room's `asr.error`: a pre-warmed stream that drops before any audio
+/// was sent reconnects silently instead of failing the composition.
+public enum SonioxQuietFailure: Sendable { case never, untilAudio, always }
+
 /// Host-only provider adapter. Credentials exist only in the initial URLRequest, never room envelopes.
 public actor SonioxClient {
-    private enum State { case idle, streaming, finalizing, ending, finished, failed }
+    /// `held`: authenticated and upgraded, no start request yet. Soniox bills streams, not held connections.
+    private enum State { case idle, held, streaming, finalizing, ending, finished, failed }
     private var state = State.idle
     private let room: Room
     private let config: SonioxConfig
@@ -86,22 +91,36 @@ public actor SonioxClient {
     private var latestTail = ""
     private var debugPartialTokens: [SonioxToken] = []
     private var audioOrigin: Double?
+    private var sentAudio = false
+    private let quietFailure: SonioxQuietFailure
+    private let onDrop: (@Sendable () async -> Void)?
+    /// `onDrop` runs after a quiet failure (never after `cancel` or `close`); the Room then sees only `asr.dropped`.
     public init(room: Room, config: SonioxConfig = SonioxConfig(), socket: any SonioxSocket = URLSessionSonioxSocket(),
-                keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20), audioOrigin: Double? = nil) {
+                keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20), audioOrigin: Double? = nil,
+                quietFailure: SonioxQuietFailure = .never, onDrop: (@Sendable () async -> Void)? = nil) {
         self.room = room; self.config = config; self.socket = socket
         self.keepaliveInterval = keepaliveInterval; self.finishTimeout = finishTimeout; self.audioOrigin = audioOrigin
+        self.quietFailure = quietFailure; self.onDrop = onDrop
     }
+    /// Connected, configured and accepting audio or finalize.
+    public var isStreaming: Bool { state == .streaming }
+    /// Connected and held, or streaming: usable for a take.
+    public var isOpen: Bool { state == .held || state == .streaming }
     public func start(apiKey: String) async throws {
+        try await open(apiKey: apiKey)
+        try await begin()
+    }
+    /// Authenticate and upgrade without a start request, so an idle keyboard is not billed. The first
+    /// keepalive completes the handshake; Soniox closes a held connection with 1001 after 40 s of silence,
+    /// so the heartbeat keeps it (every `keepaliveInterval`), without deadline for the start request.
+    public func open(apiKey: String) async throws {
         guard state == .idle else { throw SonioxError.notConnected }
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             await fail(.missingKey); throw SonioxError.missingKey
         }
         do {
             try await socket.connect(request: config.request(apiKey: apiKey))
-            try await socket.send(.text(String(decoding: config.message(), as: UTF8.self)))
-            state = .streaming; lastSend = .now
-            _ = try await room.publish(channel: .session, participant: .transcriber,
-                payload: .object(["event": .string("asr.started"), "thresholds": thresholds]))
+            state = .held
             receiver = Task { [weak self] in await self?.receiveLoop() }
             heartbeat = Task { [weak self, keepaliveInterval] in
                 while !Task.isCancelled {
@@ -109,6 +128,23 @@ public actor SonioxClient {
                     await self?.keepalive()
                 }
             }
+        } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
+    }
+    /// Hold the connection now: a keepalive is the first frame, so TLS and the upgrade finish before a tap.
+    public func hold() async throws {
+        guard state == .held else { throw failure ?? .notConnected }
+        do { try await socket.send(.text("{\"type\":\"keepalive\"}")); lastSend = .now }
+        catch { await fail(.network); throw SonioxError.network }
+    }
+    /// The start request. No acknowledgement exists: audio may follow at once on the same socket.
+    public func begin() async throws {
+        if state == .streaming { return }
+        guard state == .held else { throw failure ?? .notConnected }
+        do {
+            try await socket.send(.text(String(decoding: config.message(), as: UTF8.self)))
+            state = .streaming; lastSend = .now
+            _ = try await room.publish(channel: .session, participant: .transcriber,
+                payload: .object(["event": .string("asr.started"), "thresholds": thresholds]))
         } catch { let visible = error as? SonioxError ?? .network; await fail(visible); throw visible }
     }
     #if DEBUG || LEGATO_INTERNAL
@@ -168,17 +204,18 @@ public actor SonioxClient {
         guard state == .streaming else { throw failure ?? .notConnected }
         guard !muted, !pcm16.isEmpty else { return }
         if audioOrigin == nil { audioOrigin = ProcessInfo.processInfo.systemUptime }
-        do { try await socket.send(.binary(pcm16)); lastSend = .now }
+        do { try await socket.send(.binary(pcm16)); lastSend = .now; sentAudio = true }
         catch { await fail(.network); throw SonioxError.network }
     }
     /// Stops new audio, drains all final tokens, then waits for the server's finished acknowledgement.
-    public func finish() async throws {
+    /// `micOff: false` retires a finalized stream without ending the Room's listening phase.
+    public func finish(micOff: Bool = true) async throws {
         if state == .finished { return }
         if let failure { throw failure }
         guard state == .streaming else { throw SonioxError.notConnected }
         state = .finalizing
         do {
-            try await room.micOff(transcriberDraining: true)
+            if micOff { try await room.micOff(transcriberDraining: true) }
             if debugInput {
                 try await flushDebugHypothesis()
                 try await receiveFrame(.text("{\"finished\":true}"))
@@ -197,9 +234,24 @@ public actor SonioxClient {
         } onCancel: { Task { await self.cancel() } }
     }
     public func cancel() async { await fail(.cancelled) }
+    /// Ends the stream without finalizing: words not yet final, or final but not yet segmented, are dropped
+    /// and never published. Publishes an empty tail and `asr.closed`, never `asr.error`.
+    public func close() async {
+        guard state != .finished && state != .failed else { return }
+        state = .finished; receiver?.cancel(); heartbeat?.cancel(); timeoutTask?.cancel()
+        completion?.resume(throwing: SonioxError.cancelled); completion = nil
+        segmenter = Segmenter(); debugPartialTokens = []
+        if !latestTail.isEmpty {
+            latestTail = ""
+            _ = try? await room.publish(channel: .asrTail, participant: .transcriber,
+                payload: .object(["text": .string(""), "activity": .bool(false), "parts": .array([])]))
+        }
+        _ = try? await room.publish(channel: .session, participant: .transcriber, payload: .object(["event": .string("asr.closed")]))
+        if !debugInput { await socket.close() }
+    }
     private var thresholds: JSONValue { .object(["gapSeconds": .number(segmenter.gap), "maxWords": .number(Double(segmenter.maxWords)), "maxSeconds": .number(segmenter.maxDuration)]) }
     private func keepalive() async {
-        guard state == .streaming || state == .finalizing || state == .ending else { return }
+        guard state == .held || state == .streaming || state == .finalizing || state == .ending else { return }
         guard lastSend.duration(to: .now) >= keepaliveInterval else { return }
         do { try await socket.send(.text("{\"type\":\"keepalive\"}")); lastSend = .now }
         catch { await fail(error as? SonioxError ?? .network) }
@@ -266,9 +318,11 @@ public actor SonioxClient {
     private func fail(_ error: SonioxError) async {
         guard state != .finished && state != .failed else { return }
         state = .failed; failure = error; receiver?.cancel(); heartbeat?.cancel(); timeoutTask?.cancel()
+        let quiet = quietFailure == .always || (quietFailure == .untilAudio && !sentAudio)
         _ = try? await room.publish(channel: .session, participant: .transcriber,
-            payload: .object(["event": .string("asr.error"), "message": .string(error.localizedDescription)]))
+            payload: .object(["event": .string(quiet ? "asr.dropped" : "asr.error"), "message": .string(error.localizedDescription)]))
         completion?.resume(throwing: error); completion = nil
         await socket.close()
+        if quiet, error != .cancelled { await onDrop?() }
     }
 }

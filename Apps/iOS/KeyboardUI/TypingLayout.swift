@@ -37,7 +37,6 @@ struct LayoutRow: Equatable {
 /// The rows of the page being shown, laid out like the system keyboard (see `KeyboardMetrics.swift`).
 /// `LegatoKeyboardCore.KeyboardLayout` provides the keys of the three upper rows; the bottom row, the
 /// extra keys of email and URL fields and the numpad are built here with native widths.
-/// The optional composer return reuses the core microphone action as an overlay key.
 struct TypingLayout: Equatable {
     var rows: [LayoutRow]
 
@@ -49,16 +48,6 @@ struct TypingLayout: Equatable {
         }
         rows.append(LayoutRow(keys: bottomKeys(page: page, field: field, showsGlobe: showsGlobe), kind: .bottom))
         return TypingLayout(rows: rows)
-    }
-
-    /// Reuse the native microphone key slot to return from direct typing to the draft.
-    func includingComposerReturn() -> TypingLayout {
-        var layout = self
-        guard let last = layout.rows.indices.last,
-              !layout.rows[last].keys.contains(where: { $0.action == .mic }) else { return layout }
-        let index = layout.rows[last].keys.firstIndex(where: { $0.action == .space }) ?? 0
-        layout.rows[last].keys.insert(.special(.mic, width: 1), at: index)
-        return layout
     }
 
     private static func bottomKeys(page: KeyboardPage, field: KeyboardField, showsGlobe: Bool) -> [Key] {

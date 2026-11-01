@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 final class KeyGridView: UIView {
     static let holdDelay: Duration = .milliseconds(400)
-    private var overlayKeys: Set<String> = ["globe", "mic"]
+    private var overlayKeys: Set<String> = ["globe"]
 
     weak var typing: TypingModel?
 
@@ -69,7 +69,7 @@ final class KeyGridView: UIView {
     }
 
     func apply(layout: TypingLayout, presentation: KeyPresentation, emojiSystemSwitcher: Bool) {
-        let overlays: Set<String> = emojiSystemSwitcher ? ["globe", "emoji", "mic"] : ["globe", "mic"]
+        let overlays: Set<String> = emojiSystemSwitcher ? ["globe", "emoji"] : ["globe"]
         let overlaysChanged = overlays != overlayKeys
         overlayKeys = overlays
         let layoutChanged = layout != self.layout

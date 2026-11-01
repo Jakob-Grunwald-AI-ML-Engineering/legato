@@ -20,11 +20,9 @@ import LegatoRoom
     await session.cancel()
     #expect(session.topicContext == retained, "X discards only the new, unsent draft")
     try await session.seedDebugDraft("Another unsent draft")
-    await session.setInputMode(.instructions)
     await session.startNewTopic()
     #expect(session.topicContext == nil)
     #expect(session.renderedText.isEmpty)
-    #expect(session.inputMode == .dictation)
     #expect(ComposerSession().topicContext == nil, "Topic data is volatile, not restored from disk")
 }
 

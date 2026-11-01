@@ -27,6 +27,10 @@ public enum LinkChannel {
         public static let refined = "link.refined"
         /// keyboard -> app: one `ChoiceRecord` per key, `link.choice.<uuid>` (the app removes each once read).
         public static let choicePrefix = "link.choice."
+        /// app -> keyboard: `DictationPublication`.
+        public static let dictation = "link.dictation"
+        /// keyboard -> app: `DictationAck`.
+        public static let dictationAck = "link.dictation.ack"
     }
 
     /// Darwin notification names, one per key.
@@ -41,6 +45,8 @@ public enum LinkChannel {
         public static let refine = "\(RuntimeIdentity.current.notificationNamespace).link.refine"
         public static let refined = "\(RuntimeIdentity.current.notificationNamespace).link.refined"
         public static let choice = "\(RuntimeIdentity.current.notificationNamespace).link.choice"
+        public static let dictation = "\(RuntimeIdentity.current.notificationNamespace).link.dictation"
+        public static let dictationAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.ack"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.
