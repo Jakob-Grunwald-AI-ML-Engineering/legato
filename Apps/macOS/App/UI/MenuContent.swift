@@ -15,7 +15,11 @@ struct MenuContent: View {
             }
             Button(controller.isDictating ? "Stop composer" : "Open voice composer") { controller.toggle() }
                 .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
-            Label(controller.settings.hotkey?.displayName ?? "Set a shortcut in Settings", systemImage: "command")
+            Button(controller.dictation.isActive ? "Stop dictation" : "Dictate into the focused field") { controller.toggleDictation() }
+                .controlSize(.large)
+            Label("Composer \(controller.settings.hotkey?.displayName ?? "not set")", systemImage: "command")
+                .font(.caption).foregroundStyle(.secondary)
+            Label("Dictation \(controller.settings.dictationHotkey?.displayName ?? "not set")", systemImage: "mic")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             HistoryList(entries: controller.recent, onCopy: { controller.copy($0) }, onDelete: { controller.delete($0) })

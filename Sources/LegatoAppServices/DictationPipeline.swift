@@ -21,6 +21,8 @@ public struct DictationDelivery: Sendable, Equatable {
     public private(set) var sessionID = UUID().uuidString
     /// Lines not yet acknowledged, in speaking order.
     public private(set) var outbox: [DictationDelivery] = []
+    /// Lines received and not yet delivered to the outbox (in cleanup).
+    public private(set) var pending = 0
     /// Why lines went raw, newest last (no dictated text), for diagnostics.
     public private(set) var fallbacks: [String] = []
     /// The field's text before the cursor now (the keyboard reports it with its presence).
@@ -48,6 +50,7 @@ public struct DictationDelivery: Sendable, Equatable {
     public func receive(_ line: DictationRouteLine) async {
         let raw = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
+        pending += 1
         let pipeline = await current()
         await pipeline.submit(sequence: line.sequence, lineID: "\(sessionID)-\(line.sequence)", raw: raw, textBefore: contextBefore())
     }
@@ -62,7 +65,7 @@ public struct DictationDelivery: Sendable, Equatable {
         let old = pipeline
         pipeline = nil; terms = nil; lastWarm = nil
         sessionID = UUID().uuidString
-        outbox = []; fallbacks = []
+        outbox = []; fallbacks = []; pending = 0
         await old?.reset()
         onChange?()
     }
@@ -87,7 +90,15 @@ public struct DictationDelivery: Sendable, Equatable {
         return created
     }
 
+    /// Waits until every received line has reached the outbox (or `timeout` passes); true when none are pending.
+    public func settle(timeout: Duration = .seconds(4)) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while pending > 0, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
+        return pending == 0
+    }
+
     private func deliver(_ line: DictationCleanedLine) {
+        pending = max(0, pending - 1)
         outbox.append(.init(lineID: line.lineID, sequence: line.sequence, raw: line.raw, text: line.text, cleaned: line.status == .cleaned))
         if let reason = line.reason { fallbacks.append(reason); if fallbacks.count > 20 { fallbacks.removeFirst() } }
         onChange?()

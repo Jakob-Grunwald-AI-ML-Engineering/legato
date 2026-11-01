@@ -21,7 +21,7 @@ struct SettingsView: View {
             case .overview: "Your voice, ready to write."
             case .writing: "Make every composition sound like you."
             case .keys: "Connect the services that power your composer."
-            case .shortcut: "Bring up the composer from anywhere on your Mac."
+            case .shortcut: "Compose or dictate from anywhere on your Mac."
             }
         }
     }
@@ -96,7 +96,7 @@ struct SettingsView: View {
                     Text("SETUP").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     readiness("Writing & transcription", detail: "Claude writes your text. Soniox transcribes your voice.", ready: claudeSaved && sonioxSaved, action: "Manage keys") { page = .keys }
                     Divider()
-                    readiness("Global shortcut", detail: controller.settings.hotkey?.displayName ?? "Choose how to open Legato.", ready: controller.settings.hotkey != nil, action: "Edit shortcut") { page = .shortcut }
+                    readiness("Global shortcuts", detail: "Composer \(controller.settings.hotkey?.displayName ?? "not set"), dictation \(controller.settings.dictationHotkey?.displayName ?? "not set").", ready: controller.settings.hotkey != nil && controller.settings.dictationHotkey != nil, action: "Edit shortcuts") { page = .shortcut }
                 }
             }
             permissions
@@ -184,8 +184,16 @@ struct SettingsView: View {
             card {
                 VStack(alignment: .leading, spacing: 16) {
                     Label("Composer shortcut", systemImage: "command").font(.headline)
-                    HotkeyRecorderView()
-                    Text("Record a single modifier, such as Right ⌘, or a key combination. Press Escape or Cancel to keep your current shortcut.")
+                    HotkeyRecorderView(target: .panel)
+                    Text("Opens the voice composer: everything you say is an instruction to the writer. Record a single modifier, such as Right ⌘, or a key combination. Press Escape or Cancel to keep your current shortcut.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            card {
+                VStack(alignment: .leading, spacing: 16) {
+                    Label("Dictation shortcut", systemImage: "mic").font(.headline)
+                    HotkeyRecorderView(target: .dictation)
+                    Text("Types what you say straight into the focused text field, cleaned up line by line. Tap to start and stop, or hold to talk. It never shares speech with the composer, and needs both API keys (without a Claude key, lines are typed as heard).")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }

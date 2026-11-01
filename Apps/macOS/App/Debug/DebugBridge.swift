@@ -38,6 +38,29 @@ import AppKit
             guard command.args == ["credentials.json"] else { throw Usage.invalid }
             return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))
         }
+        // Mac dictation hotkey without speech: a finalized line (or live partial) enters where Soniox lines do and
+        // is cleaned and typed into the focused field for real. The first one begins a microphone-free session
+        // (the field in front is captured then); `dictation-debug-stop` ends it.
+        harness.register("dictation-debug-line") { command in
+            guard command.args.count == 1 else { throw Usage.invalid }
+            try await MacAppController.shared.dictation.debugLine(command.args[0])
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-debug-tail") { command in
+            guard command.args.count <= 1 else { throw Usage.invalid }
+            try await MacAppController.shared.dictation.debugTail(command.args.first ?? "")
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-debug-stop") { _ in
+            await MacAppController.shared.dictation.debugStop()
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-toggle") { _ in
+            MacAppController.shared.toggleDictation()
+            try await Task.sleep(for: .milliseconds(300))
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-state") { _ in MacAppController.shared.dictation.debugState }
         #endif
         harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "starting"] }
         harness.register("stop") { _ in MacAppController.shared.stopComposer(); return ["status": "stopping"] }

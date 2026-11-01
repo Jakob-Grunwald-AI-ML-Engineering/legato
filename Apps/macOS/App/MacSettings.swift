@@ -10,14 +10,31 @@ import Observation
             else { defaults.removeObject(forKey: "hotkey") }
         }
     }
+    /// Types dictation straight into the focused field; the panel `hotkey` stays agent-only. Right ⌥ unless the
+    /// panel shortcut already is that key (Right ⌘ was the single pre-offshoot dictation key and is the panel's now).
+    var dictationHotkey: HotkeySpec? {
+        didSet {
+            if let dictationHotkey, let data = try? JSONEncoder().encode(dictationHotkey) { defaults.set(data, forKey: "dictationHotkey") }
+            else { defaults.set(true, forKey: "dictationHotkeyCleared"); defaults.removeObject(forKey: "dictationHotkey") }
+            if dictationHotkey != nil { defaults.removeObject(forKey: "dictationHotkeyCleared") }
+        }
+    }
     var gestureMode: HotkeyGesture.Mode { didSet { defaults.set(gestureMode.rawValue, forKey: "gestureMode") } }
     var insertionMode: FieldWriter.Mode { didSet { defaults.set(insertionMode.rawValue, forKey: "insertionMode") } }
     var restoreClipboard: Bool { didSet { defaults.set(restoreClipboard, forKey: "restoreClipboard") } }
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        hotkey = defaults.data(forKey: "hotkey").flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) } ?? .modifier(.rightCommand)
+        let panel = defaults.data(forKey: "hotkey").flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) } ?? .modifier(.rightCommand)
+        hotkey = panel
+        dictationHotkey = Self.initialDictationHotkey(defaults, panel: panel)
         gestureMode = defaults.string(forKey: "gestureMode").flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
         insertionMode = defaults.string(forKey: "insertionMode").flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         restoreClipboard = defaults.object(forKey: "restoreClipboard") as? Bool ?? true
+    }
+    private static func initialDictationHotkey(_ defaults: UserDefaults, panel: HotkeySpec?) -> HotkeySpec? {
+        if let spec = defaults.data(forKey: "dictationHotkey").flatMap({ try? JSONDecoder().decode(HotkeySpec.self, from: $0) }) { return spec }
+        if defaults.bool(forKey: "dictationHotkeyCleared") { return nil }
+        let preferred = HotkeySpec.modifier(.rightOption)
+        return panel.map { preferred.conflicts(with: $0) } == true ? nil : preferred
     }
 }
