@@ -206,7 +206,12 @@ final class KeyboardController {
     /// The last dictation notice (`dictationNoticeID`) already shown; the first publication seen only sets it.
     @ObservationIgnored private var seenDictationNoticeID: Int?
     /// The surface on screen; it decides the mode (typing dictates, the composer instructs the agent).
-    private(set) var surface = KeyboardSurface.composer
+    /// The keyboard reopens on the surface it was last left on (extension-local defaults, no Full Access needed).
+    private(set) var surface = KeyboardController.lastSurface
+    private static let surfaceKey = "keyboardSurface"
+    private static var lastSurface: KeyboardSurface {
+        UserDefaults.standard.string(forKey: surfaceKey).flatMap(KeyboardSurface.init(rawValue:)) ?? .composer
+    }
     /// The presence the app follows: visibility, field, surface and, for the typing surface (dictation), the text
     /// before the cursor that the dictated lines are cleaned against. Never from a secure field.
     private func writePresence(notify: Bool) {
@@ -217,6 +222,7 @@ final class KeyboardController {
     func show(_ value: KeyboardSurface) {
         guard value != surface else { return }
         surface = value
+        UserDefaults.standard.set(value.rawValue, forKey: Self.surfaceKey)
         syncRowTakeover()
         onLayoutChange?("surface")
         if isVisible { writePresence(notify: true) }
