@@ -17,7 +17,8 @@ private final class InputInventory: Sendable {
 }
 private final class MadeInputs: Sendable { let state = Mutex<[FakeAutomaticMic]>([]) }
 private final class FakeAutomaticMic: AudioSource {
-    enum Behavior: Sendable { case quiet, speech, clipped, missing, invalid, throwsAtStart }
+    /// `missing` stays open and silent (only the no-PCM timeout ends it); `closes` ends its stream without PCM.
+    enum Behavior: Sendable { case quiet, speech, clipped, missing, closes, invalid, throwsAtStart }
     struct State { var sink: AsyncStream<AudioChunk>.Continuation?; var task: Task<Void, Never>? }
     let state = Mutex(State())
     let id: String, behavior: Behavior, probe: InputProbe
@@ -27,6 +28,7 @@ private final class FakeAutomaticMic: AudioSource {
         if behavior == .throwsAtStart { throw MicSourceError.invalidInputFormat }
         let (stream, sink) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .bufferingNewest(8))
         let behavior = behavior
+        if behavior == .closes { sink.finish() }
         let task = Task {
             while !Task.isCancelled {
                 if behavior != .missing {
@@ -57,8 +59,12 @@ private func autoHardware(_ candidates: InputInventory, probe: InputProbe,
         made?.state.withLock { $0.append(mic) }; return mic
     }, isCurrent: { input in candidates.state.withLock { $0.contains(where: { $0.id == input.id && $0.isUsable }) } })
 }
+/// Upper bound for "first PCM" in tests: only a silent input ever reaches it, so scheduler stalls cannot.
+private let neverReached = Duration.seconds(30)
+private let tick = Duration.milliseconds(20)
 private func waitForAutomaticInput(_ condition: () async -> Bool) async throws {
-    for _ in 0..<100 { if await condition() { return }; try await Task.sleep(for: .milliseconds(5)) }
+    let deadline = ContinuousClock.now + .seconds(60)
+    while ContinuousClock.now < deadline { if await condition() { return }; try await Task.sleep(for: .milliseconds(5)) }
     Issue.record("Automatic input did not reach the expected state")
 }
 
@@ -72,7 +78,7 @@ private func waitForAutomaticInput(_ condition: () async -> Bool) async throws {
 
 @Test func automaticInputAcceptsValidSilentBuffersWithoutProbingOtherMicrophones() async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("AirPods", .bluetooth), autoCandidate("Built-in", .builtIn)])
-    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe), timeout: .milliseconds(60))
+    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe), timeout: neverReached, healthInterval: tick)
     _ = try await source.start(format: autoFormat)
     try await Task.sleep(for: .milliseconds(160))
     #expect(source.diagnostics.selected?.id == "Built-in")
@@ -83,10 +89,10 @@ private func waitForAutomaticInput(_ condition: () async -> Bool) async throws {
     #expect(probe.state.withLock { $0.opened.isEmpty })
 }
 
-@Test(arguments: [FakeAutomaticMic.Behavior.missing, .invalid, .throwsAtStart])
+@Test(arguments: [FakeAutomaticMic.Behavior.closes, .invalid, .throwsAtStart])
 private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_ failure: FakeAutomaticMic.Behavior) async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("broken", .builtIn), autoCandidate("USB", .wired), autoCandidate("AirPods", .bluetooth)])
-    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, behavior: { $0 == "broken" ? failure : .speech }), timeout: .milliseconds(50))
+    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, behavior: { $0 == "broken" ? failure : .speech }), timeout: neverReached, healthInterval: tick)
     _ = try await source.start(format: autoFormat)
     #expect(source.diagnostics.selected?.id == "USB")
     #expect(source.diagnostics.rejectedInputs["broken"] != nil)
@@ -95,10 +101,18 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
     await source.stop()
 }
 
+@Test func automaticInputThatNeverDeliversPCMIsRejectedAfterTheTimeout() async throws {
+    let probe = InputProbe(), inputs = InputInventory([autoCandidate("mute", .builtIn)])
+    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, behavior: { _ in .missing }), timeout: .milliseconds(50))
+    await #expect(throws: AutomaticInputError.self) { _ = try await source.start(format: autoFormat) }
+    #expect(source.diagnostics.rejectedInputs["mute"] != nil)
+    #expect(probe.state.withLock { $0.opened.isEmpty && $0.attempts == ["mute"] })
+}
+
 @Test func automaticInputDisconnectRecoversOnTheSameStream() async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("Built-in", .builtIn), autoCandidate("USB", .wired)])
     let made = MadeInputs()
-    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, made: made), timeout: .milliseconds(60))
+    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, made: made), timeout: neverReached, healthInterval: tick)
     let stream = try await source.start(format: autoFormat)
     var iterator = stream.makeAsyncIterator()
     #expect(await iterator.next()?.format == autoFormat)
@@ -115,7 +129,7 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
 @Test func automaticInputDoesNotProbeOtherDevicesDuringADetachedLease() async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("Built-in", .builtIn), autoCandidate("USB", .wired)])
     let made = MadeInputs()
-    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, made: made), timeout: .milliseconds(50))
+    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, made: made), timeout: neverReached, healthInterval: tick)
     _ = try await source.start(format: autoFormat)
     await source.detach()
     inputs.state.withLock { $0.removeAll { $0.id == "Built-in" } }
@@ -129,7 +143,7 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
 
 @Test func automaticInputStopWinsDuringAStartThatHasNoPCM() async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("Built-in", .builtIn)])
-    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, behavior: { _ in .missing }), timeout: .seconds(1))
+    let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, behavior: { _ in .missing }), timeout: neverReached, healthInterval: tick)
     let start = Task { try await source.start(format: autoFormat) }
     try await waitForAutomaticInput { probe.state.withLock { !$0.opened.isEmpty } }
     await source.stop()
@@ -142,7 +156,7 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
 @Test func automaticInputPreflightKeepsTheFirstQuarterSecondForTheConsumer() async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("Built-in", .builtIn)])
     let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, behavior: { _ in .speech }),
-        timeout: .seconds(1), preflight: .milliseconds(250))
+        timeout: neverReached, preflight: .milliseconds(250), healthInterval: tick)
     let stream = try await source.start(format: autoFormat)
     #expect(source.diagnostics.frames >= 4_000)
     #expect(source.diagnostics.calibration == "ready-signal")
@@ -156,12 +170,9 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
 @Test func automaticInputMakesOnlyOneMeasuredLowerClippingTrial() async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("Built-in", .builtIn), autoCandidate("USB", .wired)])
     let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe,
-        behavior: { $0 == "Built-in" ? .clipped : .speech }), timeout: .milliseconds(100))
+        behavior: { $0 == "Built-in" ? .clipped : .speech }), timeout: neverReached, healthInterval: tick)
     _ = try await source.start(format: autoFormat)
-    for _ in 0..<70 {
-        if source.diagnostics.qualityComparison == "lower distortion accepted" { break }
-        try await Task.sleep(for: .milliseconds(50))
-    }
+    try await waitForAutomaticInput { source.diagnostics.qualityComparison == "lower distortion accepted" }
     #expect(source.diagnostics.selected?.id == "USB")
     #expect(source.diagnostics.qualityComparison == "lower distortion accepted")
     #expect(probe.state.withLock { $0.maximum } == 1)

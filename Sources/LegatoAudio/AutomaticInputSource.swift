@@ -76,6 +76,7 @@ public actor AutomaticInputSource: ResumableAudioSource {
     private let timeout: Duration
     private let clock: @Sendable () -> Double
     private let preflight: Duration
+    private let healthInterval: Duration
     private var qualityMeter = InputQualityMeter()
     private var clippingWindows = 0
     private var qualityTrialUsed = false
@@ -95,12 +96,15 @@ public actor AutomaticInputSource: ResumableAudioSource {
     private var recoveryCount = 0
 
     public init() {
-        hardware = .live; timeout = .seconds(2); preflight = .milliseconds(250); clock = { ProcessInfo.processInfo.systemUptime }
+        hardware = .live; timeout = .seconds(2); preflight = .milliseconds(250); healthInterval = .seconds(1); clock = { ProcessInfo.processInfo.systemUptime }
         (resumptions, resumeSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
+    /// `healthInterval` defaults to half the no-PCM timeout. Tests pass a large timeout (an upper bound that
+    /// only a silent input reaches) with a short interval, so scheduling stalls cannot fake a dead microphone.
     init(hardware: AutomaticInputHardware, timeout: Duration = .milliseconds(100), preflight: Duration = .zero,
-         clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
+         healthInterval: Duration? = nil, clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
         self.hardware = hardware; self.timeout = timeout; self.preflight = preflight; self.clock = clock
+        self.healthInterval = healthInterval ?? timeout / 2
         (resumptions, resumeSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
@@ -123,7 +127,10 @@ public actor AutomaticInputSource: ResumableAudioSource {
         guard let format, source != nil else { throw MicSourceError.notArmed }
         attached = true
         let stream = makeStream(), token = generation
-        if fault || stale {
+        // A device that vanished while detached is found here, not only when its stream-end is processed.
+        let routeChanged = if let selected { await !hardware.isCurrent(selected) } else { false }
+        guard token == generation else { throw CancellationError() }
+        if fault || stale || routeChanged {
             try await recover(token: token, format: format)
         } else { installWatchdog(token: token) }
         return stream
@@ -225,9 +232,9 @@ public actor AutomaticInputSource: ResumableAudioSource {
     }
     private func installWatchdog(token: Int) {
         watchdog?.cancel()
-        watchdog = Task { [weak self, timeout] in
+        watchdog = Task { [weak self, healthInterval] in
             while !Task.isCancelled {
-                do { try await Task.sleep(for: timeout / 2) } catch { return }
+                do { try await Task.sleep(for: healthInterval) } catch { return }
                 await self?.checkHealth(token: token)
             }
         }

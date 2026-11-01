@@ -126,29 +126,40 @@ private func tail(_ room: Room, _ text: String, activity: Bool = true) async thr
 }
 
 @Test func automaticModeSendsOnceAfterTheQuietDelayAndSpeechResetsIt() async throws {
-    let room = Room(segmentRouting: .intercepted), counter = SendCounter()
+    let room = Room(segmentRouting: .intercepted), counter = SendCounter(), clock = VirtualClock()
     let box = BinderBox()
     let binder = HintBinder(room: room, instructionSendDelay: { 0.25 }, onInstructionSend: {
         await counter.increment()
         if let binder = await box.binder { try? await sendInstruction(binder) }
-    })
+    }, clock: clock)
     await box.set(binder)
     await binder.start()
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
+    /// Waits until the binder published `text` with the countdown armed and exactly one quiet timer pending.
+    func countdownArmed(for text: String) async {
+        await eventually("countdown for \(text)") {
+            let draft = await events.values.last { $0.channel == .instructionDraft }
+            return clock.sleeperCount == 1 && draft?.payload["text"] == .string(text) && draft?.payload["countdownDeadline"] != .null
+        }
+    }
     try await inputSegment(room, ["Make", "it"], origin: 101)
-    try await Task.sleep(for: .milliseconds(150))
-    let started = try #require(await events.values.last { $0.channel == .instructionDraft })
-    #expect(started.payload["countdownDeadline"] != .null, "The countdown is published for the rim")
+    await countdownArmed(for: "Make it") // The countdown is published for the rim.
+    clock.advance(by: .milliseconds(150))
     try await tail(room, "shorter") // resumed speech
-    try await Task.sleep(for: .milliseconds(150))
+    await countdownArmed(for: "Make it shorter")
+    clock.advance(by: .milliseconds(150))
     #expect(await counter.count == 0, "Speech restarted the wait")
     try await inputSegment(room, ["shorter."], origin: 102)
-    try await Task.sleep(for: .milliseconds(600))
+    await countdownArmed(for: "Make it shorter.")
+    clock.advance(by: .milliseconds(249))
+    #expect(await counter.count == 0)
+    clock.advance(by: .milliseconds(1))
+    await eventually("instruction sent") { await events.values.filter { $0.channel == .writingInstruction }.count == 1 }
     #expect(await counter.count == 1)
     let sent = await events.values.filter { $0.channel == .writingInstruction }
     #expect(sent.count == 1 && sent.first?.payload["text"] == .string("Make it shorter."))
-    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["countdownDeadline"] == .null)
+    await eventually("countdown cleared") { await events.values.last { $0.channel == .instructionDraft }?.payload["countdownDeadline"] == .null }
     await binder.stop()
 }
 

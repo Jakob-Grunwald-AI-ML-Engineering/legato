@@ -351,36 +351,54 @@ private actor SendCount {
     let room = Room(segmentRouting: .intercepted)
     try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
     let line = try #require(await room.documentSnapshot.lines.first)
-    let count = SendCount()
-    let binder = HintBinder(room: room, quietDelay: .milliseconds(40), countdown: .milliseconds(120), onSend: { await count.increment() })
+    let count = SendCount(), clock = VirtualClock()
+    let binder = HintBinder(room: room, quietDelay: .milliseconds(40), countdown: .milliseconds(120),
+                            onSend: { await count.increment() }, clock: clock)
     await binder.start()
     let events = HintEvents(), observation = await observeHints(room, events)
     defer { observation.cancel() }
+    func lastDraft() async -> Envelope? { await events.values.last(where: { $0.channel == .correctionDraft }) }
+    func countdownDeadline() async -> JSONValue? { await lastDraft()?.payload["countdownDeadline"] }
     try await binder.tap(lineID: line.id, wordID: "target", timestamp: 100)
-    func speech(_ activity: Bool = true) async throws {
+    var speeches = 0
+    // Publishes a tail and waits until the binder has processed it: its quiet timer is armed (one sleeper).
+    func speech() async throws {
+        speeches += 1
         try await room.publish(channel: .asrTail, participant: .transcriber,
-            payload: .object(["text": .string("Morgan"), "activity": .bool(activity)]), tOrigin: 101)
+            payload: .object(["text": .string("Morgan"), "activity": .bool(true)]), tOrigin: 101)
+        await eventually("quiet timer armed") {
+            let draft = await lastDraft()
+            return clock.sleeperCount == 1 && draft?.payload["countdownDeadline"] == .null && draft?.payload["text"] == .string("Morgan")
+        }
     }
     try await speech()
-    try await Task.sleep(for: .milliseconds(70))
-    let started = try #require(await events.values.last(where: { $0.channel == .correctionDraft }))
-    #expect(started.payload["countdownDeadline"] != .null)
-    try await speech()
-    try await Task.sleep(for: .milliseconds(15))
-    #expect(await events.values.last(where: { $0.channel == .correctionDraft })?.payload["countdownDeadline"] == .null)
-    try await Task.sleep(for: .milliseconds(60))
-    try await speech(false) // A non-speech tail publication must not restart the timer.
-    try await Task.sleep(for: .milliseconds(100))
-    #expect(await count.count == 1)
+    clock.advance(by: .milliseconds(40)) // quiet delay elapsed: the countdown starts.
+    await eventually("countdown started") { await countdownDeadline().map { $0 != .null } ?? false }
+    #expect(await count.count == 0)
+    try await speech() // Speech cancels the countdown and restarts the quiet delay.
+    #expect(await countdownDeadline() == .null)
+    clock.advance(by: .milliseconds(30))
+    let draftsBefore = await events.values.filter { $0.channel == .correctionDraft }.count
+    try await room.publish(channel: .asrTail, participant: .transcriber, // A non-speech tail must not restart the timer.
+        payload: .object(["text": .string("Morgan"), "activity": .bool(false)]), tOrigin: 101)
+    await eventually("tail processed") { await events.values.filter { $0.channel == .correctionDraft }.count > draftsBefore }
+    #expect(clock.sleeperCount == 1)
+    clock.advance(by: .milliseconds(10)) // 40 ms since the last speech, not since the inactive tail.
+    await eventually("countdown restarted") { await countdownDeadline().map { $0 != .null } ?? false }
+    clock.advance(by: .milliseconds(119))
+    #expect(await count.count == 0)
+    clock.advance(by: .milliseconds(1))
+    await eventually("auto send") { await count.count == 1 }
     #expect(await binder.requestSend(timestamp: 102)) // Same path used by the host callback.
     await binder.completeSend()
-    try await Task.sleep(for: .milliseconds(20))
+    await eventually("send completed") { await lastDraft()?.payload["text"] == .null }
     #expect(!(await binder.requestSend(timestamp: 103)))
     try await binder.tap(lineID: line.id, wordID: "target", timestamp: 104)
     try await speech()
     await binder.clearSelection(timestamp: 105)
-    try await Task.sleep(for: .milliseconds(190))
+    #expect(clock.sleeperCount == 0)
+    clock.advance(by: .seconds(10))
+    await eventually("dismissal published") { await lastDraft()?.payload["text"] == .null }
     #expect(await count.count == 1)
-    #expect(await events.values.last(where: { $0.channel == .correctionDraft })?.payload["text"] == .null)
     await binder.stop()
 }

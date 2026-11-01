@@ -104,10 +104,14 @@ public actor HintBinder {
     private let quietDelay: Duration
     private let countdown: Duration
     private let onSend: (@Sendable () async -> Void)?
+    /// Drives every quiet/countdown/timeout wait; tests inject a virtual clock.
+    private let clock: any Clock<Duration>
     public init(room: Room, learner: VocabularyLearner? = nil, quietDelay: Duration = .milliseconds(500),
                 countdown: Duration = .seconds(1), onSend: (@Sendable () async -> Void)? = nil,
                 instructionSendDelay: (@Sendable () async -> Double?)? = nil,
-                onInstructionSend: (@Sendable () async -> Void)? = nil, requiresExplicitSubmission: Bool = false) {
+                onInstructionSend: (@Sendable () async -> Void)? = nil, requiresExplicitSubmission: Bool = false,
+                clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
         self.room = room; self.learner = learner; self.quietDelay = quietDelay
         self.requiresExplicitSubmission = requiresExplicitSubmission
         self.countdown = countdown; self.onSend = onSend
@@ -120,8 +124,8 @@ public actor HintBinder {
         guard capture == nil, !instructionSending, hasUnsentInstruction, let delay = await instructionSendDelay?() else { return }
         let now = ProcessInfo.processInfo.systemUptime
         instructionCountdownStart = now; instructionCountdownDeadline = now + delay
-        instructionQuietTask = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(delay)); await self?.autoSendInstruction(deadline: now + delay) } catch {}
+        instructionQuietTask = Task { [weak self, clock] in
+            do { try await clock.sleep(for: .seconds(delay)); await self?.autoSendInstruction(deadline: now + delay) } catch {}
         }
     }
     private func autoSendInstruction(deadline: Double) async {
@@ -174,8 +178,8 @@ public actor HintBinder {
         instructionCountdownStart = nil; instructionCountdownDeadline = nil
         await publishInstructionDraft()
         // A finalize that never answers must not leave the instruction stuck.
-        instructionSendTimeout = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(3)); await self?.completeInstructionSend() } catch {}
+        instructionSendTimeout = Task { [weak self, clock] in
+            do { try await clock.sleep(for: .seconds(3)); await self?.completeInstructionSend() } catch {}
         }
         return true
     }
@@ -236,11 +240,11 @@ public actor HintBinder {
         current.countdownStart = nil; current.countdownDeadline = nil; capture = current
         if requiresExplicitSubmission { await publishDraft(); return }
         let generation = timerGeneration, id = current.id
-        timer = Task { [weak self, quietDelay, countdown] in
+        timer = Task { [weak self, quietDelay, countdown, clock] in
             do {
-                try await Task.sleep(for: quietDelay)
+                try await clock.sleep(for: quietDelay)
                 guard await self?.beginCountdown(id: id, generation: generation) == true else { return }
-                try await Task.sleep(for: countdown)
+                try await clock.sleep(for: countdown)
                 await self?.autoSend(id: id, generation: generation)
             } catch {}
         }
