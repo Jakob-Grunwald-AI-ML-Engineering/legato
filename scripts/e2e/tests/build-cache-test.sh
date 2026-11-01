@@ -38,18 +38,17 @@ rmdir_mac_lock() { rm -rf "$C/derived/mac.lock"; }
 # --- Obsolete output: old per-checkout roots, strays, symlinks, locked entries. ---
 tree "$C/build-derived/gate-aaaa" $OLD; tree "$C/build-derived/mac-bbbb" $OLD
 tree "$C/e2e-derived/cccc" $OLD; tree "$C/device-derived/dddd" $OLD
-tree "$C/phone-derived" $OLD; tree "$C/derived/stray" $OLD
+tree "$C/debug-bridge" $OLD; tree "$C/derived/stray" $OLD
 tree "$C/build-derived/locked-eeee" $OLD
 mkdir "$C/build-derived/locked-eeee.lock"; proc_stamp "$$" > "$C/build-derived/locked-eeee.lock/owner"
 tree "$C/e2e-derived/claimed-ffff" $OLD
 claim_cache_lock "$C/e2e-derived/claimed-ffff" 0          # kernel-held claim, no .lock dir
 tree "$C/build-derived/fresh-gggg"; : > "$C/build-derived/fresh-gggg/new"   # modified just now
 OUTSIDE="$T/outside"; tree "$OUTSIDE/victim" $OLD
-ln -s "$OUTSIDE" "$C/linked-cache"
 ln -s "$OUTSIDE" "$C/derived/linked-target"
 ln -s "$OUTSIDE" "$C/device-derived/linked-entry"
 # TMPDIR: old CI-style work dir, recent one, tool cache, unrelated, dead and live e2e work dirs.
-tree "$TMPDIR/legato-gate.OLD1" $OLD; tree "$TMPDIR/legato-mac.NEW1"; tree "$TMPDIR/legato-xcodegen-1" $OLD; tree "$TMPDIR/unrelated-old" $OLD
+tree "$TMPDIR/legato-gate.OLD1" $OLD; tree "$TMPDIR/legato-device-ctl" $OLD; tree "$TMPDIR/legato-mac.NEW1"; tree "$TMPDIR/legato-xcodegen-1" $OLD; tree "$TMPDIR/unrelated-old" $OLD
 mkdir -p "$TMPDIR/legato-e2e.DEAD" "$TMPDIR/legato-e2e.LIVE"
 printf '999999 dead\n' > "$TMPDIR/legato-e2e.DEAD/owner"; proc_stamp "$$" > "$TMPDIR/legato-e2e.LIVE/owner"
 find "$TMPDIR/legato-e2e.DEAD" "$TMPDIR/legato-e2e.LIVE" -exec touch -t $OLD {} +
@@ -59,19 +58,20 @@ tree "$T/dd/Legato-abcdefgh" $OLD; tree "$T/dd/LegatoMac-recent"; tree "$T/dd/Ot
 tree "$LEGATO_TESTS_CACHE/Models/m" $OLD; tree "$LEGATO_SCRATCH_ROOT/-Users-x-Documents-legato/sess/scratchpad/DerivedData" $OLD
 
 "$ROOT/scripts/dev/prune-build-caches.sh" > "$T/dry.log"
-[ -d "$C/build-derived/gate-aaaa" ] && [ -d "$C/phone-derived" ] && [ -d "$TMPDIR/legato-gate.OLD1" ] && [ -d "$T/dd/Legato-abcdefgh" ] && [ -d "$TMPDIR/legato-e2e.DEAD" ] \
+[ -d "$C/build-derived/gate-aaaa" ] && [ -d "$C/derived/stray" ] && [ -d "$TMPDIR/legato-gate.OLD1" ] && [ -d "$T/dd/Legato-abcdefgh" ] && [ -d "$TMPDIR/legato-e2e.DEAD" ] \
   && check 'dry run deletes nothing' ok || check 'dry run deletes nothing' 'something removed'
-grep -q "obsolete: .*$C/phone-derived$" "$T/dry.log" && check 'dry run lists obsolete cache entries' ok || check 'dry run lists obsolete cache entries' 'not listed'
+grep -q "not a current target: .*$C/derived/stray$" "$T/dry.log" && check 'dry run lists obsolete cache entries' ok || check 'dry run lists obsolete cache entries' 'not listed'
 
 "$ROOT/scripts/dev/prune-build-caches.sh" --delete > "$T/delete.log"
 gone=ok
-for x in "$C/build-derived/gate-aaaa" "$C/build-derived/mac-bbbb" "$C/e2e-derived/cccc" "$C/device-derived/dddd" "$C/phone-derived" "$C/derived/stray" "$TMPDIR/legato-gate.OLD1" "$T/dd/Legato-abcdefgh" "$TMPDIR/legato-e2e.DEAD"; do
+for x in "$C/build-derived/gate-aaaa" "$C/build-derived/mac-bbbb" "$C/e2e-derived/cccc" "$C/device-derived/dddd" "$C/derived/stray" "$TMPDIR/legato-gate.OLD1" "$T/dd/Legato-abcdefgh" "$TMPDIR/legato-e2e.DEAD"; do
   [ ! -e "$x" ] || gone="$x retained"
 done
 check 'old per-checkout dirs, strays, stale temp, dead work dirs and Xcode Legato* copies are removed' "$gone"
 for t in "${LEGATO_BUILD_TARGETS[@]}"; do [ -s "$C/derived/$t/Build/blob" ] || gone="derived/$t removed"; done
 [ -s "$C/SourcePackages/Build/blob" ] || gone='SourcePackages removed'
 [ "$gone" = ok ] && check 'fixed target dirs and SourcePackages are never pruned' ok || check 'fixed target dirs and SourcePackages are never pruned' "$gone"
+[ -d "$C/debug-bridge" ] && [ -d "$TMPDIR/legato-device-ctl" ] && check 'runtime state (Mac harness root, ctl state) is not build output and is kept' ok || check 'runtime state (Mac harness root, ctl state) is not build output and is kept' removed
 [ -d "$C/build-derived/locked-eeee" ] && check 'entry with a live .lock owner is kept' ok || check 'entry with a live .lock owner is kept' removed
 [ -d "$C/e2e-derived/claimed-ffff" ] && check 'entry with a kernel-held claim is kept' ok || check 'entry with a kernel-held claim is kept' removed
 release_cache_claim "$C/e2e-derived/claimed-ffff"
@@ -79,7 +79,7 @@ release_cache_claim "$C/e2e-derived/claimed-ffff"
 [ -d "$TMPDIR/legato-mac.NEW1" ] && [ -d "$TMPDIR/legato-xcodegen-1" ] && [ -d "$TMPDIR/unrelated-old" ] && [ -d "$TMPDIR/legato-e2e.LIVE" ] \
   && check 'recent legato-*, xcodegen tool cache, non-legato and live-owner TMPDIR dirs are kept' ok || check 'recent legato-*, xcodegen tool cache, non-legato and live-owner TMPDIR dirs are kept' removed
 [ -d "$T/dd/LegatoMac-recent" ] && [ -d "$T/dd/OtherApp-xyz" ] && check 'recent Xcode copy and other projects are kept' ok || check 'recent Xcode copy and other projects are kept' removed
-[ -L "$C/linked-cache" ] && [ -L "$C/derived/linked-target" ] && [ -L "$C/device-derived/linked-entry" ] && [ -d "$OUTSIDE/victim" ] \
+[ -L "$C/derived/linked-target" ] && [ -L "$C/device-derived/linked-entry" ] && [ -d "$OUTSIDE/victim" ] \
   && check 'symlinks are neither followed nor removed' ok || check 'symlinks are neither followed nor removed' 'touched'
 [ -d "$LEGATO_TESTS_CACHE/Models/m" ] && [ -d "$LEGATO_SCRATCH_ROOT/-Users-x-Documents-legato/sess/scratchpad/DerivedData" ] \
   && check 'LegatoTests models and agent scratchpads are not touched' ok || check 'LegatoTests models and agent scratchpads are not touched' removed
@@ -87,15 +87,15 @@ release_cache_claim "$C/e2e-derived/claimed-ffff"
 rmdir_mac_lock
 
 # --- Report: per-target sizes, prunable items, no deletion. ---
-tree "$C/stale-report" $OLD
+tree "$C/derived/stale-report" $OLD
 "$ROOT/scripts/dev/prune-build-caches.sh" --report > "$T/report.log"
 rep=ok
-for label in 'derived/ios-device' 'derived/ios-sim' 'derived/mac' 'derived/gate' 'SourcePackages' 'Kept total' "$C/stale-report" 'Prunable total'; do
+for label in 'derived/ios-device' 'derived/ios-sim' 'derived/mac' 'derived/gate' 'SourcePackages' 'Kept total' "$C/derived/stale-report" 'Prunable total'; do
   grep -q -- "$label" "$T/report.log" || rep="missing $label"
 done
 mac_kb="$(awk '/derived\/mac/ {print $1}' "$T/report.log")"
 { [ "$rep" = ok ] && [ -n "$mac_kb" ] && [ "$mac_kb" -ge 1024 ]; } && check 'report lists sizes per target and the prunable items' ok || check 'report lists sizes per target and the prunable items' "$rep kb=${mac_kb:-none}"
-[ -d "$C/stale-report" ] && check 'report deletes nothing' ok || check 'report deletes nothing' removed
+[ -d "$C/derived/stale-report" ] && check 'report deletes nothing' ok || check 'report deletes nothing' removed
 [ "$fails" = 0 ] || { echo "$fails prune checks failed"; exit 1; }
 
 # Exercise the real mac-build entry point with only the external Xcode tools replaced.

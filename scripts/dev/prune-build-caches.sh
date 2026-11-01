@@ -6,10 +6,11 @@
 # Kept (never removed):  <cache>/derived/{ios-device,ios-sim,mac,gate}  and  <cache>/SourcePackages
 #   (<cache> = ${LEGATO_CACHE_DIR:-~/Library/Caches/legato}), plus their .lock/.guard lock files.
 # Removed:
-#   - everything else in <cache> (old build-derived/, e2e-derived/, device-derived/, unknown entries) and
-#     everything else in <cache>/derived/
+#   - the obsolete per-checkout roots <cache>/{build-derived,e2e-derived,device-derived} and any directory in
+#     <cache>/derived/ that is not a current target. Other <cache> entries (e.g. debug-bridge, the Mac harness
+#     root) are runtime state, not build output, and are left alone.
 #   - stale $TMPDIR/legato-* dirs (CI-style gate/mac work dirs) and dead $TMPDIR/legato-e2e.* work dirs;
-#     the legato-xcodegen-* tool cache is kept
+#     the legato-xcodegen-* tool cache and legato-device-ctl (ctl.sh state) are kept
 #   - ~/Library/Developer/Xcode/DerivedData/Legato* (the IDE's per-checkout copies)
 # Skipped, with a KEEP line: anything locked (.lock owner dir or kernel-held .guard claim), anything
 # modified within the last LEGATO_PRUNE_GRACE_SECONDS (default 3600), and symlinks (never followed).
@@ -48,17 +49,13 @@ is_fixed() { # is_fixed <name under derived/>
 # Lock-protocol files that sit beside a directory; kept for the lifetime of the cache (see build-caches.md).
 is_lock_file() { case "$1" in *.guard | *.lock) return 0 ;; *) return 1 ;; esac; }
 
-# Prunable top-level items: in <cache> everything but derived/SourcePackages/lock files, and in
-# <cache>/derived everything but the fixed targets and lock files. Symlinks are listed too (and skipped).
+# Prunable items: the obsolete roots in <cache>, and in <cache>/derived everything but the fixed targets
+# and lock files. Symlinks are listed too (and skipped).
 cache_extras() {
   local d n
   [ -d "$cache" ] && [ ! -L "$cache" ] || return 0
-  for d in "$cache"/* "$cache"/.[!.]*; do
-    [ -e "$d" ] || [ -L "$d" ] || continue
-    n="$(basename "$d")"
-    is_lock_file "$n" && continue
-    case "$n" in derived | SourcePackages) continue ;; esac
-    echo "$d"
+  for n in build-derived e2e-derived device-derived; do
+    if [ -e "$cache/$n" ] || [ -L "$cache/$n" ]; then echo "$cache/$n"; fi
   done
   [ -d "$cache/derived" ] && [ ! -L "$cache/derived" ] || return 0
   for d in "$cache"/derived/* "$cache"/derived/.[!.]*; do
@@ -72,7 +69,7 @@ tmp_legato_dirs() { # legato-e2e.* has its own owner-based sweep; legato-xcodege
   local d
   for d in "${TMPDIR:-/tmp}"/legato-*; do
     [ -d "$d" ] || [ -L "$d" ] || continue
-    case "$(basename "$d")" in legato-e2e.* | legato-xcodegen-*) continue ;; esac
+    case "$(basename "$d")" in legato-e2e.* | legato-xcodegen-* | legato-device-ctl) continue ;; esac
     echo "$d"
   done
 }
@@ -166,8 +163,7 @@ for root in build-derived e2e-derived device-derived; do
 done
 while IFS= read -r d; do
   [ -n "$d" ] || continue
-  case "$(basename "$d")" in build-derived | e2e-derived | device-derived) [ "$(dirname "$d")" != "$cache" ] || continue ;; esac
-  case "$d" in "$cache"/derived/*) why='not a current target' ;; *) why='obsolete' ;; esac
+  case "$d" in "$cache"/derived/*) why='not a current target' ;; *) continue ;; esac   # old roots: handled above
   reap "$d" "$why" || status=1
 done < <(cache_extras | sort -u)
 while IFS= read -r d; do if [ -n "$d" ]; then reap "$d" 'stale temp' || status=1; fi; done < <(tmp_legato_dirs)
