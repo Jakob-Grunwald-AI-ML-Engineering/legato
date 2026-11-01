@@ -12,4 +12,4 @@ Open-source on-device dictation app for iOS and macOS (Swift).
 
 ## Build output
 
-- Session start and wrap-up: `scripts/dev/prune-build-caches.sh --delete` prunes legato build output older than 48 h and caps it at 10 GiB, skipping anything in use. `--report` shows disk use against the budget (`scripts/dev/build-caches.md`).
+- Session start and wrap-up: `scripts/dev/prune-build-caches.sh --delete` removes all Legato build output except the one fixed DerivedData per target (`derived/{gate,mac,ios-sim,ios-device}`) and `SourcePackages`, skipping anything in use. `--report` shows disk use per directory (`scripts/dev/build-caches.md`).

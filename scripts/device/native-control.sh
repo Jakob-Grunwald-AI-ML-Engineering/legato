@@ -35,14 +35,24 @@ case "$command" in
   tree|keyboard|mode|tap|hold|swipe|quote|scroll|label|companion-settings|background-mic-settings|typing-fallback)
     case "$command:$#" in tree:0|companion-settings:0|background-mic-settings:0|typing-fallback:0|keyboard:0|mode:1|tap:2|hold:3|swipe:4|swipe:5|quote:4|scroll:0|label:1) ;; *) usage >&2; exit 2 ;; esac
     root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-    build="${LEGATO_NATIVE_BUILD:-/tmp/legato-native-control-build}"
+    # Same project, SDK and Debug-iphoneos products as `ctl.sh build` on a device: share its DerivedData
+    # (no fifth multi-GB tree; the app target it depends on is already compiled there).
+    # shellcheck source-path=SCRIPTDIR source=../e2e/work-dir.sh
+    source "$root/scripts/e2e/work-dir.sh"
+    build="${LEGATO_NATIVE_BUILD:-$(derived_dir ios-device)}"
     output_root="${LEGATO_NATIVE_OUTPUT:-$root/.claude/tmp/native-control}"
     mkdir -p "$output_root"
     output="$(mktemp -d "$output_root/run.XXXXXX")"
     xcodegen generate --spec "$root/Apps/iOS/project.yml" > "$output/build.log" 2>&1
+    if [ -z "${LEGATO_NATIVE_BUILD:-}" ]; then
+      mkdir -p "$(dirname "$build")"
+      lock_dir "$build" || exit 1
+      lock_dir "$(packages_dir)" || exit 1
+      trap 'unlock_dir "$(packages_dir)"; unlock_dir "$build"' EXIT
+    fi
     if ! xcodebuild -quiet build-for-testing -project "$root/Apps/iOS/Legato.xcodeproj" \
       -scheme LegatoNativeControl -destination "platform=iOS,arch=arm64,id=${LEGATO_DEVICE:-00008150-000E60360245401C}" \
-      -derivedDataPath "$build" -allowProvisioningUpdates >> "$output/build.log" 2>&1; then
+      -derivedDataPath "$build" -clonedSourcePackagesDirPath "$(packages_dir)" -allowProvisioningUpdates >> "$output/build.log" 2>&1; then
       tail -50 "$output/build.log" >&2; exit 1
     fi
     # Install only the standalone runner explicitly; this also avoids stale XCTest runner installs.
@@ -54,7 +64,7 @@ case "$command" in
     [ -n "$original" ] || { echo 'Native control runner configuration missing' >&2; exit 1; }
     run_file="$build/Build/Products/native-control-$$.xctestrun"
     cp "$original" "$run_file"
-    trap 'rm -f "$run_file"' EXIT
+    trap 'rm -f "$run_file"; if [ -z "${LEGATO_NATIVE_BUILD:-}" ]; then unlock_dir "$(packages_dir)"; unlock_dir "$build"; fi' EXIT
     /usr/libexec/PlistBuddy -c "Add :LegatoNativeControl:EnvironmentVariables:LEGATO_NATIVE_COMMAND string $command $*" "$run_file"
     /usr/libexec/PlistBuddy -c "Add :LegatoNativeControl:EnvironmentVariables:LEGATO_NATIVE_BUNDLE string ${LEGATO_BUNDLE:-de.gruenwald.legato}" "$run_file"
     if ! xcodebuild -quiet test-without-building -xctestrun "$run_file" \

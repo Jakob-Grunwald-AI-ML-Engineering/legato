@@ -18,8 +18,8 @@
 #
 # Environment:
 #   LEGATO_E2E_UDID      use this (already created) simulator; it is shut down afterwards only if the script booted it
-#   LEGATO_E2E_DERIVED   DerivedData directory to reuse between runs (default: <cache>/e2e-derived/<hash of this
-#                        checkout's path>, kept between runs; see "Build caches" below)
+#   LEGATO_E2E_DERIVED   DerivedData directory to use instead of the shared <cache>/derived/ios-sim (unmanaged:
+#                        never pruned; see "Build caches" below)
 #   LEGATO_E2E_KEEP=1    keep the work directory (logs) and print its path; kept dirs are swept after
 #                        LEGATO_E2E_KEEP_DAYS (default 7)
 #   LEGATO_CACHE_DIR     root of the shared build caches (default: ~/Library/Caches/legato)
@@ -34,13 +34,11 @@
 #
 # Build caches (all under LEGATO_CACHE_DIR, so deleting worktrees does not strand gigabytes):
 #   SourcePackages/      cloned SwiftPM packages, shared by every checkout and run (-clonedSourcePackagesDirPath;
-#                        participating builds hold its lock through resolution and every build read).
-#   e2e-derived/<hash>/  DerivedData, one per checkout, reused between runs. Not shared across checkouts: DerivedData
-#                        is keyed by source paths, so another checkout would rebuild everything anyway, and concurrent
-#                        xcodebuilds on one DerivedData are unsafe. Runs on the same checkout are serialized by a
-#                        OS-backed guard and owner marker (dead legacy owners are recovered under the guard).
-# Marked inactive caches are pruned automatically (48-hour last-use TTL, 10 GiB soft cap).
-# scripts/dev/prune-build-caches.sh previews managed and legacy cleanup by default.
+#                        held locked through resolution and every build read).
+#   derived/ios-sim/     the one DerivedData for simulator builds, overwritten by whichever checkout builds next and
+#                        shared by every worktree. Builds on it serialize on its lock (OS-backed guard + owner marker;
+#                        dead legacy owners are recovered under the guard).
+# scripts/dev/prune-build-caches.sh removes every other Legato build output.
 set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=../ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../ci/lib.sh"   # also cd's to the repo root
@@ -61,7 +59,7 @@ PKGS_LOCKED=""
 if [ -n "${LEGATO_E2E_DERIVED:-}" ]; then
   DERIVED="$LEGATO_E2E_DERIVED"
 else
-  DERIVED="$CACHE/e2e-derived/$(pwd -P | shasum | cut -c1-12)"
+  DERIVED="$(derived_dir ios-sim)"
 fi
 mkdir -p "$PKGS" "$DERIVED"
 
@@ -73,15 +71,8 @@ CHILD=""
 cleanup() {
   if declare -F stop_log > /dev/null; then stop_log; fi
   if [ "$BOOTED_BY_US" = 1 ] && [ -n "$UDID" ]; then xcrun simctl shutdown "$UDID" > /dev/null 2>&1; fi
-  if [ -n "$PKGS_LOCKED" ]; then
-    touch "$PKGS/legato-last-used"
-    unlock_dir "$PKGS"
-  fi
-  if [ -n "$DERIVED_LOCKED" ]; then
-    [ ! -f "$DERIVED/legato-managed" ] || touch "$DERIVED/legato-last-used"
-    unlock_dir "$DERIVED"
-  fi
-  [ -n "${LEGATO_E2E_TEST_STUB:-}" ] || bash scripts/dev/prune-build-caches.sh --managed-only --delete
+  if [ -n "$PKGS_LOCKED" ]; then unlock_dir "$PKGS"; fi
+  if [ -n "$DERIVED_LOCKED" ]; then unlock_dir "$DERIVED"; fi
   if [ "${LEGATO_E2E_KEEP:-0}" = 1 ]; then touch "$WORK/keep"; echo "Work directory kept: $WORK"; else rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
@@ -115,18 +106,14 @@ trap 'on_signal 143' TERM
 lock_dir "$DERIVED" || exit 2
 DERIVED_LOCKED=1
 mkdir -p "$DERIVED" || exit 2
-[ -n "${LEGATO_E2E_DERIVED:-}" ] || pwd -P > "$DERIVED/legato-checkout"
 
 # Test seam (scripts/e2e/tests/cleanup-test.sh): run a stub instead of the real work, so the trap and sweep are testable.
 if [ -n "${LEGATO_E2E_TEST_STUB:-}" ]; then run_fg "$LEGATO_E2E_TEST_STUB" "$WORK"; exit $?; fi
 
 # Hold the shared clones through every build read, so pruning and another resolver cannot race it.
-bash scripts/dev/prune-build-caches.sh --managed-only --delete || exit 2
 lock_dir "$PKGS" || exit 2
 PKGS_LOCKED=1
 mkdir -p "$PKGS" || exit 2
-mark_build_cache "$PKGS"
-[ -n "${LEGATO_E2E_DERIVED:-}" ] || mark_build_cache "$DERIVED"
 
 
 select_xcode

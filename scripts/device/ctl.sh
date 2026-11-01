@@ -5,7 +5,7 @@
 #
 # Usage: ctl.sh [--target device|sim|mac] <subcommand> [args...]
 #   devices                  list connected devices; says "unlock/plug in" when the iPhone is unavailable
-#   build                    xcodegen + signed Debug device build (derived data kept under the cache dir)
+#   build                    xcodegen + signed Debug device build (the fixed derived/<target> DerivedData under the cache dir)
 #   install                  install the last build on the device
 #   launch [args...]        (re)start Legato, e.g. launch -LegatoFakeEngine "hello world"; Debug builds start the bridge
 #   import-keys <0600-json-file>  one-time private keychain import; never passes keys in arguments
@@ -242,8 +242,15 @@ cmd_devices() {
     mac) printf 'app=%s\nharness=%s\n' "$APP" "$MAC_ROOT" ;;
   esac
 }
+# The one fixed DerivedData per target, shared by every checkout (see scripts/dev/build-caches.md).
 set_derived() {
-  DERIVED="${LEGATO_CACHE_DIR:-$HOME/Library/Caches/legato}/device-derived/$(pwd | shasum | cut -c1-12)"
+  # shellcheck source-path=SCRIPTDIR source=../e2e/work-dir.sh
+  source "$HERE/../e2e/work-dir.sh"
+  case "$TARGET" in
+    device) DERIVED="$(derived_dir ios-device)" ;;
+    sim) DERIVED="$(derived_dir ios-sim)" ;;
+    mac) DERIVED="$(derived_dir mac)" ;;
+  esac
 }
 cmd_build() {
   # Build machinery is intentionally lazy: polling must not pay for git/Xcode discovery on every call.
@@ -252,7 +259,7 @@ cmd_build() {
   set_derived
   select_xcode
   ensure_xcodegen
-  local dir=Apps/iOS project=Legato.xcodeproj destination="id=$DEVICE" extra=(-allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM")
+  local built=0 dir=Apps/iOS project=Legato.xcodeproj destination="id=$DEVICE" extra=(-allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM")
   case "$TARGET" in
     sim) destination='generic/platform=iOS Simulator'; extra=(CODE_SIGNING_ALLOWED=NO) ;;
     mac)
@@ -264,10 +271,14 @@ cmd_build() {
 
   esac
   (cd "$dir" && "$XCODEGEN" generate)
-  mkdir -p "$DERIVED"
+  # Serialize on the target's fixed DerivedData (and the shared package clones) across every checkout.
+  prepare_build_cache "${DERIVED##*/}"
+  DERIVED="$BUILD_WORK"
   echo "building (log: $STATE/build.log)"
   xcodebuild build -quiet -project "$dir/$project" -scheme Legato -configuration Debug \
-    -destination "$destination" -derivedDataPath "$DERIVED" "${extra[@]}" > "$STATE/build.log" 2>&1 || { tail -n 30 "$STATE/build.log" >&2; die "build failed"; }
+    -destination "$destination" -derivedDataPath "$DERIVED" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" "${extra[@]}" > "$STATE/build.log" 2>&1 || built=1
+  finish_build_cache
+  [ "$built" = 0 ] || { tail -n 30 "$STATE/build.log" >&2; die "build failed"; }
   echo "built $DERIVED/Build/Products"
 }
 cmd_install() {

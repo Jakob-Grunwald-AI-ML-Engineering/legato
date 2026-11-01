@@ -13,7 +13,7 @@ Licensed under Apache-2.0.
 
 ## Build caches
 
-`scripts/e2e/ios-sim.sh` keeps its builds under `~/Library/Caches/legato` (`LEGATO_CACHE_DIR`): SwiftPM clones shared by every worktree, DerivedData reused per worktree, and sweeps stale `legato-e2e.*` temp dirs of killed runs. `scripts/dev/prune-build-caches.sh` lists (dry run) or, with `--delete`, removes DerivedData and caches of deleted worktrees.
+`scripts/e2e/ios-sim.sh` keeps its builds under `~/Library/Caches/legato` (`LEGATO_CACHE_DIR`): SwiftPM clones shared by every worktree, one fixed DerivedData per build target (`derived/{gate,mac,ios-sim,ios-device}`) reused by every worktree, and sweeps stale `legato-e2e.*` temp dirs of killed runs. `scripts/dev/prune-build-caches.sh` lists (dry run) or, with `--delete`, removes all other Legato build output.
 
 ## Device debugging
 
