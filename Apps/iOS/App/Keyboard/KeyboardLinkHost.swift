@@ -117,6 +117,7 @@ final class KeyboardLinkHost: TranscriptSink {
                                                   endWordID: intent.endWordID, timestamp: intent.timestamp)
                         }
                     case "send-correction": await composer.sendCorrection()
+                    case "send-instruction": await composer.sendInstruction()
                     case "discard-instruction": await composer.discardInstruction(timestamp: intent.timestamp)
                     case "deselect": await composer.clearSelection(timestamp: intent.timestamp)
                     case "pick": if let line = intent.lineID, let word = intent.wordID, let text = intent.text { await composer.pick(lineID: line, wordID: word, text: text) }
@@ -141,6 +142,8 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.correctionCountdownStart = composer.correctionCountdownStart
                 value.correctionCountdownDeadline = composer.correctionCountdownDeadline
                 value.instructionDraft = composer.instructionPreview; value.instructionStatus = composer.instructionStatus
+                value.instructionCountdownStart = composer.instructionCountdownStart
+                value.instructionCountdownDeadline = composer.instructionCountdownDeadline
                 value.audioRoute = (self.keyboardSession?.isOpen == true ? self.keyboardSession?.route : nil)?.rawValue ?? composer.route.rawValue
                 value.dictationTail = self.keyboardSession?.dictationTail
                 value.dictationNotice = self.keyboardSession?.dictationNotice

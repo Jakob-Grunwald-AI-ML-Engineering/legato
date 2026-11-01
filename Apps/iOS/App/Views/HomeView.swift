@@ -78,7 +78,10 @@ struct HomeView: View {
     }
     private var instructionStrip: some View {
         InstructionStrip(text: controller.composer.instructionPreview, state: InstructionStripState(status: controller.composer.instructionStatus),
-                         onDiscard: { Task { await controller.composer.discardInstruction() } })
+                         onDiscard: { Task { await controller.composer.discardInstruction() } },
+                         onSend: { Task { await controller.composer.sendInstruction() } },
+                         countdownStart: controller.composer.instructionCountdownStart,
+                         countdownDeadline: controller.composer.instructionCountdownDeadline)
     }
     private var composerDraft: some View {
         ComposerView(snapshot: controller.composer.snapshot, tail: controller.composer.tail, dictationRevision: controller.composer.dictationRevision, dictationCommit: controller.composer.dictationCommit, successfulInsertionID: controller.composer.successfulInsertionID,

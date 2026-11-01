@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import LegatoAppServices
 import LegatoClaude
 import LegatoAgent
 
@@ -27,6 +28,8 @@ struct SettingsView: View {
     @Environment(MacAppController.self) private var controller
     @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
+    @AppStorage(InstructionSendSetting.modeKey) private var instructionSend = InstructionSendSetting.Mode.manual.rawValue
+    @AppStorage(InstructionSendSetting.pauseKey) private var instructionPause = InstructionSendSetting.defaultPause
     @State private var page: Page? = .overview
     @State private var claudeKey = ""
     @State private var sonioxKey = ""
@@ -110,6 +113,24 @@ struct SettingsView: View {
                         }
                     }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
                     Text("One writing agent handles quick corrections, restructuring after a pause, and final cleanup.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            card {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("Send instructions", systemImage: "wand.and.stars").font(.headline)
+                    Picker("Send instructions", selection: $instructionSend) {
+                        Text("Manual").tag(InstructionSendSetting.Mode.manual.rawValue)
+                        Text("Automatically after a pause").tag(InstructionSendSetting.Mode.automatic.rawValue)
+                    }.labelsHidden().pickerStyle(.segmented)
+                    if instructionSend == InstructionSendSetting.Mode.automatic.rawValue {
+                        Stepper(value: Binding(get: { InstructionSendSetting.clampedPause(instructionPause) },
+                                               set: { instructionPause = InstructionSendSetting.clampedPause($0) }),
+                                in: InstructionSendSetting.pauseRange, step: InstructionSendSetting.pauseStep) {
+                            Text("Pause before sending: \(String(format: "%.1f", InstructionSendSetting.clampedPause(instructionPause))) s")
+                        }
+                    }
+                    Text("Speech builds one instruction until you press Send in the strip. Automatic sends it after the pause; speaking again restarts the wait.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }

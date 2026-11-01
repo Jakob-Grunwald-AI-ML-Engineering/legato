@@ -193,7 +193,10 @@ private struct NotchComposerView: View {
                 onPick: { line, word, text in Task { await session.pick(lineID: line, wordID: word, text: text) } })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             InstructionStrip(text: session.instructionPreview, state: InstructionStripState(status: session.instructionStatus),
-                             onDiscard: { Task { await session.discardInstruction() } })
+                             onDiscard: { Task { await session.discardInstruction() } },
+                             onSend: { Task { await session.sendInstruction() } },
+                             countdownStart: session.instructionCountdownStart,
+                             countdownDeadline: session.instructionCountdownDeadline)
                 .padding(.horizontal, -6)
             if let error = session.error { Text(error).font(.callout).foregroundStyle(.red).lineLimit(2).help(error).textSelection(.disabled) }
             HStack(spacing: 6) {

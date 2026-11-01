@@ -43,9 +43,16 @@ public struct InstructionStrip: View {
     public let text: String
     public let state: InstructionStripState
     public var onDiscard: () -> Void
+    /// Sends the pending instruction. nil hides the Send button.
+    public var onSend: (() -> Void)?
+    /// Automatic-send countdown (host `systemUptime`); the Send button's rim fills between the two.
+    public var countdownStart: Double?
+    public var countdownDeadline: Double?
 
-    public init(text: String, state: InstructionStripState, onDiscard: @escaping () -> Void = {}) {
-        self.text = text; self.state = state; self.onDiscard = onDiscard
+    public init(text: String, state: InstructionStripState, onDiscard: @escaping () -> Void = {},
+                onSend: (() -> Void)? = nil, countdownStart: Double? = nil, countdownDeadline: Double? = nil) {
+        self.text = text; self.state = state; self.onDiscard = onDiscard; self.onSend = onSend
+        self.countdownStart = countdownStart; self.countdownDeadline = countdownDeadline
     }
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -104,11 +111,18 @@ public struct InstructionStrip: View {
         case .idle:
             EmptyView()
         case .listening:
-            Button(action: onDiscard) {
-                Image(systemName: "xmark.circle.fill").font(.system(size: 17)).foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 0) {
+                Button(action: onDiscard) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 17)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain).accessibilityLabel("Discard instruction")
+                .accessibilityIdentifier("composer.instruction.discard")
+                Spacer(minLength: 0)
+                if let onSend, !trimmed.isEmpty {
+                    InstructionSendButton(send: onSend, countdownStart: countdownStart, countdownDeadline: countdownDeadline)
+                }
             }
-            .buttonStyle(.plain).accessibilityLabel("Discard instruction")
-            .accessibilityIdentifier("composer.instruction.discard")
+            .frame(height: Self.textHeight)
         case .applying:
             HStack(spacing: 5) {
                 ProgressView().controlSize(.mini)
@@ -127,6 +141,37 @@ public struct InstructionStrip: View {
         case .notice(let value):
             Text(value).font(.caption2).foregroundStyle(.orange).lineLimit(3).multilineTextAlignment(.trailing)
                 .frame(maxWidth: 110, alignment: .trailing)
+        }
+    }
+}
+
+/// The wand Send button; during the automatic-send countdown its rim fills toward the deadline.
+struct InstructionSendButton: View {
+    var send: () -> Void
+    var countdownStart: Double?
+    var countdownDeadline: Double?
+    static func progress(now: Double, start: Double?, deadline: Double?) -> Double? {
+        guard let start, let deadline else { return nil }
+        return min(1, max(0, (now - start) / max(0.001, deadline - start)))
+    }
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: countdownDeadline == nil)) { _ in
+            Button(action: send) {
+                Image(systemName: "wand.and.stars").font(.system(size: 14, weight: .semibold)).foregroundStyle(.purple)
+                    .frame(width: 32, height: 32)
+                    .background(Color.purple.opacity(0.12), in: Circle())
+                    .overlay {
+                        if let progress = Self.progress(now: ProcessInfo.processInfo.systemUptime, start: countdownStart, deadline: countdownDeadline) {
+                            Circle().trim(from: 0, to: progress).rotation(.degrees(-90))
+                                .stroke(AngularGradient(colors: [.purple, .blue, .pink, .purple], center: .center),
+                                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                                .shadow(color: .purple.opacity(0.6), radius: 3)
+                        }
+                    }
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Send instruction").accessibilityIdentifier("composer.instruction.send")
         }
     }
 }

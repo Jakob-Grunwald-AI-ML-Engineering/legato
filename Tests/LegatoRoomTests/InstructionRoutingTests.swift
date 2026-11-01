@@ -25,7 +25,14 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
         payload: .object(["reason": .string("endpoint")]), tOrigin: time)
 }
 
-@Test func everyUtteranceIsOneInstructionAtTheBoundaryAndNeverTouchesTheDraft() async throws {
+/// The Send path the host runs: request, drain the provider, then the finalize boundary publishes once.
+private func sendInstruction(_ binder: HintBinder) async throws {
+    try await settleInstructionRouting()
+    #expect(await binder.requestInstructionSend())
+    await binder.completeInstructionSend()
+}
+
+@Test func speechAccumulatesAcrossBoundariesIntoOneInstructionSentOnDemandAndNeverTouchesTheDraft() async throws {
     let room = Room(segmentRouting: .intercepted), binder: HintBinder
     _ = try await room.appendSegment(words: [.init(text: "Original draft")])
     binder = HintBinder(room: room)
@@ -42,6 +49,10 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     #expect(await events.values.filter { $0.channel == .asrTail }.allSatisfy { $0.payload["text"] == .string("") })
     #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["text"] == .string("Make it concise. Keep the facts."))
     try await inputBoundary(room, at: 105)
+    try await settleInstructionRouting()
+    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty, "A segment boundary never sends")
+    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["text"] == .string("Make it concise. Keep the facts."))
+    try await sendInstruction(binder)
     try await settleInstructionRouting()
     let instructions = await events.values.filter { $0.channel == .writingInstruction }
     #expect(instructions.count == 1)
@@ -61,7 +72,7 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
     try await inputSegment(room, ["Write", "a", "short", "email", "to", "Anna", "saying", "I'm", "late."], origin: 101)
-    try await inputBoundary(room, at: 103)
+    try await sendInstruction(binder)
     try await settleInstructionRouting()
     #expect(await room.documentSnapshot.lines.isEmpty, "Speech is never dictated into the draft")
     let instruction = try #require(await events.values.first { $0.channel == .writingInstruction })
@@ -70,7 +81,7 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     await binder.stop()
 }
 
-@Test func separateUtterancesAreSeparateInstructionsAndTheSnapshotIsTakenWhenSent() async throws {
+@Test func separatelySentInstructionsAreSeparateAndTheSnapshotIsTakenWhenSent() async throws {
     let room = Room(segmentRouting: .intercepted), binder = HintBinder(room: room)
     await binder.start()
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
@@ -78,9 +89,9 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     try await inputSegment(room, ["Write", "a", "greeting."], origin: 101)
     // The writer's edit lands while the user is still speaking the next instruction.
     _ = try await room.applyDocument([.insertLines(after: nil, lines: [Line(words: [Word(text: "Hello")])])], origin: .agent, versions: [:])
-    try await inputBoundary(room, at: 102)
+    try await sendInstruction(binder)
     try await inputSegment(room, ["Make", "it", "warmer."], origin: 103)
-    try await inputBoundary(room, at: 104)
+    try await sendInstruction(binder)
     try await settleInstructionRouting()
     let sent = await events.values.filter { $0.channel == .writingInstruction }
     #expect(sent.map { $0.payload["text"] } == [.string("Write a greeting."), .string("Make it warmer.")])
@@ -88,20 +99,82 @@ private func inputBoundary(_ room: Room, at time: Double) async throws {
     await binder.stop()
 }
 
-@Test func aQuietPauseSendsTheInstructionAndResumedSpeechJoinsIt() async throws {
-    let room = Room(segmentRouting: .intercepted)
-    // The host finalizes the stream when the pause elapses; the finalize is the boundary.
-    let binder = HintBinder(room: room, onInstructionQuiet: {
-        try? await room.publish(channel: .asrBoundary, participant: .segmenter, payload: .object(["reason": .string("finalize")]))
-    })
+private actor SendCounter {
+    var count = 0
+    func increment() { count += 1 }
+}
+private func tail(_ room: Room, _ text: String, activity: Bool = true) async throws {
+    try await room.publish(channel: .asrTail, participant: .transcriber,
+        payload: .object(["text": .string(text), "activity": .bool(activity)]), tOrigin: 101)
+}
+
+@Test func manualModeNeverSendsOnItsOwn() async throws {
+    let room = Room(segmentRouting: .intercepted), counter = SendCounter()
+    let binder = HintBinder(room: room, instructionSendDelay: { nil }, onInstructionSend: { await counter.increment() })
     await binder.start()
     let events = InstructionEvents(), observer = await observeInstructions(room, events)
     defer { observer.cancel() }
     try await inputSegment(room, ["Make", "it"], origin: 101)
+    try await inputBoundary(room, at: 102)
+    try await inputSegment(room, ["shorter."], origin: 103)
     try await Task.sleep(for: .milliseconds(300))
-    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty, "A short breath is not the end of the utterance")
+    #expect(await counter.count == 0)
+    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty)
+    let draft = try #require(await events.values.last { $0.channel == .instructionDraft })
+    #expect(draft.payload["text"] == .string("Make it shorter.") && draft.payload["countdownDeadline"] == .null)
+    await binder.stop()
+}
+
+@Test func automaticModeSendsOnceAfterTheQuietDelayAndSpeechResetsIt() async throws {
+    let room = Room(segmentRouting: .intercepted), counter = SendCounter()
+    let box = BinderBox()
+    let binder = HintBinder(room: room, instructionSendDelay: { 0.25 }, onInstructionSend: {
+        await counter.increment()
+        if let binder = await box.binder { try? await sendInstruction(binder) }
+    })
+    await box.set(binder)
+    await binder.start()
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await inputSegment(room, ["Make", "it"], origin: 101)
+    try await Task.sleep(for: .milliseconds(150))
+    let started = try #require(await events.values.last { $0.channel == .instructionDraft })
+    #expect(started.payload["countdownDeadline"] != .null, "The countdown is published for the rim")
+    try await tail(room, "shorter") // resumed speech
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(await counter.count == 0, "Speech restarted the wait")
     try await inputSegment(room, ["shorter."], origin: 102)
-    try await Task.sleep(for: .milliseconds(1_000))
+    try await Task.sleep(for: .milliseconds(600))
+    #expect(await counter.count == 1)
+    let sent = await events.values.filter { $0.channel == .writingInstruction }
+    #expect(sent.count == 1 && sent.first?.payload["text"] == .string("Make it shorter."))
+    #expect(await events.values.last { $0.channel == .instructionDraft }?.payload["countdownDeadline"] == .null)
+    await binder.stop()
+}
+
+private actor BinderBox {
+    var binder: HintBinder?
+    func set(_ value: HintBinder) { binder = value }
+}
+
+@Test func pausingListeningKeepsThePendingInstruction() async throws {
+    let room = Room(segmentRouting: .intercepted, resumable: true)
+    let binder = HintBinder(room: room)
+    await binder.start()
+    let events = InstructionEvents(), observer = await observeInstructions(room, events)
+    defer { observer.cancel() }
+    try await inputSegment(room, ["Make", "it"], origin: 101)
+    try await settleInstructionRouting()
+    try await room.micOff(); try await inputBoundary(room, at: 102)
+    try await room.finishFinalPass()
+    #expect(await room.state == .paused, "An unsent instruction does not hold the pause open")
+    try await settleInstructionRouting()
+    #expect(await events.values.filter { $0.channel == .writingInstruction }.isEmpty)
+    #expect(await binder.hasUnsentInstruction)
+    try await room.resume()
+    try await inputSegment(room, ["shorter."], origin: 103)
+    try await sendInstruction(binder)
+    try await settleInstructionRouting()
     let sent = await events.values.filter { $0.channel == .writingInstruction }
     #expect(sent.count == 1 && sent.first?.payload["text"] == .string("Make it shorter."))
     await binder.stop()
