@@ -84,7 +84,14 @@ public actor HintBinder {
     private let requiresExplicitSubmission: Bool
     private var instructionTail = ""
     private var instructionQuietTask: Task<Void, Never>?
-    private let onInstructionQuiet: (@Sendable () async -> Void)?
+    private var instructionSending = false
+    private var instructionSendTimeout: Task<Void, Never>?
+    private var instructionCountdownStart: Double?
+    private var instructionCountdownDeadline: Double?
+    /// Seconds of quiet before a pending instruction sends itself; nil means manual Send only. Read on every
+    /// speech event, so a settings change applies to the instruction being spoken.
+    private let instructionSendDelay: (@Sendable () async -> Double?)?
+    private let onInstructionSend: (@Sendable () async -> Void)?
     private struct Timing: Decodable { let t0: Double?; let t1: Double? }
     private let room: Room
     private let learner: VocabularyLearner?
@@ -99,30 +106,46 @@ public actor HintBinder {
     private let onSend: (@Sendable () async -> Void)?
     public init(room: Room, learner: VocabularyLearner? = nil, quietDelay: Duration = .milliseconds(500),
                 countdown: Duration = .seconds(1), onSend: (@Sendable () async -> Void)? = nil,
-                onInstructionQuiet: (@Sendable () async -> Void)? = nil, requiresExplicitSubmission: Bool = false) {
+                instructionSendDelay: (@Sendable () async -> Double?)? = nil,
+                onInstructionSend: (@Sendable () async -> Void)? = nil, requiresExplicitSubmission: Bool = false) {
         self.room = room; self.learner = learner; self.quietDelay = quietDelay
         self.requiresExplicitSubmission = requiresExplicitSubmission
-        self.countdown = countdown; self.onSend = onSend; self.onInstructionQuiet = onInstructionQuiet
+        self.countdown = countdown; self.onSend = onSend
+        self.instructionSendDelay = instructionSendDelay; self.onInstructionSend = onInstructionSend
     }
-    private func instructionActivity() {
-        instructionQuietTask?.cancel()
-        guard capture == nil, onInstructionQuiet != nil else { return }
+    /// New instruction words or tail: resets the automatic-send countdown, which restarts from the latest speech.
+    private func instructionActivity() async {
+        instructionQuietTask?.cancel(); instructionQuietTask = nil
+        instructionCountdownStart = nil; instructionCountdownDeadline = nil
+        guard capture == nil, !instructionSending, hasUnsentInstruction, let delay = await instructionSendDelay?() else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        instructionCountdownStart = now; instructionCountdownDeadline = now + delay
         instructionQuietTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(700)); await self?.finalizeInstructionChunk() } catch {}
+            do { try await Task.sleep(for: .seconds(delay)); await self?.autoSendInstruction(deadline: now + delay) } catch {}
         }
     }
-    private func finalizeInstructionChunk() async { guard capture == nil else { return }; await onInstructionQuiet?() }
+    private func autoSendInstruction(deadline: Double) async {
+        guard instructionCountdownDeadline == deadline, capture == nil, !instructionSending, hasUnsentInstruction else { return }
+        // A paused or muted microphone, or a switch to manual, ends the countdown without sending.
+        guard await instructionSendDelay?() != nil else {
+            instructionCountdownStart = nil; instructionCountdownDeadline = nil
+            await publishInstructionDraft(); return
+        }
+        await onInstructionSend?()
+    }
     private func publishInstructionDraft() async {
         let text = [instructionCapture?.words.map(\.text).joined(separator: " ") ?? "", instructionTail]
             .filter { !$0.isEmpty }.joined(separator: " ")
-        _ = try? await room.publish(channel: .instructionDraft, participant: .hintBinder,
-            payload: .object(["text": .string(text)]))
+        _ = try? await room.publish(channel: .instructionDraft, participant: .hintBinder, payload: .object([
+            "text": .string(text),
+            "countdownStart": instructionCountdownStart.map(JSONValue.number) ?? .null,
+            "countdownDeadline": instructionCountdownDeadline.map(JSONValue.number) ?? .null]))
     }
     private func discardInstructionCapture() async {
         instructionQuietTask?.cancel(); instructionQuietTask = nil
-        let ids = instructionCapture?.segments ?? []
+        instructionSendTimeout?.cancel(); instructionSendTimeout = nil
+        instructionSending = false; instructionCountdownStart = nil; instructionCountdownDeadline = nil
         instructionCapture = nil; instructionTail = ""
-        for id in ids { await releaseSegment(id) }
     }
     public var hasUnsentInstruction: Bool { instructionCapture != nil || !instructionTail.isEmpty }
     /// Drop the unsent instruction and any of its words still in flight (spoken at or before `timestamp`).
@@ -131,15 +154,36 @@ public actor HintBinder {
         await discardInstructionCapture()
         await publishInstructionDraft()
     }
-    /// An utterance ends at any ASR boundary: a tap-again finalize, or the quiet pause that
-    /// `instructionActivity` turns into a finalize. The words so far go to the writer as one instruction.
+    /// The pending instruction (every word since the last send, across pauses) goes to the writer once.
     private func flushInstruction(_ boundary: Envelope) async {
         instructionQuietTask?.cancel(); instructionQuietTask = nil
-        instructionTail = ""
+        instructionSendTimeout?.cancel(); instructionSendTimeout = nil
+        instructionSending = false; instructionTail = ""
+        instructionCountdownStart = nil; instructionCountdownDeadline = nil
         guard let current = instructionCapture else { await publishInstructionDraft(); return }
         instructionCapture = nil
         await publishInstruction(current, boundary: boundary)
         await publishInstructionDraft()
+    }
+    /// Starts sending the pending instruction: the host drains in-flight ASR, and the finalize boundary that
+    /// follows (or `completeInstructionSend` when nothing is in flight) publishes it once.
+    public func requestInstructionSend() async -> Bool {
+        guard capture == nil, !instructionSending, hasUnsentInstruction else { return false }
+        instructionSending = true
+        instructionQuietTask?.cancel(); instructionQuietTask = nil
+        instructionCountdownStart = nil; instructionCountdownDeadline = nil
+        await publishInstructionDraft()
+        // A finalize that never answers must not leave the instruction stuck.
+        instructionSendTimeout = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(3)); await self?.completeInstructionSend() } catch {}
+        }
+        return true
+    }
+    /// Used when transcription has nothing in flight; otherwise the provider's finalize ack closes the send.
+    public func completeInstructionSend() async {
+        guard instructionSending else { return }
+        _ = try? await room.publish(channel: .asrBoundary, participant: .hintBinder,
+            payload: .object(["reason": .string("finalize")]))
     }
     private func publishInstruction(_ capture: InstructionCapture, boundary: Envelope) async {
         var current = capture
@@ -158,7 +202,6 @@ public actor HintBinder {
             _ = try? await room.publish(channel: .writingInstruction, participant: .hintBinder, payload: payload,
                 tOrigin: current.start, baseRev: current.snapshot.revision, causedBy: boundary.id)
         }
-        for id in current.segments { await releaseSegment(id) }
     }
     public func requestSend(timestamp: Double) async -> Bool {
         guard var current = capture, !current.submitting, !draftText(current).isEmpty else { return false }
@@ -234,7 +277,7 @@ public actor HintBinder {
     /// Inclusive endpoints in one document snapshot. A word tap is the same range with equal ends.
     public func select(lineID: String, wordID: String, endLineID: String? = nil,
                        endWordID: String? = nil, timestamp: Double) async throws {
-        instructionQuietTask?.cancel()
+        instructionQuietTask?.cancel(); instructionCountdownStart = nil; instructionCountdownDeadline = nil
         let discardFrom = min(capture?.discardFrom ?? timestamp, timestamp)
         await discardCapture()
         let snapshot = await room.documentSnapshot
@@ -324,14 +367,15 @@ public actor HintBinder {
                     instructionTail = ((try? envelope.payload["text"]?.decode(String.self)) ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 } else { instructionTail = "" }
+                if envelope.payload["activity"] == .bool(true), !instructionTail.isEmpty { await instructionActivity() }
                 await publishInstructionDraft()
-                if !instructionTail.isEmpty, envelope.payload["activity"] == .bool(true) { instructionActivity() }
             }
             // The general tail stays empty: speech outside a quote is an instruction, never draft text.
             _ = try? await room.publish(channel: .asrTail, participant: .hintBinder,
                 payload: .object(["text": .string(""), "activity": .bool(envelope.payload["activity"] == .bool(true))]))
         case .asrBoundary:
-            await flushInstruction(envelope)
+            if instructionSending, envelope.payload["reason"] == .string("finalize") { await flushInstruction(envelope) }
+            else { instructionTail = ""; await publishInstructionDraft() }
             // Keep audio-time tombstones: late finals may arrive after an endpoint or UI dismissal.
             suppressUntimedTail = false
             guard let current = capture, current.submitting,
@@ -418,11 +462,12 @@ public actor HintBinder {
             if current?.words.isEmpty == true { current?.start = first.start }
             current?.words += words.map(\.word); current?.end = last.end
             if current?.segments.insert(envelope.id).inserted == true {
-                segmentHolds[envelope.id, default: 0] += 1
                 current?.sources.append(.object(["segmentID": .string(envelope.id), "tOrigin": .number(envelope.tOrigin), "metadata": envelope.payload["metadata"] ?? .null]))
             }
             instructionCapture = current
-            instructionTail = ""; await publishInstructionDraft(); instructionActivity()
-        } else if !heldByQuote && segmentHolds[envelope.id] == nil { await room.resolveSegment(envelope.id) }
+            instructionTail = ""; await instructionActivity(); await publishInstructionDraft()
+        }
+        // The binder owns the words from here: an unsent instruction never holds the Room open.
+        if !heldByQuote && segmentHolds[envelope.id] == nil { await room.resolveSegment(envelope.id) }
     }
 }

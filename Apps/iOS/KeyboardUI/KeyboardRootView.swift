@@ -37,7 +37,10 @@ struct KeyboardRootView: View {
             // The composer has no keyboard: the strip shows what was said, the tool row is all there is below.
             InstructionStrip(text: controller.composer.instructionDraft ?? "",
                              state: InstructionStripState(status: controller.composer.instructionStatus ?? "Ready"),
-                             onDiscard: { controller.composerIntent("discard-instruction") })
+                             onDiscard: { controller.composerIntent("discard-instruction") },
+                             onSend: { controller.composerIntent("send-instruction") },
+                             countdownStart: controller.composer.instructionCountdownStart,
+                             countdownDeadline: controller.composer.instructionCountdownDeadline)
                 .padding(.bottom, 2)
             toolRow(landscape: landscape)
 

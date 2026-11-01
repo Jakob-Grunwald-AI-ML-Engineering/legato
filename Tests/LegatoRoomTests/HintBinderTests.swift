@@ -113,7 +113,8 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     #expect(hint.payload["text"] == .string("replacement"))
     #expect(await room.documentSnapshot.text == "first second")
     let instructions = await events.values.filter { $0.channel == .writingInstruction }
-    #expect(instructions.map { $0.payload["text"] } == [.string("old")], "The delayed pre-tap speech is a general instruction")
+    #expect(instructions.isEmpty, "A correction send never sends the general instruction")
+    #expect(await binder.hasUnsentInstruction, "The delayed pre-tap speech stays a pending general instruction")
     await binder.stop()
     await binder.start()
     try await segment(room, words: [Word(text: "after-stop")], at: 104, reason: "punctuation")
@@ -149,8 +150,8 @@ private func segment(_ room: Room, words: [Word], at time: Double, reason: Strin
     #expect(hint.payload["text"] == .string("Morgan"))
     #expect(hint.payload["speechStart"] == .number(101))
     #expect(hint.payload["speechEnd"] == .number(101.2))
-    #expect(await room.documentSnapshot.text == "Alex", "The ordinary prefix is an instruction, sent on the same boundary")
-    #expect(!(await binder.hasUnsentInstruction))
+    #expect(await room.documentSnapshot.text == "Alex", "The ordinary prefix is a pending instruction, not sent by the correction")
+    #expect(await binder.hasUnsentInstruction)
     for _ in 0..<100 {
         if await room.state == .finalPass { break }
         try await Task.sleep(for: .milliseconds(2))

@@ -37,6 +37,9 @@ public enum ComposerInsertOrigin: String, Sendable {
     public private(set) var busy = false
     public private(set) var isMuted = false
     public private(set) var instructionDraft = ""
+    /// Host timestamps (`systemUptime`) of the automatic-send countdown, nil while speech is live or in manual mode.
+    public private(set) var instructionCountdownStart: Double?
+    public private(set) var instructionCountdownDeadline: Double?
     public private(set) var lastInstruction = ""
     public private(set) var instructionApplying = false
     private var lastInstructionID: String?
@@ -321,7 +324,8 @@ public enum ComposerInsertOrigin: String, Sendable {
             let learner = VocabularyLearner(store: store, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), languages: ["de", "en"])
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
             let binder = HintBinder(room: room, learner: learner, onSend: { [weak self] in await self?.sendCorrection() },
-                onInstructionQuiet: { [weak self] in await self?.finalizeInstructionChunk() }, requiresExplicitSubmission: true)
+                instructionSendDelay: { [weak self] in await self?.automaticInstructionDelay() },
+                onInstructionSend: { [weak self] in await self?.sendInstruction() }, requiresExplicitSubmission: true)
             self.binder = binder
             await binder.start()
             try requireGeneration(generation)
@@ -534,7 +538,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         onChange?()
     }
     public var debugState: [String: Any] {
-        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "instructionDraft": instructionDraft, "instructionPreview": instructionPreview, "instructionStatus": instructionStatus, "errorDetail": errorDetail ?? NSNull(),
+        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "instructionDraft": instructionDraft, "instructionCountdownStart": instructionCountdownStart as Any? ?? NSNull(), "instructionCountdownDeadline": instructionCountdownDeadline as Any? ?? NSNull(), "instructionSend": InstructionSendSetting.mode().rawValue, "instructionPause": InstructionSendSetting.pause(), "instructionPreview": instructionPreview, "instructionStatus": instructionStatus, "errorDetail": errorDetail ?? NSNull(),
          "sessionID": sessionID ?? "", "successfulInsertionID": successfulInsertionID as Any? ?? NSNull(), "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
@@ -552,9 +556,11 @@ public enum ComposerInsertOrigin: String, Sendable {
         return state
     }
     #endif
-    private func finalizeInstructionChunk() async {
-        guard isListening else { return }
-        do { _ = try await transcriber?.finalizeChunk() } catch { fail(error) }
+    /// The automatic-send pause while the mic is live and unmuted; nil in manual mode or when listening is paused.
+    private func automaticInstructionDelay() -> Double? {
+        // A held keyboard input listens only while its gate routes audio to the agent.
+        guard isListening, !isMuted, warmInput == nil || route == .agent else { return nil }
+        return InstructionSendSetting.automaticDelay()
     }
     /// Logical voice mute: keep the mic lease, Room and agent work alive while dropping new input.
     public func setMuted(_ value: Bool) async {
@@ -829,7 +835,15 @@ public enum ComposerInsertOrigin: String, Sendable {
     public func discardInstruction(timestamp: Double = ProcessInfo.processInfo.systemUptime) async {
         await binder?.discardInstruction(timestamp: timestamp)
         instructionDraft = ""; lastInstruction = ""; instructionCompleted = true; instructionFailed = false
+        instructionCountdownStart = nil; instructionCountdownDeadline = nil
         hostActionNotice = nil; onChange?()
+    }
+    /// Send the pending instruction: drain in-flight speech, then publish it once. Listening continues.
+    public func sendInstruction() async {
+        guard await binder?.requestInstructionSend() == true else { return }
+        do {
+            if try await transcriber?.finalizeChunk() != true { await binder?.completeInstructionSend() }
+        } catch { await binder?.completeInstructionSend(); fail(error) }
     }
     public func sendCorrection() async {
         guard await binder?.requestSend(timestamp: ProcessInfo.processInfo.systemUptime) == true else { return }
@@ -879,6 +893,8 @@ public enum ComposerInsertOrigin: String, Sendable {
         case .instructionDraft:
             if case .string(let draft) = event.payload["text"], !draft.isEmpty { instructionCompleted = false; instructionFailed = false; hostActionNotice = nil }
             instructionDraft = (try? event.payload["text"]?.decode(String.self)) ?? ""
+            instructionCountdownStart = try? event.payload["countdownStart"]?.decode(Double.self)
+            instructionCountdownDeadline = try? event.payload["countdownDeadline"]?.decode(Double.self)
             // The live instruction is this route's tail; the tap-to-first-words probe reads it.
             if !instructionDraft.isEmpty { onTail?(instructionDraft) }
         case .correctionDraft:
@@ -950,7 +966,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         await transcriber?.cancel(); transcriber = nil
         await writer?.stop(); writer = nil
         await binder?.stop(); binder = nil; await alternatives?.stop(); alternatives = nil
-        isMuted = false; instructionDraft = ""; lastInstruction = ""; instructionApplying = false; instructionFailed = false; errorDetail = nil
+        isMuted = false; instructionDraft = ""; instructionCountdownStart = nil; instructionCountdownDeadline = nil; lastInstruction = ""; instructionApplying = false; instructionFailed = false; errorDetail = nil
         correctionDraft = nil; correctionSubmitting = false; correctionCountdownStart = nil; correctionCountdownDeadline = nil
         eventsTask?.cancel(); eventsTask = nil; busy = false; pendingLineIDs = []; lastTransactionID = nil
     }

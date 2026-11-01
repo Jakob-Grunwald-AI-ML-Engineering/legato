@@ -33,6 +33,9 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var dictationNoticeID: Int?
     public var instructionDraft: String?
     public var instructionStatus: String?
+    /// Automatic-send countdown over the pending instruction (host `systemUptime`); nil in manual mode.
+    public var instructionCountdownStart: Double?
+    public var instructionCountdownDeadline: Double?
     /// The last keyboard insertion consumed by the host (including a stale-session rejection).
     public var insertedIntentID: String?
     public init(snapshot: DocumentSnapshot = .init(revision: 0, lines: []), hunks: [AnimationHunk] = [], requiresSnapshot: Bool = false) {
