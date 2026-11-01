@@ -10,7 +10,7 @@ teardown() {
 }
 trap teardown EXIT
 source "$ROOT/scripts/e2e/work-dir.sh"
-mkdir -p "$T/bin" "$T/cache/build-derived/old"
+mkdir -p "$T/bin" "$T/cache/build-derived/old"   # an obsolete entry for the pruner
 mkfifo "$T/ready" "$T/release"
 exec 3<>"$T/ready"
 exec 4<>"$T/release"
@@ -25,10 +25,10 @@ fi
 exec /bin/ps "$@"
 STUB
 chmod +x "$T/bin/ps"
-printf 'v1\n' > "$T/cache/build-derived/old/legato-managed"
-touch -t 202001010000 "$T/cache/build-derived/old/legato-last-used"
+touch -t 202001010000 "$T/cache/build-derived/old"
+touch "$T/cache/build-derived/old.guard"   # the protocol file an older build leaves behind
 env LEGATO_CACHE_DIR="$T/cache" RACE_PAUSE=1 PATH="$T/bin:$PATH" \
-  /bin/bash "$ROOT/scripts/dev/prune-build-caches.sh" --managed-only --delete > "$T/prune.log" 2>&1 &
+  /bin/bash "$ROOT/scripts/dev/prune-build-caches.sh" --delete > "$T/prune.log" 2>&1 &
 child=$!
 read -r -t 10 ready <&3
 [ "$ready" = ready ]
@@ -103,7 +103,7 @@ echo 'PASS live legacy-owner rejection releases guard'
 # Real ios-sim startup: simulate deletion just before its DerivedData marker is acquired.
 export LEGATO_CACHE_DIR="$T/sim-cache" TMPDIR="$T/tmp"
 mkdir -p "$TMPDIR"
-RACE_DERIVED="$LEGATO_CACHE_DIR/e2e-derived/$(cd "$ROOT" && pwd -P | shasum | cut -c1-12)"
+RACE_DERIVED="$LEGATO_CACHE_DIR/derived/ios-sim"
 export RACE_DERIVED
 export RACE_RESULT="$T/sim-result"
 cat > "$T/bin/mkdir" <<'STUB'
@@ -114,7 +114,7 @@ STUB
 cat > "$T/bin/xcodegen" <<'STUB'
 #!/bin/bash
 if [ "$1" = --version ]; then printf 'Version: %s\n' "$(cat .xcodegen-version)"; exit; fi
-if [ -f "$RACE_DERIVED/legato-checkout" ] && [ -f "$RACE_DERIVED/legato-managed" ]; then echo ready > "$RACE_RESULT"; else echo missing > "$RACE_RESULT"; fi
+if [ -d "$RACE_DERIVED" ]; then echo ready > "$RACE_RESULT"; else echo missing > "$RACE_RESULT"; fi
 exit 77
 STUB
 cat > "$T/bin/xcodebuild" <<'STUB'
@@ -125,6 +125,6 @@ chmod +x "$T/bin/mkdir" "$T/bin/xcodegen" "$T/bin/xcodebuild"
 status=0
 env -u CI PATH="$T/bin:$PATH" /bin/bash "$ROOT/scripts/e2e/ios-sim.sh" release-check > "$T/sim.log" 2>&1 || status=$?
 [ "$status" = 2 ] || { echo 'FAIL simulator did not reach fake XcodeGen'; exit 1; }
-if [ "$(cat "$RACE_RESULT")" = ready ]; then echo 'PASS simulator recreates DerivedData and checkout stamp under lock'
+if [ "$(cat "$RACE_RESULT")" = ready ]; then echo 'PASS simulator recreates DerivedData under lock'
 else echo 'FAIL simulator lost DerivedData before lock acquisition'; fails=$((fails+1)); fi
 [ "$fails" = 0 ]

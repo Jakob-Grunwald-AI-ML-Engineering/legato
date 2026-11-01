@@ -33,12 +33,11 @@ echo "::notice::Swift build and tests completed in $((SECONDS - phase_started)) 
 ensure_xcodegen
 trap finish_build_cache EXIT
 prepare_build_cache gate
-work="$BUILD_WORK"
 build_app() { # build_app <project dir> <project> <destination> <extra args...>
   local dir="$1" project="$2" dest="$3" started=$SECONDS; shift 3
   (cd "$dir" && "$XCODEGEN" generate)
   run_build_command xcodebuild build -quiet -project "$dir/$project" -scheme Legato -destination "$dest" \
-    -derivedDataPath "$work/derived" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" \
+    -derivedDataPath "$BUILD_WORK" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" \
     CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO "$@"
   echo "::notice::$dir build completed in $((SECONDS - started)) s."
 }
