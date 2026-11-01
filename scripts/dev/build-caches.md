@@ -1,21 +1,27 @@
 # Local build caches
 
-Local `scripts/ci/test.sh` app builds and `scripts/ci/release.sh mac-build` reuse `<LEGATO_CACHE_DIR>/build-derived/{gate,mac}-<checkout-path-hash>` and `<LEGATO_CACHE_DIR>/SourcePackages`. The default root is `~/Library/Caches/legato`. Simulator builds continue to reuse `e2e-derived/<checkout-path-hash>`. Participating builds hold their DerivedData lock and the shared package lock through the entire build, serializing local package users. Explicit `LEGATO_E2E_DERIVED` directories are excluded from management.
+Legato keeps the latest build output of each build target and nothing else. Under `${LEGATO_CACHE_DIR:-~/Library/Caches/legato}`:
 
-Gate, mac-build and simulator entry/exit automatically prune only entries bearing the `v1` management marker and an explicit last-use stamp. The defaults are 48 hours since last use and a combined 10 GiB cap, evicting oldest inactive entries first. `LEGATO_CACHE_MAX_AGE_SECONDS` and `LEGATO_CACHE_MAX_KB` override these limits. An active or ambiguous lock always retains its entry, so this is a soft cap; a single active build can exceed it. Pruning never steals stale locks. Build entry points recover dead-owner locks when that cache is next used.
+| Path | Used by |
+| --- | --- |
+| `derived/gate` | `scripts/ci/test.sh` (iOS and macOS app builds) |
+| `derived/mac` | `scripts/ci/release.sh mac-build\|mac-release`, `scripts/device/ctl.sh --target mac build` |
+| `derived/ios-sim` | `scripts/e2e/ios-sim.sh` (including `release-check`), `ctl.sh --target sim build` |
+| `derived/ios-device` | `ctl.sh build` for the phone, and the XCTest runner of `scripts/device/native-control.sh` |
+| `SourcePackages` | the single SwiftPM clone set, shared by all of the above |
 
-Preview with `scripts/dev/prune-build-caches.sh --managed-only`. Add `--delete` to remove candidates. Dry runs acquire short-lived maintenance locks but do not remove cache entries. Symlink entries and unmarked legacy/custom paths are excluded. The default prune command also previews the older deleted-checkout DerivedData and stale temporary-log cleanup; `--managed-only` omits those legacy rules. Legacy Xcode DerivedData, checkout `.build`, XcodeGen downloads and kept logs are outside the managed budget. Existing caches become managed when a participating build uses them; unmanaged legacy disk use needs a separate review.
+Every checkout and worktree uses the same directories, so a build overwrites the previous one in place and Xcode rebuilds incrementally from it. Debug and Release share a target directory: Xcode separates configurations inside `Build/Products` and `Build/Intermediates.noindex`. `native-control.sh` reuses `ios-device` because it builds the same project for the same device SDK; a separate tree would only duplicate gigabytes. `LEGATO_E2E_DERIVED` (ios-sim) and `LEGATO_NATIVE_BUILD` (native-control) override the directory; overrides are never pruned.
 
-CI gate/mac builds use unique temporary directories and remove them on exit. They do not reuse the local cache or add an Actions cache. These rules bound reusable inactive outputs; fixture checks do not establish a day-long disk-use budget or a real-dependency build time.
+## Locking
 
-Run `scripts/e2e/tests/build-cache-test.sh` for private cache fixtures and a fake-Xcode drive through the real mac-build entry point. `scripts/e2e/tests/cleanup-test.sh` checks simulator work-directory signal cleanup without compiling Swift.
+Builds of one target serialize on that directory's lock, and every build also holds the `SourcePackages` lock. Both are a macOS `lockf` descriptor lock on a persistent sibling `.guard` file, plus a `.lock` owner directory for older scripts. A waiting build blocks up to `LEGATO_LOCK_WAIT` seconds (default 3600). Dead owners are recovered under the same OS lock. Never remove `.guard` files while builds may be running. CI builds use unique disposable directories under `RUNNER_TEMP` and never touch this cache.
 
-Cache users and pruning share a macOS `lockf` descriptor lock on a persistent sibling `.guard` file. The descriptor remains open for the entire lease; `.lock` owner directories provide compatibility with older running scripts. Stale owner recovery happens under the same OS lock, and pruning skips any preexisting owner directory. Guard files remain after use to preserve one lock inode across waiters; do not remove them while cache users may be running.
+## Pruning
 
-## Unmanaged output, report mode (#52)
+`scripts/dev/prune-build-caches.sh` (dry run) and `... --delete` remove all other Legato build output: old `build-derived/`, `e2e-derived/`, `device-derived/` and unknown entries in the cache dir or `derived/`, stale `$TMPDIR/legato-*` and dead `legato-e2e.*` work dirs, and Xcode's `~/Library/Developer/Xcode/DerivedData/Legato*`. It keeps the fixed directories, `SourcePackages`, the `legato-xcodegen-*` tool cache, `~/Library/Caches/LegatoTests` (downloaded models) and agent scratchpads. It skips anything locked, anything modified within `LEGATO_PRUNE_GRACE_SECONDS` (default 3600) and symlinks (never followed). It does not touch installed apps. There is no age limit or size budget; run it at session start and at wrap-up.
 
-One invocation, e.g. at session start or wrap-up: `scripts/dev/prune-build-caches.sh` (preview) or `... --delete`. Besides the managed cache it prunes, under the same TTL and 10 GiB oldest-first cap: ad-hoc build output (DerivedData roots, `SourcePackages`, `.build`) in agent scratchpads of legato projects only (`/private/tmp/claude-<uid>/-<home>-Documents-legato*/*/scratchpad`), `$TMPDIR/legato-*` dirs (not `legato-e2e.*`, which has its own sweep, nor the `legato-xcodegen-*` tool cache), unmarked top-level dirs of the legato cache dir, and non-`Models` children of `~/Library/Caches/LegatoTests` (downloaded models are never pruned). Other projects' scratchpads and everything else are never touched.
+`scripts/dev/prune-build-caches.sh --report` prints the size of each fixed directory and each prunable item and deletes nothing.
 
-A candidate is in use, and kept, if it has a `.lock` dir, a kernel-held `.guard` claim, or any file modified within the window (48 h for expiry; `LEGATO_UNMANAGED_GRACE_SECONDS`, default 1 h, for cap eviction). `LEGATO_UNMANAGED_MAX_AGE_SECONDS` overrides the unmanaged TTL. Roots are overridable for fixtures: `LEGATO_SCRATCH_ROOT`, `LEGATO_SCRATCH_PROJECT_GLOB`, `TMPDIR`, `LEGATO_CACHE_DIR`, `LEGATO_TESTS_CACHE`. `--managed-only` (used by builds) skips this pass.
+## Tests
 
-`scripts/dev/prune-build-caches.sh --report` prints disk use per category (scratchpads, TMPDIR `legato-*`, legato cache, LegatoTests, Xcode DerivedData `Legato*`), the total and the budget (`LEGATO_CACHE_MAX_KB`, 10 GiB), deleting nothing. Run it after a day of multi-session work to measure the budget; the fixtures in `scripts/e2e/tests/build-cache-test.sh` do not establish it.
+`scripts/e2e/tests/build-cache-test.sh` drives the pruner on private fixtures and the real `mac-build`, gate and simulator entry points with fake Xcode tools. `cache-lock-race-test.sh` covers lock interleavings; `cleanup-test.sh` covers simulator work-directory signal cleanup.

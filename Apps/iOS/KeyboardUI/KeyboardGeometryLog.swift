@@ -44,6 +44,49 @@ enum KeyboardGeometryLog {
         logger.notice("e2e \(message, privacy: .public)")
     }
 
+    /// Observe presentation frames only: never drives a height or causes a layout pass.
+    @MainActor static func observeMotion(view: UIView) {
+        guard let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.de.gruenwald.legato"),
+              (try? String(contentsOf: root.appendingPathComponent("Library/Caches/keyboard-motion.enabled"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)) == "1" else { return }
+        MotionTrace(view: view).start()
+    }
+
+    @MainActor private final class MotionTrace: NSObject {
+        weak var view: UIView?
+        var link: CADisplayLink?
+        var started = CACurrentMediaTime()
+        var samples: [[String: Double]] = []
+
+        init(view: UIView) { self.view = view }
+
+        func start() {
+            let link = CADisplayLink(target: self, selector: #selector(sample))
+            self.link = link
+            link.add(to: .main, forMode: .common)
+            sample()
+        }
+
+        @objc func sample() {
+            let elapsed = CACurrentMediaTime() - started
+            if let view, let window = view.window {
+                let layer = view.layer.presentation() ?? view.layer
+                let visible = layer.convert(layer.bounds, to: window.layer.presentation() ?? window.layer)
+                samples.append(["t": elapsed, "height": visible.height, "top": visible.minY,
+                                "modelHeight": view.bounds.height, "windowHeight": window.bounds.height])
+            }
+            guard elapsed >= 0.7 || view?.window == nil else { return }
+            link?.invalidate()
+            link = nil
+            guard let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.de.gruenwald.legato") else { return }
+            let url = root.appendingPathComponent("Library/Caches/keyboard-motion.json")
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let old = (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[[String: Double]]] } ?? []
+            if let data = try? JSONSerialization.data(withJSONObject: Array((old + [samples]).suffix(6))) {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+    }
+
     private static func format(_ r: CGRect) -> String {
         "\(Int(r.minX.rounded())),\(Int(r.minY.rounded())),\(Int(r.width.rounded()))x\(Int(r.height.rounded()))"
     }

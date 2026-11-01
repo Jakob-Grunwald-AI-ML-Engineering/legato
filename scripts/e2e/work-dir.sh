@@ -106,43 +106,38 @@ unlock_dir() {
   release_cache_claim "$1"
 }
 
-# Mark only directories created/used by participating build scripts. Custom paths are never adopted.
-mark_build_cache() {
-  printf 'v1\n' > "$1/legato-managed"
-  touch "$1/legato-last-used"
-}
+# One fixed, overwritten DerivedData directory per build target, shared by every checkout:
+# <cache>/derived/<target>, plus the single shared <cache>/SourcePackages. Builds of one target
+# serialize on that directory's lock; the pruner keeps nothing else under the cache dir.
+LEGATO_BUILD_TARGETS=(ios-device ios-sim mac gate)
+derived_dir() { echo "$(legato_cache_dir)/derived/$1"; }
+packages_dir() { echo "$(legato_cache_dir)/SourcePackages"; }
 
 # Shared local gate/release paths. CI remains cold under RUNNER_TEMP.
-prepare_build_cache() { # <gate|mac>
+prepare_build_cache() { # <ios-device|ios-sim|mac|gate>
   if [ -n "${CI:-}" ]; then
     BUILD_WORK="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/legato-$1.XXXXXX")"
     BUILD_PACKAGES="$BUILD_WORK/packages"
     return
   fi
-  local cache
-  cache="$(legato_cache_dir)"
-  bash scripts/dev/prune-build-caches.sh --managed-only --delete
-  BUILD_WORK="$cache/build-derived/$1-$(pwd -P | shasum | cut -c1-12)"
-  BUILD_PACKAGES="$cache/SourcePackages"
-  mkdir -p "$(dirname "$BUILD_WORK")" "$cache"
+  BUILD_WORK="$(derived_dir "$1")"
+  BUILD_PACKAGES="$(packages_dir)"
+  mkdir -p "$(dirname "$BUILD_WORK")" "$(dirname "$BUILD_PACKAGES")"
   lock_dir "$BUILD_WORK"
   BUILD_CACHE_LOCKED=1
   mkdir -p "$BUILD_WORK"
-  mark_build_cache "$BUILD_WORK"
   lock_dir "$BUILD_PACKAGES"
   BUILD_PACKAGES_LOCKED=1
   mkdir -p "$BUILD_PACKAGES"
-  mark_build_cache "$BUILD_PACKAGES"
 }
 finish_build_cache() {
   if [ -n "${BUILD_PACKAGES_LOCKED:-}" ]; then
-    touch "$BUILD_PACKAGES/legato-last-used"
     unlock_dir "$BUILD_PACKAGES"
+    BUILD_PACKAGES_LOCKED=""
   fi
   if [ -n "${BUILD_CACHE_LOCKED:-}" ]; then
-    touch "$BUILD_WORK/legato-last-used"
     unlock_dir "$BUILD_WORK"
-    bash scripts/dev/prune-build-caches.sh --managed-only --delete
+    BUILD_CACHE_LOCKED=""
   elif [ -n "${CI:-}" ] && [ -n "${BUILD_WORK:-}" ]; then
     rm -rf "$BUILD_WORK"
   fi

@@ -1,0 +1,74 @@
+{
+  "productSource": "90de466757a08bde167847a9a28d68f6afb009cf",
+  "sessions": [
+    {
+      "session": "2A6C6132-A866-43B8-A416-93CBB6850FC4",
+      "phases": [
+        "sentence",
+        "sentence",
+        "pause"
+      ],
+      "models": [
+        "claude-haiku-5-5"
+      ],
+      "requests": 6,
+      "usage": {
+        "cache_read_input_tokens": 57696,
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 29144,
+        "output_tokens": 1036
+      },
+      "maxStartedBeforeUsageOrCancel": 1,
+      "agentEdits": 2,
+      "firstEditSeconds": 15.780754666673602
+    },
+    {
+      "session": "ED08CC06-A2C5-47A1-BC91-D6DCA4B42AC0",
+      "phases": [
+        "quick",
+        "pause"
+      ],
+      "models": [
+        "claude-haiku-5-5"
+      ],
+      "requests": 4,
+      "usage": {
+        "output_tokens": 1841,
+        "cache_creation_input_tokens": 24701,
+        "input_tokens": 10,
+        "cache_read_input_tokens": 27977
+      },
+      "maxStartedBeforeUsageOrCancel": 1,
+      "agentEdits": 2,
+      "firstEditSeconds": 11.925150458322605
+    },
+    {
+      "session": "C6605911-1D0F-480C-9491-CEA4F2142775",
+      "phases": [
+        "quick",
+        "pause",
+        "final"
+      ],
+      "models": [
+        "claude-haiku-5-5"
+      ],
+      "requests": 5,
+      "usage": {
+        "input_tokens": 16,
+        "cache_creation_input_tokens": 49053,
+        "cache_read_input_tokens": 79958,
+        "output_tokens": 2344
+      },
+      "maxStartedBeforeUsageOrCancel": 1,
+      "agentEdits": 2,
+      "firstEditSeconds": 11.4810752083431
+    }
+  ],
+  "totals": {
+    "cache_read_input_tokens": 165631,
+    "input_tokens": 44,
+    "cache_creation_input_tokens": 102898,
+    "output_tokens": 5221
+  },
+  "verifiedHighTierUpperUSD": 0.12425405
+}

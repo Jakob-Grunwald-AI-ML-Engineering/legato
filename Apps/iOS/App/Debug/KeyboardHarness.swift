@@ -263,7 +263,7 @@ struct KeyboardHarness: View {
                     let length = geometry.size.height
                     VStack(spacing: 0) {
                         HarnessTextView(textView: model.document.textView).padding(8)
-                        keyboard.frame(height: KeyGeometry.height(landscape: true)).background(Self.backdrop)
+                        keyboard.frame(height: ComposerKeyboardLayout.typingHeight(landscape: true) + ComposerKeyboardLayout.additionalComposerHeight).background(Self.backdrop)
                     }
                     .frame(width: length, height: geometry.size.width)
                     .background(.background)
@@ -284,14 +284,16 @@ struct KeyboardHarness: View {
             }
         }
         .preferredColorScheme(scheme)
-        .onAppear { model.appeared() }
-        .onDisappear { model.controller.disappeared() }
+        // In system-field mode the real extension is the keyboard; a second in-process controller would write
+        // its own (composer) presence over the extension's and flip the host's surface.
+        .onAppear { if !Self.flag("LegatoHarnessSystemField") { model.appeared() } }
+        .onDisappear { if !Self.flag("LegatoHarnessSystemField") { model.controller.disappeared() } }
     }
 
-    /// The strip asks for its own height (`StripHeight.requested`), the full keyboard for the portrait one.
+    /// The harness uses the extension's portrait heights: ABC's, or the composer's share of the screen.
     private var portraitHeight: CGFloat {
-        model.controller.mode == .strip
-            ? CGFloat(StripHeight.requested(row: model.controller.stripHeight)) : KeyGeometry.height(landscape: false)
+        if model.controller.surface == .typing { return CGFloat(KeyboardHeights.height(landscape: false)) }
+        return CGFloat(ComposerKeyboardLayout.height(screenHeight: Double(UIScreen.main.bounds.height), systemOverhead: 92))
     }
 
     private var keyboard: some View {

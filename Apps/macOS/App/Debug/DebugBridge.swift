@@ -1,92 +1,89 @@
 #if LEGATO_INTERNAL
-import AppKit
 import Foundation
-import LegatoAppServices
 import LegatoDevHarness
+import LegatoAppServices
+import AppKit
 
 @MainActor enum DebugBridge {
-    typealias Command = BridgeCommand
-    private static let harness = DevHarness(root: root)
-    private static var started = false
-
-    /// Shared with ctl.sh --target mac. Each explicitly isolated app may supply its own absolute root.
     static var root: URL {
         if let path = ProcessInfo.processInfo.environment["LEGATO_MAC_ROOT"], !path.isEmpty {
             return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
         }
-        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Legato/debug-bridge", isDirectory: true)
+        return URL.cachesDirectory.appending(path: "Legato/debug-bridge", directoryHint: .isDirectory)
     }
-    private static var isEnabled: Bool {
-        #if DEBUG
-        true
-        #else
-        ["YES", "TRUE", "1"].contains((UserDefaults.standard.string(forKey: "LegatoDebugBridge") ?? "").uppercased())
-        #endif
-    }
+    private static let harness = DevHarness(root: root)
+    private static var started = false
     static func start() {
-        guard !started, isEnabled else { return }
-        // Register closures only: bootstrap is still initializing the singleton's composition.
-        registerBuiltins()
+        guard !started else { return }
+        #if !DEBUG
+        guard UserDefaults.standard.bool(forKey: "LegatoDebugBridge") else { return }
+        #endif
         started = true
-        harness.start()
-    }
-    static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
-    private static func registerBuiltins() {
-        harness.register("state") { _ in MacAppController.shared.debugState() }
-        harness.register("set-setting") { command in
-            guard command.args.count == 2 else { throw Usage.error("set-setting <key> <value>") }
-            try MacAppController.shared.debugSetSetting(command.args[0], value: command.args[1])
-            return ["key": command.args[0]]
+        harness.register("state") { _ in
+            #if DEBUG
+            return MacAppController.shared.composer.debugState
+            #else
+            return ["status": MacAppController.shared.composer.status]
+            #endif
         }
-        for (name, action) in [("toggle", MacAppController.DebugControl.toggle), ("stop", .stop),
-                               ("interrupt", .interrupt), ("hotkey-start", .start),
-                               ("meeting-start", .meetingStart), ("meeting-stop", .meetingStop)] {
+        #if DEBUG
+        for name in ComposerSession.debugCommands {
             harness.register(name) { command in
-                try MacAppController.shared.debugControl(action, id: command.id)
-                return ["accepted": true, "waitFor": "control.done"]
+                if name == "composer-debug-seed" { return try await MacAppController.shared.seedDebugComposer(command.args) }
+                if name == "composer-debug-start" { return try await MacAppController.shared.startDebugComposer(command.args) }
+                return try await MacAppController.shared.composer.debugControl(name, args: command.args)
             }
         }
-        harness.register("session-probe") { command in
-            guard command.args.count <= 1, let mode = SessionProbeMode(rawValue: command.args.first ?? "foreground") else {
-                throw Usage.error("session-probe [foreground] (iOS background modes are unavailable on Mac)")
-            }
-            guard let id = try SessionProbe.start(commandID: command.id, mode: mode,
-                status: { DebugMessages.shared.setStatus($0) }, block: { DebugMessages.shared.setBlocking($0) },
-                isBlocked: { DebugMessages.shared.blocking }, emit: { id, event, fields in emit(id: id, event: event, fields) }) else {
-                throw SessionProbeError.busy
-            }
-            return ["accepted": true, "probeID": id.uuidString, "waitFor": "session.probe.done"]
+        harness.register("composer-import-keys") { command in
+            guard command.args == ["credentials.json"] else { throw Usage.invalid }
+            return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))
         }
+        // Mac dictation hotkey without speech: a finalized line (or live partial) enters where Soniox lines do and
+        // is cleaned and typed into the focused field for real. The first one begins a microphone-free session
+        // (the field in front is captured then); `dictation-debug-stop` ends it.
+        harness.register("dictation-debug-line") { command in
+            guard command.args.count == 1 else { throw Usage.invalid }
+            try await MacAppController.shared.dictation.debugLine(command.args[0])
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-debug-tail") { command in
+            guard command.args.count <= 1 else { throw Usage.invalid }
+            try await MacAppController.shared.dictation.debugTail(command.args.first ?? "")
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-debug-stop") { _ in
+            await MacAppController.shared.dictation.debugStop()
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-toggle") { _ in
+            MacAppController.shared.toggleDictation()
+            try await Task.sleep(for: .milliseconds(300))
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-state") { _ in MacAppController.shared.dictation.debugState }
+        #endif
+        harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "starting"] }
+        harness.register("stop") { _ in MacAppController.shared.stopComposer(); return ["status": "stopping"] }
+        harness.register("composer-insert") { _ in MacAppController.shared.insertComposer(origin: .debugBridge); return nil }
+        harness.register("composer-cancel") { _ in MacAppController.shared.cancelComposer(); return nil }
+        harness.register("session-probe") { _ in try SessionProbe.start(); return nil }
         harness.register("say") { command in
-            guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.error("say <text>") }
-            DebugMessages.shared.say(id: command.id, text: parsed.text)
-            return nil
+            guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }
+            DebugMessages.shared.say(id: command.id, text: parsed.text); return nil
         }
         harness.register("ask") { command in
-            guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: true) else {
-                throw Usage.error("ask <text> <choice>... [--timeout s] [--sound]")
-            }
+            guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: true) else { throw Usage.invalid }
             DebugMessages.shared.ask(id: command.id, text: parsed.text, choices: parsed.choices, timeout: parsed.timeout, sound: parsed.sound)
             return ["waitFor": "reply"]
         }
-        harness.register("status") { command in
-            guard command.args.count == 1 else { throw Usage.error("status <text>") }
-            DebugMessages.shared.setStatus(command.args[0])
-            return nil
-        }
-        harness.register("block") { command in
-            guard command.args.count == 1, ["on", "off"].contains(command.args[0]) else { throw Usage.error("block on|off") }
-            DebugMessages.shared.setBlocking(command.args[0] == "on")
-            return ["blocking": DebugMessages.shared.blocking]
-        }
+        harness.register("status") { command in DebugMessages.shared.setStatus(command.args.first); return nil }
+        harness.register("block") { command in DebugMessages.shared.setBlocking(command.args.first == "on"); return nil }
         harness.register("clear") { _ in DebugMessages.shared.clear(); return nil }
         harness.register("foreground") { _ in NSApp.unhide(nil); NSApp.activate(); return nil }
         harness.register("background") { _ in NSApp.hide(nil); return nil }
+        harness.start()
     }
-    enum Usage: Error, CustomStringConvertible {
-        case error(String)
-        var description: String { switch self { case .error(let text): text } }
-    }
+    static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
+    enum Usage: Error { case invalid }
 }
 #endif

@@ -142,3 +142,17 @@ public struct EngineAlternativesSource: AlternativeSource {
         }
     }
 }
+
+/// Exact mishearings learned from choices or repeated cleanup runs outrank fuzzy matches.
+public struct CorrectionHistorySource: AlternativeSource {
+    private let snapshot: VocabularySnapshot
+    public init(snapshot: VocabularySnapshot) { self.snapshot = snapshot }
+    public func candidates(for word: String, context: AlternativeContext) async -> [ScoredCandidate] {
+        let key = VocabularyEntry.foldedKey(for: word)
+        let learned = snapshot.entries.filter { !$0.blocked && $0.aliases.contains(where: { VocabularyEntry.foldedKey(for: $0) == key }) }
+            .map { ScoredCandidate(text: $0.text, score: 1, source: .vocabulary) }
+        let pending = snapshot.pendingFixes.filter { VocabularyEntry.foldedKey(for: $0.raw) == key && !snapshot.isBlocked($0.target) }
+            .map { ScoredCandidate(text: $0.target, score: 0.95, source: .vocabulary) }
+        return learned + pending
+    }
+}

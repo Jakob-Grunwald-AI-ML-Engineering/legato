@@ -4,14 +4,21 @@ import SwiftUI
 /// Shows the current hotkey and records a new one: a lone modifier (Right ⌘) or a combination.
 struct HotkeyRecorderView: View {
     @Environment(MacAppController.self) private var controller
-    var target: MacAppController.HotkeyTarget = .dictation
+    var target = MacAppController.HotkeyTarget.panel
 
-    private var spec: HotkeySpec? { target == .dictation ? controller.settings.hotkey : controller.settings.muteHotkey }
-    private var isRecording: Bool { controller.isRecordingHotkey && controller.recordingTarget == target }
+    private var spec: HotkeySpec? { target == .panel ? controller.settings.hotkey : controller.settings.dictationHotkey }
+    private var isRecording: Bool { controller.recordingTarget == target }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 12) {
             recorder
+            if isRecording {
+                Label("Listening for a shortcut…", systemImage: "record.circle")
+                    .font(.callout).foregroundStyle(.tint)
+            } else if !controller.permissions.hotkeyTapActive {
+                Text("Shortcut recording is unavailable. Allow Accessibility and Input Monitoring, then reopen Legato if needed.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if !isRecording, let warning = spec?.warning {
                 Label(warning.message, systemImage: "exclamationmark.triangle")
                     .font(.caption)
@@ -26,16 +33,15 @@ struct HotkeyRecorderView: View {
             Text(label)
                 .font(.system(.body, design: .rounded, weight: .medium))
                 .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .frame(minWidth: 140)
+                .padding(.vertical, 10)
+                .frame(minWidth: 160)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityLabel("Current \(target == .panel ? "composer" : "dictation") shortcut: \(label)")
             if isRecording {
-                Button("Cancel") { controller.cancelRecording() }
+                Button("Cancel") { controller.cancelRecording() }.keyboardShortcut(.cancelAction)
             } else {
-                Button(spec == nil ? "Record" : "Change") { controller.beginRecording(target) }
-                if target == .mute, spec != nil {
-                    Button("Clear") { controller.settings.muteHotkey = nil }
-                }
+                Button(spec == nil ? "Record shortcut" : "Change shortcut") { controller.beginRecording(target) }
+                    .disabled(!controller.permissions.hotkeyTapActive)
             }
         }
     }

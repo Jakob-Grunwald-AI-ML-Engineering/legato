@@ -1,0 +1,91 @@
+{
+  "productSource": "1bc85ecd403eedd9e3cc2bd561a0b597e8b70c3d",
+  "signedBuilds": {
+    "mac": true,
+    "ios": true,
+    "strictCodesign": true
+  },
+  "mac": {
+    "bundle": "de.gruenwald.legato.mac.composer-debug",
+    "hotkeysDisabled": true,
+    "installed": true,
+    "finalStatus": "paused",
+    "busy": false,
+    "microphoneLeaseActive": false
+  },
+  "phone": {
+    "finalArtifactReady": true,
+    "finalArtifactInstalled": false,
+    "lastKnownInstalledSource": "cf8a6e6963f80c26f8d26c862cae9dea968f3c16",
+    "heldReason": "User chose to keep active session running",
+    "noInteractionsAfterHold": true
+  },
+  "manualComments": {
+    "globalQuietSeconds": 3,
+    "globalQuietDispatched": false,
+    "globalBodyReadable": true,
+    "globalSpeechFollowedToEnd": true,
+    "globalDiscardRetainedDraft": true,
+    "quoteAnchoredWithoutOverlap": true,
+    "quoteQuietDispatched": false,
+    "nativeQuoteWandChangedOnlyRequestedDay": true
+  },
+  "insert": {
+    "label": "native-5000-word-insert",
+    "targetExactOnce": true,
+    "targetWords": 5000,
+    "targetCharacters": 43889,
+    "draftEmpty": true,
+    "status": "idle",
+    "successAcknowledged": true,
+    "nativeClickThroughStateSeconds": 1.1820346669992432,
+    "error": "",
+    "micLease": false,
+    "window": {
+      "Height": 440,
+      "Width": 580,
+      "X": 670,
+      "Y": 38
+    }
+  },
+  "guardedInsert": {
+    "label": "guarded-insert-retains-draft",
+    "draftRetained": true,
+    "targetNotOverwritten": true,
+    "noSuccessAcknowledgement": true,
+    "status": "paused",
+    "busy": false,
+    "micLease": false
+  },
+  "historicalStress": {
+    "source": "9876bc1",
+    "words": 5000,
+    "characters": 43889,
+    "paragraphSeedSeconds": 1.7218713339825626,
+    "multiLineSeedSeconds": 9.361162624991266,
+    "multiLineCount": 250,
+    "reverseAgentEditSeconds": 17.002577000006568,
+    "reverseExact": true,
+    "singleUndoRestoredExact": true,
+    "rssPointSamplesMiB": [
+      194,
+      231
+    ],
+    "physicalExtensionProof": false
+  },
+  "providers": {
+    "syntheticOnly": true,
+    "microphonesStarted": 0,
+    "newSonioxStreams": 0,
+    "addedCleanupRequests": 2,
+    "addedWriterRequests": 6,
+    "cumulativeClaudeConservativeUpperUSD": 0.7464997,
+    "approvedCapUSD": 2
+  },
+  "gaps": [
+    "Physical iOS layout/predictions/manual comments/stress not exercised; user kept active session",
+    "Large reverse edit takes17 seconds on Mac",
+    "No matching Legato crash/Jetsam report obtained",
+    "Reduce Motion runtime untested"
+  ]
+}

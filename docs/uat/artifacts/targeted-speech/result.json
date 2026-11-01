@@ -1,0 +1,12 @@
+{
+  "sessionID": "374B2E3A-E0E5-4AA1-93F0-C66140A9ED03",
+  "selectedLineID": "L7E15A546-A211-4348-95C4-7087ECE0C615",
+  "selectedWordID": "0E25E938-422C-47D5-9D18-D22452B46C2C",
+  "text": "The meeting with Morgan is tomorrow at ten.",
+  "lineCount": 1,
+  "tail": "",
+  "error": "",
+  "inputSource": "debug.transcriber",
+  "microphoneLeaseActive": false,
+  "passed": true
+}

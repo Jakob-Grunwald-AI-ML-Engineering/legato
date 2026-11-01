@@ -27,6 +27,14 @@ Use the same target and identity environment for every command. State is isolate
 
 Bundle/group overrides route the CLI; they do not rewrite signing, entitlements, URL schemes or runtime identity. An isolated physical test composition must configure all app/keyboard/widget identities consistently. This session's isolated composition uses bundle `de.gruenwald.legato.reliable-harness`, group `group.de.gruenwald.legato.reliable-harness` and URL scheme `legatoharness94`.
 
+## Physical-device screenshots
+
+`bash scripts/device/native-control.sh screenshot /tmp/phone.png` captures the entire physical display, including the foreground host, actual system/custom keyboard and safe areas. `bash scripts/device/native-control.sh record /tmp/phone.mp4 10` records a bounded screen video. Both use `LEGATO_DEVICE` and never launch, install or activate an app or simulator. Coordinate the visible state with anyone using the phone before capture; avoid key/settings screens.
+
+These commands wrap Apple’s `devicectl device capture` service, verified with Xcode 27.2 and a wireless physical iPhone (1206 × 2622 PNG). The project toolchain pin stays unchanged; an older selected Xcode without this command produces a clear capability error. Use the selected Xcode’s `xcrun devicectl device capture screenshot --help` for its native options. Native touch controls use a separate signed `LegatoNativeControl` XCTest runner: `tree`, `tap X Y`, `hold X Y SECONDS`, `swipe X1 Y1 X2 Y2` and `label "Accessibility label"`. Coordinates are screen points, not screenshot pixels (the current iPhone is 402 × 874 points, screenshot scale 3). `keyboard` long-presses the globe at (42, 820) and chooses the native “Legato” menu item on that iPhone. Every invocation activates the already running `LEGATO_BUNDLE` (default `de.gruenwald.legato`), performs one action and exports the real accessibility tree plus an `XCUIScreen` screenshot beneath `.claude/tmp/native-control` (override `LEGATO_NATIVE_OUTPUT`).
+
+The runner has no target-app dependency, never reinstalls or launches Legato, and refuses a stopped target app. Xcode may briefly foreground its runner; coordinate exclusive phone ownership for touch commands and restore the desired field/keyboard before visual acceptance. `LEGATO_NATIVE_BUILD` selects its incremental build directory. Only the standalone test runner is provisioned/installed. These are manual UAT controls, outside the CI suite.
+
 ## Commands and lifecycle
 
 `send`, `wait`, `log`, `say`, `ask`, `status`, `block`, `clear` and `pull` use the same protocol on all targets. `commands` lists the running registry; platform-specific operations may return an explicit error. `pull --group <relative-path>` selects the App Group. Absolute paths and parent traversal are rejected.
@@ -55,7 +63,7 @@ Event-name waits observe events added after their initial snapshot. Prefer comma
 
 ## Checks and evidence
 
-Run `bash scripts/device/tests/ctl-test.sh` for CLI fixtures and `LEGATO_STUB_DEPS=1 swift test --filter LegatoDevHarnessTests` for the shared contract. Fixtures substitute external tool boundaries; they do not prove physical device behavior. `scripts/e2e/ios-sim.sh` now sends triggers through this CLI and retains its existing scenario assertions.
+Run `bash scripts/device/tests/ctl-test.sh` for CLI fixtures and `swift test --filter LegatoDevHarnessTests` for the shared contract. Fixtures substitute external tool boundaries; they do not prove physical device behavior. `scripts/e2e/ios-sim.sh` now sends triggers through this CLI and retains its existing scenario assertions.
 
 `LEGATO_SIMULATOR=<booted-test-UDID> bash scripts/device/tests/sim-smoke.sh` drives an already installed internal build: held preparation/release/cancellation, probe refusal, native AX message dismissal/reply/queued timeout, overlay hit testing, clear and probe terminal routing. It uses a scripted engine for dictation. It snapshots and restores the three preferences changed by fake-engine launch flags, including on failure. Its output directory preserves command IDs, native accessibility trees, actual app logs and completion records. Mac overlay verification is `scripts/device/tests/mac-overlay-smoke.sh`; it is a native-app check, separate from fixtures.
 
@@ -72,3 +80,43 @@ Native Mac verification passed Foundation Models and installed Core ML measureme
 Native validation used the available Xcode 27.2; the pinned Xcode 26.6 was unavailable locally. Toolchain pins were preserved. Full package suites remain the protected merge queue's gate; a green PR report alone does not establish that gate.
 
 Ordinary iOS and Mac Release builds passed the internal endpoint/overlay/probe-adapter exclusion scan with valid source controls (three iOS Mach-O files, one Mac executable). The existing iOS fake/e2e exclusion gate also passed. Repeat these checks with `bash scripts/ci/release.sh check` and `bash scripts/ci/release.sh mac-release`; `mac-build` retains its separate Debug compilation role. The scanner fixture suite rejects leaked embedded endpoints, stale controls and empty/resource-only bundles.
+
+### Composer transcriber bypass (Debug builds)
+
+Use the real iPhone host/keyboard or Mac composer with synthetic **Soniox output**, while keeping the real word merger, segmenter, hint binder, alternatives, Claude agents, document and UI. This validates composer behavior; it does not validate ASR, microphone quality or audio timing. No Soniox credentials, socket, microphone or audio artifact is needed by default. A Claude key is required; finalized segments and mic-off can make real paid Claude requests.
+
+Mac credential storage requires a development-signed build with its application-identifier entitlement. Build it with `LEGATO_MAC_SIGNED=1 LEGATO_BUNDLE=de.gruenwald.legato.mac.composer-debug scripts/device/ctl.sh --target mac build` (actual Mac destination allows Xcode's device registration/profile creation). Set `LEGATO_APP` to that build's `Debug/Legato.app` and an isolated `LEGATO_MAC_ROOT` when launching and controlling it. The ordinary unsigned Mac compile cannot access the Data Protection Keychain. Launch the isolated UAT app with `launch -LegatoDisableHotkeys YES` to prevent ambient global shortcuts from starting ordinary microphone sessions while agents use bridge controls. This launch-only flag is Debug-only.
+
+Import credentials once without putting secrets in arguments, launch defaults or bridge logs:
+
+```bash
+scripts/device/ctl.sh --target mac import-keys /private/path/credentials.json
+```
+
+The local JSON file must be mode `0600` and contain `anthropic` and `soniox` strings. The tool copies it to the app's private bridge directory; the host saves the existing keychain services and deletes its copy, returning only storage booleans. The local source remains yours to remove. Import does not start any client. Use `--target device` for the phone. Only one build/instance per target should consume that bridge inbox.
+
+Send commands sequentially and wait for each command ID before continuing:
+
+```bash
+ctl=scripts/device/ctl.sh
+id=$($ctl --target mac send composer-debug-start message)
+$ctl --target mac wait "$id"
+id=$($ctl --target mac send composer-debug-text 'Guten Morgen' partial 0)
+$ctl --target mac wait "$id"
+id=$($ctl --target mac send composer-debug-frame '{"tokens":[{"text":"Guten","is_final":true,"start_ms":0,"end_ms":200,"confidence":0.4,"language":"de"},{"text":" Morgen","is_final":true,"start_ms":200,"end_ms":400,"confidence":0.98,"language":"de"},{"text":"<end>","is_final":true}]}')
+$ctl --target mac wait "$id"
+id=$($ctl --target mac send composer-state)
+$ctl --target mac wait "$id"
+```
+
+For fixtures, pass the file content as the single JSON argument: `send composer-debug-frame "$(cat /path/frame.json)"`. These are transcript data, never credential files. Frame JSON uses Soniox's `tokens` array with `text`, `is_final`, optional `confidence`, `language`, `start_ms` and `end_ms`. Partial frames replace the speculative tail; final frames append final tokens. Use `<end>` to close a segment. `composer-stop` runs mic-off, final-token drain and the real final pass; `<fin>` and `finished` are reserved for that lifecycle. Text convenience accepts `<text> partial|final <start_ms>` and generates spaced word tokens with 200 ms duration, confidence 0.95 and language de. Use raw JSON for precise metadata.
+
+ABC dictation route (iOS Debug builds only; the keyboard must be open on the ABC typing surface, see `keyboard-tap`): `dictation-debug-line "<text>"` delivers one finalized line to the dictation route where a Soniox segment would arrive (cleanup, link, keyboard typing and the field run for real), and `dictation-debug-tail "<partial>"` sets the live partial (empty clears it). Both fail with a clear error on any other surface.
+
+Mac dictation hotkey (Debug builds only): `dictation-debug-line "<text>"` and `dictation-debug-tail "<partial>"` work like the iOS pair, but start a microphone-free dictation session on the field in front when none runs (no keys needed; the line is cleaned with Claude when a key exists, else typed raw with a key notice). `dictation-debug-stop` ends that session, `dictation-toggle` runs the real hotkey path, `dictation-state` reports phase, pending lines, outbox and fallbacks.
+
+`composer-state` and action replies include `sessionID`, `inputSource`, `audioOrigin`, `microphoneLeaseActive`, `status`, `tail`, `pendingLineIDs`, and `document` with real line/word IDs, versions, confidence, language, pins and alternatives. Injection acknowledges the frame being decoded/published; Claude work continues asynchronously and must be polled through state. The session's `Documents/sessions/<sessionID>/room.jsonl` records `input.source` and every full injected frame with `inputSource: debug.transcriber`. No fake audio file is created.
+
+Other controls use actual session actions: `composer-tap <lineID> <wordID> <offset_ms>`, `composer-pick <lineID> <wordID> <text>`, `composer-mode message|email|prompt|note`, `composer-undo`, `composer-cancel`, and `composer-insert-host`. Tap offsets use exactly `audioOrigin + offset_ms/1000`, sharing the injected token clock without sleeps. Query state for targets, tap, then inject correction speech at a matching offset. `composer-insert-host` immediately accepts the host document and cancels remaining work; it does **not** prove keyboard text-proxy delivery. On Mac, `composer-insert` uses the existing focused-field/paste delivery path. For actual phone keyboard Insert proof, launch the existing native field harness (`-LegatoKeyboardHarness YES -LegatoHarnessSystemField YES`) and tap the real keyboard button; `harness-status` is only the separate in-process keyboard harness.
+
+Foreground is the default phone setup. For another app's keyboard, `composer-debug-start message microphone-lease` explicitly holds the existing real microphone lease for host liveness, without forwarding or recording audio. `microphoneLeaseActive` reports it. That path still requires microphone permission; do not describe it as audio-free background execution. Without a lease, iOS can suspend a background host. Normal mic starts still use Soniox and require its key. Controls and key import are unavailable in Release builds.

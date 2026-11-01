@@ -20,6 +20,7 @@ public enum HostApplyDecision: Sendable, Equatable {
         case otherTarget
         /// No field is bound (the keyboard is appearing, or the host's field is gone).
         case noDocument
+        case changedDocument
     }
 
     public static func decide(
@@ -31,6 +32,7 @@ public enum HostApplyDecision: Sendable, Equatable {
         if cursor?.runID != host.runID, host.phase == .idle, !host.insertIsFresh(now: now) { return .skip(.unseenFinal) }
         guard host.target == .keyboard else { return .skip(.otherTarget) }
         guard documentID != nil else { return .skip(.noDocument) }
+        if let expected = host.insertDocumentID, expected != documentID { return .skip(.changedDocument) }
         return .apply
     }
 }

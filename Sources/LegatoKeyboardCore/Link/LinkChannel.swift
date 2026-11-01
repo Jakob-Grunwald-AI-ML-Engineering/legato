@@ -8,6 +8,9 @@ public enum LinkChannel {
 
     /// App Group `UserDefaults` keys.
     public enum Key {
+        public static let composer = "link.composer"
+        public static let composerAck = "link.composer.ack"
+        public static let composerIntentPrefix = "link.composer.intent."
         /// app -> keyboard: `HostState`.
         public static let host = "link.host"
         /// keyboard -> app: `KeyboardRequest`.
@@ -24,10 +27,16 @@ public enum LinkChannel {
         public static let refined = "link.refined"
         /// keyboard -> app: one `ChoiceRecord` per key, `link.choice.<uuid>` (the app removes each once read).
         public static let choicePrefix = "link.choice."
+        /// app -> keyboard: `DictationPublication`.
+        public static let dictation = "link.dictation"
+        /// keyboard -> app: `DictationAck`.
+        public static let dictationAck = "link.dictation.ack"
     }
 
     /// Darwin notification names, one per key.
     public enum Note {
+        public static let composer = "\(RuntimeIdentity.current.notificationNamespace).link.composer"
+        public static let composerIntent = "\(RuntimeIdentity.current.notificationNamespace).link.composer.intent"
         public static let host = "\(RuntimeIdentity.current.notificationNamespace).link.host"
         public static let request = "\(RuntimeIdentity.current.notificationNamespace).link.request"
         public static let ack = "\(RuntimeIdentity.current.notificationNamespace).link.ack"
@@ -36,6 +45,8 @@ public enum LinkChannel {
         public static let refine = "\(RuntimeIdentity.current.notificationNamespace).link.refine"
         public static let refined = "\(RuntimeIdentity.current.notificationNamespace).link.refined"
         public static let choice = "\(RuntimeIdentity.current.notificationNamespace).link.choice"
+        public static let dictation = "\(RuntimeIdentity.current.notificationNamespace).link.dictation"
+        public static let dictationAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.ack"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.

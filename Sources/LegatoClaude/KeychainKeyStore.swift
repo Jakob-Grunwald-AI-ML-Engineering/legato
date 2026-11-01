@@ -13,12 +13,14 @@ public struct KeychainKeyStore: APIKeyStore {
         public let status: OSStatus
     }
 
+    private let serviceName: String
     private let account: String
     private let accessGroup: String?
 
     /// - Parameter accessGroup: the Keychain access group to share the key through (the phone app and its
     ///   extensions); `nil` keeps it private to the app.
-    public init(account: String = "api-key", accessGroup: String? = nil) {
+    public init(service: String = Self.service, account: String = "api-key", accessGroup: String? = nil) {
+        self.serviceName = service
         self.account = account
         self.accessGroup = accessGroup
     }
@@ -26,7 +28,7 @@ public struct KeychainKeyStore: APIKeyStore {
     private var identity: [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
             kSecUseDataProtectionKeychain as String: true,
         ]

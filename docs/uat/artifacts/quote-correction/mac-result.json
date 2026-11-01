@@ -1,0 +1,65 @@
+{
+  "sessionID": "309D5267-E3A3-487D-ACAC-59597A89757E",
+  "hints": [
+    {
+      "event": "targeted.speech",
+      "captureID": "68DCDE88-2DBF-4849-93F6-0BDBE9797C2D",
+      "selectedQuote": "selected CSV field mappings.",
+      "lineID": "L72A64257-C1F3-4FFB-9E25-36269B598F9B",
+      "wordID": "C861525F-8882-444B-AD6E-3C33316B9BD6",
+      "endLineID": "L72A64257-C1F3-4FFB-9E25-36269B598F9B",
+      "endWordID": "0520CA58-1629-4E7F-A537-C602E0C73855",
+      "lineVersions": {
+        "L72A64257-C1F3-4FFB-9E25-36269B598F9B": 0
+      },
+      "text": "Use approved CSV column mappings.",
+      "tapTimestamp": 104610.34409116667,
+      "speechStart": 104678.101375875,
+      "speechEnd": 104679.101375875,
+      "seq": 245
+    },
+    {
+      "event": "targeted.speech",
+      "captureID": "225856A3-E8F1-4621-B840-21AB56FB7942",
+      "selectedQuote": "Casey",
+      "lineID": "L72A64257-C1F3-4FFB-9E25-36269B598F9B",
+      "wordID": "BF4F6C24-E2A1-4064-9D78-502CFCB541B2",
+      "endLineID": "L72A64257-C1F3-4FFB-9E25-36269B598F9B",
+      "endWordID": "BF4F6C24-E2A1-4064-9D78-502CFCB541B2",
+      "lineVersions": {
+        "L72A64257-C1F3-4FFB-9E25-36269B598F9B": 1
+      },
+      "text": "Use Riley instead.",
+      "tapTimestamp": 104834.83234791667,
+      "speechStart": 104835.018375875,
+      "speechEnd": 104835.61837587501,
+      "seq": 429
+    }
+  ],
+  "partial": {
+    "correctionDraft": "Use approved CSV column mappings.",
+    "busy": false,
+    "revision": 12,
+    "inputSource": "debug.transcriber",
+    "microphoneLeaseActive": false
+  },
+  "auto": {
+    "text": "Morgan reviews Project Atlas on Tuesday at 14:30.\nThe staging preview validates every imported row.\nProduction data must remain unchanged during the demonstration.\nAvery prepares the checklist before the morning review.\nCasey confirms the approved CSV column mappings.\nJordan tests the preview with a small sample.\nThe draft records all validation errors clearly.\nTaylor checks that no production writes are possible.\nThe team keeps the original file for comparison.\nA dry run happens only in the staging environment.\nThe afternoon review covers accessibility and keyboard controls.\nMorgan receives a short summary after the review.",
+    "busy": false,
+    "error": "",
+    "correctionDraft": null,
+    "revision": 13
+  },
+  "wand": {
+    "text": "Morgan reviews Project Atlas on Tuesday at 14:30.\nThe staging preview validates every imported row.\nProduction data must remain unchanged during the demonstration.\nAvery prepares the checklist before the morning review.\nRiley confirms the approved CSV column mappings.\nJordan tests the preview with a small sample.\nThe draft records all validation errors clearly.\nTaylor checks that no production writes are possible.\nThe team keeps the original file for comparison.\nA dry run happens only in the staging environment.\nThe afternoon review covers accessibility and keyboard controls.\nMorgan receives a short summary after the review.",
+    "busy": false,
+    "error": "",
+    "correctionDraft": null,
+    "revision": 14
+  },
+  "discard": {
+    "documentUnchanged": true,
+    "draft": null,
+    "busy": false
+  }
+}

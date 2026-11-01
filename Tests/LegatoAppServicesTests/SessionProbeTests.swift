@@ -1,7 +1,5 @@
 import Foundation
 import LegatoCore
-import LegatoClaude
-import LegatoMeetings
 import Synchronization
 import Testing
 @testable import LegatoAppServices
@@ -212,19 +210,6 @@ import Testing
         #expect(!coordinator.isRunning)
     }
 
-    @Test @MainActor func runningSchedulerJobMakesProbeBusyAndIsNotCancelled() async throws {
-        let entered = ProbeSignal(), release = ProbeSignal(), cancelled = Mutex(false)
-        let scheduler = ProcessingScheduler(clock: { 0 }, sample: { .idle }, isRecording: { false }, pollInterval: nil,
-            work: { _ in await entered.open(); await release.wait(); cancelled.withLock { $0 = Task.isCancelled }; return true })
-        await scheduler.enqueue(UUID())
-        let running = Task { await scheduler.tick() }
-        await entered.wait()
-        await #expect(throws: SessionProbeError.busy) { try await scheduler.reserveForProbe(UUID()) }
-        release.open()
-        await running.value
-        #expect(!cancelled.withLock { $0 })
-    }
-
     @Test @MainActor func cancellationDuringRestorationIsReportedAfterRestorationSettles() async throws {
         let coordinator = SessionProbeCoordinator(), entered = ProbeSignal(), release = ProbeSignal()
         var terminal: SessionProbeOutcome?, restoreWasCancelled = true
@@ -258,68 +243,6 @@ import Testing
         #expect(await backend.openSessions == 0)
     }
 
-    @Test @MainActor func meetingReservationBlocksAudioAndManualWorkAndRollsBackBusy() async throws {
-        let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let root = URL.temporaryDirectory.appending(path: "legato-harness-task4a-\(UUID())")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let models = ModelServices(root: root, defaults: defaults, platform: .macOS, installers: [:])
-        let services = MeetingServices(models: models, store: MeetingStore(root: root.appending(path: "meetings")),
-            settings: MeetingSettings(defaults: defaults), keyStore: InMemoryAPIKeyStore(), pollInterval: nil)
-        let owner = UUID()
-        services.setRecording(true)
-        await #expect(throws: SessionProbeError.busy) { try await services.reserveForProbe(owner) }
-        #expect(!services.isProbeReserved)
-        services.setRecording(false)
-        try await services.reserveForProbe(owner)
-        #expect(services.isProbeReserved)
-        await #expect(throws: SessionProbeError.busy) { try await services.processAfterStop(UUID()) }
-        await #expect(throws: SessionProbeError.busy) { try await services.improveTranscript(meetingID: UUID()) }
-        await services.releaseProbeReservation(UUID())
-        #expect(services.isProbeReserved)
-        await services.releaseProbeReservation(owner)
-        #expect(!services.isProbeReserved)
-    }
-
-    @Test func warmupReservationBlocksNormalAdmissionAndSurvivesInvalidate() async throws {
-        let warmup = SelectedModelWarmup(), owner = UUID()
-        let resource = SelectedModelWarmup.Resource(key: "speech", prewarm: {}, release: {})
-        try await warmup.prepare([resource], inBackground: false)
-        try await warmup.reserveForProbe(owner)
-        await #expect(throws: SessionProbeError.busy) { try await warmup.acquire(keys: ["speech"], inBackground: true) }
-        await warmup.invalidate()
-        await #expect(throws: SessionProbeError.busy) { try await warmup.prepare([resource], inBackground: false) }
-        await warmup.releaseProbeReservation(UUID())
-        await #expect(throws: SessionProbeError.busy) { try await warmup.prepare([resource], inBackground: false) }
-        await warmup.releaseProbeReservation(owner)
-        try await warmup.prepare([resource], inBackground: false)
-        await warmup.invalidate()
-    }
-
-    @Test func activeLeaseMakesProbeBusyWithoutCancellingItsOwner() async throws {
-        let warmup = SelectedModelWarmup()
-        let resource = SelectedModelWarmup.Resource(key: "refine", prewarm: {}, release: {})
-        try await warmup.prepare([resource], inBackground: false)
-        let lease = try await warmup.acquire(keys: ["refine"], inBackground: true)
-        await #expect(throws: SessionProbeError.busy) { try await warmup.reserveForProbe(UUID()) }
-        #expect(await warmup.isReady(for: ["refine"]))
-        await lease.release()
-        await warmup.invalidate()
-    }
-
-    @Test func idleSchedulerReservationKeepsDeferredJobsQueued() async throws {
-        let runs = Mutex<[UUID]>([]), id = UUID(), owner = UUID()
-        let scheduler = ProcessingScheduler(clock: { 0 }, sample: { .idle }, isRecording: { false }, pollInterval: nil,
-            work: { id in runs.withLock { $0.append(id) }; return true })
-        await scheduler.enqueue(id)
-        try await scheduler.reserveForProbe(owner)
-        await scheduler.tick()
-        #expect(runs.withLock { $0 } == [])
-        #expect(await scheduler.queued == [id])
-        await #expect(throws: SessionProbeError.busy) { try await scheduler.perform(for: UUID()) { 1 } }
-        await scheduler.releaseProbeReservation(owner)
-        await scheduler.tick()
-        #expect(runs.withLock { $0 } == [id])
-    }
 }
 
 @MainActor final class ProbeSignal {

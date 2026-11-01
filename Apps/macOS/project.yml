@@ -35,23 +35,15 @@ targets:
       - package: LegatoKit
         product: LegatoAudio
       - package: LegatoKit
-        product: LegatoAppleSpeech
-      - package: LegatoKit
         product: LegatoMac
-      # Downloadable models, engines and cleanup.
       - package: LegatoKit
-        product: LegatoModels
+        product: LegatoComposerUI
       - package: LegatoKit
-        product: LegatoFluidAudio
-      - package: LegatoKit
-        product: LegatoEngines
-      - package: LegatoKit
-        product: LegatoPostProcessing
+        product: LegatoAgent
+      # Shared composer runtime.
       - package: LegatoKit
         product: LegatoAppServices
       # Meeting notes: the session and store, and the opt-in Claude summary backend with its Keychain key.
-      - package: LegatoKit
-        product: LegatoMeetings
       - package: LegatoKit
         product: LegatoClaude
     settings:
@@ -67,6 +59,9 @@ targets:
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.device.audio-input: true
+        # Required by the Data Protection Keychain used for provider credentials.
+        com.apple.application-identifier: "$(DEVELOPMENT_TEAM).$(PRODUCT_BUNDLE_IDENTIFIER)"
+        com.apple.developer.team-identifier: "$(DEVELOPMENT_TEAM)"
     info:
       path: Gen/App-Info.plist
       properties:
@@ -76,6 +71,4 @@ targets:
         LSMinimumSystemVersion: "26.0"
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.productivity
-        NSMicrophoneUsageDescription: Legato records your voice to turn it into text. For meeting notes it also saves the meeting audio on this device.
-        NSSpeechRecognitionUsageDescription: Legato transcribes your speech on this device.
-        NSAudioCaptureUsageDescription: Legato records the audio your Mac plays, to transcribe the other side of a meeting on this device.
+        NSMicrophoneUsageDescription: Legato records your voice to compose text.

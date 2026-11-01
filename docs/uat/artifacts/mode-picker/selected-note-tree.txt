@@ -1,0 +1,105 @@
+Attributes: Application, 0x14f5bdcc0, pid: 61439, label: 'Legato'
+Element subtree:
+ →Application, 0x14f5bdcc0, pid: 61439, label: 'Legato'
+    Window (Main), 0x14f5bf840, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x14f5bf980, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x14f5bfac0, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x14f5bfc00, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x14f5bfd40, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x14f5bfe80, {{0.0, 0.0}, {402.0, 874.0}}
+                Other, 0x14f5bf200, {{16.0, 74.0}, {370.0, 324.0}}
+                  TextField, 0x14f5bf340, {{16.0, 74.0}, {370.0, 34.0}}, identifier: 'systemfield.document', placeholderValue: 'Initial field', Keyboard Focused
+                  TextField, 0x14f5bf5c0, {{16.0, 116.0}, {370.0, 34.0}}, identifier: 'systemfield.username', placeholderValue: 'username'
+                  SecureTextField, 0x14f5bf700, {{16.0, 158.0}, {370.0, 34.0}}, identifier: 'systemfield.password', placeholderValue: 'password'
+                  TextField, 0x14f5bf480, {{16.0, 200.0}, {370.0, 34.0}}, identifier: 'systemfield.newPassword', placeholderValue: 'newPassword'
+                  TextField, 0x14f5bde00, {{16.0, 242.0}, {370.0, 34.0}}, identifier: 'systemfield.oneTimeCode', placeholderValue: 'oneTimeCode'
+                  TextField, 0x14f5bdf40, {{16.0, 284.0}, {370.0, 34.0}}, identifier: 'systemfield.emailAddress', placeholderValue: 'emailAddress'
+                  TextField, 0x14f5be080, {{16.0, 326.0}, {370.0, 34.0}}, identifier: 'systemfield.prose', placeholderValue: 'prose'
+                  Button, 0x14f5be1c0, {{16.0, 368.0}, {370.0, 30.0}}, identifier: 'systemfield.releasePin', label: 'Release keyboard pin'
+                    StaticText, 0x14f5be300, {{128.0, 374.0}, {146.0, 18.0}}, label: 'Release keyboard pin'
+    Window, 0x14f5be440, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x14f5be580, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x14f5bef80, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x14f5bf0c0, {{0.0, 148.0}, {402.0, 726.0}}
+          Other, 0x14f5bee40, {{0.0, 148.0}, {402.0, 726.0}}, identifier: 'inputView'
+    Window, 0x14f5bed00, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x14f5bebc0, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x14f5bea80, {{0.0, 131.0}, {402.0, 743.0}}
+          Other, 0x14f5be940, {{0.0, 131.0}, {402.0, 743.0}}
+            Other, 0x14f5be800, {{0.0, 131.0}, {402.0, 743.0}}
+              Other, 0x14f5be6c0, {{0.0, 131.0}, {402.0, 743.0}}
+          Other, 0x14f59cb40, {{0.0, 148.0}, {402.0, 651.0}}
+            Other, 0x14f59d7c0, {{0.0, 148.0}, {402.0, 651.0}}
+              Other, 0x14f59d2c0, {{0.0, 148.0}, {402.0, 651.0}}
+                Other, 0x14f59d180, {{0.0, 148.0}, {402.0, 651.0}}
+                  Other, 0x14f59d040, {{0.0, 148.0}, {402.0, 651.0}}
+                    Other, 0x14f59d400, {{0.0, 148.0}, {402.0, 651.0}}
+                      Other, 0x14f59cdc0, {{0.0, 148.0}, {402.0, 651.0}}
+                        Other, 0x14f59cc80, {{0.0, 148.0}, {402.0, 651.0}}
+                          Other, 0x14f59c280, {{0.0, 148.0}, {402.0, 651.0}}
+                            Other, 0x14f59ca00, {{0.0, 148.0}, {402.0, 651.0}}
+                              Other, 0x14f59c8c0, {{0.0, 148.0}, {402.0, 651.0}}
+                                Other, 0x14f59c780, {{0.0, 148.0}, {402.0, 28.0}}, label: 'Composer size', value: Full
+                                ScrollView, 0x14f59c640, {{0.0, 176.0}, {402.0, 569.0}}
+                                  Other, 0x14f59c500, {{0.0, 176.0}, {402.0, 295.3}}
+                                    StaticText, 0x14f59c140, {{16.0, 192.0}, {68.0, 24.3}}, label: 'Hi Ercan,'
+                                      Link, 0x14f59c3c0, {{16.0, 192.0}, {16.0, 24.3}}, identifier: 'legato-word://2E3C900C-B934-4687-A2BF-3C59465FA94D', label: 'Hi'
+                                      Link, 0x14f59cf00, {{32.0, 192.0}, {52.0, 24.3}}, identifier: 'legato-word://699C5784-3BC0-4641-AA2E-6AE8303EFEB1', label: ' Ercan,'
+                                    StaticText, 0x14f59c000, {{16.0, 254.3}, {359.0, 76.3}}, label: 'I hope you're doing well. I'm writing to you to catch up and see how things are going on your end.'
+                                      Link, 0x14f59d900, {{16.0, 254.3}, {4.1, 26.0}}, identifier: 'legato-word://67D82CCF-6323-4B0D-9D68-D2EE2B5E45F3', label: 'I'
+                                      Link, 0x14f59d540, {{20.1, 254.3}, {42.8, 26.0}}, identifier: 'legato-word://7A430AEF-503C-4CE2-B7AC-3EADB8A83D90', label: ' hope'
+                                      Link, 0x14f59d680, {{62.9, 254.3}, {51.6, 26.0}}, identifier: 'legato-word://8F2C4C3F-1953-4D80-9E83-A8F0675F88F3', label: ' you're'
+                                      Link, 0x14f59e1c0, {{114.5, 254.3}, {47.2, 26.0}}, identifier: 'legato-word://BDF7C011-1DD2-4E8E-BEB4-5BFA88F7249E', label: ' doing'
+                                      Link, 0x14f59da40, {{161.6, 254.3}, {38.4, 26.0}}, identifier: 'legato-word://1240C992-BCB2-42A8-A93A-92B3E14F1D9C', label: ' well.'
+                                      Link, 0x14f59db80, {{200.0, 254.3}, {27.4, 26.0}}, identifier: 'legato-word://74AC3BAB-8EFE-4B28-99F3-FFE62767A8F9', label: ' I'm'
+                                      Link, 0x14f59dcc0, {{227.5, 254.3}, {55.8, 26.0}}, identifier: 'legato-word://AD9F1E6E-0EE3-4CDC-A44F-EF628A165755', label: ' writing'
+                                      Link, 0x14f59e080, {{283.3, 254.3}, {19.6, 26.0}}, identifier: 'legato-word://67972157-1645-43ED-9403-CF848A727474', label: ' to'
+                                      Link, 0x14f59df40, {{302.9, 254.3}, {31.9, 26.0}}, identifier: 'legato-word://9D2B23CE-DEFC-4CC0-BFCB-68DA02FB9AC8', label: ' you'
+                                      Link, 0x14f59e300, {{334.8, 254.3}, {19.6, 26.0}}, identifier: 'legato-word://55880A55-1895-409E-AD48-6F13473549F3', label: ' to'
+                                      Link, 0x14f59e580, {{16.0, 254.3}, {359.0, 52.0}}, identifier: 'legato-word://2C7C2C80-1E38-478D-91F3-F80B67443555', label: ' catch'
+                                      Link, 0x14f59e440, {{58.3, 280.3}, {23.8, 26.0}}, identifier: 'legato-word://7BA01095-7FA6-47D4-BE8B-17BC1CB9D7FA', label: ' up'
+                                      Link, 0x14f59de00, {{82.1, 280.3}, {32.8, 26.0}}, identifier: 'legato-word://EF659B7E-585D-4C99-9C43-1B1DEFF5E8E8', label: ' and'
+                                      Link, 0x14e1eabc0, {{114.9, 280.3}, {31.4, 26.0}}, identifier: 'legato-word://5BFC27E0-E8B6-45ED-B878-FDCB08D8D9D6', label: ' see'
+                                      Link, 0x14e1eae40, {{146.3, 280.3}, {35.9, 26.0}}, identifier: 'legato-word://6DA69FA5-7F62-4742-9EF8-BE40E0F7B930', label: ' how'
+                                      Link, 0x14e1eb0c0, {{182.2, 280.3}, {51.3, 26.0}}, identifier: 'legato-word://3A19FE42-DDA2-480D-B5CA-FB4A47C8C51B', label: ' things'
+                                      Link, 0x14e1eb340, {{233.5, 280.3}, {28.4, 26.0}}, identifier: 'legato-word://B5D8B930-97A6-47B2-9E59-45A035410A1B', label: ' are'
+                                      Link, 0x14e1e9f40, {{261.9, 280.3}, {47.1, 26.0}}, identifier: 'legato-word://6DABB006-4CFA-4A3B-9E13-DB4D6040AA6A', label: ' going'
+                                      Link, 0x14e1eb480, {{309.0, 280.3}, {23.4, 26.0}}, identifier: 'legato-word://77457746-B2FE-4266-B7B3-A7C407316CDF', label: ' on'
+                                      Link, 0x14e1eb5c0, {{332.4, 280.3}, {38.0, 26.0}}, identifier: 'legato-word://DA36623C-319E-4A33-898A-718956D4E381', label: ' your'
+                                      Link, 0x14e1eb700, {{16.0, 280.3}, {359.0, 50.3}}, identifier: 'legato-word://AFDB7ABA-4B7B-4116-8CBE-2F5E46C2D171', label: ' end.'
+                                    StaticText, 0x14e1ebd40, {{16.0, 368.7}, {280.0, 24.3}}, label: 'Looking forward to hearing from you.'
+                                      Link, 0x14e1ebc00, {{16.0, 368.7}, {60.0, 24.3}}, identifier: 'legato-word://D99CF932-0443-4034-9051-33CF63941350', label: 'Looking'
+                                      Link, 0x14e1ebac0, {{76.0, 368.7}, {62.6, 24.3}}, identifier: 'legato-word://D6CAE020-005F-48D7-AF2D-1E3523A5DE5D', label: ' forward'
+                                      Link, 0x14e1eb980, {{138.6, 368.7}, {19.6, 24.3}}, identifier: 'legato-word://D6726D26-C467-4F87-966D-0BDE1C2B8BA7', label: ' to'
+                                      Link, 0x14e1eb840, {{158.2, 368.7}, {61.4, 24.3}}, identifier: 'legato-word://CD45F0FF-9C69-4C33-A7A4-63E68F57FBC0', label: ' hearing'
+                                      Link, 0x14e1ebe80, {{219.6, 368.7}, {39.8, 24.3}}, identifier: 'legato-word://1DB3E95A-F891-4958-ABCA-A37F6AE9305B', label: ' from'
+                                      Link, 0x14f664000, {{259.4, 368.7}, {36.5, 24.3}}, identifier: 'legato-word://186B0DDE-C3D7-42A3-8648-21D5064C69FA', label: ' you.'
+                                    StaticText, 0x14f664140, {{16.0, 431.0}, {97.0, 24.3}}, label: 'Best regards'
+                                      Link, 0x14f6643c0, {{16.0, 431.0}, {34.1, 24.3}}, identifier: 'legato-word://094962B4-5A00-42B8-BB14-A42EE90F4C75', label: 'Best'
+                                      Link, 0x14f664280, {{50.1, 431.0}, {62.6, 24.3}}, identifier: 'legato-word://62C47626-DC06-4779-B237-49C966AF8FF7', label: ' regards'
+                                  Other, 0x14f664500, {{369.0, 176.0}, {30.0, 569.0}}, label: 'Vertical scroll bar, 1 page', value: 0%
+                                    Other, 0x14f664640, {{396.0, 452.7}, {3.0, 289.3}}
+                                  Other, 0x14f664780, {{369.0, 176.0}, {30.0, 569.0}}, label: 'Vertical scroll bar, 1 page', value: 0%
+                                    Other, 0x14f6648c0, {{396.0, 452.7}, {3.0, 289.3}}
+                                Image, 0x14f664b40, {{376.7, 185.0}, {15.7, 19.0}}, identifier: 'sparkles', label: 'Agent editing'
+                                Button, 0x14f664c80, {{6.3, 753.0}, {50.3, 43.0}}, identifier: 'note.text', label: 'Note'
+                                Button, 0x14f665040, {{62.7, 753.0}, {50.7, 43.0}}, identifier: 'arrow.uturn.backward', label: 'Undo'
+                                Button, 0x14f664f00, {{119.3, 753.0}, {50.3, 43.0}}, identifier: 'arrow.uturn.forward', label: 'Redo', Disabled
+                                Button, 0x14f665680, {{175.7, 753.0}, {50.7, 43.0}}, identifier: 'paperplane.fill', label: 'Insert'
+                                Button, 0x14f6652c0, {{232.3, 753.0}, {50.3, 43.0}}, identifier: 'xmark', label: 'Cancel composition'
+                                Button, 0x14f665540, {{288.7, 753.0}, {50.7, 43.0}}, identifier: 'mic.slash', label: 'Mute transcription'
+                                Button, 0x14f665180, {{345.3, 753.0}, {50.3, 43.0}}, identifier: 'key.mic', label: 'Stop dictation'
+          Other, 0x14f665400, {{0.0, 148.0}, {402.0, 726.0}}
+            Button, 0x14f664dc0, {{8.5, 805.7}, {68.1, 68.7}}, label: 'Next keyboard', value: Superwhisper
+              StaticText, 0x14f664a00, {{8.5, 805.7}, {0.0, 0.0}}
+            Button, 0x14f5c2e40, {{325.4, 805.4}, {68.1, 68.7}}, identifier: 'dictation', label: 'Dictate'
+              StaticText, 0x14f5c2d00, {{325.4, 805.4}, {0.0, 0.0}}
+            Button, 0x14f5c2bc0, {{325.4, 805.4}, {68.1, 68.7}}, identifier: 'dictation', label: 'Dictate'
+              StaticText, 0x14f5c2a80, {{325.4, 805.4}, {0.0, 0.0}}
+Path to element:
+ →Application, 0x14f5bdcc0, pid: 61439, label: 'Legato'
+Query chain:
+ →Find: Application 'de.gruenwald.legato'
+  Output: {
+    Application, 0x14f5c1680, pid: 61439, label: 'Legato'
+  }

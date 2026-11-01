@@ -5,5 +5,6 @@ public enum VocabularyHintSink: Sendable, Equatable, CaseIterable {
     /// Apple Speech's contextual strings. Also takes 2-letter all-caps acronyms.
     case appleSpeech
     /// The cleanup model's `<terms>` line. Also takes 2-letter all-caps acronyms.
+    case soniox
     case cleanup
 }

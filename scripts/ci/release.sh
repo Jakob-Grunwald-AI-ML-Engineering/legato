@@ -23,7 +23,7 @@ case "$mode" in
     select_xcode
     ensure_xcodegen
     trap finish_build_cache EXIT
-    prepare_build_cache mac
+    prepare_build_cache mac   # Debug and Release share it: Xcode separates configurations inside
     (cd Apps/macOS && "$XCODEGEN" generate)
     configuration=Debug
     [ "$mode" != mac-release ] || configuration=Release

@@ -27,12 +27,13 @@ struct ExpansionKey: View {
 
 /// A key's look for a SwiftUI button: the key fill, the pressed fill while held, the key radius.
 struct KeyButtonStyle: ButtonStyle {
+    var selected = false
     var insets = EdgeInsets()
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.background(
             RoundedRectangle(cornerRadius: KeyGeometry.keyRadius)
-                .fill(Color(uiColor: configuration.isPressed ? KeyColors.pressed : KeyColors.key))
+                .fill(Color(uiColor: configuration.isPressed || selected ? KeyColors.pressed : KeyColors.key))
                 .padding(insets))
     }
 }

@@ -1,0 +1,45 @@
+import Foundation
+import LegatoRoom
+import LegatoComposerDoc
+
+public struct LiveAgentPolicy: Sendable {
+    public private(set) var pending: [Envelope] = []
+    public private(set) var running = false
+    private var active: [Envelope] = []
+    public var editing: Set<String> = []
+    public init() {}
+    @discardableResult public mutating func enqueue(_ event: Envelope, hintTargets: Set<String> = []) -> Bool {
+        guard [.hint, .userIntent, .writingInstruction].contains(event.channel) || AgentAdmission.isAcceptedContent(event) || AgentAdmission.isUserEdit(event) else { return false }
+        let preempt = running && (event.channel == .writingInstruction || event.channel == .hint || AgentAdmission.isUserEdit(event)
+            || (event.channel == .userIntent && event.participant == .ui && event.payload["event"] == .string("mode.changed")))
+        if preempt { pending = active + pending }
+        if event.channel == .hint || event.channel == .writingInstruction { pending.insert(event, at: 0) } else { pending.append(event) }
+        return preempt
+    }
+    public mutating func begin() -> [Envelope]? {
+        guard !running, !pending.isEmpty else { return nil }; running = true
+        let priority: Channel? = pending.contains(where: { $0.channel == .hint }) ? .hint
+            : (pending.contains(where: { $0.channel == .writingInstruction }) ? .writingInstruction : nil)
+        if let priority {
+            let index = pending.firstIndex(where: { $0.channel == priority })!
+            active = [pending.remove(at: index)]
+        } else { active = pending; pending = [] }
+        editing = []; return active
+    }
+    public mutating func beginMaintenance() -> Bool {
+        guard !running, pending.isEmpty else { return false }
+        running = true; active = []; editing = []; return true
+    }
+    public mutating func finish() { running = false; editing = []; active = [] }
+}
+
+/// Raw ASR remains context, but only a binder-accepted append admits a content turn.
+enum AgentAdmission {
+    static func isUserEdit(_ event: Envelope) -> Bool {
+        guard event.channel == .docOps, let origin = try? event.payload.decode(Transaction.self).origin else { return false }
+        return origin == .user || origin == .undo
+    }
+    static func isAcceptedContent(_ event: Envelope) -> Bool {
+        event.channel == .docOps && (try? event.payload.decode(Transaction.self).origin) == .asr
+    }
+}

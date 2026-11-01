@@ -1,0 +1,54 @@
+{
+  "productSource": "9a2f6e04511c6669f7fe6e201df032ea63e7e9fe",
+  "syntheticOnly": true,
+  "microphonesStarted": false,
+  "cases": [
+    {
+      "case": "format",
+      "mode": "auto",
+      "source": "Okay, um, we have three updates for the team. The iOS build is installed, but I have not tested voice input on the phone yet. The Mac composer looks better. The sentence grouping still needs work. I think we can try another short test tomorrow, but I am not sure yet.",
+      "sessionID": "8F4A32FC-2FCD-46C8-B11E-20F87F491171",
+      "draft": "Okay, we have three updates for the team.\nThe iOS build is installed, but I have not tested voice input on the phone yet.\nThe Mac composer looks better.\nThe sentence grouping still needs work.\nI think we can try another short test tomorrow, but I am not sure yet.",
+      "error": "",
+      "micLease": false
+    },
+    {
+      "case": "style",
+      "mode": "message",
+      "source": "Um, I don't know, maybe I can join the call on Thursday at three, but I'm not sure yet because I still need to check with Morgan, and I will tell you as soon as I know.",
+      "sessionID": "326506AE-77BE-486B-843E-BDF29FA9D5A2",
+      "draft": "I might be able to join the call on Thursday at three, but I'm not sure yet because I still need to check with Morgan. I'll let you know as soon as I do.",
+      "error": "",
+      "micLease": false
+    },
+    {
+      "case": "concise",
+      "mode": "prompt",
+      "source": "I think the keyboard maybe disappears when I switch apps, but I am not sure. It could be something else.",
+      "sessionID": "7611B777-3375-48D1-B3AD-47CCDAA4CEBA",
+      "draft": "I think the keyboard maybe disappears when I switch apps, but I am not sure. It could be something else.",
+      "error": "",
+      "micLease": false,
+      "instruction": "Rewrite this into a concise investigation prompt. Keep the uncertainty and do not invent a cause.",
+      "finalDraft": "Investigate why the keyboard may disappear when switching apps. The cause is uncertain, and it may be something else.",
+      "instructionDraft": ""
+    }
+  ],
+  "globalControlledClaudeUpperUSD": 0.7118274000000001,
+  "priorControlledClaudeUpperUSD": 0.6157753,
+  "newRequests": {
+    "sentence": 8,
+    "writer": 11
+  },
+  "model": "claude-haiku-5-5",
+  "native": {
+    "mac": "signed isolated composer-debug updated; hotkeys disabled; paused; no mic lease",
+    "iphone": "signed product installed and normally launched; queried idle, busy=false, dictating=false, lease=false, draft0, audioChunks0"
+  },
+  "listFormatting": "not demonstrated; Auto update fixture retained plain sentence-lines",
+  "remainingGaps": [
+    "actual physical microphone transcription with broken AirPods connected",
+    "native iPhone keyboard flow",
+    "previous residual semantic sentence-grouping gap not rechecked in this policy-only follow-up"
+  ]
+}

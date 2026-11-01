@@ -21,6 +21,10 @@ public struct LearningHistoryStore: HistoryStore {
         vocabulary.learnFromDictation(text: entry.rawText ?? entry.text, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
     }
 
+    /// Upserts are provisional checkpoints of a draft, so they teach nothing: repeated edits must not
+    /// re-count pairs, and generated text is not a spoken sighting.
+    public func upsert(_ entry: DictationEntry) async throws { try await base.upsert(entry) }
+
     public func recent(limit: Int) async throws -> [DictationEntry] { try await base.recent(limit: limit) }
 
     public func delete(id: UUID) async throws {

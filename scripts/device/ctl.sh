@@ -5,9 +5,10 @@
 #
 # Usage: ctl.sh [--target device|sim|mac] <subcommand> [args...]
 #   devices                  list connected devices; says "unlock/plug in" when the iPhone is unavailable
-#   build                    xcodegen + signed Debug device build (derived data kept under the cache dir)
+#   build                    xcodegen + signed Debug device build (the fixed derived/<target> DerivedData under the cache dir)
 #   install                  install the last build on the device
 #   launch [args...]        (re)start Legato, e.g. launch -LegatoFakeEngine "hello world"; Debug builds start the bridge
+#   import-keys <0600-json-file>  one-time private keychain import; never passes keys in arguments
 #   send <command> [args...] queue a bridge command, print its id
 #   wait <id|event> [secs] [--ack]   wait (default 30) for a command's done/error line, or for a new line with that event
 #   log                      print the bridge log lines not shown yet
@@ -21,6 +22,7 @@
 #   terminate                stop the Legato process
 #   pull [--group] <path>    copy a file from the data container (Library/, Documents/, tmp/) or, with
 #                            --group, the App Group container, and print it (e.g. pull Library/Caches/audio-diag.jsonl)
+#   pull-sessions [--group] <path>  alias of pull for session directories/files
 #
 # Bridge commands (send): ping, commands, state, set-setting <key> <value>, plus in Debug builds every
 # simulator e2e command (toggle, interrupt, copy-last, result-insert, result-copy, foreground, background,
@@ -240,8 +242,15 @@ cmd_devices() {
     mac) printf 'app=%s\nharness=%s\n' "$APP" "$MAC_ROOT" ;;
   esac
 }
+# The one fixed DerivedData per target, shared by every checkout (see scripts/dev/build-caches.md).
 set_derived() {
-  DERIVED="${LEGATO_CACHE_DIR:-$HOME/Library/Caches/legato}/device-derived/$(pwd | shasum | cut -c1-12)"
+  # shellcheck source-path=SCRIPTDIR source=../e2e/work-dir.sh
+  source "$HERE/../e2e/work-dir.sh"
+  case "$TARGET" in
+    device) DERIVED="$(derived_dir ios-device)" ;;
+    sim) DERIVED="$(derived_dir ios-sim)" ;;
+    mac) DERIVED="$(derived_dir mac)" ;;
+  esac
 }
 cmd_build() {
   # Build machinery is intentionally lazy: polling must not pay for git/Xcode discovery on every call.
@@ -250,16 +259,26 @@ cmd_build() {
   set_derived
   select_xcode
   ensure_xcodegen
-  local dir=Apps/iOS project=Legato.xcodeproj destination="id=$DEVICE" extra=(-allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM")
+  local built=0 dir=Apps/iOS project=Legato.xcodeproj destination="id=$DEVICE" extra=(-allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM")
   case "$TARGET" in
     sim) destination='generic/platform=iOS Simulator'; extra=(CODE_SIGNING_ALLOWED=NO) ;;
-    mac) dir=Apps/macOS; project=LegatoMac.xcodeproj; destination='generic/platform=macOS'; extra=(CODE_SIGNING_ALLOWED=NO) ;;
+    mac)
+      dir=Apps/macOS; project=LegatoMac.xcodeproj; destination='generic/platform=macOS'; extra=(CODE_SIGNING_ALLOWED=NO)
+      if [ "${LEGATO_MAC_SIGNED:-0}" = 1 ]; then
+        destination='platform=macOS,arch=arm64'
+        extra=(-allowProvisioningUpdates -allowProvisioningDeviceRegistration CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BID")
+      fi ;;
+
   esac
   (cd "$dir" && "$XCODEGEN" generate)
-  mkdir -p "$DERIVED"
+  # Serialize on the target's fixed DerivedData (and the shared package clones) across every checkout.
+  prepare_build_cache "${DERIVED##*/}"
+  DERIVED="$BUILD_WORK"
   echo "building (log: $STATE/build.log)"
   xcodebuild build -quiet -project "$dir/$project" -scheme Legato -configuration Debug \
-    -destination "$destination" -derivedDataPath "$DERIVED" "${extra[@]}" > "$STATE/build.log" 2>&1 || { tail -n 30 "$STATE/build.log" >&2; die "build failed"; }
+    -destination "$destination" -derivedDataPath "$DERIVED" -clonedSourcePackagesDirPath "$BUILD_PACKAGES" "${extra[@]}" > "$STATE/build.log" 2>&1 || built=1
+  finish_build_cache
+  [ "$built" = 0 ] || { tail -n 30 "$STATE/build.log" >&2; die "build failed"; }
   echo "built $DERIVED/Build/Products"
 }
 cmd_install() {
@@ -371,6 +390,19 @@ deliver() { # deliver <id> <file>
     [ "$try" -eq 3 ] || sleep 1
   done
   copy_to "$file" "$BRIDGE/inbox/$id.json" # a last try that prints the reason
+}
+
+# Credentials never enter argv or logs. Only the fixed private destination name is queued.
+cmd_import_keys() {
+  [ $# -eq 1 ] && [ -f "$1" ] || die "usage: import-keys /private/credentials.json"
+  local permissions id
+  permissions="$(stat -f '%Lp' "$1")"
+  [ "$permissions" = 600 ] || die "credential source must have mode 0600"
+  require_device
+  copy_to "$1" "$BRIDGE/credentials.json"
+  if [ "$TARGET" != device ]; then chmod 600 "$(local_path "$BRIDGE/credentials.json")"; fi
+  id="$(cmd_send composer-import-keys credentials.json)"
+  cmd_wait "$id"
 }
 
 cmd_say() { cmd_send say "$@"; }
@@ -520,6 +552,8 @@ cmd_pull() {
 sub="${1:-}"
 [ $# -eq 0 ] || shift
 case "$sub" in
+  import-keys) cmd_import_keys "$@" ;;
+  pull-sessions) cmd_pull "$@" ;;
   devices | build | install | launch | send | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;
 esac

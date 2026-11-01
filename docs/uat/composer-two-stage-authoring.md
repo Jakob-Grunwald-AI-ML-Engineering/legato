@@ -1,0 +1,90 @@
+# Two-stage composer acceptance
+
+Latest UI follow-up: signed source `1bc85ecd403eedd9e3cc2bd561a0b597e8b70c3d` is running in the isolated Mac UAT app. Both signed builds and strict code-signature checks passed. The iPhone artifact is ready but **not installed**: the user explicitly chose to keep their active phone session running. Its last installed source remains `cf8a6e6`; no phone interaction or recording was started for this bundle. Earlier policy and provider results below remain revision-specific.
+
+Product source: `67f6a848c93e11f29d818901f700d5a1d41fd3c5`, 31 October 2026. Signed Mac and iPhone builds passed and both were installed. Mac UAT used isolated `de.gruenwald.legato.mac.composer-debug` with hotkeys disabled; production Mac was untouched. The physical iPhone received `de.gruenwald.legato`, but normal launch was blocked by **Locked**. Installation does not establish that the new iPhone app is running.
+
+## Observed behavior
+
+All provider content below was synthetic. Mac tests exercised the signed native app, real sentence-cleanup and writing providers, actual composer UI and guarded TextEdit insertion. No microphone was started by this UAT. Revision-specific results remain distinct.
+
+| Scenario | Observed result | Revision |
+| --- | --- | --- |
+| Conservative Prompt editing | Preserved wording, order and uncertainty; corrected only `somthing` to `something`. Writer requests contained the validated correction, not the raw misspelling or raw ASR channel history. | `6ddf49c` |
+| Explicit concise rewrite | Previously expanded a 20-word source to 47 words with an unsolicited heading and requirements. After the fix, the same instruction produced 20 words, retained uncertainty and added no heading or investigation checklist. | `3bc70b8` failure; `6ddf49c` recheck passed |
+| Instructions routing | Instruction speech stayed outside the draft, invoked only the writer, then the completed bubble hid. | `3bc70b8`, `6ddf49c` |
+| Pause/resume | Same session and draft retained; settled request counts did not increase on Pause or Resume. | `3bc70b8` |
+| Immediate Insert with pending cleanup | Triggered with two cleanup jobs pending. Drained in 4.74 seconds, inserted the exact draft once into a new empty TextEdit document, then cleared the composer to idle. No extra polishing turn. | `3bc70b8` |
+| Two-role concurrency | Every controlled session observed at most two sentence requests and one writer request in flight. Only validated text reached writing requests. | All three revisions |
+| Native Mac channel key | Glyph and shortcut fit at the native 580-point window width; the previous clipped Instructions label was removed. | `6ddf49c`, unchanged in final source |
+| Actual Soniox response replay | Eight provider-punctuated fragments became four draft lines through normal sentence turns. Several clear continuations joined, but one dependent clause remains separate. | Final `67f6a84`: partial improvement, remaining gap |
+
+The conservative synthetic source was “I think the keyboard maybe disappears when I switch apps, but I am not sure. It could be something else.” The explicit instruction was “Rewrite this into a concise investigation prompt. Keep the uncertainty and do not invent a cause.” The corrected result was “Investigate why the keyboard maybe disappears when switching apps. I am not sure of the cause; do not assume one.” This verifies the observed expansion fix; it is not a universal rewriting-quality guarantee.
+
+The earlier native channel/app-action/topic flows on `cee7b80` and `964feb9` also completed: quoted dictation did not clear the draft; explicit voice Insert inserted into TextEdit without sending an external Return; explicit voice Clear emptied only the composer; successful insertion retained Morgan/Thursday/3 topic context for a follow-up; native New topic cleared that context. Those are historical single-writer results, not new two-stage acceptance claims.
+
+## Semantic endpoint comparison
+
+One local TTS fixture contained a 900ms mid-phrase pause, a 200ms sentence pause, a 1500ms incomplete-phrase pause and a continuation longer than 25 words. Two real Soniox streams each consumed the same 22.223-second mono 16kHz PCM fixture. No microphone or speaker playback was involved.
+
+Soniox v5 already provides semantic endpoint detection. Defaults produced seven endpoints and prematurely punctuated “Please investigate why.” and “I would like to.” A less eager comparison (`endpoint_latency_adjustment_level: 0`, `endpoint_sensitivity: -0.3`, `max_endpoint_delay_ms: 3000`) produced five endpoints and joined one hesitation better, but still split the first incomplete phrase and changed recognition. This single synthetic comparison does not justify changing production defaults. No external semantic VAD model was evaluated. [Soniox endpoint controls](https://docs.soniox.com/stt/rt/endpoint-detection).
+
+The exact default provider responses were then replayed through the actual app decoder and both agent stages. Final source joined these boundaries:
+
+- “Please investigate why the keyboard disappears.”
+- “I would like to write a clear report about this behavior, including what happens before the keyboard disappears.”
+- “What remains visible after it changes, and whether the original composing session keeps its text and continues working when I return to it.”
+
+The last clause still remains on its own line instead of attaching to the preceding report sentence. Full grammatical sentence grouping therefore remains **partially unmet**. All eight cleanup jobs drained, all words were retained, no extra final provider request ran, and the Mac ended paused with no error or microphone lease. [Final native screenshot](artifacts/two-stage-authoring/mac-stream-replay.png).
+
+## Bounds and remaining acceptance
+
+[Transcript-free metadata](artifacts/two-stage-authoring/provider-summary.json) records request counts, role concurrency, usage and timings. Sentence cleanup took approximately 2.5–3.6 seconds in the controlled warm samples; this does not establish instant edits or improved end-to-end latency. The conservative global Claude estimate, including prior controlled session work, is **$0.6158** against the authorized $2 cap. It applies higher-tier rates to every token and is not a provider invoice. The two actual Soniox streams consumed 44.4466 seconds separately. [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
+Physical transcription with the broken AirPods microphone still connected is **untested on both platforms**. Current Mac metadata showed a built-in candidate and no armed microphone; the phone was locked. Inventory, PCM fixtures and signed builds do not prove speech clarity, best-source ranking or recovery on real hardware. No background microphone preference was changed. The iPhone native ABC/type/delete/Return/Insert walk also remains untested: earlier bounded XCTest attempts never reached observable test-body assertions, and were not repeated.
+
+Human UAT remains pending: unlock the updated phone; confirm actual built-in transcription while the broken AirPods remain connected; compare short hesitations against complete thoughts; try ABC and return to the retained composition; verify default edits stay minimal and explicit instructions transform only as requested. The new audio selection measures PCM health, not semantic speech clarity, and does not establish universal best-input selection.
+
+## Meaning-preserving style follow-up
+
+Source `9a2f6e04511c6669f7fe6e201df032ea63e7e9fe` supersedes the earlier overstrict wording policy. Signed Mac and generic iOS builds passed. The isolated Mac app was updated; after the user reconnected and unlocked the phone, the same iOS build installed and launched normally. Its directly queried state was idle, not busy or dictating, with no microphone lease, no draft, and zero audio-delivery chunks. No microphone or new Soniox stream was started for this follow-up.
+
+Three synthetic cases exercised the actual two-stage provider flow:
+
+- **Style and word choice improved proactively.** Rough tentative speech about joining a Thursday-at-three call became: “I might be able to join the call on Thursday at three, but I'm not sure yet because I still need to check with Morgan. I'll let you know as soon as I do.” The time, Morgan, uncertainty and promise to follow up survived; the result did not commit to attending.
+- **Paragraph flow and explicit concise rewriting passed.** Default Prompt combined the uncertain keyboard observation into one paragraph. The same explicit concise instruction then produced: “Investigate why the keyboard may disappear when switching apps. The cause is uncertain, and it may be something else.” That reduced the 20-word source to 19 words, retained uncertainty, and added no cause, heading or investigation checklist.
+- **Bullet formatting was not demonstrated.** Auto input introduced three team updates plus a tentative plan. The final draft removed verbal clutter and preserved all facts and uncertainty, but kept five plain sentence-lines rather than a bullet list. This does not establish proactive list formatting.
+
+All cases drained and ended paused without a microphone lease. The cumulative controlled Claude upper estimate is now **$0.7118** against the authorized $2 cap; this follow-up made eight sentence-cleanup requests and eleven writer requests. [Synthetic cases and metadata](artifacts/two-stage-authoring/meaning-policy-summary.json) contain the exact inputs and outputs. Physical transcription, native iPhone keyboard interaction and the earlier residual sentence-grouping gap remain unverified by this policy-only check; no further full-stream replay was run.
+
+## Real iPhone cleanup failure investigation
+
+A read-only pull from the reconnected physical iPhone on `9a2f6e0` found one failed sentence request among eleven responses in a real session. Sentence sequence 2 failed after **3.182 seconds**, with **1,114 input tokens and 112 output tokens**. The same sentence succeeded on the user's explicit retry about 30 seconds later, taking **1.362 seconds** with 1,115 input and 112 output tokens. The following session had six successful cleanup responses and no failures. Neither copied session recorded an ASR transport error.
+
+The current phone snapshot showed its built-in 48kHz microphone selected while a Bluetooth microphone remained available. PCM buffers were arriving, with no clipping or recoveries; the latest transcription take had delivered 59 audio chunks and accepted seven final words. This establishes input and ASR activity, not speech clarity or transcription accuracy. The composer was idle, but the user's background microphone lease remained active and was preserved. No microphone, session, preference or paid request was started or stopped by this investigation.
+
+The original sentence-stage exception and provider response were not logged, so the exact cause is **unknown**. The output count does not show the configured 1,024-token cap being reached. Slow speech or a dead microphone is not established as the cause. Private room logs stayed outside the repository; [sanitized metadata](artifacts/two-stage-authoring/cleanup-failure-summary.json) contains only counters, timing and route kinds, with no dictated text or provider bodies.
+
+Diagnostic source `cf8a6e6963f80c26f8d26c862cae9dea968f3c16` now classifies transport, provider, validation and admission failures without recording private content. Both signed builds passed and the isolated Mac app launched idle without a microphone lease. That diagnostic build was subsequently installed on the user-approved reconnect; normal launch reported idle without a microphone lease. The newer UI bundle described below remains uninstalled at the user’s request. The implementation owner's eight focused checks passed, covering sanitized classification, forced provider failure, retained raw pending text and successful explicit retry. Those checks were not repeated and are not a new native forced-failure test. A recurrence captured by the improved diagnostics is still needed to identify the original failure cause.
+
+
+## Fixed keyboard, manual comments and Insert motion
+
+Final source `1bc85ecd403eedd9e3cc2bd561a0b597e8b70c3d` combines the fixed iOS layout, reused ABC predictions, compact manual comments, bounded changed-word animation and successful-Insert flight. Signed generic iOS and isolated Mac builds passed, as did strict code-signature verification. The Mac app used `de.gruenwald.legato.mac.composer-debug` with hotkeys disabled. Production Mac and the user's active phone composition were preserved.
+
+Actual native Mac acceptance passed:
+
+- **Readable manual comments.** A multiline synthetic Instructions comment stayed staged after three seconds of silence, with no writer request. The 300-point panel showed four readable lines, automatically following the last spoken words; X discarded the comment and retained the draft. This rechecks the earlier 200-point-panel bug where the speech body disappeared.
+- **Shared quote bubble.** Clicking Thursday highlighted that word and placed the same compact correction bubble above it without covering the mark. Multiline correction speech remained staged after silence. The native wand then changed only Thursday to Friday; no countdown was present. Initial missed pointer probes were not a proven product defect: selection subsequently worked with an explicit-click-count private driver and a fresh fixture.
+- **Manual routing and Pause.** On preceding source `9876bc1`, the actual global wand applied Thursday→Friday, Pause retained a later unsent comment without applying it, and native X discarded only the comment. Final-source global staging/discard and targeted wand behavior were exercised again; the unchanged routing checks were not repeated wholesale.
+- **Exact-once large Insert and motion.** The native Insert button delivered exactly 5,000 words / 43,889 characters into a fresh empty TextEdit document, cleared the canonical draft to idle, and emitted its success acknowledgement. A native recording showed the retained viewport moving upward and fading after delivery. Native click through state observation took 1.18 seconds, including helper compilation/click overhead; this is not an isolated paste-latency measurement.
+- **Guarded Insert.** Changing a fresh bound TextEdit target before Insert preserved the exact composer draft, did not overwrite the changed target, and emitted no new success acknowledgement. The app finished paused, not busy, without a microphone lease.
+
+The preceding `9876bc1` native Mac stress checks retained both a 5,000-word paragraph and 250 lines of 20 words exactly. Seeding took 1.72 and 9.36 seconds respectively; subsequent state calls took about 0.30 seconds. A real 5,000-word reverse edit and one-step Undo both completed exactly, but the edit took **17.0 seconds**. Native scrolling displayed later lines correctly. Whole-app RSS point samples were approximately 194–231 MiB; these are neither peak measurements nor the diff-only benchmark. Large-edit responsiveness remains a limitation. A window-only typo recording showed the changed word fading/revealing while surrounding words remained stable, and Undo restored the original fixture.
+
+All provider input was synthetic; no microphone or Soniox stream was started. This follow-up added two controlled sessions, each with one cleanup request and three writer requests. The cumulative conservative Claude upper estimate is **$0.7464997 of $2**. [Sanitized runtime metadata](artifacts/two-stage-authoring/keyboard-bundle-summary.json), [instruction speech](artifacts/two-stage-authoring/mac-manual-instruction.png), [anchored correction](artifacts/two-stage-authoring/mac-manual-correction.png) and [retained failed Insert](artifacts/two-stage-authoring/mac-guarded-insert.png) are retained. Motion recordings stayed private because hiding the panel exposed unrelated background windows; static images alone are not the animation evidence.
+
+**Physical iPhone acceptance is held, not passed.** The final signed iOS artifact is ready in the existing build cache, but the user chose to keep their active session running. No final phone install, keyboard UI automation, screenshot, microphone action or simulator launch was performed. Fixed portrait geometry, removed height gestures/handle, bottom ABC placement, real prediction tap/delete/return, extension survival under large edits/Insert and device switch reasons still need physical acceptance. No matching Legato crash/Jetsam report was obtained; the disappearance cause is not established or claimed fixed. Reduce Motion was not changed or exercised at runtime. Human UAT remains pending.
+
+
+The subsequent [physical iOS follow-up](ios-keyboard-bundle.md) records installed `0bd1eca`, the oversized GPU texture diagnosis, readable 5k Composer, native geometry/ABC typing, and the remaining prediction-selection/Insert acceptance gaps.

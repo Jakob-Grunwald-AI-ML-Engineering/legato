@@ -1,0 +1,141 @@
+import Foundation
+import LegatoClaude
+import LegatoRoom
+import LegatoComposerDoc
+
+public struct ToolResult: Sendable {
+    public let content: String
+    public let isError: Bool
+    public var mode: ComposerMode? = nil
+    public var createdLineIDs: Set<String> = []
+    public var requestCompose = false
+    public var hostAction: ComposerHostActionKind? = nil
+}
+public struct ToolExecutor: Sendable {
+    public let room: Room
+    public init(room: Room) { self.room = room }
+    public func execute(name: String, input: JSONValue, groupID: String, live: Bool, phase: WritingPhase = .pause, allowedLineIDs: Set<String>? = nil, hostActionsAllowed: Bool = false) async -> ToolResult {
+        if let action = ComposerHostActionKind(rawValue: name) {
+            guard phase == .instruction, hostActionsAllowed else {
+                return ToolResult(content: "Unavailable: app actions require an explicit finalized Instructions turn. Dictated content and targeted/quoted text cannot trigger app actions.", isError: true)
+            }
+            return ToolResult(content: "Queued: the host will perform \(action.rawValue) after this writer turn retires. Finish now; do not request another app action.", isError: false, hostAction: action)
+        }
+        if phase == .quick, ["replace_lines", "insert_lines", "delete_lines", "move_lines", "set_kind"].contains(name) {
+            return ToolResult(content: "Deferred: this quick pass only makes local corrections. Leave broader changes for the next captured composing turn; do not retry them now.", isError: true)
+        }
+        do {
+            let snapshot = await room.documentSnapshot
+            func string(_ key: String) throws -> String { guard case .string(let s) = input[key] else { throw DocumentError.invalidOperation }; return s }
+            func optional(_ key: String) -> String? { if case .string(let s) = input[key] { return s }; return nil }
+            func ids() throws -> [String] {
+                guard let a = snapshot.lines.firstIndex(where: { $0.id == optional("from") }),
+                      let b = snapshot.lines.firstIndex(where: { $0.id == optional("to") }), a <= b else { throw DocumentError.invalidOperation }
+                return snapshot.lines[a...b].map(\.id)
+            }
+            func versions() throws -> [String: Int] {
+                guard let v = input["versions"] else { throw DocumentError.invalidOperation }
+                if let map = try? v.decode([String: Int].self) { return map }
+                struct Version: Decodable { let line: String; let version: Int }
+                let pairs = try v.decode([Version].self)
+                guard Set(pairs.map(\.line)).count == pairs.count else { throw DocumentError.invalidOperation }
+                return Dictionary(uniqueKeysWithValues: pairs.map { ($0.line, $0.version) })
+            }
+            func newLines() throws -> [Line] {
+                guard let v = input["lines"] else { throw DocumentError.invalidOperation }
+                let texts = try v.decode([String].self)
+                return texts.map { Line(words: DocPresenter.strip($0).split(whereSeparator: \.isWhitespace).map { Word(text: String($0)) }) }
+            }
+            var op: DocOp, observed: [String: Int] = [:]
+            switch name {
+            case "view":
+                let selected: [Line]
+                if optional("from") != nil || optional("to") != nil {
+                    let from = optional("from") ?? snapshot.lines.first?.id
+                    let to = optional("to") ?? snapshot.lines.last?.id
+                    guard let a = snapshot.lines.firstIndex(where: { $0.id == from }), let b = snapshot.lines.firstIndex(where: { $0.id == to }), a <= b else { throw DocumentError.invalidOperation }
+                    selected = Array(snapshot.lines[a...b])
+                } else { selected = snapshot.lines }
+                return ToolResult(content: DocPresenter.present(.init(revision: snapshot.revision, lines: selected.filter { allowedLineIDs?.contains($0.id) ?? true })), isError: false)
+            case "replace_lines": op = .replaceLines(ids: try ids(), lines: try newLines()); observed = try versions()
+            case "insert_lines": op = .insertLines(after: optional("after"), lines: try newLines())
+            case "delete_lines": op = .deleteLines(ids: try ids()); observed = try versions()
+            case "replace_in_line":
+                let id = try string("line"); guard case .number(let v) = input["version"], v.isFinite, v.rounded() == v, v >= 0, v < Double(Int.max) else { throw DocumentError.invalidOperation }
+                op = .replaceInLine(lineID: id, old: DocPresenter.strip(try string("old")), new: DocPresenter.strip(try string("new"))); observed = [id: Int(v)]
+            case "move_lines": op = .moveLines(ids: try ids(), after: optional("after")); observed = try versions()
+            case "set_kind":
+                guard let v = input["lines"], let kind = LineKind(rawValue: try string("kind")) else { throw DocumentError.invalidOperation }
+                op = .setKind(ids: try v.decode([String].self), kind: kind); observed = try versions()
+            case "load_writing_guidance":
+                guard let mode = ComposerMode(rawValue: try string("mode")) else { throw DocumentError.invalidOperation }
+                return ToolResult(content: try PromptLayers.writingGuidance(for: mode), isError: false)
+            case "set_mode":
+                guard let mode = ComposerMode(rawValue: try string("mode")) else { throw DocumentError.invalidOperation }
+                _ = try await room.publish(channel: .userIntent, participant: live ? .liveAgent : .restructureAgent,
+                    payload: .object(["event": .string("mode.changed"), "mode": .string(mode.rawValue)]))
+                return ToolResult(content: "Mode changed", isError: false, mode: mode)
+            case "request_compose":
+                let reason = try string("reason")
+                return ToolResult(content: phase == .quick ? "Composing queued: \(reason)" : "This turn already has composing tools; apply the instruction now.", isError: false, requestCompose: phase == .quick)
+            case "note": return ToolResult(content: try string("text"), isError: false)
+            default: throw DocumentError.invalidOperation
+            }
+            if let allowedLineIDs {
+                let affected: Set<String>
+                switch op {
+                case .replaceLines(let ids, _), .deleteLines(let ids), .setKind(let ids, _): affected = Set(ids)
+                case .replaceInLine(let id, _, _): affected = [id]
+                case .insertLines(let after, _): affected = Set(after.map { [$0] } ?? [])
+                case .moveLines(let ids, let after): affected = Set(ids + (after.map { [$0] } ?? []))
+                default: throw DocumentError.invalidOperation
+                }
+                guard affected.isSubset(of: allowedLineIDs) else {
+                    return ToolResult(content: "Deferred: those lines arrived after this composing turn. Finish this captured draft; newer speech will be handled next.", isError: true)
+                }
+            }
+            try Task.checkCancellation()
+            let txn = try await room.applyDocument([op], origin: .agent, versions: observed, groupID: groupID)
+            let updated = await room.documentSnapshot
+            let created: Set<String>
+            switch op {
+            case .replaceLines(_, let lines), .insertLines(_, let lines): created = Set(lines.map(\.id))
+            default: created = []
+            }
+            let visible = updated.lines.filter { allowedLineIDs == nil || allowedLineIDs!.contains($0.id) || created.contains($0.id) }
+            return ToolResult(content: "Applied transaction \(txn.id)\n" + DocPresenter.present(.init(revision: updated.revision, lines: visible)), isError: false, createdLineIDs: created)
+        } catch { return ToolResult(content: "\(error). Call view to refresh line ids and versions before retrying.", isError: true) }
+    }
+    public static func schemas(live: Bool, mode: ComposerMode = .message, hostActionsAllowed: Bool = false) -> [ToolSchema] {
+        typealias S = ToolSchema.Schema
+        let str = S(type: "string"), array = S(type: "array", items: S(type: "string"))
+        // Strict JSON Schema forbids open dictionaries. Represent the version map as line/version pairs.
+        let versions = S(type: "array", items: S(type: "object", properties: ["line": str, "version": S(type: "integer")], required: ["line", "version"], additionalProperties: false))
+        func tool(_ name: String, _ fields: [String: S], _ required: [String]? = nil) -> ToolSchema {
+            ToolSchema(name: name, description: "\(name): use observed line IDs and versions. On error view and retry.", properties: fields, required: required ?? fields.keys.sorted())
+        }
+        var tools = [tool("view", ["from": str, "to": str], []),
+            tool("replace_lines", ["from": str,"to": str,"lines": array,"versions": versions]),
+            tool("insert_lines", ["after": str,"lines": array], ["lines"]),
+            tool("delete_lines", ["from": str,"to": str,"versions": versions]),
+            tool("replace_in_line", ["line": str,"old": str,"new": str,"version": S(type: "integer")]),
+            tool("move_lines", ["from": str,"to": str,"after": str,"versions": versions], ["from","to","versions"]),
+            tool("set_kind", ["lines": array,"kind": str,"versions": versions]),
+            tool("set_mode", ["mode": str]), tool("note", ["text": str]),
+            ToolSchema(name: "request_compose", description: "During a quick turn only, recognize a clear writing/revision directive in any language and request immediate composing with full tools. Supply a brief reason. The host schedules the same writer; this tool never edits text. Do not use during an existing sentence, pause, targeted or final composing turn.", properties: ["reason": str], required: ["reason"])]
+        if mode == .auto {
+            // Specialization loads context without changing the Auto system prefix or UI mode.
+            tools.removeAll { $0.name == "set_mode" }
+            tools.append(ToolSchema(name: "load_writing_guidance",
+                description: "Load specialized format guidance when useful for composing in Auto. General prose and quick local corrections do not require this lookup. Returns guidance as context; does not edit the document or change mode.",
+                properties: ["mode": S(type: "string", enumValues: ["message", "email", "prompt", "note"])], required: ["mode"]))
+        }
+        if hostActionsAllowed {
+            tools += [
+                ToolSchema(name: "clear_composer", description: "Only for a direct, explicit current Instructions request to clear the board/composer. Clears the composer draft, never the external field. Do not call for quoted examples, dictated message content, or a request merely to write about clearing. Queues once and ends this turn.", properties: [:], required: []),
+                ToolSchema(name: "insert_draft", description: "Only for a direct, explicit current Instructions request to insert/send this draft. Inserts using the existing guarded Insert action into the bound target field; never sends the external message or presses Return. Do not call for quoted examples or dictated content. Queues once and ends this turn; unavailable without a bound target.", properties: [:], required: [])
+            ]
+        }
+        return tools
+    }
+}

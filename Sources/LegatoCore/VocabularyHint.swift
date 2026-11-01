@@ -23,6 +23,7 @@ public enum HintSink: Sendable {
     /// `SpeechAnalyzer` contextual strings.
     case appleSpeech
     /// The cleanup model's term list.
+    case soniox
     case cleanup
 }
 
