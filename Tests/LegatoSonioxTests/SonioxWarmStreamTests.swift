@@ -67,11 +67,12 @@ extension SonioxWarmStreamTests {
         let open = await client.isOpen, streaming = await client.isStreaming
         #expect(open && !streaming)
         await #expect(throws: SonioxError.self) { try await client.sendAudio(Data([1])) }
-        try await client.begin()
+        try await client.begin(backgroundText: "Zuletzt gesagt.")
         try await client.sendAudio(Data([1]))
         let sent = await socket.sent()
         let config = try #require(sent.firstIndex { if case .text(let text) = $0 { text.contains("stt-rt") } else { false } })
         #expect(sent.last == .binary(Data([1])) && config < sent.count - 1)
+        if case .text(let message) = sent[config] { #expect(message.contains("Zuletzt gesagt."), "The start request carries the text given at begin") }
         await client.cancel()
     }
 }

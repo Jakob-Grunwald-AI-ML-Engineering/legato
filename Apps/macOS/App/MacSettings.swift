@@ -26,6 +26,8 @@ import Observation
     var dictationSend: DictationSendSetting.Mode { didSet { defaults.set(dictationSend.rawValue, forKey: DictationSendSetting.modeKey) } }
     var dictationPause: Double { didSet { defaults.set(DictationSendSetting.clampedPause(dictationPause), forKey: DictationSendSetting.pauseKey) } }
     var insertionMode: FieldWriter.Mode { didSet { defaults.set(insertionMode.rawValue, forKey: "insertionMode") } }
+    /// Types a take in word by word (Accessibility, or key events in paste-only apps); off inserts at once and pastes.
+    var typewriter: Bool { didSet { defaults.set(typewriter, forKey: "typewriterInsertion") } }
     var restoreClipboard: Bool { didSet { defaults.set(restoreClipboard, forKey: "restoreClipboard") } }
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -36,6 +38,7 @@ import Observation
         dictationSend = DictationSendSetting.mode(in: defaults)
         dictationPause = DictationSendSetting.pause(in: defaults)
         insertionMode = defaults.string(forKey: "insertionMode").flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
+        typewriter = defaults.object(forKey: "typewriterInsertion") as? Bool ?? true
         restoreClipboard = defaults.object(forKey: "restoreClipboard") as? Bool ?? true
     }
     private static func initialDictationHotkey(_ defaults: UserDefaults, panel: HotkeySpec?) -> HotkeySpec? {

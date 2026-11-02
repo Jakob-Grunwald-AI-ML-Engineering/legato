@@ -63,7 +63,7 @@ private let thirteenWords = "one two three four five six seven eight nine ten el
         #expect(pipeline.outbox[0].raw == "hello there second one third" && pipeline.outbox[0].sequence == 0)
         let input = cleaner.takes.withLock { $0 }.first
         #expect(input?.text == "hello there second one third" && input?.textBeforeCursor == "Hi Anna, ", "Context is the field at take start")
-        #expect(input?.vocabulary == ["Legato"] && input?.previousChunks == [])
+        #expect(input?.vocabulary == ["Legato"] && input?.recentTakes == [])
         #expect(pipeline.takeLines.isEmpty && pipeline.takePhase == .buffering)
         await pipeline.finishTake()
         #expect(pipeline.outbox.count == 1, "Nothing buffered, nothing sent")
@@ -107,7 +107,23 @@ private let thirteenWords = "one two three four five six seven eight nine ten el
         clock.advance(by: .seconds(5))
         await until("the second send") { pipeline.outbox.count == 2 }
         #expect(pipeline.outbox.map(\.sequence) == [0, 1])
-        #expect(cleaner.takes.withLock { $0 }.last?.previousChunks == ["First part."])
+        #expect(cleaner.takes.withLock { $0 }.last?.recentTakes.map(\.cleaned) == ["First part."], "Earlier takes ride along as raw to cleaned pairs")
+    }
+
+    @Test func recentTakesSurviveASessionResetAndRawInsertsAreContextOnly() async {
+        let cleaner = TakeCleaner([.ok, .noKey, .ok])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, thirteenWords))
+        await pipeline.sendTake()
+        await pipeline.reset()
+        await pipeline.receive(routeLine(0, "no key here"))
+        await pipeline.sendTake()
+        await pipeline.reset()
+        await pipeline.receive(routeLine(0, "third take"))
+        await pipeline.sendTake()
+        let third = cleaner.takes.withLock { $0 }.last
+        #expect(third?.recentTakes.map(\.raw) == [thirteenWords], "Only the cleaned take is a raw to cleaned pair, and it outlived two resets")
+        #expect(pipeline.recentTakes.recent().count == 3 && pipeline.backgroundText.contains("no key here"))
     }
 
     @Test func stopSendsWhatIsBufferedAndCancelsTheCountdown() async {

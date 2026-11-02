@@ -78,7 +78,7 @@ import LegatoVocabulary
         guard active == nil, let stream else { return }
         guard let held = await stream.take() else { stream.warm(); return }
         stream.warm()
-        do { try await held.begin(); active = held } catch { await held.close() }
+        do { try await held.begin(backgroundText: sink.backgroundText); active = held } catch { await held.close() }
     }
 
     /// Audio goes out in order; a take whose stream dropped continues on the next held connection.

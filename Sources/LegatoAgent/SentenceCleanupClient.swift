@@ -193,7 +193,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         let tool = ToolSchema(name: "submit_text", description: "Submit this take's cleaned text once. Copy sentenceID exactly.",
             properties: ["sentenceID": Schema(type: "string"), "text": Schema(type: "string")], required: ["sentenceID", "text"])
         let source: JSONValue = .object(["sentenceID": .string(input.takeID), "text": .string(input.text),
-            "previousChunks": .array(input.previousChunks.map(JSONValue.string)), "textBeforeCursor": .string(String(input.textBeforeCursor.suffix(600))),
+            "recentTakes": .array(input.recentTakes.map { .object(["raw": .string($0.raw), "cleaned": .string($0.cleaned)]) }), "textBeforeCursor": .string(String(input.textBeforeCursor.suffix(600))),
             "vocabulary": .array(input.vocabulary.map(JSONValue.string))])
         let request: JSONValue = .object([
             "model": .string(ModelChoice.haiku.rawValue), "max_tokens": .number(Double(DictationTakeLimits.maxTokens(characters: input.text.count))),

@@ -24,9 +24,12 @@ public struct DictationRouteLine: Sendable, Equatable {
     func speechActivity()
     /// The take ended (stop): whatever was buffered is cleaned and written now.
     func finishTake() async
+    /// Recent written takes, newest last, sent to Soniox as background text when a take starts.
+    var backgroundText: String { get }
 }
 public extension DictationRouteSink {
     func warm() async {}
+    var backgroundText: String { "" }
     func speechActivity() {}
     func finishTake() async {}
 }

@@ -32,7 +32,8 @@ final class AppController {
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
-        dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"), defaults: AppGroup.defaults)
+        dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
+                                      recentTakesURL: root.appending(path: "recent-takes.json"), defaults: AppGroup.defaults)
         keyboardSession = KeyboardSession(composer: composer, sink: dictation)
         keyboardHost = KeyboardLinkHost()
         keyboardHost?.onChoices = { [weak self] choices in

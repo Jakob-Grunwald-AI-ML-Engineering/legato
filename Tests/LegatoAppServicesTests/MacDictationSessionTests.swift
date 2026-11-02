@@ -81,6 +81,21 @@ actor MacMic: AudioSource {
         await session.cancel()
     }
 
+    @Test func theStartRequestCarriesTheTakesRecordedAfterTheConnectionWasWarmed() async throws {
+        let session = make()
+        session.ensureWarm()
+        try await until { await sockets.last?.held == true }
+        let socket = try #require(sockets.at(0))
+        session.pipeline.recentTakes.record(raw: "lego", cleaned: "Legato läuft.", wasCleaned: true)
+        #expect(await session.start())
+        let sent = await socket.sent
+        let config = try #require(sent.compactMap { message -> String? in
+            if case .text(let text) = message, text.contains("stt-rt") { return text } else { return nil }
+        }.first)
+        #expect(config.contains("Legato läuft."), "Context is read when the take starts, not when the connection was warmed")
+        await session.cancel()
+    }
+
     @Test func spokenLinesAreCleanedAndDeliveredInOrderThenStopFinalizes() async throws {
         let session = make()
         session.ensureWarm()

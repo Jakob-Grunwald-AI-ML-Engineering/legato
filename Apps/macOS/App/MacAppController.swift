@@ -50,6 +50,8 @@ import Observation
     private var eventTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var bootstrapped = false
+    /// Real (untagged) key presses seen by the tap; typing into a paste-only app stops when this moves.
+    let keyPresses = KeyPressCounter()
 
     private init() {
         let root = URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
@@ -59,7 +61,8 @@ import Observation
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         composer = ComposerSession(history: history)
         let vocabularyURL = root.appending(path: "vocabulary.json")
-        dictation = MacDictationSession(pipeline: DictationPipeline(vocabularyURL: vocabularyURL),
+        dictation = MacDictationSession(pipeline: DictationPipeline(vocabularyURL: vocabularyURL,
+                                                                    recentTakesURL: root.appending(path: "recent-takes.json")),
                                         microphone: AutomaticInputSource(), vocabularyURL: vocabularyURL)
         dictationWriter = FieldDictationWriter(
             capture: {
@@ -69,19 +72,28 @@ import Observation
                 case .secure: .secure
                 }
             },
-            fallback: { [weak paster = paster] text, secure, copyOnly in
+            fallback: { [weak paster = paster, settings = settings, keys = keyPresses] text, secure, copyOnly in
                 guard let paster else { return .copied(message: "") }
                 let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
                 if copyOnly || pid == ProcessInfo.processInfo.processIdentifier {
                     paster.copy(text)
                     return .copied(message: secure ? PasteService.CopyReason.secureField.toast : "Copied to the clipboard. Paste with ⌘V.")
                 }
+                if settings.typewriter {
+                    switch await paster.type(text, targetPID: pid, secureField: secure, realKeyDowns: { keys.count }) {
+                    case .typed: return .typed
+                    case .interrupted(let remainder): return .interrupted(remainder: remainder, message: "Typing stopped: the rest is on the clipboard. Paste with ⌘V.")
+                    case .unavailable: break
+                    }
+                }
                 let restore = UserDefaults.standard.object(forKey: "restoreClipboard") as? Bool ?? true
                 switch await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure) {
                 case .pasted: return .pasted
                 case .copied(let reason): return .copied(message: reason.toast)
                 }
-            })
+            },
+            typewriter: { [settings = settings] in settings.typewriter },
+            frontmostApp: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
         dictation.onBegin = { [weak self] in self?.dictationWriter.begin() }
         dictation.deliver = { [weak self] text in
             guard let self else { return }
@@ -248,6 +260,7 @@ import Observation
     func cancelRecording() { recordingTarget = nil; recordingPreview = nil }
     private func handle(_ sample: TapSample) {
         guard let event = sample.event else { panelGesture.reset(); dictationGesture.reset(); return }
+        if event.kind == .keyDown { keyPresses.count &+= 1 }
         if let target = recordingTarget {
             switch recorder.feed(event) {
             case .none: break
@@ -319,6 +332,9 @@ import Observation
     func copy(_ entry: DictationEntry) { paster.copy(entry.text) }
     func delete(_ entry: DictationEntry) { Task { try? await history.delete(id: entry.id); await refreshRecent() } }
 }
+
+/// Counts real key presses, readable from the dictation writer's closures.
+@MainActor final class KeyPressCounter { var count = 0 }
 
 /// One hotkey's `HotkeyGesture` plus the timer that starts a held press.
 @MainActor private final class GestureDriver {

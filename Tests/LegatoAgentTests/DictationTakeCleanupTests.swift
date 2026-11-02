@@ -104,7 +104,7 @@ private let longClean = "So I wanted to say that the meeting went well, and we a
     let fixture = TakeFixtureMessages(try takeEvents(.object(["sentenceID": .string("take-1"), "text": .string(longClean)])))
     let client = SentenceCleanupClient(client: fixture)
     let text = try await client.cleanTake(.init(takeID: "take-1", text: longRaw, vocabulary: ["Legato"],
-                                                previousChunks: ["Earlier."], textBeforeCursor: "Hi Anna, "))
+                                                recentTakes: [.init(raw: "earlier one", cleaned: "Earlier.", wasCleaned: true, date: .distantPast)], textBeforeCursor: "Hi Anna, "))
     #expect(text == longClean)
     let request = try JSONDecoder().decode(JSONValue.self, from: #require(fixture.requests.withLock { $0 }.first))
     #expect(request["model"] == .string(ModelChoice.haiku.rawValue))
@@ -114,7 +114,7 @@ private let longClean = "So I wanted to say that the meeting went well, and we a
     #expect(system.first?["text"] == .string(PromptLayers.dictationTakeCleanup()))
     let messages = try #require(request["messages"]).decode([JSONValue].self)
     let content = try #require(messages.first?["content"]).decode(String.self)
-    #expect(content.contains("previousChunks") && content.contains("Hi Anna, ") && content.contains("take-1"))
+    #expect(content.contains("recentTakes") && content.contains("earlier one") && content.contains("Earlier.") && content.contains("Hi Anna, ") && content.contains("take-1"))
 }
 
 @Test(arguments: ["identity", "extra-field", "empty", "control", "wrong-tool", "oversized"])
