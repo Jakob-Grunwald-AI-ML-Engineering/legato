@@ -267,6 +267,9 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             case .cleaned(let text):
                 self.takePhase = .buffering
                 self.deliverTake(raw: raw, text: text, cleaned: true)
+            case .unavailable:
+                self.takePhase = .buffering
+                self.deliverTake(raw: raw, text: raw, cleaned: false)
             case .failed(let reason):
                 self.failedText = raw; self.takePhase = .failed
                 self.fallbacks.append("take-" + reason); if self.fallbacks.count > 20 { self.fallbacks.removeFirst() }

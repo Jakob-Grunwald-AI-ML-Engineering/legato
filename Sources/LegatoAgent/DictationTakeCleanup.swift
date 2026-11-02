@@ -1,4 +1,5 @@
 import Foundation
+import LegatoClaude
 
 /// What the whole-take cleanup sees: the take's lines joined in speaking order, the field's text at take start
 /// and the chunks already sent earlier in this session.
@@ -51,6 +52,8 @@ public enum DictationTakeCleanupResult: Sendable, Equatable {
     case cleaned(String)
     /// Both attempts failed, timed out or were rejected; `reason` names the last (`failed`, `timeout`, `rejected`).
     case failed(reason: String)
+    /// No Claude key: nothing to retry, the raw text goes in as heard.
+    case unavailable
 }
 
 /// Cleans a whole take with one call, retrying once when the call fails, times out or its result is rejected.
@@ -70,17 +73,20 @@ public struct DictationTakeCleaner: Sendable {
             case .cleaned(let text) where DictationTakeGuard.accepts(raw: input.text, cleaned: text): return .cleaned(text)
             case .cleaned: reason = "rejected"
             case .failed(let why): reason = why
+            case .unavailable: return .unavailable
             }
         }
         return .failed(reason: reason)
     }
 
-    private enum Outcome { case cleaned(String), failed(String) }
+    private enum Outcome { case cleaned(String), failed(String), unavailable }
     private func attempt(_ input: DictationTakeInput) async -> Outcome {
         let limit = timeout(input.text.count), cleaner = self.cleaner
         return await withTaskGroup(of: Outcome.self) { group in
             group.addTask {
-                do { return .cleaned(try await cleaner.cleanTake(input)) } catch { return .failed("failed") }
+                do { return .cleaned(try await cleaner.cleanTake(input)) }
+                catch MessagesStreamError.missingKey { return .unavailable }
+                catch { return .failed("failed") }
             }
             group.addTask {
                 try? await Task.sleep(for: limit)

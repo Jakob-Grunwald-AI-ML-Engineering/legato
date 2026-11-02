@@ -2,12 +2,13 @@ import Foundation
 import Synchronization
 import Testing
 import LegatoAgent
+import LegatoClaude
 import LegatoComposerDoc
 @testable import LegatoAppServices
 
 /// Cleans a take by capitalising and adding a full stop; scripted failures per call.
 private final class TakeCleaner: SentenceCleaning {
-    enum Behavior: Sendable { case ok, fail, garbage, hang }
+    enum Behavior: Sendable { case ok, fail, garbage, hang, noKey }
     let takes = Mutex<[DictationTakeInput]>([])
     let lineCalls = Mutex(0)
     let script: Mutex<[Behavior]>
@@ -23,6 +24,7 @@ private final class TakeCleaner: SentenceCleaning {
         case .fail: throw SentenceCleanupError.providerError
         case .garbage: return "I am sorry, but I cannot help with that request because it is not something I can do for you today."
         case .hang: try await Task.sleep(for: .seconds(30)); return ""
+        case .noKey: throw MessagesStreamError.missingKey
         }
     }
 }
@@ -148,6 +150,16 @@ private let thirteenWords = "one two three four five six seven eight nine ten el
         #expect(pipeline.fallbacks == ["take-failed"])
         await pipeline.finishTake()
         #expect(pipeline.takePhase == .failed && pipeline.outbox.isEmpty, "Stopping again does not insert")
+    }
+
+    @Test func withoutAClaudeKeyTheRawTakeGoesInAtOnce() async {
+        let cleaner = TakeCleaner([.noKey])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, "as heard"))
+        await pipeline.finishTake()
+        #expect(cleaner.takes.withLock { $0 }.count == 1)
+        #expect(pipeline.takePhase == .buffering && pipeline.failedText == nil)
+        #expect(pipeline.outbox.map(\.text) == ["as heard"] && pipeline.outbox.first?.cleaned == false)
     }
 
     @Test func aRejectedResultCountsAsAFailureAndRetries() async {

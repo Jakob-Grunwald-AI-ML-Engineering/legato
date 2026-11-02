@@ -29,7 +29,7 @@ private func takeEvents(_ payload: JSONValue, tool: String = "submit_text") thro
 
 /// Scripted whole-take cleaner: pops one behaviour per call (the last repeats).
 private final class ScriptedTakeCleaner: SentenceCleaning {
-    enum Behavior: Sendable { case text(String), fail, hang }
+    enum Behavior: Sendable { case text(String), fail, hang, noKey }
     let script: Mutex<[Behavior]>
     let calls = Mutex(0)
     init(_ script: [Behavior]) { self.script = Mutex(script) }
@@ -41,6 +41,7 @@ private final class ScriptedTakeCleaner: SentenceCleaning {
         case .text(let text): return text
         case .fail: throw SentenceCleanupError.providerError
         case .hang: try await Task.sleep(for: .seconds(30)); return ""
+        case .noKey: throw MessagesStreamError.missingKey
         }
     }
 }
@@ -93,6 +94,10 @@ private let longClean = "So I wanted to say that the meeting went well, and we a
     let hangs = ScriptedTakeCleaner([.hang])
     #expect(await DictationTakeCleaner(cleaner: hangs, timeout: { _ in .milliseconds(20) }).clean(input) == .failed(reason: "timeout"))
     #expect(hangs.calls.withLock { $0 } == 2)
+
+    let keyless = ScriptedTakeCleaner([.noKey])
+    #expect(await DictationTakeCleaner(cleaner: keyless).clean(input) == .unavailable)
+    #expect(keyless.calls.withLock { $0 } == 1, "No key: nothing to retry")
 }
 
 @Test func theClientSubmitsTheWholeTakeThroughSubmitTextWithScaledTokens() async throws {
