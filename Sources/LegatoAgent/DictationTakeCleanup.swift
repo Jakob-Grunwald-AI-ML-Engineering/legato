@@ -80,6 +80,58 @@ public struct DictationTakeCleaner: Sendable {
         return .failed(reason: reason)
     }
 
+    /// Cleans the take as a stream: `onDelta` gets each piece of the cleaned text as it arrives. The first attempt
+    /// that fails before any piece arrived is retried once, as in `clean`; one that fails after pieces were
+    /// handed out is not (the text is partly in the field), it ends as `.failed` and the caller decides. The guard
+    /// runs on the finished text only and never rejects: `rejected` says it would have.
+    public func cleanStreaming(_ input: DictationTakeInput, onDelta: @escaping @Sendable (String) async -> Void)
+        async -> (result: DictationTakeCleanupResult, rejected: Bool) {
+        var reason = "failed"
+        for _ in 0..<2 {
+            if Task.isCancelled { break }
+            let seen = Flag()
+            switch await attempt(input, seen: seen, onDelta: onDelta) {
+            case .cleaned(let text): return (.cleaned(text), !DictationTakeGuard.accepts(raw: input.text, cleaned: text))
+            case .failed(let why):
+                reason = why
+                if seen.value { return (.failed(reason: reason), false) }
+            case .unavailable: return (.unavailable, false)
+            }
+        }
+        return (.failed(reason: reason), false)
+    }
+
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var set = false
+        var value: Bool { lock.withLock { set } }
+        func raise() { lock.withLock { set = true } }
+    }
+    private func attempt(_ input: DictationTakeInput, seen: Flag, onDelta: @escaping @Sendable (String) async -> Void) async -> Outcome {
+        let limit = timeout(input.text.count), cleaner = self.cleaner
+        return await withTaskGroup(of: Outcome.self) { group in
+            group.addTask {
+                var text = ""
+                do {
+                    for try await delta in cleaner.cleanTakeStream(input) where !delta.isEmpty {
+                        seen.raise(); text += delta
+                        await onDelta(delta)
+                    }
+                    return .cleaned(text)
+                }
+                catch MessagesStreamError.missingKey { return .unavailable }
+                catch { return .failed("failed") }
+            }
+            group.addTask {
+                try? await Task.sleep(for: limit)
+                return .failed("timeout")
+            }
+            let first = await group.next() ?? .failed("failed")
+            group.cancelAll()
+            return first
+        }
+    }
+
     private enum Outcome { case cleaned(String), failed(String), unavailable }
     private func attempt(_ input: DictationTakeInput) async -> Outcome {
         let limit = timeout(input.text.count), cleaner = self.cleaner
