@@ -131,7 +131,7 @@ import Testing
         FieldDictationWriter(capture: { [self] in field }, fallback: { [self] text, secure, copyOnly in
             fallbacks.append((text, secure, copyOnly)); return result
         }, typewriter: { [self] in typewriter }, sleep: { [self] in pauses.append($0); onPause() },
-        frontmostApp: { [self] in pid }, now: { [self] in clock })
+        pacingClock: nil, frontmostApp: { [self] in pid }, now: { [self] in clock })
     }
 }
 
@@ -144,7 +144,7 @@ import Testing
         #expect(await writer.write("Ich komme später. Bis gleich!") == .typed)
         #expect(field.string == "Hi Anna, Ich komme später. Bis gleich!")
         #expect(field.writes.count == 6, "The separator, then one verified write per word")
-        #expect(scene.pauses.count == 4 && scene.pauses.allSatisfy { $0 == .milliseconds(25) })
+        #expect(scene.pauses.count == 4 && scene.pauses.allSatisfy { $0 == TypewriterPlan.duration / 4 })
         #expect(scene.fallbacks.isEmpty)
     }
 
