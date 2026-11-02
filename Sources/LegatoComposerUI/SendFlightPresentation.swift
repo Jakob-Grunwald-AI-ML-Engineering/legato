@@ -21,6 +21,9 @@ struct SendFlightPresentation: Equatable {
     mutating func reset(acknowledgement: String?) {
         lastAcknowledgement = acknowledgement; activeAcknowledgement = nil
     }
+    /// The view went away or the flight task was cancelled before `finish`: drop the flight, keeping the
+    /// acknowledgement as seen so it cannot replay. Without this the viewport stays retained.
+    mutating func abandon() { activeAcknowledgement = nil }
     mutating func finish(_ acknowledgement: String) {
         if activeAcknowledgement == acknowledgement { activeAcknowledgement = nil }
     }

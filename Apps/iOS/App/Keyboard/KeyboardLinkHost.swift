@@ -68,7 +68,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 self.composerInsertionNotice = nil
                 self.composerSessionID = composer.sessionID; self.composerHistory = ComposerLinkHistory(); self.composerRevision = -1
             }
-            if composer.snapshot.revision != self.composerRevision {
+            if self.composerHistory.needsRecord(composer.snapshot) {
                 self.composerHistory.record(composer.snapshot, hunks: composer.hunks)
                 self.composerRevision = composer.snapshot.revision
             }
@@ -132,7 +132,8 @@ final class KeyboardLinkHost: TranscriptSink {
                     self.composerInsertionNotice = nil
                     self.composerSessionID = composer.sessionID; self.composerHistory = ComposerLinkHistory(); self.composerRevision = -1
                 }
-                if composer.snapshot.revision != self.composerRevision {
+                // Compare the lines too: a restarted document can reuse a revision number (#225).
+                if self.composerHistory.needsRecord(composer.snapshot) {
                     self.composerHistory.record(composer.snapshot, hunks: composer.hunks); self.composerRevision = composer.snapshot.revision
                 }
                 var value = self.composerHistory.publication(acknowledged: channel.acknowledged)
@@ -160,6 +161,9 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.dictationNoticeID = self.keyboardSession?.dictationNoticeID
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 if self.composerPublisher.publish(value, through: channel) {
+                    #if DEBUG || LEGATO_INTERNAL
+                    Self.log.info("composer.publish rev=\(value.snapshot.revision) session=\(value.sessionID ?? "-", privacy: .public) lines=\(value.snapshot.lines.count) tail=\(value.tail.count) insertion=\(value.successfulInsertionID ?? "-", privacy: .public) hunks=\(value.hunks.count)")
+                    #endif
                     DarwinObserver.post(LinkChannel.Note.composer)
                 }
                 self.link.leaseChanged(until: composer.isArmed || composer.isListening ? Date().addingTimeInterval(60) : nil)

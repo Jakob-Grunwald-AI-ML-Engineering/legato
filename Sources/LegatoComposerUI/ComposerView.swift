@@ -1,6 +1,9 @@
 import SwiftUI
 import LegatoComposerDoc
 import Pow
+#if DEBUG || LEGATO_INTERNAL
+import os
+#endif
 
 public struct ComposerView: View {
     public let snapshot: DocumentSnapshot
@@ -69,6 +72,15 @@ public struct ComposerView: View {
         }
     }
     private var hasCanonicalDraft: Bool { !snapshot.lines.isEmpty || !tail.isEmpty }
+    /// Flight diagnostics (#225): counts and flags only, never draft text.
+    private func flightLog(_ event: String) {
+        #if DEBUG || LEGATO_INTERNAL
+        Self.log.info("composer.view \(event, privacy: .public) holds=\(sendFlight.retainsViewport(acknowledgement: successfulInsertionID, hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty) ? 1 : 0) active=\(sendFlight.activeAcknowledgement != nil ? 1 : 0) ack=\(successfulInsertionID != nil ? 1 : 0) progress=\(sendFlightProgress, format: .fixed(precision: 2)) presented=\(presentedParagraphs.count) snapshotLines=\(snapshot.lines.count) rev=\(snapshot.revision) presentedRev=\(presentedRevision) tail=\(tail.count)")
+        #endif
+    }
+    #if DEBUG || LEGATO_INTERNAL
+    private static let log = Logger(subsystem: "de.gruenwald.legato", category: "composer-view")
+    #endif
     private func beginSendFlightIfNeeded() {
         if sendFlight.observe(acknowledgement: successfulInsertionID, hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty) {
             var transaction = SwiftUI.Transaction()
@@ -77,7 +89,8 @@ public struct ComposerView: View {
         }
     }
     public var body: some View {
-        let holdsSentViewport = sendFlight.retainsViewport(acknowledgement: successfulInsertionID,
+        // A canonical draft always renders from the snapshot; only an emptied one may hold the sent viewport.
+        let holdsSentViewport = !hasCanonicalDraft && sendFlight.retainsViewport(acknowledgement: successfulInsertionID,
             hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty)
         let previous = snapshot.revision < presentedRevision ? [] : presentedParagraphs
         // Reuse the existing lazy viewport; do not create a second tree or rasterize a long draft.
@@ -143,10 +156,24 @@ public struct ComposerView: View {
                 dictationShine.baseline(dictationCommit)
                 presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true
             }
+            .onDisappear {
+                // The flight task is cancelled with the view and never reaches `finish`; release the retained
+                // viewport and resync, so a remount renders the snapshot rather than a stale flight.
+                sendFlight.abandon(); sendFlightProgress = 0
+                presentedParagraphs = hasCanonicalDraft ? ParagraphPresentation.reconcile(previous: presentedParagraphs, lines: snapshot.lines) : []
+                presentedRevision = snapshot.revision
+                flightLog("disappear")
+            }
+            #if DEBUG || LEGATO_INTERNAL
+            .onChange(of: holdsSentViewport) { _, _ in flightLog("holds") }
+            .onChange(of: sendFlight.activeAcknowledgement) { old, next in flightLog(next == nil ? (old == nil ? "ack" : "ack-cleared") : "ack-set") }
+            .onChange(of: presentedParagraphs.count) { _, _ in flightLog("presented") }
+            #endif
             .onChange(of: successfulInsertionID) { _, _ in beginSendFlightIfNeeded() }
             .onChange(of: snapshot) { _, next in
                 beginSendFlightIfNeeded()
                 if !holdsSentViewport { presentedParagraphs = paragraphs; presentedRevision = next.revision }
+                flightLog("snapshot")
             }
             .task(id: sendFlight.activeAcknowledgement) {
                 guard let acknowledgement = sendFlight.activeAcknowledgement else { return }

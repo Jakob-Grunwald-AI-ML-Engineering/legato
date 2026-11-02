@@ -43,6 +43,27 @@ struct SendFlightPresentationTests {
         flight.finish("one")
         #expect(flight.activeAcknowledgement == "two")
     }
+    /// #225 hypothesis 1: a flight can never hide a draft that exists, whatever state it is stuck in.
+    @Test func retainedViewportNeverAppliesWhileADraftExists() {
+        var flight = SendFlightPresentation()
+        _ = flight.observe(acknowledgement: "one", hasDraft: false, hadDraft: true)
+        #expect(flight.activeAcknowledgement == "one")
+        for acknowledgement in [nil, "one", "two"] as [String?] {
+            #expect(!flight.retainsViewport(acknowledgement: acknowledgement, hasDraft: true, hadDraft: true))
+        }
+    }
+    /// #225 hypothesis 1: a cancelled flight task (view disappeared) leaves the viewport retained for an empty
+    /// draft until `abandon`; after it, the same acknowledgement neither retains nor replays.
+    @Test func abandonedFlightReleasesViewportAndDoesNotReplay() {
+        var flight = SendFlightPresentation()
+        _ = flight.observe(acknowledgement: "one", hasDraft: false, hadDraft: true)
+        #expect(flight.retainsViewport(acknowledgement: "one", hasDraft: false, hadDraft: true))
+        flight.abandon()
+        #expect(flight.activeAcknowledgement == nil)
+        #expect(!flight.retainsViewport(acknowledgement: "one", hasDraft: false, hadDraft: true))
+        let replay = flight.observe(acknowledgement: "one", hasDraft: false, hadDraft: true)
+        #expect(!replay)
+    }
     @Test func noOldViewportMeansNoReplayedFlightOnOpening() {
         var flight = SendFlightPresentation()
         let observed9 = flight.observe(acknowledgement: "delivered", hasDraft: false, hadDraft: false)
