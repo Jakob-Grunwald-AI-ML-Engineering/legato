@@ -82,8 +82,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     }
     public init(cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
-                sendMode: @escaping @MainActor () -> DictationSendSetting.Mode = { DictationSendSetting.mode() },
-                pauseSeconds: @escaping @MainActor () -> Double = { DictationSendSetting.pause() },
+                sendMode: @escaping @MainActor () -> DictationSendSetting.Mode = { .lineByLine },
+                pauseSeconds: @escaping @MainActor () -> Double = { DictationSendSetting.defaultPause },
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil) {
         self.cleaner = cleaner; self.vocabulary = vocabulary; self.timeout = timeout
@@ -285,6 +285,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         sentChunks.append(text); if sentChunks.count > 4 { sentChunks.removeFirst() }
         onChange?()
     }
+
+    var nextOutboxSequenceForTesting: Int { nextTakeSequence }
 
     /// Debug bridge and tests: the take's state.
     public var takeState: [String: Any] {

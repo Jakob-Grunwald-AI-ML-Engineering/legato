@@ -8,8 +8,15 @@ import LegatoSoniox
 
 final class Cleaner: SentenceCleaning {
     let inputs = Mutex<[SentenceCleanupInput]>([])
+    let takes = Mutex<[DictationTakeInput]>([])
     let slow: Set<String>
-    init(slow: Set<String> = []) { self.slow = slow }
+    let takeDelay: Duration
+    init(slow: Set<String> = [], takeDelay: Duration = .zero) { self.slow = slow; self.takeDelay = takeDelay }
+    func cleanTake(_ input: DictationTakeInput) async throws -> String {
+        takes.withLock { $0.append(input) }
+        try await Task.sleep(for: takeDelay)
+        return input.text.prefix(1).uppercased() + input.text.dropFirst() + "."
+    }
     func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
         inputs.withLock { $0.append(input) }
         if slow.contains(input.text) { try await Task.sleep(for: .seconds(10)) }
@@ -49,8 +56,9 @@ actor MacMic: AudioSource {
     let typed = Typed()
 
     private func make(key: String = "test", cleaner: Cleaner = Cleaner(), timeout: Duration = .milliseconds(2500),
-                      context: @escaping @MainActor () -> String = { "" }) -> MacDictationSession {
-        let pipeline = DictationPipeline(cleaner: cleaner, timeout: timeout)
+                      context: @escaping @MainActor () -> String = { "" },
+                      mode: DictationSendSetting.Mode = .lineByLine, clock: any Clock<Duration> = ContinuousClock()) -> MacDictationSession {
+        let pipeline = DictationPipeline(cleaner: cleaner, timeout: timeout, sendMode: { mode }, pauseSeconds: { 5 }, clock: clock)
         pipeline.contextBefore = context
         let sockets = self.sockets
         let session = MacDictationSession(pipeline: pipeline, microphone: mic, vocabularyURL: URL(fileURLWithPath: "/nonexistent/vocabulary.json"),
@@ -163,5 +171,62 @@ actor MacMic: AudioSource {
         let finalized = await active.sent.contains(.text(#"{"type":"finalize"}"#))
         #expect(await active.closed && !finalized)
         try await until { await sockets.last?.held == true && sockets.last !== active }
+    }
+
+    @Test func inTakeModeNothingIsTypedUntilStopThenTheWholeTakeIsWrittenOnce() async throws {
+        let cleaner = Cleaner(takeDelay: .milliseconds(80))
+        let session = make(cleaner: cleaner, mode: .onStop)
+        try await session.debugLine("hallo welt")
+        try await session.debugLine("zweite zeile")
+        try await session.debugTail("dritte")
+        #expect(typed.lines.isEmpty && session.pipeline.takeLines.count == 2)
+        #expect(session.debugState["takeLength"] as? Int == "hallo welt zweite zeile".count)
+        await session.debugStop()
+        #expect(session.phase == .idle)
+        #expect(typed.lines == ["Hallo welt zweite zeile."], "Stop waited for the take's cleanup and wrote it once")
+        #expect(cleaner.takes.withLock { $0 }.count == 1)
+    }
+
+    @Test func aFailedTakeLeavesTheSessionIdleWithNothingTypedUntilTheUserChooses() async throws {
+        let session = make(mode: .onStop)
+        session.pipeline.debugFailTakes = 1
+        try await session.debugLine("keep me")
+        await session.debugStop()
+        #expect(session.phase == .idle && typed.lines.isEmpty && session.pipeline.takePhase == .failed)
+        await session.pipeline.insertRaw()
+        try await until { typed.lines.count == 1 }
+        #expect(typed.lines == ["keep me"])
+        await session.pipeline.insertRaw()
+        #expect(typed.lines.count == 1)
+    }
+
+    @Test func aCancelDiscardsTheBufferedTakeAndTypesNothing() async throws {
+        let cleaner = Cleaner()
+        let session = make(cleaner: cleaner, mode: .onStop)
+        try await session.debugLine("never typed")
+        await session.cancel()
+        #expect(session.phase == .idle && session.pipeline.takeLines.isEmpty && typed.lines.isEmpty)
+        #expect(cleaner.takes.withLock { $0 }.isEmpty)
+    }
+
+    @Test func aHeldHotkeyNeverStartsThePauseCountdownAndReleasingDoes() async throws {
+        let session = make(mode: .afterPause, clock: VirtualClock())
+        session.setHeld(true)
+        try await session.debugLine("push to talk")
+        #expect(session.pipeline.countdownDeadline == nil)
+        session.setHeld(false)
+        #expect(session.pipeline.countdownDeadline != nil)
+        await session.debugStop()
+        #expect(typed.lines == ["Push to talk."], "Stop sends the take and the countdown is gone")
+        #expect(session.pipeline.countdownDeadline == nil)
+    }
+
+    @Test func lineByLineStillTypesEachLineAsItIsCleaned() async throws {
+        let session = make(mode: .lineByLine)
+        try await session.debugLine("erste")
+        try await session.debugLine("zweite")
+        try await until { typed.lines.count == 2 }
+        #expect(typed.lines == ["Erste.", "Zweite."] && session.pipeline.takeLines.isEmpty)
+        await session.debugStop()
     }
 }

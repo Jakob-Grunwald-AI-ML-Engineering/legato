@@ -1,3 +1,4 @@
+import LegatoComposerUI
 import LegatoKeyboardCore
 import SwiftUI
 
@@ -21,26 +22,49 @@ struct WordRowView: View {
             if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
                 AutoFillSwitchKey(target: target)
             } else if let status = controller.statusText {
-                Text(status)
-                    .font(.system(size: fontSize - 4))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                    .lineLimit(2)
-                    // Live dictated text: its end matters; a hint reads from the start.
-                    .truncationMode(controller.hint == nil ? .head : .tail)
-                    .minimumScaleFactor(0.8)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black.opacity(0.001))
-                    .contentShape(Rectangle())
-                    .accessibilityIdentifier("keyboard.hint")
-                    .transition(.opacity)
+                HStack(spacing: 8) {
+                    Text(status)
+                        .font(.system(size: fontSize - 4))
+                        .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                        .lineLimit(2)
+                        // Live dictated text: its end matters; a hint reads from the start.
+                        .truncationMode(controller.hint == nil ? .head : .tail)
+                        .minimumScaleFactor(0.8)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityIdentifier("keyboard.hint")
+                    if controller.takeFailed {
+                        takeButton("Retry", id: "keyboard.take.retry") { controller.retryTake() }
+                        takeButton("Insert as-is", id: "keyboard.take.insertRaw") { controller.insertTakeRaw() }
+                    }
+                }
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.001))
+                .contentShape(Rectangle())
+                // After a pause: the rim fills toward the moment the take is sent.
+                .overlay {
+                    CountdownRim(shape: Capsule(), start: controller.takeCountdown?.start, deadline: controller.takeCountdown?.deadline, lineWidth: 2)
+                        .padding(.vertical, 3)
+                }
+                .transition(.opacity)
             } else {
                 row.transition(.opacity)
             }
         }
         // The status (or a hint) takes the row over and gives it back with a plain short fade.
         .animation(.easeOut(duration: 0.12), value: controller.statusText)
+    }
+
+    private func takeButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: fontSize - 4, weight: .semibold))
+                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(Color(uiColor: KeyColors.suggestion).opacity(0.15), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(id)
     }
 
     private var row: some View {

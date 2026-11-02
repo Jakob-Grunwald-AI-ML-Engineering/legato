@@ -1,0 +1,253 @@
+import Foundation
+import Synchronization
+import Testing
+import LegatoAgent
+import LegatoComposerDoc
+@testable import LegatoAppServices
+
+/// Cleans a take by capitalising and adding a full stop; scripted failures per call.
+private final class TakeCleaner: SentenceCleaning {
+    enum Behavior: Sendable { case ok, fail, garbage, hang }
+    let takes = Mutex<[DictationTakeInput]>([])
+    let lineCalls = Mutex(0)
+    let script: Mutex<[Behavior]>
+    init(_ script: [Behavior] = [.ok]) { self.script = Mutex(script) }
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        lineCalls.withLock { $0 += 1 }
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text.capitalized + ".")
+    }
+    func cleanTake(_ input: DictationTakeInput) async throws -> String {
+        takes.withLock { $0.append(input) }
+        switch script.withLock({ $0.count > 1 ? $0.removeFirst() : $0[0] }) {
+        case .ok: return input.text.prefix(1).uppercased() + input.text.dropFirst() + "."
+        case .fail: throw SentenceCleanupError.providerError
+        case .garbage: return "I am sorry, but I cannot help with that request because it is not something I can do for you today."
+        case .hang: try await Task.sleep(for: .seconds(30)); return ""
+        }
+    }
+}
+
+private func routeLine(_ sequence: Int, _ text: String) -> DictationRouteLine {
+    .init(sequence: sequence, text: text, words: text.split(separator: " ").map { Word(text: String($0)) }, reason: "endpoint")
+}
+@MainActor private func until(_ what: String, _ condition: @MainActor () -> Bool) async {
+    for _ in 0..<2000 { if condition() { return }; try? await Task.sleep(for: .milliseconds(2)) }
+    Issue.record("Timed out waiting for \(what)")
+}
+private let thirteenWords = "one two three four five six seven eight nine ten eleven twelve thirteen"
+
+@MainActor private func make(_ cleaner: TakeCleaner, mode: DictationSendSetting.Mode = .onStop, pause: Double = 5,
+                             clock: any Clock<Duration> = ContinuousClock(), timeout: (@Sendable (Int) -> Duration)? = nil) -> DictationPipeline {
+    DictationPipeline(cleaner: cleaner, vocabulary: { ["Legato"] }, sendMode: { mode }, pauseSeconds: { pause }, clock: clock, takeTimeout: timeout)
+}
+
+@MainActor @Suite(.timeLimit(.minutes(1))) struct DictationTakeTests {
+    @Test func onStopHoldsEveryLineAndWritesOneCleanedChunk() async {
+        let cleaner = TakeCleaner()
+        let pipeline = make(cleaner)
+        var before = "Hi Anna, "
+        pipeline.contextBefore = { before }
+        await pipeline.receive(routeLine(0, "hello there"))
+        before = "changed later"
+        await pipeline.receive(routeLine(1, "second one"))
+        await pipeline.receive(routeLine(2, "third"))
+        #expect(pipeline.outbox.isEmpty && cleaner.takes.withLock { $0 }.isEmpty && cleaner.lineCalls.withLock { $0 } == 0)
+        #expect(pipeline.takeLines == ["hello there", "second one", "third"] && pipeline.takePhase == .buffering)
+        #expect(pipeline.takeDisplay == "hello there second one third")
+
+        await pipeline.finishTake()
+        #expect(pipeline.outbox.count == 1)
+        #expect(pipeline.outbox[0].text == "Hello there second one third." && pipeline.outbox[0].cleaned)
+        #expect(pipeline.outbox[0].raw == "hello there second one third" && pipeline.outbox[0].sequence == 0)
+        let input = cleaner.takes.withLock { $0 }.first
+        #expect(input?.text == "hello there second one third" && input?.textBeforeCursor == "Hi Anna, ", "Context is the field at take start")
+        #expect(input?.vocabulary == ["Legato"] && input?.previousChunks == [])
+        #expect(pipeline.takeLines.isEmpty && pipeline.takePhase == .buffering)
+        await pipeline.finishTake()
+        #expect(pipeline.outbox.count == 1, "Nothing buffered, nothing sent")
+    }
+
+    @Test func lineByLineKeepsThePerLinePath() async throws {
+        let cleaner = TakeCleaner()
+        let pipeline = make(cleaner, mode: .lineByLine)
+        await pipeline.receive(routeLine(0, "hello there"))
+        await pipeline.receive(routeLine(1, "second one"))
+        for _ in 0..<500 where pipeline.outbox.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        #expect(pipeline.outbox.map(\.text) == ["Hello There.", "Second One."])
+        #expect(cleaner.takes.withLock { $0 }.isEmpty && pipeline.takeLines.isEmpty && pipeline.countdownDeadline == nil)
+    }
+
+    @Test func afterAPauseTheQuietTimerRestartsOnActivitySendsAtTheDeadlineAndListeningContinues() async {
+        let clock = VirtualClock()
+        let cleaner = TakeCleaner()
+        let pipeline = make(cleaner, mode: .afterPause, pause: 5, clock: clock)
+        await pipeline.receive(routeLine(0, "first part"))
+        #expect(pipeline.countdownStart != nil && pipeline.countdownDeadline != nil)
+        let firstDeadline = pipeline.countdownDeadline
+        await until("timer armed") { clock.sleeperCount == 1 }
+
+        clock.advance(by: .seconds(4))
+        #expect(pipeline.outbox.isEmpty)
+        pipeline.speechActivity() // a live tail: restart from here
+        await until("timer re-armed") { clock.sleeperCount == 1 && clock.armCount == 2 }
+        #expect(pipeline.countdownDeadline != nil && pipeline.countdownDeadline! >= firstDeadline!)
+        clock.advance(by: .seconds(4))
+        #expect(pipeline.outbox.isEmpty, "4 s after the restart is still inside the pause")
+
+        clock.advance(by: .seconds(1))
+        await until("the pause send") { pipeline.outbox.count == 1 }
+        #expect(pipeline.outbox[0].text == "First part." && pipeline.countdownDeadline == nil)
+
+        // Listening continues: the next words are a new chunk with the sent one as context.
+        await pipeline.receive(routeLine(1, "and more"))
+        #expect(pipeline.takeLines == ["and more"] && pipeline.countdownDeadline != nil)
+        await until("timer armed again") { clock.sleeperCount == 1 }
+        clock.advance(by: .seconds(5))
+        await until("the second send") { pipeline.outbox.count == 2 }
+        #expect(pipeline.outbox.map(\.sequence) == [0, 1])
+        #expect(cleaner.takes.withLock { $0 }.last?.previousChunks == ["First part."])
+    }
+
+    @Test func stopSendsWhatIsBufferedAndCancelsTheCountdown() async {
+        let clock = VirtualClock()
+        let pipeline = make(TakeCleaner(), mode: .afterPause, clock: clock)
+        await pipeline.receive(routeLine(0, "stop now"))
+        await until("timer armed") { clock.sleeperCount == 1 }
+        await pipeline.finishTake()
+        #expect(pipeline.outbox.map(\.text) == ["Stop now."] && pipeline.countdownDeadline == nil && clock.sleeperCount == 0)
+    }
+
+    @Test func aSuppressedTimerStaysQuietUntilReleased() async {
+        let clock = VirtualClock()
+        let pipeline = make(TakeCleaner(), mode: .afterPause, clock: clock)
+        pipeline.setAutoSendSuppressed(true)
+        await pipeline.receive(routeLine(0, "held key"))
+        #expect(pipeline.countdownDeadline == nil && clock.sleeperCount == 0)
+        clock.advance(by: .seconds(60))
+        #expect(pipeline.outbox.isEmpty)
+        pipeline.setAutoSendSuppressed(false)
+        #expect(pipeline.countdownDeadline != nil)
+        await until("timer armed") { clock.sleeperCount == 1 }
+    }
+
+    @Test func onStopNeverRunsATimer() async {
+        let clock = VirtualClock()
+        let pipeline = make(TakeCleaner(), mode: .onStop, clock: clock)
+        await pipeline.receive(routeLine(0, "no timer"))
+        pipeline.speechActivity()
+        #expect(pipeline.countdownDeadline == nil && clock.sleeperCount == 0)
+    }
+
+    @Test func aFailedCleanupRetriesOnceThenHoldsTheRawTextAndInsertsNothing() async {
+        let cleaner = TakeCleaner([.fail])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, "keep this safe"))
+        await pipeline.finishTake()
+        #expect(cleaner.takes.withLock { $0 }.count == 2, "One automatic retry")
+        #expect(pipeline.takePhase == .failed && pipeline.failedText == "keep this safe" && pipeline.outbox.isEmpty)
+        #expect(pipeline.fallbacks == ["take-failed"])
+        await pipeline.finishTake()
+        #expect(pipeline.takePhase == .failed && pipeline.outbox.isEmpty, "Stopping again does not insert")
+    }
+
+    @Test func aRejectedResultCountsAsAFailureAndRetries() async {
+        let cleaner = TakeCleaner([.garbage, .ok])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, thirteenWords))
+        await pipeline.finishTake()
+        #expect(cleaner.takes.withLock { $0 }.count == 2 && pipeline.takePhase == .buffering)
+        #expect(pipeline.outbox.count == 1 && pipeline.outbox[0].cleaned)
+    }
+
+    @Test func aSlowCleanupTimesOutPerAttemptAndEndsFailed() async {
+        let cleaner = TakeCleaner([.hang])
+        let pipeline = make(cleaner, timeout: { _ in .milliseconds(20) })
+        await pipeline.receive(routeLine(0, "too slow"))
+        await pipeline.finishTake()
+        #expect(pipeline.takePhase == .failed && cleaner.takes.withLock { $0 }.count == 2)
+        #expect(pipeline.fallbacks == ["take-timeout"])
+    }
+
+    @Test func retryDeliversTheCleanedTextExactlyOnce() async {
+        let cleaner = TakeCleaner([.fail, .fail, .ok])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, "try again"))
+        await pipeline.finishTake()
+        #expect(pipeline.takePhase == .failed)
+        await pipeline.retry()
+        #expect(pipeline.outbox.map(\.text) == ["Try again."] && pipeline.takePhase == .buffering && pipeline.failedText == nil)
+        await pipeline.retry(); await pipeline.insertRaw()
+        #expect(pipeline.outbox.count == 1, "Neither action does anything once the take went out")
+    }
+
+    @Test func aRetryThatFailsAgainStaysFailed() async {
+        let pipeline = make(TakeCleaner([.fail]))
+        await pipeline.receive(routeLine(0, "still broken"))
+        await pipeline.finishTake()
+        await pipeline.retry()
+        #expect(pipeline.takePhase == .failed && pipeline.outbox.isEmpty && pipeline.failedText == "still broken")
+    }
+
+    @Test func insertRawDeliversTheRawTextExactlyOnce() async {
+        let cleaner = TakeCleaner([.fail])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, "as is please"))
+        await pipeline.finishTake()
+        await pipeline.insertRaw()
+        #expect(pipeline.outbox.count == 1 && pipeline.outbox[0].text == "as is please" && !pipeline.outbox[0].cleaned)
+        #expect(pipeline.takePhase == .buffering && pipeline.failedText == nil)
+        await pipeline.insertRaw(); await pipeline.retry()
+        #expect(pipeline.outbox.count == 1)
+    }
+
+    @Test func newSpeechAfterAFailureJoinsTheHeldTextIntoOneTake() async {
+        let cleaner = TakeCleaner([.fail, .fail, .ok])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, "first held"))
+        await pipeline.finishTake()
+        await pipeline.receive(routeLine(1, "and then new"))
+        #expect(pipeline.takePhase == .buffering && pipeline.takeLines == ["first held", "and then new"])
+        await pipeline.finishTake()
+        #expect(pipeline.outbox.map(\.raw) == ["first held and then new"])
+    }
+
+    @Test func resetDropsTheUnsentTakeAndAFailedOneUnlessKept() async {
+        let pipeline = make(TakeCleaner([.fail]))
+        await pipeline.receive(routeLine(0, "never typed"))
+        await pipeline.reset()
+        #expect(pipeline.takeLines.isEmpty && pipeline.outbox.isEmpty)
+        await pipeline.finishTake()
+        #expect(pipeline.outbox.isEmpty)
+
+        await pipeline.receive(routeLine(0, "held text"))
+        await pipeline.finishTake()
+        await pipeline.reset(keepFailedTake: true)
+        #expect(pipeline.takePhase == .failed && pipeline.failedText == "held text" && pipeline.nextOutboxSequenceForTesting == 0)
+        await pipeline.reset()
+        #expect(pipeline.takePhase == .buffering && pipeline.failedText == nil)
+    }
+
+    @Test func discardingATakeCancelsACleanupInFlight() async {
+        let cleaner = TakeCleaner([.hang])
+        let pipeline = make(cleaner)
+        await pipeline.receive(routeLine(0, "cancel me"))
+        let sending = Task { await pipeline.finishTake() }
+        await until("cleanup started") { pipeline.takePhase == .cleaning && !cleaner.takes.withLock { $0 }.isEmpty }
+        pipeline.discardTake()
+        await sending.value
+        #expect(pipeline.takePhase == .buffering && pipeline.outbox.isEmpty && pipeline.failedText == nil)
+    }
+
+    #if DEBUG || LEGATO_INTERNAL
+    @Test func theDebugSwitchForcesTheNextTakeToFail() async {
+        let cleaner = TakeCleaner()
+        let pipeline = make(cleaner)
+        pipeline.debugFailTakes = 1
+        await pipeline.receive(routeLine(0, "forced"))
+        await pipeline.finishTake()
+        #expect(pipeline.takePhase == .failed && cleaner.takes.withLock { $0 }.isEmpty)
+        await pipeline.retry()
+        #expect(pipeline.outbox.map(\.text) == ["Forced."])
+    }
+    #endif
+}
