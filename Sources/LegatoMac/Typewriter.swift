@@ -10,12 +10,10 @@ public enum SyntheticEvent {
 
 /// Cuts a dictated text into the steps a typewriter writes and sets the pace. Pure.
 public enum TypewriterPlan {
-    /// The whole take takes about this long at most.
-    public static let totalBudget = Duration.milliseconds(1000)
-    /// Upper bound for the pause between two steps (short takes).
-    public static let maxInterval = Duration.milliseconds(25)
-    /// Most steps one take is cut into; longer texts group several words per step.
-    public static let maxSteps = 100
+    /// Every take, short or long, is typed out over this long: the pace adapts to the length.
+    public static let duration = Duration.milliseconds(300)
+    /// Most steps one take is cut into (about 10 ms apart); longer texts group several words per step.
+    public static let maxSteps = 30
     /// Most UTF-16 units one synthetic key event carries.
     public static let eventUnits = 20
 
@@ -39,10 +37,10 @@ public enum TypewriterPlan {
         return stride(from: 0, to: words.count, by: group).map { words[$0..<min($0 + group, words.count)].joined() }
     }
 
-    /// The pause between steps: 25 ms for short takes, shorter so the whole take stays within the budget.
+    /// The pause between steps, so the first step lands at once and the last one `duration` later.
     public static func interval(steps: Int) -> Duration {
-        guard steps > 0 else { return .zero }
-        return min(maxInterval, totalBudget / steps)
+        guard steps > 1 else { return .zero }
+        return duration / (steps - 1)
     }
 
     /// Pieces of at most `eventUnits` UTF-16 units, cut on grapheme boundaries (a grapheme longer than the
@@ -87,15 +85,21 @@ public enum Typewriter {
     }
 
     /// `write` returns false when the step could not be written (the typewriter stops there). `sleep` is injected
-    /// so tests run on a virtual clock.
+    /// so tests run on a virtual clock. With `clock`, each pause is shortened by the time the writes took, so a
+    /// slow field still finishes on schedule (a field slower than the schedule just writes back to back).
     @MainActor
-    public static func run(_ text: String, sleep: (Duration) async -> Void,
+    public static func run(_ text: String, sleep: (Duration) async -> Void, clock: ContinuousClock? = nil,
                            write: @MainActor (String) -> Bool) async -> Result {
         let steps = TypewriterPlan.steps(text)
         let interval = TypewriterPlan.interval(steps: steps.count)
+        let start = clock?.now
         var wrote = false
         for (index, step) in steps.enumerated() {
-            if index > 0 { await sleep(interval) }
+            if index > 0 {
+                var pause = interval
+                if let clock, let start { pause = max(.zero, interval * index - start.duration(to: clock.now)) }
+                if pause > .zero { await sleep(pause) }
+            }
             guard write(step) else {
                 return Result(remainder: steps[index...].joined(), wroteAny: wrote)
             }

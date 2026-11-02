@@ -100,7 +100,7 @@ final class PasteService {
             secureField: secureField || IsSecureEventInputEnabled(), modifiersReleased: released)
         guard route == .pasteKeystroke, let targetPID else { return .unavailable }
         let baseline = realKeyDowns()
-        let result = await Typewriter.run(text, sleep: { try? await Task.sleep(for: $0) }) { step in
+        let result = await Typewriter.run(text, sleep: { try? await Task.sleep(for: $0) }, clock: ContinuousClock()) { step in
             guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
                   !IsSecureEventInputEnabled(), realKeyDowns() == baseline else { return false }
             return Self.postUnicode(step)

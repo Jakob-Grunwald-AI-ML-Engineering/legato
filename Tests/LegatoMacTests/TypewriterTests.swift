@@ -11,20 +11,32 @@ import Testing
         #expect(TypewriterPlan.steps("").isEmpty)
     }
 
-    @Test func longTextsGroupWordsIntoAtMostAHundredSteps() {
+    @Test func longTextsGroupWordsIntoAtMostThirtySteps() {
         let text = (1...450).map { "w\($0)" }.joined(separator: " ")
         let steps = TypewriterPlan.steps(text)
         #expect(steps.count <= TypewriterPlan.maxSteps && steps.joined() == text)
     }
 
-    @Test func theWholeTakeStaysWithinAboutASecond() {
-        #expect(TypewriterPlan.interval(steps: 3) == .milliseconds(25), "Short takes: 25 ms per word")
-        #expect(TypewriterPlan.interval(steps: 20) == .milliseconds(25))
-        #expect(TypewriterPlan.interval(steps: 100) == .milliseconds(10))
-        for count in [1, 5, 40, 41, 80, 100] {
-            #expect(TypewriterPlan.interval(steps: count) * max(0, count - 1) <= .seconds(1))
+    @Test func everyTakeTakesTheSameTimeWhateverItsLength() {
+        for count in [2, 3, 5, 20, 30] {
+            let total = TypewriterPlan.interval(steps: count) * (count - 1)
+            #expect(total <= TypewriterPlan.duration && TypewriterPlan.duration - total < .microseconds(1))
         }
-        #expect(TypewriterPlan.interval(steps: 0) == .zero)
+        #expect(TypewriterPlan.interval(steps: 3) == .milliseconds(150))
+        let long = TypewriterPlan.steps((1...450).map { "w\($0)" }.joined(separator: " "))
+        #expect(TypewriterPlan.interval(steps: long.count) * (long.count - 1) <= TypewriterPlan.duration)
+        #expect(TypewriterPlan.interval(steps: 1) == .zero && TypewriterPlan.interval(steps: 0) == .zero)
+    }
+
+    @Test func slowWritesShortenTheFollowingPauses() async {
+        let clock = ContinuousClock()
+        var pauses: [Duration] = []
+        _ = await Typewriter.run("eins zwei drei", sleep: { pauses.append($0) }, clock: clock) { _ in
+            let until = clock.now + .milliseconds(200)
+            while clock.now < until {} // a field that takes 200 ms per write
+            return true
+        }
+        #expect(pauses.count == 0, "Behind schedule: no pauses, writes go back to back")
     }
 
     @Test func eventChunksSplitOnGraphemesWithinTwentyUnits() {
@@ -54,7 +66,7 @@ import Testing
         var pauses: [Duration] = []
         let result = await Typewriter.run("eins zwei drei", sleep: { pauses.append($0) }) { written.append($0); return true }
         #expect(result == .init(remainder: nil, wroteAny: true))
-        #expect(written == ["eins ", "zwei ", "drei"] && pauses == [.milliseconds(25), .milliseconds(25)])
+        #expect(written == ["eins ", "zwei ", "drei"] && pauses == [.milliseconds(150), .milliseconds(150)])
     }
 
     @Test func runStopsAtTheFirstFailedStepAndReturnsTheRest() async {

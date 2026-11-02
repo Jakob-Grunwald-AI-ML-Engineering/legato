@@ -70,6 +70,8 @@ public final class FieldDictationWriter {
     private let fallback: @MainActor (_ text: String, _ secure: Bool, _ copyOnly: Bool) async -> FallbackResult
     private let typewriter: @MainActor () -> Bool
     private let sleep: (Duration) async -> Void
+    /// Keeps the typewriter on schedule when the field is slow to write (nil in tests on a virtual clock).
+    private let pacingClock: ContinuousClock?
     private let frontmostApp: @MainActor () -> Int32?
     private let now: @MainActor () -> Date
     private var current: Current?
@@ -84,10 +86,11 @@ public final class FieldDictationWriter {
                 fallback: @escaping @MainActor (_ text: String, _ secure: Bool, _ copyOnly: Bool) async -> FallbackResult,
                 typewriter: @escaping @MainActor () -> Bool = { false },
                 sleep: @escaping (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+                pacingClock: ContinuousClock? = ContinuousClock(),
                 frontmostApp: @escaping @MainActor () -> Int32? = { nil },
                 now: @escaping @MainActor () -> Date = { Date() }) {
         self.capture = capture; self.fallback = fallback
-        self.typewriter = typewriter; self.sleep = sleep; self.frontmostApp = frontmostApp; self.now = now
+        self.typewriter = typewriter; self.sleep = sleep; self.pacingClock = pacingClock; self.frontmostApp = frontmostApp; self.now = now
     }
 
     /// A session starts: forget the last one's field and clipboard run, capture the field in front now.
@@ -158,7 +161,7 @@ public final class FieldDictationWriter {
             let target = field.target
             var expected: UTF16Range?
             var started = false
-            let result = await Typewriter.run(delta, sleep: sleep) { step in
+            let result = await Typewriter.run(delta, sleep: sleep, clock: pacingClock) { step in
                 if started {
                     guard let now = try? target.selectedRange(), now == expected else { return false }
                 }
