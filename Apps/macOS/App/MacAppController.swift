@@ -73,11 +73,12 @@ import Observation
                 }
             },
             fallback: { [weak paster = paster, settings = settings, keys = keyPresses] text, secure, copyOnly in
-                guard let paster else { return .copied(message: "") }
+                guard let paster else { return .copied(message: "", reason: .appChanged) }
                 let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
                 if copyOnly || pid == ProcessInfo.processInfo.processIdentifier {
                     paster.copy(text)
-                    return .copied(message: secure ? PasteService.CopyReason.secureField.toast : "Copied to the clipboard. Paste with ⌘V.")
+                    return .copied(message: secure ? CopyReason.secureField.toast : "Copied to the clipboard. Paste with ⌘V.",
+                                   reason: secure ? .secureField : .appChanged)
                 }
                 if settings.typewriter {
                     switch await paster.type(text, targetPID: pid, secureField: secure, realKeyDowns: { keys.count }) {
@@ -89,7 +90,7 @@ import Observation
                 let restore = UserDefaults.standard.object(forKey: "restoreClipboard") as? Bool ?? true
                 switch await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure) {
                 case .pasted: return .pasted
-                case .copied(let reason): return .copied(message: reason.toast)
+                case .copied(let reason): return .copied(message: reason.toast, reason: reason)
                 }
             },
             typewriter: { [settings = settings] in settings.typewriter },
@@ -98,6 +99,20 @@ import Observation
         dictation.deliver = { [weak self] text in
             guard let self else { return }
             if case .copied(let message) = await dictationWriter.write(text), !message.isEmpty { dictation.report(message) }
+        }
+        dictation.deliverStream = { [weak self] poll in
+            guard let self else { return false }
+            let outcome = await dictationWriter.writeStreaming(poll: poll)
+            if case .copied(let message) = outcome, !message.isEmpty { dictation.report(message) }
+            return outcome == .stalled
+        }
+        dictation.retractStream = { [weak self] in
+            guard let self else { return }
+            if case .copied(let message) = dictationWriter.retractStreamed(), !message.isEmpty { dictation.report(message) }
+        }
+        dictation.onEnd = { [weak self] in
+            guard let self else { return }
+            if case .copied(let message)? = await dictationWriter.finish(), !message.isEmpty { dictation.report(message) }
         }
         dictation.pipeline.contextBefore = { [weak self] in self?.dictationWriter.textBeforeCursor() ?? "" }
         composer.hostInsertionTarget = { [weak self] in self?.composerTargetToken }

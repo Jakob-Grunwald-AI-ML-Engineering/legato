@@ -72,6 +72,15 @@ import AppKit
             MacAppController.shared.dictation.pipeline.debugFailTakes = count
             return MacAppController.shared.dictation.debugState
         }
+        // Scripted streaming cleaner for the next take cleanups: `<chunkMs> [failAfterChunks]` (first stream only fails), or `off`.
+        harness.register("dictation-debug-stream") { command in
+            if command.args == ["off"] { MacAppController.shared.dictation.pipeline.debugStreamCleaner = nil; return MacAppController.shared.dictation.debugState }
+            guard (1...2).contains(command.args.count), let ms = Int(command.args[0]), ms >= 0 else { throw Usage.invalid }
+            let fail = command.args.count == 2 ? Int(command.args[1]) : nil
+            if command.args.count == 2, fail == nil { throw Usage.invalid }
+            MacAppController.shared.dictation.pipeline.debugStreamCleaner = DebugStreamingCleaner(chunkMilliseconds: ms, failAfterChunks: fail)
+            return MacAppController.shared.dictation.debugState
+        }
         // The pill's Retry and Insert as-is buttons, without a click.
         harness.register("dictation-retry") { _ in
             await MacAppController.shared.dictation.pipeline.retry()

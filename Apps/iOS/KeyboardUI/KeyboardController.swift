@@ -3,6 +3,7 @@ import LegatoKeyboardCore
 import LegatoComposerDoc
 import Observation
 import UIKit
+import os
 
 /// The keyboard's brain, shared by the extension and the DEBUG harness in the app: shows the link's
 /// state, turns the host's dictation text into edits of the document (`ProxyEditPlanner`), reports what
@@ -258,6 +259,9 @@ final class KeyboardController {
     @ObservationIgnored private var composerPoll: Task<Void, Never>?
     private let composerLink = UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) }
     @ObservationIgnored private var composerReader = ComposerPublicationReader()
+    #if DEBUG || LEGATO_INTERNAL
+    private static let composerLog = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-composer")
+    #endif
     func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
         guard fullAccess else { show("Allow Full Access to connect to the composer."); return }
         composerLink?.send(.init(action: action, lineID: lineID, wordID: wordID, endLineID: endLineID, endWordID: endWordID, text: text))
@@ -281,10 +285,21 @@ final class KeyboardController {
         guard !isTornDown else { return }
         isVisible = true
         composerPoll?.cancel()
+        // Every appearance reads the stored publication afresh, whatever bytes this reader saw before (#225).
+        composerReader.reset()
+        #if DEBUG || LEGATO_INTERNAL
+        Self.composerLog.info("composer.poll start session=\(self.composer.sessionID ?? "-", privacy: .public) rev=\(self.composer.snapshot.revision) lines=\(self.composer.snapshot.lines.count)")
+        #endif
         composerPoll = Task { [weak self] in
+            #if DEBUG || LEGATO_INTERNAL
+            defer { Self.composerLog.info("composer.poll stop cancelled=\(Task.isCancelled ? 1 : 0)") }
+            #endif
             while !Task.isCancelled {
                 guard let self else { return }
                 if let channel = self.composerLink, let value = self.composerReader.read(from: channel), value != self.composer {
+                    #if DEBUG || LEGATO_INTERNAL
+                    Self.composerLog.info("composer.read rev=\(value.snapshot.revision) session=\(value.sessionID ?? "-", privacy: .public) lines=\(value.snapshot.lines.count) tail=\(value.tail.count) insertion=\(value.successfulInsertionID ?? "-", privacy: .public) was=\(self.composer.snapshot.lines.count)")
+                    #endif
                     if let pending = self.pendingComposerInsert,
                        value.insertedIntentID == pending || value.sessionID != self.composer.sessionID {
                         self.pendingComposerInsert = nil
@@ -667,6 +682,14 @@ final class KeyboardController {
             ? typist.flush(contextBefore: context, capitalization: autocapitalization)
             : typist.step(contextBefore: context, elapsedMs: elapsedMs, capitalization: autocapitalization,
                           animated: !UIAccessibility.isReduceMotionEnabled)
+        if step.deletes > 0 {
+            // A failed take's partial text, taken back (the typist saw the field still end with exactly that).
+            let expected = String(context.dropLast(step.deletes))
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            perform([.deleteBackward(step.deletes)])
+            typing.ownEdit(contextBefore: expected)
+            versions = nil
+        }
         if !step.inserts.isEmpty {
             let text = step.inserts.joined()
             let expected = context + text

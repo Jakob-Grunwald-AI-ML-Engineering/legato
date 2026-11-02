@@ -41,8 +41,21 @@ public protocol SentenceCleaning: Sendable {
     func cleanTake(_ input: DictationTakeInput) async throws -> String
     /// Writes the take prompt into the provider's prompt cache; failures are ignored.
     func warmDictationTake() async
+    /// Streams the take's cleaned text as deltas (their concatenation is the `cleanTake` result); throws when the
+    /// call or its validation fails, after any deltas already yielded.
+    func cleanTakeStream(_ input: DictationTakeInput) -> AsyncThrowingStream<String, any Error>
 }
 public extension SentenceCleaning {
+    /// Conformers without streaming yield the whole result once.
+    func cleanTakeStream(_ input: DictationTakeInput) -> AsyncThrowingStream<String, any Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do { continuation.yield(try await self.cleanTake(input)); continuation.finish() }
+                catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
     func warmDictation() async {}
     func cleanTake(_ input: DictationTakeInput) async throws -> String { throw SentenceCleanupError.invalidInput }
     func warmDictationTake() async {}
@@ -50,6 +63,26 @@ public extension SentenceCleaning {
 
 public enum SentenceCleanupError: Error, Sendable, Equatable {
     case invalidInput, unexpectedResponse, invalidIdentity, invalidText, incomplete, providerError, outputLimit, refused
+}
+
+/// Trims a streamed text like `trimmingCharacters(in: .whitespacesAndNewlines)` will at the end: leading whitespace
+/// is dropped and trailing whitespace is held until a later character shows it is not the end.
+struct StreamTrimmer {
+    private var started = false
+    private var held = ""
+    mutating func push(_ chunk: String) -> String {
+        var out = ""
+        for scalar in chunk.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                if started { held.unicodeScalars.append(scalar) }
+            } else {
+                started = true
+                out += held; held = ""
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
 }
 
 /// Independent, local copyediting only. This client has no document or application capability.
@@ -89,7 +122,8 @@ public struct SentenceCleanupClient: SentenceCleaning {
         return .init(sentenceID: sentenceID, sequence: sequence, text: text)
     }
     /// Streams one forced tool call and returns its validated-shape input object (event discipline shared by every tool).
-    private func submission(of request: Data, tool: String, maxToolBytes: Int, usageID: String, usageSequence: Int) async throws -> JSONValue {
+    private func submission(of request: Data, tool: String, maxToolBytes: Int, usageID: String, usageSequence: Int,
+                            onFragment: ((String) async -> Void)? = nil) async throws -> JSONValue {
         var index: Int?, initial: JSONValue?, fragments = "", closed = false, stopped = false
         var usageFields: [String: JSONValue] = [:]
         do {
@@ -121,6 +155,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
                           case .string(let fragment) = value["delta"]?["partial_json"],
                           fragments.utf8.count + fragment.utf8.count <= maxToolBytes else { throw SentenceCleanupError.unexpectedResponse }
                     fragments += fragment
+                    if let onFragment { await onFragment(fragment) }
                 case "content_block_stop":
                     guard !closed, let index, Self.blockIndex(value) == index else { throw SentenceCleanupError.unexpectedResponse }
                     closed = true
@@ -165,14 +200,37 @@ public struct SentenceCleanupClient: SentenceCleaning {
     private static let maximumTakeToolBytes = 131_072
 
     public func cleanTake(_ input: DictationTakeInput) async throws -> String {
+        try await takeText(input, onDelta: nil)
+    }
+
+    /// Streams the take's text: each yield continues the last, and together they are exactly the validated result
+    /// (ends trimmed, so held-back whitespace comes with the next word). A failure (including a result that fails
+    /// validation) finishes the stream with the error after whatever was already yielded.
+    public func cleanTakeStream(_ input: DictationTakeInput) -> AsyncThrowingStream<String, any Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    _ = try await self.takeText(input) { continuation.yield($0) }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func takeText(_ input: DictationTakeInput, onDelta: (@Sendable (String) -> Void)?) async throws -> String {
         try Task.checkCancellation()
         guard !input.takeID.isEmpty, input.takeID.utf8.count <= 256,
               !input.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               input.text.utf8.count <= Self.maximumTakeBytes,
               input.vocabulary.count <= 200,
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
+        var field = StreamedStringField(key: "text"), trimmer = StreamTrimmer(), emitted = ""
         let submitted = try await submission(of: try Self.takeRequest(input), tool: "submit_text", maxToolBytes: Self.maximumTakeToolBytes,
-                                             usageID: input.takeID, usageSequence: 0)
+                                             usageID: input.takeID, usageSequence: 0, onFragment: onDelta == nil ? nil : { fragment in
+            let delta = trimmer.push(field.feed(fragment))
+            if !delta.isEmpty { emitted += delta; onDelta?(delta) }
+        })
         guard case .object(let fields) = submitted, Set(fields.keys) == ["sentenceID", "text"],
               case .string(let id) = fields["sentenceID"], id == input.takeID else { throw SentenceCleanupError.invalidIdentity }
         guard case .string(let output) = fields["text"] else { throw SentenceCleanupError.invalidText }
@@ -181,6 +239,11 @@ public struct SentenceCleanupClient: SentenceCleaning {
         guard !text.isEmpty, text.utf8.count <= Self.maximumTakeBytes * 2,
               text.unicodeScalars.allSatisfy({ $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t" }) else {
             throw SentenceCleanupError.invalidText
+        }
+        if let onDelta, emitted != text {
+            // Whatever the stream did not carry (a complete input without deltas, or a held-back tail).
+            guard text.hasPrefix(emitted) else { throw SentenceCleanupError.unexpectedResponse }
+            onDelta(String(text.dropFirst(emitted.count)))
         }
         return text
     }

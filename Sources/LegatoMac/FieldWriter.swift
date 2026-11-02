@@ -167,6 +167,30 @@ public final class FieldWriter {
         return .removed
     }
 
+    /// Takes back the last `text` this writer put into the field (a streamed take whose cleanup then failed): only
+    /// while the focused field still reads exactly as the writer left it, the caret sits right after it and `text`
+    /// ends what was written. Anything else leaves the field alone. The writer stays usable.
+    @discardableResult
+    public func retract(_ text: String) -> RevertResult {
+        guard !text.isEmpty else { return .nothingWritten }
+        guard !closed, let target, let start = spanStart, written.hasSuffix(text), tentative.isEmpty,
+              degradeReason == nil, target.isFocused() else { return .leftInPlace }
+        let span = UTF16Range(location: start, length: written.utf16.count)
+        guard let current = try? target.text(in: span), current == written,
+              let selection = try? target.selectedRange(), selection == UTF16Range(location: span.end, length: 0)
+        else { return .leftInPlace }
+        let removal = UTF16Range(location: span.end - text.utf16.count, length: text.utf16.count)
+        do { try target.replace(removal, with: "") } catch { return .leftInPlace }
+        let rest = String(written.dropLast(text.count))
+        guard let readback = try? target.text(in: UTF16Range(location: start, length: rest.utf16.count)), readback == rest,
+              (try? target.selectedRange()) == UTF16Range(location: removal.location, length: 0)
+        else { degrade(.notApplied); return .leftInPlace }
+        written = rest
+        writtenRaw = max(0, writtenRaw - text.count)
+        rawCommitted = String(rawCommitted.dropLast(text.count))
+        return .removed
+    }
+
     public func finish(finalText: String?) -> FinishAction {
         if degradeReason == nil, !tentative.isEmpty { update(appending: "", tentative: "") }
         let final = (finalText ?? committed).trimmingCharacters(in: .whitespacesAndNewlines)

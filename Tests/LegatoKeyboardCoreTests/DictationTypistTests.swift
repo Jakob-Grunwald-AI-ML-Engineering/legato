@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import LegatoKeyboardCore
 
-private func line(_ seq: Int, _ text: String, raw: String? = nil, status: DictationLineStatus = .cleaned) -> DictationLine {
-    .init(lineID: "s-\(seq)", seq: seq, raw: raw ?? text, text: text, status: status)
+private func line(_ seq: Int, _ text: String, raw: String? = nil, status: DictationLineStatus = .cleaned, final: Bool = true, retracted: Bool = false) -> DictationLine {
+    .init(lineID: "s-\(seq)", seq: seq, raw: raw ?? text, text: text, status: status, final: final, retracted: retracted)
 }
 private func publication(_ lines: DictationLine..., session: String = "s") -> DictationPublication {
     .init(sessionID: session, lines: lines)
@@ -166,18 +166,136 @@ private struct Field {
     #expect(acked.first == 0, "The interrupted line is dropped once the echo fails to arrive")
 }
 
-@Test func aShortAndALongLineBothTypeOutOverTheSameTime() {
+@Test func aShortAndALongLineAreDrainedWithoutABacklog() {
     for text in ["Short line.", String(repeating: "A much longer take with many words in it. ", count: 20)] {
         var typist = DictationTypist()
         var field = Field()
         typist.accept(publication(line(0, text)), acknowledged: nil)
         var ticks = 0
-        while typist.needsTicks, ticks < 100 {
+        while typist.needsTicks, ticks < 200 {
             field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined()
             ticks += 1
         }
         #expect(field.text == text.trimmingCharacters(in: .whitespaces))
-        // 300 ms is 9 or 10 frames of 33 ms, whatever the length.
-        #expect((9...10).contains(ticks), "\(text.count) characters in \(ticks) ticks")
+        // The drain empties what is pending over about 250 ms; even 840 characters take a bounded number of frames.
+        #expect(ticks <= (text.count < 20 ? 12 : 60), "\(text.count) characters in \(ticks) ticks")
     }
+}
+
+@Test func aGrowingLineIsTypedAsItArrivesAndAcknowledgedOnlyOnceFinal() {
+    var typist = DictationTypist()
+    var field = Field()
+    var acked: [Int] = []
+    func frames(_ n: Int) {
+        for _ in 0..<n where typist.needsTicks {
+            let step = typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .sentences)
+            field.text += step.inserts.joined()
+            if let up = step.acknowledged { acked.append(up) }
+        }
+    }
+    typist.accept(publication(line(0, "hello ", final: false)), acknowledged: nil)
+    frames(40)
+    #expect(field.text == "Hello" , "Trailing space of a growing line is not typed before the next word")
+    #expect(acked.isEmpty && !typist.needsTicks, "Fully typed but not final: the typist idles until the next publication")
+    typist.accept(publication(line(0, "hello there, how", final: false)), acknowledged: nil)
+    frames(60)
+    #expect(field.text == "Hello there, how" && acked.isEmpty)
+    typist.accept(publication(line(0, "hello there, how are you?", final: false)), acknowledged: nil)
+    frames(60)
+    #expect(field.text == "Hello there, how are you?" && acked.isEmpty)
+    typist.accept(publication(line(0, "hello there, how are you?", final: true)), acknowledged: nil)
+    frames(5)
+    #expect(acked == [0] && typist.typedThrough == 0 && !typist.needsTicks)
+    typist.accept(publication(line(0, "hello there, how are you?")), acknowledged: nil)
+    frames(5)
+    #expect(field.text == "Hello there, how are you?", "A line is never typed twice")
+}
+
+@Test func aFastStreamNeverBuildsABacklog() {
+    var typist = DictationTypist()
+    var field = Field()
+    var text = ""
+    var lag: [Int] = []
+    // 40 characters arrive every frame (far faster than speech); the typing may only trail by a bounded amount.
+    for frame in 0..<60 {
+        text += String(repeating: "x", count: 40)
+        typist.accept(publication(line(0, text, final: false)), acknowledged: nil)
+        field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined()
+        if frame > 10 { lag.append(text.count - field.text.count) }
+    }
+    // Steady state of the drain: pending ~ arrival rate x window, about 40 x 250/33 = 300 characters.
+    #expect(lag.allSatisfy { $0 < 400 }, "lag stayed bounded: \(lag.max() ?? 0)")
+    #expect(lag.last! < 400)
+    typist.accept(publication(line(0, text, final: true)), acknowledged: nil)
+    var ticks = 0
+    while typist.needsTicks, ticks < 200 { field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined(); ticks += 1 }
+    #expect(field.text.count == text.count && ticks < 60)
+}
+
+@Test func reduceMotionTypesWhateverArrivedAtOnce() {
+    var typist = DictationTypist()
+    typist.accept(publication(line(0, "a growing line of words", final: false)), acknowledged: nil)
+    let step = typist.step(contextBefore: "", elapsedMs: 33, capitalization: .none, animated: false)
+    #expect(step.inserts.joined() == "a growing line of words" && step.acknowledged == nil)
+    typist.accept(publication(line(0, "a growing line of words and more", final: true)), acknowledged: nil)
+    let rest = typist.step(contextBefore: "a growing line of words", elapsedMs: 33, capitalization: .none, animated: false)
+    #expect(rest.inserts.joined() == " and more" && rest.acknowledged == 0)
+}
+
+@Test func theNextLineWaitsBehindAGrowingOne() {
+    var typist = DictationTypist()
+    var field = Field()
+    typist.accept(publication(line(0, "first take", final: false), line(1, "second.")), acknowledged: nil)
+    _ = field.run(&typist)
+    #expect(field.text == "First take", "Order holds: take 1 types only after take 0 is final")
+    typist.accept(publication(line(0, "first take.", final: true), line(1, "second.")), acknowledged: nil)
+    _ = field.run(&typist)
+    #expect(field.text == "First take. Second.")
+}
+
+@Test func aRetractedLineErasesExactlyWhatWasTypedWhenTheFieldStillEchoesIt() {
+    var typist = DictationTypist()
+    var field = Field(text: "Dear Anna, ")
+    typist.accept(publication(line(0, "this is the partial text", final: false)), acknowledged: nil)
+    _ = field.run(&typist, steps: 60)
+    #expect(field.text == "Dear Anna, this is the partial text")
+    typist.accept(publication(line(0, "this is the partial text", final: true, retracted: true), line(1, "the whole take.")), acknowledged: nil)
+    let erase = typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none)
+    #expect(erase.deletes == "this is the partial text".count && erase.inserts.isEmpty && erase.acknowledged == 0)
+    field.text = String(field.text.dropLast(erase.deletes))
+    #expect(field.text == "Dear Anna, ")
+    _ = field.run(&typist)
+    #expect(field.text == "Dear Anna, the whole take.")
+}
+
+@Test func aRetractedLineIsLeftAloneWhenTheFieldNoLongerEchoesIt() {
+    var typist = DictationTypist()
+    var field = Field(text: "Hi ")
+    typist.accept(publication(line(0, "partial words here", final: false)), acknowledged: nil)
+    _ = field.run(&typist, steps: 60)
+    field.text += " and the user typed more"
+    typist.accept(publication(line(0, "partial words here", final: true, retracted: true)), acknowledged: nil)
+    var deleted = 0, acked: [Int] = []
+    for _ in 0..<20 {
+        let step = typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none)
+        deleted += step.deletes
+        if let up = step.acknowledged { acked.append(up) }
+    }
+    #expect(deleted == 0 && acked == [0], "Nothing is deleted from text that is not ours alone; the line is acknowledged")
+}
+
+@Test func aRetractedLineThatNeverStartedIsJustAcknowledged() {
+    var typist = DictationTypist()
+    typist.accept(publication(line(0, "never typed", final: true, retracted: true)), acknowledged: nil)
+    let step = typist.step(contextBefore: "x", elapsedMs: 33, capitalization: .none)
+    #expect(step.deletes == 0 && step.inserts.isEmpty && step.acknowledged == 0)
+}
+
+@Test func theLineCodecKeepsFinalAndRetractedAndReadsOlderPublications() throws {
+    let value = publication(line(0, "partial", final: false), line(1, "gone", final: true, retracted: true))
+    let decoded = try JSONDecoder().decode(DictationPublication.self, from: JSONEncoder().encode(value))
+    #expect(decoded == value && decoded.lines[0].final == false && decoded.lines[1].retracted)
+    let old = Data(#"{"sessionID":"s","lines":[{"lineID":"s-0","seq":0,"raw":"a","text":"A.","status":"cleaned"}]}"#.utf8)
+    let line = try #require(try JSONDecoder().decode(DictationPublication.self, from: old).lines.first)
+    #expect(line.final && !line.retracted, "A line without the flags is whole and not retracted")
 }

@@ -2,9 +2,10 @@ import Foundation
 
 /// Preserves complete surviving word records without allocating a quadratic-size LCS table.
 enum WordDiff {
-    static func reconcile(old: [Word], proposed: [Word], origin: TransactionOrigin) -> [Word] {
+    /// `keepIDs` adopts the proposed ids for words that do not survive (streamed previews name their words up front).
+    static func reconcile(old: [Word], proposed: [Word], origin: TransactionOrigin, keepIDs: Bool = false) -> [Word] {
         if origin == .undo || origin == .asr { return proposed }
-        var result = proposed.map { Word(text: $0.text, language: $0.language, pinned: origin == .user && $0.pinned) }
+        var result = proposed.map { Word(id: keepIDs ? $0.id : UUID().uuidString, text: $0.text, language: $0.language, pinned: origin == .user && $0.pinned) }
         func preserve(_ i: Int, _ j: Int) { result[j] = old[i] }
         match(old, proposed, oldRange: old.indices, newRange: proposed.indices, preserve: preserve)
         return result
@@ -82,5 +83,10 @@ enum WordDiff {
         return lengths
     }
 
-    static func words(_ text: String) -> [Word] { text.split(whereSeparator: \.isWhitespace).map { Word(text: String($0)) } }
+    /// With `idSeed`, the word at position `n` is named `<seed>-w<n>`, so a streamed preview and its final apply agree on ids.
+    static func words(_ text: String, idSeed: String? = nil) -> [Word] {
+        text.split(whereSeparator: \.isWhitespace).enumerated().map { n, piece in
+            idSeed.map { Word(id: "\($0)-w\(n)", text: String(piece)) } ?? Word(text: String(piece))
+        }
+    }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 import LegatoAgent
 import LegatoClaude
 import LegatoVocabulary
@@ -11,6 +12,15 @@ public struct DictationDelivery: Sendable, Equatable {
     public var raw: String
     public var text: String
     public var cleaned: Bool
+    /// The whole text is here. A take streams: the same delivery grows (`text` only ever appends) until it is final.
+    public var final = true
+    /// Set on a growing take whose cleanup then failed: the typed part stays until the user chooses (`retracted`).
+    public var failed = false
+    /// The user chose Retry or Insert as-is for a failed take: whoever typed the partial text erases it (if the
+    /// field still shows exactly that) and acknowledges. The delivery is final.
+    public var retracted = false
+    /// A whole-take delivery (the take modes), as opposed to a line of line-by-line dictation.
+    public var isTake = false
 }
 
 /// Where a take is: collecting lines, cleaning them in one call, or holding them raw after cleanup failed twice.
@@ -68,11 +78,23 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored private var takeTask: Task<Void, Never>?
     @ObservationIgnored private var takeGeneration = 0
     @ObservationIgnored private var takeTextBefore = ""
+    /// The growing delivery of the take being cleaned (nil until its first delta), and the text streamed so far.
+    @ObservationIgnored private var streamSeq: Int?
+    @ObservationIgnored private var streamed = ""
+    /// The delivery of a take whose cleanup failed after text was streamed: `retry()` / `insertRaw()` retract it.
+    @ObservationIgnored private var partialSeq: Int?
+    @ObservationIgnored private var notifyTask: Task<Void, Never>?
+    @ObservationIgnored private var lastNotify = ContinuousClock.now
+    /// Growth of a streaming delivery is announced at most this often (App Group writes and Darwin notes).
+    private static let streamInterval = Duration.milliseconds(30)
+    private static let log = Logger(subsystem: "de.gruenwald.legato", category: "dictation-pipeline")
     @ObservationIgnored private var nextTakeSequence = 0
     @ObservationIgnored private var suppressed = false
     #if DEBUG || LEGATO_INTERNAL
     /// Debug bridge: the next this many take cleanups fail (both attempts), so the failed state is reachable offline.
     @ObservationIgnored public var debugFailTakes = 0
+    /// Debug bridge: when set, take cleanups stream from this scripted cleaner instead of the provider.
+    @ObservationIgnored public var debugStreamCleaner: DebugStreamingCleaner?
     #endif
     /// The prompt cache lives 5 minutes after its last use.
     private static let warmInterval: TimeInterval = 240
@@ -119,6 +141,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         let old = pipeline
         let kept = keepFailedTake ? failedText : nil
         cancelTake()
+        partialSeq = nil
         pipeline = nil; terms = nil; lastWarm = nil
         sessionID = UUID().uuidString
         outbox = []; fallbacks = []; pending = 0
@@ -175,6 +198,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if let failed = failedText {
             // New speech after a failed cleanup: the held text and the new lines go in one take.
             takeLines.insert(failed, at: 0); failedText = nil
+            retractPartial()
             if takePhase == .failed { takePhase = cleaningText == nil ? .buffering : .cleaning }
         }
         if takeLines.isEmpty, cleaningText == nil { takeTextBefore = String(contextBefore().suffix(600)) }
@@ -224,6 +248,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     public func retry() async {
         guard takePhase == .failed, let raw = failedText else { return }
         failedText = nil
+        retractPartial()
         await runTake(raw)
     }
 
@@ -231,6 +256,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     public func insertRaw() async {
         guard takePhase == .failed, let raw = failedText else { return }
         failedText = nil
+        retractPartial()
         takePhase = cleaningText == nil ? .buffering : .cleaning
         deliverTake(raw: raw, text: raw, cleaned: false)
         speechActivity()
@@ -243,6 +269,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         onChange?()
     }
     private func cancelTake() {
+        // A take cut short keeps what it typed: its delivery is final as it stands.
+        for i in outbox.indices where !outbox[i].final { outbox[i].final = true }
+        streamSeq = nil; streamed = ""
+        notifyTask?.cancel(); notifyTask = nil
         takeGeneration += 1
         takeTask?.cancel(); takeTask = nil
         clearCountdown()
@@ -258,11 +288,18 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         #if DEBUG || LEGATO_INTERNAL
         if debugFailTakes > 0 { debugFailTakes -= 1; forcedFailure = true }
         #endif
-        let cleaner = DictationTakeCleaner(cleaner: self.cleaner, timeout: takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
+        var takeCleaner: any SentenceCleaning = self.cleaner
+        #if DEBUG || LEGATO_INTERNAL
+        if let scripted = debugStreamCleaner { takeCleaner = scripted }
+        #endif
+        let cleaner = DictationTakeCleaner(cleaner: takeCleaner, timeout: takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
         let task = Task { @MainActor [weak self] in
             var result = DictationTakeCleanupResult.failed(reason: "forced")
+            var rejected = false
             if !forcedFailure, let terms = await self?.loadTerms() {
-                result = await cleaner.clean(DictationTakeInput(takeID: id, text: raw, vocabulary: terms, recentTakes: recent, textBeforeCursor: before))
+                (result, rejected) = await cleaner.cleanStreaming(
+                    DictationTakeInput(takeID: id, text: raw, vocabulary: terms, recentTakes: recent, textBeforeCursor: before)
+                ) { [weak self] delta in await self?.streamDelta(delta, generation: generation, raw: raw) }
             }
             guard let self, generation == self.takeGeneration else { return }
             self.takeTask = nil
@@ -270,11 +307,16 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             switch result {
             case .cleaned(let text):
                 self.takePhase = .buffering
-                self.deliverTake(raw: raw, text: text, cleaned: true)
+                self.finishStream(raw: raw, text: text, rejected: rejected)
             case .unavailable:
                 self.takePhase = .buffering
                 self.deliverTake(raw: raw, text: raw, cleaned: false)
             case .failed(let reason):
+                // Text already streamed stays in the field until Retry / Insert as-is erases it.
+                if let seq = self.streamSeq, let i = self.outbox.firstIndex(where: { $0.sequence == seq }) {
+                    self.outbox[i].failed = true; self.partialSeq = seq
+                }
+                self.streamSeq = nil; self.streamed = ""
                 self.failedText = raw; self.takePhase = .failed
                 self.fallbacks.append("take-" + reason); if self.fallbacks.count > 20 { self.fallbacks.removeFirst() }
                 self.onChange?()
@@ -285,10 +327,65 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         await task.value
     }
 
+    /// A piece of the take's cleaned text arrived: it is appended to the take's growing delivery (created on the first).
+    private func streamDelta(_ delta: String, generation: Int, raw: String) {
+        guard generation == takeGeneration, !delta.isEmpty else { return }
+        streamed += delta
+        if let seq = streamSeq {
+            if let i = outbox.firstIndex(where: { $0.sequence == seq }) { outbox[i].text = streamed }
+            notifyStream(force: false)
+        } else {
+            let sequence = nextTakeSequence
+            nextTakeSequence += 1
+            streamSeq = sequence
+            outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: streamed, cleaned: true, final: false, isTake: true))
+            notifyStream(force: true)
+        }
+    }
+
+    /// The stream ended well: the delivery is final with the validated text. The guard only warns.
+    private func finishStream(raw: String, text: String, rejected: Bool) {
+        if rejected {
+            fallbacks.append("take-rejected-warning"); if fallbacks.count > 20 { fallbacks.removeFirst() }
+            Self.log.warning("take cleanup streamed; the guard would have rejected it (kept)")
+        }
+        guard let seq = streamSeq else { return deliverTake(raw: raw, text: text, cleaned: true) }
+        streamSeq = nil; streamed = ""
+        // The delivery may be gone: the keyboard stopped typing it (the user moved on) and acknowledged.
+        if let i = outbox.firstIndex(where: { $0.sequence == seq }) { outbox[i].text = text; outbox[i].final = true }
+        recentTakes.record(raw: raw, cleaned: text, wasCleaned: true)
+        notifyStream(force: true)
+    }
+
+    /// Retry and Insert as-is take back what a failed take streamed into the field.
+    private func retractPartial() {
+        guard let seq = partialSeq else { return }
+        partialSeq = nil
+        guard let i = outbox.firstIndex(where: { $0.sequence == seq }) else { return }
+        outbox[i].retracted = true; outbox[i].final = true
+        notifyStream(force: true)
+    }
+
+    private func notifyStream(force: Bool) {
+        let elapsed = lastNotify.duration(to: .now)
+        if force || elapsed >= Self.streamInterval {
+            notifyTask?.cancel(); notifyTask = nil
+            lastNotify = .now
+            onChange?()
+        } else if notifyTask == nil {
+            notifyTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.streamInterval - elapsed)
+                guard !Task.isCancelled, let self else { return }
+                self.notifyTask = nil; self.lastNotify = .now
+                self.onChange?()
+            }
+        }
+    }
+
     private func deliverTake(raw: String, text: String, cleaned: Bool) {
         let sequence = nextTakeSequence
         nextTakeSequence += 1
-        outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: text, cleaned: cleaned))
+        outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: text, cleaned: cleaned, isTake: true))
         recentTakes.record(raw: raw, cleaned: text, wasCleaned: cleaned)
         onChange?()
     }

@@ -39,13 +39,29 @@ actor MacMic: AudioSource {
     func stop() async { stops += 1; continuation?.finish(); continuation = nil }
 }
 
+/// Streams "Hello" and fails on the first take; later takes stream whole.
+final class FailingStreamCleaner: SentenceCleaning {
+    let calls = Mutex(0)
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence { throw SentenceCleanupError.invalidInput }
+    func cleanTake(_ input: DictationTakeInput) async throws -> String { "" }
+    func cleanTakeStream(_ input: DictationTakeInput) -> AsyncThrowingStream<String, any Error> {
+        let call = calls.withLock { $0 += 1; return $0 }
+        return AsyncThrowingStream { continuation in
+            if call == 1 { continuation.yield("Hello "); continuation.finish(throwing: SentenceCleanupError.providerError) }
+            else { continuation.yield("Hello world."); continuation.finish() }
+        }
+    }
+}
+
 @MainActor final class Typed {
     var lines: [String] = []
     func record(_ text: String) async { lines.append(text) }
 }
 
 @MainActor private func until(_ condition: @MainActor () async -> Bool) async throws {
-    for _ in 0..<1000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
+    // A wall-clock deadline, not an iteration count: under the full parallel suite each sleep runs long.
+    let deadline = ContinuousClock.now + .seconds(20)
+    while ContinuousClock.now < deadline { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
     Issue.record("Timed out waiting for condition")
     throw CancellationError()
 }
@@ -55,7 +71,7 @@ actor MacMic: AudioSource {
     let sockets = SocketBox()
     let typed = Typed()
 
-    private func make(key: String = "test", cleaner: Cleaner = Cleaner(), timeout: Duration = .milliseconds(2500),
+    private func make(key: String = "test", cleaner: any SentenceCleaning = Cleaner(), timeout: Duration = .milliseconds(2500),
                       context: @escaping @MainActor () -> String = { "" },
                       mode: DictationSendSetting.Mode = .lineByLine, clock: any Clock<Duration> = ContinuousClock()) -> MacDictationSession {
         let pipeline = DictationPipeline(cleaner: cleaner, timeout: timeout, sendMode: { mode }, pauseSeconds: { 5 }, clock: clock)
@@ -243,5 +259,33 @@ actor MacMic: AudioSource {
         try await until { typed.lines.count == 2 }
         #expect(typed.lines == ["Erste.", "Zweite."] && session.pipeline.takeLines.isEmpty)
         await session.debugStop()
+    }
+
+    @Test func aWholeTakeStreamsAndAFailedOneStaysOpenUntilRetryRetractsIt() async throws {
+        let cleaner = FailingStreamCleaner()
+        let session = make(cleaner: cleaner, mode: .onStop)
+        var seen: [DictationStreamState] = [], retracted = 0
+        session.deliverStream = { poll in
+            // Follows the take like the field writer: until it is final, retracted or stalled.
+            while let state = poll() {
+                seen.append(state)
+                if state.isFinal || state.retracted { return false }
+                if state.stalled { return true }
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+            return false
+        }
+        session.retractStream = { retracted += 1 }
+        try await session.debugLine("hello world")
+        await session.debugStop()
+        try await until { session.pipeline.takePhase == .failed && seen.contains { $0.stalled } }
+        #expect(typed.lines.isEmpty, "A take is streamed, not delivered whole")
+        #expect(seen.first?.text == "Hello " && seen.allSatisfy { !$0.isFinal })
+        #expect(session.pipeline.outbox.count == 1, "The stalled take is not acknowledged; its partial text is in the field")
+
+        await session.pipeline.retry()
+        try await until { retracted == 1 && session.pipeline.outbox.count == 1 && session.pipeline.outbox[0].final }
+        #expect(session.pipeline.outbox[0].text == "Hello world." && session.pipeline.outbox[0].sequence == 1, "The partial was retracted and acknowledged; the retry streams on")
+        try await until { seen.last?.isFinal == true }
     }
 }

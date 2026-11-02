@@ -1,5 +1,6 @@
 import Foundation
 import LegatoComposerDoc
+import os
 
 public struct ComposerPublication: Codable, Equatable, Sendable {
     public var snapshot: DocumentSnapshot
@@ -60,6 +61,11 @@ public struct ComposerLinkHistory: Sendable {
         current = snapshot; revisions.append((snapshot.revision, hunks))
         if revisions.count > 100 { revisions.removeFirst(revisions.count - 100) }
     }
+    /// True when `snapshot` is not what the history already holds. A revision number alone is not enough:
+    /// a restarted document can reuse a revision with different lines.
+    public func needsRecord(_ snapshot: DocumentSnapshot) -> Bool {
+        revisions.last?.0 != snapshot.revision || current != snapshot
+    }
     public func publication(acknowledged: Int) -> ComposerPublication {
         let oldest = revisions.first?.0 ?? current.revision + 1
         let gap = acknowledged < oldest - 1 || acknowledged > current.revision
@@ -108,6 +114,7 @@ public struct ComposerLink: Sendable {
 public struct ComposerPublicationPublisher: Sendable {
     private var previous: ComposerPublication?
     private var encoded: Data?
+    private var failedEncoding: ComposerPublication?
     public init() {}
     @discardableResult public mutating func publish(_ value: ComposerPublication, through link: ComposerLink) -> Bool {
         let data: Data
@@ -117,28 +124,75 @@ public struct ComposerPublicationPublisher: Sendable {
         } else {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .secondsSince1970
-            guard let next = try? encoder.encode(value) else { return false }
+            encoder.outputFormatting = .sortedKeys   // equal values give equal bytes
+            // A stray NaN/infinity must degrade to a string, not silently drop the whole publication.
+            encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "inf", negativeInfinity: "-inf", nan: "nan")
+            let next: Data
+            do { next = try encoder.encode(value) } catch {
+                // Logged once per distinct value: the host retries every tick.
+                if failedEncoding != value {
+                    failedEncoding = value
+                    ComposerLinkLog.logger.error("composer.publish encode failed rev=\(value.snapshot.revision) lines=\(value.snapshot.lines.count) \(ComposerLinkLog.describe(error), privacy: .public)")
+                }
+                return false
+            }
+            failedEncoding = nil
+            // Unchanged bytes (e.g. a NaN field never compares equal) are not a new publication.
+            if next == encoded, link.encodedPublication == next { previous = value; return false }
             data = next
         }
         link.store.writeEncodedData(data, forKey: LinkChannel.Key.composer)
-        guard link.encodedPublication == data else { return false }
+        guard link.encodedPublication == data else {
+            ComposerLinkLog.logger.error("composer.publish write not readable back bytes=\(data.count) rev=\(value.snapshot.revision)")
+            return false
+        }
         previous = value; encoded = data
         return true
     }
 }
 
-/// Read fresh bytes, but decode a publication only when those bytes change. Invalid values are
-/// negative-cached until changed, so a malformed publication cannot burn the keyboard's main thread.
+/// Read fresh bytes, but decode a publication only when those bytes change. Bytes that fail to decode are
+/// logged and remembered only until the bytes change or `reset()`, so a malformed publication cannot burn
+/// the keyboard's main thread, and a new appearance always starts from a clean read.
 public struct ComposerPublicationReader: Sendable {
     private var encoded: Data?
+    /// Byte count of the last publication that failed to decode; nil once a later one decodes.
+    public private(set) var lastDecodeFailureBytes: Int?
     public init() {}
+    /// Forget the bytes seen so far: the next `read` decodes whatever is stored now.
+    public mutating func reset() { encoded = nil; lastDecodeFailureBytes = nil }
     public mutating func read(from link: ComposerLink) -> ComposerPublication? {
         guard let data = link.encodedPublication else { encoded = nil; return nil }
         guard data != encoded else { return nil }
         encoded = data
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
-        return try? decoder.decode(ComposerPublication.self, from: data)
+        decoder.nonConformingFloatDecodingStrategy = .convertFromString(positiveInfinity: "inf", negativeInfinity: "-inf", nan: "nan")
+        do {
+            let value = try decoder.decode(ComposerPublication.self, from: data)
+            lastDecodeFailureBytes = nil
+            return value
+        } catch {
+            lastDecodeFailureBytes = data.count
+            ComposerLinkLog.logger.error("composer.read decode failed bytes=\(data.count) \(ComposerLinkLog.describe(error), privacy: .public)")
+            return nil
+        }
+    }
+}
+
+/// Logging for the composer link. Messages carry counts and coding paths, never draft text.
+enum ComposerLinkLog {
+    static let logger = Logger(subsystem: "de.gruenwald.legato", category: "composer-link")
+    static func describe(_ error: Error) -> String {
+        func path(_ context: [CodingKey]) -> String { "path=" + context.map(\.stringValue).joined(separator: ".") }
+        if let error = error as? DecodingError {
+            switch error {
+            case .typeMismatch(_, let c), .valueNotFound(_, let c), .keyNotFound(_, let c), .dataCorrupted(let c): return path(c.codingPath)
+            @unknown default: return "decoding"
+            }
+        }
+        if let error = error as? EncodingError, case .invalidValue(_, let c) = error { return path(c.codingPath) }
+        return String(describing: type(of: error))
     }
 }
 

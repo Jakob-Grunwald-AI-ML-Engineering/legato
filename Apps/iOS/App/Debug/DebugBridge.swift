@@ -55,6 +55,15 @@ import UIKit
             AppController.shared.dictation.debugFailTakes = count
             return AppController.shared.dictation.takeState
         }
+        // Scripted streaming cleaner for the next take cleanups: `<chunkMs> [failAfterChunks]` (first stream only fails), or `off`.
+        harness.register("dictation-debug-stream") { command in
+            if command.args == ["off"] { AppController.shared.dictation.debugStreamCleaner = nil; return AppController.shared.dictation.takeState }
+            guard (1...2).contains(command.args.count), let ms = Int(command.args[0]), ms >= 0 else { throw Usage.invalid }
+            let fail = command.args.count == 2 ? Int(command.args[1]) : nil
+            if command.args.count == 2, fail == nil { throw Usage.invalid }
+            AppController.shared.dictation.debugStreamCleaner = DebugStreamingCleaner(chunkMilliseconds: ms, failAfterChunks: fail)
+            return AppController.shared.dictation.takeState
+        }
         // The keyboard's Retry / Insert as-is buttons act through the link; these act on the host directly.
         harness.register("dictation-retry") { _ in
             await AppController.shared.dictation.retry()
