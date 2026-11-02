@@ -392,6 +392,17 @@ private let thirteenWords = "one two three four five six seven eight nine ten el
     }
 
     #if DEBUG || LEGATO_INTERNAL
+    @Test func theScriptedStreamCleanerStreamsThenFailsOnceAndRetrySucceeds() async {
+        let pipeline = make(TakeCleaner())
+        pipeline.debugStreamCleaner = DebugStreamingCleaner(chunkMilliseconds: 1, failAfterChunks: 2)
+        await pipeline.receive(routeLine(0, "hello there general"))
+        await pipeline.finishTake()
+        #expect(pipeline.takePhase == .failed)
+        #expect(pipeline.outbox.count == 1 && pipeline.outbox[0].failed && pipeline.outbox[0].text == "Hello There ")
+        await pipeline.retry()
+        #expect(pipeline.outbox.count == 2 && pipeline.outbox[0].retracted)
+        #expect(pipeline.outbox[1].text == "Hello There General" && pipeline.outbox[1].final)
+    }
     @Test func theDebugSwitchForcesTheNextTakeToFail() async {
         let cleaner = TakeCleaner()
         let pipeline = make(cleaner)

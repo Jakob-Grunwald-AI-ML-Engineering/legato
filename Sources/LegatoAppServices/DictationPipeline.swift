@@ -93,6 +93,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     #if DEBUG || LEGATO_INTERNAL
     /// Debug bridge: the next this many take cleanups fail (both attempts), so the failed state is reachable offline.
     @ObservationIgnored public var debugFailTakes = 0
+    /// Debug bridge: when set, take cleanups stream from this scripted cleaner instead of the provider.
+    @ObservationIgnored public var debugStreamCleaner: DebugStreamingCleaner?
     #endif
     /// The prompt cache lives 5 minutes after its last use.
     private static let warmInterval: TimeInterval = 240
@@ -286,7 +288,11 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         #if DEBUG || LEGATO_INTERNAL
         if debugFailTakes > 0 { debugFailTakes -= 1; forcedFailure = true }
         #endif
-        let cleaner = DictationTakeCleaner(cleaner: self.cleaner, timeout: takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
+        var takeCleaner: any SentenceCleaning = self.cleaner
+        #if DEBUG || LEGATO_INTERNAL
+        if let scripted = debugStreamCleaner { takeCleaner = scripted }
+        #endif
+        let cleaner = DictationTakeCleaner(cleaner: takeCleaner, timeout: takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
         let task = Task { @MainActor [weak self] in
             var result = DictationTakeCleanupResult.failed(reason: "forced")
             var rejected = false
