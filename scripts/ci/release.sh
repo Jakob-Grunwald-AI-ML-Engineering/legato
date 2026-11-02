@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # Usage: release.sh check|mac-build|mac-release|real-deps|ship
 #   check      iOS: Release build (arm64 simulator) + scan that no e2e/fake code is in the binary.
-#   mac-build  macOS: Debug build, arm64, unsigned (a Release build of MLX takes over 12 min cold; the signed
-#              Release build belongs to the ship pipeline, #4).
+#   mac-build  macOS: Debug build, arm64, unsigned (the signed Release build belongs to the ship pipeline, #78).
 #   mac-release macOS: ordinary Release build, arm64, unsigned + internal harness exclusion scan.
-#   real-deps  `swift test` against the real MLX, FluidAudio, swift-huggingface and swift-transformers (the gate
-#              tests against stubs; tests that need the real libraries run only here).
-#   ship       the release pipeline (not implemented yet, #4).
+#   real-deps  plain `swift test` (no stubbed dependencies remain, so this repeats the gate's package tests).
+#   ship       the release pipeline (not implemented yet, #78).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -43,7 +41,7 @@ case "$mode" in
       echo "::warning::live moved, but there are no app targets yet — nothing shipped."
       exit 0
     fi
-    echo "::error::release pipeline not implemented yet (#4) — nothing shipped."
+    echo "::error::release pipeline not implemented yet (#78) — nothing shipped."
     exit 1
     ;;
   *)

@@ -4,7 +4,7 @@
 # merge) turns this workflow into "ship untested".
 # The gate builds against stubs, so the release checks (release-checks.yml: iOS Release build + binary
 # scan, Mac Release build, real-library `swift test`) must pass before `ship`. To run only the checks, dispatch release-checks.
-# Target pipeline (TestFlight iOS; notarized DMG + Sparkle macOS): issue #4.
+# Target pipeline (TestFlight iOS; notarized DMG + Sparkle macOS): issue #78.
 name: release
 
 on:
