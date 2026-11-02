@@ -59,7 +59,9 @@ final class FailingStreamCleaner: SentenceCleaning {
 }
 
 @MainActor private func until(_ condition: @MainActor () async -> Bool) async throws {
-    for _ in 0..<1000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
+    // A wall-clock deadline, not an iteration count: under the full parallel suite each sleep runs long.
+    let deadline = ContinuousClock.now + .seconds(20)
+    while ContinuousClock.now < deadline { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
     Issue.record("Timed out waiting for condition")
     throw CancellationError()
 }
