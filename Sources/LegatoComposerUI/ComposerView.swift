@@ -81,6 +81,28 @@ public struct ComposerView: View {
     #if DEBUG || LEGATO_INTERNAL
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "composer-view")
     #endif
+    /// The flight task is cancelled with the view and never reaches `finish`; release the retained
+    /// viewport and resync, so a remount renders the snapshot rather than a stale flight.
+    private func abandonFlight() {
+        sendFlight.abandon(); sendFlightProgress = 0
+        presentedParagraphs = hasCanonicalDraft ? ParagraphPresentation.reconcile(previous: presentedParagraphs, lines: snapshot.lines) : []
+        presentedRevision = snapshot.revision
+        flightLog("disappear")
+    }
+    /// Flight diagnostics observers, kept out of `body`'s modifier chain so it still type-checks in time.
+    @ViewBuilder private func flightProbe(holds: Bool) -> some View {
+        #if DEBUG || LEGATO_INTERNAL
+        Color.clear
+            .onChange(of: holds) { _, _ in flightLog("holds") }
+            .onChange(of: sendFlight.activeAcknowledgement) { old, next in
+                let event: String = next != nil ? "ack-set" : old != nil ? "ack-cleared" : "ack"
+                flightLog(event)
+            }
+            .onChange(of: presentedParagraphs.count) { _, _ in flightLog("presented") }
+        #else
+        EmptyView()
+        #endif
+    }
     private func beginSendFlightIfNeeded() {
         if sendFlight.observe(acknowledgement: successfulInsertionID, hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty) {
             var transaction = SwiftUI.Transaction()
@@ -156,19 +178,8 @@ public struct ComposerView: View {
                 dictationShine.baseline(dictationCommit)
                 presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true
             }
-            .onDisappear {
-                // The flight task is cancelled with the view and never reaches `finish`; release the retained
-                // viewport and resync, so a remount renders the snapshot rather than a stale flight.
-                sendFlight.abandon(); sendFlightProgress = 0
-                presentedParagraphs = hasCanonicalDraft ? ParagraphPresentation.reconcile(previous: presentedParagraphs, lines: snapshot.lines) : []
-                presentedRevision = snapshot.revision
-                flightLog("disappear")
-            }
-            #if DEBUG || LEGATO_INTERNAL
-            .onChange(of: holdsSentViewport) { _, _ in flightLog("holds") }
-            .onChange(of: sendFlight.activeAcknowledgement) { old, next in flightLog(next == nil ? (old == nil ? "ack" : "ack-cleared") : "ack-set") }
-            .onChange(of: presentedParagraphs.count) { _, _ in flightLog("presented") }
-            #endif
+            .onDisappear(perform: abandonFlight)
+            .background { flightProbe(holds: holdsSentViewport) }
             .onChange(of: successfulInsertionID) { _, _ in beginSendFlightIfNeeded() }
             .onChange(of: snapshot) { _, next in
                 beginSendFlightIfNeeded()
