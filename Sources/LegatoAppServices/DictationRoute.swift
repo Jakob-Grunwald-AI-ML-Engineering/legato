@@ -20,9 +20,15 @@ public struct DictationRouteLine: Sendable, Equatable {
     func reset() async
     /// The dictation surface is about to be used: warm whatever cleaning needs (connection, prompt cache).
     func warm() async
+    /// The route heard speech (a new live tail): a pause timer restarts here.
+    func speechActivity()
+    /// The take ended (stop): whatever was buffered is cleaned and written now.
+    func finishTake() async
 }
 public extension DictationRouteSink {
     func warm() async {}
+    func speechActivity() {}
+    func finishTake() async {}
 }
 
 /// Counts finalized lines and does nothing else (the default for sessions without a keyboard link).

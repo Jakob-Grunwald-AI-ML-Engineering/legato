@@ -39,6 +39,7 @@ import LegatoSoniox
     @ObservationIgnored private var lastWarm: Date?
     @ObservationIgnored private var draining = false
     @ObservationIgnored private var delivered = -1
+    @ObservationIgnored private var held = false
     /// Where finished lines go (the focused field); called one line at a time, in speaking order.
     @ObservationIgnored public var deliver: @MainActor (String) async -> Void = { _ in }
     /// A new session begins (capture the target field).
@@ -122,6 +123,7 @@ import LegatoSoniox
         guard phase == .listening else { return }
         if let stopTask { await stopTask.value; return }
         phase = .finishing
+        updateAutoSend()
         let task = Task { await self.finishSession() }
         stopTask = task
         await task.value
@@ -136,10 +138,20 @@ import LegatoSoniox
             await engine.waitForFinish(timeout: .seconds(3))
         }
         _ = await pipeline.settle(timeout: settleTimeout)
+        // The whole take (on stop, or what the pause timer has not sent yet) is cleaned and written once, here.
+        // The cleanup bounds itself (a timeout per attempt, one retry); a failure leaves the raw text held for the user.
+        await pipeline.finishTake()
         await drainNow()
         phase = .idle
         stopTask = nil
+        updateAutoSend()
     }
+
+    /// The hotkey is held (push-to-talk): release is the send, so the pause timer stays quiet. Taps and the
+    /// debug bridge are not held.
+    public func setHeld(_ held: Bool) { self.held = held; updateAutoSend() }
+    /// No automatic send while the key is held or while stopping (stop sends the take itself).
+    private func updateAutoSend() { pipeline.setAutoSendSuppressed(held || phase == .finishing) }
 
     /// A chord after the hotkey started the run: drop the take and the half-spoken words. Lines already typed stay.
     public func cancel() async {
@@ -160,7 +172,7 @@ import LegatoSoniox
     private func beginContext() async {
         _ = await pipeline.settle(timeout: settleTimeout)
         await drainNow()
-        await pipeline.reset()
+        await pipeline.reset(keepFailedTake: true)
         delivered = -1
         engine.resetSequence()
         engine.open()
@@ -226,6 +238,7 @@ import LegatoSoniox
         ["phase": phase.rawValue, "tail": tail, "notice": notice ?? "", "noticeID": noticeID, "warm": engine.isLive,
          "pending": pipeline.pending, "outbox": pipeline.outbox.count, "fallbacks": pipeline.fallbacks, "debugSession": debugSession,
          "delivered": delivered, "sessionID": pipeline.sessionID]
+            .merging(pipeline.takeState) { $1 }
     }
     #endif
 }

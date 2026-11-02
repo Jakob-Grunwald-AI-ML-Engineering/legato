@@ -31,6 +31,13 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     /// Why the last tap on the dictation route could not start, and a counter that changes with each notice.
     public var dictationNotice: String?
     public var dictationNoticeID: Int?
+    /// The take held for one write (on stop / after a pause): its text so far (buffered, in cleanup or failed),
+    /// its phase (`buffering`, `cleaning`, `failed`) and the pause countdown (host `systemUptime`); nil in
+    /// line-by-line mode and with older hosts.
+    public var dictationTake: String?
+    public var dictationTakePhase: String?
+    public var dictationCountdownStart: Double?
+    public var dictationCountdownDeadline: Double?
     public var instructionDraft: String?
     public var instructionStatus: String?
     /// Automatic-send countdown over the pending instruction (host `systemUptime`); nil in manual mode.

@@ -9,6 +9,8 @@ struct SettingsView: View {
     let controller: AppController
     @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
+    @AppStorage(DictationSendSetting.modeKey, store: AppGroup.defaults) private var dictationSend = DictationSendSetting.defaultMode.rawValue
+    @AppStorage(DictationSendSetting.pauseKey, store: AppGroup.defaults) private var dictationPause = DictationSendSetting.defaultPause
     @AppStorage(InstructionSendSetting.modeKey) private var instructionSend = InstructionSendSetting.Mode.manual.rawValue
     @AppStorage(InstructionSendSetting.pauseKey) private var instructionPause = InstructionSendSetting.defaultPause
     @State private var keepMicrophoneActive = ComposerMicrophonePreference.keepActive()
@@ -33,6 +35,22 @@ struct SettingsView: View {
                 }.accessibilityIdentifier("settings.personalInstructionsLink")
             } header: { Text("Writing") } footer: {
                 Text("One model handles corrections and composes at pauses. Changes apply to your next session.")
+            }
+            Section {
+                Picker("Send dictation", selection: $dictationSend) {
+                    Text("On stop").tag(DictationSendSetting.Mode.onStop.rawValue)
+                    Text("After a pause").tag(DictationSendSetting.Mode.afterPause.rawValue)
+                    Text("Line by line").tag(DictationSendSetting.Mode.lineByLine.rawValue)
+                }.accessibilityIdentifier("settings.dictationSend")
+                if dictationSend == DictationSendSetting.Mode.afterPause.rawValue {
+                    Stepper(value: Binding(get: { DictationSendSetting.clampedPause(dictationPause) },
+                                           set: { dictationPause = DictationSendSetting.clampedPause($0) }),
+                            in: DictationSendSetting.pauseRange, step: DictationSendSetting.pauseStep) {
+                        LabeledContent("Pause before sending", value: "\(Int(DictationSendSetting.clampedPause(dictationPause))) s")
+                    }.accessibilityIdentifier("settings.dictationPause")
+                }
+            } header: { Text("Dictation") } footer: {
+                Text("On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Line by line cleans and types each sentence as you speak.")
             }
             Section {
                 Picker("Send instructions", selection: $instructionSend) {

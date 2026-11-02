@@ -167,15 +167,39 @@ final class KeyboardController {
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        hint ?? meetingNotice ?? dictatingStatus ?? dictationStatus
+        hint ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
     }
 
-    /// While the ABC surface dictates: the live tail of the current line takes the word row's place.
+    /// The held take's phase while the ABC surface shows one (`cleaning`, `failed`), else nil.
+    private var takePhase: String? {
+        guard surface == .typing, let phase = composer.dictationTakePhase, phase != "buffering" else { return nil }
+        return phase
+    }
+    /// A failed take cleanup: the word row offers Retry and Insert as-is.
+    var takeFailed: Bool { takePhase == "failed" }
+    /// The countdown rim over the word row (after-a-pause mode), host uptime.
+    var takeCountdown: (start: Double, deadline: Double)? {
+        guard surface == .typing, let start = composer.dictationCountdownStart, let deadline = composer.dictationCountdownDeadline else { return nil }
+        return (start, deadline)
+    }
+    /// The take's cleanup runs, or failed and holds the raw text: the word row says so.
+    private var takeStatus: String? {
+        switch takePhase {
+        case "cleaning": return "Cleaning…"
+        case "failed": return "Couldn't clean up. Text held."
+        default: return nil
+        }
+    }
+    func retryTake() { composerIntent("dictation-retry") }
+    func insertTakeRaw() { composerIntent("dictation-insert-raw") }
+
+    /// While the ABC surface dictates: the take held so far plus the live tail take the word row's place.
     private var dictatingStatus: String? {
         guard surface == .typing, routeOpen else { return nil }
         let tail = (composer.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !tail.isEmpty else { return "Listening…" }
-        return tail.count > 90 ? "…" + tail.suffix(90) : tail
+        let spoken = [(composer.dictationTake ?? "").trimmingCharacters(in: .whitespacesAndNewlines), tail].filter { !$0.isEmpty }.joined(separator: " ")
+        guard !spoken.isEmpty else { return "Listening…" }
+        return spoken.count > 90 ? "…" + spoken.suffix(90) : spoken
     }
 
     /// A dictation or a Refine is running: the word row is taken over and ↶ ↷ are dimmed.

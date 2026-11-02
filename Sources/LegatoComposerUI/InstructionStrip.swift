@@ -151,28 +151,18 @@ struct InstructionSendButton: View {
     var countdownStart: Double?
     var countdownDeadline: Double?
     static func progress(now: Double, start: Double?, deadline: Double?) -> Double? {
-        guard let start, let deadline else { return nil }
-        return min(1, max(0, (now - start) / max(0.001, deadline - start)))
+        CountdownRim<Circle>.progress(now: now, start: start, deadline: deadline)
     }
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: countdownDeadline == nil)) { _ in
-            Button(action: send) {
-                Image(systemName: "wand.and.stars").font(.system(size: 14, weight: .semibold)).foregroundStyle(.purple)
-                    .frame(width: 32, height: 32)
-                    .background(Color.purple.opacity(0.12), in: Circle())
-                    .overlay {
-                        if let progress = Self.progress(now: ProcessInfo.processInfo.systemUptime, start: countdownStart, deadline: countdownDeadline) {
-                            Circle().trim(from: 0, to: progress).rotation(.degrees(-90))
-                                .stroke(AngularGradient(colors: [.purple, .blue, .pink, .purple], center: .center),
-                                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                                .shadow(color: .purple.opacity(0.6), radius: 3)
-                        }
-                    }
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Send instruction").accessibilityIdentifier("composer.instruction.send")
+        Button(action: send) {
+            Image(systemName: "wand.and.stars").font(.system(size: 14, weight: .semibold)).foregroundStyle(.purple)
+                .frame(width: 32, height: 32)
+                .background(Color.purple.opacity(0.12), in: Circle())
+                .overlay { CountdownRim(shape: Circle(), start: countdownStart, deadline: countdownDeadline, startsAtTop: true) }
+                .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Send instruction").accessibilityIdentifier("composer.instruction.send")
     }
 }
 

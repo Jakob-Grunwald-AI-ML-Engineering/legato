@@ -7,6 +7,8 @@ public enum PromptLayers {
     }
     /// The cleanup-only prompt for line-by-line dictation into a field (the ABC surface; never the writer).
     public static func dictationCleanup() -> String { read("dictation-cleanup") }
+    /// The cleanup-only prompt for a whole dictation take sent in one call (on stop or after a pause).
+    public static func dictationTakeCleanup() -> String { read("dictation-take-cleanup") }
     public static func instruction(for phase: WritingPhase) -> String {
         switch phase {
         case .quick:

@@ -317,4 +317,22 @@ import Testing
         #expect(g.otherKeyDown() == .cancel)
         #expect(g.released(at: 2) == nil)
     }
+
+    @Test func isHoldingOnlyWhileThePressThatStartedTheRunIsDown() {
+        var g = HotkeyGesture(mode: .hold)
+        #expect(!g.isHolding)
+        _ = g.pressed(at: 0)
+        #expect(!g.isHolding, "Pending: nothing started yet")
+        #expect(g.tick(at: 0.25) == .start)
+        #expect(g.isHolding)
+        #expect(g.released(at: 3) == .stop)
+        #expect(!g.isHolding)
+
+        var toggle = HotkeyGesture(mode: .toggle)
+        _ = toggle.pressed(at: 0)
+        _ = toggle.tick(at: 0.25)
+        #expect(toggle.isHolding)
+        _ = toggle.released(at: 1)
+        #expect(!toggle.isHolding, "Latched: the key is up, the pause timer may run")
+    }
 }
