@@ -80,6 +80,8 @@ private func hotkeyTapCallback(
     case .keyUp: kind = .keyUp
     default: return Unmanaged.passUnretained(event)
     }
+    // Legato's own synthetic key events (typing, ⌘V) never count as the user's keys or chords.
+    if SyntheticEvent.isLegato(event.getIntegerValueField(.eventSourceUserData)) { return Unmanaged.passUnretained(event) }
     // Device-independent modifier bits only; the low 16 bits are per-side hardware flags.
     let flags = ModifierFlags(rawValue: UInt(truncatingIfNeeded: event.flags.rawValue) & 0xFFFF_0000)
     let keyCode = UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))

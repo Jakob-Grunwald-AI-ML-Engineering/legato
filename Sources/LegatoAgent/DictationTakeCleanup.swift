@@ -2,16 +2,17 @@ import Foundation
 import LegatoClaude
 
 /// What the whole-take cleanup sees: the take's lines joined in speaking order, the field's text at take start
-/// and the chunks already sent earlier in this session.
+/// and the recent takes (raw to cleaned) of earlier sessions and this one.
 public struct DictationTakeInput: Sendable, Equatable {
     public var takeID: String
     public var text: String
     public var vocabulary: [String]
-    public var previousChunks: [String]
+    /// Earlier cleaned takes, oldest first (see `RecentTakesStore.correctionPairs`).
+    public var recentTakes: [RecentTake]
     public var textBeforeCursor: String
-    public init(takeID: String, text: String, vocabulary: [String] = [], previousChunks: [String] = [], textBeforeCursor: String = "") {
+    public init(takeID: String, text: String, vocabulary: [String] = [], recentTakes: [RecentTake] = [], textBeforeCursor: String = "") {
         self.takeID = takeID; self.text = text; self.vocabulary = vocabulary
-        self.previousChunks = previousChunks; self.textBeforeCursor = textBeforeCursor
+        self.recentTakes = recentTakes; self.textBeforeCursor = textBeforeCursor
     }
 }
 

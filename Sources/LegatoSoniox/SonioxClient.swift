@@ -137,11 +137,12 @@ public actor SonioxClient {
         catch { await fail(.network); throw SonioxError.network }
     }
     /// The start request. No acknowledgement exists: audio may follow at once on the same socket.
-    public func begin() async throws {
+    /// `backgroundText` is read by the caller when the take starts (not when the connection was warmed).
+    public func begin(backgroundText: String = "") async throws {
         if state == .streaming { return }
         guard state == .held else { throw failure ?? .notConnected }
         do {
-            try await socket.send(.text(String(decoding: config.message(), as: UTF8.self)))
+            try await socket.send(.text(String(decoding: config.message(backgroundText: backgroundText), as: UTF8.self)))
             state = .streaming; lastSend = .now
             _ = try await room.publish(channel: .session, participant: .transcriber,
                 payload: .object(["event": .string("asr.started"), "thresholds": thresholds]))

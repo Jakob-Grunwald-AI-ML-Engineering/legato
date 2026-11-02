@@ -46,10 +46,14 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     }
     /// Characters in `takeDisplay`.
     public var takeLength: Int { takeDisplay.count }
+    /// Background text for Soniox at take start: the recent written takes.
+    public var backgroundText: String { recentTakes.backgroundText() }
     /// The field's text before the cursor now (the keyboard reports it with its presence).
     @ObservationIgnored public var contextBefore: @MainActor () -> String = { "" }
     /// Called when the outbox changed.
     @ObservationIgnored public var onChange: (@MainActor () -> Void)?
+    /// The last takes across sessions: cleanup context and Soniox background text. Survives `reset()`.
+    @ObservationIgnored public let recentTakes: RecentTakesStore
     @ObservationIgnored private let cleaner: any SentenceCleaning
     @ObservationIgnored private let vocabulary: @Sendable () async -> [String]
     @ObservationIgnored private let timeout: Duration
@@ -64,7 +68,6 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored private var takeTask: Task<Void, Never>?
     @ObservationIgnored private var takeGeneration = 0
     @ObservationIgnored private var takeTextBefore = ""
-    @ObservationIgnored private var sentChunks: [String] = []
     @ObservationIgnored private var nextTakeSequence = 0
     @ObservationIgnored private var suppressed = false
     #if DEBUG || LEGATO_INTERNAL
@@ -75,17 +78,18 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     private static let warmInterval: TimeInterval = 240
 
     /// `defaults` holds the send setting: the Mac app's standard defaults, or the App Group on iOS.
-    public convenience init(vocabularyURL: URL, defaults: UserDefaults = .standard) {
-        self.init(cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore())),
+    public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, defaults: UserDefaults = .standard) {
+        self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore())),
                   vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) })
     }
-    public init(cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
+    public init(recentTakes: RecentTakesStore = RecentTakesStore(), cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
                 sendMode: @escaping @MainActor () -> DictationSendSetting.Mode = { .lineByLine },
                 pauseSeconds: @escaping @MainActor () -> Double = { DictationSendSetting.defaultPause },
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil) {
+        self.recentTakes = recentTakes
         self.cleaner = cleaner; self.vocabulary = vocabulary; self.timeout = timeout
         self.sendMode = sendMode; self.pauseSeconds = pauseSeconds; self.clock = clock; self.takeTimeout = takeTimeout
     }
@@ -118,7 +122,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         pipeline = nil; terms = nil; lastWarm = nil
         sessionID = UUID().uuidString
         outbox = []; fallbacks = []; pending = 0
-        sentChunks = []; nextTakeSequence = 0; takeLines = []
+        nextTakeSequence = 0; takeLines = []
         if let kept { failedText = kept; takePhase = .failed }
         await old?.reset()
         onChange?()
@@ -249,7 +253,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         cleaningText = raw; takePhase = .cleaning
         onChange?()
         let generation = takeGeneration
-        let id = "\(sessionID)-t\(nextTakeSequence)", previous = Array(sentChunks.suffix(2)), before = takeTextBefore
+        let id = "\(sessionID)-t\(nextTakeSequence)", recent = recentTakes.correctionPairs(), before = takeTextBefore
         var forcedFailure = false
         #if DEBUG || LEGATO_INTERNAL
         if debugFailTakes > 0 { debugFailTakes -= 1; forcedFailure = true }
@@ -258,7 +262,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         let task = Task { @MainActor [weak self] in
             var result = DictationTakeCleanupResult.failed(reason: "forced")
             if !forcedFailure, let terms = await self?.loadTerms() {
-                result = await cleaner.clean(DictationTakeInput(takeID: id, text: raw, vocabulary: terms, previousChunks: previous, textBeforeCursor: before))
+                result = await cleaner.clean(DictationTakeInput(takeID: id, text: raw, vocabulary: terms, recentTakes: recent, textBeforeCursor: before))
             }
             guard let self, generation == self.takeGeneration else { return }
             self.takeTask = nil
@@ -285,7 +289,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         let sequence = nextTakeSequence
         nextTakeSequence += 1
         outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: text, cleaned: cleaned))
-        sentChunks.append(text); if sentChunks.count > 4 { sentChunks.removeFirst() }
+        recentTakes.record(raw: raw, cleaned: text, wasCleaned: cleaned)
         onChange?()
     }
 

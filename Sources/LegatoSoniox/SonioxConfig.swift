@@ -24,8 +24,20 @@ public struct SonioxConfig: Sendable {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         return request
     }
-    public func message() throws -> Data {
-        let context: [String: Any] = ["general": [["key": "composer", "value": general]], "terms": terms]
+    /// Characters of free-text background context at most (inside the byte budget left by general and terms).
+    public static let backgroundCharacterLimit = 1500
+    /// The background text that fits: the newest end of `text`, at most `backgroundCharacterLimit` characters and
+    /// whatever is left of the byte budget.
+    func fittedBackground(_ text: String) -> String {
+        var fitted = String(text.suffix(Self.backgroundCharacterLimit))
+        let remaining = 7500 - estimatedContextTokens
+        while fitted.utf8.count > max(0, remaining) && !fitted.isEmpty { fitted.removeFirst() }
+        return fitted
+    }
+    public func message(backgroundText: String = "") throws -> Data {
+        var context: [String: Any] = ["general": [["key": "composer", "value": general]], "terms": terms]
+        let background = fittedBackground(backgroundText)
+        if !background.isEmpty { context["text"] = background }
         return try JSONSerialization.data(withJSONObject: [
             "model": "stt-rt-v5", "audio_format": "pcm_s16le", "sample_rate": 16000, "num_channels": 1,
             "language_hints": ["de", "en"], "enable_language_identification": true,

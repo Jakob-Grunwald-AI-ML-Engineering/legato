@@ -196,6 +196,9 @@ struct SettingsView: View {
                         Text("Pause before sending: \(Int(DictationSendSetting.clampedPause(settings.dictationPause))) s")
                     }
                 }
+                Toggle("Typewriter insertion", isOn: $settings.typewriter)
+                Text("Types each take word by word in about a second instead of inserting it at once, also in apps that only accept a paste. Off inserts instantly and pastes with ⌘V.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("On stop holds the whole take and writes it once, cleaned as one text, when you stop. After a pause also writes when you stop speaking for the pause (not while you hold the key). Line by line cleans and writes each sentence as you speak.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }

@@ -76,6 +76,58 @@ final class PasteService {
         return .pasted
     }
 
+    // MARK: Typing
+
+    enum TypeOutcome {
+        /// Every character went in as key events; the pasteboard was not touched.
+        case typed
+        /// Typing stopped (the app changed, or the user pressed a key); the untyped rest is on the pasteboard.
+        case interrupted(remainder: String)
+        /// Typing was not possible (a guard failed, or the text needs a paste); nothing was typed.
+        case unavailable
+    }
+
+    /// Types `text` into the app the dictation started in (`targetPID`) as paced synthetic Unicode key events (at
+    /// most ~1 s for the whole text). Only when the paste guards hold (Accessibility granted, the app in front, no
+    /// secure input, modifiers up) and the text has no line break or tab. Stops at the first step that finds the
+    /// frontmost app changed or a real key pressed (`realKeyDowns` counts those); the rest goes to the pasteboard.
+    func type(_ text: String, targetPID: pid_t?, secureField: Bool, realKeyDowns: @MainActor () -> Int) async -> TypeOutcome {
+        guard !TypewriterPlan.needsPaste(text) else { return .unavailable }
+        let released = await waitForModifiersReleased()
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let route = FallbackRoute.route(
+            axTrusted: AXIsProcessTrusted(), frontmostIsTarget: frontmost != nil && frontmost == targetPID,
+            secureField: secureField || IsSecureEventInputEnabled(), modifiersReleased: released)
+        guard route == .pasteKeystroke, let targetPID else { return .unavailable }
+        let baseline = realKeyDowns()
+        let result = await Typewriter.run(text, sleep: { try? await Task.sleep(for: $0) }) { step in
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
+                  !IsSecureEventInputEnabled(), realKeyDowns() == baseline else { return false }
+            return Self.postUnicode(step)
+        }
+        guard let remainder = result.remainder else { return .typed }
+        let rest = String(remainder.drop(while: \.isWhitespace))
+        guard result.wroteAny else { return .unavailable }
+        copy(rest)
+        return .interrupted(remainder: rest)
+    }
+
+    /// One step as key events of at most 20 UTF-16 units each: key down and up, no modifiers, tagged as ours.
+    private static func postUnicode(_ text: String) -> Bool {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for chunk in TypewriterPlan.eventChunks(text) {
+            let units = Array(chunk.utf16)
+            for down in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { return false }
+                event.flags = []
+                event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+                event.setIntegerValueField(.eventSourceUserData, value: SyntheticEvent.userData)
+                event.post(tap: .cghidEventTap)
+            }
+        }
+        return true
+    }
+
     // MARK: Keystroke
 
     /// Waits up to a second for the hotkey's modifiers to come up; false if they are still held.
@@ -95,6 +147,7 @@ final class PasteService {
         for down in [true, false] {
             guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyV, keyDown: down) else { continue }
             event.flags = .maskCommand
+            event.setIntegerValueField(.eventSourceUserData, value: SyntheticEvent.userData)
             event.post(tap: .cghidEventTap)
         }
     }
