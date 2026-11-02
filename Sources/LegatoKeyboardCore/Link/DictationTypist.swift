@@ -1,7 +1,7 @@
 import Foundation
 
-/// Types the app's cleaned dictation lines into the field, one line at a time and in order, with the typewriter's
-/// pace (`TypewriterDrain`). Pure: the keyboard feeds it the publications and the text before the cursor, and
+/// Types the app's cleaned dictation lines into the field, one line at a time and in order, each typed out over
+/// `durationMs` whatever its length. Pure: the keyboard feeds it the publications and the text before the cursor, and
 /// carries out the inserts it returns.
 ///
 /// - A line starts against the cursor as it is then: it gets a separating space and the sentence capital the
@@ -22,7 +22,11 @@ public struct DictationTypist: Sendable, Equatable {
         var revealed = 0
         var expected: String
         var waitedMs = 0.0
+        /// Time since the line started typing; the share of it shown follows this, not the frames.
+        var typingMs = 0.0
     }
+    /// Every line (a whole take, in the take modes) is typed out over this long, short or long.
+    public static let durationMs = 300.0
 
     public private(set) var sessionID: String?
     public private(set) var typedThrough = -1
@@ -85,6 +89,7 @@ public struct DictationTypist: Sendable, Equatable {
                 active = Active(seq: line.seq, text: Array(text), expected: contextBefore)
             }
             guard var current = active else { break }
+            current.typingMs += elapsedMs
             if !OwnEditEcho.isSame(expected: current.expected, reported: contextBefore) {
                 current.waitedMs += elapsedMs
                 if current.waitedMs < TypewriterReveal.settleLimitMs { active = current; return step }
@@ -95,7 +100,7 @@ public struct DictationTypist: Sendable, Equatable {
             }
             current.waitedMs = 0
             let total = current.text.count
-            let next = animated ? TypewriterDrain.step(revealed: current.revealed, target: total, dtMs: elapsedMs) : total
+            let next = animated ? Self.revealed(current.revealed, of: total, afterMs: current.typingMs) : total
             if next > current.revealed {
                 let slice = String(current.text[current.revealed..<next])
                 step.inserts.append(slice)
@@ -113,6 +118,14 @@ public struct DictationTypist: Sendable, Equatable {
             break
         }
         return step
+    }
+
+    /// Characters of a line of `total` shown once it has been typing for `ms`: the share of `durationMs` that
+    /// passed, at least one more per step, never past the end.
+    static func revealed(_ revealed: Int, of total: Int, afterMs ms: Double) -> Int {
+        guard revealed < total else { return total }
+        let due = Int((Double(total) * min(1, ms / durationMs)).rounded(.up))
+        return min(total, max(revealed + 1, due))
     }
 
     /// The text to type for `line` at this cursor: separated from what precedes it, capitalised after a sentence end.
