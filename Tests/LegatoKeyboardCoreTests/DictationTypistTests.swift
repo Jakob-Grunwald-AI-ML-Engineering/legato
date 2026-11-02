@@ -165,3 +165,19 @@ private struct Field {
     #expect(typed == 0)
     #expect(acked.first == 0, "The interrupted line is dropped once the echo fails to arrive")
 }
+
+@Test func aShortAndALongLineBothTypeOutOverTheSameTime() {
+    for text in ["Short line.", String(repeating: "A much longer take with many words in it. ", count: 20)] {
+        var typist = DictationTypist()
+        var field = Field()
+        typist.accept(publication(line(0, text)), acknowledged: nil)
+        var ticks = 0
+        while typist.needsTicks, ticks < 100 {
+            field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined()
+            ticks += 1
+        }
+        #expect(field.text == text.trimmingCharacters(in: .whitespaces))
+        // 300 ms is 9 or 10 frames of 33 ms, whatever the length.
+        #expect((9...10).contains(ticks), "\(text.count) characters in \(ticks) ticks")
+    }
+}
