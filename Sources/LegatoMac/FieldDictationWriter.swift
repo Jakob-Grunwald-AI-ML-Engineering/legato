@@ -153,9 +153,20 @@ public final class FieldDictationWriter {
         var remainder: String?
         var wroteAny = false
         if typewriter() {
+            // Between words the caret must still sit right after our text: the writer verifies its own span, not
+            // that the user clicked elsewhere or typed at its end.
+            let target = field.target
+            var expected: UTF16Range?
+            var started = false
             let result = await Typewriter.run(delta, sleep: sleep) { step in
+                if started {
+                    guard let now = try? target.selectedRange(), now == expected else { return false }
+                }
                 writer.apply(.commit(delta: step))
-                return writer.degradeReason == nil
+                guard writer.degradeReason == nil else { return false }
+                expected = try? target.selectedRange()
+                started = true
+                return true
             }
             remainder = result.remainder; wroteAny = result.wroteAny
         } else {

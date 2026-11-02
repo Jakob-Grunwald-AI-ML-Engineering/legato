@@ -121,6 +121,24 @@ import LegatoRoom
         #expect(config.request(apiKey: "secret").value(forHTTPHeaderField: "Authorization") == "Bearer secret")
         #expect(!String(decoding: try config.message(), as: UTF8.self).contains("secret"))
     }
+    @Test func configCarriesBackgroundTextInsideTheBudget() throws {
+        let config = SonioxConfig(mode: "Dictation", personalPrompt: "", terms: ["Legato"])
+        let plain = try JSONDecoder().decode(JSONValue.self, from: config.message())
+        #expect(plain["context"]?["text"] == nil, "No background text, no field")
+        let recent = String(repeating: "Hallo Welt. ", count: 300)
+        let json = try JSONDecoder().decode(JSONValue.self, from: config.message(backgroundText: recent))
+        guard case .string(let text) = json["context"]?["text"] else { Issue.record("no context.text"); return }
+        #expect(text.count == SonioxConfig.backgroundCharacterLimit && recent.hasSuffix(text), "The newest end is kept")
+        #expect(json["context"]?["terms"] == .array([.string("Legato")]))
+        let full = SonioxConfig(mode: "Note", personalPrompt: String(repeating: "x", count: 40000))
+        let squeezed = try JSONDecoder().decode(JSONValue.self, from: full.message(backgroundText: "lots of text"))
+        #expect(squeezed["context"]?["text"] == nil, "General context filled the byte budget")
+        let tight = SonioxConfig(mode: "Note", personalPrompt: String(repeating: "x", count: 7400))
+        let total = try tight.message(backgroundText: String(repeating: "ä", count: 1000))
+        #expect(total.count < 12_000)
+        let tightJSON = try JSONDecoder().decode(JSONValue.self, from: total)
+        if case .string(let t) = tightJSON["context"]?["text"] { #expect(tight.estimatedContextTokens + t.utf8.count <= 7500) }
+    }
     @Test func providerFailuresReachTheRoomWithoutCredentials() async throws {
         for code in [401, 402, 408, 413, 429] {
             let room = Room()
