@@ -10,7 +10,8 @@ public enum SyntheticEvent {
 
 /// Cuts a dictated text into the steps a typewriter writes and sets the pace. Pure.
 public enum TypewriterPlan {
-    /// Every take, short or long, is typed out over this long: the pace adapts to the length.
+    /// A take that arrives whole (line-by-line dictation, composer inserts) is typed out over this long; a
+    /// streaming take is paced by `drainStep` instead.
     public static let duration = Duration.milliseconds(300)
     /// Most steps one take is cut into (about 10 ms apart); longer texts group several words per step.
     public static let maxSteps = 30
@@ -35,6 +36,17 @@ public enum TypewriterPlan {
         guard words.count > maxSteps else { return words }
         let group = (words.count + maxSteps - 1) / maxSteps
         return stride(from: 0, to: words.count, by: group).map { words[$0..<min($0 + group, words.count)].joined() }
+    }
+
+    /// Time constant of the streaming drain (the same as the keyboard's `TypewriterDrain`): each frame types the
+    /// share of the pending text that empties it over about this long, so the typing never lags far behind.
+    public static let drainWindowMs = 250.0
+
+    /// Characters shown after a frame of `dtMs` when `revealed` of `target` are: at least one more, never past `target`.
+    public static func drainStep(revealed: Int, target: Int, dtMs: Double) -> Int {
+        guard revealed < target else { return target }
+        let slice = max(1, Int((Double(target - revealed) * dtMs / drainWindowMs).rounded(.up)))
+        return min(target, revealed + slice)
     }
 
     /// The pause between steps, so the first step lands at once and the last one `duration` later.

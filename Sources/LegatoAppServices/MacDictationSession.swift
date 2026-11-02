@@ -40,8 +40,15 @@ import LegatoSoniox
     @ObservationIgnored private var draining = false
     @ObservationIgnored private var delivered = -1
     @ObservationIgnored private var held = false
+    /// A failed take's partial text sits in the field until Retry / Insert as-is retracts it.
+    @ObservationIgnored private var stalled: (session: String, sequence: Int)?
     /// Where finished lines go (the focused field); called one line at a time, in speaking order.
     @ObservationIgnored public var deliver: @MainActor (String) async -> Void = { _ in }
+    /// Types one take that is still being cleaned (whole-take modes): `poll` returns its state as it grows; returns
+    /// true when the take was left open because its cleanup failed (nothing more will come until the user chooses).
+    @ObservationIgnored public var deliverStream: (@MainActor (_ poll: @MainActor () -> DictationStreamState?) async -> Bool)?
+    /// Takes the stalled take's partial text back out of the field (Retry / Insert as-is).
+    @ObservationIgnored public var retractStream: (@MainActor () async -> Void)?
     /// A new session begins (capture the target field).
     @ObservationIgnored public var onBegin: @MainActor () -> Void = {}
     /// The session's last line was delivered (settle anything held back).
@@ -166,7 +173,7 @@ import LegatoSoniox
         audioTask?.cancel(); audioTask = nil
         await engine.abandonTake()
         await pipeline.reset()
-        delivered = -1
+        delivered = -1; stalled = nil
         phase = .idle
         ensureWarm()
     }
@@ -176,7 +183,7 @@ import LegatoSoniox
         _ = await pipeline.settle(timeout: settleTimeout)
         await drainNow()
         await pipeline.reset(keepFailedTake: true)
-        delivered = -1
+        delivered = -1; stalled = nil
         engine.resetSequence()
         engine.open()
         onBegin()
@@ -199,12 +206,36 @@ import LegatoSoniox
     private func drainNow() async {
         while draining { try? await Task.sleep(for: .milliseconds(5)) }
         draining = true; defer { draining = false }
+        await settleStalled()
         while let next = pipeline.outbox.first(where: { $0.sequence > delivered }) {
             let session = pipeline.sessionID
             delivered = next.sequence
-            await deliver(next.text)
+            if next.isTake, let deliverStream {
+                // A take streams: the writer follows its growing delivery until it is final (or stalls).
+                let sequence = next.sequence, pipeline = self.pipeline
+                let stalledHere = await deliverStream {
+                    guard pipeline.sessionID == session, let entry = pipeline.outbox.first(where: { $0.sequence == sequence }) else { return nil }
+                    return .init(text: entry.text, isFinal: entry.final, stalled: entry.failed && !entry.final && !entry.retracted,
+                                 retracted: entry.retracted)
+                }
+                if stalledHere { stalled = (session, sequence); continue }
+            } else {
+                await deliver(next.text)
+            }
             pipeline.acknowledge(sessionID: session, upTo: next.sequence)
         }
+    }
+
+    /// A failed take left its partial text open: once the user retracted it (Retry / Insert as-is) it is erased and
+    /// the delivery acknowledged; a delivery that ended otherwise (discarded, reset) is just acknowledged.
+    private func settleStalled() async {
+        guard let held = stalled else { return }
+        guard held.session == pipeline.sessionID,
+              let entry = pipeline.outbox.first(where: { $0.sequence == held.sequence }) else { stalled = nil; return }
+        guard entry.retracted || entry.final else { return }
+        stalled = nil
+        if entry.retracted { await retractStream?() }
+        pipeline.acknowledge(sessionID: held.session, upTo: held.sequence)
     }
 
     // MARK: Debug

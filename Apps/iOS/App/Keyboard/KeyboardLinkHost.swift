@@ -73,6 +73,21 @@ final class KeyboardLinkHost: TranscriptSink {
                 self.composerRevision = composer.snapshot.revision
             }
         }
+        // Cleaned lines wait here until the keyboard acknowledges having typed them. A streaming take grows the same
+        // line: the pipeline announces growth at most every ~30 ms, which publishes at once (the loop below only
+        // catches what changed otherwise).
+        let publishDictation: @MainActor () -> Void = { [weak self, weak dictation] in
+            guard let self, let dictation else { return }
+            if self.dictationPublished?.sessionID != dictation.sessionID || self.dictationPublished?.lines != dictation.outbox {
+                self.dictationPublished = (dictation.sessionID, dictation.outbox)
+                dictationChannel.publish(.init(sessionID: dictation.sessionID, lines: dictation.outbox.map {
+                    .init(lineID: $0.lineID, seq: $0.sequence, raw: $0.raw, text: $0.text, status: $0.cleaned ? .cleaned : .raw,
+                          final: $0.final, retracted: $0.retracted)
+                }))
+                DarwinObserver.post(LinkChannel.Note.dictation)
+            }
+        }
+        dictation?.onChange = publishDictation
         composerTask = Task { [weak self, weak composer] in
             while !Task.isCancelled {
                 guard let self, let composer else { return }
@@ -83,14 +98,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 }
                 if let dictation {
                     if let ack = dictationChannel.acknowledged() { dictation.acknowledge(sessionID: ack.sessionID, upTo: ack.upTo) }
-                    // Cleaned lines wait here until the keyboard acknowledges having typed them.
-                    if dictationPublished?.sessionID != dictation.sessionID || dictationPublished?.lines != dictation.outbox {
-                        dictationPublished = (dictation.sessionID, dictation.outbox)
-                        dictationChannel.publish(.init(sessionID: dictation.sessionID, lines: dictation.outbox.map {
-                            .init(lineID: $0.lineID, seq: $0.sequence, raw: $0.raw, text: $0.text, status: $0.cleaned ? .cleaned : .raw)
-                        }))
-                        DarwinObserver.post(LinkChannel.Note.dictation)
-                    }
+                    publishDictation()
                 }
                 for intent in channel.drainIntents() {
                     switch intent.action {

@@ -15,8 +15,23 @@ public struct DictationLine: Codable, Equatable, Sendable {
     /// What to type: the cleaned line, or the raw line when `status` is `raw`.
     public var text: String
     public var status: DictationLineStatus
-    public init(lineID: String, seq: Int, raw: String, text: String, status: DictationLineStatus) {
+    /// The whole text is here. A streaming take republishes the same `seq` with more `text` until it is final.
+    public var final: Bool
+    /// The take failed after some of it was typed and the user chose Retry or Insert as-is: erase what was typed.
+    public var retracted: Bool
+    public init(lineID: String, seq: Int, raw: String, text: String, status: DictationLineStatus, final: Bool = true, retracted: Bool = false) {
         self.lineID = lineID; self.seq = seq; self.raw = raw; self.text = text; self.status = status
+        self.final = final; self.retracted = retracted
+    }
+    private enum CodingKeys: String, CodingKey { case lineID, seq, raw, text, status, final, retracted }
+    /// Publications of an older app have neither flag: such a line is whole.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lineID = try c.decode(String.self, forKey: .lineID); seq = try c.decode(Int.self, forKey: .seq)
+        raw = try c.decode(String.self, forKey: .raw); text = try c.decode(String.self, forKey: .text)
+        status = try c.decode(DictationLineStatus.self, forKey: .status)
+        final = try c.decodeIfPresent(Bool.self, forKey: .final) ?? true
+        retracted = try c.decodeIfPresent(Bool.self, forKey: .retracted) ?? false
     }
 }
 

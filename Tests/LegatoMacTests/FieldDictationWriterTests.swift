@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import LegatoCore
 @testable import LegatoMac
 
 @MainActor private final class Scene {
@@ -338,5 +339,152 @@ import Testing
         scene.result = .interrupted(remainder: "rest", message: "stopped")
         writer.begin()
         #expect(await writer.write("Weiter rest") == .copied(message: "stopped"))
+    }
+
+    // MARK: Streaming
+
+    /// A scripted take: every poll shows the next state (the last one repeats) and runs `onPoll(index)` first.
+    @MainActor private final class Take {
+        var states: [DictationStreamState]
+        var polls = 0
+        var onPoll: (Int) -> Void = { _ in }
+        init(_ states: [DictationStreamState]) { self.states = states }
+        func poll() -> DictationStreamState? {
+            onPoll(polls)
+            defer { polls += 1 }
+            return states[min(polls, states.count - 1)]
+        }
+    }
+    private func grow(_ texts: String..., final: Bool = true) -> [DictationStreamState] {
+        texts.enumerated().map { .init(text: $1, isFinal: final && $0 == texts.count - 1) }
+    }
+    private func streamWriter(_ scene: Scene, typewriter: Bool = true) -> FieldDictationWriter {
+        FieldDictationWriter(capture: { [scene] in scene.field }, fallback: { [scene] text, secure, copyOnly in
+            scene.fallbacks.append((text, secure, copyOnly)); return scene.result
+        }, typewriter: { typewriter }, sleep: { _ in }, pacingClock: nil)
+    }
+
+    @Test func aStreamedTakeIsTypedAsItGrowsWithOneSeparator() async {
+        let field = FakeTextTarget("Hi Anna,")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene)
+        writer.begin()
+        let take = Take(grow("Ich", "Ich komme", "Ich komme später, bis gleich."))
+        #expect(await writer.writeStreaming(poll: take.poll) == .typed)
+        #expect(field.string == "Hi Anna, Ich komme später, bis gleich.")
+        #expect(field.writes.count > 3, "Paced: several writes, not one")
+        #expect(field.writes.first?.text == " " && field.writes.dropFirst().first?.text == "I", "The separator is decided once, ahead of the first step")
+        // The next take continues the text.
+        let next = Take(grow("Danke."))
+        #expect(await writer.writeStreaming(poll: next.poll) == .typed)
+        #expect(field.string == "Hi Anna, Ich komme später, bis gleich. Danke.")
+        #expect(scene.fallbacks.isEmpty)
+    }
+
+    @Test func withTheTypewriterOffTextLandsAtOnceAsItArrives() async {
+        let field = FakeTextTarget("")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene, typewriter: false)
+        writer.begin()
+        let take = Take(grow("Hello brave", "Hello brave new world."))
+        #expect(await writer.writeStreaming(poll: take.poll) == .typed)
+        #expect(field.string == "Hello brave new world.")
+        #expect(field.writes.map(\.text) == ["Hello brave", " new world."], "One write per delta")
+    }
+
+    @Test func aLongArrivalDoesNotBuildABacklog() async {
+        let field = FakeTextTarget("")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene)
+        writer.begin()
+        let long = String(repeating: "word ", count: 200).trimmingCharacters(in: .whitespaces)
+        let take = Take(grow(long))
+        #expect(await writer.writeStreaming(poll: take.poll) == .typed)
+        #expect(field.string == long)
+        #expect(take.polls < 80, "The drain finishes 1000 characters in \(take.polls) frames")
+    }
+
+    @Test func aMovedCaretStopsTheTypingAndTheRestGoesToTheClipboard() async {
+        let field = FakeTextTarget("")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene, typewriter: false)
+        writer.begin()
+        let take = Take(grow("First part", "First part, second part", "First part, second part, third part.") )
+        take.onPoll = { if $0 == 1 { field.moveCaret(to: 0) } }
+        let outcome = await writer.writeStreaming(poll: take.poll)
+        #expect(outcome == .copied(message: "Typing stopped: the rest is on the clipboard. Paste with ⌘V."))
+        #expect(field.string == "First part")
+        #expect(scene.fallbacks.last?.text == ", second part, third part." && scene.fallbacks.last?.copyOnly == true, "The whole untyped rest, once the take is final")
+    }
+
+    @Test func aFailedTakeStaysOpenAndRetractErasesExactlyItsText() async {
+        let field = FakeTextTarget("Dear Anna")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene)
+        writer.begin()
+        let take = Take([.init(text: "Ich komme", isFinal: false), .init(text: "Ich komme später", isFinal: false),
+                         .init(text: "Ich komme später", isFinal: false, stalled: true)])
+        #expect(await writer.writeStreaming(poll: take.poll) == .stalled)
+        #expect(field.string == "Dear Anna Ich komme später" || field.string.hasPrefix("Dear Anna Ich"), "The partial stays")
+        let typed = field.string
+        #expect(typed.count > "Dear Anna ".count)
+        #expect(writer.retractStreamed() == .erased)
+        #expect(field.string == "Dear Anna", "The partial and its separator are gone, nothing else")
+        // The writer carries on with a fresh take.
+        let again = Take(grow("Danke."))
+        #expect(await writer.writeStreaming(poll: again.poll) == .typed)
+        #expect(field.string == "Dear Anna Danke.")
+    }
+
+    @Test func retractionWhileStreamingErasesAtOnce() async {
+        let field = FakeTextTarget("Hello")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene, typewriter: false)
+        writer.begin()
+        let take = Take([.init(text: "partial", isFinal: false), .init(text: "partial", isFinal: true, retracted: true)])
+        #expect(await writer.writeStreaming(poll: take.poll) == .erased)
+        #expect(field.string == "Hello")
+    }
+
+    @Test func aFieldTheUserChangedIsNeverErased() async {
+        let field = FakeTextTarget("Hello")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene, typewriter: false)
+        writer.begin()
+        let take = Take([.init(text: "partial text", isFinal: false, stalled: true)])
+        #expect(await writer.writeStreaming(poll: take.poll) == .stalled)
+        field.userTypes(" and more")
+        let outcome = writer.retractStreamed()
+        #expect(outcome == .copied(message: "The field changed, so the partial text was left where it is."))
+        #expect(field.string == "Hello partial text and more")
+
+        let other = FakeTextTarget("Hi")
+        scene.field = .target(other)
+        writer.begin()
+        let again = Take([.init(text: "partial text", isFinal: false, stalled: true)])
+        _ = await writer.writeStreaming(poll: again.poll)
+        other.externalEdit(.init(location: 3, length: 2), with: "XX")
+        #expect(writer.retractStreamed() != .erased)
+        #expect(other.string == "Hi XXrtial text", "An edited partial is not ours any more")
+    }
+
+    @Test func withoutAnAccessibilityFieldTheTakeIsWrittenWholeOnceFinal() async {
+        let scene = Scene(.none)
+        scene.result = .pasted
+        let writer = streamWriter(scene)
+        writer.begin()
+        let take = Take(grow("Ein", "Ein Text", "Ein Text."))
+        #expect(await writer.writeStreaming(poll: take.poll) == .pasted)
+        #expect(scene.fallbacks.map(\.text) == ["Ein Text."])
+    }
+
+    @Test func aNeverStartedFailedTakeHasNothingToErase() async {
+        let field = FakeTextTarget("Hi")
+        let scene = Scene(.target(field))
+        let writer = streamWriter(scene)
+        writer.begin()
+        let take = Take([.init(text: "", isFinal: false, stalled: true)])
+        #expect(await writer.writeStreaming(poll: take.poll) == .stalled)
+        #expect(writer.retractStreamed() == .erased && field.string == "Hi")
     }
 }

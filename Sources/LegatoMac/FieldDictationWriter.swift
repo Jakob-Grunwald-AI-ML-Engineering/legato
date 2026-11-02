@@ -62,6 +62,10 @@ public final class FieldDictationWriter {
         case copied(message: String)
         /// Held back (modifiers still down); goes out with the next write, or at `finish`.
         case held
+        /// A streamed take whose cleanup failed: its typed part stays until `retractStreamed()`.
+        case stalled
+        /// A streamed take's typed part was taken back out of the field.
+        case erased
     }
     private struct Current {
         let target: any TextTarget
@@ -87,6 +91,18 @@ public final class FieldDictationWriter {
     private var latched = false
     /// Text held back by a passing reason, written ahead of the next line.
     private var carried = ""
+    /// What the last streamed take put into the field, kept until it is final or retracted.
+    private struct Streamed {
+        let writer: FieldWriter
+        let target: any TextTarget
+        /// Exactly what went through `writer`.
+        var committed = ""
+        /// A separator put into the field ahead of the writer's first write.
+        var freshSeparator = ""
+    }
+    private var streamed: Streamed?
+    /// A streaming frame: the poll and the drain step run this often.
+    public static let streamTickMs = 30.0
     /// Characters of the field's text before the cursor handed to cleanup.
     public static let contextLimit = 600
 
@@ -103,7 +119,7 @@ public final class FieldDictationWriter {
 
     /// A session starts: forget the last one's field and clipboard run, capture the field in front now.
     public func begin() {
-        current = nil; lines = 0; copied = ""; latched = false; carried = ""
+        current = nil; lines = 0; copied = ""; latched = false; carried = ""; streamed = nil
         _ = resolve()
     }
 
@@ -125,6 +141,124 @@ public final class FieldDictationWriter {
         let rest = carried
         carried = ""
         return await write(rest, final: true)
+    }
+
+    // MARK: Streaming
+
+    /// Types one take that is still being cleaned. `poll` returns the take as it stands now (nil once it is gone).
+    /// The text is typed as it grows: with the typewriter on, paced by the drain (`TypewriterPlan.drainStep`), else
+    /// at once. The separator is decided once, from the first text. The caret is checked before every step and the
+    /// writer's readback after it, so a field the user moved on in stops the typing; whatever is left of the take
+    /// then goes to the clipboard. Where the field cannot be written through Accessibility the take is typed in one
+    /// go when it is final (`write`). A failed take is left open (`.stalled`) until `retractStreamed()`.
+    @discardableResult
+    public func writeStreaming(poll: @MainActor () -> DictationStreamState?) async -> Outcome {
+        streamed = nil
+        var state = poll()
+        // The first text (or the end).
+        while let current = state, current.text.isEmpty, !current.isFinal, !current.retracted {
+            if current.stalled { return .stalled }
+            await sleep(.milliseconds(Self.streamTickMs))
+            state = poll()
+        }
+        guard let first = state, !first.retracted else { return .erased }
+        guard resolve() != nil, var field = current else { return await writeAfterStream(first, poll: poll) }
+        let target = field.target, writer = field.writer
+        var prefix = ""
+        var run = Streamed(writer: writer, target: target)
+        if let last = field.lastCharacter {
+            prefix = Self.separator(before: first.text, after: last, first: false)
+        } else {
+            // A fresh writer drops leading whitespace, so the separator after the field's own text goes in first.
+            let separator = Self.separator(before: first.text, after: precedingCharacter(in: target), first: true)
+            if !separator.isEmpty, let caret = try? target.selectedRange(), caret.length == 0 {
+                try? target.replace(caret, with: separator)
+                run.freshSeparator = separator
+            }
+        }
+        var revealed = 0, expected: UTF16Range?, stopped = false
+        defer { lines += 1 }
+        while let live = state {
+            if live.retracted {
+                streamed = run
+                return stopped ? Self.leftInPlace : retractStreamed()
+            }
+            if !stopped {
+                let total = live.text.count
+                let next = typewriter() ? TypewriterPlan.drainStep(revealed: revealed, target: total, dtMs: Self.streamTickMs) : total
+                if next > revealed {
+                    let slice = String(live.text.dropFirst(revealed).prefix(next - revealed))
+                    if !run.committed.isEmpty, (try? target.selectedRange()) != expected {
+                        stopped = true // the user clicked elsewhere or typed at the end of our text
+                    } else {
+                        let delta = (run.committed.isEmpty ? prefix : "") + slice
+                        writer.apply(.commit(delta: delta))
+                        if writer.degradeReason != nil { stopped = true } else {
+                            run.committed += delta; revealed = next; expected = try? target.selectedRange()
+                        }
+                    }
+                }
+            }
+            if live.isFinal, stopped || revealed >= live.text.count { break }
+            if live.stalled { streamed = run; return .stalled }
+            await sleep(.milliseconds(Self.streamTickMs))
+            state = poll()
+        }
+        guard let final = state else { // the take is gone (reset): what was typed stays
+            self.current = nil
+            return .typed
+        }
+        if !stopped {
+            field.lastCharacter = final.text.last
+            self.current = field
+            remember(lastCharacter: final.text.last, caret: try? target.selectedRange().location)
+            copied = ""; latched = false
+            return .typed
+        }
+        self.current = nil
+        guard !run.committed.isEmpty else {
+            // The first write failed: nothing of the take is in the field. Write it again, whole, the usual way.
+            return await write(final.text, final: false)
+        }
+        let typed = String(final.text.prefix(revealed))
+        remember(lastCharacter: typed.last, caret: nil)
+        let rest = String(final.text.dropFirst(revealed).drop(while: \.isWhitespace))
+        guard !rest.isEmpty else { return .typed }
+        copied = rest; latched = true
+        _ = await fallback(rest, false, true)
+        return .copied(message: "Typing stopped: the rest is on the clipboard. Paste with ⌘V.")
+    }
+
+    private static let leftInPlace = Outcome.copied(message: "The field changed, so the partial text was left where it is.")
+
+    /// The take is not streamable here (no Accessibility field): wait for the end, then write it whole.
+    private func writeAfterStream(_ first: DictationStreamState, poll: @MainActor () -> DictationStreamState?) async -> Outcome {
+        var state: DictationStreamState? = first
+        while let live = state, !live.isFinal {
+            if live.retracted { return .erased }
+            if live.stalled { streamed = nil; return .stalled }
+            await sleep(.milliseconds(Self.streamTickMs))
+            state = poll()
+        }
+        guard let final = state else { return .typed }
+        return await write(final.text, final: false)
+    }
+
+    /// Takes the last streamed take back out of the field: only when the field and caret still read as the writer
+    /// left them (`FieldWriter.retract`), else it stays and the user is told.
+    @discardableResult
+    public func retractStreamed() -> Outcome {
+        guard let run = streamed else { return .erased }
+        streamed = nil
+        guard !run.committed.isEmpty else { return .erased }
+        guard run.target.isFocused(), run.writer.retract(run.committed) == .removed else { return Self.leftInPlace }
+        let length = run.freshSeparator.utf16.count
+        if length > 0, let caret = try? run.target.selectedRange(), caret.length == 0, caret.location >= length {
+            let range = UTF16Range(location: caret.location - length, length: length)
+            if (try? run.target.text(in: range)) == run.freshSeparator { try? run.target.replace(range, with: "") }
+        }
+        current = nil // a new writer picks the field up at the caret
+        return .erased
     }
 
     private func write(_ incoming: String, final: Bool) async -> Outcome {

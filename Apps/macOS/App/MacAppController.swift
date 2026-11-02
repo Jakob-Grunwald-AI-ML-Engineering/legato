@@ -100,6 +100,16 @@ import Observation
             guard let self else { return }
             if case .copied(let message) = await dictationWriter.write(text), !message.isEmpty { dictation.report(message) }
         }
+        dictation.deliverStream = { [weak self] poll in
+            guard let self else { return false }
+            let outcome = await dictationWriter.writeStreaming(poll: poll)
+            if case .copied(let message) = outcome, !message.isEmpty { dictation.report(message) }
+            return outcome == .stalled
+        }
+        dictation.retractStream = { [weak self] in
+            guard let self else { return }
+            if case .copied(let message) = dictationWriter.retractStreamed(), !message.isEmpty { dictation.report(message) }
+        }
         dictation.onEnd = { [weak self] in
             guard let self else { return }
             if case .copied(let message)? = await dictationWriter.finish(), !message.isEmpty { dictation.report(message) }

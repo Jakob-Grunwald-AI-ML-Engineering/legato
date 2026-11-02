@@ -682,6 +682,14 @@ final class KeyboardController {
             ? typist.flush(contextBefore: context, capitalization: autocapitalization)
             : typist.step(contextBefore: context, elapsedMs: elapsedMs, capitalization: autocapitalization,
                           animated: !UIAccessibility.isReduceMotionEnabled)
+        if step.deletes > 0 {
+            // A failed take's partial text, taken back (the typist saw the field still end with exactly that).
+            let expected = String(context.dropLast(step.deletes))
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            perform([.deleteBackward(step.deletes)])
+            typing.ownEdit(contextBefore: expected)
+            versions = nil
+        }
         if !step.inserts.isEmpty {
             let text = step.inserts.joined()
             let expected = context + text
