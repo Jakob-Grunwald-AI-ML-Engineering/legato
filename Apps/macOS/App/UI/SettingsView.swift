@@ -179,6 +179,28 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
+    private var dictationSend: some View {
+        @Bindable var settings = controller.settings
+        return card {
+            VStack(alignment: .leading, spacing: 14) {
+                Label("Send dictation", systemImage: "text.cursor").font(.headline)
+                Picker("Send dictation", selection: $settings.dictationSend) {
+                    Text("On stop").tag(DictationSendSetting.Mode.onStop)
+                    Text("After a pause").tag(DictationSendSetting.Mode.afterPause)
+                    Text("Line by line").tag(DictationSendSetting.Mode.lineByLine)
+                }.labelsHidden().pickerStyle(.segmented)
+                if settings.dictationSend == .afterPause {
+                    Stepper(value: Binding(get: { DictationSendSetting.clampedPause(settings.dictationPause) },
+                                           set: { settings.dictationPause = DictationSendSetting.clampedPause($0) }),
+                            in: DictationSendSetting.pauseRange, step: DictationSendSetting.pauseStep) {
+                        Text("Pause before sending: \(Int(DictationSendSetting.clampedPause(settings.dictationPause))) s")
+                    }
+                }
+                Text("On stop holds the whole take and writes it once, cleaned as one text, when you stop. After a pause also writes when you stop speaking for the pause (not while you hold the key). Line by line cleans and writes each sentence as you speak.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
     private var shortcut: some View {
         VStack(alignment: .leading, spacing: 20) {
             card {
@@ -193,10 +215,11 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Label("Dictation shortcut", systemImage: "mic").font(.headline)
                     HotkeyRecorderView(target: .dictation)
-                    Text("Types what you say straight into the focused text field, cleaned up line by line. Tap to start and stop, or hold to talk. It never shares speech with the composer, and needs both API keys (without a Claude key, lines are typed as heard).")
+                    Text("Types what you say straight into the focused text field. Tap to start and stop, or hold to talk. It never shares speech with the composer, and needs both API keys (without a Claude key, text is typed as heard).")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
+            dictationSend
             permissions
         }
     }

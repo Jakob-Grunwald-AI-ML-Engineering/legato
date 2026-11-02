@@ -39,6 +39,7 @@ import LegatoSoniox
     @ObservationIgnored private var lastWarm: Date?
     @ObservationIgnored private var draining = false
     @ObservationIgnored private var delivered = -1
+    @ObservationIgnored private var held = false
     /// Where finished lines go (the focused field); called one line at a time, in speaking order.
     @ObservationIgnored public var deliver: @MainActor (String) async -> Void = { _ in }
     /// A new session begins (capture the target field).
@@ -122,6 +123,7 @@ import LegatoSoniox
         guard phase == .listening else { return }
         if let stopTask { await stopTask.value; return }
         phase = .finishing
+        updateAutoSend()
         let task = Task { await self.finishSession() }
         stopTask = task
         await task.value
@@ -142,11 +144,14 @@ import LegatoSoniox
         await drainNow()
         phase = .idle
         stopTask = nil
+        updateAutoSend()
     }
 
     /// The hotkey is held (push-to-talk): release is the send, so the pause timer stays quiet. Taps and the
     /// debug bridge are not held.
-    public func setHeld(_ held: Bool) { pipeline.setAutoSendSuppressed(held) }
+    public func setHeld(_ held: Bool) { self.held = held; updateAutoSend() }
+    /// No automatic send while the key is held or while stopping (stop sends the take itself).
+    private func updateAutoSend() { pipeline.setAutoSendSuppressed(held || phase == .finishing) }
 
     /// A chord after the hotkey started the run: drop the take and the half-spoken words. Lines already typed stay.
     public func cancel() async {

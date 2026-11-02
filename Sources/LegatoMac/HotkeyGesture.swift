@@ -78,6 +78,13 @@ public struct HotkeyGesture: Sendable, Equatable {
         }
     }
 
+    /// Whether the run is a push-to-talk press right now: the trigger went down, started the run and is still down.
+    /// Releasing it stops the run (hold) or latches it (a tap).
+    public var isHolding: Bool {
+        if case .holding = phase { return true }
+        return false
+    }
+
     /// Time passed: a press held alone for `armDelay` starts the run.
     public mutating func tick(at time: TimeInterval) -> Action? {
         // Timers fire a hair early now and then; a microsecond of slack keeps the start from being lost.

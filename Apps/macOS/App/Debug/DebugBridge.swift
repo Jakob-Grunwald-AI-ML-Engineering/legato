@@ -61,6 +61,22 @@ import AppKit
             return MacAppController.shared.dictation.debugState
         }
         harness.register("dictation-state") { _ in MacAppController.shared.dictation.debugState }
+        // The next N take cleanups (default 1) fail twice, so the failed state is reachable without network faults.
+        harness.register("dictation-debug-fail-take") { command in
+            guard command.args.count <= 1, let count = command.args.first.map({ Int($0) }) ?? 1, count >= 0 else { throw Usage.invalid }
+            MacAppController.shared.dictation.pipeline.debugFailTakes = count
+            return MacAppController.shared.dictation.debugState
+        }
+        // The pill's Retry and Insert as-is buttons, without a click.
+        harness.register("dictation-retry") { _ in
+            await MacAppController.shared.dictation.pipeline.retry()
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("dictation-insert-raw") { _ in
+            await MacAppController.shared.dictation.pipeline.insertRaw()
+            try await Task.sleep(for: .milliseconds(300))
+            return MacAppController.shared.dictation.debugState
+        }
         #endif
         harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "starting"] }
         harness.register("stop") { _ in MacAppController.shared.stopComposer(); return ["status": "stopping"] }

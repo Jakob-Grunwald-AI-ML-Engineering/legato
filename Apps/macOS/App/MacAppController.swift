@@ -273,6 +273,8 @@ import Observation
         }
     }
     private func dispatchDictation(_ action: HotkeyGesture.Action?) {
+        // A held trigger (push-to-talk) never auto-sends: its release is the send.
+        defer { dictation.setHeld(dictationGesture.gesture.isHolding && action != .cancel) }
         switch action {
         case .start: startDictation()
         case .stop: stopDictation()

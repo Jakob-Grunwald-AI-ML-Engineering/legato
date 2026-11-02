@@ -1,4 +1,5 @@
 import Foundation
+import LegatoAppServices
 import LegatoMac
 import Observation
 
@@ -20,6 +21,10 @@ import Observation
         }
     }
     var gestureMode: HotkeyGesture.Mode { didSet { defaults.set(gestureMode.rawValue, forKey: "gestureMode") } }
+    /// When dictated text is written: once per take (on stop, or after a pause) or line by line. The pipeline reads
+    /// the same keys live from the standard defaults.
+    var dictationSend: DictationSendSetting.Mode { didSet { defaults.set(dictationSend.rawValue, forKey: DictationSendSetting.modeKey) } }
+    var dictationPause: Double { didSet { defaults.set(DictationSendSetting.clampedPause(dictationPause), forKey: DictationSendSetting.pauseKey) } }
     var insertionMode: FieldWriter.Mode { didSet { defaults.set(insertionMode.rawValue, forKey: "insertionMode") } }
     var restoreClipboard: Bool { didSet { defaults.set(restoreClipboard, forKey: "restoreClipboard") } }
     init(defaults: UserDefaults = .standard) {
@@ -28,6 +33,8 @@ import Observation
         hotkey = panel
         dictationHotkey = Self.initialDictationHotkey(defaults, panel: panel)
         gestureMode = defaults.string(forKey: "gestureMode").flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
+        dictationSend = DictationSendSetting.mode(in: defaults)
+        dictationPause = DictationSendSetting.pause(in: defaults)
         insertionMode = defaults.string(forKey: "insertionMode").flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         restoreClipboard = defaults.object(forKey: "restoreClipboard") as? Bool ?? true
     }

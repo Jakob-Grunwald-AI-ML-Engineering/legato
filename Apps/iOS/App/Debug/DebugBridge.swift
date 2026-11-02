@@ -43,6 +43,27 @@ import UIKit
             try AppController.shared.keyboardSession.debugDictationTail(command.args.first ?? "")
             return AppController.shared.composer.debugState
         }
+        // Ends the take as the keyboard's mic key does (no microphone): the held take is cleaned and typed now.
+        harness.register("dictation-debug-stop") { _ in
+            try AppController.shared.keyboardSession.debugDictationStop()
+            return AppController.shared.dictation.takeState
+        }
+        harness.register("dictation-state") { _ in AppController.shared.dictation.takeState }
+        // The next N take cleanups (default 1) fail twice, so the failed state is reachable without network faults.
+        harness.register("dictation-debug-fail-take") { command in
+            guard command.args.count <= 1, let count = command.args.first.map({ Int($0) }) ?? 1, count >= 0 else { throw Usage.invalid }
+            AppController.shared.dictation.debugFailTakes = count
+            return AppController.shared.dictation.takeState
+        }
+        // The keyboard's Retry / Insert as-is buttons act through the link; these act on the host directly.
+        harness.register("dictation-retry") { _ in
+            await AppController.shared.dictation.retry()
+            return AppController.shared.dictation.takeState
+        }
+        harness.register("dictation-insert-raw") { _ in
+            await AppController.shared.dictation.insertRaw()
+            return AppController.shared.dictation.takeState
+        }
         harness.register("composer-import-keys") { command in
             guard command.args == ["credentials.json"] else { throw Usage.invalid }
             return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))

@@ -248,6 +248,13 @@ import LegatoVocabulary
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
         dictation.debugTail(text)
     }
+    /// Debug bridge: ends the take as the mic key's stop does (no microphone is involved), so the held take is
+    /// cleaned and written now.
+    public func debugDictationStop() throws {
+        guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        dictation.debugTail("")
+        finishDictationTake(waitingForWords: false)
+    }
     public enum DebugDictationError: Error, CustomStringConvertible, Sendable {
         case notOnDictationSurface, empty
         public var description: String {
