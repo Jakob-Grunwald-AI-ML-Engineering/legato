@@ -18,8 +18,8 @@ public enum FallbackResult: Sendable, Equatable {
     case typed
     /// Typing stopped half-way (the app changed, or the user typed): `remainder` is on the clipboard.
     case interrupted(remainder: String, message: String)
-    /// Left on the clipboard; `message` says why, for the notice.
-    case copied(message: String)
+    /// Left on the clipboard; `message` says why, for the notice, and `reason` whether the rest of the run follows.
+    case copied(message: String, reason: CopyReason)
 }
 
 /// The last dictation text this Mac delivered, to space the next dictation when its field cannot be read.
@@ -50,14 +50,18 @@ public struct DeliveryMemory: Sendable, Equatable {
 /// `FieldWriter`, paste fallback). The target is captured when the session starts (`begin`); every later line goes
 /// to that field while it keeps focus and to the newly focused field when it does not. Lines that cannot be typed
 /// (no field, secure field, a write the readback does not show) are pasted, or copied when pasting is not safe;
-/// once one line was only copied the rest of the session is copied too, accumulated, so the clipboard holds the
-/// whole untyped text.
+/// once one line was only copied for a lasting reason (secure field, app switched, no Accessibility) the rest of the
+/// session is copied too, accumulated, so the clipboard holds the whole untyped text. A passing reason (modifiers
+/// still held) does not latch: the text is carried into the next write, and `finish` retries what is left once
+/// before it goes to the clipboard.
 @MainActor
 public final class FieldDictationWriter {
     public enum Outcome: Sendable, Equatable {
         case typed
         case pasted
         case copied(message: String)
+        /// Held back (modifiers still down); goes out with the next write, or at `finish`.
+        case held
     }
     private struct Current {
         let target: any TextTarget
@@ -78,7 +82,11 @@ public final class FieldDictationWriter {
     /// Survives `begin()`: the next dictation continues this text when the field is unreadable.
     private var lastDelivery: DeliveryMemory?
     private var lines = 0
+    /// Text that only reached the clipboard since a lasting reason latched the run to copy-only.
     private var copied = ""
+    private var latched = false
+    /// Text held back by a passing reason, written ahead of the next line.
+    private var carried = ""
     /// Characters of the field's text before the cursor handed to cleanup.
     public static let contextLimit = 600
 
@@ -95,7 +103,7 @@ public final class FieldDictationWriter {
 
     /// A session starts: forget the last one's field and clipboard run, capture the field in front now.
     public func begin() {
-        current = nil; lines = 0; copied = ""
+        current = nil; lines = 0; copied = ""; latched = false; carried = ""
         _ = resolve()
     }
 
@@ -107,16 +115,33 @@ public final class FieldDictationWriter {
     }
 
     @discardableResult
-    public func write(_ text: String) async -> Outcome {
-        guard !text.allSatisfy({ $0 == " " }) else { return .typed }
+    public func write(_ text: String) async -> Outcome { await write(text, final: false) }
+
+    /// The session is over: whatever was held back is tried once more, then left on the clipboard.
+    /// Nil when nothing was held.
+    @discardableResult
+    public func finish() async -> Outcome? {
+        guard !carried.isEmpty else { return nil }
+        let rest = carried
+        carried = ""
+        return await write(rest, final: true)
+    }
+
+    private func write(_ incoming: String, final: Bool) async -> Outcome {
+        guard !incoming.allSatisfy({ $0 == " " }) else { return .typed }
         defer { lines += 1 }
+        var text = incoming
+        if !carried.isEmpty {
+            text = carried + (text.first?.isNewline == true ? "" : Self.separator(before: text, after: "x", first: false)) + text
+            carried = ""
+        }
         if resolve() != nil, let outcome = await type(text, retry: true) {
-            if outcome == .typed { copied = "" }
+            if outcome == .typed { copied = ""; latched = false }
             return outcome
         }
         // Nothing typable (or the write failed). A secure field never gets a paste, and once a line was only
-        // copied the rest of the run is too, so the clipboard holds all of it.
-        return await deliver(text, secure: lastWasSecure, copyOnly: lastWasSecure || !copied.isEmpty)
+        // copied for a lasting reason the rest of the run is too, so the clipboard holds all of it.
+        return await deliver(text, secure: lastWasSecure, copyOnly: lastWasSecure || latched, final: final)
     }
 
     // MARK: Typing
@@ -197,7 +222,7 @@ public final class FieldDictationWriter {
         let typed = String(delta.unicodeScalars.dropLast(remainder.unicodeScalars.count))
         remember(lastCharacter: typed.last, caret: nil)
         let rest = String(remainder.drop(while: \.isWhitespace))
-        copied = rest
+        copied = rest; latched = true
         _ = await fallback(rest, false, true)
         return .copied(message: "Typing stopped: the rest is on the clipboard. Paste with ⌘V.")
     }
@@ -222,7 +247,7 @@ public final class FieldDictationWriter {
 
     // MARK: Fallback
 
-    private func deliver(_ text: String, secure: Bool, copyOnly: Bool) async -> Outcome {
+    private func deliver(_ text: String, secure: Bool, copyOnly: Bool, final: Bool) async -> Outcome {
         let body = text.trimmingCharacters(in: .whitespaces)
         let payload: String
         if copyOnly, !copied.isEmpty {
@@ -235,16 +260,22 @@ public final class FieldDictationWriter {
             remember(lastCharacter: payload.last, caret: nil)
             return .pasted
         case .typed:
-            copied = ""
+            copied = ""; latched = false
             remember(lastCharacter: payload.last, caret: nil)
             return .typed
         case .interrupted(let remainder, let message):
-            copied = remainder
+            copied = remainder; latched = true
             let typed = String(payload.unicodeScalars.dropLast(remainder.unicodeScalars.count))
             remember(lastCharacter: typed.last, caret: nil)
             return .copied(message: message)
-        case .copied(let message):
-            copied = payload
+        case .copied(let message, let reason):
+            guard reason.latches else {
+                // Held modifiers pass. Wait for the next write; at the end of the run the clipboard has it.
+                guard final else { carried = body; return .held }
+                _ = await fallback(body, false, true)
+                return .copied(message: reason.toast)
+            }
+            copied = payload; latched = true
             return .copied(message: message)
         }
     }

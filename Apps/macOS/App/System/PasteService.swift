@@ -17,20 +17,6 @@ final class PasteService {
         pasteboard.setString(text, forType: .string)
     }
 
-    /// Why a paste became a plain copy.
-    enum CopyReason {
-        case accessibilityMissing, secureField, appChanged, modifiersHeld
-
-        var toast: String {
-            switch self {
-            case .accessibilityMissing: "Copied to the clipboard. Grant Accessibility to type into fields."
-            case .secureField: "Secure field: copied to the clipboard, not typed."
-            case .appChanged: "You switched apps: copied to the clipboard, paste with ⌘V."
-            case .modifiersHeld: "Keys were still held: copied to the clipboard, paste with ⌘V."
-            }
-        }
-    }
-
     enum PasteOutcome {
         case pasted
         case copied(CopyReason)
@@ -51,12 +37,9 @@ final class PasteService {
         let onTarget = frontmost != nil && frontmost == targetPID
         let route = FallbackRoute.route(
             axTrusted: trusted, frontmostIsTarget: onTarget, secureField: secure, modifiersReleased: released)
-        guard route == .pasteKeystroke else {
+        if case .copyOnly(let reason) = route {
             copy(text)
-            if !trusted { return .copied(.accessibilityMissing) }
-            if secure { return .copied(.secureField) }
-            if !onTarget { return .copied(.appChanged) }
-            return .copied(.modifiersHeld)
+            return .copied(reason)
         }
 
         pasteboard.clearContents()
@@ -130,15 +113,11 @@ final class PasteService {
 
     // MARK: Keystroke
 
-    /// Waits up to a second for the hotkey's modifiers to come up; false if they are still held.
+    /// Waits for the hotkey's modifiers to come up (the hotkey release), up to `ModifierWait.cap`; false if they are
+    /// still held. Reads the hardware state, which synthesized events do not change.
     private func waitForModifiersReleased() async -> Bool {
         let mask: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
-        func held() -> Bool { !CGEventSource.flagsState(.combinedSessionState).intersection(mask).isEmpty }
-        let deadline = ContinuousClock.now + .seconds(1)
-        while held(), ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(20))
-        }
-        return !held()
+        return await ModifierWait.untilReleased(held: { !CGEventSource.flagsState(.hidSystemState).intersection(mask).isEmpty })
     }
 
     private func postCommandV() {

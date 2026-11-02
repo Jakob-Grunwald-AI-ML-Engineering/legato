@@ -44,6 +44,8 @@ import LegatoSoniox
     @ObservationIgnored public var deliver: @MainActor (String) async -> Void = { _ in }
     /// A new session begins (capture the target field).
     @ObservationIgnored public var onBegin: @MainActor () -> Void = {}
+    /// The session's last line was delivered (settle anything held back).
+    @ObservationIgnored public var onEnd: @MainActor () async -> Void = {}
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "mac-dictation")
     private static let warmInterval: TimeInterval = 240
 
@@ -142,6 +144,7 @@ import LegatoSoniox
         // The cleanup bounds itself (a timeout per attempt, one retry); a failure leaves the raw text held for the user.
         await pipeline.finishTake()
         await drainNow()
+        await onEnd()
         phase = .idle
         stopTask = nil
         updateAutoSend()

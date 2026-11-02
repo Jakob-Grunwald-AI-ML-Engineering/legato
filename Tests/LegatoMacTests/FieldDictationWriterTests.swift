@@ -5,7 +5,7 @@ import Testing
 @MainActor private final class Scene {
     var field: FocusedField
     var fallbacks: [(text: String, secure: Bool, copyOnly: Bool)] = []
-    var result = FallbackResult.copied(message: "copied")
+    var result = FallbackResult.copied(message: "copied", reason: .appChanged)
     init(_ field: FocusedField) { self.field = field }
     func writer() -> FieldDictationWriter {
         FieldDictationWriter(capture: { [self] in field }, fallback: { [self] text, secure, copyOnly in
@@ -88,13 +88,77 @@ import Testing
         writer.begin()
         #expect(await writer.write("eins.") == .pasted)
         #expect(scene.fallbacks.last?.text == "eins." && scene.fallbacks.last?.copyOnly == false)
-        scene.result = .copied(message: "No Accessibility")
+        scene.result = .copied(message: "No Accessibility", reason: .accessibilityMissing)
         scene.field = .none
         #expect(await writer.write("zwei.") == .copied(message: "No Accessibility"))
         #expect(scene.fallbacks.last?.text == " zwei.", "Pasted lines are spaced apart")
         #expect(await writer.write("drei.") == .copied(message: "No Accessibility"))
         #expect(scene.fallbacks.last?.copyOnly == true)
         #expect(scene.fallbacks.last?.text == " zwei. drei.", "Once copying, the clipboard accumulates the untyped text")
+    }
+
+    @Test func heldModifiersDoNotLatchAndTheTextIsCarriedIntoTheNextWrite() async {
+        let scene = Scene(.none)
+        scene.result = .copied(message: "held", reason: .modifiersHeld)
+        let writer = scene.writer()
+        writer.begin()
+        #expect(await writer.write("eins.") == .held)
+        #expect(scene.fallbacks.last?.copyOnly == false)
+        #expect(await writer.write("zwei.") == .held)
+        #expect(scene.fallbacks.last?.copyOnly == false, "A passing reason never forbids the paste")
+        #expect(scene.fallbacks.last?.text == " eins. zwei.", "The held-back line goes out ahead of the next one")
+        scene.result = .pasted
+        #expect(await writer.write("drei.") == .pasted)
+        #expect(scene.fallbacks.last?.text == " eins. zwei. drei.", "Nothing held back is lost")
+        #expect(scene.fallbacks.last?.copyOnly == false)
+    }
+
+    @Test func heldTextIsTypedAheadOfTheNextLineOnceTheFieldTakesIt() async {
+        let scene = Scene(.none)
+        scene.result = .copied(message: "held", reason: .modifiersHeld)
+        let writer = scene.writer()
+        writer.begin()
+        #expect(await writer.write("eins.") == .held)
+        let field = FakeTextTarget("")
+        scene.field = .target(field)
+        #expect(await writer.write("zwei.") == .typed)
+        #expect(field.string == "eins. zwei.")
+        #expect(await writer.finish() == nil)
+    }
+
+    @Test func aSwitchedAppOrASecureFieldLatchesTheRestOfTheRun() async {
+        for reason in [CopyReason.appChanged, .secureField, .accessibilityMissing] {
+            let scene = Scene(.none)
+            scene.result = .copied(message: "no", reason: reason)
+            let writer = scene.writer()
+            writer.begin()
+            #expect(await writer.write("eins.") == .copied(message: "no"))
+            #expect(await writer.write("zwei.") == .copied(message: "no"))
+            #expect(scene.fallbacks.last?.copyOnly == true && scene.fallbacks.last?.text == "eins. zwei.", "\(reason)")
+        }
+    }
+
+    @Test func theRunEndRetriesTheHeldTextOnceThenLeavesItOnTheClipboard() async {
+        let scene = Scene(.none)
+        scene.result = .copied(message: "held", reason: .modifiersHeld)
+        let writer = scene.writer()
+        writer.begin()
+        #expect(await writer.write("eins.") == .held)
+        #expect(await writer.finish() == .copied(message: CopyReason.modifiersHeld.toast))
+        #expect(scene.fallbacks.count == 3, "Write, one retry, then the clipboard")
+        #expect(scene.fallbacks.last?.copyOnly == true && scene.fallbacks.last?.text == "eins.")
+        #expect(await writer.finish() == nil, "Nothing is left to settle")
+    }
+
+    @Test func theRunEndRetrySucceedsWhenTheModifiersAreUp() async {
+        let scene = Scene(.none)
+        scene.result = .copied(message: "held", reason: .modifiersHeld)
+        let writer = scene.writer()
+        writer.begin()
+        await writer.write("eins.")
+        scene.result = .pasted
+        #expect(await writer.finish() == .pasted)
+        #expect(scene.fallbacks.count == 2 && scene.fallbacks.last?.copyOnly == false)
     }
 
     @Test func aSecureFieldIsNeverTypedOrPasted() async {
