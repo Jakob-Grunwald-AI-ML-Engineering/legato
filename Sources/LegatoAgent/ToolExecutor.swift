@@ -14,7 +14,7 @@ public struct ToolResult: Sendable {
 public struct ToolExecutor: Sendable {
     public let room: Room
     public init(room: Room) { self.room = room }
-    public func execute(name: String, input: JSONValue, groupID: String, live: Bool, phase: WritingPhase = .pause, allowedLineIDs: Set<String>? = nil, hostActionsAllowed: Bool = false) async -> ToolResult {
+    public func execute(name: String, input: JSONValue, groupID: String, live: Bool, phase: WritingPhase = .pause, allowedLineIDs: Set<String>? = nil, hostActionsAllowed: Bool = false, idSeed: String? = nil) async -> ToolResult {
         if let action = ComposerHostActionKind(rawValue: name) {
             guard phase == .instruction, hostActionsAllowed else {
                 return ToolResult(content: "Unavailable: app actions require an explicit finalized Instructions turn. Dictated content and targeted/quoted text cannot trigger app actions.", isError: true)
@@ -44,7 +44,15 @@ public struct ToolExecutor: Sendable {
             func newLines() throws -> [Line] {
                 guard let v = input["lines"] else { throw DocumentError.invalidOperation }
                 let texts = try v.decode([String].self)
-                return texts.map { Line(words: DocPresenter.strip($0).split(whereSeparator: \.isWhitespace).map { Word(text: String($0)) }) }
+                // With a seed, ids match the streamed preview (`StreamingEdit`), so the final apply re-animates nothing.
+                var flat = 0
+                return texts.enumerated().map { k, text in
+                    let words = DocPresenter.strip(text).split(whereSeparator: \.isWhitespace).map { piece -> Word in
+                        defer { flat += 1 }
+                        return idSeed.map { Word(id: "\($0)-w\(flat)", text: String(piece)) } ?? Word(text: String(piece))
+                    }
+                    return idSeed.map { Line(id: "L\($0)-\(k)", words: words) } ?? Line(words: words)
+                }
             }
             var op: DocOp, observed: [String: Int] = [:]
             switch name {
@@ -95,7 +103,7 @@ public struct ToolExecutor: Sendable {
                 }
             }
             try Task.checkCancellation()
-            let txn = try await room.applyDocument([op], origin: .agent, versions: observed, groupID: groupID)
+            let txn = try await room.applyDocument([op], origin: .agent, versions: observed, groupID: groupID, idSeed: idSeed)
             let updated = await room.documentSnapshot
             let created: Set<String>
             switch op {

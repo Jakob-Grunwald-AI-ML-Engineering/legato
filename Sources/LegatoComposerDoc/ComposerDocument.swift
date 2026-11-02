@@ -20,7 +20,7 @@ public struct ComposerDocument: Sendable {
         rawTranscript.append(words)
         return txn
     }
-    @discardableResult public mutating func apply(_ ops: [DocOp], origin: TransactionOrigin, versions: [String: Int], groupID: String? = nil) throws -> Transaction {
+    @discardableResult public mutating func apply(_ ops: [DocOp], origin: TransactionOrigin, versions: [String: Int], groupID: String? = nil, idSeed: String? = nil) throws -> Transaction {
         var draft = self
         let initial = Dictionary(uniqueKeysWithValues: lines.map { ($0.id, $0.version) })
         var touched = Set<String>(), inverse: [DocOp] = [], hunks: [AnimationHunk] = []
@@ -31,7 +31,7 @@ public struct ComposerDocument: Sendable {
                 if let version = initial[id], versions[id] != version { throw DocumentError.versionConflict(id) }
             }
             let before = draft.lines
-            let undo = try draft.perform(op, origin: origin, hunks: &hunks)
+            let undo = try draft.perform(op, origin: origin, idSeed: idSeed, hunks: &hunks)
             if origin == .agent {
                 let surviving = draft.lines.flatMap(\.words)
                 for word in before.flatMap(\.words) where word.pinned {
@@ -77,7 +77,7 @@ public struct ComposerDocument: Sendable {
             for word in line.words { guard ids.insert(word.id).inserted else { throw DocumentError.duplicateID(word.id) } }
         }
     }
-    private mutating func perform(_ op: DocOp, origin: TransactionOrigin, hunks: inout [AnimationHunk]) throws -> [DocOp] {
+    private mutating func perform(_ op: DocOp, origin: TransactionOrigin, idSeed: String?, hunks: inout [AnimationHunk]) throws -> [DocOp] {
         switch op {
         case let .insertLines(after, proposed):
             let added = proposed.map { line -> Line in
@@ -104,7 +104,7 @@ public struct ComposerDocument: Sendable {
             guard indices == Array(indices[0]..<(indices[0] + indices.count)) else { throw DocumentError.invalidOperation }
             let originals = indices.map { lines[$0] }, start = indices[0]
             let previous = start > 0 ? lines[start - 1].id : nil
-            let reconciled = WordDiff.reconcile(old: originals.flatMap(\.words), proposed: proposed.flatMap(\.words), origin: origin)
+            let reconciled = WordDiff.reconcile(old: originals.flatMap(\.words), proposed: proposed.flatMap(\.words), origin: origin, keepIDs: idSeed != nil)
             var cursor = 0
             let replacements = proposed.map { line -> Line in
                 var copy = line; copy.words = Array(reconciled[cursor..<(cursor + line.words.count)]); cursor += line.words.count; return copy
@@ -120,7 +120,7 @@ public struct ComposerDocument: Sendable {
             let matches = original.text.ranges(of: old)
             guard matches.count == 1, let range = matches.first else { throw DocumentError.ambiguousText }
             let text = original.text.replacingCharacters(in: range, with: new)
-            lines[i].words = WordDiff.reconcile(old: original.words, proposed: WordDiff.words(text), origin: origin)
+            lines[i].words = WordDiff.reconcile(old: original.words, proposed: WordDiff.words(text, idSeed: idSeed), origin: origin, keepIDs: idSeed != nil)
             hunks.append(.wordsReplaced(lineID: id, old: original.words, new: lines[i].words))
             return [.replaceLines(ids: [id], lines: [original])]
         case let .moveLines(ids, after):

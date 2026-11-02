@@ -218,6 +218,19 @@ public actor AgentRunner {
             await self?.turnRetired(phase: next, generation: token)
         }
     }
+    /// Previews the streamed tool calls `keys` through the Room (display only).
+    private func preview(_ keys: [Int], _ blocks: [Int: JSONValue], _ partial: [Int: String], _ seeds: inout [Int: String],
+                         _ phase: WritingPhase, _ allowed: Set<String>?) async {
+        for key in keys {
+            guard case .string(let tool) = blocks[key]?["name"], StreamingEdit.tools.contains(tool), let json = partial[key] else { continue }
+            let seed = seeds[key] ?? UUID().uuidString; seeds[key] = seed
+            let edit = StreamingEdit.edit(name: tool, tree: PartialJSONTree(parsing: json), base: await room.documentSnapshot,
+                                          seed: seed, phase: phase, allowedLineIDs: allowed)
+            await room.setProvisional(block: key, edit)
+        }
+    }
+    /// Minimum gap between draft previews while a tool call streams.
+    static let previewInterval = 0.04
     public static func shouldReseed(tokens: Int, idle: Double) -> Bool { tokens > 50_000 || idle > 300 }
     public static func request(model: ModelChoice, system: String, messages: [JSONValue], live: Bool, mode: ComposerMode = .message, hostActionsAllowed: Bool = false) throws -> Data {
         let tools = try JSONValue.encoding(ToolExecutor.schemas(live: live, mode: mode, hostActionsAllowed: hostActionsAllowed))
@@ -292,6 +305,8 @@ public actor AgentRunner {
                 var blocks: [Int: JSONValue] = [:], partial: [Int: String] = [:]
                 var usage: JSONValue = .null, first = true
                 let started = ProcessInfo.processInfo.systemUptime
+                // Streamed edits preview in the draft as their JSON grows (display only; execute below stays authoritative).
+                var seeds: [Int: String] = [:], dirty = Set<Int>(), lastPreview = 0.0
                 for try await event in client.stream(request: request) {
                     try Task.checkCancellation()
                     await log(participant, ["event": .string("response.delta"), "type": .string(event.event), "data": .string(event.data)])
@@ -312,6 +327,12 @@ public actor AgentRunner {
                         let targets = PartialJSON.targets(in: partial[i]!)
                         policy.editing.formUnion(targets)
                         if !targets.isEmpty { await log(participant, ["event": .string("pending.edit"), "lines": .array(targets.sorted().map(JSONValue.string)), "group": .string(group)]) }
+                        dirty.insert(i)
+                        // Coalesced: later fragments within the window ride on the next flush or the block's end.
+                        if ProcessInfo.processInfo.systemUptime - lastPreview >= Self.previewInterval {
+                            lastPreview = ProcessInfo.processInfo.systemUptime; dirty.remove(i)
+                            await preview([i], blocks, partial, &seeds, phase, allowedLineIDs)
+                        }
                     }
                     for key in ["text", "thinking", "signature"] {
                         if case .string(let fragment) = delta[key] {
@@ -320,8 +341,13 @@ public actor AgentRunner {
                         }
                     }
                     blocks[i] = .object(block)
+                    if event.event == "content_block_stop", dirty.contains(i) {
+                            lastPreview = ProcessInfo.processInfo.systemUptime; dirty.remove(i)
+                            await preview([i], blocks, partial, &seeds, phase, allowedLineIDs)
+                        }
                 }
                 try Task.checkCancellation()
+                if !dirty.isEmpty { await preview(dirty.sorted(), blocks, partial, &seeds, phase, allowedLineIDs); dirty = [] }
                 for (i, json) in partial {
                     guard case .object(var block) = blocks[i] else { continue }
                     if json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -331,7 +357,8 @@ public actor AgentRunner {
                     }
                     blocks[i] = .object(block)
                 }
-                let content = blocks.keys.sorted().compactMap { blocks[$0] }
+                let keyed = blocks.keys.sorted().compactMap { key in blocks[key].map { (key, $0) } }
+                let content = keyed.map(\.1)
                 guard !content.isEmpty else { throw MessagesStreamError.incomplete }
                 conversation.messages.append(.object(["role": .string("assistant"), "content": .array(content)]))
                 await log(participant, ["event": .string("usage"), "usage": usage])
@@ -342,15 +369,16 @@ public actor AgentRunner {
                 }
                 var results: [JSONValue] = []
                 var actionAttempted = false
-                for block in content where block["type"] == .string("tool_use") {
+                for (key, block) in keyed where block["type"] == .string("tool_use") {
                     try Task.checkCancellation()
                     guard case .string(let id) = block["id"], case .string(let name) = block["name"], let input = block["input"] else { throw MessagesStreamError.incomplete }
                     let result: ToolResult
                     if queuedAction != nil {
                         result = ToolResult(content: "Rejected: one app action is already queued for this turn. No additional action or edit will run.", isError: true)
                     } else {
-                        result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: true, phase: phase, allowedLineIDs: allowedLineIDs, hostActionsAllowed: hostActionsAllowed)
+                        result = await ToolExecutor(room: room).execute(name: name, input: input, groupID: group, live: true, phase: phase, allowedLineIDs: allowedLineIDs, hostActionsAllowed: hostActionsAllowed, idSeed: seeds[key])
                     }
+                    await room.dropProvisional(block: key)
                     if ComposerHostActionKind(rawValue: name) != nil { actionAttempted = true }
                     if let kind = result.hostAction, let instructionID, let actionContext {
                         queuedAction = ComposerHostAction(id: instructionID + ":" + id, instructionID: instructionID, kind: kind, context: actionContext)
@@ -374,7 +402,10 @@ public actor AgentRunner {
             conversation.lastTurn = ProcessInfo.processInfo.systemUptime; conversation.seeded = true
             self.conversation = conversation
             if let queuedAction { queuedHostActions[generation] = queuedAction }
-        } catch is CancellationError {} catch {
+            await room.dropProvisional()
+        } catch is CancellationError { await room.dropProvisional() } catch {
+            // A failed stream or call reverts the preview to the pre-turn draft; edits already applied stay.
+            await room.dropProvisional()
             await log(participant, ["event": .string("error"), "message": .string(String(describing: error))])
         }
     }

@@ -10,6 +10,7 @@ public actor Room {
     private var sequence: Int64 = 0
     private var subscribers: [UUID: (Set<Channel>, AsyncStream<Envelope>.Continuation)] = [:]
     private var document = ComposerDocument()
+    private var provisional: [Int: ProvisionalEdit] = [:]
     private var lifecycle = SessionLifecycle()
     private var transcriberDraining = false
     private var pendingSegments: Set<String> = []
@@ -103,9 +104,9 @@ public actor Room {
     }
 
     @discardableResult public func applyDocument(_ ops: [DocOp], origin: TransactionOrigin,
-        versions: [String: Int], groupID: String? = nil, causedBy: String? = nil) throws -> Transaction {
+        versions: [String: Int], groupID: String? = nil, causedBy: String? = nil, idSeed: String? = nil) throws -> Transaction {
         try requireActive()
-        let transaction = try document.apply(ops, origin: origin, versions: versions, groupID: groupID)
+        let transaction = try document.apply(ops, origin: origin, versions: versions, groupID: groupID, idSeed: idSeed)
         publishTransaction(transaction, causedBy: causedBy)
         return transaction
     }
@@ -121,6 +122,47 @@ public actor Room {
         guard let publication = document.publication(for: transaction) else { return }
         _ = try? publishDocument(publication, causedBy: causedBy)
         _ = try? publishDocument(document.snapshotPublication, causedBy: causedBy)
+        // The preview rides on top of every authoritative change, so a snapshot never flickers back under it.
+        if !provisional.isEmpty { emitProvisional() }
+    }
+
+    /// A streamed tool call's edit so far, keyed by its content block. Display only: it never touches the
+    /// document, its ids or its versions. Edits that no longer apply (the real call landed, a version moved) are skipped.
+    public struct ProvisionalEdit: Sendable {
+        public var op: DocOp, versions: [String: Int], idSeed: String
+        public init(op: DocOp, versions: [String: Int], idSeed: String) { self.op = op; self.versions = versions; self.idSeed = idSeed }
+    }
+    public func setProvisional(block: Int, _ edit: ProvisionalEdit?) {
+        guard state != .done else { return }
+        if provisional[block] == nil && edit == nil { return }
+        provisional[block] = edit
+        emitProvisional()
+    }
+    /// Drops one block's preview (its authoritative call ran) or, with nil, every preview (turn end, failure, cancel).
+    public func dropProvisional(block: Int? = nil) {
+        guard !provisional.isEmpty else { return }
+        if let block { provisional[block] = nil } else { provisional = [:] }
+        emitProvisional()
+    }
+    public var hasProvisional: Bool { !provisional.isEmpty }
+    /// `agent.status` event `draft.provisional`: the previewed snapshot (at the authoritative revision); `clear` marks the authoritative one.
+    /// Never logged, as it fires many times a second.
+    private func emitProvisional() {
+        let (preview, applied) = renderProvisional()
+        var payload: [String: JSONValue] = ["event": .string("draft.provisional")]
+        if !applied { payload["clear"] = .bool(true) }
+        if let value = try? JSONValue.encoding(preview) { payload["snapshot"] = value }
+        emit(channel: .agentStatus, participant: .liveAgent, payload: .object(payload), logged: false)
+    }
+    /// The draft as shown: the authoritative document with every live preview applied on top.
+    public var draftSnapshot: DocumentSnapshot { renderProvisional().0 }
+    private func renderProvisional() -> (DocumentSnapshot, Bool) {
+        var preview = document, applied = false
+        for key in provisional.keys.sorted() {
+            guard let edit = provisional[key] else { continue }
+            if (try? preview.apply([edit.op], origin: .agent, versions: edit.versions, idSeed: edit.idSeed)) != nil { applied = true }
+        }
+        return (applied ? DocumentSnapshot(revision: document.revision, lines: preview.lines) : document.snapshot, applied)
     }
 
     /// A publication can only be minted by ComposerDocument; arbitrary doc payloads are rejected.
@@ -190,6 +232,7 @@ public actor Room {
     public func cancel() throws { if state != .done { finish(reason: "cancel") } }
 
     private func finish(reason: String) {
+        dropProvisional()
         lifecycle.finish()
         sessionEvent("cancel.work", fields: ["reason": .string(reason)])
         sessionEvent("done", fields: ["reason": .string(reason)])
@@ -208,13 +251,13 @@ public actor Room {
     private func requireActive() throws { if state == .done { throw RoomError.sessionEnded } }
 
     @discardableResult private func emit(channel: Channel, participant: Participant, payload: JSONValue,
-        tOrigin: Double? = nil, baseRev: Int? = nil, causedBy: String? = nil) -> Envelope {
+        tOrigin: Double? = nil, baseRev: Int? = nil, causedBy: String? = nil, logged: Bool = true) -> Envelope {
         sequence += 1
         let now = clock()
         let envelope = Envelope(seq: sequence, id: UUID().uuidString, channel: channel,
                                 participant: participant, tMono: now, tOrigin: tOrigin ?? now,
                                 baseRev: baseRev, causedBy: causedBy, payload: payload)
-        do { try log?.append(envelope) } catch { loggingError = String(describing: error) }
+        if logged { do { try log?.append(envelope) } catch { loggingError = String(describing: error) } }
         for (channels, continuation) in subscribers.values where channels.contains(channel) { continuation.yield(envelope) }
         return envelope
     }

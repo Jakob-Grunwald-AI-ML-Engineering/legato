@@ -903,6 +903,10 @@ public enum ComposerInsertOrigin: String, Sendable {
             correctionCountdownStart = try? event.payload["countdownStart"]?.decode(Double.self)
             correctionCountdownDeadline = try? event.payload["countdownDeadline"]?.decode(Double.self)
         case .agentStatus:
+            // A streamed writer edit previews on top of the authoritative draft (never checkpointed); `clear` restores it.
+            if event.payload["event"] == .string("draft.provisional"), let value = try? event.payload["snapshot"]?.decode(DocumentSnapshot.self) {
+                snapshot = value; if event.payload["clear"] == nil { hunks = [] }
+            }
             if event.payload["event"] == .string("instruction.notice") { hostActionNotice = try? event.payload["message"]?.decode(String.self) }
             if event.payload["event"] == .string("host.action.queued") { instructionApplying = true }
             if event.payload["event"] == .string("host.action.result") {
