@@ -116,6 +116,10 @@ final class KeyboardLinkHost: TranscriptSink {
                             await composer.select(lineID: line, wordID: word, endLineID: intent.endLineID,
                                                   endWordID: intent.endWordID, timestamp: intent.timestamp)
                         }
+                    // A failed take cleanup: the keyboard's Retry / Insert as-is buttons (cleanup can take seconds, so
+                    // Retry never holds this loop).
+                    case "dictation-retry": if let dictation { Task { await dictation.retry() } }
+                    case "dictation-insert-raw": if let dictation { Task { await dictation.insertRaw() } }
                     case "send-correction": await composer.sendCorrection()
                     case "send-instruction": await composer.sendInstruction()
                     case "discard-instruction": await composer.discardInstruction(timestamp: intent.timestamp)
@@ -146,6 +150,12 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.instructionCountdownDeadline = composer.instructionCountdownDeadline
                 value.audioRoute = (self.keyboardSession?.isOpen == true ? self.keyboardSession?.route : nil)?.rawValue ?? composer.route.rawValue
                 value.dictationTail = self.keyboardSession?.dictationTail
+                if let dictation, dictation.mode != .lineByLine, self.keyboardSession?.isOpen == true {
+                    value.dictationTake = dictation.takeDisplay
+                    value.dictationTakePhase = dictation.takePhase.rawValue
+                    value.dictationCountdownStart = dictation.countdownStart
+                    value.dictationCountdownDeadline = dictation.countdownDeadline
+                }
                 value.dictationNotice = self.keyboardSession?.dictationNotice
                 value.dictationNoticeID = self.keyboardSession?.dictationNoticeID
                 value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs

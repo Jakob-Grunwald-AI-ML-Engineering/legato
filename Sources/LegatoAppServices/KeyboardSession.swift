@@ -42,6 +42,8 @@ import LegatoVocabulary
     @ObservationIgnored private let dictation: DictationEngine
     @ObservationIgnored private var probe = TapLatencyProbe()
     @ObservationIgnored private var routeClosedAt: Double?
+    /// Waits for the stopped take's last words, then has the sink clean and write the take once.
+    @ObservationIgnored private var takeFinish: Task<Void, Never>?
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-session")
 
     public convenience init(composer: ComposerSession, sink: any DictationRouteSink = DiscardingDictationSink()) {
@@ -94,7 +96,11 @@ import LegatoVocabulary
         if !target.visible { guard isOpen else { return false }; await close(); return true }
         if !isOpen { await open(surface: target.surface); return true }
         guard target.surface != gate.surface else { return false }
-        if let action = gate.show(target.surface) { await perform(action) }
+        if let action = gate.show(target.surface) {
+            await perform(action)
+            // Leaving the typing surface mid-take: the words already final are written, not lost.
+            if action == .abandon(.dictation) { finishDictationTake(waitingForWords: false) }
+        }
         await cool(except: gate.surface)
         await warm(gate.surface)
         return true
@@ -114,6 +120,8 @@ import LegatoVocabulary
     private func close() async {
         if let action = gate.abandon() { await perform(action) }
         isOpen = false; probe.cancel()
+        // The take is the keyboard appearance's: closing mid-take drops what was not sent.
+        takeFinish?.cancel(); takeFinish = nil
         await closeDictation()
         await sink.reset()
         dictation.resetSequence()
@@ -198,6 +206,7 @@ import LegatoVocabulary
         case .finalize(.dictation):
             composer.setRoute(.idle)
             await dictation.finalizeTake()
+            finishDictationTake(waitingForWords: true)
         case .abandon(.agent): await composer.abandonTake()
         case .abandon(.dictation):
             composer.setRoute(.idle)
@@ -211,6 +220,15 @@ import LegatoVocabulary
     // MARK: Dictation route
 
     private func openDictation() { dictation.open() }
+    private func finishDictationTake(waitingForWords: Bool) {
+        let dictation = self.dictation, sink = self.sink
+        takeFinish?.cancel()
+        takeFinish = Task {
+            if waitingForWords { await dictation.waitForFinish(timeout: .seconds(3)) }
+            guard !Task.isCancelled else { return }
+            await sink.finishTake()
+        }
+    }
     private func closeDictation() async { await dictation.close() }
     private func sendDictation(_ pcm: Data) async {
         guard gate.route == .dictation else { return }
