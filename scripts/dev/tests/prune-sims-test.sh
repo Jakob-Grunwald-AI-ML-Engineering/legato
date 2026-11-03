@@ -33,7 +33,8 @@ P="$ROOT/scripts/dev/prune-build-caches.sh"
 "$P" --report > "$T/report.log"
 grep -q 'simulator legato-e2e-kb (Shutdown) U-KB' "$T/report.log" && grep -q 'simulator legato-live (Booted) U-BOOT' "$T/report.log" \
   && check 'report lists stale legato-* simulators with state' ok || check 'report lists stale legato-* simulators' "$(cat "$T/report.log")"
-! grep -q 'U-E2E\|U-OTHER' "$T/report.log" && check 'report omits legato-e2e and non-legato simulators' ok || check 'report omits legato-e2e and non-legato simulators' listed
+! grep -q 'U-OTHER' "$T/report.log" && [ "$(grep -c 'U-E2E' "$T/report.log")" = 1 ] && grep -q "legato-e2e (Booted) U-E2E (ios-sim.sh's" "$T/report.log" \
+  && check 'report shows legato-e2e once as kept, omits non-legato simulators' ok || check 'report shows legato-e2e once as kept, omits non-legato simulators' "$(cat "$T/report.log")"
 grep -q 'shared spike cache' "$T/report.log" && check 'report shows the spike cache' ok || check 'report shows the spike cache' missing
 
 LEGATO_E2E_UDID=U-PIN "$P" > "$T/dry.log"

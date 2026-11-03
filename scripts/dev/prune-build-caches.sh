@@ -99,7 +99,7 @@ scratchpad_build_kb() { # informational only: agent scratchpad content is never 
   echo "$kb"
 }
 
-# Stale simulators: "<udid>\t<name>\t<state>" for every legato* device (legato-e2e-kb, legato58-production, ...) except legato-e2e. Prints nothing
+# stale_simulators [stale|e2e]: "<udid>\t<name>\t<state>" for every legato* device (legato-e2e-kb, legato58-production, ...) except legato-e2e (with e2e: only legato-e2e). Prints nothing
 # without xcrun or when LEGATO_PRUNE_SIMULATORS=0. Whether one is kept (booted, LEGATO_E2E_UDID) is decided later.
 stale_simulators() {
   [ "${LEGATO_PRUNE_SIMULATORS:-1}" != 0 ] && command -v xcrun > /dev/null 2>&1 || return 0
@@ -111,9 +111,9 @@ except Exception:
     sys.exit(0)
 for devices in runtimes:
     for d in devices:
-        if d["name"].startswith("legato") and d["name"] != "legato-e2e":
+        if d["name"].startswith("legato") and (d["name"] == "legato-e2e") == (sys.argv[1] == "e2e"):
             print("%s\t%s\t%s" % (d["udid"], d["name"], d["state"]))
-'
+' "${1:-stale}"
 }
 row() { printf '%12d KB  %s\n' "$2" "$1"; }
 
@@ -139,8 +139,12 @@ if [ "$report" = 1 ]; then
   echo 'Not pruned (informational):'
   row "shared spike cache $cache/spikes (never pruned)" "$(kb_of "$cache/spikes")"
   row "LegatoTests caches $tests_cache" "$(kb_of "$tests_cache")"
+  while IFS=$'\t' read -r u n st; do
+    [ -n "$u" ] || continue
+    row "simulator $n ($st) $u (ios-sim.sh's, reused; LEGATO_E2E_ERASE=1 erases it)" "$(kb_of "$sim_devices/$u")"
+  done < <(stale_simulators e2e)
   row 'agent scratchpad content of legato projects' "$(scratchpad_build_kb)"
-  printf '%12d KB  Total kept + prunable (%.1f GB)\n' "$((keep + extra))" "$(echo "($keep + $extra) / 1048576" | bc -l)"
+  printf '%12d KB  Build output total, kept + prunable (%.1f GB; the informational lines above are extra)\n' "$((keep + extra))" "$(echo "($keep + $extra) / 1048576" | bc -l)"
   exit 0
 fi
 

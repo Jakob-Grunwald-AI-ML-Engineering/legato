@@ -24,7 +24,11 @@ Builds of one target serialize on that directory's lock, and every build also ho
 
 ## Spike cache
 
-`spikes/ane-cleanup` keeps its ANEMLL source, build output and model weights (tens of GB) in `<cache>/spikes/ane-cleanup/{cache,models}`, shared by every worktree. `scripts/setup.sh --prepare` (and `stage-model.sh --download`) runs `scripts/cache-link.sh`, which symlinks the spike's `.cache` and `models` to it and migrates an existing real directory instead of overwriting it. A fresh worktree therefore reuses the download. The pruner reports this directory and never deletes it; remove it by hand to reclaim the space.
+`spikes/ane-cleanup` keeps its ANEMLL source, build output and model weights (tens of GB) in `<cache>/spikes/ane-cleanup/{cache,models}`, shared by every worktree. `scripts/setup.sh --prepare` (and `stage-model.sh --download`) runs `scripts/cache-link.sh`, which symlinks the spike's `.cache` and `models` to it and migrates an existing real directory instead of overwriting it. A fresh worktree therefore reuses the download. The pruner reports this directory and never deletes it; to reclaim the space, `rm -rf ~/Library/Caches/legato/spikes/ane-cleanup` (the next `setup.sh --prepare` downloads again).
+
+## Runtime state
+
+`<cache>/debug-bridge` is the Mac app's debug bridge root (`scripts/device/ctl.sh --target mac`; `~/Library/Caches/Legato` is the same directory on a case-insensitive disk), not build output; the pruner leaves it and any other unknown entry in `<cache>` alone. The simulator `legato-e2e` (4–6 GB once used) is reused by every `ios-sim.sh` run; `--report` shows its size, and `LEGATO_E2E_ERASE=1 scripts/e2e/ios-sim.sh` erases it after a run.
 
 ## Tests
 
