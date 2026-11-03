@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
-# Headless end-to-end check of the iOS app on a simulator. See Apps/iOS/App/Debug/E2E.swift for the hooks.
+# Headless end-to-end check of the iOS app on a simulator: the composer keyboard link and whole-take dictation.
 #
-# Usage: ios-sim.sh [run|release-check]
+# Usage: ios-sim.sh [run|release-check|list]
 #   run             (default) build the Debug app, run the scenarios, print a PASS/FAIL table.
-#   release-check   build the Release app (arm64 simulator) and verify none of the fake/e2e code is in the binary;
+#   release-check   build the Release app (arm64 simulator) and verify none of the debug/e2e code is in the binary;
 #                   every needle must still occur in the sources (stale-needle control).
+#   list            print the scenario names, one per line (no build).
 #
-# SpeechTranscriber and the microphone don't work on the Simulator and there is no Action Button, so the
-# app runs with a scripted engine and a fake mic (-LegatoFakeEngine), driven through
-# `scripts/device/ctl.sh --target sim send <toggle|interrupt|copy-last|kbd-...>`. The keyboard extension is
-# stood in for by a fake keyboard inside the app (kbd-* commands) that speaks the real link protocol. Everything else is the real
-# app: ActivityKit (Live Activities), UIPasteboard, the history file in the App Group container, the
-# AVAudioSession interruption observer. Assertions read the app's `e2e` os_log lines
-# (subsystem de.gruenwald.legato), `simctl pbpaste`, the history file and, for meetings, the App Group
-# container's Meetings/ folder (meeting.json, segments.jsonl, the m4a, the exported Markdown). A meeting
-# records a scripted tone for a microphone, with the scripted engine for its transcript.
+# The keyboard extension cannot be loaded headless, so the app is launched with -LegatoKeyboardHarness YES: the
+# real KeyboardController and KeyboardRootView over a text view, inside the app (Apps/iOS/App/Debug/KeyboardHarness.swift).
+# They talk to the app's own composer and dictation through the real App Group values and Darwin notes, like the
+# extension does. Nothing here is faked on the link: the host publishes, the keyboard polls, applies and acknowledges.
+# SpeechTranscriber, Soniox and Haiku are never called: the composer draft is seeded (composer-debug-seed) and the
+# dictation cleanup is a scripted streaming cleaner (dictation-debug-stream) that capitalizes the take in chunks
+# and can fail on cue. The scenarios are driven by `scripts/device/ctl.sh --target sim send <command>` (the bridge
+# in Apps/iOS/App/Debug/DebugBridge.swift) and assert on the bridge's replies (harness-state: the field, the surface,
+# the draft the keyboard shows, the held take) and on the app's `e2e` os_log lines (subsystem de.gruenwald.legato).
+#
+# Scenarios (names for LEGATO_E2E_ONLY): composer, take_stream, take_retry, take_insert_raw, take_fail_hook.
 #
 # Environment:
 #   LEGATO_E2E_UDID      use this (already created) simulator; it is shut down afterwards only if the script booted it
+#                        and never erased
+#   LEGATO_E2E_ERASE=1   at exit shut down and erase (simctl erase) the "legato-e2e" simulator this script owns,
+#                        returning its disk space; ignored with LEGATO_E2E_UDID. Default: keep it for the next run
 #   LEGATO_E2E_DERIVED   DerivedData directory to use instead of the shared <cache>/derived/ios-sim (unmanaged:
 #                        never pruned; see "Build caches" below)
 #   LEGATO_E2E_KEEP=1    keep the work directory (logs) and print its path; kept dirs are swept after
 #                        LEGATO_E2E_KEEP_DAYS (default 7)
 #   LEGATO_CACHE_DIR     root of the shared build caches (default: ~/Library/Caches/legato)
-#   LEGATO_E2E_SHOTS     directory for the keyboard screenshots (scenario s; default: inside the work directory)
-#   LEGATO_E2E_ONLY      space-separated scenario names to run (for example "x x2 y z"); default: all
+#   LEGATO_E2E_ONLY      space-separated scenario names to run (for example "composer take_retry"); default: all.
+#                        An unknown name, or a selection that runs nothing, fails the run.
 # Without LEGATO_E2E_UDID a simulator named "legato-e2e" is created once (iPhone, newest iOS 26+ runtime),
 # reused by later runs, and shut down at the end.
 #
@@ -44,6 +50,33 @@ set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../ci/lib.sh"   # also cd's to the repo root
 
 mode="${1:-run}"
+
+# The scenarios, in run order. Each name has a function scenario_<name> below; scripts/e2e/tests/dispatch-test.sh
+# checks that the list is not empty and matches the functions.
+SCENARIOS=(composer take_stream take_retry take_insert_raw take_fail_hook)
+case "$mode" in
+  run | release-check | list) ;;
+  *) echo "usage: ios-sim.sh [run|release-check|list]"; exit 2 ;;
+esac
+if [ "$mode" = list ]; then printf '%s\n' "${SCENARIOS[@]}"; exit 0; fi
+# The selection is validated before anything is built, so a typo fails in a second, not after the build.
+SELECTED=()
+if [ "$mode" = run ]; then
+  if [ -n "${LEGATO_E2E_ONLY+x}" ]; then
+    # shellcheck disable=SC2206 # split on whitespace on purpose
+    requested=($LEGATO_E2E_ONLY)
+    [ "${#requested[@]}" -gt 0 ] || { echo "LEGATO_E2E_ONLY selects no scenario (known: ${SCENARIOS[*]})"; exit 2; }
+    for name in "${requested[@]}"; do
+      case " ${SCENARIOS[*]} " in
+        *" $name "*) SELECTED+=("$name") ;;
+        *) echo "Unknown scenario in LEGATO_E2E_ONLY: <$name> (known: ${SCENARIOS[*]})"; exit 2 ;;
+      esac
+    done
+    [ "${#SELECTED[@]}" -gt 0 ] || { echo "LEGATO_E2E_ONLY selects no scenario (known: ${SCENARIOS[*]})"; exit 2; }
+  else
+    SELECTED=("${SCENARIOS[@]}")
+  fi
+fi
 BID=de.gruenwald.legato
 SIM_NAME=legato-e2e
 # shellcheck source-path=SCRIPTDIR source=work-dir.sh
@@ -71,6 +104,11 @@ CHILD=""
 cleanup() {
   if declare -F stop_log > /dev/null; then stop_log; fi
   if [ "$BOOTED_BY_US" = 1 ] && [ -n "$UDID" ]; then xcrun simctl shutdown "$UDID" > /dev/null 2>&1; fi
+  # Opt-in: give the owned legato-e2e simulator's disk back (never a simulator named by LEGATO_E2E_UDID).
+  if [ "${LEGATO_E2E_ERASE:-0}" = 1 ] && [ -n "$UDID" ] && [ -z "${LEGATO_E2E_UDID:-}" ]; then
+    xcrun simctl shutdown "$UDID" > /dev/null 2>&1
+    xcrun simctl erase "$UDID" > /dev/null 2>&1 && echo "Erased simulator $SIM_NAME ($UDID)"
+  fi
   if [ -n "$PKGS_LOCKED" ]; then unlock_dir "$PKGS"; fi
   if [ -n "$DERIVED_LOCKED" ]; then unlock_dir "$DERIVED"; fi
   if [ "${LEGATO_E2E_KEEP:-0}" = 1 ]; then touch "$WORK/keep"; echo "Work directory kept: $WORK"; else rm -rf "$WORK"; fi
@@ -202,17 +240,11 @@ if [ "$mode" = release-check ]; then
   app="$DERIVED/Build/Products/Release-iphonesimulator/Legato.app"
   # Identifiers that exist only in the e2e hooks. Positive control (no Debug build): each must still occur in
   # the iOS sources, or the needle is stale (renamed/removed) and the scan would pass vacuously.
-  needles=(E2EScriptedEngine E2EFakeAudioSource E2ENoopSessionControl LegatoFakeEngine LegatoFakeReadiness
-    LegatoFakeWordDelayMs LegatoForceTapToCopy e2e-scripted de.gruenwald.legato.e2e system-stop handleE2E
-    AudioDiagnostics session.deactivate.skipped audio-diag.jsonl keepSessionActiveBetweenRuns LegatoFakeOtherAudio
-    LegatoFakeBackground LegatoFakeBackgroundRefusal LegatoFakeRefusalOnlyNonDefault LegatoFakeRefusalInForeground LegatoFakeRefusalCount LegatoAudioPolicy
-    start.route start.fallback toggle-after-hop
-    result-insert result-copy "source=activity-copy changed=false forced=tapToCopy" E2EFakeKeyboard LegatoKeepAliveSeconds LegatoFakeKeyboardApply kbd-hop-arm kbd-hop-start kbd-forged-url kbd.forged-url
-    "keyboard.url admission" kbd.apply "link.host phase=" debugForceTapToCopy debugShowPauseOthers
-    KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers LegatoHarnessAppearance
-    LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape LegatoHarnessAutocap LegatoHarnessSuggestions
-    LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
-    harness-mic-hop-retry foreign-engine-change interrupt-end
+  needles=(KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers
+    harness-state harness-visible harness-hidden harness-surface harness-send harness-retry harness-insert-raw harness-clear
+    harness.edit LegatoHarnessAppearance LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape
+    LegatoHarnessAutocap LegatoHarnessSuggestions LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
+    harness-mic-hop-retry dictation-debug-stream dictation-debug-fail-take composer-debug-seed
 )
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
@@ -233,8 +265,6 @@ if [ "$mode" = release-check ]; then
   exit "$fail"
 fi
 
-[ "$mode" = run ] || { echo "usage: ios-sim.sh [run|release-check]"; exit 2; }
-
 prepare_simulator
 echo "Simulator: $UDID"
 t_start=$SECONDS
@@ -246,14 +276,17 @@ APP="$DERIVED/Build/Products/Debug-iphonesimulator/Legato.app"
 [ -d "$APP" ] || { echo "No app at $APP"; exit 2; }
 echo "Built in $((SECONDS - t_start))s"
 
+
 # ---------------------------------------------------------------------------------------------- harness
 
 ROWS=()          # "scenario|check|PASS/FAIL"
 DETAILS=()       # failure details
 FAILED=0
+RAN=0
 SCENARIO=""
 LOG=""
-SCEN_START=0
+LOGSEQ=0
+REPLY=""         # the last bridge reply (a JSON object)
 
 record() { # record <PASS|FAIL> <description> [detail]
   ROWS+=("$SCENARIO|$2|$1")
@@ -265,35 +298,6 @@ assert_eq() { # assert_eq <description> <expected> <actual>
 assert_log() { # assert_log <description> <fixed string>: appears in the scenario log
   if grep -q -F -- "$2" "$LOG"; then record PASS "$1"; else record FAIL "$1" "no log line containing <$2>"; fi
 }
-assert_no_log() {
-  if grep -q -F -- "$2" "$LOG"; then record FAIL "$1" "unexpected: $(grep -F -- "$2" "$LOG" | head -1 | cut -c1-200)"; else record PASS "$1"; fi
-}
-assert_no_log_after() { # description, first marker, forbidden text (exclude the legitimate initial arm hop)
-  if awk -v marker="$2" 'index($0, marker) { seen = 1 } seen' "$LOG" | grep -F -- "$3" > /dev/null; then
-    record FAIL "$1" "unexpected <$3> after <$2>"
-  else record PASS "$1"; fi
-}
-assert_count() { # assert_count <description> <fixed string> <n>
-  local n; n="$(grep -c -F -- "$2" "$LOG")"
-  if [ "$n" = "$3" ]; then record PASS "$1"; else record FAIL "$1" "<$2> logged $n times, expected $3"; fi
-}
-assert_order() { # assert_order <description> <first> <second>: first appears before second
-  local a b
-  a="$(grep -n -F -- "$2" "$LOG" | head -1 | cut -d: -f1)"
-  b="$(grep -n -F -- "$3" "$LOG" | tail -1 | cut -d: -f1)"
-  if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then record PASS "$1"
-  else record FAIL "$1" "<$2> at line ${a:-none}, <$3> at line ${b:-none}"; fi
-}
-
-# The value of key="..." on the first line matching a fixed string, or empty.
-log_field() { # log_field <line marker> <key>
-  grep -F -- "$1" "$LOG" | head -1 | sed -n "s/.*[ ]$2=\"\\([^\"]*\\)\".*/\\1/p"
-}
-# Same, on the last matching line.
-log_field_last() { # log_field_last <line marker> <key>
-  grep -F -- "$1" "$LOG" | tail -1 | sed -n "s/.*[ ]$2=\"\\([^\"]*\\)\".*/\\1/p"
-}
-last_line() { grep -F -- "$1" "$LOG" | tail -1; }
 
 stop_log() {
   if [ -n "$LOGPID" ]; then kill "$LOGPID" > /dev/null 2>&1; wait "$LOGPID" 2> /dev/null; LOGPID=""; fi
@@ -308,1059 +312,210 @@ wait_log() {
   done
   return 1
 }
-# Same, but counts: wait until at least <n> lines match.
-wait_log_n() {
-  local deadline=$((SECONDS + ${3:-10}))
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    [ "$(grep -c -F -- "$1" "$LOG")" -ge "$2" ] && return 0
-    sleep 0.2
+
+ctl() {
+  LEGATO_SIMULATOR="$UDID" LEGATO_BUNDLE="$BID" LEGATO_STATE="$WORK/ctl" bash scripts/device/ctl.sh --target sim "$@"
+}
+
+# bridge <command> [args...]: run a bridge command and keep its reply (the done line) in REPLY. Fails with the
+# bridge's error line in REPLY when the command is refused.
+bridge() {
+  local id
+  REPLY=""
+  id="$(ctl send "$@" 2> "$WORK/ctl.err")" || { REPLY="$(cat "$WORK/ctl.err")"; return 1; }
+  REPLY="$(ctl wait "$id" 20 2> "$WORK/ctl.err" | tail -1)" || { REPLY="${REPLY:-$(cat "$WORK/ctl.err")}"; return 1; }
+}
+# One field of the last reply: strings as they are, other values as JSON, "" when absent.
+field() {
+  jq -r --arg k "$1" 'if has($k) then (.[$k] | if type == "string" then . else tojson end) else "" end' <<< "$REPLY" 2> /dev/null
+}
+# The keyboard harness's state field <key> now.
+kbd() {
+  bridge harness-state || { echo "<bridge: $REPLY>"; return; }
+  field "$1"
+}
+
+# await_kbd <key> <expected> [timeout seconds]: poll the harness state until the field has the value.
+await_kbd() {
+  local deadline=$((SECONDS + ${3:-10})) value=""
+  while :; do
+    value="$(kbd "$1")"
+    [ "$value" = "$2" ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.3
   done
+  LAST_SEEN="$value"
   return 1
 }
-
-trigger() {
-  LEGATO_SIMULATOR="$UDID" LEGATO_BUNDLE="$BID" LEGATO_STATE="$WORK/ctl" \
-    bash scripts/device/ctl.sh --target sim send "$@" > /dev/null
+LAST_SEEN=""
+# check_kbd <description> <key> <expected> [timeout]: PASS once the harness state has the value.
+check_kbd() {
+  if await_kbd "$2" "$3" "${4:-10}"; then record PASS "$1"; else record FAIL "$1" "$2: expected <$3> got <$LAST_SEEN>"; fi
 }
 
-# begin <scenario name> [launch args...]: clean install, log capture, launch.
+# retry_bridge <timeout seconds> <command> [args...]: a command that is refused until the host has noticed the
+# keyboard (its presence) is retried until it is accepted.
+retry_bridge() {
+  local deadline=$((SECONDS + $1)); shift
+  until bridge "$@"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.4
+  done
+}
+
+# begin <scenario name>: clean install, log capture, launch with the in-app keyboard.
 begin() {
-  SCENARIO="$1"; shift
-  SCEN_START=$SECONDS
+  SCENARIO="$1"
   stop_log
   xcrun simctl terminate "$UDID" "$BID" > /dev/null 2>&1
   xcrun simctl uninstall "$UDID" "$BID" > /dev/null 2>&1
   xcrun simctl install "$UDID" "$APP" || { record FAIL "install" "simctl install failed"; return 1; }
-  xcrun simctl privacy "$UDID" grant microphone "$BID" > /dev/null 2>&1
-  relaunch "$@"
-}
-
-# relaunch [launch args...]: new process on the current install, log capture restarted.
-relaunch() {
-  stop_log
-  xcrun simctl terminate "$UDID" "$BID" > /dev/null 2>&1
   LOG="$WORK/${SCENARIO%%.*}-$((++LOGSEQ)).log"
   : > "$LOG"
   xcrun simctl spawn "$UDID" log stream --level debug --style compact \
     --predicate 'subsystem == "de.gruenwald.legato" AND category == "e2e"' > "$LOG" 2>&1 &
   LOGPID=$!
   sleep 1.5
-  xcrun simctl launch "$UDID" "$BID" "$@" > "$WORK/launch.out" 2>&1
-  wait_log "e2e launch " 10 && return 0
-  record FAIL "app launches and logs" "no 'e2e launch' line ($(cat "$WORK/launch.out"))"
-  return 1
-}
-LOGSEQ=0
-
-pasteboard() { xcrun simctl pbpaste "$UDID" 2> /dev/null; }
-
-# The history entries ("text" per line) in the app's App Group container.
-history_texts() {
-  local group file
-  group="$(xcrun simctl get_app_container "$UDID" "$BID" groups | awk -F'\t' '$1 == "group.de.gruenwald.legato" {print $2}')"
-  file="$group/history.jsonl"
-  [ -n "$group" ] && [ -f "$file" ] || return 0
-  python3 -I -c '
-import json, sys
-for line in open(sys.argv[1]):
-    if line.strip():
-        print(json.loads(line)["text"])' "$file"
+  if ! ctl launch -LegatoKeyboardHarness YES > "$WORK/launch.out" 2>&1; then
+    record FAIL "app launches with the bridge" "$(tail -3 "$WORK/launch.out")"; return 1
+  fi
+  if ! wait_log "harness ready" 15; then record FAIL "keyboard harness is up" "no 'harness ready' line"; return 1; fi
+  record PASS "app launches, keyboard harness is up"
 }
 
 # ---------------------------------------------------------------------------------------------- scenarios
 
-# The App Group container of the app on the simulator.
-group_dir() {
-  xcrun simctl get_app_container "$UDID" "$BID" groups | awk -F'\t' '$1 == "group.de.gruenwald.legato" {print $2}'
-}
-# 21 words: about 3.2 s of scripted speech, long enough for an interruption mid-way
-LONG="hello world from the simulator this is a longer dictation that keeps going for a few seconds so the activity updates"
-
-# A stopped Action Button run waits for an explicit result action. These checks also prevent a
-# legacy automatic clipboard write from being hidden by the following Copy.
-copy_result() { # copy_result [run count] [clipboard sentinel]
-  local n="${1:-1}" sentinel="${2:-sentinel}"
-  assert_count "result waits for an explicit action" "activity.result phase=result" "$n"
-  assert_eq "clipboard unchanged before Copy" "$sentinel" "$(pasteboard)"
-  assert_no_log "stop never writes the clipboard automatically" "clipboard.write source=coordinator"
-  trigger result-copy
-  wait_log_n "e2e result-copy.done" "$n" 10
-}
-
-scenario_a() {
-  begin "a. happy path" -LegatoFakeEngine "$LONG" -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log "e2e outcome kind=started" 10
-  wait_log 'phase=listening tail="hello world' 10
-  sleep 3   # the rest of the script
-  trigger toggle
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  assert_log "activity requested (starting)" "activity.request phase=starting"
-  assert_count "exactly one activity requested" "activity.request phase=" 1
-  assert_log "real ActivityKit tracks the activity" "activity.request phase=starting tail=\"\" live=1"
-  assert_log "activity updated (listening, tail has the first words)" 'activity.update phase=listening tail="hello world'
-  assert_order "request before audio starts" "activity.request phase=starting" "audio.start"
-  assert_order "starting before listening" "activity.request phase=starting" "activity.update phase=listening"
-  assert_log "finishing update on stop" "activity.update phase=finishing"
-  copy_result
-  assert_order "clipboard written before activity ends" "clipboard.write source=activity-copy" "activity.end phase=copied"
-  assert_eq "activity ended (copied) with the full text" "$LONG" "$(log_field "activity.end phase=copied" tail)"
-  assert_eq "outcome text" "$LONG" "$(log_field "outcome kind=stopped" text)"
-  assert_eq "pbpaste == text" "$LONG" "$(pasteboard)"
-  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$LONG")"
-  xcrun simctl pbcopy "$UDID" <<< "after-copy"
-  trigger result-copy
-  wait_log_n "e2e result-copy.done" 2 10
-  assert_eq "repeated Copy leaves a newer clipboard alone" "after-copy" "$(pasteboard)"
-  assert_count "successful Copy writes once" "clipboard.write source=activity-copy changed=true" 1
-  assert_count "successful Copy ends the activity once" "activity.end phase=copied" 1
-  assert_log "audio and session released" "session.deactivate"
-}
-
-scenario_b() {
-  local issue
-  begin "b. readiness" -LegatoFakeEngine "$TEXT" -LegatoFakeReadiness liveActivitiesDisabled || return
-  for issue in liveActivitiesDisabled micPermission assetsMissing; do
-    SCENARIO="b. readiness $issue"
-    if [ "$issue" != liveActivitiesDisabled ]; then relaunch -LegatoFakeEngine "$TEXT" -LegatoFakeReadiness "$issue" || continue; fi
-    xcrun simctl pbcopy "$UDID" <<< "sentinel"
-    trigger toggle
-    wait_log "e2e outcome" 10
-    sleep 1
-    assert_log "outcome needsOnboarding($issue)" "outcome kind=needsOnboarding issue=$issue"
-    assert_no_log "no activity requested" "activity.request"
-    assert_no_log "no session built, no audio" "session.make"
-    assert_no_log "mic never started" "audio.start"
-    assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
-    assert_eq "history empty" "0" "$(history_texts | grep -c .)"
+# await_host_open <true|false>: poll the host's keyboard session until it matches (the keyboard's presence).
+await_host_open() {
+  local deadline=$((SECONDS + 10)) value=""
+  while :; do
+    bridge composer-state && value="$(jq -r '.keyboardSession.open' <<< "$REPLY")"
+    [ "$value" = "$1" ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.3
   done
 }
 
-scenario_c() {
-  begin "c. interruption mid-dictation" -LegatoFakeEngine "$LONG" -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log 'phase=listening tail="hello world' 10
-  trigger interrupt
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  local partial; partial="$(log_field "outcome kind=stopped" text)"
-  assert_log "AVAudioSession observer path ran" 'system-stop reason="interruption began"'
-  if [ -n "$partial" ] && [ "$partial" != "$LONG" ] && [[ "$LONG" == "$partial"* ]]; then
-    record PASS "outcome is a non-empty partial of the script"
-  else record FAIL "outcome is a non-empty partial of the script" "got <$partial>"; fi
-  copy_result
-  assert_eq "pbpaste == partial text" "$partial" "$(pasteboard)"
-  assert_eq "history has the partial once" "1" "$(history_texts | grep -c -x -F -- "$partial")"
-  assert_eq "activity ended (copied) with the partial" "$partial" "$(log_field "activity.end phase=copied" tail)"
-  assert_log "audio stopped" "audio.stop"
-}
-
-scenario_d() {
-  begin "d. two dictations in a row" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  local i
-  for i in 1 2; do
-    xcrun simctl pbcopy "$UDID" <<< "sentinel$i"
-    trigger toggle
-    wait_log_n "e2e outcome kind=started" "$i" 10
-    sleep 1.5   # the script is ~0.8 s long
-    trigger toggle
-    wait_log_n "e2e outcome kind=stopped" "$i" 10
-    sleep 0.5
-    copy_result "$i" "sentinel$i"
-    assert_eq "run $i: pbpaste == text" "$TEXT" "$(pasteboard)"
-  done
-  assert_count "two activities requested" "activity.request phase=starting" 2
-  assert_count "two activities ended (copied)" "activity.end phase=copied" 2
-  assert_count "two fresh sessions" "session.make" 2
-  assert_eq "history has both entries" "2" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  local pids; pids="$(sed -n 's/.*Legato\[\([0-9]*\):.*/\1/p' "$LOG" | sort -u | wc -l | tr -d ' ')"
-  assert_eq "same process throughout (the app never quits itself)" "1" "$pids"
-}
-
-scenario_e() {
-  begin "e. tapToCopy" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy YES || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log "e2e outcome kind=started" 10
-  sleep 1.5
-  trigger toggle
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  copy_result
-  assert_log "clipboard write reported as not changed" "clipboard.write source=activity-copy changed=false forced=tapToCopy"
-  assert_eq "activity ended (tapToCopy) with the text" "$TEXT" "$(log_field "activity.end phase=tapToCopy" tail)"
-  assert_eq "clipboard untouched by the stop" "sentinel" "$(pasteboard)"
-  assert_eq "history has the entry" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  # Stands in for tapping the activity (legato://copy-last): a simctl openurl of a custom scheme stops at
-  # an "Open in Legato?" dialog that nothing headless can confirm.
-  trigger copy-last
-  wait_log "clipboard.write source=copy-last" 10
-  assert_log "copy-last write changed the pasteboard" "clipboard.write source=copy-last changed=true"
-  assert_eq "pbpaste == text after copy-last" "$TEXT" "$(pasteboard)"
-}
-
-scenario_f() {
-  # A phrase spoken in under a second, then silence. The activity should show it well before the
-  # 10 s heartbeat; LiveTranscript's throttle must not hold the last words back.
-  begin "f. last words reach the activity" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger toggle
-  wait_log "e2e outcome kind=started" 10
-  wait_log 'phase=listening tail="hello world from the simulator"' 4
-  assert_log "listening update carries the whole phrase within 4 s" 'phase=listening tail="hello world from the simulator"'
-  trigger toggle
-  wait_log "e2e outcome kind=stopped" 10
-}
-
-scenario_g() {
-  # Music plays while the app is in the background (-LegatoFakeOtherAudio YES -LegatoFakeBackground YES):
-  # the start is attempted in the background all the same (it can work, ducked); there is no hop.
-  begin "g. music + background" -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio YES -LegatoFakeBackground YES -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log "e2e outcome kind=started" 10
-  assert_log "start.route: ran in the background, music seen" "start.route route=background reason=none outcome=started otherAudio=true"
-  assert_no_log "no foreground hop" "kind=needsForeground"
-  assert_log "activity requested first" "activity.request phase=starting"
-  assert_order "request before audio starts" "activity.request phase=starting" "audio.start"
-  assert_no_log "no activity dismissed" "activity.dismiss"
-  sleep 1.5
-  trigger toggle
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  copy_result
-  assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
-  assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
-  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  assert_count "exactly one activity requested" "activity.request phase=" 1
-  assert_count "exactly one session built" "session.make" 1
-
-  # Music, and the system refuses the background start: the hop, then the foreground retry.
-  SCENARIO="g. music + background, refused, after the hop"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoFakeOtherAudio YES -LegatoFakeBackground YES -LegatoFakeBackgroundRefusal pla -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log "e2e outcome kind=needsForeground" 10
-  assert_log "start.route: hop after the refusal, music seen" "start.route route=foregroundHop reason=backgroundStartRefused outcome=needsForeground otherAudio=true"
-  trigger foreground
-  wait_log "e2e command foreground" 10
-  trigger toggle-after-hop
-  wait_log "e2e outcome kind=started" 10
-  assert_log "start.route: ran as a foreground hop" "start.route route=foregroundHop reason=backgroundStartRefused outcome=started"
-  sleep 1.5
-  trigger toggle
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  copy_result
-  assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
-}
-
-scenario_i() {
-  # The system refuses a background start anyway (music the app did not see, a race): the same hop, with
-  # a clean teardown. The activity requested first must be gone at once, not left behind as "failed".
-  local step
-  for step in pla what; do
-    SCENARIO="i. background refused ($step)"
-    begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoFakeBackground YES -LegatoFakeBackgroundRefusal "$step" -LegatoForceTapToCopy NO || continue
-    xcrun simctl pbcopy "$UDID" <<< "sentinel"
-    trigger toggle
-    wait_log "e2e outcome kind=needsForeground" 10
-    sleep 1
-    assert_log "outcome needsForeground(backgroundStartRefused)" "outcome kind=needsForeground reason=backgroundStartRefused"
-    assert_log "start.route: foregroundHop, with the reason" "start.route route=foregroundHop reason=backgroundStartRefused outcome=needsForeground"
-    assert_log "the background start was attempted" "$([ "$step" = pla ] && echo session.activate.refused || echo audio.start.refused)"
-    assert_no_log "default policy: no pointless fallback retry" "start.fallback"
-    assert_count "default policy: one session built for the refused start" "session.make" 1
-    assert_count "one activity requested" "activity.request phase=" 1
-    assert_log "activity dismissed at once, none left" "activity.dismiss live=0"
-    assert_no_log "no failed activity left behind" "activity.end"
-    if grep -qE 'e2e audio\.start *$' "$LOG"; then record FAIL "no audio ran" "audio.start logged"; else record PASS "no audio ran"; fi
-    assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
-    assert_eq "history empty" "0" "$(history_texts | grep -c .)"
-    trigger foreground
-    wait_log "e2e command foreground" 10
-    trigger toggle
-    wait_log "e2e outcome kind=started" 10
-    sleep 1.5
-    trigger toggle
-    wait_log "e2e outcome kind=stopped" 10
-    sleep 0.5
-    copy_result
-    assert_count "a fresh session for the foreground start" "session.make" 2
-    assert_count "second activity requested" "activity.request phase=" 2
-    assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
-    assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
-    assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  done
-}
-
-scenario_h() {
-  # Regression: the system event raised by our own session deactivation (route change, interruption)
-  # arrives after the stop finished. It must never start a new dictation.
-  begin "h. late system event after a stop" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger toggle
-  wait_log "e2e outcome kind=started" 10
-  sleep 1.5
-  trigger toggle
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  trigger interrupt
-  wait_log 'system-event reason="interruption began"' 10
-  sleep 1.5
-  assert_log "the late event reached the system-event path" 'system-event reason="interruption began"'
-  assert_no_log "no system-stop (nothing was running)" "system-stop"
-  assert_count "still exactly one outcome=started" "e2e outcome kind=started" 1
-  assert_count "still exactly one activity requested" "activity.request phase=starting" 1
-  assert_count "still exactly one session built" "session.make" 1
-  # Idle is idle: the next press is a normal start.
-  trigger toggle
-  wait_log_n "e2e outcome kind=started" 2 10
-  assert_count "the next press starts" "e2e outcome kind=started" 2
-  trigger toggle
-  wait_log_n "e2e outcome kind=stopped" 2 10
-}
-
-
-# ----------------------------------------------------------------------------- keyboard link scenarios
-# The fake keyboard (E2EFakeKeyboard) publishes presence, sends requests and types the streamed text
-# into an in-memory field with the real ProxyEditPlanner, over the real App Group values and Darwin notes.
-
-# run_once <n>: one Action Button dictation (start, ~1.5 s of script, stop); n counts the run in the log.
-run_once() {
-  trigger toggle
-  wait_log_n "e2e outcome kind=started" "$1" 10
-  sleep 1.5
-  trigger toggle
-  wait_log_n "e2e outcome kind=stopped" "$1" 10
-  sleep 0.5
-}
-
-scenario_p() {
-  begin "p. keyboard visible: explicit Insert" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  run_once 1
-  assert_log "press waits in result, activity still required" "route target=result activity=required keepAliveSeconds=0"
-  assert_order "activity requested before audio starts" "activity.request phase=starting" "audio.start"
-  assert_log "result run is not streamed to the keyboard" "link.host phase=listening final=0 target=app"
-  assert_no_log "nothing typed before Insert" "kbd.apply"
-  assert_eq "clipboard unchanged before Insert" "sentinel" "$(pasteboard)"
-  assert_eq "result offers the transcript" "$TEXT" "$(log_field "activity.result phase=result" tail)"
-  trigger result-insert
-  wait_log "e2e result-insert.done" 10
-  wait_log "e2e kbd.apply final=1" 10   # the typewriter reveal has finished
-  local ticks; ticks="$(grep -c -F -- "kbd.reveal tick" "$LOG")"
-  if [ "$ticks" -ge 2 ]; then record PASS "typed progressively through TypewriterReveal ticks"; else record FAIL "typed progressively through TypewriterReveal ticks" "$ticks tick lines, expected >= 2"; fi
-  assert_eq "keyboard field == script" "$TEXT" "$(log_field_last "kbd.apply final=1" doc)"
-  assert_eq "explicit insert publishes exactly the transcript" "$TEXT" "$(log_field_last "link.host phase=idle final=1" committed)"
-  assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
-  assert_no_log "clipboard not written" "clipboard.write"
-  assert_eq "activity ended (inserted) with the text" "$TEXT" "$(log_field "activity.end phase=inserted" tail)"
-  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  assert_log "session released (no keep-alive)" "session.deactivate"
-}
-
-scenario_p2() {
-  begin "p2. keyboard hidden during the reveal flushes the text" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  run_once 1
-  trigger result-insert
-  trigger kbd-hidden
-  wait_log "e2e kbd.visible value=0" 10
-  wait_log "e2e result-insert.done" 10
-  assert_eq "hiding flushed the whole text into the field" "$TEXT" "$(log_field_last "kbd.apply final=1" doc)"
-}
-
-scenario_j() {
-  begin "j. keyboard never confirms: Insert fails, explicit Copy" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoFakeKeyboardApply NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  run_once 1
-  assert_log "press waits in result" "route target=result"
-  assert_no_log "nothing was typed before Insert" "kbd.apply"
-  assert_eq "clipboard untouched before Insert" "sentinel" "$(pasteboard)"
-  trigger result-insert
-  wait_log "e2e result-insert.done" 10
-  assert_no_log "unconfirmed Insert typed nothing" "kbd.apply"
-  assert_eq "explicit Insert published the script" "$TEXT" "$(log_field_last "link.host phase=idle final=1" committed)"
-  assert_eq "failed Insert retains the transcript and actions" "$TEXT" "$(log_field "activity.update phase=insertFailed" tail)"
-  assert_no_log "failed Insert did not end the activity" "activity.end"
-  copy_result
-  assert_eq "pbpaste == text after explicit Copy" "$TEXT" "$(pasteboard)"
-  assert_log "clipboard written by explicit Copy" "clipboard.write source=activity-copy changed=true"
-  assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
-}
-
-scenario_o() {
-  begin "o. keyboard hidden: explicit Copy, keep-ready still applies" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  trigger kbd-hidden
-  wait_log "e2e kbd.visible value=0" 10
-  run_once 1
-  assert_log "press waits in result: activity required, keep-ready applies" "route target=result activity=required keepAliveSeconds=30"
-  assert_log "session built with the keep-ready linger" "lingerSeconds=30"
-  assert_eq "clipboard unchanged before Insert" "sentinel" "$(pasteboard)"
-  trigger result-insert
-  wait_log "e2e result-insert.done" 10
-  assert_eq "hidden keyboard leaves result actions available" "$TEXT" "$(log_field "activity.update phase=insertFailed" tail)"
-  assert_no_log "failed Insert did not end the activity" "activity.end"
-  copy_result
-  assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
-  assert_no_log "nothing typed into a keyboard" "kbd.apply"
-  assert_no_log "mic kept ready, not released" "session.deactivate"
-  assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
-}
-
-scenario_k() {
-  begin "k. keep-alive: one session, two runs" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  run_once 1
-  assert_no_log "first result was not auto inserted" "kbd.apply"
-  trigger result-insert
-  wait_log "e2e result-insert.done" 10
-  wait_log "e2e kbd.apply final=1" 10   # the typewriter reveal has finished before the next run
-  run_once 2
-  assert_eq "second result waits for Insert" "$TEXT" "$(log_field_last "kbd.apply final=1" doc)"
-  trigger result-insert
-  wait_log_n "e2e result-insert.done" 2 10
-  assert_count "a single session built" "session.make" 1
-  assert_log "built with the 30 s linger" "lingerSeconds=30"
-  assert_count "audio session activated once" "session.activate" 1
-  assert_count "mic armed once" "audio.start" 1
-  assert_count "second run re-routed the armed mic" "audio.route" 1
-  assert_count "nothing released between the runs" "session.deactivate" 0
-  assert_count "an activity per run" "activity.request phase=starting" 2
-  assert_eq "history has both entries" "2" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  wait_log_n "e2e kbd.apply final=1" 2 10   # the typewriter reveal has finished
-  assert_eq "keyboard field == script twice" "$TEXT $TEXT" "$(log_field_last "kbd.apply final=1" doc)"
-  assert_log "lease published (remote start allowed)" "lease=1 accepts=1"
-  trigger kbd-request-end-keep-alive
-  wait_log "session.deactivate" 10
-  sleep 0.5
-  assert_log "end request acked accepted" "kbd.ack result=accepted"
-  assert_count "ending the keep-alive released the session" "session.deactivate" 1
-  if last_line "link.host" | grep -q -F "lease=0 accepts=0"; then record PASS "host publishes the lease as gone"
-  else record FAIL "host publishes the lease as gone" "last link.host: $(last_line "link.host" | cut -c1-200)"; fi
-}
-
-scenario_l() {
-  begin "l. keep-alive expires" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 2 || return
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  run_once 1
-  assert_count "held right after the run" "session.deactivate" 0
-  wait_log "session.deactivate" 8
-  assert_count "released when the 2 s ran out" "session.deactivate" 1
-  sleep 0.5
-  if last_line "link.host" | grep -q -F "lease=0 accepts=0"; then record PASS "host publishes the lease as gone"
-  else record FAIL "host publishes the lease as gone" "last link.host: $(last_line "link.host" | cut -c1-200)"; fi
-  run_once 2
-  assert_count "after expiry the next run builds a new session" "session.make" 2
-  assert_count "and activates the audio session again" "session.activate" 2
-}
-
-scenario_m() {
-  begin "m. remote start and stop (lease held)" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 || return
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  run_once 1
-  assert_no_log "Action Button result was not auto inserted" "kbd.apply"
-  trigger result-insert
-  wait_log "e2e result-insert.done" 10
-  trigger kbd-request-start
-  wait_log_n "e2e outcome kind=started" 2 10
-  assert_log "start acked accepted" "kbd.ack result=accepted"
-  assert_log "remote start: keyboard target, best-effort activity" "route target=keyboard activity=bestEffort keepAliveSeconds=30"
-  sleep 1.5
-  trigger kbd-request-stop
-  wait_log_n "e2e outcome kind=stopped" 2 10
-  sleep 0.5
-  assert_count "stop acked accepted too" "kbd.ack result=accepted" 2
-  assert_count "still one session" "session.make" 1
-  assert_count "mic armed once" "audio.start" 1
-  wait_log_n "e2e kbd.apply final=1" 2 10   # the typewriter reveal has finished
-  assert_eq "keyboard field == script twice" "$TEXT $TEXT " "$(log_field_last "kbd.apply final=1" doc)"
-
-  SCENARIO="m. remote start without a lease"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  trigger kbd-request-start
-  wait_log "kbd.ack" 5
-  sleep 1
-  assert_log "no lease: the keyboard is told to hop" "kbd.ack result=hop"
-  assert_no_log "nothing started" "e2e outcome kind=started"
-  assert_no_log "no session built" "session.make"
-}
-
-scenario_n5() {
-  begin "n5. immediate hop retry after refused activation" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoKeyboardHarness YES -LegatoFakeBackgroundRefusal pla -LegatoFakeRefusalInForeground YES \
-    -LegatoFakeRefusalCount 1 || return
-  wait_log "harness ready" 10
-  trigger harness-mic-hop-retry
-  wait_log "harness hop-retry.done" 10
-  assert_count "first activation failed once" "arm outcome=failed" 1
-  assert_count "fresh retry actually arms microphone" "arm outcome=armed" 1
-  assert_count "two distinct arm operations admitted" "arm outcome=" 2
-}
-
-scenario_n4() {
-  begin "n4. unrelated engine preserves indefinite lease" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoKeepAliveSeconds -1 -LegatoFakeBackgroundRefusal pla || return
-  trigger kbd-hop-arm
-  wait_log "arm outcome=armed" 10
-  trigger foreign-engine-change
-  wait_log "command foreign-engine-change" 5
-  sleep 0.5
-  assert_no_log "foreign engine cannot release armed microphone" "session.deactivate"
-  assert_no_log "foreign engine cannot invalidate lease" "system-event reason=\"engine configuration change\""
-  xcrun simctl io "$UDID" screenshot "$WORK/n4-hop-ready.png" > /dev/null 2>&1
-  trigger background
-  trigger kbd-visible
-  wait_log "kbd.visible value=1" 10
-  trigger kbd-request-start
-  wait_log "outcome kind=started" 10
-  assert_log "background dictation still uses armed microphone" "outcome kind=started"
-  assert_count "no replacement microphone" "audio.start" 1
-  trigger kbd-request-stop
-  wait_log "outcome kind=stopped" 10
-  assert_log "dictation remains stoppable" "outcome kind=stopped"
-  trigger interrupt
-  wait_log "system-event reason=\"interruption began\"" 5
-  assert_count "genuine interruption releases retained microphone" "session.deactivate" 1
-}
-
-scenario_n3() {
-  begin "n3. app cancels before first keyboard poll" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoFakeStartWatchHeld YES \
-    -LegatoKeepAliveSeconds 30 -LegatoFakeBackgroundRefusal pla || return
-  wait_log "harness ready" 10
-  trigger harness-mic-hop
-  wait_log "arm outcome=armed" 10
-  trigger background
-  trigger harness-mic
-  wait_log "watcher.wait" 10
-  trigger toggle
-  wait_log "outcome kind=busy" 10
-  trigger preparation-release
-  trigger watcher-release
-  wait_log "watcher.released" 5
-  sleep 0.5
-  trigger harness-status
-  wait_log "harness status=" 5
-  assert_log "early app cancellation clears keyboard preparation" 'harness status="" capturing=0 command=start'
-  assert_no_log "early app cancellation cannot start late" "outcome kind=started"
-  assert_no_log_after "early cancellation causes no old hop" "harness mic mode=remote-start" "harness ack result=hop"
-  assert_eq "early cancelled run has no history" "0" "$(history_texts | grep -c .)"
-
-  begin "n3. accepted request loses host visibility" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoFakeStartWatchHeld YES \
-    -LegatoKeepAliveSeconds 30 -LegatoFakeBackgroundRefusal pla || return
-  wait_log "harness ready" 10
-  trigger harness-mic-hop
-  wait_log "arm outcome=armed" 10
-  trigger background
-  trigger harness-mic
-  wait_log "watcher.wait" 10
-  trigger toggle
-  wait_log "outcome kind=busy" 10
-  trigger preparation-release
-  trigger harness-host-missing
-  trigger watcher-release
-  wait_log "watcher.released" 5
-  sleep 3.5
-  trigger harness-status
-  wait_log "harness status=" 5
-  assert_log "missing host is bounded by freshness rather than preparing forever" 'harness status="" capturing=0 command=arm'
-  assert_no_log "missing host cannot resume cancelled capture" "outcome kind=started"
-}
-
-scenario_n2() {
-  # The real keyboard controller, App Group transport and AppController admission, with only
-  # native resources/audio replaced. Hold longer than the keyboard's old eight-second watcher.
-  begin "n2. cancel keyboard preparation" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoKeepAliveSeconds 30 \
-    -LegatoFakeBackgroundRefusal pla || return
-  wait_log "harness ready" 10
-  trigger harness-mic-hop
-  wait_log "arm outcome=armed" 10
-  assert_log "cold preparation does not block microphone arm" "arm outcome=armed"
-  trigger background
-  trigger harness-mic
-  wait_log "harness ack result=accepted" 10
-  sleep 9
-  trigger harness-status
-  wait_log "harness status=" 5
-  assert_log "keyboard visibly prepares rather than claiming listening" 'harness status="Preparing dictation…" capturing=0 command=stop'
-  assert_no_log "preparation has not started a recording" "outcome kind=started"
-  trigger harness-mic
-  sleep 0.5
-  trigger preparation-release
-  wait_log "preparation.ready" 10
+scenario_composer() {
+  # The composer surface: the host's draft reaches the keyboard over the link, the keyboard's presence reaches the
+  # host, and Send types the draft into the field exactly once.
+  begin composer || return
+  local draft="Meet at noon and bring the budget"
+  bridge harness-surface composer && bridge harness-visible
+  check_kbd "keyboard is visible on the composer surface" visible true
+  assert_eq "keyboard surface" composer "$(kbd surface)"
+  if await_host_open true; then record PASS "host sees the keyboard appear"; else record FAIL "host sees the keyboard appear" "keyboardSession.open stayed false"; fi
+  bridge composer-debug-seed "$draft" || { record FAIL "seed a draft" "$REPLY"; return; }
+  check_kbd "keyboard shows the host's draft" composerText "$draft"
+  bridge harness-hidden
+  check_kbd "keyboard hides" visible false
+  if await_host_open false; then record PASS "host sees the keyboard hide"; else record FAIL "host sees the keyboard hide" "keyboardSession.open stayed true"; fi
+  # A new appearance starts a fresh composition on the host, so the draft is seeded again.
+  bridge harness-visible
+  if await_host_open true; then record PASS "host sees the keyboard reappear"; else record FAIL "host sees the keyboard reappear" "keyboardSession.open stayed false"; fi
+  bridge composer-debug-seed "$draft" || { record FAIL "seed the draft again" "$REPLY"; return; }
+  check_kbd "keyboard shows the draft again" composerText "$draft"
+  assert_eq "nothing typed before Send" "" "$(kbd text)"
+  bridge harness-send
+  check_kbd "Send types the draft into the field" text "$draft"
+  check_kbd "Send is acknowledged by the host" pendingInsert false
   sleep 2
-  trigger harness-status
-  wait_log_n "harness status=" 2 5
-  assert_log "second mic press cancels pending admission" "harness mic mode=remote-stop"
-  assert_no_log "cancelled preparation never starts late" "outcome kind=started"
-  assert_no_log "no repeat foreground hop" "harness ack result=hop-after-accept"
-  assert_no_log_after "no hop acknowledgment after remote start" "harness mic mode=remote-start" "harness ack result=hop"
-  assert_no_log_after "cancellation never forces an open-app mic" "harness mic mode=remote-start" "command=arm"
-  assert_log "cancelled keyboard returns to ready mic" 'harness status="" capturing=0 command=start'
-  assert_eq "cancelled run creates no history" "0" "$(history_texts | grep -c .)"
-
-  begin "n2. finish keyboard preparation" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoKeyboardHarness YES -LegatoFakePreparationHeld YES -LegatoKeepAliveSeconds 30 \
-    -LegatoFakeBackgroundRefusal pla || return
-  wait_log "harness ready" 10
-  trigger harness-mic-hop
-  wait_log "arm outcome=armed" 10
-  trigger background
-  trigger harness-mic
-  wait_log "harness ack result=accepted" 10
-  sleep 9
-  trigger harness-status
-  wait_log "harness status=" 5
-  assert_log "pending completion remains cancellable beyond eight seconds" 'harness status="Preparing dictation…" capturing=0 command=stop'
-  trigger preparation-release
-  wait_log "outcome kind=started" 10
-  assert_log "prepared dictation starts on held background mic" "outcome kind=started"
-  sleep 2
-  trigger harness-mic
-  wait_log "outcome kind=stopped" 10
-  assert_log "dictation stops through the keyboard" "outcome kind=stopped"
-  assert_eq "keyboard roundtrip inserts the transcript" "$TEXT " "$(log_field_last "harness apply final=1" doc)"
-  assert_eq "one completed history entry" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  assert_count "completion reuses microphone armed in foreground" "audio.start" 1
-  assert_no_log "completion needs no foreground hop" "harness ack result=hop-after-accept"
-  assert_no_log_after "completion never acknowledges a hop" "harness mic mode=remote-start" "harness ack result=hop"
+  assert_eq "the draft is in the field exactly once" "$draft" "$(kbd text)"
+  assert_log "keyboard logged the typing" "harness.edit"
 }
 
-scenario_n() {
-  # The keyboard's first mic tap (no lease) hops to the app. The hop only arms the microphone: no run, no
-  # transcription, no history entry, no Live Activity, no clipboard. Back in the host app (the app in the
-  # background, a fresh background start refused by the system), the next tap starts the dictation at once
-  # on the armed lease, typing into the keyboard's field.
-  begin "n. hop arms only, the next tap dictates" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO \
-    -LegatoFakeBackgroundRefusal pla || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger kbd-hop-arm
-  wait_log "e2e arm outcome=armed" 10
-  sleep 1
-  assert_count "one arm (request + URL deduped)" "e2e arm outcome=" 1
-  assert_log "hop screen shown" "hop shown command=arm"
-  assert_no_log "the keyboard was not left waiting" "kbd.ack result=timeout"
-  assert_count "one session built" "session.make" 1
-  assert_count "audio session activated" "session.activate" 1
-  assert_count "mic armed" "audio.start" 1
-  assert_no_log "no run started" "e2e outcome kind="
-  assert_no_log "no run routed" "e2e route target="
-  assert_no_log "no run published" "link.host phase=listening"
-  assert_no_log "no run state at all" "link.host phase=starting"
-  assert_no_log "no Live Activity" "activity.request"
-  assert_no_log "nothing transcribed" "audio.route"
-  assert_no_log "clipboard not written" "clipboard.write source=coordinator"
-  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
-  assert_eq "history empty" "0" "$(history_texts | wc -l | tr -d ' ')"
-  assert_log "lease published (the next tap may start remotely)" "lease=1 accepts=1"
-  assert_no_log "session held, not released" "session.deactivate"
+# Open the dictation surface and wait until the host accepts debug lines (it has noticed the keyboard).
+open_dictation() {
+  bridge harness-clear
+  bridge harness-surface typing && bridge harness-visible
+  check_kbd "keyboard is visible on the ABC dictation surface" visible true
+  bridge dictation-debug-stream "$@" || record FAIL "scripted streaming cleaner" "$REPLY"
+}
+# take <text>: speak one line and end the take as the mic key does.
+take() {
+  retry_bridge 15 dictation-debug-line "$1" || { record FAIL "host accepts a dictated line" "$REPLY"; return 1; }
+  bridge dictation-debug-stop || { record FAIL "end the take" "$REPLY"; return 1; }
+}
 
-  # Back in the host app: the app is in the background, the keyboard is on screen, the user taps the mic.
-  SCENARIO="n. back in the host app, the next tap dictates"
-  trigger background
-  wait_log "e2e command background" 5
-  trigger kbd-visible
-  wait_log "e2e kbd.visible value=1" 10
-  trigger kbd-request-start
-  wait_log "e2e outcome kind=started" 10
-  assert_log "start acked accepted" "kbd.ack result=accepted"
-  assert_log "run targets the keyboard, best-effort activity, keep-ready off" "route target=keyboard activity=bestEffort keepAliveSeconds=0"
-  assert_log "started from the background" "start.route route=background"
-  assert_no_log "no refused activation, no hop" "kind=needsForeground"
-  assert_no_log "no fallback" "start.fallback"
-  assert_count "still the one session" "session.make" 1
-  assert_count "audio session not activated again" "session.activate" 1
-  assert_count "armed mic re-routed" "audio.route" 1
-  assert_count "armed mic not started again" "audio.start" 1
-  assert_log "run published to the keyboard" "link.host phase=listening final=0 target=keyboard"
+scenario_take_stream() {
+  # A take is cleaned in one streamed call and typed progressively; the field ends with the complete cleaned text.
+  begin take_stream || return
+  open_dictation 60
+  take "the quick brown fox jumps" || return
+  check_kbd "cleaned take is typed completely" text "The Quick Brown Fox Jumps" 20
+  local edits
+  edits="$(grep -c -F 'harness.edit' "$LOG")"
+  if [ "$edits" -ge 4 ]; then record PASS "take arrives progressively ($edits edits)"; else record FAIL "take arrives progressively" "only $edits edits"; fi
   sleep 1.5
-  trigger kbd-request-stop
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  wait_log "e2e kbd.apply final=1" 10   # the typewriter reveal has finished
-  assert_eq "keyboard field == script" "$TEXT " "$(log_field "kbd.apply final=1" doc)"
-  assert_eq "final link.host committed == script" "$TEXT " "$(log_field "link.host phase=idle final=1" committed)"
-  assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
-  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  assert_count "keep-ready off: the mic is released after the run" "session.deactivate" 1
-  sleep 0.3
-  if last_line "link.host" | grep -q -F "lease=0 accepts=0"; then record PASS "host publishes the lease as gone"
-  else record FAIL "host publishes the lease as gone" "last link.host: $(last_line "link.host" | cut -c1-200)"; fi
-
-  SCENARIO="n. hop arms only, URL first"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger kbd-hop-arm-url-first
-  wait_log "e2e arm outcome=armed" 10
-  sleep 1
-  assert_count "one arm" "e2e arm outcome=" 1
-  assert_log "hop screen shown" "hop shown command=arm"
-  assert_count "one session" "session.make" 1
-  assert_no_log "no run started" "e2e outcome kind="
-  assert_no_log "no Live Activity" "activity.request"
-
-  # Anything can open legato://keyboard?cmd=arm: without a request from the keyboard it must not touch the mic.
-  SCENARIO="n. forged URL"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO || return
-  trigger kbd-forged-url
-  wait_log "kbd.forged-url handled" 10
-  assert_log "the URL was rejected" "keyboard.url admission=rejected"
-  assert_no_log "no hop screen" "hop shown"
-  assert_no_log "nothing armed" "e2e arm outcome="
-  assert_no_log "nothing started" "e2e outcome kind=started"
-  assert_no_log "no session, no mic" "session.make"
-  assert_no_log "no activity" "activity.request"
+  assert_eq "take is in the field exactly once" "The Quick Brown Fox Jumps" "$(kbd text)"
+  assert_eq "no failure is reported afterwards" false "$(kbd takeFailed)"
 }
 
-scenario_q() {
-  # The keyboard's own UI code (KeyboardController, KeyboardRootView, MicKey) in the app's harness, over a
-  # UITextView document, on the real App Group values and Darwin notes: the keyboard-side planner types
-  # the fake engine's text into the harness document, and the mic key talks to the real app.
-  begin "q. harness: Action Button waits for explicit Insert" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeyboardHarness YES || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  wait_log "e2e harness visible value=1" 10
-  assert_log "the harness keyboard beats presence" "harness visible value=1"
-  run_once 1
-  assert_log "press waits in result" "route target=result activity=required keepAliveSeconds=0"
-  trigger harness-status
-  wait_log "e2e harness status=" 5
-  assert_log "document snapshot was captured before Insert" "e2e harness status="
-  assert_eq "document stays empty until Insert" "" "$(log_field "harness status=" doc)"
-  assert_no_log "nothing auto inserted" "harness apply"
-  assert_eq "clipboard unchanged before Insert" "sentinel" "$(pasteboard)"
-  assert_eq "result offers the transcript" "$TEXT" "$(log_field "activity.result phase=result" tail)"
-  trigger result-insert
-  wait_log "e2e result-insert.done" 10
-  assert_eq "harness document == script" "$TEXT" "$(log_field_last "harness apply final=1" doc)"
-  trigger result-insert
-  wait_log_n "e2e result-insert.done" 2 10
-  trigger harness-status
-  wait_log_n "e2e harness status=" 2 5
-  assert_eq "repeated Insert does not duplicate text" "$TEXT" "$(log_field_last "harness status=" doc)"
-  assert_count "successful Insert ends the activity exactly once" "activity.end phase=inserted" 1
-  assert_eq "explicit Insert publishes exactly the transcript" "$TEXT" "$(log_field_last "link.host phase=idle final=1" committed)"
-  assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
-  assert_no_log "clipboard not written" "clipboard.write"
-  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+# fail_take: speak a take whose stream fails after two chunks, and wait for the failed state.
+fail_take() {
+  open_dictation 40 2
+  take "the quick brown fox" || return 1
+  check_kbd "failed take is reported to the keyboard" takeFailed true 20
+  assert_eq "failed take holds the failed phase" failed "$(kbd takePhase)"
+}
 
-  # The mic key with the microphone held (keep-alive): a request over the link, no hop.
-  SCENARIO="q. harness: mic key, remote start and stop"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeepAliveSeconds 30 -LegatoKeyboardHarness YES || return
-  wait_log "e2e harness visible value=1" 10
-  run_once 1
-  trigger harness-mic
-  wait_log "harness mic mode=remote-start" 10
-  wait_log_n "e2e outcome kind=started" 2 10
-  assert_log "the mic key asked the running app to start" "harness mic mode=remote-start"
-  assert_log "the app acked accepted" "harness ack result=accepted"
-  assert_log "remote start: keyboard target, best-effort activity" "route target=keyboard activity=bestEffort keepAliveSeconds=30"
+scenario_take_retry() {
+  # Retry after a failed take: the partial text is erased and the cleaned take is typed once.
+  begin take_retry || return
+  fail_take || return
+  bridge harness-retry
+  check_kbd "Retry types the cleaned take" text "The Quick Brown Fox" 20
+  check_kbd "failed state clears after Retry" takeFailed false
   sleep 1.5
-  trigger harness-mic
-  wait_log "harness mic mode=remote-stop" 10
-  wait_log_n "e2e outcome kind=stopped" 2 10
-  sleep 0.5
-  assert_log "the mic key asked the running app to stop" "harness mic mode=remote-stop"
-  assert_count "both requests acked accepted" "harness ack result=accepted" 2
-  assert_count "still one session" "session.make" 1
-  assert_eq "only remote dictation inserted; Action Button result stayed pending" "$TEXT " "$(log_field_last "harness apply final=1" doc)"
+  assert_eq "retried take is in the field exactly once" "The Quick Brown Fox" "$(kbd text)"
+}
 
-  # No running app to ask: the mic key is an open-app key; the request goes out all the same and the
-  # idle app answers hop (the URL, which the Link opens, is what arms the mic).
-  SCENARIO="q. harness: mic key, app not running a lease"
-  relaunch -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeyboardHarness YES || return
-  wait_log "e2e harness visible value=1" 10
-  trigger harness-mic
-  wait_log "harness ack" 5
-  sleep 0.5
-  assert_log "no lease: the mic key opens the app" "harness mic mode=openApp"
-  assert_log "the idle app answers hop" "harness ack result=hop"
-  assert_no_log "nothing started over the link" "e2e outcome kind=started"
-  assert_no_log "nothing armed over the link either" "e2e arm outcome="
-
-  # The real keyboard code end to end: tap 1 (open-app mode) sends an arm request and the Link opens the
-  # app, which only arms the mic; tap 2 (now remote mode, the app in the background) dictates into the
-  # harness document.
-  begin "q. harness: first tap arms, second tap dictates" -LegatoFakeEngine "$TEXT" -LegatoForceTapToCopy NO -LegatoKeyboardHarness YES || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  wait_log "e2e harness visible value=1" 10
-  trigger harness-mic-hop
-  wait_log "e2e arm outcome=armed" 10
-  sleep 1
-  assert_log "the first tap was an open-app tap" "harness mic mode=openApp"
-  assert_log "the hop screen came up" "hop shown command=arm"
-  assert_no_log "the first tap started no run" "e2e outcome kind="
-  assert_no_log "no run published" "link.host phase=listening"
-  assert_no_log "no Live Activity" "activity.request"
-  assert_no_log "nothing typed into the harness document" "harness apply"
-  trigger background
-  wait_log "e2e command background" 5
-  trigger harness-mic
-  wait_log "harness mic mode=remote-start" 10
-  wait_log "e2e outcome kind=started" 10
-  assert_log "the second tap asked the running app to start" "harness mic mode=remote-start"
-  assert_log "run targets the keyboard" "route target=keyboard activity=bestEffort"
-  assert_log "run published to the keyboard" "link.host phase=listening final=0 target=keyboard"
-  assert_count "audio session activated once, by the arm" "session.activate" 1
+scenario_take_insert_raw() {
+  # Insert as-is after a failed take: the partial text is erased and the raw words are typed once.
+  begin take_insert_raw || return
+  fail_take || return
+  bridge harness-insert-raw
+  check_kbd "Insert as-is types the raw take" text "The quick brown fox" 20
+  check_kbd "failed state clears after Insert as-is" takeFailed false
   sleep 1.5
-  trigger harness-mic
-  wait_log "harness mic mode=remote-stop" 10
-  wait_log "e2e outcome kind=stopped" 10
-  sleep 0.5
-  assert_eq "harness document == script" "$TEXT " "$(log_field "harness apply final=1" doc)"
-  assert_eq "clipboard untouched (the text landed)" "sentinel" "$(pasteboard)"
-  assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
+  assert_eq "raw take is in the field exactly once" "The quick brown fox" "$(kbd text)"
 }
 
-scenario_t() {
-  # The typing engine through the keyboard's real commit path (TypingModel over the harness document):
-  # autocapitalization, shift and caps lock, double-space period, delete, pages. The expected texts are
-  # written here, not derived from the code under test.
-  begin "t. harness: typing rules" -LegatoKeyboardHarness YES || return
-  wait_log "e2e harness ready" 10
-  assert_eq "return key label (en)" "return" "$(log_field "harness ready" returnLabel)"
-  assert_eq "space key label (en)" "space" "$(log_field "harness ready" spaceLabel)"
-  assert_eq "letters page rows have 10, 9, 9 and 4 keys (no globe)" "10,9,9,4" "$(sed -n 's/.* keys=\([0-9,]*\).*/\1/p' "$LOG" | head -1)"
-  trigger harness-type
-  wait_log "harness typing case=double-space-after-punctuation " 10
-  sleep 0.3
-  local pair name expected
-  for pair in "autocap=Hi" "double-space=Hi. There" "single-space=Hi there" "shift=Hi Bye" "caps-lock=Hi ABc" \
-    "delete=Hello wor" "delete-recapitalizes=C" "numbers=Ab12c" "double-space-after-punctuation=Ok,  x"; do
-    name="${pair%%=*}"; expected="${pair#*=}"
-    assert_eq "typing: $name" "$expected" "$(log_field "harness typing case=$name " text)"
-  done
-
-  SCENARIO="t. harness: German labels, email and number fields"
-  relaunch -LegatoKeyboardHarness YES -LegatoHarnessReturn send -AppleLanguages "(de)" || return
-  wait_log "e2e harness ready" 10
-  assert_eq "return key label (de, send)" "Senden" "$(log_field "harness ready" returnLabel)"
-  assert_eq "space key label (de)" "Leerzeichen" "$(log_field "harness ready" spaceLabel)"
-  relaunch -LegatoKeyboardHarness YES -LegatoHarnessKeyboardType email -LegatoHarnessGlobe YES || return
-  wait_log "e2e harness ready" 10
-  assert_eq "email letters page: bottom row adds @ and . (globe shown)" "10,9,9,7" "$(sed -n 's/.* keys=\([0-9,]*\).*/\1/p' "$LOG" | head -1)"
-  relaunch -LegatoKeyboardHarness YES -LegatoHarnessKeyboardType phone || return
-  wait_log "e2e harness ready" 10
-  assert_eq "phone field: numpad rows (3 columns, bottom row + 0 delete)" "3,3,3,3" "$(sed -n 's/.* keys=\([0-9,]*\).*/\1/p' "$LOG" | head -1)"
-  relaunch -LegatoKeyboardHarness YES -LegatoHarnessKeyboardType numbers || return
-  wait_log "e2e harness ready" 10
-  assert_log "numbers-and-punctuation field starts on the numbers page" "page=numbers"
+scenario_take_fail_hook() {
+  # The forced failure (dictation-debug-fail-take) fails before any text streams: nothing is typed until Retry.
+  begin take_fail_hook || return
+  open_dictation 40
+  bridge dictation-debug-fail-take 1
+  take "send the report today" || return
+  check_kbd "forced failure is reported to the keyboard" takeFailed true 20
+  assert_eq "nothing is typed while the take is held" "" "$(kbd text)"
+  bridge harness-retry
+  check_kbd "Retry types the cleaned take" text "Send The Report Today" 20
+  sleep 1.5
+  assert_eq "retried take is in the field exactly once" "Send The Report Today" "$(kbd text)"
 }
 
-scenario_s() {
-  # Screenshots of the keyboard UI in the harness: light, dark, landscape and a few field types. Saved to
-  # $LEGATO_E2E_SHOTS (default: inside the work directory, so only the size is checked).
-  local dir="${LEGATO_E2E_SHOTS:-$WORK/shots}"
-  mkdir -p "$dir"
-  local name file
-  shot() { # shot <name> <launch args...>: relaunch the harness with the args, then take the screenshot
-    name="$1"; shift
-    file="$dir/keyboard-$name.png"
-    SCENARIO="s. screenshots"
-    relaunch -LegatoKeyboardHarness YES "$@" || return 1
-    wait_log "e2e harness ready" 10
-    sleep 1.2
-  }
-  take() {
-    xcrun simctl io "$UDID" screenshot "$file" > /dev/null 2>&1
-    local size; size="$(stat -f %z "$file" 2> /dev/null || echo 0)"
-    if [ "$size" -gt 20000 ]; then record PASS "screenshot $name ($size bytes)"; else record FAIL "screenshot $name" "no usable image at $file"; fi
-  }
-  begin "s. screenshots" -LegatoKeyboardHarness YES -LegatoHarnessAppearance light -LegatoHarnessSuggestions typ,type,tip || return
-  wait_log "e2e harness ready" 10
-  trigger harness-type   # leaves some text in the field
-  sleep 1.2
-  name=light; file="$dir/keyboard-light.png"; take
-  shot dark -LegatoHarnessAppearance dark -LegatoHarnessSuggestions typ,type,tip && take
-  shot landscape -LegatoHarnessAppearance light -LegatoHarnessLandscape YES && {
-    take
-    sips -r 90 "$file" --out "$file" > /dev/null 2>&1
-    local w h
-    w="$(sips -g pixelWidth "$file" 2> /dev/null | awk '/pixelWidth/ {print $2}')"
-    h="$(sips -g pixelHeight "$file" 2> /dev/null | awk '/pixelHeight/ {print $2}')"
-    if [ "${w:-0}" -gt "${h:-1}" ]; then record PASS "landscape screenshot is wider than tall (${w}x${h})"
-    else record FAIL "landscape screenshot is wider than tall" "${w}x${h}"; fi
-  }
-  shot landscape-dark -LegatoHarnessAppearance dark -LegatoHarnessLandscape YES && { take; sips -r 90 "$file" --out "$file" > /dev/null 2>&1; }
-  shot numbers -LegatoHarnessAppearance light && { trigger harness-numbers; sleep 1; take; }
-  shot email-send -LegatoHarnessAppearance light -LegatoHarnessKeyboardType email -LegatoHarnessReturn send -LegatoHarnessGlobe YES && take
-  shot german-go -LegatoHarnessAppearance dark -LegatoHarnessReturn go -AppleLanguages "(de)" && take
-  shot phone -LegatoHarnessAppearance light -LegatoHarnessKeyboardType phone -LegatoHarnessGlobe YES && take
-  [ "${LEGATO_E2E_SHOTS:-}" != "" ] && echo "Screenshots: $dir"
-}
+# ---------------------------------------------------------------------------------------------- dispatch
 
-# The last value of key=<value> on the last line matching a fixed string (values without spaces).
-log_kv_last() { # log_kv_last <line marker> <key>
-  grep -F -- "$1" "$LOG" | tail -1 | sed -n "s/.* $2=\\([^ ]*\\).*/\\1/p"
-}
-
-scenario_r() {
-  # The real keyboard extension, not the harness: the system presents it for a plain text field, and the
-  # extension logs where its keys are (`kbd.geometry`, Debug builds; KeyboardGeometryLog.swift). All four key
-  # rows must lie inside the visible keyboard, at the height the extension asked for. Regression for a
-  # portrait keyboard (402 x 297) read as landscape because it is wider than tall: 190 pt, rows 3 and 4 cut.
-  # Enabling the keyboard: the Settings preferences below (a simulator reads them when the app starts).
-  # Screenshots go to $LEGATO_E2E_SHOTS (default: inside the work directory).
-  local dir="${LEGATO_E2E_SHOTS:-$WORK/shots}"
-  mkdir -p "$dir"
-  xcrun simctl spawn "$UDID" defaults write -g AppleKeyboards -array "$BID.keyboard" "en_US@sw=QWERTY;hw=Automatic" "emoji@sw=Emoji"
-  xcrun simctl spawn "$UDID" defaults write -g AppleKeyboardsExpanded -int 1
-  xcrun simctl spawn "$UDID" defaults write com.apple.Preferences KeyboardsCurrentAndNext -array "$BID.keyboard" "en_US@sw=QWERTY;hw=Automatic"
-  local appearance file size
-  for appearance in light dark; do
-    SCENARIO="r. real extension ($appearance)"
-    begin "$SCENARIO" -LegatoKeyboardHarness YES -LegatoHarnessSystemField YES -LegatoHarnessAppearance "$appearance" || return
-    if ! wait_log "kbd.geometry" 8; then   # the first launch after the preferences changed may not see the keyboard yet
-      relaunch -LegatoKeyboardHarness YES -LegatoHarnessSystemField YES -LegatoHarnessAppearance "$appearance" || return
-      wait_log "kbd.geometry" 10
-    fi
-    sleep 2.5   # the system resizes the keyboard while it comes up; the last layout counts
-    assert_log "the system presented the Legato keyboard extension" "kbd.geometry"
-    assert_log "the extension asked for the portrait height (297 pt, not landscape's 223)" "constraint=297@999"
-    assert_no_log "portrait is never taken for landscape" "constraint=223@"
-    assert_eq "the keyboard view is 297 pt high" "297" "$(last_line "kbd.view" | sed -n 's/.* bounds=[0-9-]*,[0-9-]*,[0-9]*x\([0-9]*\) .*/\1/p')"
-    assert_eq "all four key rows are inside the visible keyboard" "1" "$(log_kv_last kbd.geometry visible)"
-    local bottom height
-    bottom="$(log_kv_last kbd.geometry keysMaxY)"
-    height="$(last_line kbd.geometry | sed -n 's/.* grid=[0-9-]*,[0-9-]*,[0-9]*x\([0-9]*\) .*/\1/p')"
-    if [ -n "$bottom" ] && [ -n "$height" ] && [ "$bottom" -le "$height" ]; then record PASS "lowest key edge ${bottom} pt <= keyboard height ${height} pt"
-    else record FAIL "lowest key edge <= keyboard height" "keysMaxY=<$bottom> height=<$height>"; fi
-    file="$dir/keyboard-extension-$appearance.png"
-    xcrun simctl io "$UDID" screenshot "$file" > /dev/null 2>&1
-    size="$(stat -f %z "$file" 2> /dev/null || echo 0)"
-    if [ "$size" -gt 20000 ]; then record PASS "screenshot of the real extension ($appearance, $size bytes)"; else record FAIL "screenshot of the real extension ($appearance)" "no usable image at $file"; fi
-  done
-}
-
-# ------------------------------------------------------------------------ start fallbacks (policy chain, settle retry)
-
-scenario_u() {
-  # The experimental policy (duck music, pause spoken audio) is refused in the background: the start is
-  # retried once with the default (duckOthers), in the background, with the same activity. No hop.
-  local step expect
-  for step in int input; do
-    expect="$([ "$step" = int ] && echo '!int' || echo invalidInputFormat)"
-    SCENARIO="u. fallback to duckOthers ($step)"
-    begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoFakeBackground YES -LegatoAudioPolicy duckMusicPauseSpoken \
-      -LegatoFakeBackgroundRefusal "$step" -LegatoFakeRefusalOnlyNonDefault YES -LegatoForceTapToCopy NO || continue
-    xcrun simctl pbcopy "$UDID" <<< "sentinel"
-    trigger toggle
-    wait_log "e2e outcome kind=" 10
-    sleep 0.5
-    assert_log "outcome started" "outcome kind=started"
-    assert_no_log "no foreground hop" "kind=needsForeground"
-    assert_log "start.fallback logged with from, to and the refusal" "start.fallback from=duckMusicPauseSpoken to=duckOthers error=$expect"
-    assert_count "exactly one fallback" "start.fallback" 1
-    assert_log "the experimental session was refused" "$([ "$step" = int ] && echo session.activate.refused || echo audio.start.refused)"
-    assert_log "first session built for the selected policy" "session.make engine=e2e-scripted policy=duckMusicPauseSpoken"
-    assert_log "second session built for the default" "session.make engine=e2e-scripted policy=duckOthers"
-    assert_count "two sessions built" "session.make" 2
-    assert_log "start.route: ran in the background" "start.route route=background reason=none outcome=started"
-    assert_count "one activity requested (no flicker)" "activity.request phase=" 1
-    assert_no_log "activity not dismissed" "activity.dismiss"
-    assert_no_log "activity not ended failed" "activity.end phase=failed"
-    sleep 1.5
-    trigger toggle
-    wait_log "e2e outcome kind=stopped" 10
-    sleep 0.5
-    copy_result
-    assert_eq "activity ended (copied) with the text" "$TEXT" "$(log_field "activity.end phase=copied" tail)"
-    assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
-    assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  done
-
-  # Both policies refused: one retry, then the hop, with the activity gone at once.
-  SCENARIO="u. fallback refused too"
-  begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoFakeBackground YES -LegatoAudioPolicy duckMusicPauseSpoken \
-    -LegatoFakeBackgroundRefusal int -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log "e2e outcome kind=needsForeground" 10
-  sleep 1
-  assert_count "exactly one fallback" "start.fallback" 1
-  assert_count "two sessions built, no more" "session.make" 2
-  assert_count "outcome needsForeground once" "outcome kind=needsForeground" 1
-  assert_log "start.route: foregroundHop" "start.route route=foregroundHop reason=backgroundStartRefused outcome=needsForeground"
-  assert_count "one activity requested" "activity.request phase=" 1
-  assert_log "activity dismissed at once" "activity.dismiss live=0"
-  assert_no_log "no failed activity left behind" "activity.end"
-  assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
-  assert_eq "history empty" "0" "$(history_texts | grep -c .)"
-}
-
-scenario_v() {
-  # Foreground, the mic has no input yet (0 Hz): the start is retried with a fresh session after a short
-  # settle wait, same policy first, then duckOthers for a non-default policy. Same activity throughout.
-  local label="$1" policy="$2" count="$3" sessions="$4" expect_started="$5"
-  SCENARIO="v. foreground no mic input ($label)"
-  begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoAudioPolicy "$policy" -LegatoFakeBackgroundRefusal input \
-    -LegatoFakeRefusalInForeground YES -LegatoFakeRefusalCount "$count" -LegatoForceTapToCopy NO || return
-  xcrun simctl pbcopy "$UDID" <<< "sentinel"
-  trigger toggle
-  wait_log "e2e outcome kind=" 10
-  sleep 0.5
-  assert_count "sessions built" "session.make" "$sessions"
-  assert_count "one activity requested (no flicker)" "activity.request phase=" 1
-  assert_no_log "no hop" "kind=needsForeground"
-  assert_no_log "activity not dismissed" "activity.dismiss"
-  assert_log "start.fallback logged for the retry" "start.fallback from=$policy to="
-  if [ "$expect_started" = yes ]; then
-    assert_log "outcome started" "outcome kind=started"
-    assert_no_log "no failed activity" "activity.end phase=failed"
-    sleep 1.5
-    trigger toggle
-    wait_log "e2e outcome kind=stopped" 10
-    sleep 0.5
-    copy_result
-    assert_eq "pbpaste == text" "$TEXT" "$(pasteboard)"
-    assert_eq "history has the entry once" "1" "$(history_texts | grep -c -x -F -- "$TEXT")"
-  else
-    assert_log "outcome failed(invalidInputFormat)" 'outcome kind=failed error="invalidInputFormat"'
-    assert_count "activity ended failed once" "activity.end phase=failed" 1
-    assert_eq "clipboard untouched" "sentinel" "$(pasteboard)"
-    assert_eq "history empty" "0" "$(history_texts | grep -c .)"
+t_run=$SECONDS
+for name in "${SELECTED[@]}"; do
+  if ! declare -F "scenario_$name" > /dev/null; then
+    SCENARIO="$name"; record FAIL "scenario function exists" "scenario_$name is not defined"; continue
   fi
-}
-
-scenario_w() {
-  # A foreground refusal of another kind ('!int') is a plain failure: no retry, no fallback.
-  SCENARIO="w. foreground !int still fails"
-  begin "$SCENARIO" -LegatoFakeEngine "$TEXT" -LegatoAudioPolicy duckMusicPauseSpoken -LegatoFakeBackgroundRefusal int \
-    -LegatoFakeRefusalInForeground YES -LegatoForceTapToCopy NO || return
-  trigger toggle
-  wait_log "e2e outcome kind=" 10
-  sleep 0.5
-  assert_log "outcome failed" "outcome kind=failed"
-  assert_count "one session, no retry" "session.make" 1
-  assert_no_log "no fallback" "start.fallback"
-  assert_no_log "no hop" "kind=needsForeground"
-  assert_count "activity ended failed once" "activity.end phase=failed" 1
-}
+  RAN=$((RAN + 1))
+  "scenario_$name"
+  stop_log
+done
+xcrun simctl terminate "$UDID" "$BID" > /dev/null 2>&1
 
 # ---------------------------------------------------------------------------------------------- report
 
 echo
-printf '%-34s %-58s %s\n' SCENARIO CHECK RESULT
-printf '%-34s %-58s %s\n' ---------------------------------- ---------------------------------------------------------- ------
+printf '%-20s %-62s %s\n' SCENARIO CHECK RESULT
+printf '%-20s %-62s %s\n' -------------------- -------------------------------------------------------------- ------
 for row in "${ROWS[@]}"; do
   IFS='|' read -r s c r <<< "$row"
-  printf '%-34s %-58s %s\n' "$s" "$c" "$r"
+  printf '%-20s %-62s %s\n' "$s" "$c" "$r"
 done
 echo
 if [ "${#DETAILS[@]}" -gt 0 ]; then
@@ -1369,5 +524,7 @@ if [ "${#DETAILS[@]}" -gt 0 ]; then
   echo
 fi
 echo "Scenarios ran in $((SECONDS - t_run))s (build $((t_run - t_start))s, total $((SECONDS - t_start))s)."
+if [ "$RAN" -eq 0 ]; then echo "FAIL: no scenario ran."; exit 1; fi
+if [ "${#ROWS[@]}" -eq 0 ]; then echo "FAIL: scenarios ran but recorded no checks."; exit 1; fi
 if [ "$FAILED" -gt 0 ]; then echo "FAIL: $FAILED check(s) failed (logs: LEGATO_E2E_KEEP=1)."; LEGATO_E2E_KEEP=1; exit 1; fi
-echo "PASS: ${#ROWS[@]} checks."
+echo "PASS: ${#ROWS[@]} checks in $RAN scenario(s)."

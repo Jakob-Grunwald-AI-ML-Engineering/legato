@@ -12,11 +12,14 @@ free_kib=$(df -Pk . | awk 'NR==2 {print $4}')
 printf 'ANEMLL %s; swift-transformers exact 1.3.5\n' "$revision"
 printf 'Available: %s KiB; source+build allowance: %s KiB; reserve: %s KiB\n' "$free_kib" "$build_estimate_kib" "$reserve_kib"
 printf 'Shared packages: %s\n' "${LEGATO_SOURCE_PACKAGES:-$HOME/Library/Caches/legato/SourcePackages}"
+printf 'Cache: %s/spikes/ane-cleanup (shared by all worktrees)\n' "${LEGATO_CACHE_DIR:-$HOME/Library/Caches/legato}"
 printf 'No weights. Conversion/device storage need separate preflight.\n'
 shasum -a 256 patches/*.patch
 if [ "${1:---dry-run}" = --dry-run ]; then exit 0; fi
 [ "${1:-}" = --prepare ] || { echo 'Usage: setup.sh [--dry-run|--prepare]' >&2; exit 64; }
 [ "$free_kib" -gt $((reserve_kib + build_estimate_kib)) ] || { echo 'Insufficient disk for build allowance plus reserve.' >&2; exit 1; }
+# .cache and models/ live in the shared Legato cache (see cache-link.sh), so every worktree reuses one download.
+bash scripts/cache-link.sh
 mkdir -p .cache
 if [ ! -f .cache/anemll.tar.gz ]; then
   curl --fail --location --silent --show-error "https://api.github.com/repos/Anemll/Anemll/tarball/$revision" -o .cache/anemll.tar.gz

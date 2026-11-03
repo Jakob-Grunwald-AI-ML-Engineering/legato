@@ -24,9 +24,9 @@
 #                            --group, the App Group container, and print it (e.g. pull Library/Caches/audio-diag.jsonl)
 #   pull-sessions [--group] <path>  alias of pull for session directories/files
 #
-# Bridge commands (send): ping, commands, state, set-setting <key> <value>, plus in Debug builds every
-# simulator e2e command (toggle, interrupt, copy-last, result-insert, result-copy, foreground, background,
-# kbd-*, harness-*, meeting-*; see E2E.swift). `commands` lists what the running build accepts.
+# Bridge commands (send): ping, commands, state, set-setting <key> <value>, plus in Debug builds the
+# composer-*, dictation-* and harness-* commands the simulator e2e run uses (see Apps/iOS/App/Debug/DebugBridge.swift).
+# `commands` lists what the running build accepts.
 #
 # Environment: LEGATO_DEVICE (UDID, default the project iPhone), LEGATO_DEVICE_TEAM (default XWSGN23W75),
 # LEGATO_DEVICE_STATE (scratch dir for pulled logs), LEGATO_CACHE_DIR (build caches).
