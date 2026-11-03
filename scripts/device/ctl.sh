@@ -24,7 +24,7 @@
 #                            --group, the App Group container, and print it (e.g. pull Library/Caches/audio-diag.jsonl)
 #   pull-sessions [--group] <path>  alias of pull for session directories/files
 #   device-logs [--since <dur>]  collect the iPhone's unified log (default --since 10m; <num>m|h|d), keep the
-#                            subsystem de.gruenwald.legato lines (app, keyboard, widget) in $STATE/pulled/device-logs.txt
+#                            subsystem de.gruenwald.legato lines (app, keyboard, widget) in $STATE/pulled/device-logs.txt (prompts for sudo)
 #                            and print its path with the composer-view/keyboard-composer findings (#225)
 #
 # Bridge commands (send): ping, commands, state, set-setting <key> <value>, plus in Debug builds the
@@ -572,9 +572,17 @@ cmd_device_logs() {
   positive_seconds "$budget" "device logs timeout"
   mkdir -p "$STATE/pulled"
   rm -rf "$archive" "$dest"
-  run_bounded_tool "$budget" log collect --device-udid "$DEVICE" --last "$since" --output "$archive" > /dev/null \
+  # `log collect` reads an attached device only as root. Prompt once here: the bounded child below
+  # captures its output and cannot ask for a password.
+  local as_root=""
+  if [ "$(id -u)" != 0 ]; then
+    sudo -v || die "device-logs needs sudo: log collect reads an attached iPhone only as root"
+    as_root="sudo -n"
+  fi
+  run_bounded_tool "$budget" $as_root log collect --device-udid "$DEVICE" --last "$since" --output "$archive" > /dev/null \
     || die "log collect failed: is the iPhone unlocked and paired with this Mac?"
   [ -e "$archive" ] || die "log collect produced no archive"
+  [ -z "$as_root" ] || sudo -n chown -R "$(id -u)" "$archive"
   run_bounded_tool "$budget" log show --archive "$archive" --info --debug --style compact \
     --predicate 'subsystem == "de.gruenwald.legato"' > "$dest.part" || { rm -f "$dest.part"; die "log show failed on $archive"; }
   mv "$dest.part" "$dest"

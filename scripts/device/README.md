@@ -29,7 +29,7 @@ Bundle/group overrides route the CLI; they do not rewrite signing, entitlements,
 
 ## Device logs
 
-`bash scripts/device/ctl.sh device-logs [--since 10m]` (`<num>m|h|d`) runs `log collect --device-udid "$LEGATO_DEVICE" --last <dur>` and filters the archive with `log show --archive … --info --debug --predicate 'subsystem == "de.gruenwald.legato"'` (app, keyboard and widget share the subsystem). The text lands in `$STATE/pulled/device-logs.txt`; the command prints its path, the line count and the latest `composer.view blank` / `composer.poll stale|start|stop` lines (#225). Needs the phone unlocked and paired; device target only. Messages carry counts and flags, never draft text. `LEGATO_DEVICE_LOGS_TIMEOUT` caps collect and filter (300 s).
+`bash scripts/device/ctl.sh device-logs [--since 10m]` (`<num>m|h|d`) runs `log collect --device-udid "$LEGATO_DEVICE" --last <dur>` and filters the archive with `log show --archive … --info --debug --predicate 'subsystem == "de.gruenwald.legato"'` (app, keyboard and widget share the subsystem). The text lands in `$STATE/pulled/device-logs.txt`; the command prints its path, the line count and the latest `composer.view blank` / `composer.poll stale|start|stop` lines (#225). Needs the phone unlocked and paired, and sudo: `log collect` reads an attached device only as root, so the command prompts once (`sudo -v`) before collecting; run it from your own terminal. Device target only. Messages carry counts and flags, never draft text. `LEGATO_DEVICE_LOGS_TIMEOUT` caps collect and filter (300 s).
 
 ## Physical-device screenshots
 
