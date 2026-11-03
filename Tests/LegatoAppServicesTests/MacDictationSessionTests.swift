@@ -284,8 +284,10 @@ final class FailingStreamCleaner: SentenceCleaning {
         #expect(session.pipeline.outbox.count == 1, "The stalled take is not acknowledged; its partial text is in the field")
 
         await session.pipeline.retry()
-        try await until { retracted == 1 && session.pipeline.outbox.count == 1 && session.pipeline.outbox[0].final }
-        #expect(session.pipeline.outbox[0].text == "Hello world." && session.pipeline.outbox[0].sequence == 1, "The partial was retracted and acknowledged; the retry streams on")
-        try await until { seen.last?.isFinal == true }
+        // The writer follows the retry to its end and acknowledges it, so the finished delivery is only in the outbox
+        // for an instant: wait for what the writer saw and for the acknowledgement, not for that window.
+        try await until { retracted == 1 && seen.last?.isFinal == true && session.pipeline.outbox.isEmpty }
+        #expect(seen.last?.text == "Hello world." && seen.last?.retracted == false, "The retry streamed on to the whole text")
+        #expect(retracted == 1 && session.pipeline.nextOutboxSequenceForTesting == 2, "The partial (sequence 0) was retracted and acknowledged; the retry is sequence 1")
     }
 }
