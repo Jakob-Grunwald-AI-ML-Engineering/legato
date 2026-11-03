@@ -1,5 +1,6 @@
 import Foundation
 import LegatoAppServices
+import LegatoAudio
 import LegatoCore
 import LegatoKeyboardCore
 import LegatoVocabulary
@@ -42,6 +43,7 @@ final class AppController {
                     fromVocabulary: choice.fromVocabulary)
             }
         }
+        composer.inputRoute = Self.inputRoutePolicy()
         keyboardHost?.attach(composer, keyboardSession: keyboardSession, dictation: dictation)
         keyboardHost?.link.onRequest = { [weak self] request in
             guard let self else { return false }
@@ -61,6 +63,14 @@ final class AppController {
         #if LEGATO_INTERNAL
         DebugBridge.start()
         #endif
+    }
+
+    /// #226: built-in mic while the mic is only held, the headset's for a take. Read per call, so the internal
+    /// toggle takes effect without a relaunch; release builds always read false and never touch the route.
+    private static func inputRoutePolicy() -> InputRoutePolicy {
+        InputRoutePolicy(
+            preferIdle: { if Settings.airpodsIdleBuiltIn { PreferredInputRoute.apply(.builtIn) } },
+            preferTake: { if Settings.airpodsIdleBuiltIn { PreferredInputRoute.apply(.bluetooth) } })
     }
 
     func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {

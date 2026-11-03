@@ -167,15 +167,20 @@ import LegatoVocabulary
         probe.tapped(route: surface, at: tapped, warm: warmSince != nil,
                      idleS: warmSince.map { now() - max($0, routeClosedAt ?? $0) })
         _ = gate.tap()
+        // Before any chunk routes: the headset's mic for this take (the idle hold prefers the built-in one).
+        await composer.preferTakeInput()
         switch surface {
         case .agent:
             await composer.start()
-            guard composer.isListening else { _ = gate.close(); probe.cancel(); return composer.error == nil }
+            guard composer.isListening else {
+                _ = gate.close(); probe.cancel(); await composer.preferIdleInput()
+                return composer.error == nil
+            }
         case .dictation:
             await dictation.activate()
             guard dictation.hasActiveTake else {
                 // No stream to talk to (no or unreachable Soniox): do not pretend to listen.
-                _ = gate.close(); probe.cancel()
+                _ = gate.close(); probe.cancel(); await composer.preferIdleInput()
                 dictationNotice = sonioxKey().isEmpty
                     ? "Add your Soniox key in the Legato app to dictate."
                     : "Can't reach Soniox. Check your connection and key, then try again."
@@ -214,6 +219,8 @@ import LegatoVocabulary
             await dictation.abandonTake()
         case .finalize(.idle), .abandon(.idle): composer.setRoute(.idle)
         }
+        // Closing (or abandoning) a take: back to the built-in mic so the headset leaves call mode.
+        if case .open = action {} else { await composer.preferIdleInput() }
         probe.cancel()
     }
 
