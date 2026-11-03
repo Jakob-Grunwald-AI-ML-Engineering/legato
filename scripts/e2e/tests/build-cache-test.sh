@@ -14,6 +14,8 @@ trap teardown EXIT
 export LEGATO_CACHE_DIR="$T/cache" LEGATO_DERIVED_DATA="$T/dd" TMPDIR="$T/tmp"
 # The pruner also reports agent scratchpads and test caches: keep every root inside the fixture.
 export LEGATO_SCRATCH_ROOT="$T/claude" LEGATO_SCRATCH_PROJECT_GLOB='-Users-x-Documents-legato*' LEGATO_TESTS_CACHE="$T/LegatoTests"
+# The pruner also deletes stale legato* simulators; the fixture must never touch the real ones.
+export LEGATO_PRUNE_SIMULATORS=0
 C="$LEGATO_CACHE_DIR"
 mkdir -p "$TMPDIR" "$C"
 source "$ROOT/scripts/e2e/work-dir.sh"

@@ -114,8 +114,8 @@ final class HarnessDocument: TextDocument {
         }
     }
 
-    func insert(_ text: String) { textView.insertText(text) }
-    func deleteBackward() { textView.deleteBackward() }
+    func insert(_ text: String) { textView.insertText(text); E2E.log("harness.edit doc=\(E2E.quote(self.text))") }
+    func deleteBackward() { textView.deleteBackward(); E2E.log("harness.edit doc=\(E2E.quote(self.text))") }
 
     func adjustTextPosition(byCharacterOffset offset: Int) {
         // The proxy counts UTF-16 units, as UITextView's NSRange does.
@@ -211,6 +211,40 @@ final class KeyboardHarnessModel {
         case "harness-type": runTypingCases()
         default: E2E.log("harness.unknown \(command)")
         }
+    }
+
+    // MARK: Bridge drive (scripts/e2e/ios-sim.sh)
+
+    /// What the scenarios read: the field, the surface, the composer the keyboard shows and the held take.
+    var state: [String: Any] {
+        let published = controller.composer
+        return ["text": document.text, "visible": controller.isVisible, "surface": controller.surface.rawValue,
+                "composerText": published.snapshot.lines.map(\.text).joined(separator: "\n"),
+                "composerLines": published.snapshot.lines.count, "composerSession": published.sessionID ?? "",
+                "pendingInsert": controller.pendingComposerInsert != nil,
+                "takePhase": published.dictationTakePhase ?? "", "takeText": published.dictationTake ?? "",
+                "takeFailed": controller.takeFailed, "status": controller.statusText ?? ""]
+    }
+
+    func setVisible(_ visible: Bool) -> [String: Any] {
+        if visible { appeared() } else { controller.disappeared() }
+        return state
+    }
+
+    func show(_ surface: KeyboardSurface) -> [String: Any] {
+        controller.show(surface)
+        return state
+    }
+
+    func press(_ action: (KeyboardController) -> Void) -> [String: Any] {
+        action(controller)
+        return state
+    }
+
+    func clearDocument() -> [String: Any] {
+        document.textView.text = ""
+        controller.documentDidChange()
+        return state
     }
 
     private func runTypingCases() {

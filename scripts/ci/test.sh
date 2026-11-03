@@ -23,6 +23,8 @@ phase_started=$SECONDS
 /bin/bash scripts/ci/tests/check-internal-exclusion-test.sh
 scripts/e2e/tests/build-cache-test.sh
 scripts/e2e/tests/cache-lock-race-test.sh
+scripts/e2e/tests/dispatch-test.sh
+scripts/dev/tests/prune-sims-test.sh
 echo "::notice::Shell checks completed in $((SECONDS - phase_started)) s."
 phase_started=$SECONDS
 # This gate consumes binaries and test results, not IDE indexing data.

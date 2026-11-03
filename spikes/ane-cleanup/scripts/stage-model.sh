@@ -10,6 +10,7 @@ repo=$(jq -er --arg id "$model" '.models[]|select(.id==$id)|.repository' models.
 revision=$(jq -er --arg id "$model" '.models[]|select(.id==$id)|.revision' models.json)
 printf 'Pinned checkpoint: %s @ %s\nTarget: .cache/models/%s\nNo files are deleted.\n' "$repo" "$revision" "$model"
 [ "$mode" = --download ] || exit 0
+bash scripts/cache-link.sh   # .cache is the shared spike cache; no-op when already linked
 mkdir -p .cache/models
 manifest=".cache/models/$model-download-manifest.json"
 curl --fail --location --silent --show-error "https://huggingface.co/api/models/$repo/revision/$revision?blobs=true" -o "$manifest"

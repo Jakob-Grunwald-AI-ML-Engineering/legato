@@ -43,6 +43,8 @@ LEGATO_SPIKE_FIXTURE=1 bash scripts/build.sh Release <physical-device-udid>
 
 That selects `fixture-project.yml`, `ANECleanupFixture.xcodeproj` and `.cache/FixtureDerivedData`; its app/extension bundle IDs and data container match the isolated parity target. Only one composition can be installed at a time. `device-run.sh install` points to the default parity product in `.cache/DerivedData`, so it is not an installer for the separate fixture build. The fixture CLI/URLs described below are not controls for the new default target.
 
+`.cache/` and `models/` are symlinks into the shared `~/Library/Caches/legato/spikes/ane-cleanup/` (see `scripts/cache-link.sh`, run by `setup.sh --prepare`), so worktrees share one download; an existing real directory is migrated, not overwritten.
+
 Setup downloads only pinned ANEMLL source, verifies the archive, applies three versioned patches and records tool/patch hashes in `.cache/build-provenance.txt`. It refuses unexpected source state and reserves 3 GiB. The real combined dependency compatibility build succeeded using ANEMLL `f4ad26d…`, its `anemll-swift-cli` package and Legato's exact swift-transformers 1.3.5. The patches pin that requirement, provide a synchronized cancellation hook at every direct prediction site, and expose raw/canonical tokenization without extra BOS. An iOS build checks real APIs; stubs and simulator runs prove no ANE behavior.
 
 Repository pin: Xcode 26.6; this machine currently has Xcode 27.1 (27A9275) only. Actual build versions are recorded. Deployment remains iOS 26.0. No iOS 27 inference entitlement is requested. XcodeGen must be 2.46.0. All remote dependency revisions are locked in `Package.resolved`; builds reuse `~/Library/Caches/legato/SourcePackages`.

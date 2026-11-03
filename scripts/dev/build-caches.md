@@ -18,10 +18,14 @@ Builds of one target serialize on that directory's lock, and every build also ho
 
 ## Pruning
 
-`scripts/dev/prune-build-caches.sh` (dry run) and `... --delete` remove all other Legato build output: old `build-derived/`, `e2e-derived/`, `device-derived/` and unknown entries in the cache dir or `derived/`, stale `$TMPDIR/legato-*` and dead `legato-e2e.*` work dirs, and Xcode's `~/Library/Developer/Xcode/DerivedData/Legato*`. It keeps the fixed directories, `SourcePackages`, the `legato-xcodegen-*` tool cache, `~/Library/Caches/LegatoTests` (downloaded models) and agent scratchpads. It skips anything locked, anything modified within `LEGATO_PRUNE_GRACE_SECONDS` (default 3600) and symlinks (never followed). It does not touch installed apps. There is no age limit or size budget; run it at session start and at wrap-up.
+`scripts/dev/prune-build-caches.sh` (dry run) and `... --delete` remove all other Legato build output: old `build-derived/`, `e2e-derived/`, `device-derived/` and unknown entries in the cache dir or `derived/`, stale `$TMPDIR/legato-*` and dead `legato-e2e.*` work dirs, Xcode's `~/Library/Developer/Xcode/DerivedData/Legato*`, and shut-down `legato*` simulators (2.5 to 6 GB each, deleted with `simctl delete`). It keeps the fixed directories, `SourcePackages`, the `legato-xcodegen-*` tool cache, `~/Library/Caches/LegatoTests` (downloaded models) and agent scratchpads. It always keeps the simulator `legato-e2e` (the one `ios-sim.sh` reuses), any simulator named in `LEGATO_E2E_UDID`, booted simulators (KEEP line) and the shared spike cache below. `LEGATO_PRUNE_SIMULATORS=0` skips simulators. It skips anything locked, anything modified within `LEGATO_PRUNE_GRACE_SECONDS` (default 3600) and symlinks (never followed). It does not touch installed apps. There is no age limit or size budget; run it at session start and at wrap-up.
 
-`scripts/dev/prune-build-caches.sh --report` prints the size of each fixed directory and each prunable item and deletes nothing.
+`scripts/dev/prune-build-caches.sh --report` prints the size of each fixed directory and each prunable item (including `legato*` simulators with their state) and the shared spike cache, and deletes nothing.
+
+## Spike cache
+
+`spikes/ane-cleanup` keeps its ANEMLL source, build output and model weights (tens of GB) in `<cache>/spikes/ane-cleanup/{cache,models}`, shared by every worktree. `scripts/setup.sh --prepare` (and `stage-model.sh --download`) runs `scripts/cache-link.sh`, which symlinks the spike's `.cache` and `models` to it and migrates an existing real directory instead of overwriting it. A fresh worktree therefore reuses the download. The pruner reports this directory and never deletes it; remove it by hand to reclaim the space.
 
 ## Tests
 
-`scripts/e2e/tests/build-cache-test.sh` drives the pruner on private fixtures and the real `mac-build`, gate and simulator entry points with fake Xcode tools. `cache-lock-race-test.sh` covers lock interleavings; `cleanup-test.sh` covers simulator work-directory signal cleanup.
+`scripts/e2e/tests/build-cache-test.sh` drives the pruner on private fixtures and the real `mac-build`, gate and simulator entry points with fake Xcode tools. `cache-lock-race-test.sh` covers lock interleavings; `cleanup-test.sh` covers simulator work-directory signal cleanup. `scripts/dev/tests/prune-sims-test.sh` covers simulator pruning (stubbed `xcrun`) and the spike cache link. Fixture tests that run `--delete` against the real PATH should export `LEGATO_PRUNE_SIMULATORS=0`.

@@ -12,9 +12,13 @@
 #   - stale $TMPDIR/legato-* dirs (CI-style gate/mac work dirs) and dead $TMPDIR/legato-e2e.* work dirs;
 #     the legato-xcodegen-* tool cache and legato-device-ctl (ctl.sh state) are kept
 #   - ~/Library/Developer/Xcode/DerivedData/Legato* (the IDE's per-checkout copies)
+#   - shut-down CoreSimulator devices named legato* (test leftovers, 2.5-6 GB each) via `simctl delete`. Kept
+#     with a KEEP line: legato-e2e (ios-sim.sh's reusable simulator), any UDID in LEGATO_E2E_UDID, booted ones.
+#     LEGATO_PRUNE_SIMULATORS=0 skips simulators entirely (for fixture tests); no xcrun means none.
 # Skipped, with a KEEP line: anything locked (.lock owner dir or kernel-held .guard claim), anything
 # modified within the last LEGATO_PRUNE_GRACE_SECONDS (default 3600), and symlinks (never followed).
-# Never touched: installed/delivered apps, ~/Library/Caches/LegatoTests (downloaded models), agent scratchpads.
+# Never touched: installed/delivered apps, ~/Library/Caches/LegatoTests (downloaded models), agent scratchpads,
+# and the shared spike cache <cache>/spikes (ANEMLL source, model weights; reported, never deleted).
 #
 # --report prints disk use per fixed directory and per prunable item, deleting nothing.
 set -uo pipefail
@@ -37,6 +41,7 @@ grace="${LEGATO_PRUNE_GRACE_SECONDS:-3600}"
 cache="$(legato_cache_dir)"
 xcode_dd="${LEGATO_DERIVED_DATA:-$HOME/Library/Developer/Xcode/DerivedData}"
 tests_cache="${LEGATO_TESTS_CACHE:-$HOME/Library/Caches/LegatoTests}"
+sim_devices="${LEGATO_SIM_DEVICES:-$HOME/Library/Developer/CoreSimulator/Devices}"
 
 kb_of() { du -sk "$1" 2> /dev/null | awk '{s += $1} END {print s + 0}'; }
 # True while anything under $1 changed within the last $2 seconds.
@@ -94,6 +99,22 @@ scratchpad_build_kb() { # informational only: agent scratchpad content is never 
   echo "$kb"
 }
 
+# Stale simulators: "<udid>\t<name>\t<state>" for every legato* device (legato-e2e-kb, legato58-production, ...) except legato-e2e. Prints nothing
+# without xcrun or when LEGATO_PRUNE_SIMULATORS=0. Whether one is kept (booted, LEGATO_E2E_UDID) is decided later.
+stale_simulators() {
+  [ "${LEGATO_PRUNE_SIMULATORS:-1}" != 0 ] && command -v xcrun > /dev/null 2>&1 || return 0
+  xcrun simctl list devices -j 2> /dev/null | python3 -I -c '
+import json, sys
+try:
+    runtimes = json.load(sys.stdin)["devices"].values()
+except Exception:
+    sys.exit(0)
+for devices in runtimes:
+    for d in devices:
+        if d["name"].startswith("legato") and d["name"] != "legato-e2e":
+            print("%s\t%s\t%s" % (d["udid"], d["name"], d["state"]))
+'
+}
 row() { printf '%12d KB  %s\n' "$2" "$1"; }
 
 if [ "$report" = 1 ]; then
@@ -110,8 +131,13 @@ if [ "$report" = 1 ]; then
     [ -n "$d" ] || continue
     kb="$(kb_of "$d")"; row "$d" "$kb"; extra=$((extra + kb))
   done < <({ cache_extras; tmp_legato_dirs; xcode_legato_dirs; } | sort -u)
+  while IFS=$'\t' read -r u n st; do
+    [ -n "$u" ] || continue
+    kb="$(kb_of "$sim_devices/$u")"; row "simulator $n ($st) $u" "$kb"; extra=$((extra + kb))
+  done < <(stale_simulators)
   row 'Prunable total' "$extra"
   echo 'Not pruned (informational):'
+  row "shared spike cache $cache/spikes (never pruned)" "$(kb_of "$cache/spikes")"
   row "LegatoTests caches $tests_cache" "$(kb_of "$tests_cache")"
   row 'agent scratchpad content of legato projects' "$(scratchpad_build_kb)"
   printf '%12d KB  Total kept + prunable (%.1f GB)\n' "$((keep + extra))" "$(echo "($keep + $extra) / 1048576" | bc -l)"
@@ -168,6 +194,17 @@ while IFS= read -r d; do
 done < <(cache_extras | sort -u)
 while IFS= read -r d; do if [ -n "$d" ]; then reap "$d" 'stale temp' || status=1; fi; done < <(tmp_legato_dirs)
 while IFS= read -r d; do if [ -n "$d" ]; then reap "$d" 'Xcode IDE copy' || status=1; fi; done < <(xcode_legato_dirs)
+
+# Stale legato-* simulators: shut down, not legato-e2e, not LEGATO_E2E_UDID. Dry run only says what would go.
+while IFS=$'\t' read -r u n st; do
+  [ -n "$u" ] || continue
+  if [ "$u" = "${LEGATO_E2E_UDID:-}" ]; then echo "KEEP LEGATO_E2E_UDID simulator: $n $u"; continue; fi
+  if [ "$st" != Shutdown ]; then echo "KEEP $st simulator: $n $u"; continue; fi
+  kb="$(kb_of "$sim_devices/$u")"
+  if [ "$delete" = 1 ] && ! xcrun simctl delete "$u" > /dev/null 2>&1; then echo "FAILED to delete simulator: $n $u" >&2; status=1; continue; fi
+  echo "stale simulator: $kb KB $n $u"
+  removed_kb=$((removed_kb + kb))
+done < <(stale_simulators)
 
 # Dead-owner simulator work dirs: the same sweep ios-sim.sh runs at start.
 if [ "$delete" = 1 ]; then sweep_stale_work_dirs "${TMPDIR:-/tmp}"; else sweep_stale_work_dirs "${TMPDIR:-/tmp}" 1; fi
