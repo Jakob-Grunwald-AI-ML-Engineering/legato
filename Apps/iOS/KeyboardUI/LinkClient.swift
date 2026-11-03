@@ -25,6 +25,13 @@ final class LinkClient {
         })
     }
 
+    /// Calls `handler` on the main actor for every `link.composer` note (the app published the composer).
+    func observeComposer(_ handler: @escaping @MainActor () -> Void) {
+        observers.append(DarwinObserver(name: LinkChannel.Note.composer) {
+            Task { @MainActor in handler() }
+        })
+    }
+
     /// Stops the `link.host` observation; the handlers never run again.
     func stopObserving() { observers.removeAll() }
 

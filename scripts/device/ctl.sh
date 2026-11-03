@@ -23,6 +23,9 @@
 #   pull [--group] <path>    copy a file from the data container (Library/, Documents/, tmp/) or, with
 #                            --group, the App Group container, and print it (e.g. pull Library/Caches/audio-diag.jsonl)
 #   pull-sessions [--group] <path>  alias of pull for session directories/files
+#   device-logs [--since <dur>]  collect the iPhone's unified log (default --since 10m; <num>m|h|d), keep the
+#                            subsystem de.gruenwald.legato lines (app, keyboard, widget) in $STATE/pulled/device-logs.txt
+#                            and print its path with the composer-view/keyboard-composer findings (#225)
 #
 # Bridge commands (send): ping, commands, state, set-setting <key> <value>, plus in Debug builds the
 # composer-*, dictation-* and harness-* commands the simulator e2e run uses (see Apps/iOS/App/Debug/DebugBridge.swift).
@@ -31,7 +34,8 @@
 # Environment: LEGATO_DEVICE (UDID, default the project iPhone), LEGATO_DEVICE_TEAM (default XWSGN23W75),
 # LEGATO_DEVICE_STATE (scratch dir for pulled logs), LEGATO_CACHE_DIR (build caches).
 # LEGATO_DEVICE_TIMEOUT (per-operation cap, 10s), LEGATO_DEVICE_INSTALL_TIMEOUT (120s),
-# LEGATO_DEVICE_LAUNCH_TIMEOUT and LEGATO_DEVICE_SEND_TIMEOUT (total budget, 30s each).
+# LEGATO_DEVICE_LAUNCH_TIMEOUT and LEGATO_DEVICE_SEND_TIMEOUT (total budget, 30s each),
+# LEGATO_DEVICE_LOGS_TIMEOUT (device-logs collect and filter, 300s).
 # Limits: the phone must be unlocked for launch/copy; the keyboard extension and locking the phone
 # cannot be driven from here.
 set -euo pipefail
@@ -549,11 +553,41 @@ cmd_pull() {
   if [ -d "$dest" ]; then ls -l "$dest"; else cat "$dest"; fi
 }
 
+# Unified log of the physical iPhone: `log collect --device-udid` writes a .logarchive (needs the phone
+# unlocked and paired), `log show --archive` filters it. Debug-level lines are included; our messages mark
+# draft content private, so the file holds counts and flags only.
+cmd_device_logs() {
+  local since=10m
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --since) [ $# -ge 2 ] || die "usage: device-logs [--since <num>[m|h|d]]"; since="$2"; shift 2 ;;
+      *) die "usage: device-logs [--since <num>[m|h|d]]" ;;
+    esac
+  done
+  case "$since" in [0-9]*[mhd]) ;; *) die "--since must look like 10m, 2h or 1d" ;; esac
+  case "${since%?}" in '' | *[!0-9]*) die "--since must look like 10m, 2h or 1d" ;; esac
+  [ "$TARGET" = device ] || die "device-logs reads the physical iPhone; use the simulator's own log (xcrun simctl spawn booted log show)"
+  require_device
+  local archive="$STATE/device-logs.logarchive" dest="$STATE/pulled/device-logs.txt" budget="${LEGATO_DEVICE_LOGS_TIMEOUT:-300}"
+  positive_seconds "$budget" "device logs timeout"
+  mkdir -p "$STATE/pulled"
+  rm -rf "$archive" "$dest"
+  run_bounded_tool "$budget" log collect --device-udid "$DEVICE" --last "$since" --output "$archive" > /dev/null \
+    || die "log collect failed: is the iPhone unlocked and paired with this Mac?"
+  [ -e "$archive" ] || die "log collect produced no archive"
+  run_bounded_tool "$budget" log show --archive "$archive" --info --debug --style compact \
+    --predicate 'subsystem == "de.gruenwald.legato"' > "$dest.part" || { rm -f "$dest.part"; die "log show failed on $archive"; }
+  mv "$dest.part" "$dest"
+  echo "$dest ($(wc -l < "$dest" | tr -d ' ') lines, last $since)"
+  grep -E 'composer\.view blank|composer\.poll (stale|start|stop)' "$dest" | tail -n 20 || true
+}
+
 sub="${1:-}"
 [ $# -eq 0 ] || shift
 case "$sub" in
   import-keys) cmd_import_keys "$@" ;;
   pull-sessions) cmd_pull "$@" ;;
+  device-logs) cmd_device_logs "$@" ;;
   devices | build | install | launch | send | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;
 esac

@@ -98,6 +98,8 @@ public struct ComposerLink: Sendable {
     public init(store: LinkStore) { self.store = store }
     public func publish(_ value: ComposerPublication) { store.write(value, forKey: LinkChannel.Key.composer) }
     public func read() -> ComposerPublication? { store.read(ComposerPublication.self, forKey: LinkChannel.Key.composer) }
+    /// Size of the stored publication, for diagnostics only.
+    public var storedByteCount: Int? { encodedPublication?.count }
     public func acknowledge(_ revision: Int) { store.write(revision, forKey: LinkChannel.Key.composerAck) }
     public var acknowledged: Int { store.read(Int.self, forKey: LinkChannel.Key.composerAck) ?? 0 }
     public func send(_ intent: ComposerIntent) { store.write(intent, forKey: LinkChannel.Key.composerIntentPrefix + intent.id) }
