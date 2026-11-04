@@ -8,6 +8,19 @@ public struct MeetingDayGroup: Sendable, Equatable {
     public var meetings: [Meeting]
 }
 
+/// A project's meetings in the sidebar; `project` nil: filed under the client only.
+public struct MeetingProjectGroup: Sendable, Equatable {
+    public var project: String?
+    /// Newest first.
+    public var meetings: [Meeting]
+}
+
+/// A client's projects in the sidebar; `client` nil: meetings that are not filed.
+public struct MeetingClientGroup: Sendable, Equatable {
+    public var client: String?
+    public var projects: [MeetingProjectGroup]
+}
+
 /// What the meetings list shows when it has no cards.
 public enum MeetingListEmptyState: Sendable, Equatable { case none, noMeetings, searching, noMatch }
 
@@ -34,6 +47,36 @@ public enum MeetingListLogic {
         let byDay = Dictionary(grouping: meetings) { calendar.startOfDay(for: $0.date) }
         return byDay.keys.sorted(by: >).map { day in
             MeetingDayGroup(day: day, meetings: byDay[day]!.sorted { $0.date > $1.date })
+        }
+    }
+
+    /// The sidebar's folders: meetings grouped Client, then Project, each newest first. Unfiled meetings (no client)
+    /// come last; a client's meetings without a project come first in it. Names sort ignoring case.
+    public static func groupByClient(_ meetings: [Meeting]) -> [MeetingClientGroup] {
+        func key(_ s: String?) -> String? { s?.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let byClient = Dictionary(grouping: meetings) { key($0.client) }
+        let groups = byClient.values.map { members -> MeetingClientGroup in
+            let byProject = Dictionary(grouping: members) { key($0.project) }
+            let projects = byProject.values.map { items in
+                MeetingProjectGroup(project: items.compactMap(\.project).first, meetings: items.sorted { $0.date > $1.date })
+            }
+            .sorted { a, b in
+                switch (a.project, b.project) {
+                case (nil, _?): true
+                case (_?, nil): false
+                case (let x?, let y?): x.localizedCaseInsensitiveCompare(y) == .orderedAscending
+                default: false
+                }
+            }
+            return MeetingClientGroup(client: members.compactMap(\.client).first, projects: projects)
+        }
+        return groups.sorted { a, b in
+            switch (a.client, b.client) {
+            case (nil, _?): false
+            case (_?, nil): true
+            case (let x?, let y?): x.localizedCaseInsensitiveCompare(y) == .orderedAscending
+            default: false
+            }
         }
     }
 
@@ -67,7 +110,7 @@ public enum MeetingListLogic {
     ) -> Bool {
         let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !words.isEmpty else { return true }
-        var parts = [meeting.title] + summaries + meeting.speakers.values.map(\.name) + segments.map(\.text)
+        var parts = [meeting.title] + [meeting.client, meeting.project].compactMap { $0 } + meeting.tags + summaries + meeting.speakers.values.map(\.name) + segments.map(\.text)
         if let notes { parts.append(notes) }
         let haystack = parts.joined(separator: "\n")
         return words.allSatisfy { haystack.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }

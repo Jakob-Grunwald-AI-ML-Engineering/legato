@@ -188,6 +188,21 @@ final class ScriptedClaude: LLMBackend {
         #expect(retried.summaryFailure == nil && retried.completedSteps.contains(.summary))
     }
 
+    @Test func aMeetingIsRetitledAndFiledAndComesBackAfterARelaunch() async throws {
+        let rig = ServicesRig()
+        defer { rig.cleanup() }
+        let meeting = try await rig.saved(state: .finished)
+        let saved = try await rig.services.updateMetadata(
+            meetingID: meeting.id, MeetingMetadata(title: "Kickoff", client: "Acme", project: "Website", tags: ["design"]))
+        #expect(saved.title == "Kickoff")
+        let relaunched = MeetingStore(root: rig.root)
+        let found = try await relaunched.meetings(matching: .init(client: "acme", project: "website", tags: ["Design"], query: "kickoff"))
+        #expect(found.map(\.id) == [meeting.id])
+        await #expect(throws: MeetingServicesError.unknownMeeting) {
+            try await rig.services.updateMetadata(meetingID: UUID(), MeetingMetadata(title: "x"))
+        }
+    }
+
     @Test func aSummaryOffLeavesItToTheUser() async throws {
         let rig = ServicesRig(autoSummary: false)
         defer { rig.cleanup() }

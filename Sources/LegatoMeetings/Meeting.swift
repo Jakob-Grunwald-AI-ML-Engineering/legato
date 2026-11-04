@@ -56,6 +56,34 @@ public struct TranscriptGap: Sendable, Equatable, Codable {
     }
 }
 
+/// What the user files a meeting under: a title, an optional client and project (the folders: Client, then
+/// Project inside it) and tags. Plain strings, stored as they are in `meeting.json` for other readers (a CLI).
+public struct MeetingMetadata: Sendable, Equatable, Codable {
+    public var title: String
+    public var client: String?
+    public var project: String?
+    public var tags: [String]
+
+    public init(title: String, client: String? = nil, project: String? = nil, tags: [String] = []) {
+        self.title = title
+        self.client = client
+        self.project = project
+        self.tags = tags
+    }
+
+    /// Trimmed; a blank client or project is none; tags without blanks and without repeats (ignoring case),
+    /// in the order given. A blank title is `fallbackTitle`.
+    public func normalized(fallbackTitle: String) -> MeetingMetadata {
+        func clean(_ value: String?) -> String? {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        var seen = Set<String>()
+        let tags = self.tags.compactMap(clean).filter { seen.insert($0.lowercased()).inserted }
+        return MeetingMetadata(title: clean(title) ?? fallbackTitle, client: clean(client), project: clean(project), tags: tags)
+    }
+}
+
 /// A recorded meeting: what `meeting.json` holds. Segments live next to it in `segments.jsonl`.
 public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public enum State: String, Sendable, Equatable, Codable {
@@ -79,6 +107,10 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
 
     public var id: UUID
     public var title: String
+    /// The folder the meeting is filed under, with ``project``; nil: not filed.
+    public var client: String?
+    public var project: String?
+    public var tags: [String]
     public var date: Date
     /// Seconds of audio.
     public var duration: TimeInterval
@@ -102,13 +134,17 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public var summaryFailure: String?
 
     public init(
-        id: UUID = UUID(), title: String, date: Date, duration: TimeInterval = 0,
+        id: UUID = UUID(), title: String, client: String? = nil, project: String? = nil, tags: [String] = [],
+        date: Date, duration: TimeInterval = 0,
         mutedRanges: [MutedRange] = [], pausedRanges: [PausedRange] = [], gaps: [TranscriptGap] = [],
         speakers: [PersonID: SpeakerInfo] = [:], mergedSpeakers: [PersonID: PersonID] = [:], locale: String? = nil,
         sections: [SectionID]? = nil, state: State = .recording, completedSteps: Set<Step> = [], summaryFailure: String? = nil
     ) {
         self.id = id
         self.title = title
+        self.client = client
+        self.project = project
+        self.tags = tags
         self.date = date
         self.duration = duration
         self.mutedRanges = mutedRanges
@@ -123,11 +159,19 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         self.summaryFailure = summaryFailure
     }
 
+    public var metadata: MeetingMetadata {
+        get { MeetingMetadata(title: title, client: client, project: project, tags: tags) }
+        set { (title, client, project, tags) = (newValue.title, newValue.client, newValue.project, newValue.tags) }
+    }
+
     // Fields that came later decode with their default, so a `meeting.json` written before one still opens.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         title = try c.decode(String.self, forKey: .title)
+        client = try c.decodeIfPresent(String.self, forKey: .client)
+        project = try c.decodeIfPresent(String.self, forKey: .project)
+        tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         date = try c.decode(Date.self, forKey: .date)
         duration = try c.decode(TimeInterval.self, forKey: .duration)
         mutedRanges = try c.decodeIfPresent([MutedRange].self, forKey: .mutedRanges) ?? []

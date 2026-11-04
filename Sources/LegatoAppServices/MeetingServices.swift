@@ -296,6 +296,15 @@ public final class MeetingServices {
         }
     }
 
+    /// Retitles the meeting and files it: client, project and tags (see ``MeetingMetadata``). Throws
+    /// ``MeetingServicesError/unknownMeeting`` for a meeting that is gone. Works while the meeting records:
+    /// the session saves only the fields it owns.
+    @discardableResult
+    public func updateMetadata(meetingID id: UUID, _ metadata: MeetingMetadata) async throws -> Meeting {
+        guard let meeting = try await store.updateMetadata(id: id, metadata) else { throw MeetingServicesError.unknownMeeting }
+        return meeting
+    }
+
     /// Removes a saved meeting and everything of it. A meeting that records is not touched.
     public func deleteMeeting(id: UUID) async throws {
         guard id != activeMeetingID else { return }

@@ -80,6 +80,68 @@ public actor MeetingStore {
         try FileManager.default.removeItem(at: folder)
     }
 
+    // MARK: Metadata
+
+    /// Files the meeting: its title (blank keeps the old one), client, project and tags, normalized
+    /// (``MeetingMetadata/normalized(fallbackTitle:)``). Returns the saved meeting, nil when it does not exist.
+    @discardableResult
+    public func updateMetadata(id: UUID, _ metadata: MeetingMetadata) throws -> Meeting? {
+        try update(id: id) { $0.metadata = metadata.normalized(fallbackTitle: $0.title) }
+    }
+
+    /// What a list narrows to. Client, project and tags match ignoring case and accents; every tag must be on the
+    /// meeting. `query` words must each appear in the title, client, project or a tag.
+    public struct Filter: Sendable, Equatable {
+        public var client: String?
+        public var project: String?
+        public var tags: [String]
+        public var query: String
+
+        public init(client: String? = nil, project: String? = nil, tags: [String] = [], query: String = "") {
+            self.client = client
+            self.project = project
+            self.tags = tags
+            self.query = query
+        }
+
+        public func matches(_ meeting: Meeting) -> Bool {
+            if let client, !Self.same(client, meeting.client) { return false }
+            if let project, !Self.same(project, meeting.project) { return false }
+            for tag in tags where !meeting.tags.contains(where: { Self.same(tag, $0) }) { return false }
+            let haystack = ([meeting.title, meeting.client, meeting.project].compactMap { $0 } + meeting.tags).joined(separator: "\n")
+            return query.split(whereSeparator: \.isWhitespace).allSatisfy {
+                haystack.range(of: String($0), options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+        }
+
+        private static func same(_ a: String, _ b: String?) -> Bool {
+            guard let b else { return false }
+            return a.compare(b, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+    }
+
+    /// Newest first, narrowed by `filter`.
+    public func meetings(matching filter: Filter) throws -> [Meeting] {
+        try meetings().filter(filter.matches)
+    }
+
+    /// The clients in use, sorted, one spelling for each (the first meeting's, newest first).
+    public func knownClients() throws -> [String] { Self.distinct(try meetings().compactMap(\.client)) }
+
+    /// The projects in use, sorted; of one `client` when given.
+    public func knownProjects(client: String? = nil) throws -> [String] {
+        let all = try meetings().filter { client == nil || Filter(client: client).matches($0) }
+        return Self.distinct(all.compactMap(\.project))
+    }
+
+    public func knownTags() throws -> [String] { Self.distinct(try meetings().flatMap(\.tags)) }
+
+    private static func distinct(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)).inserted }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
     // MARK: Notes
 
     /// The user's notes; nil when there are none (a blank note is no note).
