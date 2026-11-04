@@ -3,7 +3,7 @@ import LegatoCore
 
 /// Renders a meeting as Markdown: title, date, duration, the summary, the user's notes, then the transcript.
 ///
-/// The transcript is one paragraph per segment, `**Alice** [mm:ss] text` named by the meeting's speakers, in
+/// The transcript is one paragraph per turn (consecutive segments of one speaker), `**Alice** [mm:ss] text` named by the meeting's speakers, in
 /// time order, with muted and paused ranges noted where they begin (`_Microphone muted 00:30–01:10_`,
 /// `_Paused 02:00–02:30_`, `_Transcript missing 04:10–04:55_`). A segment with no speaker has no name.
 public enum MarkdownExporter {
@@ -33,7 +33,7 @@ public enum MarkdownExporter {
             case muted(MutedRange)
             case paused(PausedRange)
             case gap(TranscriptGap)
-            case spoken(MeetingSegment)
+            case spoken(MeetingTurn)
             var start: TimeInterval {
                 switch self {
                 case .muted(let r): r.start
@@ -43,8 +43,11 @@ public enum MarkdownExporter {
                 }
             }
         }
+        // Consecutive segments of one speaker read as one turn; no turn spans a muted, paused or missing stretch.
+        let breaks = meeting.mutedRanges.map(\.start) + meeting.pausedRanges.map(\.start) + meeting.gaps.map(\.start)
+        let turns = MeetingTurns.merge(segments, breakingAt: breaks)
         let items = (meeting.mutedRanges.map(Item.muted) + meeting.pausedRanges.map(Item.paused)
-            + meeting.gaps.map(Item.gap) + segments.map(Item.spoken))
+            + meeting.gaps.map(Item.gap) + turns.map(Item.spoken))
             .enumerated()
             .sorted { ($0.element.start, $0.offset) < ($1.element.start, $1.offset) }
             .map(\.element)
@@ -64,7 +67,7 @@ public enum MarkdownExporter {
         return blocks.joined(separator: "\n\n") + "\n"
     }
 
-    private static func label(_ segment: MeetingSegment, speakers: [PersonID: SpeakerInfo]) -> String? {
+    private static func label(_ segment: MeetingTurn, speakers: [PersonID: SpeakerInfo]) -> String? {
         segment.speaker.flatMap { speakers[$0]?.name }
     }
 

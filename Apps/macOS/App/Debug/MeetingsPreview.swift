@@ -139,6 +139,7 @@ import LegatoMeetings
         let lines: [UUID: [MeetingSegment]] = [
             planning.id: [
                 seg("P1", 4, "Let's start with the pricing page, since that blocks everything else in the relaunch."),
+                seg("P1", 10, "It also decides the order of every other page we touch."),
                 seg("P2", 15, "Agreed. Legal still has to approve the new plan names, so I'd keep the copy in a draft until Thursday."),
                 seg("P1", 31, "Fine by me. Jonas, can your team have the new navigation ready by the end of the month?"),
                 seg("P3", 45, "We can, if the design tokens land this week. Otherwise we ship it with the old colours and migrate later."),

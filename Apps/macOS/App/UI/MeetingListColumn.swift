@@ -69,7 +69,7 @@ private struct MeetingRow: View {
 
     /// "9:10 · 42 min · Acme".
     private var subtitle: String {
-        [meeting.date.formatted(date: .omitted, time: .shortened), MeetingFormat.length(meeting.duration), meeting.client ?? ""]
+        [MeetingFormat.time(meeting.date), MeetingFormat.length(meeting.duration), meeting.client ?? ""]
             .filter { !$0.isEmpty }.joined(separator: " · ")
     }
 

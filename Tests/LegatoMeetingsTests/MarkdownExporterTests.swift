@@ -58,6 +58,32 @@ import LegatoCore
         #expect(md.contains("**Alice Smith** [00:09] Hi, thanks for joining."))
     }
 
+    @Test func consecutiveSegmentsOfOneSpeakerFormOneParagraphWithTheFirstTimestamp() {
+        let segs = [
+            MeetingSegment(text: "I think", start: 10, end: 12, speaker: "P2"),
+            MeetingSegment(text: "we should ship", start: 12, end: 15, speaker: "P2"),
+            MeetingSegment(text: "on Friday.", start: 16, end: 18, speaker: "P2"),
+            MeetingSegment(text: "Agreed.", start: 20, end: 21, speaker: "P1"),
+        ]
+        let md = MarkdownExporter.markdown(meeting: meeting, segments: segs, summary: nil, timeZone: utc)
+        #expect(md.contains("**Alice** [00:10] I think we should ship on Friday.\n\n**You** [00:20] Agreed."))
+        #expect(!md.contains("[00:12]"))
+    }
+
+    @Test func aGapMuteOrPauseEndsAParagraph() {
+        // The meeting has a gap at 90, a mute at 30 and a pause at 120.
+        let segs = [
+            MeetingSegment(text: "Before the gap.", start: 80, end: 85, speaker: "P2"),
+            MeetingSegment(text: "After the gap.", start: 112, end: 115, speaker: "P2"),
+            MeetingSegment(text: "Before the pause.", start: 116, end: 118, speaker: "P2"),
+            MeetingSegment(text: "After the pause.", start: 152, end: 154, speaker: "P2"),
+        ]
+        let md = MarkdownExporter.markdown(meeting: meeting, segments: segs, summary: nil, timeZone: utc)
+        #expect(md.contains("**Alice** [01:20] Before the gap."))
+        #expect(md.contains("**Alice** [01:52] After the gap. Before the pause."))
+        #expect(md.contains("**Alice** [02:32] After the pause."))
+    }
+
     @Test func theSystemStreamsMuteIsNamedToo() {
         var m = meeting
         m.mutedRanges = [MutedRange(stream: .system, start: 5, end: 8)]

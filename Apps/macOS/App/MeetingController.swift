@@ -86,10 +86,20 @@ final class MeetingController {
     @ObservationIgnored private var startTask: Task<Void, Never>?
 
     init(root: URL, vocabularyURL: URL?, defaults: UserDefaults = .standard) {
+        var sonioxKey: @Sendable () -> String = { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" }
+        var claudeKeys: any APIKeyStore = KeychainKeyStore()
+        var makeSocket: @Sendable () -> any SonioxSocket = { URLSessionSonioxSocket() }
+        #if LEGATO_INTERNAL
+        if MeetingsFaults.noSonioxKey { sonioxKey = { "" } }
+        if MeetingsFaults.noClaudeKey { claudeKeys = MeetingsFaults.NoClaudeKey() }
+        if let seconds = MeetingsFaults.dropSonioxAfter {
+            let plan = MeetingsFaults.DropOnce(seconds: seconds)
+            makeSocket = { MeetingsFaults.DroppingSocket(plan: plan) }
+        }
+        #endif
         services = MeetingServices(
             store: MeetingStore(root: root), settings: MeetingSettings(defaults: defaults),
-            sonioxKey: { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" },
-            claudeKeys: KeychainKeyStore(), vocabularyURL: vocabularyURL)
+            sonioxKey: sonioxKey, claudeKeys: claudeKeys, vocabularyURL: vocabularyURL, makeSocket: makeSocket)
     }
 
     var isRecording: Bool { phase != .idle || services.isRecording }

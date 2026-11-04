@@ -16,9 +16,9 @@ needles=(DebugBridge DebugOverlayView session-probe debug-bridge 12SessionProbeO
 controls=(DebugBridge DebugOverlayView session-probe debug-bridge 'enum SessionProbe' 'Session probe:')
 files=(Debug/DebugBridge.swift Debug/DebugOverlay.swift Debug/DebugBridge.swift Debug/DebugBridge.swift Internal/SessionProbe.swift Internal/SessionProbe.swift)
 if [ "$platform" = mac ]; then
-  needles+=(LEGATO_MAC_ROOT)
-  controls+=(LEGATO_MAC_ROOT)
-  files+=(Debug/DebugBridge.swift)
+  needles+=(LEGATO_MAC_ROOT LegatoMeetingsDropSonioxAfter LegatoMeetingsNoSonioxKey LegatoMeetingsNoClaudeKey)
+  controls+=(LEGATO_MAC_ROOT LegatoMeetingsDropSonioxAfter LegatoMeetingsNoSonioxKey LegatoMeetingsNoClaudeKey)
+  files+=(Debug/DebugBridge.swift Debug/MeetingsFaults.swift Debug/MeetingsFaults.swift Debug/MeetingsFaults.swift)
 fi
 fail=0
 for ((i=0; i<${#needles[@]}; i++)); do

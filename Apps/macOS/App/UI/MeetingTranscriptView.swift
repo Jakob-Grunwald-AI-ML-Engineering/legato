@@ -63,20 +63,19 @@ struct MeetingTranscriptView: View {
 
     @State private var follow = TranscriptFollow()
 
-    private struct Turn: Identifiable {
-        var id: UUID
-        var speaker: PersonID?
-        var start: TimeInterval
-        var text: String
-    }
-
     private enum Item: Identifiable {
-        case turn(Turn)
+        case turn(MeetingTurn)
         case gap(TranscriptGap)
         var id: String {
             switch self {
             case .turn(let turn): turn.id.uuidString
             case .gap(let gap): "gap-\(gap.start)"
+            }
+        }
+        var start: TimeInterval {
+            switch self {
+            case .turn(let turn): turn.start
+            case .gap(let gap): gap.start
             }
         }
     }
@@ -94,7 +93,8 @@ struct MeetingTranscriptView: View {
                         }
                     }
                     if !volatile.isEmpty {
-                        Text(volatile).font(.body).lineSpacing(4).foregroundStyle(.secondary)
+                        // What is still being recognised: lighter and italic until it settles into a turn.
+                        Text(volatile).font(.body.italic()).lineSpacing(4).foregroundStyle(.tertiary)
                     } else if segments.isEmpty {
                         Text(live ? "Listening…" : "Nothing was transcribed.").foregroundStyle(.secondary)
                     }
@@ -105,49 +105,29 @@ struct MeetingTranscriptView: View {
                 .padding(20)
                 .textSelection(.enabled)
             }
-            .defaultScrollAnchor(live ? .bottom : .top)
+            // Starts at the top, so a short transcript is not pushed down; a live one follows its newest line once it
+            // is longer than the pane.
+            .task { if live { try? await Task.sleep(for: .milliseconds(150)); proxy.scrollTo("end", anchor: .bottom) } }
             .onScrollGeometryChange(for: Metrics.self) { geometry in
                 Metrics(offset: geometry.contentOffset.y, content: geometry.contentSize.height, container: geometry.containerSize.height)
             } action: { old, new in
                 if new.content != old.content || new.container != old.container {
-                    if live && follow.follows { proxy.scrollTo("end", anchor: .bottom) }
-                } else {
+                    // After the layout that grew the content, or the end it scrolls to is the old one.
+                    if live && follow.follows { Task { @MainActor in proxy.scrollTo("end", anchor: .bottom) } }
+                } else if new.offset != old.offset && new.container > 0 {
                     follow.scrollSettled(distanceFromBottom: new.content - new.offset - new.container)
                 }
             }
         }
     }
 
-    /// Segments and gaps in time order, the segments of one speaker joined into a turn; a gap ends a turn.
+    /// Turns and gaps in time order. A gap ends a turn.
     private var items: [Item] {
-        enum Entry { case segment(MeetingSegment), gap(TranscriptGap) }
-        func start(_ entry: Entry) -> TimeInterval {
-            switch entry { case .segment(let segment): segment.start; case .gap(let gap): gap.start }
-        }
-        let entries = (segments.map(Entry.segment) + meeting.gaps.map(Entry.gap)).sorted { start($0) < start($1) }
-        var items: [Item] = []
-        var open: Turn?
-        func close() { if let turn = open { items.append(.turn(turn)); open = nil } }
-        for entry in entries {
-            switch entry {
-            case .gap(let gap):
-                close()
-                items.append(.gap(gap))
-            case .segment(let segment):
-                if var turn = open, turn.speaker == segment.speaker {
-                    turn.text += " " + segment.text
-                    open = turn
-                } else {
-                    close()
-                    open = Turn(id: segment.id, speaker: segment.speaker, start: segment.start, text: segment.text)
-                }
-            }
-        }
-        close()
-        return items
+        let turns = MeetingTurns.merge(segments, breakingAt: meeting.gaps.map(\.start)).map(Item.turn)
+        return (turns + meeting.gaps.map(Item.gap)).sorted { $0.start < $1.start }
     }
 
-    private func row(_ turn: Turn) -> some View {
+    private func row(_ turn: MeetingTurn) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 if let person = turn.speaker, let info = meeting.speakers[person] {

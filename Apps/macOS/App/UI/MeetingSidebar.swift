@@ -51,8 +51,14 @@ struct MeetingSidebar: View {
                 Section("Clients") { OutlineGroup(folders, children: \.children) { row($0) } }
             }
             if !tags.isEmpty {
-                // Tags are a filter, not a folder: collapsed until wanted.
-                Section("Tags", isExpanded: $tagsOpen) { ForEach(tags) { row($0) } }
+                // Tags are a filter, not a folder: a collapsed group with its own disclosure triangle, apart from the clients.
+                Section {
+                    DisclosureGroup(isExpanded: $tagsOpen) {
+                        ForEach(tags) { row($0) }
+                    } label: {
+                        Label("Tags", systemImage: "tag").frame(minHeight: 28).badge(tags.count)
+                    }
+                }
             }
         }
         .listStyle(.sidebar)
