@@ -41,3 +41,7 @@ The first real Message run (`CA130DDD-BE2B-4BC0-9317-A3DE6D6A53B2`) exposed an e
 Checks: signed native Mac compilation passed; all four `NotchGeometryTests` passed; all seven affected Agent tests passed, including three empty/whitespace/truncated-input cases. Logs are `geometry.log`, `empty-input-red.log`, `empty-input-green.log` in the private evidence directory. Full integration gate belongs to the epic integration session.
 
 Private full state snapshots are `states.jsonl` in the same evidence directory. Provider traces and source-input evidence are `/Users/work/Documents/sessions/<sessionID>/room.jsonl`; these include `input.source`, full injected frames, requests, streamed events and tool results. No credentials were printed or committed.
+
+## Island placement (#230)
+
+The panel is a black island attached to the notch: its window reaches the screen top on notch displays with content below the camera, grows out of the notch on open and shrinks back on Cancel or after a send. Displays without a notch keep a black top-centre card. Earlier notes above describe the previous card below the camera. Visual check pending a human run.

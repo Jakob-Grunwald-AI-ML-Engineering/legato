@@ -9,6 +9,7 @@ import LegatoMac
 @MainActor @Observable
 final class DictationPillModel {
     var notice: String?
+    var style = NotchIslandStyle.detached
 }
 
 /// Never key, never main, never activating: the field underneath keeps focus. Clicks pass through except while a
@@ -16,6 +17,7 @@ final class DictationPillModel {
 private final class DictationPillPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 /// A click on a button of the (never key) pill acts at once instead of first activating the window.
@@ -23,7 +25,7 @@ private final class DictationPillHostingView<Content: View>: NSHostingView<Conte
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// A small glass pill at the top centre (under the notch when there is one) while dictation runs: the listening
+/// A small island growing out of the notch (a top-centre card without one) while dictation runs: the listening
 /// state and the live line, or a readable notice (missing key, no field, microphone).
 @MainActor
 final class DictationPillController {
@@ -31,13 +33,19 @@ final class DictationPillController {
     private let session: MacDictationSession
     private var panel: NSPanel?
     private var hideTask: Task<Void, Never>?
+    private var closeTask: Task<Void, Never>?
+    private var presentGeneration = 0
+    private let presentation = IslandPresentation()
+    private let occupiedFrame: () -> NSRect?
     private var lastNoticeID = 0
     private static let size = NSSize(width: 460, height: 64)
-    private static let failedSize = NSSize(width: 460, height: 112)
+    private static let failedSize = NSSize(width: 460, height: 92)
     private var size: NSSize { session.pipeline.takePhase == .failed ? Self.failedSize : Self.size }
 
-    init(session: MacDictationSession) {
+    /// `occupiedFrame` is the open composer, which a notice must not cover.
+    init(session: MacDictationSession, occupiedFrame: @escaping () -> NSRect? = { nil }) {
         self.session = session
+        self.occupiedFrame = occupiedFrame
         lastNoticeID = session.noticeID
         track()
     }
@@ -79,21 +87,46 @@ final class DictationPillController {
         }
     }
 
+    /// Shrinks back into the notch; a `present` meanwhile cancels it.
     private func hide() {
-        panel?.orderOut(nil)
+        guard let panel, panel.isVisible, closeTask == nil else { return }
+        panel.ignoresMouseEvents = true
+        presentation.close()
+        closeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(NotchIslandTokens.closeDuration + 0.05))
+            guard !Task.isCancelled, let self else { return }
+            closeTask = nil
+            panel.orderOut(nil)
+        }
     }
 
     private func present() {
+        presentGeneration += 1
+        closeTask?.cancel(); closeTask = nil
         let panel = self.panel ?? makePanel()
         self.panel = panel
+        let wasShown = panel.isVisible
         panel.ignoresMouseEvents = session.pipeline.takePhase != .failed
         position(panel)
+        if !wasShown { presentation.jump(to: false) }
         panel.orderFrontRegardless()
+        if wasShown { presentation.open() } else { openSoon() }
+    }
+
+    /// One frame at the notch size first, so the grow is drawn instead of skipped.
+    private func openSoon() {
+        let generation = presentGeneration
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(30))
+            guard let self, generation == presentGeneration else { return }
+            presentation.open()
+        }
     }
 
     private func makePanel() -> NSPanel {
         let panel = DictationPillPanel(contentRect: NSRect(origin: .zero, size: Self.size),
                                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.animationBehavior = .none
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
@@ -104,65 +137,78 @@ final class DictationPillController {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.becomesKeyOnlyIfNeeded = true
-        panel.contentView = DictationPillHostingView(rootView: DictationPillView(session: session, model: model))
+        panel.contentView = DictationPillHostingView(rootView: DictationPillView(session: session, model: model, presentation: presentation))
         return panel
     }
 
     private func position(_ panel: NSPanel) {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let size = self.size
-        let frame = NotchGeometry.frame(screen: screen.frame, visible: screen.visibleFrame, safeTop: screen.safeAreaInsets.top, height: Self.size.height)
-        panel.setFrame(NSRect(x: screen.frame.midX - size.width / 2, y: frame.minY - 6 + Self.size.height - size.height, width: size.width, height: size.height), display: true)
+        var style = NotchIslandStyle(screen: screen)
+        var frame = NotchGeometry.island(screen: screen.frame, visible: screen.visibleFrame, safeTop: style.safeTop, width: size.width, height: size.height)
+        if let occupied = occupiedFrame(), occupied.intersects(frame) {
+            style = .detached
+            frame = NSRect(x: frame.midX - size.width / 2, y: occupied.minY - 8 - size.height, width: size.width, height: size.height)
+        } else if !style.attached {
+            frame.origin.y -= 6
+        }
+        if model.style != style { model.style = style }
+        panel.setFrame(frame, display: true)
     }
 }
 
 struct DictationPillView: View {
     let session: MacDictationSession
     let model: DictationPillModel
+    let presentation: IslandPresentation
     private var pipeline: DictationPipeline { session.pipeline }
-    private static let shape = RoundedRectangle(cornerRadius: 22)
+    private static let rim = RoundedRectangle(cornerRadius: 18)
 
     var body: some View {
-        VStack {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .center, spacing: 10) {
-                    Image(systemName: symbol)
-                        .foregroundStyle(tint)
-                        .symbolEffect(.pulse, isActive: session.phase == .listening && model.notice == nil && pipeline.takePhase == .buffering)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 2) {
-                        if let caption {
-                            Text(caption).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                        }
-                        Text(line)
-                            .font(.system(size: 14))
-                            .foregroundStyle(showsPlaceholder ? .secondary : .primary)
-                            .lineLimit(caption == nil ? 2 : 1)
-                            .truncationMode(.head)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if showsFailedActions {
-                    HStack(spacing: 8) {
-                        Spacer(minLength: 0)
-                        Button("Retry") { Task { await pipeline.retry() } }
-                            .accessibilityIdentifier("dictation.pill.retry")
-                        Button("Insert as-is") { Task { await pipeline.insertRaw() } }
-                            .accessibilityIdentifier("dictation.pill.insertRaw")
-                    }
-                    .buttonStyle(.bordered).controlSize(.small)
-                }
+        NotchIsland(style: model.style, presentation: presentation) { card }
+            .accessibilityElement(children: showsFailedActions ? .contain : .combine)
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: symbol)
+                    .foregroundStyle(tint)
+                    .symbolEffect(.pulse, isActive: session.phase == .listening && model.notice == nil && pipeline.takePhase == .buffering)
+                    .frame(width: 20)
+                text
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .glassEffect(.regular, in: Self.shape)
-            .overlay { CountdownRim(shape: Self.shape, start: pipeline.countdownStart, deadline: pipeline.countdownDeadline, lineWidth: 2) }
-            Spacer(minLength: 0)
+            if showsFailedActions { failedActions }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.horizontal, 8)
-        .accessibilityElement(children: showsFailedActions ? .contain : .combine)
+        .overlay { CountdownRim(shape: Self.rim, start: pipeline.countdownStart, deadline: pipeline.countdownDeadline, lineWidth: 2).padding(5) }
+    }
+
+    private var text: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let caption {
+                Text(caption).font(NotchIslandTokens.caption).foregroundStyle(.secondary)
+            }
+            Text(line)
+                .font(NotchIslandTokens.body)
+                .foregroundStyle(showsPlaceholder ? .secondary : .primary)
+                .lineLimit(caption == nil ? 2 : 1)
+                .truncationMode(.head)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var failedActions: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            Button("Retry") { Task { await pipeline.retry() } }
+                .accessibilityIdentifier("dictation.pill.retry")
+            Button("Insert as-is") { Task { await pipeline.insertRaw() } }
+                .accessibilityIdentifier("dictation.pill.insertRaw")
+        }
+        .buttonStyle(.bordered).controlSize(.small)
     }
 
     private var showsFailedActions: Bool { model.notice == nil && pipeline.takePhase == .failed }

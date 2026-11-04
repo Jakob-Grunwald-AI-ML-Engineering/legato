@@ -1,6 +1,6 @@
 # Mac composer controls
 
-The panel now has one action strip with Mode, Undo, Redo, Insert, Cancel, Mute, and Dictate/Stop. Each control shows its actual shortcut. Insert uses a paper-plane glyph and the primary accent; secondary actions share rounded surfaces, hover/pressed feedback, and disabled states. The compact status header and adaptive document height retain the existing notch-safe placement and rounded fallback panel.
+The panel now has one action strip with Mode, Undo, Redo, Insert, Cancel, Mute, and Dictate/Stop. Each control shows its actual shortcut. Insert uses a paper-plane glyph and the primary accent; secondary actions share rounded surfaces, hover/pressed feedback, and disabled states. The compact status header and adaptive document height sit in the island attached to the notch (content below the camera; see `composer-mac.md`, Island placement) with a black top-centre card as the fallback.
 
 | Action | Panel shortcut |
 | --- | --- |
