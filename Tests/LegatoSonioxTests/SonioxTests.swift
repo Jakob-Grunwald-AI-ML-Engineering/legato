@@ -114,7 +114,7 @@ import LegatoRoom
     @Test func configCapsContextAndUsesHeader() throws {
         let config = SonioxConfig(mode: "Note", personalPrompt: String(repeating: "x", count: 40000), terms: (0..<150).map { "Term\($0)" })
         let json = try JSONDecoder().decode(JSONValue.self, from: config.message())
-        #expect(json["model"] == .string("stt-rt-v5"))
+        #expect(json["model"] == .string("stt-rt-v6"))
         #expect(json["audio_format"] == .string("pcm_s16le"))
         #expect(config.terms.count == 100)
         #expect(config.estimatedContextTokens < 8000)

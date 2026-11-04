@@ -39,7 +39,7 @@ public struct SonioxConfig: Sendable {
         let background = fittedBackground(backgroundText)
         if !background.isEmpty { context["text"] = background }
         return try JSONSerialization.data(withJSONObject: [
-            "model": "stt-rt-v5", "audio_format": "pcm_s16le", "sample_rate": 16000, "num_channels": 1,
+            "model": "stt-rt-v6", "audio_format": "pcm_s16le", "sample_rate": 16000, "num_channels": 1,
             "language_hints": ["de", "en"], "enable_language_identification": true,
             "enable_endpoint_detection": true, "context": context
         ], options: [.sortedKeys])
