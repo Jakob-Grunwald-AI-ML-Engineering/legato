@@ -39,7 +39,7 @@ final class DictationPillController {
     private let occupiedFrame: () -> NSRect?
     private var lastNoticeID = 0
     private static let size = NSSize(width: 460, height: 64)
-    private static let failedSize = NSSize(width: 460, height: 112)
+    private static let failedSize = NSSize(width: 460, height: 92)
     private var size: NSSize { session.pipeline.takePhase == .failed ? Self.failedSize : Self.size }
 
     /// `occupiedFrame` is the open composer, which a notice must not cover.
@@ -126,6 +126,7 @@ final class DictationPillController {
     private func makePanel() -> NSPanel {
         let panel = DictationPillPanel(contentRect: NSRect(origin: .zero, size: Self.size),
                                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.animationBehavior = .none
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]

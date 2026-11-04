@@ -98,9 +98,14 @@ struct NotchIsland<Content: View>: View {
             .overlay { hairline(shape) }
             .clipShape(shape)
             .contentShape(shape)
-            .opacity(presentation.presented ? 1 : 0)
+            .animation(fade) { $0.opacity(presentation.presented ? 1 : 0) }
             .frame(width: size.width, height: size.height, alignment: .top)
             .environment(\.colorScheme, .dark)
+    }
+
+    /// Visible from the first frame of the grow, gone only at the end of the shrink, so the size change is what shows.
+    private var fade: Animation {
+        presentation.presented ? .linear(duration: 0.05) : .linear(duration: 0.08).delay(NotchIslandTokens.closeDuration - 0.08)
     }
 
     private func laidOut(in size: CGSize) -> some View {

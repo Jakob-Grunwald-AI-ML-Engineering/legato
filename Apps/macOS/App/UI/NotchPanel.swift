@@ -54,6 +54,7 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
         let panel = self.panel ?? ComposerPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         self.panel = panel
         let alreadyShown = panel.isVisible
+        panel.animationBehavior = .none // AppKit's own scale and fade would hide the grow and delay `hide()`.
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
