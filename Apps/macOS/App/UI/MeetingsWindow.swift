@@ -37,8 +37,13 @@ struct MeetingsWindow: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let notice = controller.notice {
-                Banner(text: notice, symbol: "exclamationmark.triangle.fill", tint: .orange)
-                    .padding(10)
+                HStack(alignment: .top, spacing: 4) {
+                    Banner(text: notice, symbol: "exclamationmark.triangle.fill", tint: .orange)
+                    Button { controller.dismissNotice() } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless).foregroundStyle(.secondary).accessibilityLabel("Dismiss")
+                        .padding(.top, 8)
+                }
+                .padding(10)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }

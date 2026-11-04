@@ -68,6 +68,8 @@ final class MeetingController {
     private(set) var tapStatus: SystemAudioStatus?
     /// What the last start, stop or action could not do, in words for the user.
     private(set) var notice: String?
+    /// The notice stays until it is read (a start that failed).
+    private(set) var noticeIsSticky = false
     /// Bumped when a meeting changed on disk, so open detail views reload.
     private(set) var revision = 0
     /// Set when a start should bring the Meetings window up.
@@ -135,7 +137,7 @@ final class MeetingController {
                 query = ""
             } catch {
                 phase = .idle
-                flash(Self.describe(error), seconds: 8)
+                flash(Self.describe(error), seconds: nil)
             }
         }
     }
@@ -197,7 +199,7 @@ final class MeetingController {
         case .failed(let reason): return "System audio stopped: \(reason)"
         default: break
         }
-        if live?.engineError != nil { return "Transcription is offline. The audio keeps recording and the transcript marks the gap." }
+        if live?.engineError != nil { return "Transcription is offline. The audio keeps recording." }
         if let audio = live?.audioError { return "Recording problem: \(audio)" }
         return nil
     }
@@ -206,15 +208,24 @@ final class MeetingController {
 
     // MARK: Notices
 
-    /// Shows `text` in the island and the window for a few seconds.
-    func flash(_ text: String, seconds: Double = 5) {
+    /// Shows `text` in the island and the window: for `seconds`, or until it is read (`dismissNotice()`) when nil.
+    func flash(_ text: String, seconds: Double? = 5) {
         notice = text
+        noticeIsSticky = seconds == nil
         noticeTask?.cancel()
+        guard let seconds else { return }
         noticeTask = Task {
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             notice = nil
         }
+    }
+
+    /// The notice was read.
+    func dismissNotice() {
+        noticeTask?.cancel()
+        notice = nil
+        noticeIsSticky = false
     }
 
     private static func describe(_ error: any Error) -> String {

@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct LegatoMacApp: App {
     private let controller = MacAppController.shared
+    @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var delegate
 
     init() {
         MacAppController.shared.bootstrap()
@@ -67,5 +68,18 @@ private struct MenuBarLabel: View {
                 openWindow(id: MeetingController.windowID)
             }
 
+    }
+}
+
+/// Opening Legato again (Spotlight, Finder, `open`) shows the Meetings window, so the app can be reached when its menu-bar
+/// icon is hidden behind the notch. The reopen that comes with the launch itself is ignored: a first launch shows the
+/// onboarding or nothing, not a window.
+final class MacAppDelegate: NSObject, NSApplicationDelegate {
+    private let launched = ProcessInfo.processInfo.systemUptime
+    static let launchGrace: TimeInterval = 2
+
+    @MainActor func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if ProcessInfo.processInfo.systemUptime - launched > Self.launchGrace { MacAppController.shared.meetings.showWindow() }
+        return false
     }
 }

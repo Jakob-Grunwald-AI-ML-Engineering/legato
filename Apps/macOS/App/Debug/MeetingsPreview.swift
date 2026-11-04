@@ -8,6 +8,22 @@ import LegatoMeetings
 /// Meetings window, writes a PNG of it for each state and quits. No session, no network, no key.
 @MainActor enum MeetingsPreview {
     static func runIfRequested(_ controller: MeetingController) {
+        if UserDefaults.standard.bool(forKey: "LegatoMeetingsSimulateReopen") {
+            // The reopen handler called as AppKit calls it: ignored during the launch, honoured later.
+            Task {
+                func meetingsVisible() -> Bool { NSApp.windows.contains { $0.title == "Meetings" && $0.isVisible } }
+                try? await Task.sleep(for: .seconds(1))
+                _ = NSApp.delegate?.applicationShouldHandleReopen?(NSApp, hasVisibleWindows: false)
+                try? await Task.sleep(for: .seconds(1))
+                print("REOPEN during launch: meetings window visible = \(meetingsVisible())")
+                try? await Task.sleep(for: .seconds(2))
+                _ = NSApp.delegate?.applicationShouldHandleReopen?(NSApp, hasVisibleWindows: false)
+                try? await Task.sleep(for: .seconds(2))
+                print("REOPEN after launch: meetings window visible = \(meetingsVisible())")
+                NSApp.terminate(nil)
+            }
+            return
+        }
         if UserDefaults.standard.bool(forKey: "LegatoMeetingsLiveSim") {
             // A live meeting that gains a line every 0.7 s, to watch how the transcript scrolls.
             Task {
@@ -81,8 +97,19 @@ import LegatoMeetings
             controller.previewLive(live.state, elapsed: 754)
             controller.selection = live.id
             controller.detailTab = .transcript
+            // The card shows for 3 s after a start, then the pill rests.
+            try? await Task.sleep(for: .milliseconds(900))
+            snapshot(window: nil, to: directory.appending(path: "8-island-expanded.png"))
             await shot("7-live-transcript")
-            snapshot(window: nil, to: directory.appending(path: "8-island.png"))
+            try? await Task.sleep(for: .milliseconds(800))
+            snapshot(window: nil, to: directory.appending(path: "9-island-compact.png"))
+            var warned = live.state
+            warned.engineError = "offline"
+            controller.previewLive(warned, elapsed: 760)
+            try? await Task.sleep(for: .milliseconds(900))
+            snapshot(window: nil, to: directory.appending(path: "10-island-warning-expanded.png"))
+            try? await Task.sleep(for: .seconds(8))
+            snapshot(window: nil, to: directory.appending(path: "11-island-compact-warning.png"))
             NSApp.terminate(nil)
         }
     }
@@ -93,7 +120,7 @@ import LegatoMeetings
     private static func snapshot(window title: String?, region: Bool = false, to url: URL) {
         let candidates = NSApp.windows.filter { $0.isVisible }
         let target = title.flatMap { title in candidates.first { $0.title == title } }
-            ?? candidates.first { $0.frame.height < 140 && $0.frame.width >= 390 }
+            ?? candidates.first { String(describing: type(of: $0)).contains("MeetingIslandPanel") }
         guard let target else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
