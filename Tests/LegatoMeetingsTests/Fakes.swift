@@ -127,8 +127,10 @@ func tone(_ count: Int, _ value: Float = 0.5) -> AudioChunk {
     AudioChunk(samples: Array(repeating: value, count: count), format: recFormat)
 }
 
-func finalEvent(_ text: String, _ range: Range<TimeInterval>? = nil, stream: TranscriptEvent.Stream = .mixed) -> TranscriptEvent {
-    TranscriptEvent(stream: stream, text: text, isFinal: true, range: range)
+func finalEvent(
+    _ text: String, _ range: Range<TimeInterval>? = nil, stream: TranscriptEvent.Stream = .mixed, speaker: String? = nil
+) -> TranscriptEvent {
+    TranscriptEvent(stream: stream, text: text, isFinal: true, range: range, speaker: speaker)
 }
 
 /// A held fake operation waits for an explicit release, even if its caller is cancelled.
