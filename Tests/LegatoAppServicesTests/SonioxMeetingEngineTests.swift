@@ -116,7 +116,7 @@ extension SonioxMeetingEngine.Timing {
     static var tests: Self {
         var timing = Self()
         timing.retryDelays = [.milliseconds(5)]
-        timing.backlog = 1
+        timing.backlog = 5
         timing.inFlight = 0.5
         return timing
     }
@@ -202,7 +202,8 @@ private func tokens(_ words: [(String, Int, Int, String?)]) -> String {
         #expect(rig.finals[0].speaker == "1")
         #expect(rig.finals[1].speaker == "2.1")
         let resumed = try #require(rig.finals[1].range)
-        #expect(resumed.lowerBound > 1.0 && resumed.lowerBound < 1.5, "stream times are meeting times, from where audio resumed: \(resumed)")
+        // The stream starts where the held audio does (1.0 to 1.5 s); its word is 0.3 s into it.
+        #expect(resumed.lowerBound > 1.3 - 1e-6 && resumed.lowerBound < 1.8 + 1e-6, "stream times are meeting times: \(resumed)")
         rig.endInput()
         await eventually("the session ends") { rig.isEnded }
         #expect(rig.failure == nil)
@@ -212,6 +213,7 @@ private func tokens(_ words: [(String, Int, Int, String?)]) -> String {
         // The first three attempts to connect fail: the outage outlasts the one second of audio held.
         var timing = SonioxMeetingEngine.Timing.tests
         timing.retryDelays = [.milliseconds(200)]
+        timing.backlog = 1
         let rig = try MeetingEngineRig(refusingFirst: 3, timing: timing)
         defer { rig.cleanup() }
         rig.start()

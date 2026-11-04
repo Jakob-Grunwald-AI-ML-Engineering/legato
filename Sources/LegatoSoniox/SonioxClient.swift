@@ -148,6 +148,8 @@ public actor SonioxClient {
         guard state == .held else { throw failure ?? .notConnected }
         do {
             try await socket.send(.text(String(decoding: config.message(backgroundText: backgroundText), as: UTF8.self)))
+            // The stream may have failed or closed while the request was in flight; that outcome stands.
+            guard state == .held else { throw failure ?? .notConnected }
             state = .streaming; lastSend = .now
             _ = try await room.publish(channel: .session, participant: .transcriber,
                 payload: .object(["event": .string("asr.started"), "thresholds": thresholds]))

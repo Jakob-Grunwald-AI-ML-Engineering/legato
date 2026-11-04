@@ -152,7 +152,7 @@ private actor MeetingStreamRunner {
         guard fatal == nil else { return }
         if let current = live, !adopting, !flushing {
             if fed - current.since >= timing.rolloverAfter { startConnecting() }
-            do { return try await current.client.sendAudio(pcm) } catch { dropped(current.id) }
+            do { return try await current.client.sendAudio(pcm) } catch { await lost(current.id) }
         }
         enqueue(pcm, start: start, seconds: seconds)
         if live == nil { startConnecting() }
@@ -228,6 +228,11 @@ private actor MeetingStreamRunner {
         live = Live(id: id, client: client, since: since)
         adopting = false
         if let previous { retire(previous.client) }
+        // The stream may have failed while it was being adopted: nobody was told, as it was not live yet.
+        if await client.lastFailure != nil {
+            await clientDropped(id)
+            return
+        }
         if let from = gapFrom {
             gapFrom = nil
             if since - from >= timing.minimumGap { output.yield(TranscriptEvent(stream: .mixed, text: "", isFinal: true, range: from..<since, isGap: true)) }
@@ -243,7 +248,7 @@ private actor MeetingStreamRunner {
             do { try await current.client.sendAudio(held.pcm) } catch {
                 backlog.insert(held, at: 0)
                 backlogSeconds += held.seconds
-                dropped(id)
+                await lost(id)
                 break
             }
         }
@@ -252,10 +257,16 @@ private actor MeetingStreamRunner {
     }
 
     private func clientDropped(_ id: Int) async {
+        guard live?.id == id else { return }
+        await lost(id)
+        startConnecting()
+    }
+
+    /// The live stream `id` failed: a refused key ends the session's transcription, anything else is retried.
+    private func lost(_ id: Int) async {
         guard let current = live, current.id == id else { return }
         if let failure = await current.client.lastFailure, Self.isFatal(failure) { return fail(failure) }
         dropped(id)
-        startConnecting()
     }
 
     private func dropped(_ id: Int) {
