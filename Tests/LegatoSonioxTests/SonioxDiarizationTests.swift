@@ -13,18 +13,21 @@ import LegatoRoom
         #expect(try message(config) == #"{"audio_format":"pcm_s16le","context":{"general":[{"key":"composer","value":"Mode: Dictation\np"}],"terms":["Legato"]},"enable_endpoint_detection":true,"enable_language_identification":true,"language_hints":["de","en"],"model":"stt-rt-v6","num_channels":1,"sample_rate":16000}"#)
     }
 
-    @Test func diarizationIsOptInAndTheOnlyDifference() throws {
+    @Test func diarizationIsOptInAndOnlyDropsEndpointDetection() throws {
         let plain = SonioxConfig(mode: "Meeting", terms: ["Legato"])
         let diarized = SonioxConfig(mode: "Meeting", terms: ["Legato"], diarization: true)
         let off = try JSONDecoder().decode(JSONValue.self, from: plain.message())
         var on = try JSONDecoder().decode(JSONValue.self, from: diarized.message())
         #expect(off["enable_speaker_diarization"] == nil)
         #expect(on["enable_speaker_diarization"] == .bool(true))
+        #expect(off["enable_endpoint_detection"] == .bool(true))
+        #expect(on["enable_endpoint_detection"] == .bool(false))
         guard case .object(var fields) = on else {
             Issue.record("not an object")
             return
         }
         fields["enable_speaker_diarization"] = nil
+        fields["enable_endpoint_detection"] = .bool(true)
         on = .object(fields)
         #expect(on == off)
     }

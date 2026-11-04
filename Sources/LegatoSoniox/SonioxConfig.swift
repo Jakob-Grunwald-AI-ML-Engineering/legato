@@ -44,7 +44,7 @@ public struct SonioxConfig: Sendable {
         var message: [String: Any] = [
             "model": "stt-rt-v6", "audio_format": "pcm_s16le", "sample_rate": 16000, "num_channels": 1,
             "language_hints": ["de", "en"], "enable_language_identification": true,
-            "enable_endpoint_detection": true, "context": context
+            "enable_endpoint_detection": !diarization, "context": context
         ]
         if diarization { message["enable_speaker_diarization"] = true }
         return try JSONSerialization.data(withJSONObject: message, options: [.sortedKeys])
