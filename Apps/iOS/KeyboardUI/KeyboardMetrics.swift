@@ -135,8 +135,8 @@ enum KeyColors {
         $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.44) : UIColor(red: 197 / 255, green: 197 / 255, blue: 201 / 255, alpha: 1)
     }
     /// Opaque popup surface: a native dark capture has a subtle material gradient around #333.
-    /// Alpha here reveals sibling SwiftUI tool buttons underneath the grid's popup drawing;
-    /// clearing the grid's own backing does not clear those siblings.
+    /// Alpha here reveals the word and tool rows under the grid's popup drawing; clearing the
+    /// grid's own backing does not clear those siblings. The grid must stay above them.
     static let popup = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.2, alpha: 1) : .white }
     static let ink = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
     static let accent = UIColor(red: 0, green: 122 / 255, blue: 1, alpha: 1)

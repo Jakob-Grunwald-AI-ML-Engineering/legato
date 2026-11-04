@@ -25,13 +25,14 @@ struct TypingFallbackView: View {
                     KeyGrid(typing: controller.typing, layout: layout,
                             presentation: controller.typing.presentation, appearance: controller.appearance,
                             emojiSystemSwitcher: controller.emojiSystemSwitcher)
+                        .zIndex(1)  // Its popups reach over the word and tool rows; it takes no touches there.
                     ForEach(frames.filter { $0.id == "globe" || ($0.id == "emoji" && controller.emojiSystemSwitcher) }, id: \.id) { frame in
                         place(frame.cgRect) { GlobeKey(target: controller.inputModeTarget, typing: controller.typing, emoji: frame.id == "emoji") }
+                            .zIndex(2)
                     }
                 }
                 place(g.wordRowFrame) {
-                    WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: Double(g.wordRowFrame.width)),
-                                contentOffset: WordRowHeight.textOffset(landscape: g.landscape))
+                    WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: Double(g.wordRowFrame.width)))
                         .accessibilityIdentifier("typing.predictions")
                 }
                 place(g.hotkeyFrame(buttons: Self.toolKeys)) { toolKeys }

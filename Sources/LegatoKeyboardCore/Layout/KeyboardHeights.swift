@@ -1,9 +1,9 @@
 import Foundation
 
-/// iOS 26 prediction geometry. The system adds a 17 pt rounded area above portrait extensions;
-/// that area is already included in Apple's 44 pt prediction view. Landscape adds no top area.
-/// Measured with the actual extension and native keyboard; disabling host safe areas or changing
-/// public input-view style leaves the system area unchanged. See the keyboard polishing validation.
+/// iOS 26 prediction geometry. The system may add a rounded area above portrait extensions, counted
+/// in Apple's 44 pt prediction view. Landscape adds none. On a phone it measured 0, 17 and about 33 pt,
+/// and 0 and 17 in the same field, with the extension's settled geometry identical: it cannot be read,
+/// so the words center in the extension's own row and never lean on that area.
 public enum WordRowHeight {
     public static let visible = 44.0
     public static let portraitSystemTop = 17.0
@@ -11,8 +11,6 @@ public enum WordRowHeight {
     public static let strip = portrait
 
     public static func content(landscape: Bool) -> Double { landscape ? visible : portrait }
-    /// Keeps portrait word ink at the native baseline within the complete visible row.
-    public static func textOffset(landscape: Bool) -> Double { landscape ? 0 : -5.67 }
 }
 
 /// Predictions, one tool key row, then the unchanged native typing grid.
