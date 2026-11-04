@@ -38,34 +38,38 @@ struct MeetingDetailView: View {
         // The geometry reader gives the column the window's height whatever its content needs, so a long summary or a
         // banner cannot push the window's minimum height up.
         GeometryReader { proxy in
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                MeetingMetadataEditor(meeting: shown, known: controller.meetings) { controller.updateMetadata(meeting.id, $0) }
-                statusLine
-                banners
-                Picker("View", selection: $bindable.detailTab) {
-                    ForEach(MeetingController.DetailTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 24) {
+                    header
+                    HStack(spacing: 12) {
+                        Picker("View", selection: $bindable.detailTab) {
+                            ForEach(MeetingController.DetailTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden().fixedSize()
+                        gapIndicator
+                        if processing && !summarizing {
+                            Label("Finishing the recording…", systemImage: "hourglass").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
-            }
-            .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 14)
-            Divider()
-            Group {
-                switch controller.detailTab {
-                case .summary: ScrollView { summaryTab.padding(24) }
-                case .transcript:
-                    MeetingTranscriptView(
-                        meeting: shown, segments: live?.segments ?? segments, volatile: live?.volatile ?? "",
-                        live: isLive, seek: player.map { player in { player.seek(to: $0); player.play() } },
-                        rename: { controller.renameSpeaker(meeting.id, person: $0, to: $1) })
-                }
-            }
-            if let player, !isLive {
+                .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 16)
                 Divider()
-                MeetingPlayerBar(player: player)
+                Group {
+                    switch controller.detailTab {
+                    case .summary: ScrollView { summaryTab.padding(20) }
+                    case .transcript:
+                        MeetingTranscriptView(
+                            meeting: shown, segments: live?.segments ?? segments, volatile: live?.volatile ?? "",
+                            live: isLive, seek: player.map { player in { player.seek(to: $0); player.play() } },
+                            rename: { controller.renameSpeaker(meeting.id, person: $0, to: $1) })
+                    }
+                }
+                if let player, !isLive {
+                    Divider()
+                    MeetingPlayerBar(player: player)
+                }
             }
-        }
-        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
         }
         .toolbar { toolbar }
         .task(id: LoadKey(id: meeting.id, revision: controller.revision, summarizing: summarizing)) { await load() }
@@ -79,35 +83,58 @@ struct MeetingDetailView: View {
 
     // MARK: Header
 
-    private var statusLine: some View {
-        HStack(spacing: 8) {
-            if isLive {
-                Circle().fill(.red).frame(width: 8, height: 8)
-                Text("Recording").foregroundStyle(.red)
-                Text(MeetingListLogic.clock(controller.elapsed)).monospacedDigit()
-            } else {
-                Text(meeting.date.formatted(date: .complete, time: .shortened))
-                if meeting.duration > 0 { Text("·"); Text(MeetingListLogic.clock(meeting.duration)) }
+    /// The title, one line of facts (folder, time, length), the tags, and the warnings that matter.
+    private var header: some View {
+        @Bindable var bindable = controller
+        return VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(shown.title).font(.title2.weight(.semibold)).lineLimit(2).textSelection(.enabled)
+                    Button("Edit Details") { controller.editingDetails = true }
+                        .buttonStyle(.link).controlSize(.small)
+                        .accessibilityIdentifier("meeting.details.edit")
+                        .popover(isPresented: $bindable.editingDetails, arrowEdge: .bottom) {
+                            MeetingMetadataEditor(meeting: shown, known: controller.meetings,
+                                                  save: { controller.updateMetadata(meeting.id, $0) }, done: { controller.editingDetails = false })
+                        }
+                }
+                Text(facts).font(.callout).foregroundStyle(.secondary)
+            }
+            if !shown.tags.isEmpty {
+                FlowLayout(spacing: 6) {
+                    ForEach(shown.tags, id: \.self) { tag in
+                        Text(tag).font(.caption).padding(.horizontal, 8).padding(.vertical, 2).background(.quaternary, in: Capsule())
+                    }
+                }
+            }
+            if isLive, let warning = controller.liveWarning {
+                Banner(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
+            }
+            if meeting.state == .interrupted {
+                Banner(text: "Legato quit while this meeting recorded. The transcript and the audio up to then were kept.",
+                       symbol: "exclamationmark.arrow.triangle.2.circlepath", tint: .orange)
             }
         }
-        .font(.callout).foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder private var banners: some View {
-        if isLive, let warning = controller.liveWarning {
-            Banner(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
-        }
-        if meeting.state == .interrupted {
-            Banner(text: "Legato quit while this meeting recorded. The transcript and the audio up to then were kept.",
-                   symbol: "exclamationmark.arrow.triangle.2.circlepath", tint: .orange)
-        }
-        if processing && !summarizing {
-            Banner(text: "Finishing the recording…", symbol: "hourglass", tint: .secondary, spinning: true)
-        }
-        if !isLive && !shown.gaps.isEmpty {
-            Banner(text: shown.gaps.count == 1 ? "The transcript misses one stretch where the connection was down."
-                : "The transcript misses \(shown.gaps.count) stretches where the connection was down.",
-                symbol: "wifi.slash", tint: .orange)
+    /// "Acme › Website relaunch · Wed 9:10 · 42 min"; a recording says so instead of the length.
+    private var facts: String {
+        let length = isLive ? "Recording \(MeetingListLogic.clock(controller.elapsed))" : MeetingFormat.length(shown.duration)
+        return [MeetingFormat.folder(client: shown.client, project: shown.project), MeetingFormat.when(shown.date), length]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    /// A small note beside the tabs that the transcript misses stretches; it opens the transcript, where they are marked.
+    @ViewBuilder private var gapIndicator: some View {
+        if !shown.gaps.isEmpty {
+            Button { controller.detailTab = .transcript } label: {
+                Label(shown.gaps.count == 1 ? "1 gap" : "\(shown.gaps.count) gaps", systemImage: "wifi.slash")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            .buttonStyle(.plain)
+            .help("The connection was down; the audio of each gap was recorded but not transcribed.")
+            .accessibilityLabel("\(shown.gaps.count) transcript gaps, show transcript")
         }
     }
 
@@ -150,16 +177,16 @@ struct MeetingDetailView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
-            Button { copy(.summary) } label: {
-                Label(copied == .summary ? "Copied" : "Copy Summary", systemImage: copied == .summary ? "checkmark" : "doc.on.doc")
+            Menu {
+                Button("Copy Summary") { copy(.summary) }.disabled(summary == nil)
+                Button("Copy Transcript") { copy(.transcript) }
+                Divider()
+                ShareLink(item: markdown, subject: Text(meeting.title)) { Label("Share as Markdown…", systemImage: "square.and.arrow.up") }
+                    .disabled(markdown.isEmpty)
+            } label: {
+                Label(copied == nil ? "Share" : "Copied", systemImage: copied == nil ? "square.and.arrow.up" : "checkmark")
             }
-            .disabled(summary == nil).help("Copy the summary")
-            Button { copy(.transcript) } label: {
-                Label(copied == .transcript ? "Copied" : "Copy Transcript", systemImage: copied == .transcript ? "checkmark" : "text.quote")
-            }
-            .help("Copy the transcript")
-            ShareLink(item: markdown, subject: Text(meeting.title)) { Label("Share", systemImage: "square.and.arrow.up") }
-                .disabled(markdown.isEmpty).help("Share the meeting as Markdown")
+            .accessibilityIdentifier("meeting.share")
             Menu {
                 Button("Show in Finder") {
                     Task { NSWorkspace.shared.activateFileViewerSelecting([await controller.services.store.folder(for: meeting.id)]) }
@@ -167,6 +194,7 @@ struct MeetingDetailView: View {
                 Divider()
                 Button("Delete…", role: .destructive) { confirmDelete = true }.disabled(isLive)
             } label: { Label("More", systemImage: "ellipsis.circle") }
+            .accessibilityIdentifier("meeting.more")
         }
     }
 

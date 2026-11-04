@@ -1,13 +1,15 @@
 import LegatoMeetings
 import SwiftUI
 
-/// Title, client, project and tags of one meeting, editable while it records and afterwards. Client, project and tags
-/// suggest the values the other meetings already use; a change is saved when a field is left or submitted.
+/// The details popover of one meeting: title, client, project and tags, editable while it records and afterwards.
+/// Client, project and tags suggest the values the other meetings already use; a change is saved when a field is
+/// left or submitted, and when the popover closes.
 struct MeetingMetadataEditor: View {
     let meeting: Meeting
     /// Every meeting, for the suggestions.
     let known: [Meeting]
     let save: (MeetingMetadata) -> Void
+    let done: () -> Void
 
     @State private var title = ""
     @State private var client = ""
@@ -18,43 +20,62 @@ struct MeetingMetadataEditor: View {
     fileprivate enum Field { case title, client, project, tag }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            TextField("Title", text: $title)
-                .textFieldStyle(.plain)
-                .font(.largeTitle.weight(.bold))
-                .focused($focus, equals: .title)
-                .onSubmit(commit)
-            HStack(alignment: .firstTextBaseline, spacing: 18) {
-                SuggestingField(label: "Client", symbol: "building.2", text: $client, suggestions: clients,
-                                focus: $focus, field: .client, commit: commit)
-                SuggestingField(label: "Project", symbol: "folder", text: $project, suggestions: projects,
-                                focus: $focus, field: .project, commit: commit)
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Details").font(.headline)
+            VStack(alignment: .leading, spacing: 10) {
+                row("Title") {
+                    TextField("Title", text: $title)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focus, equals: .title)
+                        .onSubmit(commit)
+                        .accessibilityIdentifier("meeting.details.title")
+                }
+                SuggestingField(label: "Client", text: $client, suggestions: clients, focus: $focus, field: .client, commit: commit)
+                SuggestingField(label: "Project", text: $project, suggestions: projects, focus: $focus, field: .project, commit: commit)
+                row("Tags") { tagRow }
             }
-            tagRow
+            HStack {
+                Spacer()
+                Button("Done") { commit(); done() }.keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("meeting.details.done")
+            }
         }
+        .padding(16)
+        .frame(width: 360)
         .onChange(of: focus) { old, _ in if old != nil { commit() } }
-        .onChange(of: meeting, initial: true) { _, _ in if focus == nil { load() } }
+        .onAppear(perform: load)
+        .onDisappear(perform: commit)
+    }
+
+    private func row<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label).foregroundStyle(.secondary).frame(width: 52, alignment: .trailing)
+            content()
+        }
     }
 
     private var tagRow: some View {
-        FlowLayout(spacing: 6) {
-            Image(systemName: "number").foregroundStyle(.secondary)
-            ForEach(tags, id: \.self) { tag in
-                HStack(spacing: 4) {
-                    Text(tag)
-                    Button { tags.removeAll { $0 == tag }; commit() } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Remove tag \(tag)")
+        VStack(alignment: .leading, spacing: 6) {
+            if !tags.isEmpty {
+                FlowLayout(spacing: 6) {
+                    ForEach(tags, id: \.self) { tag in
+                        HStack(spacing: 4) {
+                            Text(tag)
+                            Button { tags.removeAll { $0 == tag }; commit() } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Remove tag \(tag)")
+                        }
+                        .font(.caption)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(.quaternary, in: Capsule())
+                    }
                 }
-                .font(.callout)
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(.tint.opacity(0.15), in: Capsule())
             }
             TextField("Add tag", text: $newTag)
-                .textFieldStyle(.plain)
-                .frame(width: 90)
+                .textFieldStyle(.roundedBorder)
                 .focused($focus, equals: .tag)
                 .onSubmit { addTag(); focus = .tag }
+                .accessibilityIdentifier("meeting.details.tag")
                 .textInputSuggestions {
                     ForEach(tagSuggestions, id: \.self) { Text($0).textInputCompletion($0) }
                 }
@@ -107,10 +128,9 @@ struct MeetingMetadataEditor: View {
     }
 }
 
-/// A one-line field with an icon, typed suggestions and a menu of the values in use.
+/// A labelled field with typed suggestions and a menu of the values in use.
 private struct SuggestingField: View {
     let label: String
-    let symbol: String
     @Binding var text: String
     let suggestions: [String]
     var focus: FocusState<MeetingMetadataEditor.Field?>.Binding
@@ -118,20 +138,20 @@ private struct SuggestingField: View {
     let commit: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol).foregroundStyle(.secondary)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label).foregroundStyle(.secondary).frame(width: 52, alignment: .trailing)
             TextField(label, text: $text)
-                .textFieldStyle(.plain)
-                .frame(minWidth: 110, maxWidth: 200)
+                .textFieldStyle(.roundedBorder)
                 .focused(focus, equals: field)
                 .onSubmit(commit)
+                .accessibilityIdentifier("meeting.details.\(label.lowercased())")
                 .textInputSuggestions {
                     ForEach(matching, id: \.self) { Text($0).textInputCompletion($0) }
                 }
             if !suggestions.isEmpty {
                 Menu {
                     ForEach(suggestions, id: \.self) { value in Button(value) { text = value; commit() } }
-                } label: { Image(systemName: "chevron.down").font(.caption2) }
+                } label: { Image(systemName: "chevron.down") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                     .accessibilityLabel("\(label) in use")
             }

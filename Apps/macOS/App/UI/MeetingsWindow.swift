@@ -18,14 +18,22 @@ struct MeetingsWindow: View {
         } detail: {
             if let meeting = controller.meeting(controller.selection) {
                 MeetingDetailView(meeting: meeting).id(meeting.id)
+            } else if controller.meetings.isEmpty {
+                ContentUnavailableView {
+                    Label("No meetings yet", systemImage: "waveform.badge.mic")
+                } description: {
+                    Text("Record a call or a conversation to get a transcript and a summary.")
+                } actions: {
+                    Button("Start Meeting") { app.toggleMeeting() }.buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("meeting.empty.start")
+                }
             } else {
-                ContentUnavailableView("Select a meeting", systemImage: "waveform.and.mic",
-                                       description: Text("Its summary, transcript and recording appear here."))
+                ContentUnavailableView("Select a meeting", systemImage: "text.alignleft")
             }
         }
         .searchable(text: $bindable.query, placement: .toolbar, prompt: "Search meetings")
         .toolbar {
-            ToolbarItem(placement: .navigation) { recordButton(controller) }
+            ToolbarItem(placement: .primaryAction) { recordButton(controller) }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let notice = controller.notice {
@@ -49,16 +57,19 @@ struct MeetingsWindow: View {
         switch controller.phase {
         case .idle:
             Button { app.toggleMeeting() } label: { Label("Start Meeting", systemImage: "record.circle") }
-                .tint(.red).help("Record the microphone and the audio your Mac plays")
-        case .starting:
+                .labelStyle(.titleAndIcon)
+                .help("Record the microphone and the audio your Mac plays")
+                .accessibilityIdentifier("meeting.start")
+        case .starting, .stopping:
             ProgressView().controlSize(.small)
         case .recording:
-            Button { app.toggleMeeting() } label: {
-                Label("Stop \(MeetingListLogic.clock(controller.elapsed))", systemImage: "stop.circle.fill")
+            HStack(spacing: 8) {
+                Circle().fill(.red).frame(width: 8, height: 8)
+                Text(MeetingListLogic.clock(controller.elapsed)).font(.callout.monospacedDigit())
+                StopButton { app.toggleMeeting() }.accessibilityIdentifier("meeting.stop")
             }
-            .tint(.red).help("Stop recording")
-        case .stopping:
-            ProgressView().controlSize(.small)
+            .padding(.horizontal, 6)
+            .accessibilityElement(children: .contain)
         }
     }
 }

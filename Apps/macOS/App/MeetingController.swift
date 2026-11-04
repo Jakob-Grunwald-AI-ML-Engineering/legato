@@ -61,6 +61,8 @@ final class MeetingController {
     private(set) var meetings: [Meeting] = []
     private(set) var live: Live?
     var detailTab = DetailTab.summary
+    /// The details popover (title, client, project, tags) of the open meeting.
+    var editingDetails = false
     /// Seconds since the meeting began, ticking while it records.
     private(set) var elapsed: TimeInterval = 0
     private(set) var tapStatus: SystemAudioStatus?

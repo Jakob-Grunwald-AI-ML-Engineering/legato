@@ -41,8 +41,7 @@ struct MeetingListColumn: View {
         if !controller.query.trimmingCharacters(in: .whitespaces).isEmpty {
             ContentUnavailableView.search(text: controller.query)
         } else if controller.meetings.isEmpty {
-            ContentUnavailableView("No meetings yet", systemImage: "waveform.badge.mic",
-                                   description: Text("Start a meeting from the menu bar or the button above. Legato listens to your microphone and to the audio your Mac plays."))
+            Text("No meetings").foregroundStyle(.secondary)
         } else {
             ContentUnavailableView("Nothing here", systemImage: "folder", description: Text("No meeting is filed under this."))
         }
@@ -55,36 +54,34 @@ private struct MeetingRow: View {
     let summarizing: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                if meeting.state == .recording { Circle().fill(.red).frame(width: 8, height: 8) }
-                Text(meeting.title).font(.headline).lineLimit(1)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Text(meeting.title).font(.headline.weight(.medium)).lineLimit(1)
+                Spacer(minLength: 4)
+                badge
             }
-            HStack(spacing: 6) {
-                Text(meeting.date.formatted(date: .omitted, time: .shortened))
-                if meeting.duration > 0 { Text("·"); Text(MeetingListLogic.clock(meeting.duration)) }
-                if let status { Text("·"); status }
-            }
-            .font(.caption).foregroundStyle(.secondary)
-            if let filing {
-                Text(filing).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
-            }
+            Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .frame(minHeight: 56, alignment: .leading)
+        .listRowInsets(EdgeInsets())
     }
 
-    private var filing: String? {
-        let folder = [meeting.client, meeting.project].compactMap { $0 }.joined(separator: " / ")
-        let line = ([folder] + meeting.tags.map { "#\($0)" }).filter { !$0.isEmpty }.joined(separator: "  ")
-        return line.isEmpty ? nil : line
+    /// "9:10 · 42 min · Acme".
+    private var subtitle: String {
+        [meeting.date.formatted(date: .omitted, time: .shortened), MeetingFormat.length(meeting.duration), meeting.client ?? ""]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
-    private var status: Text? {
-        if meeting.state == .recording { return Text("Recording").foregroundStyle(.red) }
-        if summarizing { return Text("Summarizing…") }
-        if processing || meeting.state == .processing { return Text("Finishing…") }
-        if meeting.state == .interrupted { return Text("Interrupted").foregroundStyle(.orange) }
-        if meeting.summaryFailure != nil { return Text("No summary").foregroundStyle(.orange) }
-        return nil
+    @ViewBuilder private var badge: some View {
+        if meeting.state == .recording {
+            Label("Recording", systemImage: "circle.fill").labelStyle(.iconOnly).font(.system(size: 8)).foregroundStyle(.red)
+        } else if summarizing || processing || meeting.state == .processing {
+            ProgressView().controlSize(.mini)
+        } else if meeting.state == .interrupted {
+            Text("Interrupted").font(.caption).foregroundStyle(.orange)
+        } else if meeting.summaryFailure != nil {
+            Text("No summary").font(.caption).foregroundStyle(.orange)
+        }
     }
 }

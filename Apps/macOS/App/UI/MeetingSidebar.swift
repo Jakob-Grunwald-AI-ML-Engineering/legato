@@ -42,6 +42,7 @@ private struct SidebarNode: Identifiable {
 struct MeetingSidebar: View {
     let meetings: [Meeting]
     @Binding var selection: MeetingSidebarItem
+    @State private var tagsOpen = false
 
     var body: some View {
         List(selection: $selection) {
@@ -50,14 +51,17 @@ struct MeetingSidebar: View {
                 Section("Clients") { OutlineGroup(folders, children: \.children) { row($0) } }
             }
             if !tags.isEmpty {
-                Section("Tags") { ForEach(tags) { row($0) } }
+                // Tags are a filter, not a folder: collapsed until wanted.
+                Section("Tags", isExpanded: $tagsOpen) { ForEach(tags) { row($0) } }
             }
         }
         .listStyle(.sidebar)
+        .onChange(of: selection, initial: true) { _, item in if case .tag = item { tagsOpen = true } }
     }
 
     private func row(_ node: SidebarNode) -> some View {
         Label(node.title, systemImage: node.symbol)
+            .frame(minHeight: 28)
             .badge(node.count)
             .tag(node.item)
     }
@@ -82,6 +86,6 @@ struct MeetingSidebar: View {
             counts[key] = (counts[key]?.name ?? tag, (counts[key]?.count ?? 0) + 1)
         }
         return counts.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            .map { SidebarNode(item: .tag($0.name), title: $0.name, symbol: "number", count: $0.count) }
+            .map { SidebarNode(item: .tag($0.name), title: $0.name, symbol: "tag", count: $0.count) }
     }
 }

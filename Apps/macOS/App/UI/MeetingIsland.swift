@@ -137,8 +137,7 @@ private struct MeetingIslandView: View {
                 }
                 Spacer(minLength: 0)
                 if controller.phase == .recording {
-                    Button("Stop") { controller.stop() }
-                        .buttonStyle(.borderedProminent).tint(.red).controlSize(.small)
+                    StopButton { controller.stop() }
                         .accessibilityIdentifier("meeting.island.stop")
                 }
             }
@@ -166,5 +165,24 @@ private struct MeetingIslandView: View {
     private var detail: String {
         controller.notice ?? controller.liveWarning
             ?? (controller.phase == .recording ? "Microphone and system audio, with speakers" : "Opening the microphone and the system audio")
+    }
+}
+
+/// The red Stop of a recording: the island and the window's toolbar capsule share it.
+struct StopButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("Stop")
+                .font(.caption.weight(.semibold))
+                .fixedSize()
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12).padding(.vertical, 4)
+                .background(Color.red, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Stop meeting")
+        .accessibilityAction(.default, action)
     }
 }

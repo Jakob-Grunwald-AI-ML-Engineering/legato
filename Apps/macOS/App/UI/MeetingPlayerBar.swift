@@ -13,17 +13,19 @@ struct MeetingPlayerBar: View {
             Button { player.toggle() } label: {
                 Image(systemName: player.isPlaying ? "pause.fill" : "play.fill").frame(width: 18)
             }
-            .buttonStyle(.borderless).controlSize(.large)
+            .buttonStyle(.borderless)
             .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
             Text(MeetingListLogic.clock(scrubbing ? position : player.currentTime))
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 52, alignment: .trailing)
             Slider(value: Binding(get: { scrubbing ? position : player.currentTime }, set: { position = $0 }),
                    in: 0...max(player.duration, 1)) { scrubbing = $0; if !$0 { player.seek(to: position) } }
+                .controlSize(.mini)
+                .accessibilityLabel("Playback position")
             Text(MeetingListLogic.clock(player.duration))
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
         }
-        .padding(.horizontal, 16)
-        .frame(height: 48)
+        .padding(.horizontal, 20)
+        .frame(height: 44)
         .background(.bar)
         .task {
             while !Task.isCancelled {

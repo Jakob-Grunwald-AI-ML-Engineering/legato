@@ -7,57 +7,35 @@ enum SpeakerPalette {
     static func color(_ info: SpeakerInfo?) -> Color { colors[abs(info?.colorIndex ?? 0) % colors.count] }
 }
 
-/// The speakers of a meeting, in order of appearance, each one a chip that renames the person.
-struct SpeakerStrip: View {
-    let meeting: Meeting
-    let rename: (PersonID, String) -> Void
-
-    var body: some View {
-        if !meeting.speakers.isEmpty {
-            FlowLayout(spacing: 8) {
-                ForEach(people, id: \.0) { id, info in SpeakerName(person: id, info: info, rename: rename, chip: true) }
-            }
-        }
-    }
-
-    private var people: [(PersonID, SpeakerInfo)] {
-        meeting.speakers.sorted { (Int($0.key.dropFirst()) ?? 0) < (Int($1.key.dropFirst()) ?? 0) }.map { ($0.key, $0.value) }
-    }
-}
-
 /// A speaker's name; a click opens the field that renames them. A name that another person has merges the two.
 struct SpeakerName: View {
     let person: PersonID
     let info: SpeakerInfo
     let rename: (PersonID, String) -> Void
-    var chip = false
     @State private var editing = false
     @State private var draft = ""
 
     var body: some View {
         Button { draft = info.name; editing = true } label: {
-            HStack(spacing: 5) {
-                Circle().fill(SpeakerPalette.color(info)).frame(width: 8, height: 8)
-                Text(info.name).fontWeight(.semibold)
-                if chip { Image(systemName: "pencil").font(.caption2).foregroundStyle(.secondary) }
-            }
-            .padding(.horizontal, chip ? 9 : 0).padding(.vertical, chip ? 4 : 0)
-            .background(chip ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: Capsule())
+            Text(info.name).font(.subheadline.weight(.semibold))
         }
         .buttonStyle(.plain)
         .help("Rename \(info.name)")
+        .accessibilityLabel("Speaker \(info.name), rename")
         .popover(isPresented: $editing, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Who is this?").font(.headline)
-                TextField("Name", text: $draft).frame(width: 220).onSubmit(save)
+                TextField("Name", text: $draft).textFieldStyle(.roundedBorder).frame(width: 220).onSubmit(save)
+                    .accessibilityIdentifier("meeting.speaker.name")
                 Text("Giving two speakers the same name merges them.").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
                     Button("Cancel") { editing = false }.keyboardShortcut(.cancelAction)
                     Button("Rename", action: save).keyboardShortcut(.defaultAction).disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .accessibilityIdentifier("meeting.speaker.rename")
                 }
             }
-            .padding(14)
+            .padding(16)
         }
     }
 
@@ -68,8 +46,12 @@ struct SpeakerName: View {
     }
 }
 
-/// The transcript: speech under its speaker with the time it started, the stretches the connection missed, and while
-/// recording the words still being recognised. A click on a time moves the recording there.
+/// The transcript, one row per turn: the speaker and the time the turn began, then what was said. The stretches the
+/// connection missed are marked where they fall, and while recording the words still being recognised follow the last
+/// turn. A click on a time moves the recording there.
+///
+/// A live transcript follows its newest line until the reader scrolls up, and follows again once they come back to the
+/// bottom (`TranscriptFollow`). Growth of the content never counts as the reader's scroll.
 struct MeetingTranscriptView: View {
     let meeting: Meeting
     let segments: [MeetingSegment]
@@ -79,78 +61,106 @@ struct MeetingTranscriptView: View {
     let seek: ((TimeInterval) -> Void)?
     let rename: (PersonID, String) -> Void
 
-    fileprivate enum Item: Identifiable {
-        case spoken(MeetingSegment, showsName: Bool)
+    @State private var follow = TranscriptFollow()
+
+    private struct Turn: Identifiable {
+        var id: UUID
+        var speaker: PersonID?
+        var start: TimeInterval
+        var text: String
+    }
+
+    private enum Item: Identifiable {
+        case turn(Turn)
         case gap(TranscriptGap)
         var id: String {
             switch self {
-            case .spoken(let segment, _): segment.id.uuidString
+            case .turn(let turn): turn.id.uuidString
             case .gap(let gap): "gap-\(gap.start)"
             }
         }
     }
 
+    private struct Metrics: Equatable { var offset: Double; var content: Double; var container: Double }
+
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                SpeakerStrip(meeting: meeting, rename: rename).padding(.bottom, 4)
-                ForEach(items) { item in
-                    switch item {
-                    case .spoken(let segment, let showsName): line(segment, showsName: showsName)
-                    case .gap(let gap): gapRow(gap)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(items) { item in
+                        switch item {
+                        case .turn(let turn): row(turn)
+                        case .gap(let gap): gapRow(gap)
+                        }
                     }
+                    if !volatile.isEmpty {
+                        Text(volatile).font(.body).lineSpacing(4).foregroundStyle(.secondary)
+                    } else if segments.isEmpty {
+                        Text(live ? "Listening…" : "Nothing was transcribed.").foregroundStyle(.secondary)
+                    }
+                    Color.clear.frame(height: 1).id("end")
                 }
-                if !volatile.isEmpty {
-                    Text(volatile).foregroundStyle(.secondary).padding(.leading, 58)
-                } else if live && segments.isEmpty {
-                    Text("Listening…").foregroundStyle(.secondary)
-                } else if !live && segments.isEmpty {
-                    Text("Nothing was transcribed.").foregroundStyle(.secondary)
+                .frame(maxWidth: 680, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+                .textSelection(.enabled)
+            }
+            .defaultScrollAnchor(live ? .bottom : .top)
+            .onScrollGeometryChange(for: Metrics.self) { geometry in
+                Metrics(offset: geometry.contentOffset.y, content: geometry.contentSize.height, container: geometry.containerSize.height)
+            } action: { old, new in
+                if new.content != old.content || new.container != old.container {
+                    if live && follow.follows { proxy.scrollTo("end", anchor: .bottom) }
+                } else {
+                    follow.scrollSettled(distanceFromBottom: new.content - new.offset - new.container)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(24)
-            .textSelection(.enabled)
         }
-        .defaultScrollAnchor(live ? .bottom : .top, for: .sizeChanges)
     }
 
-    /// Segments and gaps in time order; a speaker's name is shown when the speaker changes and after a gap.
+    /// Segments and gaps in time order, the segments of one speaker joined into a turn; a gap ends a turn.
     private var items: [Item] {
         enum Entry { case segment(MeetingSegment), gap(TranscriptGap) }
-        let entries = (segments.map(Entry.segment) + meeting.gaps.map(Entry.gap)).sorted {
-            func start(_ e: Entry) -> TimeInterval { switch e { case .segment(let s): s.start; case .gap(let g): g.start } }
-            return start($0) < start($1)
+        func start(_ entry: Entry) -> TimeInterval {
+            switch entry { case .segment(let segment): segment.start; case .gap(let gap): gap.start }
         }
+        let entries = (segments.map(Entry.segment) + meeting.gaps.map(Entry.gap)).sorted { start($0) < start($1) }
         var items: [Item] = []
-        var lastSpeaker: PersonID?
-        var showName = true
+        var open: Turn?
+        func close() { if let turn = open { items.append(.turn(turn)); open = nil } }
         for entry in entries {
             switch entry {
             case .gap(let gap):
+                close()
                 items.append(.gap(gap))
-                showName = true
             case .segment(let segment):
-                items.append(.spoken(segment, showsName: showName || segment.speaker != lastSpeaker))
-                lastSpeaker = segment.speaker
-                showName = false
+                if var turn = open, turn.speaker == segment.speaker {
+                    turn.text += " " + segment.text
+                    open = turn
+                } else {
+                    close()
+                    open = Turn(id: segment.id, speaker: segment.speaker, start: segment.start, text: segment.text)
+                }
             }
         }
+        close()
         return items
     }
 
-    private func line(_ segment: MeetingSegment, showsName: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Button { seek?(segment.start) } label: {
-                Text(MeetingListLogic.clock(segment.start)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain).frame(width: 46, alignment: .trailing).disabled(seek == nil)
-            VStack(alignment: .leading, spacing: 2) {
-                if showsName, let person = segment.speaker, let info = meeting.speakers[person] {
+    private func row(_ turn: Turn) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if let person = turn.speaker, let info = meeting.speakers[person] {
+                    Circle().fill(SpeakerPalette.color(info)).frame(width: 6, height: 6)
                     SpeakerName(person: person, info: info, rename: rename)
                 }
-                Text(segment.text)
+                Button { seek?(turn.start) } label: {
+                    Text(MeetingListLogic.clock(turn.start)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain).disabled(seek == nil)
+                .accessibilityLabel("Play from \(MeetingListLogic.clock(turn.start))")
             }
+            Text(turn.text).font(.body).lineSpacing(4)
         }
     }
 
@@ -158,6 +168,5 @@ struct MeetingTranscriptView: View {
         Label("Transcript missing \(MeetingListLogic.clock(gap.start)) to \(MeetingListLogic.clock(gap.end)). The audio was recorded.",
               systemImage: "wifi.slash")
             .font(.callout).foregroundStyle(.orange)
-            .padding(.leading, 58)
     }
 }

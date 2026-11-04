@@ -15,15 +15,19 @@ struct MenuContent: View {
                 }
             }
             Button(controller.isDictating ? "Stop composer" : "Open voice composer") { controller.toggle() }
+                .menuAction("menu.composer") { controller.toggle() }
                 .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
             Button(controller.dictation.isActive ? "Stop dictation" : "Dictate into the focused field") { controller.toggleDictation() }
+                .menuAction("menu.dictation") { controller.toggleDictation() }
                 .controlSize(.large)
             HStack(spacing: 8) {
                 Button(controller.meetings.phase == .recording ? "Stop meeting" : "Start meeting") { controller.toggleMeeting() }
                     .controlSize(.large)
+                    .menuAction("menu.meeting") { controller.toggleMeeting() }
                     .disabled(controller.meetings.phase == .starting || controller.meetings.phase == .stopping)
                 Button("Meetings…") { NSApp.activate(); openWindow(id: MeetingController.windowID) }
                     .controlSize(.large)
+                    .menuAction("menu.meetings") { NSApp.activate(); openWindow(id: MeetingController.windowID) }
             }
             Label("Composer \(controller.settings.hotkey?.displayName ?? "not set")", systemImage: "command")
                 .font(.caption).foregroundStyle(.secondary)
@@ -34,11 +38,21 @@ struct MenuContent: View {
             Divider()
             HStack {
                 Button("Settings…") { NSApp.activate(); openSettings() }
+                    .menuAction("menu.settings") { NSApp.activate(); openSettings() }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
+                    .menuAction("menu.quit") { NSApplication.shared.terminate(nil) }
             }
         }.padding(20).frame(width: 300)
             // Reloads on open and whenever the composer or backfill stores a new revision.
             .task(id: controller.composer.historyRevision) { await controller.refreshRecent() }
+    }
+}
+
+private extension View {
+    /// A button of the menu-bar window that assistive tools can find and press: an identifier, and the press (AXPress)
+    /// runs the action directly, as the click does, instead of relying on the window being key.
+    func menuAction(_ id: String, _ action: @escaping () -> Void) -> some View {
+        accessibilityIdentifier(id).accessibilityAction(.default, action)
     }
 }

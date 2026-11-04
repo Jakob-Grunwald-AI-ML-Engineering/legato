@@ -8,23 +8,63 @@ import LegatoMeetings
 /// Meetings window, writes a PNG of it for each state and quits. No session, no network, no key.
 @MainActor enum MeetingsPreview {
     static func runIfRequested(_ controller: MeetingController) {
+        if UserDefaults.standard.bool(forKey: "LegatoMeetingsLiveSim") {
+            // A live meeting that gains a line every 0.7 s, to watch how the transcript scrolls.
+            Task {
+                let live = await seedLive(controller.services.store)
+                await controller.refresh()
+                controller.showWindow()
+                controller.selection = live.id
+                controller.detailTab = .transcript
+                var state = live.state
+                var n = 0
+                while true {
+                    n += 1
+                    let last = state.segments.last?.end ?? 0
+                    state.segments.append(MeetingSegment(text: "Line \(n): the export total differs by a few cents because every line is rounded on its own before the sum.", start: last + 1, end: last + 7, speaker: n % 2 == 0 ? "P1" : "P2"))
+                    controller.previewLive(state, elapsed: last + 7)
+                    try? await Task.sleep(for: .milliseconds(700))
+                }
+            }
+            return
+        }
+        if UserDefaults.standard.bool(forKey: "LegatoMeetingsSeed") {
+            Task {
+                let ids = await seed(controller.services.store)
+                await controller.refresh()
+                controller.showWindow()
+                controller.selection = ids.planning
+            }
+            return
+        }
         guard let path = UserDefaults.standard.string(forKey: "LegatoMeetingsShots") else { return }
         let directory = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
         Task {
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if UserDefaults.standard.bool(forKey: "LegatoMeetingsEmpty") {
+                try? await Task.sleep(for: .seconds(2))
+                controller.showWindow()
+                try? await Task.sleep(for: .seconds(4))
+                snapshot(window: "Meetings", to: directory.appending(path: "0-empty.png"))
+                NSApp.terminate(nil)
+                return
+            }
             let ids = await seed(controller.services.store)
             await controller.refresh()
             controller.showWindow()
             try? await Task.sleep(for: .seconds(4))
-            @MainActor func shot(_ name: String) async {
+            @MainActor func shot(_ name: String, region: Bool = false) async {
                 try? await Task.sleep(for: .milliseconds(2000))
-                snapshot(window: "Meetings", to: directory.appending(path: "\(name).png"))
+                snapshot(window: "Meetings", region: region, to: directory.appending(path: "\(name).png"))
             }
             controller.selection = ids.planning
             controller.detailTab = .summary
             await shot("1-summary")
             controller.detailTab = .transcript
             await shot("2-transcript-speakers-gap-player")
+            controller.editingDetails = true
+            await shot("2b-details-popover", region: true)
+            controller.editingDetails = false
             controller.sidebar = .project(client: "Acme", project: "Website relaunch")
             await shot("3-folder-filter")
             controller.sidebar = .all
@@ -50,7 +90,7 @@ import LegatoMeetings
     // MARK: Snapshots
 
     /// The window as the screen shows it, through `screencapture -l`.
-    private static func snapshot(window title: String?, to url: URL) {
+    private static func snapshot(window title: String?, region: Bool = false, to url: URL) {
         let candidates = NSApp.windows.filter { $0.isVisible }
         let target = title.flatMap { title in candidates.first { $0.title == title } }
             ?? candidates.first { $0.frame.height < 140 && $0.frame.width >= 390 }
@@ -58,6 +98,10 @@ import LegatoMeetings
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         process.arguments = ["-x", "-o", "-l", String(target.windowNumber), url.path]
+        if region, let popover = NSApp.windows.first(where: { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }) {
+            // A popover is a window of its own; the window behind it is the other shot.
+            process.arguments = ["-x", "-o", "-l", String(popover.windowNumber), url.path]
+        }
         try? process.run()
         process.waitUntilExit()
     }
