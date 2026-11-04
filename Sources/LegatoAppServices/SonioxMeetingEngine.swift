@@ -215,21 +215,29 @@ private actor MeetingStreamRunner {
     /// The new stream starts at the oldest audio still held (or the next audio, when nothing is): its times are
     /// measured from there. Audio that arrives meanwhile waits behind the backlog.
     private func adopt(_ client: SonioxClient, id: Int) async {
-        connecting = nil
-        guard !closed else { return await client.close() }
+        // Until the stream is live, `connecting` stays set so that no second connection starts meanwhile.
+        guard !closed else {
+            connecting = nil
+            return await client.close()
+        }
         adopting = true
         let since = backlog.first?.start ?? fed
         await client.setAudioOrigin(since)
         guard !closed else {
             adopting = false
+            connecting = nil
             return await client.close()
         }
         let previous = live
         live = Live(id: id, client: client, since: since)
+        // Audio that arrives from here on queues behind the backlog until `flush` has sent it.
+        flushing = true
         adopting = false
+        connecting = nil
         if let previous { retire(previous.client) }
         // The stream may have failed while it was being adopted: nobody was told, as it was not live yet.
         if await client.lastFailure != nil {
+            flushing = false
             await clientDropped(id)
             return
         }
@@ -241,7 +249,6 @@ private actor MeetingStreamRunner {
     }
 
     private func flush(id: Int) async {
-        flushing = true
         while let held = backlog.first, let current = live, current.id == id {
             backlog.removeFirst()
             backlogSeconds -= held.seconds
