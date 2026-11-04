@@ -32,8 +32,7 @@ struct TypingFallbackView: View {
                     }
                 }
                 place(g.wordRowFrame) {
-                    WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: Double(g.wordRowFrame.width)),
-                                contentOffset: WordRowHeight.textOffset(landscape: g.landscape))
+                    WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: Double(g.wordRowFrame.width)))
                         .accessibilityIdentifier("typing.predictions")
                 }
                 place(g.hotkeyFrame(buttons: Self.toolKeys)) { toolKeys }
