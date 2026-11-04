@@ -93,15 +93,20 @@ public actor SonioxClient {
     private var audioOrigin: Double?
     private var sentAudio = false
     private let quietFailure: SonioxQuietFailure
+    private let speakerPrefix: String
     private let onDrop: (@Sendable () async -> Void)?
     /// `onDrop` runs after a quiet failure (never after `cancel` or `close`); the Room then sees only `asr.dropped`.
+    /// `speakerPrefix` is put in front of every diarized speaker label, so a meeting that reconnects can tell the
+    /// new stream's "1" from the old one's.
     public init(room: Room, config: SonioxConfig = SonioxConfig(), socket: any SonioxSocket = URLSessionSonioxSocket(),
                 keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20), audioOrigin: Double? = nil,
-                quietFailure: SonioxQuietFailure = .never, onDrop: (@Sendable () async -> Void)? = nil) {
+                quietFailure: SonioxQuietFailure = .never, speakerPrefix: String = "", onDrop: (@Sendable () async -> Void)? = nil) {
         self.room = room; self.config = config; self.socket = socket
         self.keepaliveInterval = keepaliveInterval; self.finishTimeout = finishTimeout; self.audioOrigin = audioOrigin
-        self.quietFailure = quietFailure; self.onDrop = onDrop
+        self.quietFailure = quietFailure; self.speakerPrefix = speakerPrefix; self.onDrop = onDrop
     }
+    /// Why the stream failed, once it has; nil until then (and after a clean finish or `close`).
+    public var lastFailure: SonioxError? { failure }
     /// Connected, configured and accepting audio or finalize.
     public var isStreaming: Bool { state == .streaming }
     /// Connected and held, or streaming: usable for a take.
@@ -306,7 +311,9 @@ public actor SonioxClient {
             case .segment(let segment):
                 let t0 = segment.words.first?.t0
                 let t1 = segment.words.last?.t1
-                let metadata: JSONValue = .object(["t0": t0.map(JSONValue.number) ?? .null, "t1": t1.map(JSONValue.number) ?? .null, "timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds])
+                var fields: [String: JSONValue] = ["t0": t0.map(JSONValue.number) ?? .null, "t1": t1.map(JSONValue.number) ?? .null, "timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds]
+                if let speaker = segment.speaker { fields["speaker"] = .string(speakerPrefix + speaker) }
+                let metadata: JSONValue = .object(fields)
                 _ = try await room.publish(channel: .asrSegment, participant: .segmenter,
                     payload: .object(["words": try .encoding(segment.words.map(\.word)), "metadata": metadata]),
                     tOrigin: t0.flatMap { start in audioOrigin.map { $0 + start } })

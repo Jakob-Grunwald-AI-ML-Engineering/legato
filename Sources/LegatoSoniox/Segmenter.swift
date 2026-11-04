@@ -3,6 +3,8 @@ import Foundation
 public struct SonioxSegment: Codable, Sendable, Equatable {
     public var words: [TimedWord]
     public var reason: String
+    /// The speaker of the segment's words; a speaker change closes a segment, so there is one.
+    public var speaker: String? = nil
 }
 public enum SegmenterEvent: Sendable {
     case segment(SonioxSegment)
@@ -35,7 +37,7 @@ public struct Segmenter: Sendable {
         var events: [SegmenterEvent] = []
         func close(_ reason: String) {
             if !words.isEmpty {
-                let segment = SonioxSegment(words: words, reason: reason)
+                let segment = SonioxSegment(words: words, reason: reason, speaker: words.first?.speaker)
                 segments.append(segment); events.append(.segment(segment)); words = []
             }
             // Silence/endpoint is a chunk boundary even when punctuation already flushed the words.
@@ -47,6 +49,8 @@ public struct Segmenter: Sendable {
             }
         }
         func add(_ word: TimedWord) {
+            // A new speaker starts a new segment (only when the stream is diarized: otherwise no word has one).
+            if let speaker = word.speaker, let current = words.last?.speaker, speaker != current { close("speaker") }
             if let start = word.t0, let end = lastWordEnd, hasUnclosedChunk, start - end >= gap { close("gap") }
             words.append(word)
             lastWordEnd = word.t1 ?? lastWordEnd
