@@ -3,6 +3,7 @@ import Observation
 import os
 import LegatoAgent
 import LegatoClaude
+import LegatoCore
 import LegatoVocabulary
 
 /// A cleaned line waiting for the keyboard to type it.
@@ -16,8 +17,8 @@ public struct DictationDelivery: Sendable, Equatable {
     public var final = true
     /// Set on a growing take whose cleanup then failed: the typed part stays until the user chooses (`retracted`).
     public var failed = false
-    /// The user chose Retry or Insert as-is for a failed take: whoever typed the partial text erases it (if the
-    /// field still shows exactly that) and acknowledges. The delivery is final.
+    /// The streamed text is taken back (Retry or Insert as-is on a failed take, or the guard rejected it): whoever
+    /// typed it erases it (if the field still shows exactly that) and acknowledges. The delivery is final.
     public var retracted = false
     /// A whole-take delivery (the take modes), as opposed to a line of line-by-line dictation.
     public var isTake = false
@@ -50,6 +51,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// The pause countdown over the buffered take (host `systemUptime`); nil when none runs.
     public private(set) var countdownStart: Double?
     public private(set) var countdownDeadline: Double?
+    /// Counts writes to history, so history views can reload.
+    public private(set) var historyRevision = 0
     /// Everything the take holds, for display: failed or cleaning text first, then the buffer.
     public var takeDisplay: String {
         ([failedText ?? cleaningText] + takeLines).compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
@@ -64,6 +67,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored public var onChange: (@MainActor () -> Void)?
     /// The last takes across sessions: cleanup context and Soniox background text. Survives `reset()`.
     @ObservationIgnored public let recentTakes: RecentTakesStore
+    /// Keeps every dictated text. A take is saved raw before cleanup starts, so no cleanup outcome can lose it.
+    @ObservationIgnored private let history: (any HistoryStore)?
+    /// The history entry of the last take: a retry of the same text updates it instead of adding another.
+    @ObservationIgnored private var takeEntry: (raw: String, id: UUID)?
     @ObservationIgnored private let cleaner: any SentenceCleaning
     @ObservationIgnored private let vocabulary: @Sendable () async -> [String]
     @ObservationIgnored private let timeout: Duration
@@ -100,18 +107,18 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     private static let warmInterval: TimeInterval = 240
 
     /// `defaults` holds the send setting: the Mac app's standard defaults, or the App Group on iOS.
-    public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, defaults: UserDefaults = .standard) {
-        self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore())),
+    public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard) {
+        self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), history: history, cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore())),
                   vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) })
     }
-    public init(recentTakes: RecentTakesStore = RecentTakesStore(), cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
+    public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
                 sendMode: @escaping @MainActor () -> DictationSendSetting.Mode = { .lineByLine },
                 pauseSeconds: @escaping @MainActor () -> Double = { DictationSendSetting.defaultPause },
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil) {
-        self.recentTakes = recentTakes
+        self.recentTakes = recentTakes; self.history = history
         self.cleaner = cleaner; self.vocabulary = vocabulary; self.timeout = timeout
         self.sendMode = sendMode; self.pauseSeconds = pauseSeconds; self.clock = clock; self.takeTimeout = takeTimeout
     }
@@ -293,7 +300,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if let scripted = debugStreamCleaner { takeCleaner = scripted }
         #endif
         let cleaner = DictationTakeCleaner(cleaner: takeCleaner, timeout: takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
+        let entryID = takeEntry?.raw == raw ? takeEntry?.id ?? UUID() : UUID()
+        takeEntry = (raw, entryID)
         let task = Task { @MainActor [weak self] in
+            await self?.save(id: entryID, raw: raw, text: raw)
             var result = DictationTakeCleanupResult.failed(reason: "forced")
             var rejected = false
             if !forcedFailure, let terms = await self?.loadTerms() {
@@ -308,6 +318,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             case .cleaned(let text):
                 self.takePhase = .buffering
                 self.finishStream(raw: raw, text: text, rejected: rejected)
+                if !rejected { await self.save(id: entryID, raw: raw, text: text) }
             case .unavailable:
                 self.takePhase = .buffering
                 self.deliverTake(raw: raw, text: raw, cleaned: false)
@@ -343,11 +354,17 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         }
     }
 
-    /// The stream ended well: the delivery is final with the validated text. The guard only warns.
+    /// The stream ended: the delivery is final with the validated text. A result the guard rejects is not the
+    /// speaker's words, so what it streamed is taken back and the raw take goes in instead.
     private func finishStream(raw: String, text: String, rejected: Bool) {
         if rejected {
-            fallbacks.append("take-rejected-warning"); if fallbacks.count > 20 { fallbacks.removeFirst() }
-            Self.log.warning("take cleanup streamed; the guard would have rejected it (kept)")
+            fallbacks.append("take-rejected"); if fallbacks.count > 20 { fallbacks.removeFirst() }
+            Self.log.warning("take cleanup rejected by the guard; inserting the raw take")
+            if let seq = streamSeq, let i = outbox.firstIndex(where: { $0.sequence == seq }) {
+                outbox[i].retracted = true; outbox[i].final = true
+            }
+            streamSeq = nil; streamed = ""
+            return deliverTake(raw: raw, text: raw, cleaned: false)
         }
         guard let seq = streamSeq else { return deliverTake(raw: raw, text: text, cleaned: true) }
         streamSeq = nil; streamed = ""
@@ -390,6 +407,13 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         onChange?()
     }
 
+    private func save(id: UUID, raw: String, text: String) async {
+        guard let history else { return }
+        try? await history.upsert(DictationEntry(id: id, date: Date(), text: text, rawText: text == raw ? nil : raw,
+                                                 localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0))
+        historyRevision += 1
+    }
+
     var nextOutboxSequenceForTesting: Int { nextTakeSequence }
 
     /// Debug bridge and tests: the take's state.
@@ -403,5 +427,6 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         outbox.append(.init(lineID: line.lineID, sequence: line.sequence, raw: line.raw, text: line.text, cleaned: line.status == .cleaned))
         if let reason = line.reason { fallbacks.append(reason); if fallbacks.count > 20 { fallbacks.removeFirst() } }
         onChange?()
+        Task { [weak self] in await self?.save(id: UUID(), raw: line.raw, text: line.text) }
     }
 }

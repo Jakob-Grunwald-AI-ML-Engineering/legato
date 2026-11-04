@@ -65,7 +65,8 @@ import Observation
         let vocabularyURL = root.appending(path: "vocabulary.json")
         meetings = MeetingController(root: Self.meetingsRoot(in: root), vocabularyURL: vocabularyURL)
         dictation = MacDictationSession(pipeline: DictationPipeline(vocabularyURL: vocabularyURL,
-                                                                    recentTakesURL: root.appending(path: "recent-takes.json")),
+                                                                    recentTakesURL: root.appending(path: "recent-takes.json"),
+                                                                    history: history),
                                         microphone: AutomaticInputSource(), vocabularyURL: vocabularyURL)
         dictationWriter = FieldDictationWriter(
             capture: {

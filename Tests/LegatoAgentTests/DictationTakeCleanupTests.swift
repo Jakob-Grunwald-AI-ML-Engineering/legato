@@ -233,12 +233,14 @@ private final class Collected: @unchecked Sendable {
     #expect(failed.result == .failed(reason: "failed") && seen.all == ["Half "] && late.calls.withLock { $0 } == 1, "A failure after deltas is surfaced, not retried")
 }
 
-@Test func theStreamingGuardOnlyWarns() async {
+@Test func theStreamingGuardReportsARejectionToTheCaller() async {
     let input = DictationTakeInput(takeID: "t", text: longRaw)
     let garbage = PiecewiseCleaner([.init(pieces: ["I am sorry, but I cannot help with that request because it is not something I can do for you today."], fails: false)])
     let outcome = await DictationTakeCleaner(cleaner: garbage).cleanStreaming(input) { _ in }
     #expect(outcome.rejected)
-    if case .cleaned = outcome.result {} else { Issue.record("Streamed text is kept even when the guard would reject it") }
+    if case .cleaned = outcome.result {} else { Issue.record("A finished stream reports its text with the rejection") }
+    let oneWord = PiecewiseCleaner([.init(pieces: ["placeholder"], fails: false)])
+    #expect(await DictationTakeCleaner(cleaner: oneWord).cleanStreaming(input) { _ in }.rejected, "A long take must not collapse to one word")
     let good = PiecewiseCleaner([.init(pieces: [longClean], fails: false)])
     #expect(await DictationTakeCleaner(cleaner: good).cleanStreaming(input) { _ in }.rejected == false)
 }

@@ -4,13 +4,16 @@ import LegatoAgent
 
 /// Debug bridge: a scripted streaming cleaner. It "cleans" a take by capitalizing it and yields the result in small
 /// chunks with a delay between them; optionally the first stream fails after `failAfterChunks` chunks (later ones succeed).
+/// With `reply` every take streams that text instead, to stand in for a model that answers with something else.
 public final class DebugStreamingCleaner: SentenceCleaning, @unchecked Sendable {
     public let chunkDelay: Duration
     public let chunkSize: Int
     private let lock = NSLock()
     private var failAfter: Int?
+    private let reply: String?
 
-    public init(chunkMilliseconds: Int, failAfterChunks: Int? = nil, chunkSize: Int = 6) {
+    public init(chunkMilliseconds: Int, failAfterChunks: Int? = nil, chunkSize: Int = 6, reply: String? = nil) {
+        self.reply = reply
         chunkDelay = .milliseconds(max(0, chunkMilliseconds)); self.failAfter = failAfterChunks; self.chunkSize = max(1, chunkSize)
     }
 
@@ -19,7 +22,7 @@ public final class DebugStreamingCleaner: SentenceCleaning, @unchecked Sendable 
 
     public func cleanTakeStream(_ input: DictationTakeInput) -> AsyncThrowingStream<String, any Error> {
         let fail = lock.withLock { () -> Int? in let n = failAfter; failAfter = nil; return n }
-        let characters = Array(input.text.capitalized)
+        let characters = Array(reply ?? input.text.capitalized)
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var sent = 0

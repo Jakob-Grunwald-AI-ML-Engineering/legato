@@ -45,7 +45,7 @@ struct MenuContent: View {
             }
         }.padding(20).frame(width: 300)
             // Reloads on open and whenever the composer or backfill stores a new revision.
-            .task(id: controller.composer.historyRevision) { await controller.refreshRecent() }
+            .task(id: controller.composer.historyRevision + controller.dictation.pipeline.historyRevision) { await controller.refreshRecent() }
     }
 }
 
