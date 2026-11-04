@@ -20,6 +20,14 @@ struct LegatoMacApp: App {
         }
         .menuBarExtraStyle(.window)
 
+        Window("Meetings", id: MeetingController.windowID) {
+            MeetingsWindow()
+                .environment(controller)
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 1180, height: 720)
+        .defaultLaunchBehavior(.suppressed)
+
         Window("Set up Legato", id: MacAppController.onboardingWindowID) {
             OnboardingView()
                 .environment(controller)
@@ -46,11 +54,17 @@ private struct MenuBarLabel: View {
     var body: some View {
         Image(systemName: controller.setupAttention
             ? "exclamationmark.triangle.fill"
+            : controller.meetings.isRecording ? "record.circle.fill"
             : controller.isDictating || controller.dictation.isActive ? "waveform.circle.fill" : "waveform")
             .onChange(of: controller.onboardingRequests, initial: true) { _, count in
                 guard count > 0 else { return }
                 NSApp.activate()
                 openWindow(id: MacAppController.onboardingWindowID)
+            }
+            .onChange(of: controller.meetings.windowRequests) { _, count in
+                guard count > 0 else { return }
+                NSApp.activate()
+                openWindow(id: MeetingController.windowID)
             }
 
     }

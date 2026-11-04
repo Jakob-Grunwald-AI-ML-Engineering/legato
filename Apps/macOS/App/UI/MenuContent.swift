@@ -4,6 +4,7 @@ import SwiftUI
 struct MenuContent: View {
     @Environment(MacAppController.self) private var controller
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
@@ -17,6 +18,13 @@ struct MenuContent: View {
                 .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
             Button(controller.dictation.isActive ? "Stop dictation" : "Dictate into the focused field") { controller.toggleDictation() }
                 .controlSize(.large)
+            HStack(spacing: 8) {
+                Button(controller.meetings.phase == .recording ? "Stop meeting" : "Start meeting") { controller.toggleMeeting() }
+                    .controlSize(.large)
+                    .disabled(controller.meetings.phase == .starting || controller.meetings.phase == .stopping)
+                Button("Meetings…") { NSApp.activate(); openWindow(id: MeetingController.windowID) }
+                    .controlSize(.large)
+            }
             Label("Composer \(controller.settings.hotkey?.displayName ?? "not set")", systemImage: "command")
                 .font(.caption).foregroundStyle(.secondary)
             Label("Dictation \(controller.settings.dictationHotkey?.displayName ?? "not set")", systemImage: "mic")
