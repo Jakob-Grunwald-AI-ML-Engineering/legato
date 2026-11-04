@@ -10,6 +10,7 @@ mkdir -p "$work/sources/Apps/iOS/App/Debug" "$work/sources/Apps/iOS/App/Internal
   "$work/sources/Apps/macOS/App/Debug" "$work/sources/Apps/macOS/App/Internal"
 for platform in iOS macOS; do
   printf '%s\n' 'enum DebugBridge' 'session-probe' 'debug-bridge' 'LEGATO_MAC_ROOT' > "$work/sources/Apps/$platform/App/Debug/DebugBridge.swift"
+  printf '%s\n' 'LegatoMeetingsDropSonioxAfter' 'LegatoMeetingsNoSonioxKey' 'LegatoMeetingsNoClaudeKey' > "$work/sources/Apps/$platform/App/Debug/MeetingsFaults.swift"
   printf '%s\n' 'struct DebugOverlayView' > "$work/sources/Apps/$platform/App/Debug/DebugOverlay.swift"
   printf '%s\n' 'enum SessionProbe' 'Session probe:' > "$work/sources/Apps/$platform/App/Internal/SessionProbe.swift"
 done

@@ -4,8 +4,11 @@ public struct SonioxConfig: Sendable {
     public static let endpoint = URL(string: "wss://stt-rt.soniox.com/transcribe-websocket")!
     public let general: String
     public let terms: [String]
+    /// Ask Soniox to tell speakers apart (a meeting); dictation leaves it off and its start message unchanged.
+    public let diarization: Bool
     public var estimatedContextTokens: Int { general.utf8.count + terms.reduce(0) { $0 + $1.utf8.count + 4 } }
-    public init(mode: String = "Note", personalPrompt: String = "", terms: [String] = []) {
+    public init(mode: String = "Note", personalPrompt: String = "", terms: [String] = [], diarization: Bool = false) {
+        self.diarization = diarization
         // One UTF-8 byte per estimated token is conservative for multilingual text. Leave margin for schema.
         var remaining = 7500
         var selected: [String] = []
@@ -38,10 +41,12 @@ public struct SonioxConfig: Sendable {
         var context: [String: Any] = ["general": [["key": "composer", "value": general]], "terms": terms]
         let background = fittedBackground(backgroundText)
         if !background.isEmpty { context["text"] = background }
-        return try JSONSerialization.data(withJSONObject: [
+        var message: [String: Any] = [
             "model": "stt-rt-v6", "audio_format": "pcm_s16le", "sample_rate": 16000, "num_channels": 1,
             "language_hints": ["de", "en"], "enable_language_identification": true,
-            "enable_endpoint_detection": true, "context": context
-        ], options: [.sortedKeys])
+            "enable_endpoint_detection": !diarization, "context": context
+        ]
+        if diarization { message["enable_speaker_diarization"] = true }
+        return try JSONSerialization.data(withJSONObject: message, options: [.sortedKeys])
     }
 }

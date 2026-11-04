@@ -74,7 +74,7 @@ private let ok = #"{"id":"msg_1","type":"message","role":"assistant","content":[
 
         let json = try #require(JSONSerialization.jsonObject(with: seen.body) as? [String: Any])
         #expect(json["model"] as? String == "claude-sonnet-5-5")
-        #expect(json["max_tokens"] as? Int == 4096)
+        #expect(json["max_tokens"] as? Int == 8192)
         #expect(json["system"] as? String == "Be brief.")
         #expect(json["thinking"] == nil)
         let messages = try #require(json["messages"] as? [[String: Any]])

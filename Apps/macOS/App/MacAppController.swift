@@ -19,6 +19,8 @@ import Observation
     var recent: [DictationEntry] = []
     let composer: ComposerSession
     let notch = NotchPanelController()
+    let meetings: MeetingController
+    private var meetingIsland: MeetingIslandController?
     /// The dictation hotkey: types straight into the focused field. It never shares speech with `composer`.
     let dictation: MacDictationSession
     private let dictationWriter: FieldDictationWriter
@@ -61,6 +63,7 @@ import Observation
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         composer = ComposerSession(history: history)
         let vocabularyURL = root.appending(path: "vocabulary.json")
+        meetings = MeetingController(root: Self.meetingsRoot(in: root), vocabularyURL: vocabularyURL)
         dictation = MacDictationSession(pipeline: DictationPipeline(vocabularyURL: vocabularyURL,
                                                                     recentTakesURL: root.appending(path: "recent-takes.json")),
                                         microphone: AutomaticInputSource(), vocabularyURL: vocabularyURL)
@@ -125,11 +128,21 @@ import Observation
         }
         composer.hostClearComposer = { [weak self] in await self?.clearComposer() }
     }
+    private static func meetingsRoot(in root: URL) -> URL {
+        #if LEGATO_INTERNAL
+        if let path = UserDefaults.standard.string(forKey: "LegatoMeetingsRoot") {
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        #endif
+        return root.appending(path: "Meetings", directoryHint: .isDirectory)
+    }
     func bootstrap() {
         guard !bootstrapped else { return }; bootstrapped = true
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
         dictationPill = DictationPillController(session: dictation, occupiedFrame: { [weak self] in self?.notch.occupiedFrame })
         dictation.ensureWarm()
+        meetingIsland = MeetingIslandController(controller: meetings)
+        meetings.bootstrap()
         Task {
             await composer.backfillHistory(markerURL: URL.applicationSupportDirectory.appending(path: "Legato/history-backfill.v1.done"))
             await refreshRecent()
@@ -151,11 +164,13 @@ import Observation
         }
         #if LEGATO_INTERNAL
         DebugBridge.start()
+        MeetingsPreview.runIfRequested(meetings)
         #endif
     }
     func toggle() {
         if isDictating { stopComposer(); return }
         guard !starting else { return }
+        guard !refusedByMeeting() else { panelGesture.runEnded(); return }
         guard !dictation.isActive else { dictationPill?.show(notice: "Stop dictation before opening the composer."); return }
         starting = true
         prepareComposerTarget()
@@ -320,6 +335,7 @@ import Observation
     }
     private func startDictation() {
         guard !dictation.isActive else { return }
+        guard !refusedByMeeting() else { dictationGesture.runEnded(); return }
         guard !isDictating, !starting else { dictationPill?.show(notice: "Close the composer before dictating."); dictationGesture.runEnded(); return }
         switch permissions.mic {
         case .granted: break
@@ -332,6 +348,28 @@ import Observation
             dictationGesture.runEnded(); return
         }
         Task { if await !dictation.start() { dictationGesture.runEnded() } }
+    }
+    /// Starts a meeting, or stops the one that records. A meeting and a dictation never share the microphone.
+    func toggleMeeting() {
+        switch meetings.phase {
+        case .recording: meetings.stop()
+        case .idle:
+            switch permissions.mic {
+            case .granted: meetings.start(dictationActive: isDictating || starting || dictation.isActive)
+            case .undetermined:
+                Task { await permissions.requestMicrophone() }
+                meetings.flash("Allow microphone access, then start the meeting again.")
+            case .denied:
+                meetings.flash("Microphone access is off. Allow Legato in System Settings, Privacy & Security.")
+            }
+        case .starting, .stopping: break
+        }
+    }
+    /// While a meeting records, dictation and the composer say so and do not start.
+    private func refusedByMeeting() -> Bool {
+        guard let refusal = meetings.refusal else { return false }
+        meetings.flash("\(refusal). Stop it to dictate or compose.")
+        return true
     }
     private func stopDictation() { Task { await dictation.stop() } }
     private func cancelDictation() { Task { await dictation.cancel(); dictationGesture.runEnded() } }

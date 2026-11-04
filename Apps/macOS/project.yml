@@ -3,7 +3,7 @@
 #
 # Non-sandboxed on purpose (Accessibility writes into other apps, a global event tap, synthesized
 # paste), so distribution is Developer ID with the hardened runtime; the only entitlement is the
-# microphone. Signing, notarization and the release flow are leg 5.
+# microphone (the system-audio tap of meetings asks for its own permission at runtime). Signing, notarization and the release flow are leg 5.
 name: LegatoMac
 options:
   bundleIdPrefix: de.gruenwald.legato
@@ -43,9 +43,11 @@ targets:
       # Shared composer runtime.
       - package: LegatoKit
         product: LegatoAppServices
-      # Meeting notes: the session and store, and the opt-in Claude summary backend with its Keychain key.
+      # Meeting notes: the opt-in Claude summary backend with its Keychain key, and the session and store.
       - package: LegatoKit
         product: LegatoClaude
+      - package: LegatoKit
+        product: LegatoMeetings
     settings:
       base:
         PRODUCT_NAME: Legato
@@ -71,4 +73,5 @@ targets:
         LSMinimumSystemVersion: "26.0"
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.productivity
-        NSMicrophoneUsageDescription: Legato records your voice to compose text.
+        NSMicrophoneUsageDescription: Legato records your voice to compose text and, for meeting notes, to save your side of the meeting on this device.
+        NSAudioCaptureUsageDescription: Legato records the audio your Mac plays, to transcribe the other side of a meeting.

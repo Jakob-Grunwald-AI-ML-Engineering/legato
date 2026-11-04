@@ -19,12 +19,13 @@ public actor Room {
     private let segmentRouting: SegmentRouting
     private let resumable: Bool
     private let drainOnly: Bool
+    private let logsTail: Bool
     public private(set) var loggingError: String?
     public var state: SessionState { lifecycle.state }
     public var documentSnapshot: DocumentSnapshot { document.snapshot }
-    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic, resumable: Bool = false, drainOnly: Bool = false,
+    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic, resumable: Bool = false, drainOnly: Bool = false, logsTail: Bool = true,
                 clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
-        self.log = log; self.segmentRouting = segmentRouting; self.resumable = resumable; self.drainOnly = drainOnly; self.clock = clock
+        self.log = log; self.segmentRouting = segmentRouting; self.resumable = resumable; self.drainOnly = drainOnly; self.logsTail = logsTail; self.clock = clock
     }
 
     public func subscribe(participant: Participant, channels: Set<Channel>, buffering: SubscriptionBuffer? = nil) -> AsyncStream<Envelope> {
@@ -257,7 +258,9 @@ public actor Room {
         let envelope = Envelope(seq: sequence, id: UUID().uuidString, channel: channel,
                                 participant: participant, tMono: now, tOrigin: tOrigin ?? now,
                                 baseRev: baseRev, causedBy: causedBy, payload: payload)
-        if logged { do { try log?.append(envelope) } catch { loggingError = String(describing: error) } }
+        // A long session (a meeting) leaves the tail out of the log: it changes with every provider frame.
+        let isTail = channel == .asrTail || channel == .asrRawTail
+        if logged, logsTail || !isTail { do { try log?.append(envelope) } catch { loggingError = String(describing: error) } }
         for (channels, continuation) in subscribers.values where channels.contains(channel) { continuation.yield(envelope) }
         return envelope
     }

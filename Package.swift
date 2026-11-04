@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "LegatoAppServices", targets: ["LegatoAppServices"]),
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
+        .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
     ],
     dependencies: [
         .package(path: "Vendor/Pow"),
@@ -43,13 +44,16 @@ let package = Package(
         .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore", "LegatoAudioBridge"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore", "LegatoAudioBridge"]),
-        .target(name: "LegatoAppServices", dependencies: ["LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc"]),
-        .testTarget(name: "LegatoAppServicesTests", dependencies: ["LegatoAppServices", "LegatoCore", "LegatoVocabulary"]),
+        .target(name: "LegatoAppServices", dependencies: ["LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings"]),
+        .testTarget(name: "LegatoAppServicesTests", dependencies: ["LegatoAppServices", "LegatoCore", "LegatoVocabulary", "LegatoMeetings"]),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
         .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoClaudeTests", dependencies: ["LegatoClaude", "LegatoCore"]),
         .target(name: "LegatoAudioBridge", publicHeadersPath: "include"),
+        // Meeting notes: a mixed-stream session, its store, recovery, summaries and export. Core only.
+        .target(name: "LegatoMeetings", dependencies: ["LegatoCore"]),
+        .testTarget(name: "LegatoMeetingsTests", dependencies: ["LegatoMeetings", "LegatoCore"], resources: [.copy("Fixtures")]),
     ],
     swiftLanguageModes: [.v6]
 )

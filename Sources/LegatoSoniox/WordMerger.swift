@@ -6,6 +6,8 @@ public struct TimedWord: Codable, Sendable, Equatable {
     /// Seconds relative to the audio stream.
     public var t0: Double?
     public var t1: Double?
+    /// The diarized speaker of the word's first token; nil when the stream is not diarized.
+    public var speaker: String? = nil
 }
 
 /// Soniox final tokens are append-only; non-final tokens replace the previous speculative tail.
@@ -23,7 +25,7 @@ public struct WordMerger: Sendable {
             let text = String(part)
             if pending == nil {
                 pending = TimedWord(word: Word(text: text, confidence: token.confidence, language: token.language),
-                                    t0: token.startMs.map { $0 / 1000 }, t1: token.endMs.map { $0 / 1000 })
+                                    t0: token.startMs.map { $0 / 1000 }, t1: token.endMs.map { $0 / 1000 }, speaker: token.speaker)
             } else {
                 pending?.word.text += text
                 if let confidence = token.confidence { let previous = pending?.word.confidence ?? confidence; pending?.word.confidence = min(previous, confidence) }

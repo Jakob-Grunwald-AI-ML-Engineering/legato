@@ -96,6 +96,20 @@ import LegatoComposerDoc
     #expect(log.audioURL.lastPathComponent == "audio.m4a")
 }
 
+@Test func aRoomThatSkipsTheTailLogsTheRestOfTheSession() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try SessionLog(rootDirectory: root)
+    let room = Room(log: log, segmentRouting: .intercepted, logsTail: false)
+    let tails = await room.subscribe(participant: .logger, channels: [.asrRawTail], buffering: .unbounded)
+    var received = tails.makeAsyncIterator()
+    _ = try await room.publish(channel: .asrTail, participant: .transcriber, payload: .object(["text": .string("partial")]))
+    _ = try await room.publish(channel: .session, participant: .transcriber, payload: .object(["event": .string("asr.started")]))
+    #expect(await received.next()?.payload["text"] == .string("partial"), "subscribers still hear the tail")
+    let raw = try String(contentsOf: log.roomURL, encoding: .utf8)
+    #expect(raw.contains("asr.started") && !raw.contains("partial") && !raw.contains("asr.raw-tail"))
+}
+
 @Test func finalPassWaitsForTranscriberAndAgents() async throws {
     let room = Room(clock: { 77 })
     let events = await room.subscribe(participant: .logger, channels: [.session])

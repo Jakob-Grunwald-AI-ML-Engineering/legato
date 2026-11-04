@@ -60,3 +60,49 @@ public struct SessionConfig: Sendable, Equatable {
         self.mode = mode
     }
 }
+
+// MARK: Meetings
+
+/// Why a meeting cannot start now.
+public enum MeetingStartRefusal: Sendable, Equatable {
+    case alreadyRecording
+    case dictationRunning
+
+    public var message: String {
+        switch self {
+        case .alreadyRecording: "A meeting is already recording."
+        case .dictationRunning: "Stop the dictation first."
+        }
+    }
+}
+
+/// Who may hold the microphone: a meeting and a dictation (or a composition) never run together.
+public enum MeetingArbitration {
+    /// What a refused dictation or composer start says (the hotkey, the composer's button).
+    public static let dictationNotice = "Meeting recording"
+
+    /// The notice for a dictation or composer start that arrives while a meeting records; nil when it may go ahead.
+    public static func dictationRefusal(meetingActive: Bool) -> String? {
+        meetingActive ? dictationNotice : nil
+    }
+
+    /// Why a meeting may not start now; nil when it may.
+    public static func meetingRefusal(dictationActive: Bool, meetingActive: Bool) -> MeetingStartRefusal? {
+        if meetingActive { return .alreadyRecording }
+        if dictationActive { return .dictationRunning }
+        return nil
+    }
+}
+
+/// A meeting's recording must stay on the wall-clock timeline, so audio a source did not deliver
+/// (the tap is rebuilt, the engine restarts) is filled with silence.
+public enum MeetingSilence {
+    /// Shorter shortfalls are buffer jitter, not a gap.
+    public static let tolerance: TimeInterval = 0.25
+
+    /// Seconds of silence to add so `delivered` seconds of audio cover `elapsed` seconds of meeting.
+    public static func deficit(elapsed: TimeInterval, delivered: TimeInterval) -> TimeInterval {
+        let missing = elapsed - delivered
+        return missing > tolerance ? missing : 0
+    }
+}
