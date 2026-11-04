@@ -11,12 +11,17 @@ private final class ComposerPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
     var handleShortcut: ((NSEvent) -> Bool)?
+    /// While the close animation runs the panel takes no keys, so nothing typed meant for the target is swallowed.
+    var isClosing = false
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown { makeKey() }
+        if isClosing, event.type == .keyDown || event.type == .keyUp { return }
+        if event.type == .leftMouseDown, !isClosing { makeKey() }
         if event.type == .keyDown, handleShortcut?(event) == true { return }
         super.sendEvent(event)
     }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if isClosing { return false }
         if handleShortcut?(event) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
@@ -34,14 +39,21 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
     private var presentationGeneration = 0
     private var sending = false
     private var screen: NSScreen?
+    private var style = NotchIslandStyle.detached
+    private var closing = false
+    private let presentation = IslandPresentation()
+    /// The composer's frame while it is open, for the pill to stay clear of.
+    var occupiedFrame: NSRect? { panel?.isVisible == true && !closing ? panel?.frame : nil }
     func show(controller: MacAppController, targetPID: pid_t?) {
         presentationGeneration += 1; sending = false
         let screen = targetScreen(pid: targetPID) ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         self.screen = screen
-        let frame = NotchGeometry.frame(screen: screen.frame, visible: screen.visibleFrame, safeTop: screen.safeAreaInsets.top, height: 188)
+        style = NotchIslandStyle(screen: screen)
+        let frame = windowFrame(height: NotchComposerView.contentHeight(session: controller.composer, showingCorrection: false))
         let panel = self.panel ?? ComposerPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         self.panel = panel
+        let alreadyShown = panel.isVisible
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
@@ -49,28 +61,55 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = !style.attached
         panel.becomesKeyOnlyIfNeeded = false
+        panel.isClosing = false; closing = false
+        panel.ignoresMouseEvents = false
         panel.handleShortcut = { [weak controller] event in
             guard let controller else { return false }
             return ComposerShortcut.handle(event, controller: controller)
         }
-        panel.contentView = ComposerHostingView(rootView: NotchComposerView(controller: controller, attached: screen.safeAreaInsets.top > 0, resize: resize))
-        panel.setFrame(frame.offsetBy(dx: 0, dy: 24), display: false)
-        panel.alphaValue = 0
+        // A panel that is already open (or still closing) comes back fully grown; a hidden one grows from the notch.
+        presentation.jump(to: alreadyShown)
+        panel.contentView = ComposerHostingView(rootView: NotchComposerView(controller: controller, style: style, presentation: presentation, resize: resize))
+        panel.setFrame(frame, display: true)
         panel.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.28
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1.12)
-            panel.animator().setFrame(frame, display: true)
-            panel.animator().alphaValue = 1
+        if !alreadyShown { openSoon() }
+        invalidateShadowSoon()
+    }
+    /// Instant: the send flow hides the panel just before the paste and reveals the same panel again.
+    func hide() {
+        presentationGeneration += 1; sending = false; closing = false
+        panel?.isClosing = false
+        panel?.ignoresMouseEvents = false
+        panel?.orderOut(nil)
+    }
+    /// Shrinks back into the notch, then orders out. A `show` or `revealForSend` meanwhile cancels it.
+    func dismiss() {
+        guard let panel, panel.isVisible, !closing else { return }
+        presentationGeneration += 1; sending = false; closing = true
+        let generation = presentationGeneration
+        panel.isClosing = true
+        panel.ignoresMouseEvents = true
+        panel.resignKey()
+        panel.makeFirstResponder(nil)
+        presentation.close()
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(NotchIslandTokens.closeDuration + 0.05))
+            guard let self, generation == presentationGeneration else { return }
+            closing = false
+            panel.isClosing = false
+            panel.ignoresMouseEvents = false
+            panel.orderOut(nil)
         }
     }
-    func hide() { presentationGeneration += 1; sending = false; panel?.orderOut(nil) }
     /// Preserve the same hosting view so its acknowledged draft can fly out after focus handoff.
     func revealForSend() -> Int? {
         guard let panel else { return nil }
-        sending = true
+        sending = true; closing = false
+        panel.isClosing = false
+        panel.ignoresMouseEvents = false
+        presentation.jump(to: true)
         panel.orderFrontRegardless()
         return presentationGeneration
     }
@@ -80,7 +119,7 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
             guard let self, generation == presentationGeneration else { return }
             sending = false
             guard panel?.isKeyWindow != true, ifUnchanged() else { return }
-            hide()
+            dismiss()
         }
     }
     private weak var modeController: MacAppController?
@@ -104,7 +143,7 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
         topic.image = NSImage(systemSymbolName: "sparkles.rectangle.stack", accessibilityDescription: nil)
         topic.target = self
         menu.addItem(topic)
-        menu.popUp(positioning: nil, at: NSPoint(x: panel.frame.minX + 14, y: panel.frame.minY + 12), in: nil)
+        menu.popUp(positioning: nil, at: NSPoint(x: panel.frame.minX + style.shoulder + 14, y: panel.frame.minY + 12), in: nil)
     }
     @objc private func startNewTopic(_ item: NSMenuItem) {
         guard let controller = modeController else { return }
@@ -114,13 +153,34 @@ private final class ComposerHostingView: NSHostingView<NotchComposerView> {
         guard let raw = item.representedObject as? String, let mode = ComposerMode(rawValue: raw), let controller = modeController else { return }
         Task { await controller.composer.setMode(mode) }
     }
+    private func windowFrame(height: CGFloat) -> NSRect {
+        guard let screen else { return .zero }
+        return NotchGeometry.island(screen: screen.frame, visible: screen.visibleFrame, safeTop: style.safeTop, height: height)
+    }
     private func resize(_ height: CGFloat) {
-        guard !sending else { return }
-        guard let panel, let screen else { return }
-        let frame = NotchGeometry.frame(screen: screen.frame, visible: screen.visibleFrame, safeTop: screen.safeAreaInsets.top, height: height)
+        guard !sending, !closing, let panel, screen != nil else { return }
+        let frame = windowFrame(height: height)
+        guard frame != panel.frame else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.2
             panel.animator().setFrame(frame, display: true)
+        }
+        invalidateShadowSoon()
+    }
+    /// One frame at the notch size first, so the grow is drawn instead of skipped.
+    private func openSoon() {
+        let generation = presentationGeneration
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(30))
+            guard let self, generation == presentationGeneration else { return }
+            presentation.open()
+        }
+    }
+    private func invalidateShadowSoon() {
+        guard !style.attached else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            self?.panel?.invalidateShadow()
         }
     }
     private func targetScreen(pid: pid_t?) -> NSScreen? {
@@ -161,12 +221,15 @@ private func modeIcon(_ mode: ComposerMode) -> String {
 
 private struct NotchComposerView: View {
     let controller: MacAppController
-    let attached: Bool
+    let style: NotchIslandStyle
+    let presentation: IslandPresentation
     let resize: (CGFloat) -> Void
     @State private var showingModes = false
     @State private var showingCorrection = false
     private var session: ComposerSession { controller.composer }
-    private var contentHeight: CGFloat {
+    private var contentHeight: CGFloat { Self.contentHeight(session: session, showingCorrection: showingCorrection) }
+    /// The card height below the notch for the session's current content (the window opens at it).
+    static func contentHeight(session: ComposerSession, showingCorrection: Bool) -> CGFloat {
         let rows = session.snapshot.lines.reduce(0) { count, line in
             count + max(1, Int(ceil(Double(line.words.map(\.text).joined(separator: " ").count) / 58)))
         }
@@ -175,14 +238,17 @@ private struct NotchComposerView: View {
         return min(440, max(showingCorrection ? 300 : 230, 170 + commentSpace + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
     }
     var body: some View {
+        NotchIsland(style: style, presentation: presentation) { card }
+    }
+    private var card: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "waveform").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                Text("Composer").font(.system(size: 12, weight: .semibold))
+                Text("Composer").font(NotchIslandTokens.title)
                 Spacer()
                 Circle().fill(session.isListening && !session.isMuted ? Color.red : Color.secondary.opacity(0.6)).frame(width: 5, height: 5)
                 Text(session.status.capitalized)
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                    .font(NotchIslandTokens.caption).foregroundStyle(.secondary)
             }
             ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, dictationCommit: session.dictationCommit, successfulInsertionID: session.successfulInsertionID, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
                 correctionDraft: session.correctionDraft, correctionSubmitting: session.correctionSubmitting,
@@ -219,15 +285,8 @@ private struct NotchComposerView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(red: 0.085, green: 0.085, blue: 0.095), in: shape)
-        .overlay { shape.strokeBorder(.white.opacity(0.1), lineWidth: 0.5) }
-        .clipShape(shape)
         .onAppear { resize(contentHeight) }
         .onChange(of: contentHeight) { _, height in resize(height) }
-        .environment(\.colorScheme, .dark)
-    }
-    private var shape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(topLeadingRadius: attached ? 14 : 20, bottomLeadingRadius: 22, bottomTrailingRadius: 22, topTrailingRadius: attached ? 14 : 20)
     }
     private func key(_ title: String, symbol: String, shortcut: String, enabled: Bool = true, prominent: Bool = false, selected: Bool = false, iconOnly: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) { ComposerKeyLabel(title: title, symbol: symbol, shortcut: shortcut, iconOnly: iconOnly) }

@@ -128,7 +128,7 @@ import Observation
     func bootstrap() {
         guard !bootstrapped else { return }; bootstrapped = true
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
-        dictationPill = DictationPillController(session: dictation)
+        dictationPill = DictationPillController(session: dictation, occupiedFrame: { [weak self] in self?.notch.occupiedFrame })
         dictation.ensureWarm()
         Task {
             await composer.backfillHistory(markerURL: URL.applicationSupportDirectory.appending(path: "Legato/history-backfill.v1.done"))
@@ -197,7 +197,7 @@ import Observation
         sessionTask?.cancel(); sessionTask = nil; starting = false
         await composer.cancel()
         guard composer.snapshot.lines.isEmpty, composer.status == "idle" else { return }
-        notch.hide(); writer = nil; composerTargetToken = nil; panelGesture.runEnded()
+        notch.dismiss(); writer = nil; composerTargetToken = nil; panelGesture.runEnded()
     }
     func insertComposer(origin: ComposerInsertOrigin = .macPanelButton) { Task { _ = await performComposerInsertion(origin: origin) } }
     private func performComposerInsertion(expectedTarget: String? = nil, origin: ComposerInsertOrigin) async -> ComposerHostActionResult {
