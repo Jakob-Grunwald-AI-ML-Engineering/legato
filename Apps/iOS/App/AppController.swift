@@ -35,7 +35,7 @@ final class AppController {
         composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
         dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
-                                      recentTakesURL: root.appending(path: "recent-takes.json"), defaults: AppGroup.defaults)
+                                      recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults)
         keyboardSession = KeyboardSession(composer: composer, sink: dictation)
         holdActivity = HoldActivityPresenter(composer: composer)
         keyboardHost = KeyboardLinkHost()

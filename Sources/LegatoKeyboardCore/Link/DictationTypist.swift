@@ -12,7 +12,7 @@ import Foundation
 ///   `TypewriterReveal.settleLimitMs` to catch up) stops the rest of the current line; what is typed stays and the
 ///   following lines go in at the new cursor.
 /// - A line is acknowledged once typed or stopped, never typed twice: lines at or below `typedThrough` are ignored.
-/// - A `retracted` line (its take failed after text was streamed) is erased: when the field still ends with
+/// - A `retracted` line (its streamed text was taken back) is erased: when the field still ends with
 ///   exactly what was typed for it, those characters are deleted (`Step.deletes`); otherwise it is left. Either
 ///   way it is acknowledged.
 public struct DictationTypist: Sendable, Equatable {

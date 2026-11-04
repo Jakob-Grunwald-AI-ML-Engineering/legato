@@ -4,6 +4,7 @@ import Testing
 import LegatoAgent
 import LegatoClaude
 import LegatoComposerDoc
+import LegatoCore
 @testable import LegatoAppServices
 
 /// Cleans a take by capitalising and adding a full stop; scripted failures per call.
@@ -52,6 +53,17 @@ private func routeLine(_ sequence: Int, _ text: String) -> DictationRouteLine {
     Issue.record("Timed out waiting for \(what)")
 }
 private let thirteenWords = "one two three four five six seven eight nine ten eleven twelve thirteen"
+
+private actor TakeHistory: HistoryStore {
+    private var entries: [DictationEntry] = []
+    func append(_ entry: DictationEntry) { entries.append(entry) }
+    func upsert(_ entry: DictationEntry) {
+        entries.removeAll { $0.id == entry.id }
+        entries.append(entry)
+    }
+    func recent(limit: Int) -> [DictationEntry] { Array(entries.reversed().prefix(limit)) }
+    func delete(id: UUID) { entries.removeAll { $0.id == id } }
+}
 
 @MainActor private func make(_ cleaner: TakeCleaner, mode: DictationSendSetting.Mode = .onStop, pause: Double = 5,
                              clock: any Clock<Duration> = ContinuousClock(), timeout: (@Sendable (Int) -> Duration)? = nil) -> DictationPipeline {
@@ -193,14 +205,35 @@ private let thirteenWords = "one two three four five six seven eight nine ten el
         #expect(pipeline.outbox.map(\.text) == ["as heard"] && pipeline.outbox.first?.cleaned == false)
     }
 
-    @Test func aRejectedResultOnlyWarnsAndIsKept() async {
+    @Test func aRejectedResultIsTakenBackAndTheRawTakeGoesIn() async {
         let cleaner = TakeCleaner([.garbage, .ok])
         let pipeline = make(cleaner)
         await pipeline.receive(routeLine(0, thirteenWords))
         await pipeline.finishTake()
         #expect(cleaner.takes.withLock { $0 }.count == 1 && pipeline.takePhase == .buffering, "The guard runs at the end and never retries")
-        #expect(pipeline.outbox.count == 1 && pipeline.outbox[0].cleaned && pipeline.outbox[0].final)
-        #expect(pipeline.fallbacks == ["take-rejected-warning"])
+        #expect(pipeline.outbox.count == 2 && pipeline.outbox[0].retracted && pipeline.outbox[0].final, "The streamed text is erased")
+        #expect(pipeline.outbox[1].text == thirteenWords && !pipeline.outbox[1].cleaned && pipeline.outbox[1].final, "The speaker's words replace it")
+        #expect(pipeline.fallbacks == ["take-rejected"])
+        #expect(pipeline.recentTakes.recent().last?.cleaned == thirteenWords, "The rejected text never becomes context")
+    }
+
+    @Test func historyKeepsTheRawTakeWhateverCleanupDoes() async throws {
+        let history = TakeHistory()
+        for script in [TakeCleaner.Behavior.garbage, .hang] {
+            let pipeline = DictationPipeline(history: history, cleaner: TakeCleaner([script]), sendMode: { .onStop }, takeTimeout: { _ in .milliseconds(20) })
+            await pipeline.receive(routeLine(0, thirteenWords))
+            await pipeline.finishTake()
+            #expect(try await history.recent(limit: 1).first?.text == thirteenWords)
+        }
+    }
+
+    @Test func aCleanedTakeUpdatesItsHistoryEntry() async throws {
+        let history = TakeHistory()
+        let pipeline = DictationPipeline(history: history, cleaner: TakeCleaner([.ok]), sendMode: { .onStop })
+        await pipeline.receive(routeLine(0, thirteenWords))
+        await pipeline.finishTake()
+        let entries = try await history.recent(limit: 10)
+        #expect(entries.count == 1 && entries[0].rawText == thirteenWords && entries[0].text != thirteenWords)
     }
 
     @Test func aSlowCleanupTimesOutPerAttemptAndEndsFailed() async {

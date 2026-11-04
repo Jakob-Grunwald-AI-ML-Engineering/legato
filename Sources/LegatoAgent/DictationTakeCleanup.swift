@@ -83,7 +83,7 @@ public struct DictationTakeCleaner: Sendable {
     /// Cleans the take as a stream: `onDelta` gets each piece of the cleaned text as it arrives. The first attempt
     /// that fails before any piece arrived is retried once, as in `clean`; one that fails after pieces were
     /// handed out is not (the text is partly in the field), it ends as `.failed` and the caller decides. The guard
-    /// runs on the finished text only and never rejects: `rejected` says it would have.
+    /// runs on the finished text only: `rejected` tells the caller to take the streamed text back.
     public func cleanStreaming(_ input: DictationTakeInput, onDelta: @escaping @Sendable (String) async -> Void)
         async -> (result: DictationTakeCleanupResult, rejected: Bool) {
         var reason = "failed"

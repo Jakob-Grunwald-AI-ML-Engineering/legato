@@ -72,9 +72,14 @@ import AppKit
             MacAppController.shared.dictation.pipeline.debugFailTakes = count
             return MacAppController.shared.dictation.debugState
         }
-        // Scripted streaming cleaner for the next take cleanups: `<chunkMs> [failAfterChunks]` (first stream only fails), or `off`.
+        // Scripted streaming cleaner for the next take cleanups: `<chunkMs> [failAfterChunks]` (first stream only fails),
+        // `<chunkMs> reply <text>` (every take streams that text), or `off`.
         harness.register("dictation-debug-stream") { command in
             if command.args == ["off"] { MacAppController.shared.dictation.pipeline.debugStreamCleaner = nil; return MacAppController.shared.dictation.debugState }
+            if command.args.count >= 3, command.args[1] == "reply", let ms = Int(command.args[0]), ms >= 0 {
+                MacAppController.shared.dictation.pipeline.debugStreamCleaner = DebugStreamingCleaner(chunkMilliseconds: ms, reply: command.args[2...].joined(separator: " "))
+                return MacAppController.shared.dictation.debugState
+            }
             guard (1...2).contains(command.args.count), let ms = Int(command.args[0]), ms >= 0 else { throw Usage.invalid }
             let fail = command.args.count == 2 ? Int(command.args[1]) : nil
             if command.args.count == 2, fail == nil { throw Usage.invalid }
