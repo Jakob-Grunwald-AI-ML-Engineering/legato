@@ -4,6 +4,8 @@ import Foundation
 
 public enum DictationPhase: String, Sendable, Equatable, Codable, CaseIterable {
     case starting, listening, finishing
+    /// No take runs; the app only holds the microphone in the background (`HoldActivityPlanner`).
+    case held
     /// The run is over and its text waits in the activity for the Insert and Copy buttons (`DictationResult`).
     /// The activity stays up (it is not ended) until a button resolves it or the result's lifetime ends.
     case result

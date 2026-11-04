@@ -12,6 +12,8 @@ struct DictationAttributes: ActivityAttributes {
         /// Mirrors `DictationPhase` (same raw values).
         enum Phase: String, Codable, Hashable, Sendable {
             case starting, listening, finishing
+            /// The app only holds the microphone; no take runs.
+            case held
             /// The text waits for the Insert and Copy buttons.
             case result
             /// Terminal: the text was typed into the Legato keyboard's field.

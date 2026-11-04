@@ -115,6 +115,7 @@ final class KeyboardController {
         cursor = link.readApplied()
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
+        link.observeComposer { [weak self] in self?.composerNoteArrived() }
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
     }
@@ -260,6 +261,7 @@ final class KeyboardController {
     private let composerLink = UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) }
     @ObservationIgnored private var composerReader = ComposerPublicationReader()
     #if DEBUG || LEGATO_INTERNAL
+    @ObservationIgnored private var composerWatch = ComposerPollWatch()
     private static let composerLog = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-composer")
     #endif
     func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
@@ -278,6 +280,46 @@ final class KeyboardController {
         channel.send(intent)
         DarwinObserver.post(LinkChannel.Note.composerIntent)
     }
+    /// One read of the stored composer publication, from the 100 ms poll and from the host's `Note.composer`.
+    private func pollComposer() {
+        #if DEBUG || LEGATO_INTERNAL
+        let now = ProcessInfo.processInfo.systemUptime
+        switch composerWatch.tick(at: now) {
+        case .staleAfterNote(let age)?:
+            Self.composerLog.error("composer.poll stale reason=note age=\(age, format: .fixed(precision: 1)) rev=\(self.composer.snapshot.revision) lines=\(self.composer.snapshot.lines.count) bytes=\(self.composerLink?.storedByteCount ?? -1) decodeFailBytes=\(self.composerReader.lastDecodeFailureBytes ?? 0)")
+        case .loopGap(let gap)?:
+            Self.composerLog.error("composer.poll stale reason=loop-gap gap=\(gap, format: .fixed(precision: 1)) rev=\(self.composer.snapshot.revision) lines=\(self.composer.snapshot.lines.count)")
+        case nil: break
+        }
+        #endif
+        guard let channel = composerLink, let value = composerReader.read(from: channel) else { return }
+        #if DEBUG || LEGATO_INTERNAL
+        composerWatch.delivered(at: now)
+        #endif
+        guard value != composer else { return }
+        #if DEBUG || LEGATO_INTERNAL
+        Self.composerLog.info("composer.read rev=\(value.snapshot.revision) session=\(value.sessionID ?? "-", privacy: .public) lines=\(value.snapshot.lines.count) tail=\(value.tail.count) insertion=\(value.successfulInsertionID ?? "-", privacy: .public) was=\(self.composer.snapshot.lines.count)")
+        #endif
+        if let pending = pendingComposerInsert,
+           value.insertedIntentID == pending || value.sessionID != composer.sessionID {
+            pendingComposerInsert = nil
+            pendingComposerDocumentID = nil
+        }
+        if let id = value.dictationNoticeID, let seen = seenDictationNoticeID, id != seen, let text = value.dictationNotice {
+            show(text)
+        }
+        seenDictationNoticeID = value.dictationNoticeID ?? seenDictationNoticeID
+        composer = value; composerLink?.acknowledge(value.snapshot.revision)
+        syncRowTakeover()
+    }
+    /// The host published: read now rather than at the next poll tick, and keep the note for the stall check.
+    private func composerNoteArrived() {
+        guard isVisible, !isTornDown else { return }
+        #if DEBUG || LEGATO_INTERNAL
+        composerWatch.noteArrived(at: ProcessInfo.processInfo.systemUptime)
+        #endif
+        pollComposer()
+    }
     // MARK: Visibility
 
     /// The keyboard came on screen: beat presence once a second, and catch up with a run in progress.
@@ -290,28 +332,16 @@ final class KeyboardController {
         #if DEBUG || LEGATO_INTERNAL
         Self.composerLog.info("composer.poll start session=\(self.composer.sessionID ?? "-", privacy: .public) rev=\(self.composer.snapshot.revision) lines=\(self.composer.snapshot.lines.count)")
         #endif
+        #if DEBUG || LEGATO_INTERNAL
+        composerWatch.start(at: ProcessInfo.processInfo.systemUptime)
+        #endif
         composerPoll = Task { [weak self] in
             #if DEBUG || LEGATO_INTERNAL
             defer { Self.composerLog.info("composer.poll stop cancelled=\(Task.isCancelled ? 1 : 0)") }
             #endif
             while !Task.isCancelled {
                 guard let self else { return }
-                if let channel = self.composerLink, let value = self.composerReader.read(from: channel), value != self.composer {
-                    #if DEBUG || LEGATO_INTERNAL
-                    Self.composerLog.info("composer.read rev=\(value.snapshot.revision) session=\(value.sessionID ?? "-", privacy: .public) lines=\(value.snapshot.lines.count) tail=\(value.tail.count) insertion=\(value.successfulInsertionID ?? "-", privacy: .public) was=\(self.composer.snapshot.lines.count)")
-                    #endif
-                    if let pending = self.pendingComposerInsert,
-                       value.insertedIntentID == pending || value.sessionID != self.composer.sessionID {
-                        self.pendingComposerInsert = nil
-                        self.pendingComposerDocumentID = nil
-                    }
-                    if let id = value.dictationNoticeID, let seen = self.seenDictationNoticeID, id != seen, let text = value.dictationNotice {
-                        self.show(text)
-                    }
-                    self.seenDictationNoticeID = value.dictationNoticeID ?? self.seenDictationNoticeID
-                    self.composer = value; self.composerLink?.acknowledge(value.snapshot.revision)
-                    self.syncRowTakeover()
-                }
+                self.pollComposer()
                 self.receiveDictation()
                 try? await Task.sleep(for: .milliseconds(100))
             }

@@ -80,6 +80,18 @@ public struct ComposerView: View {
     }
     #if DEBUG || LEGATO_INTERNAL
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "composer-view")
+    /// What the view shows against what the snapshot holds; `blank` means a draft exists but nothing of it is on screen.
+    private struct BlankState: Equatable {
+        var blank: Bool, blocks: Int, duplicateIDs: Bool, holds: Bool, placeholder: Bool
+    }
+    private func blankState(_ blocks: [ParagraphRenderBlock]) -> BlankState {
+        let hasLines = !snapshot.lines.isEmpty
+        let holds = !hasCanonicalDraft && sendFlight.retainsViewport(acknowledgement: successfulInsertionID, hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty)
+        let duplicates = Set(blocks.map(\.id)).count != blocks.count
+        let placeholder = snapshot.lines.isEmpty && tail.isEmpty && !holds
+        return .init(blank: hasLines && (blocks.isEmpty || holds || duplicates || placeholder),
+                     blocks: blocks.count, duplicateIDs: duplicates, holds: holds, placeholder: placeholder)
+    }
     #endif
     /// The flight task is cancelled with the view and never reaches `finish`; release the retained
     /// viewport and resync, so a remount renders the snapshot rather than a stale flight.
@@ -90,9 +102,16 @@ public struct ComposerView: View {
         flightLog("disappear")
     }
     /// Flight diagnostics observers, kept out of `body`'s modifier chain so it still type-checks in time.
-    @ViewBuilder private func flightProbe(holds: Bool) -> some View {
+    @ViewBuilder private func flightProbe(holds: Bool, blocks: [ParagraphRenderBlock]) -> some View {
         #if DEBUG || LEGATO_INTERNAL
         Color.clear
+            .task(id: blankState(blocks)) {
+                // A draft that stays unrendered for a second is the #225 symptom; counts and flags only.
+                let state = blankState(blocks)
+                guard state.blank else { return }
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                Self.log.error("composer.view blank blocks=\(state.blocks) duplicateIDs=\(state.duplicateIDs ? 1 : 0) holds=\(state.holds ? 1 : 0) placeholder=\(state.placeholder ? 1 : 0) snapshotLines=\(snapshot.lines.count) rev=\(snapshot.revision) presented=\(presentedParagraphs.count) presentedRev=\(presentedRevision) progress=\(sendFlightProgress, format: .fixed(precision: 2)) tail=\(tail.count)")
+            }
             .onChange(of: holds) { _, _ in flightLog("holds") }
             .onChange(of: sendFlight.activeAcknowledgement) { old, next in
                 let event: String = next != nil ? "ack-set" : old != nil ? "ack-cleared" : "ack"
@@ -114,7 +133,7 @@ public struct ComposerView: View {
         // A canonical draft always renders from the snapshot; only an emptied one may hold the sent viewport.
         let holdsSentViewport = !hasCanonicalDraft && sendFlight.retainsViewport(acknowledgement: successfulInsertionID,
             hasDraft: hasCanonicalDraft, hadDraft: !presentedParagraphs.isEmpty)
-        let previous = snapshot.revision < presentedRevision ? [] : presentedParagraphs
+        let previous = ParagraphPresentation.previous(presented: presentedParagraphs, presentedRevision: presentedRevision, snapshot: snapshot)
         // Reuse the existing lazy viewport; do not create a second tree or rasterize a long draft.
         let paragraphs = holdsSentViewport ? presentedParagraphs : ParagraphPresentation.reconcile(previous: previous, lines: snapshot.lines, animateInsertions: hasPresented)
         let renderBlocks = ParagraphRenderBlocks.make(paragraphs, previous: holdsSentViewport ? paragraphs : previous)
@@ -179,7 +198,7 @@ public struct ComposerView: View {
                 presentedParagraphs = paragraphs; presentedRevision = snapshot.revision; hasPresented = true
             }
             .onDisappear(perform: abandonFlight)
-            .background { flightProbe(holds: holdsSentViewport) }
+            .background { flightProbe(holds: holdsSentViewport, blocks: renderBlocks) }
             .onChange(of: successfulInsertionID) { _, _ in beginSendFlightIfNeeded() }
             .onChange(of: snapshot) { _, next in
                 beginSendFlightIfNeeded()

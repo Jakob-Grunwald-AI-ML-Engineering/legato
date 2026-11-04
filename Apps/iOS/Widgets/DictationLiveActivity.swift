@@ -9,6 +9,7 @@ extension DictationAttributes.ContentState {
         case .starting: "Starting…"
         case .listening: "Listening"
         case .finishing: "Finishing…"
+        case .held: "Mic ready"
         case .result: "Dictation ready"
         case .inserted: "Inserted"
         case .insertFailed: "Legato keyboard not active"
@@ -21,6 +22,7 @@ extension DictationAttributes.ContentState {
     var symbol: String {
         switch phase {
         case .starting, .listening, .finishing: "mic.fill"
+        case .held: "waveform"
         case .result: "text.bubble.fill"
         case .inserted: "checkmark.circle.fill"
         case .insertFailed: "keyboard"
@@ -33,6 +35,7 @@ extension DictationAttributes.ContentState {
     var tint: Color {
         switch phase {
         case .starting, .listening, .finishing: .red
+        case .held: .indigo
         case .result: .blue
         case .inserted: .green
         case .insertFailed: .orange
@@ -59,6 +62,7 @@ struct DictationLiveActivity: Widget {
                 .widgetURL(context.state.tapURL)
         } dynamicIsland: { context in
             let state = context.state
+            if state.phase == .held { return heldIsland() }
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Image(systemName: state.symbol).foregroundStyle(state.tint)
@@ -102,6 +106,10 @@ private struct LockScreenView: View {
     let state: DictationAttributes.ContentState
 
     var body: some View {
+        if state.phase == .held { HeldRow() } else { runBody }
+    }
+
+    private var runBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Image(systemName: state.symbol).foregroundStyle(state.tint)
@@ -146,5 +154,63 @@ private struct StopButton: View {
             Image(systemName: "stop.circle.fill").font(.title)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Held microphone (#229)
+
+/// The background hold: the app keeps the microphone open and no take runs. Calm and narrow on purpose; iOS
+/// keeps its own privacy dot next to it.
+private func heldIsland() -> DynamicIsland {
+    DynamicIsland {
+        DynamicIslandExpandedRegion(.leading) { HeldGlyph() }
+        DynamicIslandExpandedRegion(.center) { HeldTitle() }
+        DynamicIslandExpandedRegion(.trailing) { ReleaseButton() }
+    } compactLeading: {
+        HeldGlyph()
+    } compactTrailing: {
+        EmptyView()
+    } minimal: {
+        HeldGlyph()
+    }
+}
+
+private struct HeldGlyph: View {
+    var body: some View {
+        Image(systemName: "waveform").foregroundStyle(.indigo)
+    }
+}
+
+private struct HeldTitle: View {
+    var body: some View {
+        VStack(spacing: 2) {
+            Text("Mic ready").font(.headline)
+            Text("Legato keyboard").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// One slim row: glyph, title, Release.
+private struct HeldRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            HeldGlyph().font(.title3)
+            Text("Mic ready").font(.headline)
+            Spacer()
+            ReleaseButton()
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+    }
+}
+
+/// Lets go of the held microphone, which ends this activity.
+private struct ReleaseButton: View {
+    var body: some View {
+        Button(intent: ReleaseMicrophoneIntent()) {
+            Text("Release").font(.subheadline.weight(.semibold))
+        }
+        .buttonStyle(.bordered)
+        .tint(.indigo)
     }
 }

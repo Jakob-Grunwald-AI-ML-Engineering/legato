@@ -105,6 +105,36 @@ fi
 FAKE
 chmod +x "$work/bin/ps"
 
+# `log` is the other external boundary: collect writes an archive, show prints the lines.
+cat > "$work/bin/log" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'log %s\n' "$*" >> "$FIXTURE/calls"
+case "$1" in
+  collect)
+    out=; while [ $# -gt 0 ]; do [ "$1" != --output ] || out="$2"; shift; done
+    [ "$SCENARIO" != logs-failed ] || { echo 'device locked' >&2; exit 1; }
+    mkdir -p "$out" ;;
+  show)
+    echo '2026-11-03 10:00:00.1 I Legato[1:2] [de.gruenwald.legato:composer-view] composer.view blank blocks=0 snapshotLines=2'
+    echo '2026-11-03 10:00:01.1 E Keyboard[3:4] [de.gruenwald.legato:keyboard-composer] composer.poll stale reason=note age=2.5' ;;
+  *) echo "unexpected log command: $*" >&2; exit 81 ;;
+esac
+FAKE
+chmod +x "$work/bin/log"
+# `sudo -v` primes the credential; `sudo -n <cmd>` runs it. A denied prompt fails the whole command.
+cat > "$work/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sudo %s\n' "$*" >> "$FIXTURE/calls"
+[ "$SCENARIO" != logs-no-sudo ] || exit 1
+case "$1" in
+  -v) ;;
+  -n) shift; [ "$1" != chown ] || exit 0; exec "$@" ;;
+  *) echo "unexpected sudo: $*" >&2; exit 82 ;;
+esac
+FAKE
+chmod +x "$work/bin/sudo"
 chmod +x "$work/bin/xcrun"
 export PATH="$work/bin:$PATH"
 failures=0
@@ -290,6 +320,25 @@ for scenario in mac-foreign mac-dead mac-stale mac-existing; do
   }
   check rejects_invalid_mac_launch
 done
+setup logs
+device_logs() {
+  run_ctl device-logs --since 2h || return 1
+  grep -q -- '^sudo -v$' "$FIXTURE/calls" &&
+    grep -q -- 'sudo -n log collect --device-udid 00008150-000E60360245401C --last 2h' "$FIXTURE/calls" &&
+    grep -q -- 'log show --archive .*--predicate subsystem == "de.gruenwald.legato"' "$FIXTURE/calls" &&
+    grep -q 'composer.view blank' "$FIXTURE/out" && grep -q 'composer.poll stale' "$FIXTURE/out" &&
+    [ "$(grep -c . "$LEGATO_DEVICE_STATE"/*/pulled/device-logs.txt)" = 2 ]
+}
+check device_logs
+setup logs-failed
+device_logs_failed() { ! run_ctl device-logs && grep -q 'log collect failed' "$FIXTURE/err"; }
+check device_logs_failed
+setup logs-no-sudo
+device_logs_no_sudo() { ! run_ctl device-logs && grep -q 'needs sudo' "$FIXTURE/err" && ! grep -q '^log ' "$FIXTURE/calls"; }
+check device_logs_no_sudo
+setup logs-since
+device_logs_since() { ! run_ctl device-logs --since 'ten' && grep -q -- '--since must look like' "$FIXTURE/err" && ! grep -q '^log ' "$FIXTURE/calls" 2> /dev/null; }
+check device_logs_since
 setup malformed-timeout
 malformed_timeout() { ! run_ctl wait c-test nonsense && grep -q 'positive integer' "$FIXTURE/err" && [ ! -f "$FIXTURE/calls" ]; }
 check malformed_timeout

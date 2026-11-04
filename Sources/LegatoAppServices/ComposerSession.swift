@@ -116,6 +116,8 @@ public enum ComposerInsertOrigin: String, Sendable {
     @ObservationIgnored private let mic: any AudioSource
     @ObservationIgnored private let activateAudioSession: @MainActor () async throws -> Void
     private var keepMicrophoneActive = true
+    /// Which input the session prefers while only held versus during a take (iOS headset routing, #226).
+    @ObservationIgnored public var inputRoute: InputRoutePolicy = .none
     @ObservationIgnored private var eventsTask: Task<Void, Never>?
     @ObservationIgnored private var audioTask: Task<Void, Never>?
     @ObservationIgnored private var binder: HintBinder?
@@ -244,6 +246,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         do {
             _ = try await prepareMicrophoneStream()
             isArmed = true; error = nil; status = "ready"; onChange?()
+            await inputRoute.preferIdle()
         } catch { fail(error) }
     }
     private static func activateMicrophoneSession() async throws {
@@ -733,9 +736,14 @@ public enum ComposerInsertOrigin: String, Sendable {
                 }
                 self?.warmInputEnded(token)
             }
+            await inputRoute.preferIdle()
             return true
         } catch { return false }
     }
+    /// A take is about to route audio: the headset's mic, if one is connected. Never fails the take.
+    func preferTakeInput() async { await inputRoute.preferTake() }
+    /// The hold is idle again (hold established, take closed): the built-in mic.
+    func preferIdleInput() async { await inputRoute.preferIdle() }
     /// The gate. Opening `agent` happens through `start`, which begins the take; `idle` only stops routing.
     func setRoute(_ value: AudioRoute) {
         guard warmInput != nil || value == .idle else { return }

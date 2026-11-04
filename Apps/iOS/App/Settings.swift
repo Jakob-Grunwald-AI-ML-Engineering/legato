@@ -18,6 +18,7 @@ enum Settings {
         static let keepAliveChoicesVersion = "keepAliveChoicesVersion"
         #if LEGATO_INTERNAL
         static let keepSessionActiveBetweenRuns = "keepSessionActiveBetweenRuns"
+        static let airpodsIdleBuiltIn = "airpodsIdleBuiltIn"
         static let debugShowPauseOthers = "debugShowPauseOthers"
         static let debugForceTapToCopy = "debugForceTapToCopy"
         #endif
@@ -127,6 +128,24 @@ enum Settings {
         set {
             #if LEGATO_INTERNAL
             AppGroup.defaults.set(newValue, forKey: Key.keepSessionActiveBetweenRuns)
+            #endif
+        }
+    }
+
+    /// Device experiment (#226): the idle mic hold prefers the built-in mic so AirPods stay in music mode (stem
+    /// presses keep controlling the media app), and a take prefers the headset's. Default on in internal builds
+    /// until the device check passes. Absent from App Store builds (`LEGATO_INTERNAL` only), where it reads false.
+    static var airpodsIdleBuiltIn: Bool {
+        get {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.object(forKey: Key.airpodsIdleBuiltIn) as? Bool ?? true
+            #else
+            false
+            #endif
+        }
+        set {
+            #if LEGATO_INTERNAL
+            AppGroup.defaults.set(newValue, forKey: Key.airpodsIdleBuiltIn)
             #endif
         }
     }

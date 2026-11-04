@@ -121,6 +121,7 @@ enum AudioDiagnostics {
             "liveActivities": Activity<DictationAttributes>.activities.count,
             "settings": [
                 "keepSessionActiveBetweenRuns": Settings.keepSessionActiveBetweenRuns,
+                "airpodsIdleBuiltIn": Settings.airpodsIdleBuiltIn,
                 "policy": Settings.audioPolicy.rawValue,
             ] as [String: Any],
         ]

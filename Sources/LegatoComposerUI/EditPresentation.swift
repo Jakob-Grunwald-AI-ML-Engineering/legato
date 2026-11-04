@@ -11,6 +11,13 @@ struct PresentedParagraph: Identifiable, Equatable {
 }
 
 enum ParagraphPresentation {
+    /// The paragraphs a new snapshot reconciles against. A lower revision is a restarted document, and an equal
+    /// revision over different lines is a reused one (#225): in both the presented paragraphs are stale.
+    static func previous(presented: [PresentedParagraph], presentedRevision: Int, snapshot: DocumentSnapshot) -> [PresentedParagraph] {
+        if snapshot.revision < presentedRevision { return [] }
+        if snapshot.revision == presentedRevision, presented.map(\.line.id) != snapshot.lines.map(\.id) { return [] }
+        return presented
+    }
     static func reconcile(previous: [PresentedParagraph], lines: [Line], animateInsertions: Bool = false) -> [PresentedParagraph] {
         let exact = Dictionary(uniqueKeysWithValues: previous.enumerated().map { ($0.element.line.id, $0.offset) })
         var matches: [Int: Int] = [:], used = Set<Int>()
@@ -36,9 +43,18 @@ enum ParagraphPresentation {
         for index in lines.indices where matches[index] == nil && previous.indices.contains(index) && !used.contains(index) {
             matches[index] = index; used.insert(index)
         }
+        // A presentation ID inherited from an older line can equal a new line's own ID; duplicate ForEach
+        // IDs leave rows unrendered, so a repeat gets a distinct suffix.
+        var taken = Set<String>()
         return lines.enumerated().map { index, line in
-            .init(id: matches[index].map { previous[$0].id } ?? line.id, line: line, ordinal: index + 1,
-                  animateInsertion: matches[index].map { previous[$0].animateInsertion } ?? animateInsertions)
+            var id = matches[index].map { previous[$0].id } ?? line.id
+            if !taken.insert(id).inserted {
+                var n = 2
+                while !taken.insert("\(id)#\(n)").inserted { n += 1 }
+                id = "\(id)#\(n)"
+            }
+            return .init(id: id, line: line, ordinal: index + 1,
+                         animateInsertion: matches[index].map { previous[$0].animateInsertion } ?? animateInsertions)
         }
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import LegatoAppServices
+import LegatoAudio
 import LegatoCore
 import LegatoKeyboardCore
 import LegatoVocabulary
@@ -18,6 +19,7 @@ final class AppController {
     let composer: ComposerSession
     let keyboardSession: KeyboardSession
     let dictation: DictationPipeline
+    private let holdActivity: HoldActivityPresenter
     var notice: String { composer.error ?? composer.status.capitalized }
     var lastTranscript: String?
     var isDictating: Bool { composer.isListening }
@@ -35,6 +37,7 @@ final class AppController {
         dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
                                       recentTakesURL: root.appending(path: "recent-takes.json"), defaults: AppGroup.defaults)
         keyboardSession = KeyboardSession(composer: composer, sink: dictation)
+        holdActivity = HoldActivityPresenter(composer: composer)
         keyboardHost = KeyboardLinkHost()
         keyboardHost?.onChoices = { [weak self] choices in
             for choice in choices {
@@ -42,6 +45,7 @@ final class AppController {
                     fromVocabulary: choice.fromVocabulary)
             }
         }
+        composer.inputRoute = Self.inputRoutePolicy()
         keyboardHost?.attach(composer, keyboardSession: keyboardSession, dictation: dictation)
         keyboardHost?.link.onRequest = { [weak self] request in
             guard let self else { return false }
@@ -51,7 +55,7 @@ final class AppController {
             case .stop where self.keyboardSession.isOpen: await self.keyboardSession.closeGate()
             case .start: await self.composer.start()
             case .stop: await self.composer.stop()
-            case .arm: await self.composer.arm(); self.keyboardHost?.link.leaseChanged(until: self.composer.isArmed ? Date().addingTimeInterval(3600) : nil)
+            case .arm: await self.holdActivity.arming { await self.composer.arm() }; self.keyboardHost?.link.leaseChanged(until: self.composer.isArmed ? Date().addingTimeInterval(3600) : nil)
             default: await self.composer.releaseMicrophone()
             }
             return true
@@ -61,6 +65,14 @@ final class AppController {
         #if LEGATO_INTERNAL
         DebugBridge.start()
         #endif
+    }
+
+    /// #226: built-in mic while the mic is only held, the headset's for a take. Read per call, so the internal
+    /// toggle takes effect without a relaunch; release builds always read false and never touch the route.
+    private static func inputRoutePolicy() -> InputRoutePolicy {
+        InputRoutePolicy(
+            preferIdle: { if Settings.airpodsIdleBuiltIn { PreferredInputRoute.apply(.builtIn) } },
+            preferTake: { if Settings.airpodsIdleBuiltIn { PreferredInputRoute.apply(.bluetooth) } })
     }
 
     func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
@@ -73,10 +85,15 @@ final class AppController {
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }
     func stopIfRunning() async { await composer.stop() }
+    /// The Live Activity's Release button: the same release as the keyboard's, which ends the hold's activity.
+    func releaseMicrophone() async {
+        await composer.releaseMicrophone()
+        keyboardHost?.link.leaseChanged(until: nil)
+    }
     func handle(_ url: URL) async {
         if let request = KeyboardURL.parse(url), request.command == .arm,
            keyboardHost?.link.admitURL(requestID: request.requestID, command: request.command) == .act {
-            await composer.arm(); keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
+            await holdActivity.arming { await composer.arm() }; keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
         }
     }
     func insertResult() async { if let lastTranscript { _ = await keyboardHost?.insert(lastTranscript) } }
