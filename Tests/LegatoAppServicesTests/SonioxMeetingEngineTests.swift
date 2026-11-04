@@ -117,7 +117,6 @@ extension SonioxMeetingEngine.Timing {
         var timing = Self()
         timing.retryDelays = [.milliseconds(5)]
         timing.backlog = 5
-        timing.inFlight = 0.5
         return timing
     }
 }
@@ -202,11 +201,33 @@ private func tokens(_ words: [(String, Int, Int, String?)]) -> String {
         #expect(rig.finals[0].speaker == "1")
         #expect(rig.finals[1].speaker == "2.1")
         let resumed = try #require(rig.finals[1].range)
-        // The stream starts where the held audio does (1.0 to 1.5 s); its word is 0.3 s into it.
-        #expect(resumed.lowerBound > 1.3 - 1e-6 && resumed.lowerBound < 1.8 + 1e-6, "stream times are meeting times: \(resumed)")
+        // The stream starts where the last final word ended (0.8 s); its word is 0.3 s into it.
+        #expect(abs(resumed.lowerBound - 1.1) < 0.1 + 1e-6, "stream times are meeting times: \(resumed)")
         rig.endInput()
         await eventually("the session ends") { rig.isEnded }
         #expect(rig.failure == nil)
+    }
+
+    @Test func wordsNotFinalWhenAStreamDropsAreHeardAgainOnTheNextOne() async throws {
+        let rig = try MeetingEngineRig()
+        defer { rig.cleanup() }
+        rig.start()
+        rig.hear(3)
+        await eventually("the first stream") { await rig.sockets.at(0)?.configuration != nil }
+        let first = try #require(rig.sockets.at(0))
+        await eventually("the audio is sent") { await first.audio.reduce(0) { $0 + $1.count } >= 96_000 }
+
+        await first.fail()
+        await eventually("a second stream") { await rig.sockets.at(1)?.configuration != nil }
+        let second = try #require(rig.sockets.at(1))
+        await eventually("all of it is sent again") { await second.audio.reduce(0) { $0 + $1.count } >= 96_000 }
+        await second.feed(tokens([("Kept.", 500, 900, "1")]))
+        await eventually("its segment") { rig.finals.count == 1 }
+        let kept = try #require(rig.finals[0].range)
+        #expect(abs(kept.lowerBound - 0.5) < 1e-6, "the replay keeps meeting times: \(kept)")
+        rig.endInput()
+        await eventually("the session ends") { rig.isEnded }
+        #expect(rig.gaps.isEmpty)
     }
 
     @Test func audioTheBacklogCannotHoldIsReportedAsAGap() async throws {

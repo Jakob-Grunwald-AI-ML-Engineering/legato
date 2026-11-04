@@ -10,8 +10,8 @@ import LegatoSoniox
 ///
 /// - **Speakers.** Every final segment carries Soniox's speaker label ("1", "2", …). The session turns labels into people.
 /// - **Reconnect.** A stream that drops is replaced in the background (backoff). The audio meanwhile is held, newest
-///   `backlog` seconds, and sent on the new stream, so a short outage costs nothing. What Soniox never heard is
-///   reported as a gap (`TranscriptEvent.isGap`) that the transcript shows; the recording itself never stops. A new
+///   `backlog` seconds, and sent on the new stream after the audio the old one never finalized (`replay`), so a short
+///   outage costs nothing. What Soniox never heard is reported as a gap (`TranscriptEvent.isGap`) that the transcript shows; the recording itself never stops. A new
 ///   stream numbers its speakers afresh, so its labels get a prefix (`1.2`): the same voice may appear as a second
 ///   person that the user can merge by renaming.
 /// - **Rollover.** Soniox ends a stream at 300 minutes. At `rolloverAfter` the next stream connects while the old
@@ -27,11 +27,12 @@ public final class SonioxMeetingEngine: LegatoCore.DictationEngine, Sendable {
         /// Audio seconds on one stream before the next one takes over (Soniox's cap is 300 minutes).
         public var rolloverAfter: TimeInterval = 285 * 60
         /// Audio held while there is no stream, seconds.
-        public var backlog: TimeInterval = 10
+        public var backlog: TimeInterval = 30
         /// Waits between attempts to connect; the last one repeats.
         public var retryDelays: [Duration] = [.milliseconds(500), .seconds(1), .seconds(2), .seconds(4), .seconds(8), .seconds(15)]
-        /// Speech Soniox had heard but not yet finalized when a stream dropped, seconds: the gap starts that far back.
-        public var inFlight: TimeInterval = 2
+        /// Sent audio kept for the next stream until its words are final, seconds. Older audio that is still not final
+        /// is silence: segments close long before this.
+        public var replay: TimeInterval = 20
         /// Shorter stretches are not reported as gaps.
         public var minimumGap: TimeInterval = 1
         public init() {}
@@ -106,6 +107,8 @@ private actor MeetingStreamRunner {
     private var flushing = false
     private var backlog: [(pcm: Data, start: TimeInterval, seconds: TimeInterval)] = []
     private var backlogSeconds: TimeInterval = 0
+    /// Audio the live stream was sent whose words are not final yet: lost with the stream, so it goes to the next one.
+    private var unconfirmed: [(pcm: Data, start: TimeInterval, seconds: TimeInterval)] = []
     /// Where Soniox lost audio: from when it was last heard, until the audio resumes.
     private var gapFrom: TimeInterval?
     private var lastHeard: TimeInterval = 0
@@ -152,7 +155,10 @@ private actor MeetingStreamRunner {
         guard fatal == nil else { return }
         if let current = live, !adopting, !flushing {
             if fed - current.since >= timing.rolloverAfter { startConnecting() }
-            do { return try await current.client.sendAudio(pcm) } catch { await lost(current.id) }
+            do {
+                try await current.client.sendAudio(pcm)
+                return remember(pcm, start: start, seconds: seconds)
+            } catch { await lost(current.id) }
         }
         enqueue(pcm, start: start, seconds: seconds)
         if live == nil { startConnecting() }
@@ -168,6 +174,16 @@ private actor MeetingStreamRunner {
             backlogSeconds -= lost.seconds
             gapFrom = min(gapFrom ?? lost.start, lost.start)
         }
+    }
+
+    private func remember(_ pcm: Data, start: TimeInterval, seconds: TimeInterval) {
+        unconfirmed.append((pcm, start, seconds))
+        forgetConfirmed()
+    }
+
+    private func forgetConfirmed() {
+        let oldest = max(lastHeard, fed - timing.replay)
+        unconfirmed.removeAll { $0.start + $0.seconds <= oldest }
     }
 
     // MARK: Connections
@@ -230,6 +246,8 @@ private actor MeetingStreamRunner {
         }
         let previous = live
         live = Live(id: id, client: client, since: since)
+        // After a rollover the old stream finishes its own words.
+        unconfirmed = []
         // Audio that arrives from here on queues behind the backlog until `flush` has sent it.
         flushing = true
         adopting = false
@@ -252,7 +270,10 @@ private actor MeetingStreamRunner {
         while let held = backlog.first, let current = live, current.id == id {
             backlog.removeFirst()
             backlogSeconds -= held.seconds
-            do { try await current.client.sendAudio(held.pcm) } catch {
+            do {
+                try await current.client.sendAudio(held.pcm)
+                remember(held.pcm, start: held.start, seconds: held.seconds)
+            } catch {
                 backlog.insert(held, at: 0)
                 backlogSeconds += held.seconds
                 await lost(id)
@@ -280,8 +301,11 @@ private actor MeetingStreamRunner {
         guard let current = live, current.id == id else { return }
         live = nil
         failures += 1
-        // Speech Soniox had heard but not finalized is lost with the stream.
-        gapFrom = gapFrom ?? max(current.since, lastHeard, fed - timing.inFlight)
+        // What Soniox had heard but not finalized is lost with the stream: the next one hears it again.
+        forgetConfirmed()
+        backlog.insert(contentsOf: unconfirmed, at: 0)
+        backlogSeconds += unconfirmed.reduce(0) { $0 + $1.seconds }
+        unconfirmed = []
         Task { await current.client.close() }
     }
 
