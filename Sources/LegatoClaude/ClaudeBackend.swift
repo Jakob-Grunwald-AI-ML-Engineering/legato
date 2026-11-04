@@ -17,6 +17,9 @@ public struct ClaudeBackend: LLMBackend {
 
     public let id = "claude"
     public let maxPromptCharacters: Int? = 600_000
+    /// The longest answer: a meeting summary with several sections (an email follow-up, 1:1 notes) can run past
+    /// 4096 tokens, and a cut-off summary reads as a finished one.
+    static let maxOutputTokens = 8192
 
     private let keyStore: any APIKeyStore
     private let session: URLSession
@@ -106,7 +109,7 @@ public struct ClaudeBackend: LLMBackend {
         }
         messages.append(["role": "user", "content": prompt])
         let body: [String: Any] = [
-            "model": Self.model, "max_tokens": 4096, "system": instructions, "messages": messages,
+            "model": Self.model, "max_tokens": Self.maxOutputTokens, "system": instructions, "messages": messages,
         ]
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
