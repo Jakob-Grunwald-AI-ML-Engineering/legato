@@ -186,6 +186,8 @@ private func tokens(_ words: [(String, Int, Int, String?)]) -> String {
         rig.start()
         rig.hear(1)
         await eventually("the first stream") { await rig.sockets.at(0)?.configuration != nil }
+        // Soniox finalizes only what it has heard.
+        await eventually("the audio is sent") { await rig.sockets.at(0)?.audio.reduce(0) { $0 + $1.count } ?? 0 >= 32_000 }
         await rig.sockets.at(0)?.feed(tokens([("Before.", 100, 800, "1")]))
         await eventually("its segment") { rig.finals.count == 1 }
 
@@ -271,8 +273,11 @@ private func tokens(_ words: [(String, Int, Int, String?)]) -> String {
         rig.start()
         rig.hear(1)
         await eventually("the first stream") { await rig.sockets.at(0)?.configuration != nil }
-        for _ in 0..<5 { rig.hear(0.5); try await Task.sleep(for: .milliseconds(5)) }
-        await eventually("the next stream connects") { await rig.sockets.at(1)?.configuration != nil }
+        // Audio keeps coming, as in a meeting: the rollover is decided as it is sent.
+        await eventually("the next stream connects") {
+            rig.hear(0.1)
+            return await rig.sockets.at(1)?.configuration != nil
+        }
         let first = try #require(rig.sockets.at(0)), second = try #require(rig.sockets.at(1))
         await eventually("the old stream finishes its words") { await first.finalizes == 1 }
         rig.hear(0.5)
