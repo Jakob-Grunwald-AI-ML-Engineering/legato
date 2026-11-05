@@ -17,6 +17,26 @@ import LegatoVocabulary
 /// reaches the composition.
 @MainActor @Observable public final class KeyboardSession {
     public private(set) var isOpen = false
+    public private(set) var meetingSuspended = false
+
+    /// Serialize a microphone handoff after queued presence and take operations. Keep the draft intact.
+    public func suspendForMeeting() async {
+        meetingSuspended = true
+        composer.microphoneReserved = true
+        desired.visible = false
+        await settle()
+        await serial { [self] in
+            if gate.route != .idle { await perform(gate.close()) }
+            await takeFinish?.value
+            await closeDictation()
+            isOpen = false
+            composer.dictationAudio = nil
+            await composer.suspendMicrophoneForMeeting()
+        }
+    }
+
+    /// A stopped meeting never implicitly rearms the microphone. A new explicit arm is required.
+    public func finishMeeting() { meetingSuspended = false; composer.microphoneReserved = false }
     public var surface: AudioRoute { gate.surface }
     public var route: AudioRoute { gate.route }
     /// The dictation route's uncommitted words.
@@ -65,6 +85,7 @@ import LegatoVocabulary
 
     /// The keyboard's presence, read on every host link pass. Transitions run one at a time, in order.
     public func update(visible: Bool, surface: AudioRoute) {
+        guard !meetingSuspended else { return }
         desired = (visible, surface == .idle ? .agent : surface)
         guard reconciling == nil, visible != isOpen || (visible && desired.surface != gate.surface) else { return }
         reconciling = Task { [weak self] in
@@ -86,13 +107,14 @@ import LegatoVocabulary
     /// The composition was cleared (✕, New topic): build the next one now so the next tap stays warm.
     public func rewarm() async {
         await serial { [weak self] in
-            guard let self, self.isOpen, self.gate.surface == .agent else { return }
+            guard let self, !self.meetingSuspended, self.isOpen, self.gate.surface == .agent else { return }
             await self.composer.prepareComposition()
         }
     }
 
     private func reconcileStep() async -> Bool {
         let target = desired
+        if meetingSuspended { return false }
         if !target.visible { guard isOpen else { return false }; await close(); return true }
         if !isOpen { await open(surface: target.surface); return true }
         guard target.surface != gate.surface else { return false }
@@ -158,7 +180,7 @@ import LegatoVocabulary
         await serial { [weak self] in await self?.performOpen(tapAt: tapAt) ?? false }
     }
     private func performOpen(tapAt: Date?) async -> Bool {
-        guard isOpen else { return false }
+        guard !meetingSuspended, !composer.microphoneReserved, isOpen else { return false }
         guard gate.route == .idle else { return true }
         let tapped = now() - max(0, tapAt.map { Date().timeIntervalSince($0) } ?? 0)
         if !composer.holdsWarmInput, !(await composer.holdWarmInput()) { return false }

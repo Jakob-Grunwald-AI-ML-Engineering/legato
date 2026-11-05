@@ -14,6 +14,7 @@ for platform in iOS macOS; do
   printf '%s\n' 'struct DebugOverlayView' > "$work/sources/Apps/$platform/App/Debug/DebugOverlay.swift"
   printf '%s\n' 'enum SessionProbe' 'Session probe:' > "$work/sources/Apps/$platform/App/Internal/SessionProbe.swift"
 done
+printf '%s\n' MeetingFixtures offline-fixture meetings-real-microphone > "$work/sources/Apps/iOS/App/Debug/IOSMeetingFixture.swift"
 make_object() {
   local destination="$1" literal="$2"
   mkdir -p "$(dirname "$destination")"
@@ -39,7 +40,7 @@ echo 'PASS clean Mach-O bundle'
 make_object "$work/clean app/PlugIns/Widget.appex/Widget" 'session-probe'
 expect_failure 'embedded endpoint leak' 'Release contains: session-probe' "$work/clean app"
 make_object "$work/clean app/PlugIns/Widget.appex/Widget" 'ordinary widget'
-for needle in DebugBridge DebugOverlayView 12SessionProbeO 'Session probe:'; do
+for needle in DebugBridge DebugOverlayView 12SessionProbeO 'Session probe:' MeetingFixtures offline-fixture meetings-real-microphone; do
   make_object "$work/leaked/Legato" "$needle"
   expect_failure "internal entry point $needle" "Release contains: $needle" "$work/leaked"
 done

@@ -29,7 +29,7 @@ struct LegatoApp: App {
     }
 }
 
-/// Settings need ordinary text entry even when the voice-only Legato keyboard was last selected.
+/// Settings and meeting metadata need ordinary text entry even when the voice-only Legato keyboard was last selected.
 @MainActor final class CompanionAppDelegate: NSObject, UIApplicationDelegate {
     static var isEditingSettings = false
     func application(_ application: UIApplication,

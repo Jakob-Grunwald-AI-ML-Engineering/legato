@@ -5,6 +5,7 @@ import WidgetKit
 struct LegatoWidgets: WidgetBundle {
     var body: some Widget {
         DictationLiveActivity()
+        MeetingLiveActivity()
         ToggleDictationControl()
     }
 }
