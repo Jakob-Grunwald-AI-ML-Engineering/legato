@@ -19,7 +19,7 @@ struct HomeView: View {
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     HStack {
-                        Label(controller.notice, systemImage: controller.isDictating ? "waveform" : "circle.fill")
+                        Label(controller.composer.error == nil ? (controller.composer.voiceIsolationStatus ?? controller.notice) : controller.notice, systemImage: controller.isDictating ? "waveform" : "circle.fill")
                             .font(.subheadline).foregroundStyle(controller.composer.error == nil ? Color.secondary : .red)
                             .accessibilityIdentifier("home.status")
                         Spacer()

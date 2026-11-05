@@ -14,6 +14,7 @@ import LegatoVocabulary
 @MainActor @Observable public final class DictationEngine {
     /// The route's uncommitted words.
     public private(set) var tail = ""
+    public private(set) var voiceIsolationStatus: String?
     @ObservationIgnored private let sink: any DictationRouteSink
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
     @ObservationIgnored private let makeSocket: @Sendable () -> any SonioxSocket
@@ -54,7 +55,7 @@ import LegatoVocabulary
         let room = Room(segmentRouting: .intercepted)
         self.room = room
         events = Task { [weak self] in
-            let events = await room.subscribe(participant: .ui, channels: [.asrSegment, .asrRawTail], buffering: .unbounded)
+            let events = await room.subscribe(participant: .ui, channels: [.asrSegment, .asrRawTail, .session], buffering: .unbounded)
             for await event in events {
                 guard !Task.isCancelled, let self else { return }
                 await self.receive(event, room: room)
@@ -74,6 +75,7 @@ import LegatoVocabulary
 
     /// Starts the take on the held connection (or a fresh one) and holds the next connection right away.
     public func activate() async {
+        voiceIsolationStatus = nil
         if stream == nil { open() }
         guard active == nil, let stream else { return }
         guard let held = await stream.take() else { stream.warm(); return }
@@ -146,6 +148,10 @@ import LegatoVocabulary
     private func receive(_ event: Envelope, room: Room) async {
         guard room === self.room else { return }
         switch event.channel {
+        case .session:
+            if event.payload["event"] == .string("asr.voiceIsolation"), case .string(let state) = event.payload["status"] {
+                voiceIsolationStatus = ComposerSession.voiceIsolationMessage(state)
+            }
         case .asrSegment:
             await room.resolveSegment(event.id)
             guard let words = try? event.payload["words"]?.decode([Word].self), !words.isEmpty else { return }

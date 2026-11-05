@@ -236,7 +236,7 @@ private struct NotchComposerView: View {
         }
         let tailRows = session.tail.isEmpty ? 0 : max(1, Int(ceil(Double(session.tail.count) / 58)))
         let commentSpace: CGFloat = (showingCorrection ? 104 : 0) + InstructionStrip.height + 12
-        return min(440, max(showingCorrection ? 300 : 230, 170 + commentSpace + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
+        return min(440, max(showingCorrection ? 300 : 230, 170 + commentSpace + (session.voiceIsolationStatus == nil ? 0 : 24) + CGFloat(rows + tailRows) * 23 + CGFloat(max(0, session.snapshot.lines.count - 1)) * 12 + (session.error == nil ? 0 : 42)))
     }
     var body: some View {
         NotchIsland(style: style, presentation: presentation) { card }
@@ -250,6 +250,11 @@ private struct NotchComposerView: View {
                 Circle().fill(session.isListening && !session.isMuted ? Color.red : Color.secondary.opacity(0.6)).frame(width: 5, height: 5)
                 Text(session.status.capitalized)
                     .font(NotchIslandTokens.caption).foregroundStyle(.secondary)
+            }
+            if let voiceStatus = session.voiceIsolationStatus {
+                Label(voiceStatus, systemImage: "person.wave.2")
+                    .font(NotchIslandTokens.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("composer.voiceIsolationStatus")
             }
             ComposerView(snapshot: session.snapshot, tail: session.tail, dictationRevision: session.dictationRevision, dictationCommit: session.dictationCommit, successfulInsertionID: session.successfulInsertionID, pendingLineIDs: session.pendingLineIDs, busy: session.busy,
                 correctionDraft: session.correctionDraft, correctionSubmitting: session.correctionSubmitting,

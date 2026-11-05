@@ -1,0 +1,42 @@
+[
+  {
+    "path": "CamPlusPlus_v2.mlmodelc/analytics/coremldata.bin",
+    "sha256": "d0c5e0bf34974549ebc42431a49122d5cc05222a750a864ae53b9d9f625e0d5a"
+  },
+  {
+    "path": "CamPlusPlus_v2.mlmodelc/coremldata.bin",
+    "sha256": "6412f16c728165dfbefce470359665ab94e3c0b7784d25febdd58faed035edab"
+  },
+  {
+    "path": "CamPlusPlus_v2.mlmodelc/metadata.json",
+    "sha256": "5378d1a66538cd6be3ca20400667c2dfdf01911f3c71aa21ef95a34633a1276c"
+  },
+  {
+    "path": "CamPlusPlus_v2.mlmodelc/model.mil",
+    "sha256": "6f0506e4e7f01a0f8cf68bb9ba5f02f75ed2184b7d79c4264db3b1a734cb0e2a"
+  },
+  {
+    "path": "CamPlusPlus_v2.mlmodelc/weights/weight.bin",
+    "sha256": "3e5bafbc3d3faa94aff8c72afd22ffae97ce31d87ce70c000585e055cd776c18"
+  },
+  {
+    "path": "CamPlusPreprocessor_v2.mlmodelc/analytics/coremldata.bin",
+    "sha256": "79a870e41d4cb1681d8a6d971f6df7958c06b7532ff5dfe7a6d554a5c18a775d"
+  },
+  {
+    "path": "CamPlusPreprocessor_v2.mlmodelc/coremldata.bin",
+    "sha256": "a455197a14ef8f53a4ef8bc10a0b255660c124618b0c256b8b158896c3bb0e3d"
+  },
+  {
+    "path": "CamPlusPreprocessor_v2.mlmodelc/metadata.json",
+    "sha256": "b429e84df33fc4f5e6c621144b6c9a478130c1dafa8b289d8e3b2e519eecaeb9"
+  },
+  {
+    "path": "CamPlusPreprocessor_v2.mlmodelc/model.mil",
+    "sha256": "5361a74b04fc56879ed8cc46dba654658d5b6e409b789c862e4edd5e223d453a"
+  },
+  {
+    "path": "CamPlusPreprocessor_v2.mlmodelc/weights/weight.bin",
+    "sha256": "24c77ee75e17819622b3a69eeaccd57c6f6f05b0f5747c807a6540f032d3f1fb"
+  }
+]

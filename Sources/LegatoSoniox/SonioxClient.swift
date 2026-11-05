@@ -1,5 +1,6 @@
 import Foundation
 import LegatoRoom
+import LegatoVoiceIdentity
 
 public enum SonioxFrame: Sendable, Equatable { case text(String), binary(Data) }
 public protocol SonioxSocket: Sendable {
@@ -45,9 +46,11 @@ public actor URLSessionSonioxSocket: SonioxSocket {
 }
 
 public enum SonioxError: Error, Sendable, Equatable, LocalizedError {
+    case voiceIsolation(String)
     case missingKey, notConnected, inputMuted, invalidResponse, network, timeout, cancelled, provider(Int)
     public var errorDescription: String? {
         switch self {
+        case .voiceIsolation(let message): message
         case .missingKey: "Add a Soniox API key in Settings."
         case .notConnected: "Soniox is not connected."
         case .inputMuted: "Voice input is muted."
@@ -92,6 +95,10 @@ public actor SonioxClient {
     private var debugPartialTokens: [SonioxToken] = []
     private var audioOrigin: Double?
     private var sentAudio = false
+    private var voiceFilter: VoiceTokenFilter?
+    private let voiceMatcher: VoiceTokenFilter.Matcher?
+    private let voiceIsolationOverride: Bool?
+    private var lastVoiceStatus: String?
     private let quietFailure: SonioxQuietFailure
     private let speakerPrefix: String
     private let onDrop: (@Sendable () async -> Void)?
@@ -100,9 +107,11 @@ public actor SonioxClient {
     /// new stream's "1" from the old one's.
     public init(room: Room, config: SonioxConfig = SonioxConfig(), socket: any SonioxSocket = URLSessionSonioxSocket(),
                 keepaliveInterval: Duration = .seconds(10), finishTimeout: Duration = .seconds(20), audioOrigin: Double? = nil,
-                quietFailure: SonioxQuietFailure = .never, speakerPrefix: String = "", onDrop: (@Sendable () async -> Void)? = nil) {
+                quietFailure: SonioxQuietFailure = .never, speakerPrefix: String = "",
+                voiceIsolationEnabled: Bool? = nil, voiceMatcher: (@Sendable ([Float]) async throws -> Float)? = nil, onDrop: (@Sendable () async -> Void)? = nil) {
         self.room = room; self.config = config; self.socket = socket
         self.keepaliveInterval = keepaliveInterval; self.finishTimeout = finishTimeout; self.audioOrigin = audioOrigin
+        self.voiceIsolationOverride = voiceIsolationEnabled; self.voiceMatcher = voiceMatcher
         self.quietFailure = quietFailure; self.speakerPrefix = speakerPrefix; self.onDrop = onDrop
     }
     /// Why the stream failed, once it has; nil until then (and after a clean finish or `close`).
@@ -147,6 +156,17 @@ public actor SonioxClient {
         if state == .streaming { return }
         guard state == .held else { throw failure ?? .notConnected }
         do {
+            // Snapshot once per stream. Meetings always bypass isolation, irrespective of the global setting.
+            if !config.diarization && (voiceIsolationOverride ?? VoiceIsolationSettings.enabled) {
+                do {
+                    if let voiceMatcher { voiceFilter = VoiceTokenFilter(matcher: voiceMatcher) }
+                    else {
+                        let matcher = try await VoiceIdentityService.shared.makeMatcher()
+                        voiceFilter = VoiceTokenFilter(matcher: matcher)
+                    }
+                    try await voiceStatus("identifying")
+                } catch { throw SonioxError.voiceIsolation(error.localizedDescription) }
+            }
             try await socket.send(.text(String(decoding: config.message(backgroundText: backgroundText), as: UTF8.self)))
             // The stream may have failed or closed while the request was in flight; that outcome stands.
             guard state == .held else { throw failure ?? .notConnected }
@@ -212,7 +232,10 @@ public actor SonioxClient {
         guard state == .streaming else { throw failure ?? .notConnected }
         guard !muted, !pcm16.isEmpty else { return }
         if audioOrigin == nil { audioOrigin = ProcessInfo.processInfo.systemUptime }
-        do { try await socket.send(.binary(pcm16)); lastSend = .now; sentAudio = true }
+        do {
+            await voiceFilter?.append(pcm16)
+            try await socket.send(.binary(pcm16)); lastSend = .now; sentAudio = true
+        }
         catch { await fail(.network); throw SonioxError.network }
     }
     /// Stops new audio, drains all final tokens, then waits for the server's finished acknowledgement.
@@ -246,6 +269,7 @@ public actor SonioxClient {
     /// and never published. Publishes an empty tail and `asr.closed`, never `asr.error`.
     public func close() async {
         guard state != .finished && state != .failed else { return }
+        voiceFilter = nil
         state = .finished; receiver?.cancel(); heartbeat?.cancel(); timeoutTask?.cancel()
         completion?.resume(throwing: SonioxError.cancelled); completion = nil
         segmenter = Segmenter(); debugPartialTokens = []
@@ -285,7 +309,19 @@ public actor SonioxClient {
         do { response = try JSONDecoder().decode(Response.self, from: data) }
         catch { await fail(.invalidResponse); throw SonioxError.invalidResponse }
         if let code = response.error_code { await fail(.provider(code)); throw SonioxError.provider(code) }
-        let tokens = response.tokens ?? []
+        var tokens = response.tokens ?? []
+        if let filter = voiceFilter {
+            do {
+                let filtered = try await filter.filter(tokens, force: response.finished == true || tokens.contains { $0.text == "<fin>" || $0.text == "<end>" })
+                guard state != .finished && state != .failed else { return }
+                tokens = filtered.tokens
+                if filtered.withheld { try await voiceStatus("uncertain") }
+                else if tokens.contains(where: { !$0.text.hasPrefix("<") }) { try await voiceStatus("matching") }
+            } catch {
+                let visible = SonioxError.voiceIsolation(error.localizedDescription)
+                await fail(visible); throw visible
+            }
+        }
         if debugInput { debugPartialTokens = tokens.filter { !$0.isFinal && !$0.text.hasPrefix("<") } }
         try await publish(segmenter.ingest(tokens, finished: response.finished == true),
                           activity: tokens.contains { !$0.text.hasPrefix("<") && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
@@ -295,6 +331,7 @@ public actor SonioxClient {
             if !debugInput { try await socket.send(.text("")); lastSend = .now }
         }
         if response.finished == true {
+            voiceFilter = nil
             state = .finished; heartbeat?.cancel(); timeoutTask?.cancel()
             _ = try? await room.publish(channel: .session, participant: .transcriber, payload: .object(["event": .string("asr.finished")]))
             await room.finishTranscription()
@@ -325,8 +362,15 @@ public actor SonioxClient {
                 "parts": .array(output.tailParts.map { part in .object(["text": .string(part.text),
                     "timed": .bool(part.time != nil), "tOrigin": .number(part.time.flatMap { time in audioOrigin.map { $0 + time } } ?? ProcessInfo.processInfo.systemUptime)]) })]))
     }
+    private func voiceStatus(_ status: String) async throws {
+        guard status != lastVoiceStatus else { return }
+        lastVoiceStatus = status
+        _ = try await room.publish(channel: .session, participant: .transcriber,
+            payload: .object(["event": .string("asr.voiceIsolation"), "status": .string(status)]))
+    }
     private func fail(_ error: SonioxError) async {
         guard state != .finished && state != .failed else { return }
+        voiceFilter = nil
         state = .failed; failure = error; receiver?.cancel(); heartbeat?.cancel(); timeoutTask?.cancel()
         let quiet = quietFailure == .always || (quietFailure == .untilAudio && !sentAudio)
         _ = try? await room.publish(channel: .session, participant: .transcriber,

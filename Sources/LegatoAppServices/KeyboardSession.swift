@@ -21,6 +21,7 @@ import LegatoVocabulary
     public var route: AudioRoute { gate.route }
     /// The dictation route's uncommitted words.
     public var dictationTail: String { dictation.tail }
+    public var dictationVoiceIsolationStatus: String? { gate.route == .dictation ? dictation.voiceIsolationStatus : nil }
     /// Why the last dictation tap could not start (shown in the keyboard's word row); `dictationNoticeID` changes
     /// with every new notice so the same text can show again.
     public private(set) var dictationNotice: String?
@@ -158,6 +159,7 @@ import LegatoVocabulary
         await serial { [weak self] in await self?.performOpen(tapAt: tapAt) ?? false }
     }
     private func performOpen(tapAt: Date?) async -> Bool {
+        guard !VoiceEnrollmentController.shared.isBusy else { return false }
         guard isOpen else { return false }
         guard gate.route == .idle else { return true }
         let tapped = now() - max(0, tapAt.map { Date().timeIntervalSince($0) } ?? 0)
