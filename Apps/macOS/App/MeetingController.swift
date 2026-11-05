@@ -245,8 +245,8 @@ final class MeetingController {
     func refresh() async {
         meetings = (try? await services.meetings()) ?? meetings
         var empty = Set<UUID>()
-        for meeting in meetings where meeting.state != .recording && !(await services.store.hasSegments(for: meeting.id)) {
-            empty.insert(meeting.id)
+        for meeting in meetings where meeting.state != .recording {
+            if !(await services.store.hasSegments(for: meeting.id)) { empty.insert(meeting.id) }
         }
         emptyTranscripts = empty
         revision += 1
