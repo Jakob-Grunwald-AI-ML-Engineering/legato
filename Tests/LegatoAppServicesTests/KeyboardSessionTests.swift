@@ -49,6 +49,47 @@ import LegatoSoniox
         return (composer, keyboard)
     }
 
+    @Test func meetingSuspensionKeepsDraftAndRejectsAllMicrophoneAdmission() async throws {
+        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
+        try await composer.seedDebugDraft("Keep this draft for after the meeting.")
+        let draft = composer.snapshot
+        await composer.arm()
+        let sockets = self.sockets
+        let keyboard = KeyboardSession(composer: composer, sink: sink, sonioxKey: { "test" },
+            makeSocket: { sockets.make() }, warmConnection: {})
+        keyboard.update(visible: true, surface: .dictation)
+        await keyboard.settle()
+        await keyboard.suspendForMeeting()
+        let starts = await mic.starts
+        let routes = await mic.routes
+        keyboard.update(visible: true, surface: .agent)
+        await keyboard.settle()
+        #expect(!(await keyboard.openGate()))
+        await composer.arm()
+        await composer.start()
+        let afterStarts = await mic.starts
+        let afterRoutes = await mic.routes
+        #expect(afterStarts == starts && afterRoutes == routes)
+        #expect(!composer.isArmed && !composer.holdsWarmInput && !keyboard.isOpen)
+        #expect(composer.snapshot == draft, "A meeting must never cancel the existing composition")
+        keyboard.finishMeeting()
+        #expect(!composer.isArmed, "Finishing a meeting never implicitly rearms the mic")
+        #expect(composer.snapshot == draft)
+    }
+
+    @Test func meetingReservationWinsAgainstAnArmingPermissionAwait() async throws {
+        let permission = ConnectGate()
+        var entered = false
+        let composer = ComposerSession(microphone: mic, activateAudioSession: { entered = true; await permission.wait() })
+        let arming = Task { await composer.arm() }
+        try await until { entered }
+        await composer.suspendMicrophoneForMeeting()
+        permission.open()
+        await arming.value
+        #expect(!composer.isArmed)
+        #expect(await mic.starts == 0, "Permission returning cannot start a mic after a meeting reserved it")
+    }
+
     @Test func debugDictationLineEntersTheSinkOnTheTypingSurface() async throws {
         let (_, keyboard) = try await openOnTyping()
         try await keyboard.debugDictationLine("Hallo Welt")
@@ -161,8 +202,9 @@ import LegatoSoniox
 
 actor GateMicrophone: AudioSource {
     var routes = 0
+    var starts = 0
     private var continuation: AsyncStream<AudioChunk>.Continuation?
-    func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> { AsyncStream { $0.finish() } }
+    func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> { starts += 1; return AsyncStream { $0.finish() } }
     func route() async throws -> AsyncStream<AudioChunk> {
         routes += 1; continuation?.finish()
         let pair = AsyncStream<AudioChunk>.makeStream(); continuation = pair.continuation

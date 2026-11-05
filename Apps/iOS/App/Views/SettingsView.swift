@@ -43,7 +43,7 @@ struct SettingsView: View {
                 Button("Cancel", role: .cancel) { enrollment.cancel() }
             } else {
                 Button(enrollment.hasProfile ? "Record replacement voice profile" : "Record voice profile") {
-                    enrollment.record(microphoneBusy: { controller.composer.isArmed || controller.composer.holdsWarmInput || controller.composer.isListening || controller.composer.status == "starting" })
+                    enrollment.record(microphoneBusy: { controller.meetings.isActive || controller.composer.isArmed || controller.composer.holdsWarmInput || controller.composer.isListening || controller.composer.status == "starting" })
                 }.accessibilityIdentifier("settings.recordVoiceProfile")
                 if enrollment.hasProfile {
                     Button("Delete voice profile", role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }

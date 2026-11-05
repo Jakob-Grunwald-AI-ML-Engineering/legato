@@ -6,8 +6,18 @@ import LegatoKeyboardCore
 enum AppGroup {
     static let id = LinkChannel.appGroupID
 
-    static var defaults: UserDefaults { UserDefaults(suiteName: id) ?? .standard }
-    static var containerURL: URL? { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id) }
+    static var defaults: UserDefaults {
+        #if LEGATO_INTERNAL
+        if let defaults = IOSMeetingFixtureConfiguration.defaults { return defaults }
+        #endif
+        return UserDefaults(suiteName: id) ?? .standard
+    }
+    static var containerURL: URL? {
+        #if LEGATO_INTERNAL
+        if let root = IOSMeetingFixtureConfiguration.applicationRoot { return root }
+        #endif
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id)
+    }
 }
 
 /// User settings, in the App Group's `UserDefaults`.
