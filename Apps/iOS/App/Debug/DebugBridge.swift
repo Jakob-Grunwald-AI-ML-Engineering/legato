@@ -28,6 +28,14 @@ import UIKit
         for name in ComposerSession.debugCommands {
             harness.register(name) { command in try await AppController.shared.composer.debugControl(name, args: command.args) }
         }
+        harness.register("microphone-arm") { _ in
+            await AppController.shared.readyMicrophone()
+            return AppController.shared.composer.debugState
+        }
+        harness.register("microphone-release") { _ in
+            await AppController.shared.releaseMicrophone()
+            return AppController.shared.composer.debugState
+        }
         // The keyboard mic key's gate on the current surface (the typing surface has no mic key yet).
         harness.register("keyboard-tap") { _ in
             _ = await AppController.shared.keyboardSession.tap()

@@ -3,7 +3,7 @@ import LegatoCore
 import Synchronization
 
 public struct AudioInputCandidate: Sendable, Codable, Equatable {
-    public enum Kind: String, Sendable, Codable { case builtIn, wired, bluetooth, continuity, aggregate, virtual, other }
+    public enum Kind: String, Sendable, Codable { case combined, builtIn, wired, bluetooth, continuity, aggregate, virtual, other }
     public let id: String
     public let name: String
     public let kind: Kind
@@ -20,7 +20,7 @@ public struct AudioInputCandidate: Sendable, Codable, Equatable {
     }
     public static func ordered(_ inputs: [Self]) -> [Self] {
         func rank(_ kind: Kind) -> Int {
-            switch kind { case .builtIn: 0; case .wired: 1; case .bluetooth: 2; case .continuity: 3; default: 4 }
+            switch kind { case .combined: -1; case .builtIn: 0; case .wired: 1; case .bluetooth: 2; case .continuity: 3; default: 4 }
         }
         return inputs.filter(\.isUsable).sorted { a, b in
             rank(a.kind) == rank(b.kind) ? a.id < b.id : rank(a.kind) < rank(b.kind)
@@ -45,6 +45,10 @@ public struct AutomaticInputDiagnostics: Sendable, Codable {
     public var rejectedInputs: [String: String] = [:]
     public var qualityComparison = "not attempted"
     public var error: String?
+    /// Reports actual PCM freshness, including while the keyboard has detached its consumer.
+    public var captureHealthy: Bool {
+        state == "capturing" && lastBufferUptime.map { ProcessInfo.processInfo.systemUptime - $0 < 2 } == true
+    }
     public init() {}
 }
 
@@ -52,6 +56,17 @@ struct AutomaticInputHardware: Sendable {
     let candidates: @Sendable () async -> [AudioInputCandidate]
     let make: @Sendable (AudioInputCandidate) -> any AudioSource
     let isCurrent: @Sendable (AudioInputCandidate) async -> Bool
+    var fallbackFromCombined: (@Sendable (String) async throws -> Void)? = nil
+}
+
+/// Distinguishes a rejected category downgrade from a recoverable engine-start failure.
+/// Preserve the native cause so a background admission refusal remains diagnosable.
+struct CombinedInputFallbackFailure: Error, LocalizedError {
+    let cause: any Error
+    var errorDescription: String? {
+        let native = cause as NSError
+        return "Microphone fallback failed: \(native.domain) \(native.code): \(native.localizedDescription)"
+    }
 }
 
 public enum AutomaticInputError: Error, Sendable, LocalizedError {
@@ -64,7 +79,8 @@ public enum AutomaticInputError: Error, Sendable, LocalizedError {
     }
 }
 
-/// One physical input at a time. Built-in is preferred over headset input; silence is healthy PCM.
+/// Uses the system's combined input when admitted in dual-route mode; otherwise prefers built-in.
+/// Silence is healthy PCM.
 /// Missing/invalid buffers and native source failure trigger bounded same-stream recovery.
 public actor AutomaticInputSource: ResumableAudioSource {
     public nonisolated let resumptions: AsyncStream<Void>
@@ -92,11 +108,13 @@ public actor AutomaticInputSource: ResumableAudioSource {
     private var connecting = false
     private var fault = false
     private var failed: Set<String> = []
-    private var retried: Set<String> = []
+    private var combinedFallbackUsed = false
     private var recoveryCount = 0
+    private var recoveryBudgetUsed = 0
+    private var healthySince: Double?
 
     public init() {
-        hardware = .live; timeout = .seconds(2); preflight = .milliseconds(250); healthInterval = .seconds(1); clock = { ProcessInfo.processInfo.systemUptime }
+        hardware = .live; timeout = .seconds(2); preflight = .zero; healthInterval = .seconds(1); clock = { ProcessInfo.processInfo.systemUptime }
         (resumptions, resumeSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
     /// `healthInterval` defaults to half the no-PCM timeout. Tests pass a large timeout (an upper bound that
@@ -112,7 +130,8 @@ public actor AutomaticInputSource: ResumableAudioSource {
         try Task.checkCancellation()
         guard format.sampleRate.isFinite, format.sampleRate > 0, format.channelCount > 0 else { throw MicSourceError.invalidInputFormat }
         let token = generation
-        self.format = format; attached = true; failed = []; retried = []; recoveryCount = 0; qualityTrialUsed = false
+        combinedFallbackUsed = false
+        self.format = format; attached = true; failed = []; recoveryCount = 0; recoveryBudgetUsed = 0; healthySince = nil; qualityTrialUsed = false
         diagnosticState.withLock { $0 = AutomaticInputDiagnostics(); $0.state = "starting" }
         let stream = makeStream()
         do { try await connect(format: format, token: token) }
@@ -124,18 +143,37 @@ public actor AutomaticInputSource: ResumableAudioSource {
         return stream
     }
     public func route() async throws -> AsyncStream<AudioChunk> {
-        guard let format, source != nil else { throw MicSourceError.notArmed }
+        guard let format else { throw MicSourceError.notArmed }
         attached = true
         let stream = makeStream(), token = generation
+        // A keyboard may reopen during an autonomous repair. Join that repair rather than
+        // treating its temporarily absent engine as a lost foreground admission.
+        while connecting {
+            try await Task.sleep(for: .milliseconds(10))
+            try check(token)
+        }
+        guard source != nil else { throw MicSourceError.notArmed }
         // A device that vanished while detached is found here, not only when its stream-end is processed.
         let routeChanged = if let selected { await !hardware.isCurrent(selected) } else { false }
         guard token == generation else { throw CancellationError() }
         if fault || stale || routeChanged {
             try await recover(token: token, format: format)
-        } else { installWatchdog(token: token) }
+        }
         return stream
     }
-    public func detach() async { attached = false; watchdog?.cancel(); watchdog = nil; router.setSink(nil) }
+    #if DEBUG || LEGATO_INTERNAL
+    /// Stops only the physical engine, preserving the held lease and consumer. Exercises the
+    /// same recovery path as an unexpected engine loss, without changing system audio routes.
+    public func interruptCaptureForDiagnostics() async {
+        await source?.stop()
+    }
+    #endif
+    public func detach() async {
+        attached = false
+        router.setSink(nil)
+        // The engine remains owned by the lease. Monitor and repair it even without a run,
+        // otherwise a headset disconnect silently leaves the Live Activity claiming readiness.
+    }
     public func stop() async {
         generation += 1; routeGeneration += 1; attached = false; connecting = false; format = nil
         watchdog?.cancel(); watchdog = nil
@@ -186,7 +224,8 @@ public actor AutomaticInputSource: ResumableAudioSource {
                         try check(token)
                         diagnosticState.withLock {
                             $0.selected = current ?? candidate; $0.state = "capturing"; $0.calibration = "ready-" + $0.quality.state
-                            $0.selectedReason = candidate.kind == .builtIn ? "built-in preference, measured PCM" : "physical fallback, measured PCM"
+                            $0.selectedReason = candidate.kind == .combined ? "combined route, measured PCM" :
+                                (candidate.kind == .builtIn ? "built-in preference, measured PCM" : "physical fallback, measured PCM")
                         }
                         return
                     }
@@ -202,6 +241,22 @@ public actor AutomaticInputSource: ResumableAudioSource {
                 source = nil
             }
         }
+        // Admission may have succeeded while the device/engine cannot supply the full
+        // combined route. Downgrade once per lease, then inventory the single-input session.
+        if !combinedFallbackUsed, candidates.contains(where: { $0.kind == .combined && failed.contains($0.id) }),
+           let fallback = hardware.fallbackFromCombined {
+            try check(token)
+            combinedFallbackUsed = true
+            do { try await fallback(diagnostics.error ?? "Combined input delivered no audio") }
+            catch {
+                try check(token)
+                throw CombinedInputFallbackFailure(cause: error)
+            }
+            try check(token)
+            try await connect(format: format, token: token)
+            diagnosticState.withLock { $0.selectedReason = "combined capture unavailable; physical fallback, measured PCM" }
+            return
+        }
         throw AutomaticInputError.noUsableInput
     }
     private func receive(_ chunk: AudioChunk, token: Int, route: Int) async -> Bool {
@@ -211,6 +266,8 @@ public actor AutomaticInputSource: ResumableAudioSource {
             if !chunk.samples.isEmpty { fault = true; return false }
             return true
         }
+        if healthySince == nil { healthySince = clock() }
+        if let healthySince, clock() - healthySince >= 30 { recoveryBudgetUsed = 0 }
         let quality = qualityMeter.observe(chunk)
         if quality.seconds >= 2 {
             clippingWindows = quality.clippedFraction >= 0.15 ? clippingWindows + 1 : 0
@@ -227,7 +284,7 @@ public actor AutomaticInputSource: ResumableAudioSource {
     private func ended(token: Int, route: Int) async {
         guard token == generation, route == routeGeneration else { return }
         fault = true
-        guard !connecting, attached, format != nil else { return }
+        guard !connecting, format != nil else { return }
         Task { [weak self] in await self?.checkHealth(token: token) }
     }
     private func installWatchdog(token: Int) {
@@ -240,7 +297,7 @@ public actor AutomaticInputSource: ResumableAudioSource {
         }
     }
     private func checkHealth(token: Int) async {
-        guard token == generation, attached, !connecting, let format else { return }
+        guard token == generation, !connecting, let format else { return }
         let routeChanged = if let selected { await !hardware.isCurrent(selected) } else { true }
         guard token == generation, !connecting else { return }
         if !fault && !stale && !routeChanged && clippingWindows >= 2 && !qualityTrialUsed {
@@ -292,17 +349,35 @@ public actor AutomaticInputSource: ResumableAudioSource {
     }
     private func recover(token: Int, format: AudioFormatSpec) async throws {
         try check(token)
-        guard !connecting, recoveryCount < 3 else { throw AutomaticInputError.noPCM }
-        connecting = true; recoveryCount += 1
-        diagnosticState.withLock { $0.state = "recovering"; $0.recoveries = recoveryCount }
-        if let selected, !retried.insert(selected.id).inserted { failed.insert(selected.id) }
-        let old = source, oldPump = pump
-        source = nil; pump = nil; routeGeneration += 1
-        oldPump?.cancel(); await old?.stop()
-        try check(token)
-        try await connect(format: format, token: token)
-        resumeSink.yield()
-        installWatchdog(token: token)
+        guard !connecting, recoveryBudgetUsed < 3 else { throw AutomaticInputError.noPCM }
+        connecting = true
+        healthySince = nil
+        defer { if token == generation { connecting = false } }
+        var lastError: any Error = AutomaticInputError.noPCM
+        while recoveryBudgetUsed < 3 {
+            recoveryCount += 1
+            recoveryBudgetUsed += 1
+            diagnosticState.withLock { $0.state = "recovering"; $0.recoveries = recoveryCount }
+            let old = source, oldPump = pump
+            source = nil; pump = nil; routeGeneration += 1
+            oldPump?.cancel(); await old?.stop()
+            try check(token)
+            // A route that failed during a transient Bluetooth transition can become healthy
+            // again. Reconsider it within the bounded recovery budget, including a sole mic.
+            failed = []
+            do {
+                try await connect(format: format, token: token)
+                resumeSink.yield()
+                return
+            } catch {
+                try check(token)
+                if error is CombinedInputFallbackFailure { throw error }
+                lastError = error
+                connecting = true
+                if recoveryBudgetUsed < 3 { try await Task.sleep(for: .milliseconds(150)) }
+            }
+        }
+        throw lastError
     }
     private func failIfCurrent(_ token: Int, error: any Error) async {
         guard token == generation else { return }

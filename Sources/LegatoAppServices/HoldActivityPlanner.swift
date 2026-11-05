@@ -22,16 +22,18 @@ public struct HoldActivityPlanner: Sendable {
 
     public init() {}
 
-    public static func phase(listening: Bool) -> DictationPhase { listening ? .listening : .held }
+    public static func phase(listening: Bool, recovering: Bool = false) -> DictationPhase {
+        recovering ? .recovering : (listening ? .listening : .held)
+    }
 
-    public mutating func plan(armed: Bool, listening: Bool, tail: String, now: Date = Date()) -> Step? {
+    public mutating func plan(armed: Bool, listening: Bool, tail: String, recovering: Bool = false, now: Date = Date()) -> Step? {
         guard armed else {
             requested = false
             guard active else { return nil }
             active = false
             return .end
         }
-        let phase = Self.phase(listening: listening)
+        let phase = Self.phase(listening: listening, recovering: recovering)
         let tail = phase == .listening ? tail : ""
         guard active else {
             guard !requested else { return nil }

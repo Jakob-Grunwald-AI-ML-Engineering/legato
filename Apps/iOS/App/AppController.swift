@@ -20,7 +20,7 @@ final class AppController {
     let keyboardSession: KeyboardSession
     let dictation: DictationPipeline
     private let holdActivity: HoldActivityPresenter
-    var notice: String { composer.error ?? composer.status.capitalized }
+    var notice: String { composer.error ?? (composer.microphoneRecovering ? "Reconnecting microphone…" : composer.status.capitalized) }
     var lastTranscript: String?
     var isDictating: Bool { composer.isListening }
 
@@ -55,7 +55,7 @@ final class AppController {
             case .stop where self.keyboardSession.isOpen: await self.keyboardSession.closeGate()
             case .start: await self.composer.start()
             case .stop: await self.composer.stop()
-            case .arm: await self.holdActivity.arming { await self.composer.arm() }; self.keyboardHost?.link.leaseChanged(until: self.composer.isArmed ? Date().addingTimeInterval(3600) : nil)
+            case .arm: await self.readyMicrophone()
             default: await self.composer.releaseMicrophone()
             }
             return true
@@ -76,7 +76,8 @@ final class AppController {
     }
 
     func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
-        if composer.isListening { await composer.stop() } else { await composer.start() }
+        if composer.isListening { await composer.stop() }
+        else { await holdActivity.arming { await composer.start() } }
         lastTranscript = composer.renderedText
         if let error = composer.error { return .failed(error) }
         return composer.isListening ? .started : .stopped(composer.renderedText)
@@ -90,10 +91,14 @@ final class AppController {
         await composer.releaseMicrophone()
         keyboardHost?.link.leaseChanged(until: nil)
     }
+    func readyMicrophone() async {
+        await holdActivity.arming { await composer.arm() }
+        keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
+    }
     func handle(_ url: URL) async {
         if let request = KeyboardURL.parse(url), request.command == .arm,
            keyboardHost?.link.admitURL(requestID: request.requestID, command: request.command) == .act {
-            await holdActivity.arming { await composer.arm() }; keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
+            await readyMicrophone()
         }
     }
     func insertResult() async { if let lastTranscript { _ = await keyboardHost?.insert(lastTranscript) } }

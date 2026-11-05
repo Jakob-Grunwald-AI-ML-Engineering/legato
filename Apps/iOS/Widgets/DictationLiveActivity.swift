@@ -10,6 +10,7 @@ extension DictationAttributes.ContentState {
         case .listening: "Listening"
         case .finishing: "Finishing…"
         case .held: "Mic ready"
+        case .recovering: "Reconnecting microphone…"
         case .result: "Dictation ready"
         case .inserted: "Inserted"
         case .insertFailed: "Legato keyboard not active"
@@ -23,6 +24,7 @@ extension DictationAttributes.ContentState {
         switch phase {
         case .starting, .listening, .finishing: "mic.fill"
         case .held: "waveform"
+        case .recovering: "arrow.clockwise"
         case .result: "text.bubble.fill"
         case .inserted: "checkmark.circle.fill"
         case .insertFailed: "keyboard"
@@ -36,6 +38,7 @@ extension DictationAttributes.ContentState {
         switch phase {
         case .starting, .listening, .finishing: .red
         case .held: .indigo
+        case .recovering: .orange
         case .result: .blue
         case .inserted: .green
         case .insertFailed: .orange
@@ -62,7 +65,7 @@ struct DictationLiveActivity: Widget {
                 .widgetURL(context.state.tapURL)
         } dynamicIsland: { context in
             let state = context.state
-            if state.phase == .held { return heldIsland() }
+            if state.phase == .held || state.phase == .recovering { return heldIsland(state: state) }
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Image(systemName: state.symbol).foregroundStyle(state.tint)
@@ -106,7 +109,7 @@ private struct LockScreenView: View {
     let state: DictationAttributes.ContentState
 
     var body: some View {
-        if state.phase == .held { HeldRow() } else { runBody }
+        if state.phase == .held || state.phase == .recovering { HeldRow(state: state) } else { runBody }
     }
 
     private var runBody: some View {
@@ -161,30 +164,34 @@ private struct StopButton: View {
 
 /// The background hold: the app keeps the microphone open and no take runs. Calm and narrow on purpose; iOS
 /// keeps its own privacy dot next to it.
-private func heldIsland() -> DynamicIsland {
+private func heldIsland(state: DictationAttributes.ContentState) -> DynamicIsland {
     DynamicIsland {
-        DynamicIslandExpandedRegion(.leading) { HeldGlyph() }
-        DynamicIslandExpandedRegion(.center) { HeldTitle() }
+        DynamicIslandExpandedRegion(.leading) { HeldGlyph(state: state) }
+        DynamicIslandExpandedRegion(.center) { HeldTitle(state: state) }
         DynamicIslandExpandedRegion(.trailing) { ReleaseButton() }
     } compactLeading: {
-        HeldGlyph()
+        HeldGlyph(state: state)
     } compactTrailing: {
         EmptyView()
     } minimal: {
-        HeldGlyph()
+        HeldGlyph(state: state)
     }
 }
 
 private struct HeldGlyph: View {
+    let state: DictationAttributes.ContentState
+
     var body: some View {
-        Image(systemName: "waveform").foregroundStyle(.indigo)
+        Image(systemName: state.symbol).foregroundStyle(state.tint)
     }
 }
 
 private struct HeldTitle: View {
+    let state: DictationAttributes.ContentState
+
     var body: some View {
         VStack(spacing: 2) {
-            Text("Mic ready").font(.headline)
+            Text(state.title).font(.headline)
             Text("Legato keyboard").font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -192,10 +199,12 @@ private struct HeldTitle: View {
 
 /// One slim row: glyph, title, Release.
 private struct HeldRow: View {
+    let state: DictationAttributes.ContentState
+
     var body: some View {
         HStack(spacing: 10) {
-            HeldGlyph().font(.title3)
-            Text("Mic ready").font(.headline)
+            HeldGlyph(state: state).font(.title3)
+            Text(state.title).font(.headline)
             Spacer()
             ReleaseButton()
         }

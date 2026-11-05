@@ -6,9 +6,9 @@ import Testing
     private let t0 = Date(timeIntervalSince1970: 1_000)
 
     private func run(_ p: inout HoldActivityPlanner, armed: Bool = true, listening: Bool = false,
-                     tail: String = "", at: TimeInterval = 0, succeeds: Bool = true) -> HoldActivityPlanner.Step? {
+                     tail: String = "", recovering: Bool = false, at: TimeInterval = 0, succeeds: Bool = true) -> HoldActivityPlanner.Step? {
         let now = t0.addingTimeInterval(at)
-        let step = p.plan(armed: armed, listening: listening, tail: tail, now: now)
+        let step = p.plan(armed: armed, listening: listening, tail: tail, recovering: recovering, now: now)
         if let step { p.performed(step, succeeded: succeeds, now: now) }
         return step
     }
@@ -43,6 +43,15 @@ import Testing
         #expect(run(&p, armed: false) == .end)
         #expect(run(&p, armed: false) == nil)
         #expect(run(&p) == .request(.held, tail: ""))
+    }
+
+    @Test func recoveryRetainsActivityWithoutClaimingReadiness() {
+        var p = HoldActivityPlanner()
+        #expect(run(&p, recovering: true) == .request(.recovering, tail: ""))
+        #expect(run(&p, recovering: true) == nil)
+        #expect(run(&p) == .update(.held, tail: ""))
+        #expect(run(&p, listening: true, tail: "old text", recovering: true) == .update(.recovering, tail: ""))
+        #expect(run(&p, armed: false, recovering: true) == .end)
     }
 
     @Test func refusedRequestIsNotRetriedWithinTheHold() {

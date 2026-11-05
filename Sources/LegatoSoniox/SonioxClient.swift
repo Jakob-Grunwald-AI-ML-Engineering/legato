@@ -245,7 +245,12 @@ public actor SonioxClient {
     /// Ends the stream without finalizing: words not yet final, or final but not yet segmented, are dropped
     /// and never published. Publishes an empty tail and `asr.closed`, never `asr.error`.
     public func close() async {
-        guard state != .finished && state != .failed else { return }
+        guard state != .finished && state != .failed else {
+            // A receiver may already have marked terminal state but still be suspended in
+            // event publication. Closing the take must also await transport teardown.
+            if !debugInput { await socket.close() }
+            return
+        }
         state = .finished; receiver?.cancel(); heartbeat?.cancel(); timeoutTask?.cancel()
         completion?.resume(throwing: SonioxError.cancelled); completion = nil
         segmenter = Segmenter(); debugPartialTokens = []

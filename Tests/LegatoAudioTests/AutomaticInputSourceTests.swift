@@ -126,7 +126,7 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
     await source.stop()
 }
 
-@Test func automaticInputDoesNotProbeOtherDevicesDuringADetachedLease() async throws {
+@Test func automaticInputRepairsADeadMicrophoneDuringADetachedLease() async throws {
     let probe = InputProbe(), inputs = InputInventory([autoCandidate("Built-in", .builtIn), autoCandidate("USB", .wired)])
     let made = MadeInputs()
     let source = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, made: made), timeout: neverReached, healthInterval: tick)
@@ -134,8 +134,8 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
     await source.detach()
     inputs.state.withLock { $0.removeAll { $0.id == "Built-in" } }
     await made.state.withLock { $0[0] }.stop()
-    try await Task.sleep(for: .milliseconds(120))
-    #expect(probe.state.withLock { $0.attempts } == ["Built-in"])
+    try await waitForAutomaticInput { source.diagnostics.selected?.id == "USB" && source.diagnostics.captureHealthy }
+    #expect(probe.state.withLock { $0.attempts } == ["Built-in", "USB"])
     _ = try await source.route()
     #expect(source.diagnostics.selected?.id == "USB")
     await source.stop()
@@ -186,4 +186,113 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
     #expect(quiet.state == "quiet" && quiet.clippedFraction == 0)
     let clipped = meter.observe(.init(samples: Array(repeating: 1, count: 160), format: autoFormat))
     #expect(clipped.state == "clipping" && clipped.clippedFraction == 0.5)
+}
+
+@Test func automaticInputRecoveryRetriesTheSameMicAfterTransientStartFailure() async throws {
+    let probe = InputProbe(), inventory = InputInventory([autoCandidate("Built-in", .builtIn)])
+    let made = MadeInputs()
+    let count = Mutex(0)
+    let hardware = AutomaticInputHardware(candidates: { inventory.state.withLock { $0 } }, make: { candidate in
+        let attempt = count.withLock { value in value += 1; return value }
+        let mic = FakeAutomaticMic(id: candidate.id, behavior: attempt == 2 ? .throwsAtStart : .speech, probe: probe)
+        made.state.withLock { $0.append(mic) }
+        return mic
+    }, isCurrent: { _ in true })
+    let source = AutomaticInputSource(hardware: hardware, timeout: neverReached, healthInterval: tick)
+    let stream = try await source.start(format: autoFormat)
+    var iterator = stream.makeAsyncIterator()
+    _ = await iterator.next()
+    await made.state.withLock { $0[0] }.stop()
+    try await waitForAutomaticInput { source.diagnostics.captureHealthy && source.diagnostics.recoveries == 2 }
+    #expect(await iterator.next() != nil)
+    #expect(probe.state.withLock { $0.attempts.count } == 3)
+    await source.stop()
+}
+
+@Test func automaticInputStopsRepairingAfterItsBoundedBudget() async throws {
+    let probe = InputProbe(), inventory = InputInventory([autoCandidate("Built-in", .builtIn)])
+    let made = MadeInputs()
+    let count = Mutex(0)
+    let hardware = AutomaticInputHardware(candidates: { inventory.state.withLock { $0 } }, make: { candidate in
+        let first = count.withLock { value in value += 1; return value == 1 }
+        let mic = FakeAutomaticMic(id: candidate.id, behavior: first ? .speech : .throwsAtStart, probe: probe)
+        made.state.withLock { $0.append(mic) }
+        return mic
+    }, isCurrent: { _ in true })
+    let source = AutomaticInputSource(hardware: hardware, timeout: neverReached, healthInterval: tick)
+    _ = try await source.start(format: autoFormat)
+    await source.detach()
+    await made.state.withLock { $0[0] }.stop()
+    try await waitForAutomaticInput { source.diagnostics.state == "failed" }
+    #expect(source.diagnostics.recoveries == 3)
+    #expect(!source.diagnostics.captureHealthy)
+    #expect(probe.state.withLock { $0.attempts.count == 4 && $0.opened.isEmpty })
+    await source.stop()
+}
+
+@Test func automaticInputCombinedFailureDowngradesOnceAndCapturesFromBuiltIn() async throws {
+    let probe = InputProbe(), inventory = InputInventory([autoCandidate("combined", .combined, channels: 2)])
+    let fallbacks = Mutex(0)
+    var hardware = autoHardware(inventory, probe: probe, behavior: { $0 == "combined" ? .throwsAtStart : .speech })
+    hardware.fallbackFromCombined = { _ in
+        fallbacks.withLock { $0 += 1 }
+        inventory.state.withLock { $0 = [autoCandidate("Built-in", .builtIn)] }
+    }
+    let source = AutomaticInputSource(hardware: hardware, timeout: neverReached, healthInterval: tick)
+    let stream = try await source.start(format: autoFormat)
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() != nil)
+    #expect(source.diagnostics.selected?.id == "Built-in")
+    #expect(source.diagnostics.captureHealthy)
+    #expect(fallbacks.withLock { $0 } == 1)
+    #expect(probe.state.withLock { $0.attempts == ["combined", "Built-in"] && $0.maximum == 1 })
+    await source.stop()
+}
+
+@Test func automaticInputCombinedFallbackRejectionPreservesNativeFailure() async throws {
+    let probe = InputProbe(), inventory = InputInventory([autoCandidate("combined", .combined, channels: 2)])
+    let fallbacks = Mutex(0)
+    var hardware = autoHardware(inventory, probe: probe, behavior: { _ in .throwsAtStart })
+    hardware.fallbackFromCombined = { _ in
+        fallbacks.withLock { $0 += 1 }
+        throw NSError(domain: "TestAudioSession", code: 561017449)
+    }
+    let source = AutomaticInputSource(hardware: hardware, timeout: neverReached, healthInterval: tick)
+    do {
+        _ = try await source.start(format: autoFormat)
+        Issue.record("Rejected fallback succeeded")
+    } catch let error as CombinedInputFallbackFailure {
+        #expect((error.cause as NSError).domain == "TestAudioSession")
+        #expect((error.cause as NSError).code == 561017449)
+    }
+    #expect(fallbacks.withLock { $0 } == 1)
+    #expect(source.diagnostics.error?.contains("561017449") == true)
+    #expect(!source.diagnostics.captureHealthy)
+    await source.stop()
+}
+
+@Test func automaticInputCombinedRecoveryDowngradesOnTheExistingStream() async throws {
+    let probe = InputProbe(), inventory = InputInventory([autoCandidate("combined", .combined, channels: 2)])
+    let made = MadeInputs(), count = Mutex(0), fallbacks = Mutex(0)
+    let hardware = AutomaticInputHardware(candidates: { inventory.state.withLock { $0 } }, make: { candidate in
+        let attempt = count.withLock { value in value += 1; return value }
+        let mic = FakeAutomaticMic(id: candidate.id,
+            behavior: attempt == 2 ? .throwsAtStart : .speech, probe: probe)
+        made.state.withLock { $0.append(mic) }
+        return mic
+    }, isCurrent: { _ in true }, fallbackFromCombined: { _ in
+        fallbacks.withLock { $0 += 1 }
+        inventory.state.withLock { $0 = [autoCandidate("Built-in", .builtIn)] }
+    })
+    let source = AutomaticInputSource(hardware: hardware, timeout: neverReached, healthInterval: tick)
+    let stream = try await source.start(format: autoFormat)
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() != nil)
+    await made.state.withLock { $0[0] }.stop()
+    try await waitForAutomaticInput { source.diagnostics.captureHealthy && source.diagnostics.selected?.id == "Built-in" }
+    #expect(await iterator.next() != nil)
+    #expect(fallbacks.withLock { $0 } == 1)
+    #expect(source.diagnostics.recoveries == 1)
+    #expect(probe.state.withLock { $0.attempts == ["combined", "combined", "Built-in"] && $0.maximum == 1 })
+    await source.stop()
 }

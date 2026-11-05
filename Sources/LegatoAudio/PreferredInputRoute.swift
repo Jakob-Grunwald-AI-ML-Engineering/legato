@@ -32,6 +32,9 @@ public enum PreferredInputRoute {
     @discardableResult
     public static func apply(_ kind: PreferredInputKind) -> Bool {
         let session = AVAudioSession.sharedInstance()
+        // The combined session owns both ports. An idle/take preference must not collapse
+        // it to one microphone or trigger a route transition at the start of speech.
+        if #available(iOS 26.2, *), session.mode == .dualRoute { return false }
         let available = session.availableInputs ?? []
         let ports = available.map { InputPortInfo(id: $0.uid, kind: Self.kind(of: $0.portType)) }
         guard let chosen = choose(kind, among: ports), let port = available.first(where: { $0.uid == chosen.id }) else {
