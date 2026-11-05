@@ -1,16 +1,20 @@
 import Foundation
 
-/// What `AutoMutePolicy` needs to know about one process: whether it has the mic and the speakers open.
+/// What `AutoMutePolicy` and `CallDetectionPolicy` need to know about one process: whether it has the mic and the
+/// speakers open.
 public struct AutoMuteProcess: Sendable, Equatable, Hashable {
     public var pid: Int32
+    /// The process's bundle ID; empty when Core Audio does not know it.
+    public var bundleID: String
     public var isRunningInput: Bool
     public var isRunningOutput: Bool
-    /// The input devices the process records from (`kAudioProcessPropertyDevices`, input scope), for
-    /// ``MeetingMicRoute``. Empty when it records nothing or the read failed.
+    /// The input devices the process records from (`kAudioProcessPropertyDevices`, input scope). Empty when it
+    /// records nothing or the read failed.
     public var inputDevices: [UInt32]
 
-    public init(pid: Int32, isRunningInput: Bool, isRunningOutput: Bool, inputDevices: [UInt32] = []) {
+    public init(pid: Int32, bundleID: String = "", isRunningInput: Bool, isRunningOutput: Bool, inputDevices: [UInt32] = []) {
         self.pid = pid
+        self.bundleID = bundleID
         self.isRunningInput = isRunningInput
         self.isRunningOutput = isRunningOutput
         self.inputDevices = inputDevices
