@@ -68,7 +68,7 @@ private struct MeetingRow: View {
                 if let discard {
                     Button(action: discard) { Label("Discard", systemImage: "trash") }
                         .labelStyle(.iconOnly).buttonStyle(.borderless).foregroundStyle(.secondary)
-                        .help("Discard this meeting: it is too short or has no transcript.")
+                        .help("Delete this short recording for good, without asking.")
                 }
             }
             Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)

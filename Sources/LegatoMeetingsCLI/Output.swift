@@ -102,14 +102,11 @@ enum Output {
         }.joined(separator: "\n") + "\n"
     }
 
-    /// The exporter's Markdown, with the meeting's id and filing added under its Date and Duration lines (it does not carry them).
+    /// The exporter's Markdown, with the meeting's id and state added under its Date and Duration lines (it does not carry them).
     static func detailText(_ detail: MeetingDetail) -> String {
         let meeting = detail.meeting
         let markdown = MarkdownExporter.markdown(meeting: meeting, segments: detail.segments, summary: detail.summary?.text, notes: detail.notes)
         var extra = ["- ID: \(meeting.id.uuidString)"]
-        if let client = meeting.client { extra.append("- Client: \(client)") }
-        if let project = meeting.project { extra.append("- Project: \(project)") }
-        if !meeting.tags.isEmpty { extra.append("- Tags: \(meeting.tags.joined(separator: ", "))") }
         if meeting.state != .finished { extra.append("- State: \(meeting.state.rawValue)") }
         var lines = markdown.components(separatedBy: "\n")
         let at = lines.firstIndex { $0.hasPrefix("- Duration:") }.map { $0 + 1 } ?? min(1, lines.count)

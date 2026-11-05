@@ -92,7 +92,7 @@ import Testing
         #expect(result.status == 0)
         #expect(result.stdout.hasPrefix("# Kickoff\n"))
         for part in ["- ID: AAAA1111-0000-0000-0000-000000000001", "- Client: Acme", "- Project: Website", "- Tags: Planning, design", "Launch is set for March.", "## Transcript", "**Alice** [00:03] We agreed on the Zürich launch date."] {
-            #expect(result.stdout.contains(part), "missing \(part)")
+            #expect(result.stdout.components(separatedBy: part).count == 2, "\(part) should appear once")
         }
         let withDashes = await run(["meetings", "show", "aaaa1111-0000", "--root", f.root.path])
         #expect(withDashes.stdout == result.stdout)

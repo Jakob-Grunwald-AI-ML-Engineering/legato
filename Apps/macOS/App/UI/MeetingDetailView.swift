@@ -180,7 +180,7 @@ struct MeetingDetailView: View {
             // A slip of a recording goes in one click, no dialog.
             if controller.canDiscard(meeting) {
                 Button { controller.delete(meeting.id) } label: { Label("Discard", systemImage: "trash") }
-                    .help("Discard this meeting: it is too short or has no transcript.")
+                    .help("Delete this short recording for good, without asking.")
                     .accessibilityIdentifier("meeting.discard")
             }
             Menu {
