@@ -79,6 +79,17 @@ public enum ComposerInsertOrigin: String, Sendable {
         }
     }.joined(separator: "\n") }
     public private(set) var isArmed = false
+    /// Capture is settling or being repaired; the lease remains owned, but the UI must not claim readiness.
+    public private(set) var microphoneRecovering = false
+    @ObservationIgnored private var microphoneEpoch = UUID()
+    @ObservationIgnored private var microphonePreparation: (id: UUID, task: Task<AsyncStream<AudioChunk>, any Error>)?
+    @ObservationIgnored private var microphoneMonitor: Task<Void, Never>?
+    @ObservationIgnored private var startupCapture: Task<AsyncStream<AudioChunk>, any Error>?
+    private var pendingAudioRoute: AudioRoute?
+    private var takeAudioBuffer = TakeAudioBuffer()
+    private(set) var takeBufferFailure: (any Error)?
+    var bufferedTakeFrames: Int { takeAudioBuffer.frameCount }
+    private(set) var consumedWarmInputChunks = 0
     public var isListening: Bool { status == "listening" }
     /// Where microphone chunks go while a keyboard session holds the warm input (`holdWarmInput`).
     public private(set) var route = AudioRoute.idle
@@ -247,6 +258,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     /// Release capture and warm streams while keeping the composition, history and writer intact.
     public func suspendMicrophoneForMeeting() async {
         microphoneReserved = true
+        invalidateMicrophoneAdmission()
         if isListening { await stop() }
         isArmed = false
         await releaseWarmInput()
@@ -256,11 +268,16 @@ public enum ComposerInsertOrigin: String, Sendable {
 
     public func arm() async {
         guard !microphoneReserved else { return }
+        // A repeated ready request must not replace the stream of a running take.
+        // The capture watchdog owns repair of an existing lease.
         guard !isArmed else { return }
         do {
             _ = try await prepareMicrophoneStream()
             isArmed = true; error = nil; status = "ready"; onChange?()
+            monitorMicrophone()
             await inputRoute.preferIdle()
+        } catch is CancellationError {
+            // A released/superseded admission must not become a visible failure.
         } catch { fail(error) }
     }
     private static func activateMicrophoneSession() async throws {
@@ -268,43 +285,125 @@ public enum ComposerInsertOrigin: String, Sendable {
         guard await AVAudioApplication.requestRecordPermission() else {
             throw NSError(domain: "Composer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings."])
         }
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP])
-        try session.setActive(true)
+        try AudioSessionController.configureMicrophoneCapture(combineInputs: ComposerMicrophonePreference.combineInputs())
         #endif
     }
     func prepareMicrophoneStream() async throws -> AsyncStream<AudioChunk> {
         guard !microphoneReserved else { throw CancellationError() }
-        do {
-            // The keyboard starts while this host is backgrounded. Reconfiguring its
-            // already-live AVAudioSession can be refused with '!int'; route the held mic.
-            if isArmed { return try await mic.route() }
-            try await activateAudioSession()
-            guard !microphoneReserved else { throw CancellationError() }
-            let stream = try await mic.start(format: .init(sampleRate: 16000, channelCount: 1))
-            guard !microphoneReserved else { throw CancellationError() }
-            isArmed = keepMicrophoneActive
-            return stream
-        } catch {
-            // A route lost to interruption is no longer an honest background lease.
-            isArmed = false
-            await mic.stop()
-            throw error
+        if let pending = microphonePreparation { return try await pending.task.value }
+        let id = UUID(), epoch = microphoneEpoch
+        let task = Task { try await self.acquireMicrophoneStream(epoch: epoch) }
+        microphonePreparation = (id, task)
+        defer { if microphonePreparation?.id == id { microphonePreparation = nil } }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: { task.cancel() }
+    }
+    private func acquireMicrophoneStream(epoch: UUID) async throws -> AsyncStream<AudioChunk> {
+        let held = isArmed
+        for attempt in 0..<3 {
+            try checkMicrophoneEpoch(epoch)
+            do {
+                let stream: AsyncStream<AudioChunk>
+                if held && attempt == 0 { stream = try await mic.route() }
+                else {
+                    // Rebuild on the existing active session first. Reconfiguring even the same
+                    // category in the background can be refused by iOS.
+                    if !held { try await activateAudioSession() }
+                    #if os(iOS)
+                    if held { try AudioSessionController().reactivate() }
+                    #endif
+                    try checkMicrophoneEpoch(epoch)
+                    stream = try await mic.start(format: .init(sampleRate: 16000, channelCount: 1))
+                }
+                try checkMicrophoneEpoch(epoch)
+                isArmed = held || keepMicrophoneActive
+                microphoneRecovering = false
+                monitorMicrophone()
+                onChange?()
+                return stream
+            } catch {
+                guard epoch == microphoneEpoch else { throw CancellationError() }
+                await mic.stop()
+                if Task.isCancelled { isArmed = false; microphoneRecovering = false; throw CancellationError() }
+                try checkMicrophoneEpoch(epoch)
+                guard attempt < 2, Self.transientMicrophoneFailure(error) else {
+                    isArmed = false; microphoneRecovering = false; onChange?()
+                    throw error is CancellationError ? AutomaticInputError.noPCM : error
+                }
+                microphoneRecovering = true; onChange?()
+                try await Task.sleep(for: .milliseconds(150 * (attempt + 1)))
+            }
         }
+        throw AutomaticInputError.noPCM
+    }
+    private func checkMicrophoneEpoch(_ expected: UUID) throws {
+        try Task.checkCancellation()
+        guard !microphoneReserved, expected == microphoneEpoch else { throw CancellationError() }
+    }
+    private static func transientMicrophoneFailure(_ error: any Error) -> Bool {
+        if error is CancellationError || error is AutomaticInputError { return true }
+        if let mic = error as? MicSourceError { return mic == .notArmed || mic == .invalidInputFormat }
+        let ns = error as NSError
+        return (ns.domain == NSOSStatusErrorDomain || ns.domain == "com.apple.coreaudio.avfaudio")
+            && [560_557_684, 561_015_905, 561_145_187, 2_003_329_396].contains(ns.code)
+    }
+    private func monitorMicrophone() {
+        guard microphoneMonitor == nil, let automatic = mic as? AutomaticInputSource else { return }
+        let epoch = microphoneEpoch
+        microphoneMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                guard let self, epoch == self.microphoneEpoch else { return }
+                let health = automatic.diagnostics
+                switch health.state {
+                case "capturing":
+                    let stale = health.lastBufferUptime.map { ProcessInfo.processInfo.systemUptime - $0 > 2.5 } ?? true
+                    if self.microphoneRecovering != stale { self.microphoneRecovering = stale; self.onChange?() }
+                case "starting", "recovering":
+                    if !self.microphoneRecovering { self.microphoneRecovering = true; self.onChange?() }
+                case "failed":
+                    self.isArmed = false; self.microphoneRecovering = false
+                    self.microphoneMonitor = nil
+                    self.deactivateMicrophoneSession()
+                    self.fail(AutomaticInputError.noPCM)
+                    return
+                default: break
+                }
+            }
+        }
+    }
+    private func deactivateMicrophoneSession() {
+        #if os(iOS)
+        // In particular, dual-route capture is non-mixable. Stopping its engine alone
+        // must not leave other apps' audio interrupted after the lease is released.
+        AudioSessionController().deactivate()
+        #endif
+    }
+    private func invalidateMicrophoneAdmission() {
+        microphoneEpoch = UUID()
+        microphonePreparation?.task.cancel(); microphonePreparation = nil
+        startupCapture?.cancel(); startupCapture = nil
+        microphoneMonitor?.cancel(); microphoneMonitor = nil
+        microphoneRecovering = false
     }
     /// Changes retention only; enabling this setting never starts a microphone.
     public func setKeepMicrophoneActive(_ value: Bool) async {
         keepMicrophoneActive = value
-        if !value, !isListening { isArmed = false; await mic.stop(); onChange?() }
+        if !value, !isListening { invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); deactivateMicrophoneSession(); onChange?() }
     }
     /// Opting out stops new input on backgrounding, preserving the draft and final agent work.
     public func prepareForBackground() async {
         _ = await flushHistory()
         guard !keepMicrophoneActive else { return }
         if isListening { await stop() }
-        isArmed = false; await mic.stop(); onChange?()
+        invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); deactivateMicrophoneSession(); onChange?()
     }
-    public func releaseMicrophone() async { isArmed = false; await releaseWarmInput(); await cancel() }
+    public func releaseMicrophone() async {
+        invalidateMicrophoneAdmission(); isArmed = false
+        discardTakeBuffer()
+        await releaseWarmInput(); await cancel(); await mic.stop(); deactivateMicrophoneSession(); onChange?()
+    }
     public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
     /// Keyboard pre-warm: build the composition (Room, cleanup pipeline, writer) without starting a take,
     /// then open its Soniox stream so the first tap only opens the gate.
@@ -341,6 +440,9 @@ public enum ComposerInsertOrigin: String, Sendable {
             guard (debugMode != nil || !soniox.isEmpty), !claude.isEmpty else {
                 throw NSError(domain: "Composer", code: 1, userInfo: [NSLocalizedDescriptionKey: debugMode == nil ? "Add Claude and Soniox API keys in Settings." : "Add a Claude API key in Settings for debug transcriber UAT."])
             }
+            if beginsInput, debugMode == nil, warmInput == nil {
+                startupCapture = Task { try await self.prepareMicrophoneStream() }
+            }
             let store = VocabularyStore(fileURL: vocabularyURL)
             let learner = VocabularyLearner(store: store, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), languages: ["de", "en"])
             let terms = (try? await store.snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
@@ -368,11 +470,12 @@ public enum ComposerInsertOrigin: String, Sendable {
             inputConfig = .init(mode: mode.rawValue, personalPrompt: prompt, terms: terms)
             guard beginsInput else { prepared = true; status = "ready"; onChange?(); return }
             try await beginInput(room: room, log: log, debug: debugMode != nil, soniox: soniox, generation: generation)
+        } catch is CancellationError {
+            if self.generation == generation { await cleanup(); status = "idle"; onChange?() }
         } catch {
             if self.generation == generation {
                 fail(error)
-                // A pre-warm that cannot build (missing keys) keeps the lease; the tap reports it again.
-                if beginsInput { isArmed = false }
+                // Provider/setup failures do not revoke a working microphone lease.
                 try? await room?.cancel(); await cleanup()
             }
         }
@@ -385,8 +488,10 @@ public enum ComposerInsertOrigin: String, Sendable {
             let soniox = try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? ""
             guard !soniox.isEmpty else { throw SonioxError.missingKey }
             try await beginInput(room: room, log: log, debug: false, soniox: soniox, generation: token)
+        } catch is CancellationError {
+            if generation == token { discardTakeBuffer(); status = "ready"; onChange?() }
         } catch {
-            if generation == token { route = .idle; fail(error); if await room.state == .listening { try? await room.micOff(); await room.finishTranscription() } }
+            if generation == token { route = .idle; discardTakeBuffer(); fail(error); if await room.state == .listening { try? await room.micOff(); await room.finishTranscription() } }
         }
     }
     /// Holds the next take's Soniox connection ahead of the tap (no start request, so nothing is billed),
@@ -430,46 +535,61 @@ public enum ComposerInsertOrigin: String, Sendable {
             await warm?.close()
             guard let transcriber else { throw SonioxError.notConnected }
             self.transcriber = transcriber; try requireGeneration(generation)
+            if let takeBufferFailure { throw takeBufferFailure }
             await transcriber.setAudioOrigin(audioOrigin)
             recordingTake += 1
             let audioURL = recordingTake == 1 ? log.audioURL : log.directory.appending(path: "audio-\(recordingTake).m4a")
             agentRecorder = try ComposerAudioRecorder(url: audioURL)
             _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("audio.take"), "file": .string(audioURL.lastPathComponent), "warm": .bool(warm != nil)]))
-            routedAudioAt = nil; route = .agent
+            routedAudioAt = nil; setRoute(.agent)
             status = "listening"; onChange?()
             return
         }
-        let stream = try await prepareMicrophoneStream()
+        let stream: AsyncStream<AudioChunk>
+        if let capture = startupCapture {
+            stream = try await capture.value; startupCapture = nil
+        } else { stream = try await prepareMicrophoneStream() }
         try requireGeneration(generation)
         let transcriber = SonioxClient(room: room, config: inputConfig, audioOrigin: nil)
-        self.transcriber = transcriber; try await transcriber.start(apiKey: soniox); try requireGeneration(generation)
-        await transcriber.setAudioOrigin(audioOrigin)
+        self.transcriber = transcriber
         recordingTake += 1
         let audioURL = recordingTake == 1 ? log.audioURL : log.directory.appending(path: "audio-\(recordingTake).m4a")
         let recorder = try ComposerAudioRecorder(url: audioURL)
-        _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("audio.take"), "file": .string(audioURL.lastPathComponent)]))
-        status = "listening"; onChange?()
+        let pending = PendingTakeAudio()
+        // Consume immediately: a slow recognition connection must not fill the microphone's
+        // small realtime queue and evict the first words.
         audioTask = Task { [weak self] in
             var converter = PCM16Converter()
             do {
                 for await chunk in stream {
                     try Task.checkCancellation()
-                    // Keep the iOS background mic lease, but never record/forward muted speech.
-                    guard let self, !self.isMuted else { continue }
-                    try recorder.append(chunk)
-                    try await transcriber.sendAudio(converter.convert(chunk))
-                    self.deliveredAudioChunks += 1; self.deliveredAudioFrames += chunk.samples.count / max(1, chunk.format.channelCount)
+                    guard let self, self.generation == generation, !self.isMuted else { continue }
+                    if !pending.ready { try pending.buffer.append(chunk); continue }
+                    for captured in pending.buffer.takeAll() + [chunk] {
+                        try Task.checkCancellation()
+                        guard self.generation == generation else { return }
+                        try recorder.append(captured)
+                        try await transcriber.sendAudio(converter.convert(captured))
+                        self.deliveredAudioChunks += 1
+                        self.deliveredAudioFrames += captured.samples.count / max(1, captured.format.channelCount)
+                    }
                 }
-                if !Task.isCancelled, let self, self.generation == generation, self.isListening {
+                if !Task.isCancelled, let self, self.generation == generation {
+                    pending.failure = AutomaticInputError.noPCM
                     self.fail(AutomaticInputError.noPCM); self.isArmed = false
                     await self.mic.stop()
                 }
             } catch is CancellationError {} catch {
-                self?.fail(error)
-                self?.isArmed = false
-                await self?.mic.stop()
+                pending.failure = error
+                if let self, self.generation == generation { self.fail(error) }
             }
         }
+        try await transcriber.start(apiKey: soniox); try requireGeneration(generation)
+        if let failure = pending.failure { throw failure }
+        await transcriber.setAudioOrigin(audioOrigin)
+        _ = try await room.publish(channel: .session, participant: .ui, payload: .object(["event": .string("audio.take"), "file": .string(audioURL.lastPathComponent)]))
+        pending.ready = true
+        status = "listening"; onChange?()
     }
     func resumeSession(debug: Bool) async {
         guard let room, let log = sessionLog else { return }
@@ -505,7 +625,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         } catch is CancellationError {
         } catch {
             if generation == token {
-                fail(error); isArmed = false; await mic.stop()
+                discardTakeBuffer(); fail(error)
                 // Retain the composition after a failed reconnect; its next Record
                 // tap can retry without discarding the draft or conversation.
                 if await room.state == .listening { try? await room.micOff(); await room.finishTranscription() }
@@ -558,8 +678,11 @@ public enum ComposerInsertOrigin: String, Sendable {
         if let room { snapshot = await room.documentSnapshot }
         onChange?()
     }
+    func interruptMicrophoneForDiagnostics() async {
+        if let automatic = mic as? AutomaticInputSource { await automatic.interruptCaptureForDiagnostics() }
+    }
     public var debugState: [String: Any] {
-        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "inputSource": inputSource, "instructionDraft": instructionDraft, "instructionCountdownStart": instructionCountdownStart as Any? ?? NSNull(), "instructionCountdownDeadline": instructionCountdownDeadline as Any? ?? NSNull(), "instructionSend": InstructionSendSetting.mode().rawValue, "instructionPause": InstructionSendSetting.pause(), "instructionPreview": instructionPreview, "instructionStatus": instructionStatus, "errorDetail": errorDetail ?? NSNull(),
+        var state: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime, "status": status, "dictating": isListening, "muted": isMuted, "microphoneLeaseActive": isArmed, "microphoneRecovering": microphoneRecovering, "bufferedTakeFrames": bufferedTakeFrames, "inputSource": inputSource, "instructionDraft": instructionDraft, "instructionCountdownStart": instructionCountdownStart as Any? ?? NSNull(), "instructionCountdownDeadline": instructionCountdownDeadline as Any? ?? NSNull(), "instructionSend": InstructionSendSetting.mode().rawValue, "instructionPause": InstructionSendSetting.pause(), "instructionPreview": instructionPreview, "instructionStatus": instructionStatus, "errorDetail": errorDetail ?? NSNull(),
          "sessionID": sessionID ?? "", "successfulInsertionID": successfulInsertionID as Any? ?? NSNull(), "hasTopicContext": topicContext != nil, "topicContextCharacters": (topicContext?.deliveredText.count ?? 0) + (topicContext?.pastRequests.count ?? 0), "audioOrigin": audioOrigin as Any? ?? NSNull(), "revision": snapshot.revision,
          "document": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))) ?? [:],
          "correctionDraft": correctionDraft as Any? ?? NSNull(),
@@ -571,7 +694,7 @@ public enum ComposerInsertOrigin: String, Sendable {
             state["audioInput"] = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(automatic.diagnostics))) ?? [:]
         }
         state["audioDelivery"] = ["chunks": deliveredAudioChunks, "frames": deliveredAudioFrames, "acceptedFinalWords": acceptedASRWords]
-        state["audioRoute"] = route.rawValue; state["holdsWarmInput"] = warmInput != nil; state["prepared"] = prepared
+        state["audioRoute"] = route.rawValue; state["holdsWarmInput"] = warmInput != nil; state["consumedWarmInputChunks"] = consumedWarmInputChunks; state["prepared"] = prepared
         state["agentStreamWarm"] = agentWarm?.isLive ?? false
         if let keyboardDiagnostics { state["keyboardSession"] = keyboardDiagnostics() }
         return state
@@ -599,7 +722,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         status = "trailing"; onChange?()
         try? await room?.micOff(transcriberDraining: true)
         if warmInput != nil { route = .idle; agentRecorder = nil }
-        else { if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil }
+        else { if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop(); deactivateMicrophoneSession() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil }
         guard generation == token else { return }
         do {
             if let transcriber { try await transcriber.finish() }
@@ -751,6 +874,7 @@ public enum ComposerInsertOrigin: String, Sendable {
                 for await chunk in stream {
                     guard !Task.isCancelled, let self else { return }
                     await self.routeChunk(chunk, converter: &converter)
+                    self.consumedWarmInputChunks += 1
                 }
                 self?.warmInputEnded(token)
             }
@@ -763,12 +887,31 @@ public enum ComposerInsertOrigin: String, Sendable {
     /// The hold is idle again (hold established, take closed): the built-in mic.
     func preferIdleInput() async { await inputRoute.preferIdle() }
     /// The gate. Opening `agent` happens through `start`, which begins the take; `idle` only stops routing.
+    func beginTakeBuffer(for target: AudioRoute) {
+        pendingAudioRoute = target; takeAudioBuffer.removeAll(); takeBufferFailure = nil
+    }
+    func discardTakeBuffer() { pendingAudioRoute = nil; takeAudioBuffer.removeAll(); takeBufferFailure = nil }
     func setRoute(_ value: AudioRoute) {
         guard warmInput != nil || value == .idle else { return }
         if value != route { routedAudioAt = nil }
+        if value == .idle { discardTakeBuffer() }
+        else if pendingAudioRoute == value { pendingAudioRoute = nil }
         route = value; onChange?()
     }
     private func routeChunk(_ chunk: AudioChunk, converter: inout PCM16Converter) async {
+        if route == .idle, pendingAudioRoute != nil {
+            do { try takeAudioBuffer.append(chunk) }
+            catch { discardTakeBuffer(); takeBufferFailure = error; fail(error) }
+            return
+        }
+        let buffered = takeAudioBuffer.takeAll()
+        let target = route
+        for captured in buffered + [chunk] {
+            guard route == target, route != .idle else { break }
+            await routeCapturedChunk(captured, converter: &converter)
+        }
+    }
+    private func routeCapturedChunk(_ chunk: AudioChunk, converter: inout PCM16Converter) async {
         switch route {
         case .idle: return
         case .dictation:
@@ -789,19 +932,21 @@ public enum ComposerInsertOrigin: String, Sendable {
     private func warmInputEnded(_ token: UUID) {
         guard warmInputToken == token else { return }
         warmInput = nil; warmInputToken = nil
+        isArmed = false; microphoneRecovering = false
         let wasRouting = route != .idle
         route = .idle; agentRecorder = nil
         if wasRouting, isListening { fail(AutomaticInputError.noPCM) }
         onChange?()
     }
     func releaseWarmInput() async {
+        discardTakeBuffer()
         route = .idle; agentRecorder = nil
         await closeAgentStream()
         guard let task = warmInput else { return }
         warmInput = nil; warmInputToken = nil
         task.cancel()
         if isListening { return }
-        if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }
+        if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop(); deactivateMicrophoneSession() }
     }
     /// The keyboard went away: end the composition (History keeps it), its writer conversation, cleanup
     /// context and delivered-topic reference, and release the held input.
@@ -953,11 +1098,11 @@ public enum ComposerInsertOrigin: String, Sendable {
             if case .string(let value) = event.payload["state"] {
                 // Room reopens before the new provider connects. Expose listening
                 // only when beginInput has established its actual input stream.
-                if value == "listening", resuming { break }
+                if value == "listening", resuming || status == "starting" { break }
                 status = value
                 if value == "done" { busyParticipants = []; busy = false; pendingLineIDs = [] }
             }
-            if event.payload["event"] == .string("asr.error"), case .string(let message) = event.payload["message"] { error = message; status = "error"; isArmed = false; await mic.stop() }
+            if event.payload["event"] == .string("asr.error"), case .string(let message) = event.payload["message"] { error = message; status = "error"; route = .idle; discardTakeBuffer() }
         default: break
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { self.mode = mode }
@@ -974,6 +1119,8 @@ public enum ComposerInsertOrigin: String, Sendable {
     }
     private func requireGeneration(_ expected: UUID) throws { try Task.checkCancellation(); if generation != expected { throw CancellationError() } }
     private func fail(_ failure: any Error) {
+        guard !(failure is CancellationError) else { return }
+        errorDetail = String(describing: failure)
         var underlying: NSError? = failure as NSError
         var refusal = failure as? MicSourceError == .notArmed
         for _ in 0..<5 {
@@ -986,12 +1133,16 @@ public enum ComposerInsertOrigin: String, Sendable {
         status = "error"; onChange?()
     }
     private func cleanup() async {
+        let pendingCapture = startupCapture; startupCapture = nil
+        pendingCapture?.cancel()
+        _ = await pendingCapture?.result
+        discardTakeBuffer()
         route = .idle; agentRecorder = nil; prepared = false
         retiring?.cancel(); retiring = nil
         await closeAgentStream()
         // A held keyboard input outlives compositions; only the keyboard session releases it.
         if warmInput == nil {
-            audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
+            audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop(); deactivateMicrophoneSession() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         }
         await transcriber?.cancel(); transcriber = nil
         await writer?.stop(); writer = nil

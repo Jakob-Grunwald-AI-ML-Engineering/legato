@@ -6,7 +6,7 @@ import LegatoClaude
 
 /// Internal host controls call the same session methods as the native composer surfaces.
 @MainActor public extension ComposerSession {
-    static let debugCommands = ["composer-debug-edit", "composer-debug-seed", "composer-debug-start", "composer-debug-frame", "composer-debug-text", "composer-stop", "composer-insert-host", "composer-cancel", "composer-new-topic", "composer-tap", "composer-pick", "composer-mode", "composer-undo", "composer-send-instruction", "composer-state"]
+    static let debugCommands = ["composer-debug-edit", "composer-debug-seed", "composer-debug-start", "composer-debug-frame", "composer-debug-text", "composer-stop", "composer-insert-host", "composer-cancel", "composer-new-topic", "composer-tap", "composer-pick", "composer-mode", "composer-undo", "composer-send-instruction", "composer-state", "microphone-interrupt"]
     func debugControl(_ command: String, args: [String]) async throws -> [String: Any] {
         func argument(_ index: Int) throws -> String {
             guard args.indices.contains(index) else { throw DebugControlError.usage }
@@ -38,6 +38,7 @@ import LegatoClaude
             await setMode(mode)
         case "composer-undo": await undo()
         case "composer-send-instruction": await sendInstruction()
+        case "microphone-interrupt": await interruptMicrophoneForDiagnostics()
         case "composer-state": break
         default: throw DebugControlError.usage
         }

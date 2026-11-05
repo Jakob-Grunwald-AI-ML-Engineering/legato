@@ -30,7 +30,7 @@ final class HoldActivityPresenter {
     func arming(_ arm: () async -> Void) async {
         arming = true
         defer { arming = false }
-        if !composer.isArmed, let step = planner.plan(armed: true, listening: false, tail: "") {
+        if !composer.isArmed, let step = planner.plan(armed: true, listening: false, tail: "", recovering: true) {
             Self.log.notice("request before audio activation")
             await enqueue(step).value
         }
@@ -41,7 +41,7 @@ final class HoldActivityPresenter {
 
     private func observe() {
         withObservationTracking {
-            _ = composer.isArmed; _ = composer.status; _ = composer.tail
+            _ = composer.isArmed; _ = composer.status; _ = composer.tail; _ = composer.microphoneRecovering
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -52,7 +52,8 @@ final class HoldActivityPresenter {
     }
 
     private func reconcile() {
-        guard let step = planner.plan(armed: composer.isArmed, listening: composer.isListening, tail: composer.tail) else { return }
+        guard let step = planner.plan(armed: composer.isArmed, listening: composer.isListening, tail: composer.tail,
+                                      recovering: composer.microphoneRecovering) else { return }
         enqueue(step)
     }
 

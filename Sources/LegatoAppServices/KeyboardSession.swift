@@ -189,19 +189,28 @@ import LegatoVocabulary
         probe.tapped(route: surface, at: tapped, warm: warmSince != nil,
                      idleS: warmSince.map { now() - max($0, routeClosedAt ?? $0) })
         _ = gate.tap()
+        composer.beginTakeBuffer(for: surface)
         // Before any chunk routes: the headset's mic for this take (the idle hold prefers the built-in one).
         await composer.preferTakeInput()
         switch surface {
         case .agent:
             await composer.start()
             guard composer.isListening else {
+                composer.discardTakeBuffer()
                 _ = gate.close(); probe.cancel(); await composer.preferIdleInput()
                 return composer.error == nil
             }
         case .dictation:
             await dictation.activate()
+            if let failure = composer.takeBufferFailure {
+                await dictation.abandonTake()
+                composer.discardTakeBuffer(); _ = gate.close(); probe.cancel()
+                dictationNotice = failure.localizedDescription; dictationNoticeID += 1
+                return true
+            }
             guard dictation.hasActiveTake else {
                 // No stream to talk to (no or unreachable Soniox): do not pretend to listen.
+                composer.discardTakeBuffer()
                 _ = gate.close(); probe.cancel(); await composer.preferIdleInput()
                 dictationNotice = sonioxKey().isEmpty
                     ? "Add your Soniox key in the Legato app to dictate."

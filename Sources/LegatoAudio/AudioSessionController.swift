@@ -1,4 +1,6 @@
 import LegatoCore
+import Foundation
+import Synchronization
 #if os(iOS)
 import AVFAudio
 #endif
@@ -19,6 +21,58 @@ public struct AudioSessionController: AudioSessionControlling {
     }
 
     #if os(iOS)
+    private static let dualAdmissionFailure = Mutex<String?>(nil)
+    /// The stage and native error from the last rejected dual-route admission, if any.
+    /// Metadata only; remains available after falling back to built-in capture.
+    public static var lastDualAdmissionFailure: String? { dualAdmissionFailure.withLock { $0 } }
+
+    /// Dictation admission only. Called in the foreground before arming a held microphone.
+    /// dualRoute supplies the built-in and compatible headset microphones in one clocked input.
+    /// Older devices and rejected configurations retain the built-in capture fallback.
+    public static func configureMicrophoneCapture(combineInputs: Bool = true) throws {
+        let session = AVAudioSession.sharedInstance()
+        dualAdmissionFailure.withLock { $0 = nil }
+        if #available(iOS 26.2, *), combineInputs {
+            var stage = "setCategory"
+            do {
+                // mixWithOthers and duckOthers are only valid for multiRoute in default
+                // mode. dualRoute requires HFP alone; combining it with mixing is rejected.
+                try session.setCategory(.multiRoute, mode: .dualRoute, options: [.allowBluetoothHFP])
+                stage = "setActive"
+                try session.setActive(true)
+                // MicSource sets the complete client format and explicit input channel map.
+                // A best-effort session channel preference must not reject valid admission.
+                return
+            } catch {
+                let native = error as NSError
+                dualAdmissionFailure.withLock {
+                    $0 = "\(stage): \(native.domain) \(native.code): \(native.localizedDescription)"
+                }
+                // Admission may fail for this OS/device combination. Restore the established
+                // single-input configuration; never leave a partially configured dual session.
+            }
+        }
+        try configureSingleMicrophoneCapture()
+    }
+
+    /// Called once when dual-route admission succeeds but its engine cannot deliver PCM.
+    /// Background category rejection is allowed to throw, so the host can request foreground
+    /// admission instead of claiming that a microphone was successfully repaired.
+    static func fallbackFromCombinedCapture(reason: String) throws {
+        dualAdmissionFailure.withLock { $0 = "capture: " + reason }
+        try configureSingleMicrophoneCapture()
+    }
+
+    private static func configureSingleMicrophoneCapture() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .default,
+            options: [.mixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker])
+        if let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+            try? session.setPreferredInput(mic)
+        }
+        try session.setActive(true)
+    }
+
     public var supportedPolicies: Set<AudioPolicy> { Set(AudioPolicy.allCases) }
 
     public func activate(_ config: SessionConfig) throws {

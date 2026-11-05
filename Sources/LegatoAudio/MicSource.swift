@@ -2,6 +2,9 @@ import AVFAudio
 import LegatoCore
 import LegatoAudioBridge
 import Synchronization
+#if os(iOS)
+import AudioToolbox
+#endif
 #if os(macOS)
 import AudioToolbox
 import CoreAudio
@@ -226,14 +229,29 @@ public final class MicSource: ResumableAudioSource {
 
     public func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
         await stop()
-        state.withLock { s in
+        let lease = state.withLock { s in
             s.lease += 1
             s.format = format
+            return s.lease
         }
-        let box = try await launchEngine(format: format, device: device)
-        state.withLock { $0.engine = box }
-        installConfigurationObserver(for: box)
-        return makeStream()
+        // Install the consumer before starting I/O: the first tap must be buffered while
+        // engine startup and the caller's recognition connection are still completing.
+        let stream = makeStream()
+        do {
+            let box = try await launchEngine(format: format, device: device)
+            guard !Task.isCancelled else { box.stop(); throw CancellationError() }
+            let kept = state.withLock { s in
+                guard s.lease == lease else { return false }
+                s.engine = box
+                return true
+            }
+            guard kept else { box.stop(); throw CancellationError() }
+            installConfigurationObserver(for: box)
+            return stream
+        } catch {
+            if state.withLock({ $0.lease == lease }) { router.setSink(nil) }
+            throw error
+        }
     }
 
     /// Builds, taps and starts a fresh engine on `device` (nil: the default input), retrying while the route settles.
@@ -251,6 +269,7 @@ public final class MicSource: ResumableAudioSource {
         // an input format that installTap then rejects), and is gated on a valid input format.
         var lastError: (any Error)?
         for attempt in 0..<Self.maxAttempts {
+            try Task.checkCancellation()
             if attempt > 0 { try await Task.sleep(for: Self.retryDelay) }
             let engine = AVAudioEngine()
             let input = engine.inputNode
@@ -280,9 +299,21 @@ public final class MicSource: ResumableAudioSource {
                 continue
             }
             #endif
-            let inFormat = Self.tapFormat(
+            let inFormat: AVAudioFormat
+            #if os(iOS)
+            do {
+                inFormat = try Self.combinedInputFormat(input) ?? input.outputFormat(forBus: 0)
+            } catch {
+                lastError = error
+                onAttempt?(Attempt(index: attempt, inputSampleRate: 0, inputChannelCount: 0, error: error))
+                engine.stop()
+                continue
+            }
+            #else
+            inFormat = Self.tapFormat(
                 output: input.outputFormat(forBus: 0), hardware: input.inputFormat(forBus: 0),
                 bound: device != nil, voiceProcessing: voiceProcessing)
+            #endif
             let report = { [onAttempt] (error: (any Error)?) in
                 onAttempt?(Attempt(
                     index: attempt, inputSampleRate: inFormat.sampleRate,
@@ -302,7 +333,12 @@ public final class MicSource: ResumableAudioSource {
             // A route may change between the format read and installTap. AVFAudio raises an
             // Objective-C exception for that race; Swift catch alone cannot contain it.
             if let error = LegatoAudioCatchException({
-                input.installTap(onBus: 0, bufferSize: 4096, format: inFormat, block: Self.tapBlock(self.router, converter, probe))
+                #if os(iOS)
+                let bufferSize: AVAudioFrameCount = 1024
+                #else
+                let bufferSize: AVAudioFrameCount = 4096
+                #endif
+                input.installTap(onBus: 0, bufferSize: bufferSize, format: inFormat, block: Self.tapBlock(self.router, converter, probe))
                 tapInstalled = true
                 engine.prepare()
             }) {
@@ -345,6 +381,34 @@ public final class MicSource: ResumableAudioSource {
         }
         throw lastError ?? MicSourceError.invalidInputFormat
     }
+
+    #if os(iOS)
+    /// Core Audio flattens input ports into one global channel space. Explicitly map every
+    /// hardware channel so a default mono client format cannot discard the secondary mic.
+    /// See Apple's "Routing audio to specific devices in multidevice sessions" guide.
+    private static func combinedInputFormat(_ input: AVAudioInputNode) throws -> AVAudioFormat? {
+        let session = AVAudioSession.sharedInstance()
+        guard #available(iOS 26.2, *), session.mode == .dualRoute else { return nil }
+        let ports = session.currentRoute.inputs
+        let counts = ports.compactMap { $0.channels?.count }
+        guard !ports.isEmpty, counts.count == ports.count, counts.allSatisfy({ $0 > 0 }) else {
+            throw MicSourceError.invalidInputFormat
+        }
+        let count = counts.reduce(0, +)
+        let rate = input.inputFormat(forBus: 0).sampleRate
+        guard rate > 0, let unit = input.audioUnit,
+              let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(count)) else {
+            throw MicSourceError.invalidInputFormat
+        }
+        let map = (0..<count).map(Int32.init)
+        let status = map.withUnsafeBytes { bytes in
+            AudioUnitSetProperty(unit, kAudioOutputUnitProperty_ChannelMap, kAudioUnitScope_Input,
+                1, bytes.baseAddress!, UInt32(bytes.count))
+        }
+        guard status == noErr else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+        return AVAudioFormat(standardFormatWithSampleRate: rate, channelLayout: layout)
+    }
+    #endif
 
     public func route() async throws -> AsyncStream<AudioChunk> {
         guard state.withLock({ $0.engine?.engine.isRunning == true }) else { throw MicSourceError.notArmed }

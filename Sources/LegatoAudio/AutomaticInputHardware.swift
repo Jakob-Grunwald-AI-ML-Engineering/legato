@@ -10,6 +10,11 @@ public struct AudioInputPlatformStatus: Sendable, Codable {
     public let currentIDs: [String]
     public let preferredID: String?
     public let sampleRate: Double?
+    public var category: String? = nil
+    public var mode: String? = nil
+    public var inputChannelCount: Int? = nil
+    public var currentChannelCounts: [String: Int] = [:]
+    public var lastDualAdmissionFailure: String? = nil
 }
 
 extension AutomaticInputSource {
@@ -18,7 +23,12 @@ extension AutomaticInputSource {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         return .init(available: AutomaticInputHardware.platformInputs(), currentIDs: session.currentRoute.inputs.map(\.uid),
-            preferredID: session.preferredInput?.uid, sampleRate: session.sampleRate)
+            preferredID: session.preferredInput?.uid, sampleRate: session.sampleRate,
+            category: session.category.rawValue, mode: session.mode.rawValue,
+            inputChannelCount: session.inputNumberOfChannels,
+            currentChannelCounts: Dictionary(uniqueKeysWithValues: session.currentRoute.inputs.map {
+                ($0.uid, $0.channels?.count ?? 0)
+            }), lastDualAdmissionFailure: AudioSessionController.lastDualAdmissionFailure)
         #else
         return .init(available: AutomaticInputHardware.platformInputs(), currentIDs: [], preferredID: nil, sampleRate: nil)
         #endif
@@ -28,15 +38,24 @@ extension AutomaticInputSource {
 extension AutomaticInputHardware {
     static let live = Self(candidates: { platformInputs() }, make: { candidate in
         #if os(iOS)
-        PreferredSessionInput(uid: candidate.id)
+        if candidate.kind == .combined { MicSource() }
+        else { PreferredSessionInput(uid: candidate.id) }
         #else
         MeetingHALMicSource(device: UInt32(candidate.id) ?? 0)
         #endif
     }, isCurrent: { candidate in
         #if os(iOS)
-        AVAudioSession.sharedInstance().currentRoute.inputs.contains { $0.uid == candidate.id }
+        if candidate.kind == .combined {
+            platformInputs().contains { $0.kind == .combined && $0.id == candidate.id }
+        } else {
+            AVAudioSession.sharedInstance().currentRoute.inputs.contains { $0.uid == candidate.id }
+        }
         #else
         platformInputs().contains { $0.id == candidate.id && $0.isUsable }
+        #endif
+    }, fallbackFromCombined: { reason in
+        #if os(iOS)
+        try AudioSessionController.fallbackFromCombinedCapture(reason: reason)
         #endif
     })
 
@@ -44,6 +63,13 @@ extension AutomaticInputHardware {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         let current = Set(session.currentRoute.inputs.map(\.uid))
+        if #available(iOS 26.2, *), session.mode == .dualRoute {
+            let inputs = session.currentRoute.inputs
+            return [.init(id: "combined:" + inputs.map(\.uid).sorted().joined(separator: ","),
+                name: inputs.map(\.portName).joined(separator: " + "), kind: .combined,
+                channels: inputs.reduce(0) { $0 + ($1.channels?.count ?? 0) },
+                sampleRate: session.sampleRate > 0 ? session.sampleRate : nil)]
+        }
         return (session.availableInputs ?? []).map { port in
             let kind: AudioInputCandidate.Kind
             switch port.portType {

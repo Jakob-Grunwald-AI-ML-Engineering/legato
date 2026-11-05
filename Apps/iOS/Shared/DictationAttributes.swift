@@ -14,6 +14,8 @@ struct DictationAttributes: ActivityAttributes {
             case starting, listening, finishing
             /// The app only holds the microphone; no take runs.
             case held
+            /// Capture is being restored; the microphone is not ready yet.
+            case recovering
             /// The text waits for the Insert and Copy buttons.
             case result
             /// Terminal: the text was typed into the Legato keyboard's field.

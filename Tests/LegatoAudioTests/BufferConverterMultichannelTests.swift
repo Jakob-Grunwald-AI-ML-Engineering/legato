@@ -40,3 +40,25 @@ import LegatoCore
         #expect(chunk.samples.allSatisfy { abs($0 - 0.6) < 0.01 })
     }
 }
+
+@Suite struct CombinedInputConverterTests {
+    @Test(arguments: [false, true]) func bothMicrophoneChannelsReachMono(interleaved: Bool) throws {
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000, channels: 2, interleaved: interleaved))
+        let input = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160))
+        input.frameLength = 160
+        let data = try #require(input.floatChannelData)
+        for frame in 0..<160 {
+            let first: Float = frame < 80 ? 0.8 : 0
+            let second: Float = frame < 80 ? 0 : 0.4
+            if interleaved { data[0][frame * 2] = first; data[0][frame * 2 + 1] = second }
+            else { data[0][frame] = first; data[1][frame] = second }
+        }
+        let spec = AudioFormatSpec(sampleRate: 16_000, channelCount: 1)
+        let converter = try #require(BufferConverter(from: format, to: spec))
+        let result = try #require(converter.convert(input))
+        #expect(result.samples.count == 160)
+        #expect(result.samples.prefix(80).allSatisfy { abs($0 - 0.4) < 0.001 })
+        #expect(result.samples.suffix(80).allSatisfy { abs($0 - 0.2) < 0.001 })
+    }
+}
