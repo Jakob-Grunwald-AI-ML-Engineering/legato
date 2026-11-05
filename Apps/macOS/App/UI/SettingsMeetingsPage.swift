@@ -46,6 +46,7 @@ struct SettingsMeetingsPage: View {
     @ViewBuilder private var additionalSections: some View {
         SettingsCallDetectionCard()
         SettingsCalendarCard()
+        MeetingToolsSettings()
     }
 
     // MARK: Summary

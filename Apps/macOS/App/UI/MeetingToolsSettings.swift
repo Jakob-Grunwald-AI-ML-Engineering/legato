@@ -63,13 +63,18 @@ enum MeetingTools {
     }
 }
 
-/// Settings section: agents and scripts reach your meetings through `legato`. Not part of `SettingsView` yet.
+/// Settings section: agents and scripts reach your meetings through `legato`.
 struct MeetingToolsSettings: View {
     @State private var status = MeetingTools.status()
     @State private var failure: String?
     @State private var copied = false
 
     var body: some View {
+        SettingsCard { content }
+            .onAppear { status = MeetingTools.status() }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Agents and scripts", systemImage: "terminal").font(.headline)
             Text("The legato command line searches and reads your meetings, read-only: summaries, notes and transcripts stay on this Mac. Link it to use it in Terminal; give the MCP configuration to an agent that supports it.")
@@ -99,10 +104,6 @@ struct MeetingToolsSettings: View {
                     .controlSize(.small).disabled(status == .helperMissing)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(20)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
-        .onAppear { status = MeetingTools.status() }
     }
 
     private var statusText: String {
