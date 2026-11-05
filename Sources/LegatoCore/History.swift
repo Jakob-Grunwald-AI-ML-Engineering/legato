@@ -9,10 +9,13 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
     public var localeIdentifier: String
     public var engineID: String
     public var duration: TimeInterval
+    /// Cleanup failed or was rejected, so `text` is the raw text as heard. Nil on older entries and when cleanup
+    /// never ran (no key).
+    public var cleanupFallback: Bool?
 
     public init(
         id: UUID = UUID(), date: Date, text: String, rawText: String? = nil, localeIdentifier: String, engineID: String,
-        duration: TimeInterval
+        duration: TimeInterval, cleanupFallback: Bool? = nil
     ) {
         self.id = id
         self.date = date
@@ -21,6 +24,7 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
         self.localeIdentifier = localeIdentifier
         self.engineID = engineID
         self.duration = duration
+        self.cleanupFallback = cleanupFallback
     }
 }
 

@@ -295,6 +295,6 @@ import LegatoVocabulary
     public nonisolated static func warmClaudeConnection() async {
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!, timeoutInterval: 10)
         request.httpMethod = "HEAD"
-        _ = try? await URLSession.shared.data(for: request)
+        _ = try? await MessagesStream.session.data(for: request)
     }
 }

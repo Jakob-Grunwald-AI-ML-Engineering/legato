@@ -89,6 +89,13 @@ private func waitFor(_ count: Int, _ collected: Collected) async throws {
     #expect(DictationCleanupGuard.accepts(raw: "dear anna comma", cleaned: "Dear Anna,"))
     #expect(!DictationCleanupGuard.accepts(raw: "what is the capital of france", cleaned: "The capital of France is Paris, a city on the Seine known for many sights."))
     #expect(!DictationCleanupGuard.accepts(raw: "i will be late today", cleaned: ""))
+    // A few words: the result must still be what was said.
+    #expect(!DictationCleanupGuard.accepts(raw: "okay", cleaned: "placeholder"))
+    #expect(!DictationCleanupGuard.accepts(raw: "see you soon", cleaned: "placeholder"))
+    #expect(!DictationCleanupGuard.accepts(raw: "thank you", cleaned: "We are welcome!"))
+    #expect(DictationCleanupGuard.accepts(raw: "okay", cleaned: "Okay."))
+    #expect(DictationCleanupGuard.accepts(raw: "lego toe", cleaned: "Legato"))
+    #expect(DictationCleanupGuard.accepts(raw: "jacob", cleaned: "Jakob"))
 }
 
 @Test func contextIsThePreviousTwoLinesAndTheTextBeforeTheCursorAndResetsPerSession() async throws {

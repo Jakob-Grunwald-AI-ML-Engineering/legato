@@ -51,7 +51,7 @@ private struct HistoryRow: View {
                     Text(entry.text)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
-                    Text(copied ? "Copied" : entry.date.formatted(date: .abbreviated, time: .shortened))
+                    Text(copied ? "Copied" : entry.date.formatted(date: .abbreviated, time: .shortened) + (entry.cleanupFallback == true ? " · Not cleaned up" : ""))
                         .font(.caption)
                         .foregroundStyle(copied ? Color.accentColor : .secondary)
                 }
