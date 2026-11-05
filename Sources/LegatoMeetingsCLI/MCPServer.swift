@@ -122,8 +122,8 @@ enum Tools {
         """
 
     private static let filters: [String: JSONValue] = [
-        "client": ["type": "string", "description": "Only meetings filed under this client (ignores case and accents)."],
-        "project": ["type": "string", "description": "Only meetings filed under this project (ignores case and accents)."],
+        "client": ["type": "string", "description": "Only meetings whose client contains this (ignores case and accents)."],
+        "project": ["type": "string", "description": "Only meetings whose project contains this (ignores case and accents)."],
         "tags": [
             "type": "array", "items": ["type": "string"],
             "description": "Only meetings that have every one of these tags (ignores case and accents).",

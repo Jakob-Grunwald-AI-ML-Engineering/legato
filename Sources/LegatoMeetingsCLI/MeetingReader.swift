@@ -45,7 +45,9 @@ public struct MeetingReader: Sendable {
     /// Newest first.
     public func list(_ filters: MeetingFilters = MeetingFilters()) async throws -> [Meeting] {
         do {
-            return try await store.meetings(matching: Self.filter(filters))
+            return try await store.meetings(matching: MeetingStore.Filter(tags: filters.tags)).filter {
+                Self.contains($0.client, filters.client) && Self.contains($0.project, filters.project)
+            }
         } catch {
             throw CommandFailure("cannot read the meetings folder \(root.path): \(error.localizedDescription)")
         }
@@ -89,8 +91,10 @@ public struct MeetingReader: Sendable {
             notes: (try? await store.notes(for: meeting.id)) ?? nil, segments: (try? await store.segments(for: meeting.id)) ?? [])
     }
 
-    private static func filter(_ filters: MeetingFilters) -> MeetingStore.Filter {
-        MeetingStore.Filter(client: filters.client, project: filters.project, tags: filters.tags)
+    /// True when `wanted` is nil or part of `value`: "Nordlicht" finds "Nordlicht Verlag".
+    private static func contains(_ value: String?, _ wanted: String?) -> Bool {
+        guard let wanted else { return true }
+        return value?.range(of: wanted, options: [.caseInsensitive, .diacriticInsensitive]) != nil
     }
 
     private static func bare(_ id: String) -> String { id.lowercased().replacingOccurrences(of: "-", with: "") }

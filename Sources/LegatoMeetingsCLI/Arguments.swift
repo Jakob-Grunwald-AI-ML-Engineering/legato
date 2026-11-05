@@ -1,6 +1,6 @@
 import Foundation
 
-/// What `--client`, `--project` and `--tag` narrow a list or search to. Matching ignores case and accents; every tag must be on the meeting.
+/// What `--client`, `--project` and `--tag` narrow a list or search to. Client and project match on part of the name, ignoring case and accents; every tag must be on the meeting.
 public struct MeetingFilters: Sendable, Equatable {
     public var client: String?
     public var project: String?
@@ -161,8 +161,8 @@ public enum Help {
                                project, tags, speaker names, summaries, notes or transcript.
 
         Filters (list and search; repeatable --tag; every tag must be on the meeting):
-          --client <name>      Only meetings filed under this client.
-          --project <name>     Only meetings filed under this project.
+          --client <name>      Only meetings whose client contains this.
+          --project <name>     Only meetings whose project contains this.
           --tag <tag>          Only meetings with this tag.
 
         Options:

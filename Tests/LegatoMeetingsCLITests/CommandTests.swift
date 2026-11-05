@@ -31,6 +31,7 @@ import Testing
         }
         #expect(await titles(["--client", "ACME"]) == "Weekly,Kickoff", "ignores case")
         #expect(await titles(["--client", "acme", "--project", "website"]) == "Kickoff")
+        #expect(await titles(["--client", "acm", "--project", "web"]) == "Kickoff", "part of the name")
         #expect(await titles(["--tag", "planning", "--tag", "DESIGN"]) == "Kickoff", "every tag")
         #expect(await titles(["--client", "nobody"]) == "")
     }
