@@ -14,7 +14,7 @@ public struct AudioProcessInfo: Sendable, Equatable {
 }
 
 /// Reads which processes have the mic and the speakers open (`kAudioProcessPropertyIsRunningInput` / `IsRunningOutput`),
-/// and which input devices they record from. Feeds `AutoMutePolicy` and `MeetingMicRoute`; which call apps close the
+/// and which input devices they record from. Feeds `AutoMutePolicy` and `CallDetectionPolicy`; which call apps close the
 /// mic on mute is a device measurement (spike task 0).
 public struct MicInUseMonitor: Sendable {
     public let interval: Duration
@@ -46,11 +46,11 @@ public struct MicInUseMonitor: Sendable {
         }
     }
 
-    /// The processes with the mic or the speakers running now (our own included; `AutoMutePolicy` drops it).
+    /// The processes with the mic or the speakers running now (our own included; the policies drop it).
     public func activeProcesses() throws -> [AutoMuteProcess] {
         try snapshot().filter { $0.isRunningInput || $0.isRunningOutput }.map {
             AutoMuteProcess(
-                pid: $0.pid, isRunningInput: $0.isRunningInput, isRunningOutput: $0.isRunningOutput,
+                pid: $0.pid, bundleID: $0.bundleID, isRunningInput: $0.isRunningInput, isRunningOutput: $0.isRunningOutput,
                 inputDevices: $0.inputDevices)
         }
     }

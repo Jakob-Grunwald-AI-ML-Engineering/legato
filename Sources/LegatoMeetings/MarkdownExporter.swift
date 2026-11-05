@@ -1,7 +1,7 @@
 import Foundation
 import LegatoCore
 
-/// Renders a meeting as Markdown: title, date, duration, the summary, the user's notes, then the transcript.
+/// Renders a meeting as Markdown: title, date, duration, client, project and tags when set, the summary, the user's notes, then the transcript.
 ///
 /// The transcript is one paragraph per turn (consecutive segments of one speaker), `**Alice** [mm:ss] text` named by the meeting's speakers, in
 /// time order, with muted and paused ranges noted where they begin (`_Microphone muted 00:30–01:10_`,
@@ -19,10 +19,11 @@ public enum MarkdownExporter {
         dateFormat.timeZone = timeZone
         dateFormat.dateFormat = "yyyy-MM-dd HH:mm"
 
-        var blocks = [
-            "# \(meeting.title)",
-            "- Date: \(dateFormat.string(from: meeting.date))\n- Duration: \(clock(meeting.duration))",
-        ]
+        var facts = ["- Date: \(dateFormat.string(from: meeting.date))", "- Duration: \(clock(meeting.duration))"]
+        if let client = meeting.client { facts.append("- Client: \(client)") }
+        if let project = meeting.project { facts.append("- Project: \(project)") }
+        if !meeting.tags.isEmpty { facts.append("- Tags: \(meeting.tags.joined(separator: ", "))") }
+        var blocks = ["# \(meeting.title)", facts.joined(separator: "\n")]
         if let summary, !summary.isEmpty { blocks.append(summary) }
         if let notes, !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             blocks.append("## Notes\n\n" + notes.trimmingCharacters(in: .whitespacesAndNewlines))

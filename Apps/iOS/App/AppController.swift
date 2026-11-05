@@ -20,13 +20,20 @@ final class AppController {
     let keyboardSession: KeyboardSession
     let dictation: DictationPipeline
     private let holdActivity: HoldActivityPresenter
-    var notice: String { composer.error ?? (composer.microphoneRecovering ? "Reconnecting microphone…" : composer.status.capitalized) }
+    let meetings: IOSMeetingController
+    var notice: String {
+        if meetings.isActive { return "Meeting recording. Stop the meeting to use dictation; your draft is kept." }
+        return composer.error ?? (composer.microphoneRecovering ? "Reconnecting microphone…" : composer.status.capitalized)
+    }
     var lastTranscript: String?
     var isDictating: Bool { composer.isListening }
 
     private init() {
-        let root = AppGroup.containerURL
+        var root = AppGroup.containerURL
             ?? URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
+        #if LEGATO_INTERNAL
+        if let fixture = IOSMeetingFixture.current { root = fixture.applicationRoot }
+        #endif
         let settings = EngineSettings(defaults: AppGroup.defaults)
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(settings) },
@@ -38,7 +45,15 @@ final class AppController {
                                       recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults)
         keyboardSession = KeyboardSession(composer: composer, sink: dictation)
         holdActivity = HoldActivityPresenter(composer: composer)
+        #if LEGATO_INTERNAL
+        keyboardHost = IOSMeetingFixture.current == nil ? KeyboardLinkHost() : nil
+        #else
         keyboardHost = KeyboardLinkHost()
+        #endif
+        let host = keyboardHost
+        meetings = IOSMeetingController(root: root.appending(path: "Meetings"),
+            vocabularyURL: root.appending(path: "vocabulary.json"), keyboard: keyboardSession, composer: composer,
+            publishReservation: { active in host?.link.meetingChanged(active: active) })
         keyboardHost?.onChoices = { [weak self] choices in
             for choice in choices {
                 self?.vocabulary.recordChoice(original: choice.original, chosen: choice.chosen,
@@ -49,6 +64,7 @@ final class AppController {
         keyboardHost?.attach(composer, keyboardSession: keyboardSession, dictation: dictation)
         keyboardHost?.link.onRequest = { [weak self] request in
             guard let self else { return false }
+            guard !self.meetings.isActive, !self.meetings.fixtureMode else { return false }
             switch request.command {
             // With the keyboard on screen a tap only opens the pre-warmed gate on its surface's route.
             case .start where self.keyboardSession.isOpen: return await self.keyboardSession.openGate(tapAt: request.at)
@@ -76,6 +92,8 @@ final class AppController {
     }
 
     func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
+        guard !meetings.fixtureMode else { return .failed("Offline meetings fixture: use the Meetings tab. Composer drafts can be seeded for acceptance.") }
+        guard !meetings.isActive else { return .failed("Stop the meeting before dictating. Your draft is kept.") }
         if composer.isListening { await composer.stop() }
         else { await holdActivity.arming { await composer.start() } }
         lastTranscript = composer.renderedText
@@ -88,6 +106,7 @@ final class AppController {
     func stopIfRunning() async { await composer.stop() }
     /// The Live Activity's Release button: the same release as the keyboard's, which ends the hold's activity.
     func releaseMicrophone() async {
+        guard !meetings.isActive else { return }
         await composer.releaseMicrophone()
         keyboardHost?.link.leaseChanged(until: nil)
     }
@@ -96,6 +115,8 @@ final class AppController {
         keyboardHost?.link.leaseChanged(until: composer.isArmed ? Date().addingTimeInterval(3600) : nil)
     }
     func handle(_ url: URL) async {
+        if url.host == "meetings" { meetings.open(); return }
+        guard !meetings.isActive, !meetings.fixtureMode else { return }
         if let request = KeyboardURL.parse(url), request.command == .arm,
            keyboardHost?.link.admitURL(requestID: request.requestID, command: request.command) == .act {
             await readyMicrophone()

@@ -73,8 +73,10 @@ final class FailingStreamCleaner: SentenceCleaning {
 
     private func make(key: String = "test", cleaner: any SentenceCleaning = Cleaner(), timeout: Duration = .milliseconds(2500),
                       context: @escaping @MainActor () -> String = { "" },
-                      mode: DictationSendSetting.Mode = .lineByLine, clock: any Clock<Duration> = ContinuousClock()) -> MacDictationSession {
-        let pipeline = DictationPipeline(cleaner: cleaner, timeout: timeout, sendMode: { mode }, pauseSeconds: { 5 }, clock: clock)
+                      mode: DictationSendSetting.Mode = .lineByLine, clock: any Clock<Duration> = ContinuousClock(),
+                      takeTimeout: (@Sendable (Int) -> Duration)? = nil) -> MacDictationSession {
+        let pipeline = DictationPipeline(cleaner: cleaner, timeout: timeout, sendMode: { mode }, pauseSeconds: { 5 }, clock: clock,
+                                         takeTimeout: takeTimeout)
         pipeline.contextBefore = context
         let sockets = self.sockets
         let session = MacDictationSession(pipeline: pipeline, microphone: mic, vocabularyURL: URL(fileURLWithPath: "/nonexistent/vocabulary.json"),
@@ -263,7 +265,9 @@ final class FailingStreamCleaner: SentenceCleaning {
 
     @Test func aWholeTakeStreamsAndAFailedOneStaysOpenUntilRetryRetractsIt() async throws {
         let cleaner = FailingStreamCleaner()
-        let session = make(cleaner: cleaner, mode: .onStop)
+        // The take cleanup's own 4 s timeout is wall-clock: on a starved runner it fired before the first stream
+        // answered, the cleaner moved on to the second (whole) stream, and the take never failed. Only the stream fails here.
+        let session = make(cleaner: cleaner, mode: .onStop, takeTimeout: { _ in .seconds(3600) })
         var seen: [DictationStreamState] = [], retracted = 0
         session.deliverStream = { poll in
             // Follows the take like the field writer: until it is final, retracted or stalled.

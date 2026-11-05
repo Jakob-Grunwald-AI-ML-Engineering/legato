@@ -6,12 +6,13 @@ import LegatoAgent
 
 struct SettingsView: View {
     private enum Page: String, CaseIterable, Identifiable {
-        case overview = "Overview", writing = "Writing", keys = "API Keys", shortcut = "Shortcut"
+        case overview = "Overview", writing = "Writing", meetings = "Meetings", keys = "API Keys", shortcut = "Shortcut"
         var id: Self { self }
         var symbol: String {
             switch self {
             case .overview: "sparkles"
             case .writing: "text.alignleft"
+            case .meetings: "person.2.wave.2"
             case .keys: "key.horizontal"
             case .shortcut: "command"
             }
@@ -20,6 +21,7 @@ struct SettingsView: View {
             switch self {
             case .overview: "Your voice, ready to write."
             case .writing: "Make every composition sound like you."
+            case .meetings: "Record, transcribe and summarize your calls."
             case .keys: "Connect the services that power your composer."
             case .shortcut: "Compose or dictate from anywhere on your Mac."
             }
@@ -66,6 +68,7 @@ struct SettingsView: View {
                     switch currentPage {
                     case .overview: overview
                     case .writing: writing
+                    case .meetings: SettingsMeetingsPage()
                     case .keys: keys
                     case .shortcut: shortcut
                     }
@@ -274,9 +277,7 @@ struct SettingsView: View {
         }
     }
     private func card<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content().frame(maxWidth: .infinity, alignment: .leading).padding(20)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
+        SettingsCard { content() }
     }
     private func modelName(_ model: ModelChoice) -> String {
         switch model { case .haiku: "Claude Haiku 5.5"; case .sonnet: "Claude Sonnet 5.5"; case .opus: "Claude Opus 5.5" }

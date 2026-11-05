@@ -6,6 +6,16 @@ import LegatoRoom
 import LegatoSoniox
 @testable import LegatoAppServices
 
+/// Holds a socket's connect until the test opens it, so a test decides when a stream may come up instead of
+/// racing a retry delay.
+final class PullCount: Sendable { let value = Mutex(0) }
+
+final class ConnectGate: Sendable {
+    private let signal = AsyncStream<Void>.makeStream()
+    func open() { signal.continuation.finish() }
+    func wait() async { for await _ in signal.stream {} }
+}
+
 /// A Soniox socket the test drives: it answers a finalize with `<fin>` and the end-of-stream with `finished`.
 actor MeetingSocket: SonioxSocket {
     private(set) var sent: [SonioxFrame] = []
@@ -13,8 +23,9 @@ actor MeetingSocket: SonioxSocket {
     private var inbox: [Result<SonioxFrame, any Error>] = []
     private var waiter: CheckedContinuation<SonioxFrame, any Error>?
     private let refuseConnect: Bool
+    private let gate: ConnectGate?
 
-    init(refuseConnect: Bool = false) { self.refuseConnect = refuseConnect }
+    init(refuseConnect: Bool = false, gate: ConnectGate? = nil) { (self.refuseConnect, self.gate) = (refuseConnect, gate) }
 
     var audio: [Data] { sent.compactMap { if case .binary(let data) = $0 { data } else { nil } } }
     var configuration: String? {
@@ -23,6 +34,7 @@ actor MeetingSocket: SonioxSocket {
     var finalizes: Int { sent.filter { $0 == .text(#"{"type":"finalize"}"#) }.count }
 
     func connect(request: URLRequest) async throws {
+        await gate?.wait()
         if refuseConnect { throw SonioxError.network }
     }
     func send(_ frame: SonioxFrame) async throws {
@@ -53,13 +65,17 @@ actor MeetingSocket: SonioxSocket {
 final class MeetingSockets: Sendable {
     private let all = Mutex<[MeetingSocket]>([])
     private let refusals: Mutex<Int>
-    init(refusingFirst: Int = 0) { refusals = Mutex(refusingFirst) }
+    private let gate: ConnectGate?
+    init(refusingFirst: Int = 0, gate: ConnectGate? = nil) {
+        refusals = Mutex(refusingFirst)
+        self.gate = gate
+    }
     func make() -> MeetingSocket {
         let refuse = refusals.withLock { count -> Bool in
             defer { count = max(0, count - 1) }
             return count > 0
         }
-        let socket = MeetingSocket(refuseConnect: refuse)
+        let socket = MeetingSocket(refuseConnect: refuse, gate: gate)
         all.withLock { $0.append(socket) }
         return socket
     }
@@ -78,9 +94,11 @@ final class MeetingEngineRig: Sendable {
     private let events = Mutex<[TranscriptEvent]>([])
     private let outcome = Mutex<(any Error)?>(nil)
     private let ended = Mutex(false)
+    private let pullCount = PullCount()
+    var pulls: Int { pullCount.value.withLock { $0 } }
 
-    init(key: String = "sk-test", refusingFirst: Int = 0, timing: SonioxMeetingEngine.Timing = .tests) throws {
-        let sockets = MeetingSockets(refusingFirst: refusingFirst)
+    init(key: String = "sk-test", refusingFirst: Int = 0, gate: ConnectGate? = nil, timing: SonioxMeetingEngine.Timing = .tests) throws {
+        let sockets = MeetingSockets(refusingFirst: refusingFirst, gate: gate)
         self.sockets = sockets
         log = try SessionLog(rootDirectory: root, sessionID: "log", secrets: [key])
         engine = SonioxMeetingEngine(
@@ -88,8 +106,18 @@ final class MeetingEngineRig: Sendable {
             makeSocket: { sockets.make() }, timing: timing)
     }
 
-    func start() {
-        let stream = engine.transcribe(input.stream)
+    private func counted(_ source: AsyncStream<AudioChunk>) -> AsyncStream<AudioChunk> {
+        nonisolated(unsafe) var chunks = source.makeAsyncIterator()  // only the engine's one reader pulls
+        return AsyncStream(unfolding: { [pullCount] in
+            pullCount.value.withLock { $0 += 1 }
+            return await chunks.next()
+        })
+    }
+
+    /// - Parameter countingPulls: ``pulls`` counts how often the engine asked for the next chunk; with `n` chunks
+    ///   fed, `n + 1` pulls mean it has handled all of them and waits for more.
+    func start(countingPulls: Bool = false) {
+        let stream = engine.transcribe(countingPulls ? counted(input.stream) : input.stream)
         Task {
             do { for try await event in stream { events.withLock { $0.append(event) } } } catch { outcome.withLock { $0 = error } }
             ended.withLock { $0 = true }
@@ -233,20 +261,22 @@ private func tokens(_ words: [(String, Int, Int, String?)]) -> String {
     }
 
     @Test func audioTheBacklogCannotHoldIsReportedAsAGap() async throws {
-        // The first three attempts to connect fail: the outage outlasts the one second of audio held.
+        // No stream comes up while three seconds of audio are heard: the one second held cannot keep the start.
         var timing = SonioxMeetingEngine.Timing.tests
-        timing.retryDelays = [.milliseconds(200)]
         timing.backlog = 1
-        let rig = try MeetingEngineRig(refusingFirst: 3, timing: timing)
+        let gate = ConnectGate()
+        let rig = try MeetingEngineRig(gate: gate, timing: timing)
         defer { rig.cleanup() }
-        rig.start()
-        for _ in 0..<30 { rig.hear(0.1); try await Task.sleep(for: .milliseconds(2)) }
-        await eventually("a stream connects") { await rig.sockets.at(3)?.configuration != nil }
+        rig.start(countingPulls: true)
+        rig.hear(3)
+        await eventually("all the audio is handled") { rig.pulls == 31 }
+        gate.open()
+        await eventually("a stream connects") { await rig.sockets.at(0)?.configuration != nil }
         await eventually("the gap is reported") { rig.gaps.count == 1 }
         let gap = try #require(rig.gaps.first?.range)
         #expect(gap.lowerBound == 0 && gap.upperBound >= 1.5, "the start of the meeting was never transcribed: \(gap)")
         #expect(rig.gaps[0].text.isEmpty && rig.gaps[0].isFinal)
-        let held = try #require(rig.sockets.at(3))
+        let held = try #require(rig.sockets.at(0))
         await eventually("the newest audio is sent") { await held.audio.reduce(0) { $0 + $1.count } >= 32_000 }
         rig.endInput()
         await eventually("the session ends") { rig.isEnded }

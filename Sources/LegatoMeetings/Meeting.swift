@@ -132,13 +132,20 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public var completedSteps: Set<Step>
     /// Why the last summary attempt failed (words for the user); nil when it has not, or once one succeeded.
     public var summaryFailure: String?
+    /// The title is the date title the app made, not one the user chose, so the first summary may replace it
+    /// (``MeetingTitle``). Any edit of the title clears it; false for meetings saved before it existed.
+    public var titleIsAutomatic: Bool
+    /// Display names of the calendar event's other attendees (the user excluded), offered as speaker names. Empty
+    /// unless the title came from the calendar, and for meetings saved before it existed.
+    public var attendees: [String]
 
     public init(
         id: UUID = UUID(), title: String, client: String? = nil, project: String? = nil, tags: [String] = [],
         date: Date, duration: TimeInterval = 0,
         mutedRanges: [MutedRange] = [], pausedRanges: [PausedRange] = [], gaps: [TranscriptGap] = [],
         speakers: [PersonID: SpeakerInfo] = [:], mergedSpeakers: [PersonID: PersonID] = [:], locale: String? = nil,
-        sections: [SectionID]? = nil, state: State = .recording, completedSteps: Set<Step> = [], summaryFailure: String? = nil
+        sections: [SectionID]? = nil, state: State = .recording, completedSteps: Set<Step> = [], summaryFailure: String? = nil,
+        titleIsAutomatic: Bool = false, attendees: [String] = []
     ) {
         self.id = id
         self.title = title
@@ -157,6 +164,18 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         self.state = state
         self.completedSteps = completedSteps
         self.summaryFailure = summaryFailure
+        self.titleIsAutomatic = titleIsAutomatic
+        self.attendees = attendees
+    }
+
+    /// A recording shorter than this is a slip of the finger, not a meeting.
+    public static let discardableBelow: TimeInterval = 60
+
+    /// A stopped meeting that is too short to keep or has no transcript can be discarded without asking.
+    /// - Parameter transcriptIsEmpty: it has no transcript segments (``MeetingStore/hasSegments(for:)``).
+    public func isDiscardable(transcriptIsEmpty: Bool) -> Bool {
+        guard state == .finished || state == .interrupted else { return false }
+        return duration < Self.discardableBelow || transcriptIsEmpty
     }
 
     public var metadata: MeetingMetadata {
@@ -184,5 +203,7 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         state = try c.decode(State.self, forKey: .state)
         completedSteps = try c.decodeIfPresent(Set<Step>.self, forKey: .completedSteps) ?? []
         summaryFailure = try c.decodeIfPresent(String.self, forKey: .summaryFailure)
+        titleIsAutomatic = try c.decodeIfPresent(Bool.self, forKey: .titleIsAutomatic) ?? false
+        attendees = try c.decodeIfPresent([String].self, forKey: .attendees) ?? []
     }
 }

@@ -15,6 +15,11 @@ esac
 needles=(DebugBridge DebugOverlayView session-probe debug-bridge 12SessionProbeO 'Session probe:')
 controls=(DebugBridge DebugOverlayView session-probe debug-bridge 'enum SessionProbe' 'Session probe:')
 files=(Debug/DebugBridge.swift Debug/DebugOverlay.swift Debug/DebugBridge.swift Debug/DebugBridge.swift Internal/SessionProbe.swift Internal/SessionProbe.swift)
+if [ "$platform" = ios ]; then
+  needles+=(MeetingFixtures offline-fixture meetings-real-microphone)
+  controls+=(MeetingFixtures offline-fixture meetings-real-microphone)
+  files+=(Debug/IOSMeetingFixture.swift Debug/IOSMeetingFixture.swift Debug/IOSMeetingFixture.swift)
+fi
 if [ "$platform" = mac ]; then
   needles+=(LEGATO_MAC_ROOT LegatoMeetingsDropSonioxAfter LegatoMeetingsNoSonioxKey LegatoMeetingsNoClaudeKey)
   controls+=(LEGATO_MAC_ROOT LegatoMeetingsDropSonioxAfter LegatoMeetingsNoSonioxKey LegatoMeetingsNoClaudeKey)
