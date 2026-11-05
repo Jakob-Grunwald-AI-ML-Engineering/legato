@@ -1,0 +1,164 @@
+{
+  "name": "LibriSpeech test-clean 18-utterance speaker subset",
+  "source_url": "https://www.openslr.org/12",
+  "archive_url": "https://openslr.trmal.net/resources/12/test-clean.tar.gz",
+  "official_checksums_url": "https://openslr.trmal.net/resources/12/md5sum.txt",
+  "archive_md5": "32fa31d27d2e1cad72775fee3f4849a9",
+  "archive_sha256": "39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23",
+  "archive_bytes": 346663984,
+  "license": "CC BY 4.0",
+  "attribution": "Vassil Panayotov, Guoguo Chen, Daniel Povey, Sanjeev Khudanpur. LibriSpeech: an ASR corpus based on public domain audio books. ICASSP 2015. Human audiobook readings from LibriVox.",
+  "splits": {
+    "5": "enrollment",
+    "6": "calibration",
+    "0": "heldout"
+  },
+  "selection": "Six speakers, one complete utterance per split, three disjoint source chapters per speaker. Selected near twelve seconds without reference to verifier outcomes. One heldout clip is 20.185 seconds.",
+  "limitations": "Clean English read audiobooks; no overlapping speech, conversational noise, device acoustics, or real owner identity. Chapter-disjoint is not proof of recording-session independence. Speaker encoders may have trained on public corpora; check model training provenance separately.",
+  "clips": [
+    {
+      "speaker": "260",
+      "chapter": "123286",
+      "split": "5",
+      "source": "LibriSpeech/test-clean/260/123286/260-123286-0019.flac",
+      "seconds": 11.905,
+      "sha256": "271e626e78815d8062c8df36730cea52fc2cf183274b8e7dc7f5a103704b6c07"
+    },
+    {
+      "speaker": "260",
+      "chapter": "123288",
+      "split": "6",
+      "source": "LibriSpeech/test-clean/260/123288/260-123288-0005.flac",
+      "seconds": 12.55,
+      "sha256": "bc7b76112e044fe70a30e61590aba6b87e8c694ce40c533e8c14ba88bdac2d38"
+    },
+    {
+      "speaker": "260",
+      "chapter": "123440",
+      "split": "0",
+      "source": "LibriSpeech/test-clean/260/123440/260-123440-0004.flac",
+      "seconds": 12.02,
+      "sha256": "288d22f60ab2527ac2e4035a16c9095438c71deed8becde769d91a964234d139"
+    },
+    {
+      "speaker": "1284",
+      "chapter": "1180",
+      "split": "5",
+      "source": "LibriSpeech/test-clean/1284/1180/1284-1180-0018.flac",
+      "seconds": 12.005,
+      "sha256": "59f74bee5d32c262d3dd703d50b3edac94c86de550ebd664bc8c5b9764c802f9"
+    },
+    {
+      "speaker": "1284",
+      "chapter": "1181",
+      "split": "6",
+      "source": "LibriSpeech/test-clean/1284/1181/1284-1181-0017.flac",
+      "seconds": 11.775,
+      "sha256": "fe3ca1e1ebd628db6648e22c0221b1c0210d1ae912ae1910c3d95fba255dae8c"
+    },
+    {
+      "speaker": "1284",
+      "chapter": "134647",
+      "split": "0",
+      "source": "LibriSpeech/test-clean/1284/134647/1284-134647-0004.flac",
+      "seconds": 12.835,
+      "sha256": "1d15e22dcd3961562e2424da21c080f803b37e82f298ed0efe60e17d438ecdc1"
+    },
+    {
+      "speaker": "1995",
+      "chapter": "1826",
+      "split": "5",
+      "source": "LibriSpeech/test-clean/1995/1826/1995-1826-0021.flac",
+      "seconds": 11.41,
+      "sha256": "85ccf2e5b479f62e4eb45025bfea0ec1bf0d9e530dee86b39ee47e1f584b75dd"
+    },
+    {
+      "speaker": "1995",
+      "chapter": "1836",
+      "split": "6",
+      "source": "LibriSpeech/test-clean/1995/1836/1995-1836-0005.flac",
+      "seconds": 10.9,
+      "sha256": "c313336adfb9a4d953ce34de9cc59e0871719418b22a37afca11b4e3f0e9d6dd"
+    },
+    {
+      "speaker": "1995",
+      "chapter": "1837",
+      "split": "0",
+      "source": "LibriSpeech/test-clean/1995/1837/1995-1837-0014.flac",
+      "seconds": 12.46,
+      "sha256": "d16de5d8bf89f38d009e17e3041b4d18a9e9c94454d7ed63e5a92f38ff4c3383"
+    },
+    {
+      "speaker": "6930",
+      "chapter": "75918",
+      "split": "5",
+      "source": "LibriSpeech/test-clean/6930/75918/6930-75918-0019.flac",
+      "seconds": 11.6450625,
+      "sha256": "aaae97a4b13b4ccc8a59dcf5402bd5d63370116e21183c5b84fb4024eea7d755"
+    },
+    {
+      "speaker": "6930",
+      "chapter": "76324",
+      "split": "6",
+      "source": "LibriSpeech/test-clean/6930/76324/6930-76324-0015.flac",
+      "seconds": 12.405,
+      "sha256": "50e73f77a754627fcfcbed4c6fb6e04d9f67cd7e2a76d7d786e14cdec98de4ba"
+    },
+    {
+      "speaker": "6930",
+      "chapter": "81414",
+      "split": "0",
+      "source": "LibriSpeech/test-clean/6930/81414/6930-81414-0009.flac",
+      "seconds": 12.015,
+      "sha256": "c78a114976295f3adcc623ec20666b802c6baec291f35b55e80acb68e062db79"
+    },
+    {
+      "speaker": "8463",
+      "chapter": "287645",
+      "split": "5",
+      "source": "LibriSpeech/test-clean/8463/287645/8463-287645-0002.flac",
+      "seconds": 12.92,
+      "sha256": "642ea69d357b7dc380dfd40051b103471eed41af9d241689c1b14647969c1506"
+    },
+    {
+      "speaker": "8463",
+      "chapter": "294825",
+      "split": "6",
+      "source": "LibriSpeech/test-clean/8463/294825/8463-294825-0006.flac",
+      "seconds": 11.135,
+      "sha256": "27a534645f01ce5844ed1dc986511c8d7dbe8abf62dc5725b4eb981d8f6eefe4"
+    },
+    {
+      "speaker": "8463",
+      "chapter": "294828",
+      "split": "0",
+      "source": "LibriSpeech/test-clean/8463/294828/8463-294828-0007.flac",
+      "seconds": 12.96,
+      "sha256": "a3ed68e1514f0892cdf2e0bbd24103d8a551d44922130bfb134af645d5b51030"
+    },
+    {
+      "speaker": "5142",
+      "chapter": "33396",
+      "split": "5",
+      "source": "LibriSpeech/test-clean/5142/33396/5142-33396-0032.flac",
+      "seconds": 9.785,
+      "sha256": "f9d9779a1978befc18c75701df78c4597991dcbe3b242485ab29a4e6036ef8e5"
+    },
+    {
+      "speaker": "5142",
+      "chapter": "36377",
+      "split": "6",
+      "source": "LibriSpeech/test-clean/5142/36377/5142-36377-0025.flac",
+      "seconds": 11.885,
+      "sha256": "00146850da035900673a47186f2ac3ac46d4134e009ba9339f36b8aafeb0fb9f"
+    },
+    {
+      "speaker": "5142",
+      "chapter": "36600",
+      "split": "0",
+      "source": "LibriSpeech/test-clean/5142/36600/5142-36600-0001.flac",
+      "seconds": 20.185,
+      "sha256": "6b352ce79228bff600dbac842e1faf04611bad4bbcbaaba8f5e49122ede8c744"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+.cache/
+.build/
+
+.venv/
+
+results/embeddings-*.json
+results/*report.txt
