@@ -258,10 +258,12 @@ public struct SentenceCleanupClient: SentenceCleaning {
         _ = try? await cleanTake(.init(takeID: "warm", text: "Okay."))
     }
     private static let takePrompt: String = PromptLayers.dictationTakeCleanup()
+    /// The call is forced, so the model cannot decline in words: this field must say what it always has to hold.
+    private static let cleanedTextDescription = "The complete cleaned text, every meaningful word of the input in order, however long or unusual. Never a placeholder, stub, summary or note."
     private static func takeRequest(_ input: DictationTakeInput) throws -> Data {
         typealias Schema = ToolSchema.Schema
         let tool = ToolSchema(name: "submit_text", description: "Submit this take's cleaned text once. Copy sentenceID exactly.",
-            properties: ["sentenceID": Schema(type: "string"), "text": Schema(type: "string")], required: ["sentenceID", "text"])
+            properties: ["sentenceID": Schema(type: "string"), "text": Schema(type: "string", description: Self.cleanedTextDescription)], required: ["sentenceID", "text"])
         let source: JSONValue = .object(["sentenceID": .string(input.takeID), "text": .string(input.text),
             "recentTakes": .array(input.recentTakes.map { .object(["raw": .string($0.raw), "cleaned": .string($0.cleaned)]) }), "textBeforeCursor": .string(String(input.textBeforeCursor.suffix(600))),
             "vocabulary": .array(input.vocabulary.map(JSONValue.string))])
@@ -286,7 +288,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         // Dictation keeps the tool byte-identical between requests (the identity enum would change the cached prefix).
         let tool = ToolSchema(name: "submit_sentence", description: "Submit this sentence's local copyedit once. Copy sentenceID and sequence exactly.",
             properties: ["sentenceID": Schema(type: "string", enumValues: input.dictation == nil ? [input.sentenceID] : nil),
-                         "sequence": Schema(type: "integer"), "text": Schema(type: "string")],
+                         "sequence": Schema(type: "integer"), "text": Schema(type: "string", description: input.dictation == nil ? nil : Self.cleanedTextDescription)],
             required: ["sentenceID", "sequence", "text"])
         var fields: [String: JSONValue] = ["sentenceID": .string(input.sentenceID), "sequence": .number(Double(input.sequence)),
             "text": .string(input.text), "vocabulary": .array(input.vocabulary.map(JSONValue.string))]

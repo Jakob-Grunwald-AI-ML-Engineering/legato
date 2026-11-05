@@ -112,6 +112,8 @@ private let longClean = "So I wanted to say that the meeting went well, and we a
     #expect(request["tool_choice"]?["name"] == .string("submit_text"))
     let system = try #require(request["system"]).decode([JSONValue].self)
     #expect(system.first?["text"] == .string(PromptLayers.dictationTakeCleanup()))
+    let tools = try #require(request["tools"]).decode([JSONValue].self)
+    #expect(tools.first?["input_schema"]?["properties"]?["text"]?["description"] != nil, "The forced tool says the field holds the whole text")
     let messages = try #require(request["messages"]).decode([JSONValue].self)
     let content = try #require(messages.first?["content"]).decode(String.self)
     #expect(content.contains("recentTakes") && content.contains("earlier one") && content.contains("Earlier.") && content.contains("Hi Anna, ") && content.contains("take-1"))

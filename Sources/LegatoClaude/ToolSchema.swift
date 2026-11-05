@@ -17,14 +17,16 @@ public struct ToolSchema: Codable, Sendable {
         public let additionalProperties: Bool?
         public let items: Schema?
         public let enumValues: [String]?
+        public let description: String?
         private enum CodingKeys: String, CodingKey {
-            case type, properties, required, additionalProperties, items
+            case type, properties, required, additionalProperties, items, description
             case enumValues = "enum"
         }
         public init(type: String, properties: [String: Schema]? = nil, required: [String]? = nil,
-                    additionalProperties: Bool? = nil, items: Schema? = nil, enumValues: [String]? = nil) {
+                    additionalProperties: Bool? = nil, items: Schema? = nil, enumValues: [String]? = nil, description: String? = nil) {
             self.type = type; self.properties = properties; self.required = required
             self.additionalProperties = additionalProperties; self.items = items; self.enumValues = enumValues
+            self.description = description
         }
     }
 }
