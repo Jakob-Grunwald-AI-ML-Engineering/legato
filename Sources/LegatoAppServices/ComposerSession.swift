@@ -348,12 +348,20 @@ public enum ComposerInsertOrigin: String, Sendable {
                 case "failed":
                     self.isArmed = false; self.microphoneRecovering = false
                     self.microphoneMonitor = nil
+                    self.deactivateMicrophoneSession()
                     self.fail(AutomaticInputError.noPCM)
                     return
                 default: break
                 }
             }
         }
+    }
+    private func deactivateMicrophoneSession() {
+        #if os(iOS)
+        // In particular, dual-route capture is non-mixable. Stopping its engine alone
+        // must not leave other apps' audio interrupted after the lease is released.
+        AudioSessionController().deactivate()
+        #endif
     }
     private func invalidateMicrophoneAdmission() {
         microphoneEpoch = UUID()
@@ -365,19 +373,19 @@ public enum ComposerInsertOrigin: String, Sendable {
     /// Changes retention only; enabling this setting never starts a microphone.
     public func setKeepMicrophoneActive(_ value: Bool) async {
         keepMicrophoneActive = value
-        if !value, !isListening { invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); onChange?() }
+        if !value, !isListening { invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); deactivateMicrophoneSession(); onChange?() }
     }
     /// Opting out stops new input on backgrounding, preserving the draft and final agent work.
     public func prepareForBackground() async {
         _ = await flushHistory()
         guard !keepMicrophoneActive else { return }
         if isListening { await stop() }
-        invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); onChange?()
+        invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); deactivateMicrophoneSession(); onChange?()
     }
     public func releaseMicrophone() async {
         invalidateMicrophoneAdmission(); isArmed = false
         discardTakeBuffer()
-        await releaseWarmInput(); await cancel(); await mic.stop(); onChange?()
+        await releaseWarmInput(); await cancel(); await mic.stop(); deactivateMicrophoneSession(); onChange?()
     }
     public func start() async { await startSession(debugMode: nil, microphoneLease: false) }
     /// Keyboard pre-warm: build the composition (Room, cleanup pipeline, writer) without starting a take,
@@ -696,7 +704,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         status = "trailing"; onChange?()
         try? await room?.micOff(transcriberDraining: true)
         if warmInput != nil { route = .idle; agentRecorder = nil }
-        else { if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil }
+        else { if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop(); deactivateMicrophoneSession() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil }
         guard generation == token else { return }
         do {
             if let transcriber { try await transcriber.finish() }
@@ -919,7 +927,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         warmInput = nil; warmInputToken = nil
         task.cancel()
         if isListening { return }
-        if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }
+        if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop(); deactivateMicrophoneSession() }
     }
     /// The keyboard went away: end the composition (History keeps it), its writer conversation, cleanup
     /// context and delivered-topic reference, and release the held input.
@@ -1115,7 +1123,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         await closeAgentStream()
         // A held keyboard input outlives compositions; only the keyboard session releases it.
         if warmInput == nil {
-            audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
+            audioTask?.cancel(); if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop(); deactivateMicrophoneSession() }; audioTask?.cancel(); await audioTask?.value; audioTask = nil
         }
         await transcriber?.cancel(); transcriber = nil
         await writer?.stop(); writer = nil

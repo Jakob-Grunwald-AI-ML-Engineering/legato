@@ -13,10 +13,14 @@ Capture promptly, retain opening speech while recognition connects, combine buil
 
 Run focused audio conversion/recovery, microphone admission/cancellation, keyboard reappearance, opening-audio buffering, and activity-planner tests. Compile the iOS app locally and let the protected merge queue run its required full gate.
 
-A fresh UAT agent uses the installed phone app as a user, with AirPods connected, and returns observed behavior, friction, and retained evidence. The change should make microphone readiness and keyboard reuse reliable. The physical iPhone and capture-only controls are available; live validation is authorized for at most three short dictation takes totaling under one minute using saved provider keys; no other external writes are authorized. Simulator/unit results do not establish acoustic quality, real speech recognition, or Bluetooth timing. Retain device snapshots of actual ports, mapped channels, PCM freshness and foreground/background capture separately.
+A fresh UAT agent uses the installed phone app as a user, with AirPods connected, and returns observed behavior, friction, and retained evidence. The change should make microphone readiness and keyboard reuse reliable. The physical iPhone and capture-only controls are available; this session alone authorized at most three short dictation takes totaling under one minute using saved provider keys; no other external writes are authorized. Simulator/unit results do not establish acoustic quality, real speech recognition, or Bluetooth timing. Retain device snapshots of actual ports, mapped channels, PCM freshness and foreground/background capture separately.
 
 After findings are fixed, open a PR against main. Leave it open if material hardware evidence remains missing; otherwise wait through the full merge-group gate and verify MERGED. Do not promote live.
 
 ## Input preference
 
 Phone microphone is the default, preserving other apps’ music. Combined phone/headset capture is optional because iOS dual-route capture does not support mixing other apps’ audio. Changes apply on the next fresh microphone admission; the settings expose Release microphone. Failed dual capture downgrades once to the phone input where iOS allows it.
+
+## Verified result
+
+Physical iPhone acceptance confirmed automatic recovery from an injected engine stop, microphone continuity between keyboard appearances, live insertion with opening words intact, and sustained capture from the phone and AirPods as two mapped input channels. The successful warm take routed audio 68 ms after the tap. Two live attempts used a conservative 35 seconds; no standing paid-call authorization remains. Combined capture was restored off and the phone microphone left ready. Real headset disconnection, comparative acoustic quality, and combined-mode transcription remain unmeasured.

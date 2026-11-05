@@ -296,3 +296,12 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
     #expect(probe.state.withLock { $0.attempts == ["combined", "combined", "Built-in"] && $0.maximum == 1 })
     await source.stop()
 }
+
+@Test func combinedFallbackPreservesNativeCauseWithoutShowingTechnicalErrors() throws {
+    let original = NSError(domain: NSOSStatusErrorDomain, code: 560_557_684)
+    let failure = CombinedInputFallbackFailure(cause: original)
+    let bridged = failure as NSError
+    let underlying = try #require(bridged.userInfo[NSUnderlyingErrorKey] as? NSError)
+    #expect(underlying.domain == original.domain && underlying.code == original.code)
+    #expect(failure.localizedDescription == "Open Legato to ready the microphone again.")
+}

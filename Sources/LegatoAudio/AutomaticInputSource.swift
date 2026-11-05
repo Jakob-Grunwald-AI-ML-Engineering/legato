@@ -61,11 +61,13 @@ struct AutomaticInputHardware: Sendable {
 
 /// Distinguishes a rejected category downgrade from a recoverable engine-start failure.
 /// Preserve the native cause so a background admission refusal remains diagnosable.
-struct CombinedInputFallbackFailure: Error, LocalizedError {
+struct CombinedInputFallbackFailure: Error, LocalizedError, CustomNSError {
     let cause: any Error
-    var errorDescription: String? {
-        let native = cause as NSError
-        return "Microphone fallback failed: \(native.domain) \(native.code): \(native.localizedDescription)"
+    var errorDescription: String? { "Open Legato to ready the microphone again." }
+    static var errorDomain: String { "Legato.CombinedInputFallback" }
+    var errorCode: Int { 1 }
+    var errorUserInfo: [String: Any] {
+        [NSLocalizedDescriptionKey: errorDescription!, NSUnderlyingErrorKey: cause as NSError]
     }
 }
 
@@ -136,7 +138,7 @@ public actor AutomaticInputSource: ResumableAudioSource {
         let stream = makeStream()
         do { try await connect(format: format, token: token) }
         catch {
-            if token == generation { await stop(); diagnosticState.withLock { $0.state = "failed"; $0.error = error.localizedDescription } }
+            if token == generation { await stop(); diagnosticState.withLock { $0.state = "failed"; $0.error = Self.diagnosticFailure(error) } }
             throw error
         }
         installWatchdog(token: token)
@@ -385,8 +387,12 @@ public actor AutomaticInputSource: ResumableAudioSource {
         let old = source; source = nil; pump?.cancel(); pump = nil
         await old?.stop()
         guard token == generation else { return }
-        diagnosticState.withLock { $0.state = "failed"; $0.error = error.localizedDescription }
+        diagnosticState.withLock { $0.state = "failed"; $0.error = Self.diagnosticFailure(error) }
         router.setSink(nil)
+    }
+    private static func diagnosticFailure(_ error: any Error) -> String {
+        if let fallback = error as? CombinedInputFallbackFailure { return String(describing: fallback.cause) }
+        return error.localizedDescription
     }
     private func check(_ token: Int) throws { try Task.checkCancellation(); guard token == generation else { throw CancellationError() } }
 }
