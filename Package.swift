@@ -19,6 +19,8 @@ let package = Package(
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
         .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
+        .library(name: "LegatoMeetingsCLI", targets: ["LegatoMeetingsCLI"]),
+        .executable(name: "legato", targets: ["legato"]),
     ],
     dependencies: [
         .package(path: "Vendor/Pow"),
@@ -54,6 +56,10 @@ let package = Package(
         // Meeting notes: a mixed-stream session, its store, recovery, summaries and export. Core only.
         .target(name: "LegatoMeetings", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMeetingsTests", dependencies: ["LegatoMeetings", "LegatoCore"], resources: [.copy("Fixtures")]),
+        // `legato`: read-only meeting search for agents and scripts (CLI and MCP server). The Mac app bundles the executable.
+        .target(name: "LegatoMeetingsCLI", dependencies: ["LegatoMeetings"]),
+        .executableTarget(name: "legato", dependencies: ["LegatoMeetingsCLI"]),
+        .testTarget(name: "LegatoMeetingsCLITests", dependencies: ["LegatoMeetingsCLI", "LegatoMeetings", "legato"]),
     ],
     swiftLanguageModes: [.v6]
 )

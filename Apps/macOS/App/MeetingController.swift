@@ -327,9 +327,7 @@ final class MeetingController {
             var hits = Set<UUID>()
             for meeting in candidates {
                 if Task.isCancelled { return }
-                let segments = (try? await services.store.segments(for: meeting.id)) ?? []
-                let summaries = ((try? await services.store.summaries(for: meeting.id)) ?? []).map(\.text)
-                if MeetingListLogic.matches(words, meeting: meeting, summaries: summaries, notes: nil, segments: segments) { hits.insert(meeting.id) }
+                if await services.store.matches(words, meeting: meeting) { hits.insert(meeting.id) }
             }
             if !Task.isCancelled { searchHits = hits }
         }
