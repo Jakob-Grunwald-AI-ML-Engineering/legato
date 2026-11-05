@@ -14,6 +14,8 @@ The test process was terminated to end capture while the locked phone required h
 
 The first-use microphone permission transition was fixed and rechecked on the phone: the original Record tap reached Recording after permission was granted, without a second tap.
 
+The tester also expanded the meeting Live Activity in Dynamic Island while the phone was authenticated and pressed its Stop control. The app then showed Finished with saved transcript and playback controls. Independent diagnostics confirmed no active meeting or activity, microphone reservation released, and completed audio and summary steps. This verifies the authenticated activity action; the locked-screen action remains unverified.
+
 ## Isolation and checks
 
 Internal fixtures replace both meeting providers unconditionally and isolate files and preferences. A temporary test identity can bake LegatoMeetingFixtureName and LegatoMeetingFixtureUsesMicrophone into its Info.plist so widget and automation launches remain isolated without arguments. A meetingsuat identity missing its fixture configuration fails before shared storage access. Production builds omit the fixture implementation, and the ordinary Release binary scan checks for fixture and diagnostic strings.
@@ -22,4 +24,4 @@ Focused keyboard/service contracts passed, including draft preservation and comp
 
 ## Limits
 
-Lock-screen Stop is not yet verified: the first physical attempt encountered a Live Activities permission overlay and authenticated-device automation limits. Real Soniox/Claude quality, physical audible playback, sharing to recipients, real call/Siri/alarm interruptions and Bluetooth route changes remain untested. No paid provider requests or distribution deployment were performed. Other apps' call audio is outside this microphone recording feature.
+Stop while locked is not yet verified: the first physical attempt encountered a Live Activities permission overlay and authenticated-device automation limits. Real Soniox/Claude quality, physical audible playback, sharing to recipients, real call/Siri/alarm interruptions and Bluetooth route changes remain untested. No paid provider requests or distribution deployment were performed. Other apps' call audio is outside this microphone recording feature.
