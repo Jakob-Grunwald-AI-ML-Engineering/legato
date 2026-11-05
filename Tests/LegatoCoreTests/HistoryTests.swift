@@ -108,3 +108,8 @@ extension JSONLHistoryStoreTests {
         #expect(recent[1].date == old.date)
     }
 }
+
+@Test func entriesWrittenBeforeTheFallbackMarkStillLoad() throws {
+    let json = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","date":0,"text":"Hi","localeIdentifier":"en","engineID":"dictation","duration":0}"#
+    #expect(try JSONDecoder().decode(DictationEntry.self, from: Data(json.utf8)).cleanupFallback == nil)
+}

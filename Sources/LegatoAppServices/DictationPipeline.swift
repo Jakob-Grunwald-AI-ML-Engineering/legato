@@ -318,7 +318,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             case .cleaned(let text):
                 self.takePhase = .buffering
                 self.finishStream(raw: raw, text: text, rejected: rejected)
-                if !rejected { await self.save(id: entryID, raw: raw, text: text) }
+                await self.save(id: entryID, raw: raw, text: rejected ? raw : text, fallback: rejected)
             case .unavailable:
                 self.takePhase = .buffering
                 self.deliverTake(raw: raw, text: raw, cleaned: false)
@@ -331,6 +331,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
                 self.failedText = raw; self.takePhase = .failed
                 self.fallbacks.append("take-" + reason); if self.fallbacks.count > 20 { self.fallbacks.removeFirst() }
                 self.onChange?()
+                await self.save(id: entryID, raw: raw, text: raw, fallback: true)
             }
             self.speechActivity()
         }
@@ -407,10 +408,11 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         onChange?()
     }
 
-    private func save(id: UUID, raw: String, text: String) async {
+    private func save(id: UUID, raw: String, text: String, fallback: Bool = false) async {
         guard let history else { return }
         try? await history.upsert(DictationEntry(id: id, date: Date(), text: text, rawText: text == raw ? nil : raw,
-                                                 localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0))
+                                                 localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0,
+                                                 cleanupFallback: fallback ? true : nil))
         historyRevision += 1
     }
 
@@ -427,6 +429,6 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         outbox.append(.init(lineID: line.lineID, sequence: line.sequence, raw: line.raw, text: line.text, cleaned: line.status == .cleaned))
         if let reason = line.reason { fallbacks.append(reason); if fallbacks.count > 20 { fallbacks.removeFirst() } }
         onChange?()
-        Task { [weak self] in await self?.save(id: UUID(), raw: line.raw, text: line.text) }
+        Task { [weak self] in await self?.save(id: UUID(), raw: line.raw, text: line.text, fallback: line.reason != nil) }
     }
 }

@@ -21,6 +21,7 @@ struct HistoryView: View {
                         }
                         HStack {
                             Text(entry.date, format: .dateTime.day().month().hour().minute())
+                            if entry.cleanupFallback == true { Text("Not cleaned up") }
                             if copiedID == entry.id { Text("Copied").foregroundStyle(.green) }
                         }
                         .font(.caption)

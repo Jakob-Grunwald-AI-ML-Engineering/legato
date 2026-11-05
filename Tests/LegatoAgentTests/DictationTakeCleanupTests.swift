@@ -115,6 +115,8 @@ private let longClean = "So I wanted to say that the meeting went well, and we a
     let messages = try #require(request["messages"]).decode([JSONValue].self)
     let content = try #require(messages.first?["content"]).decode(String.self)
     #expect(content.contains("recentTakes") && content.contains("earlier one") && content.contains("Earlier.") && content.contains("Hi Anna, ") && content.contains("take-1"))
+    let keys = ["\"recentTakes\"", "\"sentenceID\"", "\"text\":\"\(longRaw.prefix(8))", "\"textBeforeCursor\"", "\"vocabulary\""].map { content.range(of: $0)?.lowerBound }
+    #expect(keys.allSatisfy { $0 != nil } && keys == keys.sorted { $0! < $1! }, "The fields keep one order, whatever the run")
 }
 
 @Test(arguments: ["identity", "extra-field", "empty", "control", "wrong-tool", "oversized"])

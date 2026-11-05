@@ -20,7 +20,10 @@ public enum DictationCleanupGuard {
         let source = tokens(raw), result = tokens(cleaned)
         guard !cleaned.isEmpty, cleaned.count <= max(48, raw.count * 3 / 2 + 24) else { return false }
         if result.isEmpty { return true } // a bare line break or punctuation from a spoken command
-        guard source.count > 3 else { return result.count <= source.count + 3 }
+        // A few words: too few to count overlap, so the result must sound like them (an ASR fix) or share a word.
+        guard source.count > 3 else {
+            return result.count <= source.count + 3 && (!Set(source).isDisjoint(with: result) || resembles(source.joined(), result.joined()))
+        }
         guard result.count <= source.count + 4, result.count * 5 >= source.count * 2 else { return false }
         // Most of the result's words must be words the speaker said (ASR fixes and spoken commands may differ).
         let said = Set(source)
@@ -29,6 +32,21 @@ public enum DictationCleanupGuard {
     }
     private static func tokens(_ text: String) -> [String] {
         text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
+    /// At most half of the longer text differs (Levenshtein distance).
+    private static func resembles(_ a: String, _ b: String) -> Bool {
+        let a = Array(a), b = Array(b)
+        var row = Array(0...b.count)
+        for i in a.indices {
+            var diagonal = row[0]
+            row[0] = i + 1
+            for j in b.indices {
+                let above = row[j + 1]
+                row[j + 1] = min(above + 1, row[j] + 1, diagonal + (a[i] == b[j] ? 0 : 1))
+                diagonal = above
+            }
+        }
+        return row[b.count] * 2 <= max(a.count, b.count)
     }
 }
 

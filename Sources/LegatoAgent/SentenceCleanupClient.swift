@@ -195,6 +195,13 @@ public struct SentenceCleanupClient: SentenceCleaning {
         guard let index = try? value["index"]?.decode(Int.self), index >= 0 else { return nil }
         return index
     }
+    /// Sorted keys: the same input gives the same bytes, so the model always reads the fields in one order and the
+    /// cached prompt prefix (tools before system) stays identical.
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return encoder
+    }()
     /// A take is long: up to 32 KB of text, and a larger tool payload to match (JSON escapes can double it).
     private static let maximumTakeBytes = 32_768
     private static let maximumTakeToolBytes = 131_072
@@ -262,9 +269,9 @@ public struct SentenceCleanupClient: SentenceCleaning {
             "model": .string(ModelChoice.haiku.rawValue), "max_tokens": .number(Double(DictationTakeLimits.maxTokens(characters: input.text.count))),
             "stream": .bool(true), "thinking": ModelChoice.haiku.thinking,
             "system": .array([.object(["type": .string("text"), "text": .string(takePrompt), "cache_control": .object(["type": .string("ephemeral")])])]),
-            "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try JSONEncoder().encode(source), as: UTF8.self))])]),
+            "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try encoder.encode(source), as: UTF8.self))])]),
             "tools": try .encoding([tool]), "tool_choice": .object(["type": .string("tool"), "name": .string("submit_text")])])
-        return try JSONEncoder().encode(request)
+        return try encoder.encode(request)
     }
 
     /// A cheap real request with the dictation prompt: the cache entry (tools + system) is written before the
@@ -298,8 +305,8 @@ public struct SentenceCleanupClient: SentenceCleaning {
             "thinking": ModelChoice.haiku.thinking,
             "system": input.dictation == nil ? .string(instruction)
                 : .array([.object(["type": .string("text"), "text": .string(dictationPrompt), "cache_control": .object(["type": .string("ephemeral")])])]),
-            "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try JSONEncoder().encode(source), as: UTF8.self))])]),
+            "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try encoder.encode(source), as: UTF8.self))])]),
             "tools": try .encoding([tool]), "tool_choice": .object(["type": .string("tool"), "name": .string("submit_sentence")])])
-        return try JSONEncoder().encode(request)
+        return try encoder.encode(request)
     }
 }

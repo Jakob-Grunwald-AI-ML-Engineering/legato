@@ -10,7 +10,10 @@ public final class MessagesStream: MessagesStreaming, Sendable {
     private let keyStore: any APIKeyStore
     private let session: URLSession
     private let endpoint: URL
-    public init(keyStore: any APIKeyStore, session: URLSession = .shared,
+    /// Every Messages API call shares this transport: dictated text in a request must never reach the on-disk URL
+    /// cache, and one session keeps the connection `warmClaudeConnection` opened.
+    public static let session = URLSession(configuration: ClaudeBackend.defaultSessionConfiguration())
+    public init(keyStore: any APIKeyStore, session: URLSession = MessagesStream.session,
                 endpoint: URL = URL(string: "https://api.anthropic.com/v1/messages")!) {
         self.keyStore = keyStore; self.session = session; self.endpoint = endpoint
     }

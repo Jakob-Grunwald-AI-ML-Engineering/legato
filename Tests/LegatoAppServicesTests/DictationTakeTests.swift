@@ -227,6 +227,17 @@ private actor TakeHistory: HistoryStore {
         }
     }
 
+    @Test func historyMarksATakeThatStayedRaw() async throws {
+        let history = TakeHistory()
+        let failing = DictationPipeline(history: history, cleaner: TakeCleaner([.fail, .fail, .ok]), sendMode: { .onStop }, takeTimeout: { _ in .milliseconds(20) })
+        await failing.receive(routeLine(0, thirteenWords))
+        await failing.sendTake()
+        #expect(try await history.recent(limit: 1).first?.cleanupFallback == true)
+        await failing.retry()
+        let entries = try await history.recent(limit: 10)
+        #expect(entries.count == 1 && entries.first?.cleanupFallback == nil, "A retry that cleans the take clears the mark")
+    }
+
     @Test func aCleanedTakeUpdatesItsHistoryEntry() async throws {
         let history = TakeHistory()
         let pipeline = DictationPipeline(history: history, cleaner: TakeCleaner([.ok]), sendMode: { .onStop })
@@ -363,9 +374,9 @@ private actor TakeHistory: HistoryStore {
         let (pipeline, sending) = await streaming(cleaner)
         cleaner.finish(failing: true)
         await until("second attempt") { cleaner.calls == 2 }
-        cleaner.yield("Fine.", attempt: 1); cleaner.finish(attempt: 1)
+        cleaner.yield("One, two, three.", attempt: 1); cleaner.finish(attempt: 1)
         await sending.value
-        #expect(pipeline.outbox.map(\.text) == ["Fine."] && pipeline.takePhase == .buffering)
+        #expect(pipeline.outbox.map(\.text) == ["One, two, three."] && pipeline.takePhase == .buffering)
     }
 
     @Test func aFailureAfterDeltasKeepsThePartialAndWaitsForTheUser() async {
