@@ -44,7 +44,8 @@ struct SettingsMeetingsPage: View {
     /// The place for the Meetings sections that come later (call detection, calendar, the command-line tool): each
     /// is one `SettingsCard` placed here, below the summary sections.
     @ViewBuilder private var additionalSections: some View {
-        EmptyView()
+        SettingsCallDetectionCard()
+        SettingsCalendarCard()
     }
 
     // MARK: Summary

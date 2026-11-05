@@ -2,8 +2,8 @@
 # LegatoMac.xcodeproj and Gen/; both are gitignored. Run it from this directory.
 #
 # Non-sandboxed on purpose (Accessibility writes into other apps, a global event tap, synthesized
-# paste), so distribution is Developer ID with the hardened runtime; the only entitlement is the
-# microphone (the system-audio tap of meetings asks for its own permission at runtime). Signing, notarization and the release flow are leg 5.
+# paste), so distribution is Developer ID with the hardened runtime; the entitlements are the microphone and
+# the calendar (meeting titles; read only, opt-in). The system-audio tap of meetings asks for its own permission at runtime. Signing, notarization and the release flow are leg 5.
 name: LegatoMac
 options:
   bundleIdPrefix: de.gruenwald.legato
@@ -61,6 +61,7 @@ targets:
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.device.audio-input: true
+        com.apple.security.personal-information.calendars: true
         # Required by the Data Protection Keychain used for provider credentials.
         com.apple.application-identifier: "$(DEVELOPMENT_TEAM).$(PRODUCT_BUNDLE_IDENTIFIER)"
         com.apple.developer.team-identifier: "$(DEVELOPMENT_TEAM)"
@@ -74,4 +75,5 @@ targets:
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.productivity
         NSMicrophoneUsageDescription: Legato records your voice to compose text and, for meeting notes, to save your side of the meeting on this device.
+        NSCalendarsFullAccessUsageDescription: Legato reads your calendar to title a meeting after the event happening now and to suggest its attendees as speaker names. It only reads, and only when you turn this on.
         NSAudioCaptureUsageDescription: Legato records the audio your Mac plays, to transcribe the other side of a meeting.

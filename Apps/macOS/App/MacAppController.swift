@@ -21,6 +21,7 @@ import Observation
     let notch = NotchPanelController()
     let meetings: MeetingController
     private var meetingIsland: MeetingIslandController?
+    private var callDetection: CallDetectionController?
     /// The dictation hotkey: types straight into the focused field. It never shares speech with `composer`.
     let dictation: MacDictationSession
     private let dictationWriter: FieldDictationWriter
@@ -144,6 +145,13 @@ import Observation
         dictation.ensureWarm()
         meetingIsland = MeetingIslandController(controller: meetings)
         meetings.bootstrap()
+        callDetection = CallDetectionController(
+            meetings: meetings,
+            busy: { [weak self] in
+                guard let self else { return true }
+                return isDictating || dictation.isActive || inserting || notch.occupiedFrame != nil
+            },
+            startMeeting: { [weak self] automatically in self?.beginMeeting(automatically: automatically) })
         Task {
             await composer.backfillHistory(markerURL: URL.applicationSupportDirectory.appending(path: "Legato/history-backfill.v1.done"))
             await refreshRecent()
@@ -354,16 +362,21 @@ import Observation
     func toggleMeeting() {
         switch meetings.phase {
         case .recording: meetings.stop()
-        case .idle:
-            switch permissions.mic {
-            case .granted: meetings.start(dictationActive: isDictating || starting || dictation.isActive)
-            case .undetermined:
-                Task { await permissions.requestMicrophone() }
-                meetings.flash("Allow microphone access, then start the meeting again.")
-            case .denied:
-                meetings.flash("Microphone access is off. Allow Legato in System Settings, Privacy & Security.")
-            }
+        case .idle: beginMeeting(automatically: false)
         case .starting, .stopping: break
+        }
+    }
+    /// Starts a meeting if none runs. Call detection starts one `automatically`, which only says so in a notice and
+    /// never opens the microphone permission dialog by itself.
+    func beginMeeting(automatically: Bool) {
+        guard meetings.phase == .idle else { return }
+        switch permissions.mic {
+        case .granted: meetings.start(dictationActive: isDictating || starting || dictation.isActive, automatically: automatically)
+        case .undetermined:
+            if !automatically { Task { await permissions.requestMicrophone() } }
+            meetings.flash("Allow microphone access, then start the meeting again.")
+        case .denied:
+            meetings.flash("Microphone access is off. Allow Legato in System Settings, Privacy & Security.")
         }
     }
     /// While a meeting records, dictation and the composer say so and do not start.
