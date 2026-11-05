@@ -303,7 +303,8 @@ final class TitlingClaude: LLMBackend {
         defer { chosen.cleanup() }
         let kept = try await chosen.saved(state: .finished)
         try await chosen.services.summarize(meetingID: kept.id)
-        #expect(asked.withLock { $0 } == 0 && (try await chosen.store.meeting(id: kept.id))?.title == "Weekly")
+        let keptTitle = try await chosen.store.meeting(id: kept.id)?.title
+        #expect(asked.withLock { $0 } == 0 && keptTitle == "Weekly")
     }
 
     @Test func aFailedTitleRequestLeavesTheSummaryAndTheDateTitle() async throws {

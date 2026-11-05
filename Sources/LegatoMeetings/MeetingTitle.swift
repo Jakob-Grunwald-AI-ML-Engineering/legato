@@ -9,7 +9,7 @@ public struct MeetingTitle: Sendable {
     /// How much of the summary is sent; a title needs the gist, not the whole document.
     private static let maxSummaryCharacters = 6_000
 
-    static let instructions = """
+    public static let instructions = """
         Give a short title for the meeting this summary describes: at most eight words, in the language of the \
         summary, naming what the meeting was about. Reply with the title only, on one line, with no quotes, no \
         Markdown and no full stop.
@@ -35,9 +35,7 @@ public struct MeetingTitle: Sendable {
         // "# Title", "**Title**", "- Title": leading marks, then wrapping emphasis and quotes.
         title = String(title.drop { "#-*> ".contains($0) })
         let wrappers = CharacterSet(charactersIn: "*_`\"'“”„‚‘’«»")
-        title = title.trimmingCharacters(in: wrappers.union(.whitespaces))
-        if title.hasSuffix(".") { title.removeLast() }
-        title = title.trimmingCharacters(in: .whitespaces)
+        title = title.trimmingCharacters(in: wrappers.union(.whitespaces).union(CharacterSet(charactersIn: ".")))
         guard !title.isEmpty, title.count <= maxLength else { return nil }
         return title
     }
