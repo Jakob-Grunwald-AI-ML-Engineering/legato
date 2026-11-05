@@ -89,6 +89,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     private var takeAudioBuffer = TakeAudioBuffer()
     private(set) var takeBufferFailure: (any Error)?
     var bufferedTakeFrames: Int { takeAudioBuffer.frameCount }
+    private(set) var consumedWarmInputChunks = 0
     public var isListening: Bool { status == "listening" }
     /// Where microphone chunks go while a keyboard session holds the warm input (`holdWarmInput`).
     public private(set) var route = AudioRoute.idle
@@ -693,7 +694,7 @@ public enum ComposerInsertOrigin: String, Sendable {
             state["audioInput"] = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(automatic.diagnostics))) ?? [:]
         }
         state["audioDelivery"] = ["chunks": deliveredAudioChunks, "frames": deliveredAudioFrames, "acceptedFinalWords": acceptedASRWords]
-        state["audioRoute"] = route.rawValue; state["holdsWarmInput"] = warmInput != nil; state["prepared"] = prepared
+        state["audioRoute"] = route.rawValue; state["holdsWarmInput"] = warmInput != nil; state["consumedWarmInputChunks"] = consumedWarmInputChunks; state["prepared"] = prepared
         state["agentStreamWarm"] = agentWarm?.isLive ?? false
         if let keyboardDiagnostics { state["keyboardSession"] = keyboardDiagnostics() }
         return state
@@ -873,6 +874,7 @@ public enum ComposerInsertOrigin: String, Sendable {
                 for await chunk in stream {
                     guard !Task.isCancelled, let self else { return }
                     await self.routeChunk(chunk, converter: &converter)
+                    self.consumedWarmInputChunks += 1
                 }
                 self?.warmInputEnded(token)
             }

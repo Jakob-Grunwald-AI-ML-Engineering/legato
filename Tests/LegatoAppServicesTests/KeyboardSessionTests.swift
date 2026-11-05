@@ -191,7 +191,9 @@ import LegatoSoniox
     @Test func speechDuringTakeConnectionIsBufferedButIdleSpeechIsDiscarded() async throws {
         let (composer, keyboard) = try await openOnTyping()
         let socket = try #require(sockets.last)
+        let idleChunks = composer.consumedWarmInputChunks
         await mic.emit(sample: 0.9)
+        try await until { composer.consumedWarmInputChunks > idleChunks }
         await socket.holdConfiguration()
         let opening = Task { await keyboard.openGate() }
         try await until { await socket.configurationBlocked }

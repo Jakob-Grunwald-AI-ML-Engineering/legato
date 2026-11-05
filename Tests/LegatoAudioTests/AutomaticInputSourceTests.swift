@@ -243,7 +243,14 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
     var iterator = stream.makeAsyncIterator()
     #expect(await iterator.next() != nil)
     #expect(source.diagnostics.selected?.id == "Built-in")
-    #expect(source.diagnostics.captureHealthy)
+    // Readiness is time-sensitive: wait for fresh PCM rather than assuming the
+    // test executor resumes within two seconds of the first buffered chunk.
+    var captureHealthy = false
+    try await waitForAutomaticInput {
+        captureHealthy = source.diagnostics.captureHealthy
+        return captureHealthy
+    }
+    #expect(captureHealthy)
     #expect(fallbacks.withLock { $0 } == 1)
     #expect(probe.state.withLock { $0.attempts == ["combined", "Built-in"] && $0.maximum == 1 })
     await source.stop()
