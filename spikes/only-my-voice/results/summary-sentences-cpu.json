@@ -1,0 +1,402 @@
+{
+  "calibrated_threshold": 0.36,
+  "selection": "minimum balanced error across calibration windows, equal trial weights",
+  "model_load_seconds": 0.242648292,
+  "peak_rss_bytes": 171425792,
+  "user_cpu_seconds": 12.503653,
+  "system_cpu_seconds": 0.497876,
+  "enrollment": [
+    {
+      "inference_ms": 238.030667,
+      "seconds": 12.005,
+      "speaker": "1284"
+    },
+    {
+      "inference_ms": 239.263958,
+      "seconds": 11.41,
+      "speaker": "1995"
+    },
+    {
+      "inference_ms": 267.953,
+      "seconds": 11.905,
+      "speaker": "260"
+    },
+    {
+      "inference_ms": 208.728,
+      "seconds": 9.785,
+      "speaker": "5142"
+    },
+    {
+      "inference_ms": 291.53758400000004,
+      "seconds": 11.6450625,
+      "speaker": "6930"
+    },
+    {
+      "inference_ms": 279.02333400000003,
+      "seconds": 12.92,
+      "speaker": "8463"
+    }
+  ],
+  "windows": [
+    {
+      "seconds": 0.35,
+      "target_retained": 0.4248927038626609,
+      "other_rejected": 0.9218884120171674,
+      "target_trials": 233,
+      "other_trials": 1165,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.28,
+          "calibration": {
+            "target_retained": 0.696969696969697,
+            "other_rejected": 0.797979797979798,
+            "target_trials": 198,
+            "other_trials": 990
+          },
+          "test": {
+            "target_retained": 0.6351931330472103,
+            "other_rejected": 0.8094420600858369,
+            "target_trials": 233,
+            "other_trials": 1165,
+            "worst_target_retained": 0.45714285714285713,
+            "worst_other_rejected": 0.7563451776649747
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.02,
+          "calibration": {
+            "target_retained": 0.9949494949494949,
+            "other_rejected": 0.08383838383838384,
+            "target_trials": 198,
+            "other_trials": 990
+          },
+          "test": {
+            "target_retained": 0.9957081545064378,
+            "other_rejected": 0.08497854077253218,
+            "target_trials": 233,
+            "other_trials": 1165,
+            "worst_target_retained": 0.972972972972973,
+            "worst_other_rejected": 0.05527638190954774
+          }
+        }
+      ],
+      "median_inference_ms": 8.26825,
+      "p95_inference_ms": 13.909334000000001,
+      "per_target": [
+        {
+          "speaker": "1284",
+          "target_retained": 0.5,
+          "other_rejected": 0.9035532994923858
+        },
+        {
+          "speaker": "1995",
+          "target_retained": 0.22857142857142856,
+          "other_rejected": 0.9191919191919192
+        },
+        {
+          "speaker": "260",
+          "target_retained": 0.35294117647058826,
+          "other_rejected": 0.9045226130653267
+        },
+        {
+          "speaker": "5142",
+          "target_retained": 0.5087719298245614,
+          "other_rejected": 0.9602272727272727
+        },
+        {
+          "speaker": "6930",
+          "target_retained": 0.47058823529411764,
+          "other_rejected": 0.8944723618090452
+        },
+        {
+          "speaker": "8463",
+          "target_retained": 0.43243243243243246,
+          "other_rejected": 0.9540816326530612
+        }
+      ]
+    },
+    {
+      "seconds": 1.0,
+      "target_retained": 0.9875,
+      "other_rejected": 0.6425,
+      "target_trials": 80,
+      "other_trials": 400,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.51,
+          "calibration": {
+            "target_retained": 0.8955223880597015,
+            "other_rejected": 0.9223880597014925,
+            "target_trials": 67,
+            "other_trials": 335
+          },
+          "test": {
+            "target_retained": 0.8625,
+            "other_rejected": 0.96,
+            "target_trials": 80,
+            "other_trials": 400,
+            "worst_target_retained": 0.75,
+            "worst_other_rejected": 0.8823529411764706
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.36,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 0.6059701492537314,
+            "target_trials": 67,
+            "other_trials": 335
+          },
+          "test": {
+            "target_retained": 0.9875,
+            "other_rejected": 0.6425,
+            "target_trials": 80,
+            "other_trials": 400,
+            "worst_target_retained": 0.9166666666666666,
+            "worst_other_rejected": 0.5147058823529411
+          }
+        }
+      ],
+      "median_inference_ms": 19.543583499999997,
+      "p95_inference_ms": 21.857666000000002,
+      "per_target": [
+        {
+          "speaker": "1284",
+          "target_retained": 1.0,
+          "other_rejected": 0.5147058823529411
+        },
+        {
+          "speaker": "1995",
+          "target_retained": 0.9166666666666666,
+          "other_rejected": 0.6617647058823529
+        },
+        {
+          "speaker": "260",
+          "target_retained": 1.0,
+          "other_rejected": 0.5441176470588235
+        },
+        {
+          "speaker": "5142",
+          "target_retained": 1.0,
+          "other_rejected": 0.7
+        },
+        {
+          "speaker": "6930",
+          "target_retained": 1.0,
+          "other_rejected": 0.6176470588235294
+        },
+        {
+          "speaker": "8463",
+          "target_retained": 1.0,
+          "other_rejected": 0.8235294117647058
+        }
+      ]
+    },
+    {
+      "seconds": 2.0,
+      "target_retained": 1.0,
+      "other_rejected": 0.46,
+      "target_trials": 40,
+      "other_trials": 200,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.65,
+          "calibration": {
+            "target_retained": 0.96875,
+            "other_rejected": 0.98125,
+            "target_trials": 32,
+            "other_trials": 160
+          },
+          "test": {
+            "target_retained": 0.9,
+            "other_rejected": 0.995,
+            "target_trials": 40,
+            "other_trials": 200,
+            "worst_target_retained": 0.8333333333333334,
+            "worst_other_rejected": 0.9705882352941176
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.58,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 0.90625,
+            "target_trials": 32,
+            "other_trials": 160
+          },
+          "test": {
+            "target_retained": 0.975,
+            "other_rejected": 0.97,
+            "target_trials": 40,
+            "other_trials": 200,
+            "worst_target_retained": 0.8333333333333334,
+            "worst_other_rejected": 0.9411764705882353
+          }
+        }
+      ],
+      "median_inference_ms": 36.485312500000006,
+      "p95_inference_ms": 42.691584,
+      "per_target": [
+        {
+          "speaker": "1284",
+          "target_retained": 1.0,
+          "other_rejected": 0.35294117647058826
+        },
+        {
+          "speaker": "1995",
+          "target_retained": 1.0,
+          "other_rejected": 0.5
+        },
+        {
+          "speaker": "260",
+          "target_retained": 1.0,
+          "other_rejected": 0.29411764705882354
+        },
+        {
+          "speaker": "5142",
+          "target_retained": 1.0,
+          "other_rejected": 0.6
+        },
+        {
+          "speaker": "6930",
+          "target_retained": 1.0,
+          "other_rejected": 0.4411764705882353
+        },
+        {
+          "speaker": "8463",
+          "target_retained": 1.0,
+          "other_rejected": 0.5882352941176471
+        }
+      ]
+    },
+    {
+      "seconds": 3.0,
+      "target_retained": 1.0,
+      "other_rejected": 0.3,
+      "target_trials": 26,
+      "other_trials": 130,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.68,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 0.97,
+            "target_trials": 20,
+            "other_trials": 100
+          },
+          "test": {
+            "target_retained": 0.8846153846153846,
+            "other_rejected": 1.0,
+            "target_trials": 26,
+            "other_trials": 130,
+            "worst_target_retained": 0.75,
+            "worst_other_rejected": 1.0
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.68,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 0.97,
+            "target_trials": 20,
+            "other_trials": 100
+          },
+          "test": {
+            "target_retained": 0.8846153846153846,
+            "other_rejected": 1.0,
+            "target_trials": 26,
+            "other_trials": 130,
+            "worst_target_retained": 0.75,
+            "worst_other_rejected": 1.0
+          }
+        }
+      ],
+      "median_inference_ms": 51.350083,
+      "p95_inference_ms": 66.07875,
+      "per_target": [
+        {
+          "speaker": "1284",
+          "target_retained": 1.0,
+          "other_rejected": 0.18181818181818182
+        },
+        {
+          "speaker": "1995",
+          "target_retained": 1.0,
+          "other_rejected": 0.3181818181818182
+        },
+        {
+          "speaker": "260",
+          "target_retained": 1.0,
+          "other_rejected": 0.13636363636363635
+        },
+        {
+          "speaker": "5142",
+          "target_retained": 1.0,
+          "other_rejected": 0.4
+        },
+        {
+          "speaker": "6930",
+          "target_retained": 1.0,
+          "other_rejected": 0.2727272727272727
+        },
+        {
+          "speaker": "8463",
+          "target_retained": 1.0,
+          "other_rejected": 0.5
+        }
+      ]
+    }
+  ],
+  "ordered_sessions": {
+    "enrollment": [
+      {
+        "case": "target_first",
+        "sessions": 30,
+        "target_retained": 1.0,
+        "other_rejected": 0.7
+      },
+      {
+        "case": "other_first",
+        "sessions": 30,
+        "target_retained": 1.0,
+        "other_rejected": 0.7
+      }
+    ],
+    "automatic_first_voice": [
+      {
+        "case": "target_first",
+        "sessions": 30,
+        "target_retained": 1.0,
+        "other_rejected": 0.9444444444444444
+      },
+      {
+        "case": "other_first",
+        "sessions": 30,
+        "target_retained": 0.05,
+        "other_rejected": 0.05555555555555555
+      }
+    ],
+    "dominant_cluster": [
+      {
+        "case": "target_first",
+        "sessions": 30,
+        "target_retained": 0.23333333333333334,
+        "other_rejected": 0.2
+      },
+      {
+        "case": "other_first",
+        "sessions": 30,
+        "target_retained": 0.05,
+        "other_rejected": 0.05555555555555555
+      }
+    ]
+  }
+}

@@ -1,0 +1,402 @@
+{
+  "calibrated_threshold": 0.34,
+  "selection": "minimum balanced error across calibration windows, equal trial weights",
+  "model_load_seconds": 0.109157708,
+  "peak_rss_bytes": 112541696,
+  "user_cpu_seconds": 4.334695,
+  "system_cpu_seconds": 0.179609,
+  "enrollment": [
+    {
+      "inference_ms": 146.56254099999998,
+      "seconds": 5.023625,
+      "speaker": "jackson"
+    },
+    {
+      "inference_ms": 65.94154200000001,
+      "seconds": 3.59375,
+      "speaker": "nicolas"
+    },
+    {
+      "inference_ms": 56.537667,
+      "seconds": 3.307125,
+      "speaker": "theo"
+    },
+    {
+      "inference_ms": 61.946333,
+      "seconds": 3.418375,
+      "speaker": "yweweler"
+    },
+    {
+      "inference_ms": 188.23320800000002,
+      "seconds": 5.097375,
+      "speaker": "george"
+    },
+    {
+      "inference_ms": 116.772166,
+      "seconds": 5.5685,
+      "speaker": "lucas"
+    }
+  ],
+  "windows": [
+    {
+      "seconds": 0.35,
+      "target_retained": 0.7638888888888888,
+      "other_rejected": 0.9833333333333333,
+      "target_trials": 72,
+      "other_trials": 360,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.3,
+          "calibration": {
+            "target_retained": 0.8823529411764706,
+            "other_rejected": 0.9264705882352942,
+            "target_trials": 68,
+            "other_trials": 340
+          },
+          "test": {
+            "target_retained": 0.8472222222222222,
+            "other_rejected": 0.9527777777777777,
+            "target_trials": 72,
+            "other_trials": 360,
+            "worst_target_retained": 0.6875,
+            "worst_other_rejected": 0.8709677419354839
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.16,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 0.5588235294117647,
+            "target_trials": 68,
+            "other_trials": 340
+          },
+          "test": {
+            "target_retained": 0.9861111111111112,
+            "other_rejected": 0.6222222222222222,
+            "target_trials": 72,
+            "other_trials": 360,
+            "worst_target_retained": 0.9375,
+            "worst_other_rejected": 0.42857142857142855
+          }
+        }
+      ],
+      "median_inference_ms": 15.2309165,
+      "p95_inference_ms": 55.640375,
+      "per_target": [
+        {
+          "speaker": "jackson",
+          "target_retained": 0.5714285714285714,
+          "other_rejected": 0.9482758620689655
+        },
+        {
+          "speaker": "nicolas",
+          "target_retained": 0.7777777777777778,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "theo",
+          "target_retained": 0.7777777777777778,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "yweweler",
+          "target_retained": 0.9,
+          "other_rejected": 0.967741935483871
+        },
+        {
+          "speaker": "george",
+          "target_retained": 0.9285714285714286,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "lucas",
+          "target_retained": 0.6875,
+          "other_rejected": 0.9821428571428571
+        }
+      ]
+    },
+    {
+      "seconds": 1.0,
+      "target_retained": 1.0,
+      "other_rejected": 0.9304347826086956,
+      "target_trials": 23,
+      "other_trials": 115,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.44,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 0.9916666666666667,
+            "target_trials": 24,
+            "other_trials": 120
+          },
+          "test": {
+            "target_retained": 0.9130434782608695,
+            "other_rejected": 0.9739130434782609,
+            "target_trials": 23,
+            "other_trials": 115,
+            "worst_target_retained": 0.6,
+            "worst_other_rejected": 0.8888888888888888
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.45,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 0.9916666666666667,
+            "target_trials": 24,
+            "other_trials": 120
+          },
+          "test": {
+            "target_retained": 0.9130434782608695,
+            "other_rejected": 0.9739130434782609,
+            "target_trials": 23,
+            "other_trials": 115,
+            "worst_target_retained": 0.6,
+            "worst_other_rejected": 0.8888888888888888
+          }
+        }
+      ],
+      "median_inference_ms": 42.589375,
+      "p95_inference_ms": 97.937291,
+      "per_target": [
+        {
+          "speaker": "jackson",
+          "target_retained": 1.0,
+          "other_rejected": 0.8333333333333334
+        },
+        {
+          "speaker": "nicolas",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "theo",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "yweweler",
+          "target_retained": 1.0,
+          "other_rejected": 0.85
+        },
+        {
+          "speaker": "george",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "lucas",
+          "target_retained": 1.0,
+          "other_rejected": 0.8888888888888888
+        }
+      ]
+    },
+    {
+      "seconds": 2.0,
+      "target_retained": 1.0,
+      "other_rejected": 0.8666666666666667,
+      "target_trials": 9,
+      "other_trials": 45,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.46,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 1.0,
+            "target_trials": 9,
+            "other_trials": 45
+          },
+          "test": {
+            "target_retained": 1.0,
+            "other_rejected": 0.9777777777777777,
+            "target_trials": 9,
+            "other_trials": 45,
+            "worst_target_retained": 1.0,
+            "worst_other_rejected": 0.8571428571428571
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.72,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 1.0,
+            "target_trials": 9,
+            "other_trials": 45
+          },
+          "test": {
+            "target_retained": 0.6666666666666666,
+            "other_rejected": 1.0,
+            "target_trials": 9,
+            "other_trials": 45,
+            "worst_target_retained": 0.0,
+            "worst_other_rejected": 1.0
+          }
+        }
+      ],
+      "median_inference_ms": 105.040834,
+      "p95_inference_ms": 137.17220799999998,
+      "per_target": [
+        {
+          "speaker": "jackson",
+          "target_retained": 1.0,
+          "other_rejected": 0.5714285714285714
+        },
+        {
+          "speaker": "nicolas",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "theo",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "yweweler",
+          "target_retained": 1.0,
+          "other_rejected": 0.75
+        },
+        {
+          "speaker": "george",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "lucas",
+          "target_retained": 1.0,
+          "other_rejected": 0.8571428571428571
+        }
+      ]
+    },
+    {
+      "seconds": 3.0,
+      "target_retained": 1.0,
+      "other_rejected": 0.8333333333333334,
+      "target_trials": 6,
+      "other_trials": 30,
+      "duration_calibrated": [
+        {
+          "operating_point": "balanced_error",
+          "threshold": 0.48,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 1.0,
+            "target_trials": 6,
+            "other_trials": 30
+          },
+          "test": {
+            "target_retained": 1.0,
+            "other_rejected": 0.9666666666666667,
+            "target_trials": 6,
+            "other_trials": 30,
+            "worst_target_retained": 1.0,
+            "worst_other_rejected": 0.8
+          }
+        },
+        {
+          "operating_point": "at_least_99pct_calibration_target_retention",
+          "threshold": 0.84,
+          "calibration": {
+            "target_retained": 1.0,
+            "other_rejected": 1.0,
+            "target_trials": 6,
+            "other_trials": 30
+          },
+          "test": {
+            "target_retained": 0.3333333333333333,
+            "other_rejected": 1.0,
+            "target_trials": 6,
+            "other_trials": 30,
+            "worst_target_retained": 0.0,
+            "worst_other_rejected": 1.0
+          }
+        }
+      ],
+      "median_inference_ms": 174.4466665,
+      "p95_inference_ms": 275.20716699999997,
+      "per_target": [
+        {
+          "speaker": "jackson",
+          "target_retained": 1.0,
+          "other_rejected": 0.6
+        },
+        {
+          "speaker": "nicolas",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "theo",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "yweweler",
+          "target_retained": 1.0,
+          "other_rejected": 0.6
+        },
+        {
+          "speaker": "george",
+          "target_retained": 1.0,
+          "other_rejected": 1.0
+        },
+        {
+          "speaker": "lucas",
+          "target_retained": 1.0,
+          "other_rejected": 0.8
+        }
+      ]
+    }
+  ],
+  "ordered_sessions": {
+    "enrollment": [
+      {
+        "case": "target_first",
+        "sessions": 30,
+        "target_retained": 1.0,
+        "other_rejected": 0.9111111111111111
+      },
+      {
+        "case": "other_first",
+        "sessions": 30,
+        "target_retained": 1.0,
+        "other_rejected": 0.9111111111111111
+      }
+    ],
+    "automatic_first_voice": [
+      {
+        "case": "target_first",
+        "sessions": 30,
+        "target_retained": 1.0,
+        "other_rejected": 0.9555555555555556
+      },
+      {
+        "case": "other_first",
+        "sessions": 30,
+        "target_retained": 0.05,
+        "other_rejected": 0.05555555555555555
+      }
+    ],
+    "dominant_cluster": [
+      {
+        "case": "target_first",
+        "sessions": 30,
+        "target_retained": 0.23333333333333334,
+        "other_rejected": 0.2111111111111111
+      },
+      {
+        "case": "other_first",
+        "sessions": 30,
+        "target_retained": 0.03333333333333333,
+        "other_rejected": 0.05555555555555555
+      }
+    ]
+  }
+}

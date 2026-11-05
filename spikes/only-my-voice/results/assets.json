@@ -1,0 +1,952 @@
+[
+  {
+    "path": ".cache/models/CamPlusPlus_v2.mlmodelc/analytics/coremldata.bin",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPlus_v2.mlmodelc/analytics/coremldata.bin",
+    "sha256": "d0c5e0bf34974549ebc42431a49122d5cc05222a750a864ae53b9d9f625e0d5a"
+  },
+  {
+    "path": ".cache/models/CamPlusPlus_v2.mlmodelc/coremldata.bin",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPlus_v2.mlmodelc/coremldata.bin",
+    "sha256": "6412f16c728165dfbefce470359665ab94e3c0b7784d25febdd58faed035edab"
+  },
+  {
+    "path": ".cache/models/CamPlusPlus_v2.mlmodelc/metadata.json",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPlus_v2.mlmodelc/metadata.json",
+    "sha256": "5378d1a66538cd6be3ca20400667c2dfdf01911f3c71aa21ef95a34633a1276c"
+  },
+  {
+    "path": ".cache/models/CamPlusPlus_v2.mlmodelc/model.mil",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPlus_v2.mlmodelc/model.mil",
+    "sha256": "6f0506e4e7f01a0f8cf68bb9ba5f02f75ed2184b7d79c4264db3b1a734cb0e2a"
+  },
+  {
+    "path": ".cache/models/CamPlusPlus_v2.mlmodelc/weights/weight.bin",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPlus_v2.mlmodelc/weights/weight.bin",
+    "sha256": "3e5bafbc3d3faa94aff8c72afd22ffae97ce31d87ce70c000585e055cd776c18"
+  },
+  {
+    "path": ".cache/models/CamPlusPreprocessor_v2.mlmodelc/analytics/coremldata.bin",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPreprocessor_v2.mlmodelc/analytics/coremldata.bin",
+    "sha256": "79a870e41d4cb1681d8a6d971f6df7958c06b7532ff5dfe7a6d554a5c18a775d"
+  },
+  {
+    "path": ".cache/models/CamPlusPreprocessor_v2.mlmodelc/coremldata.bin",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPreprocessor_v2.mlmodelc/coremldata.bin",
+    "sha256": "a455197a14ef8f53a4ef8bc10a0b255660c124618b0c256b8b158896c3bb0e3d"
+  },
+  {
+    "path": ".cache/models/CamPlusPreprocessor_v2.mlmodelc/metadata.json",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPreprocessor_v2.mlmodelc/metadata.json",
+    "sha256": "b429e84df33fc4f5e6c621144b6c9a478130c1dafa8b289d8e3b2e519eecaeb9"
+  },
+  {
+    "path": ".cache/models/CamPlusPreprocessor_v2.mlmodelc/model.mil",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPreprocessor_v2.mlmodelc/model.mil",
+    "sha256": "5361a74b04fc56879ed8cc46dba654658d5b6e409b789c862e4edd5e223d453a"
+  },
+  {
+    "path": ".cache/models/CamPlusPreprocessor_v2.mlmodelc/weights/weight.bin",
+    "url": "https://huggingface.co/FluidInference/campplus-coreml/resolve/f316edbc70d9023a94aaf8965538aba4330dc28e/CamPlusPreprocessor_v2.mlmodelc/weights/weight.bin",
+    "sha256": "24c77ee75e17819622b3a69eeaccd57c6f6f05b0f5747c807a6540f032d3f1fb"
+  },
+  {
+    "path": ".cache/audio/0_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_jackson_0.wav",
+    "sha256": "eea86018ce1730baaf7f5dd6ec88c1f727dd90203521a9115b489310a248ea05"
+  },
+  {
+    "path": ".cache/audio/0_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_jackson_5.wav",
+    "sha256": "5b47a9df20e6fdd4ce8c0c93c8854e8911aff4448eac5bdb8d6d29e25d994915"
+  },
+  {
+    "path": ".cache/audio/0_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_jackson_6.wav",
+    "sha256": "b86b28b52e367ba92e132b5e24a83668cbe7ebda2ae15e90e2b60001e52e07e3"
+  },
+  {
+    "path": ".cache/audio/1_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_jackson_0.wav",
+    "sha256": "b3739400f793620875bb7849bfd8629dc6b2966ed6bda8276aa14178a612f13a"
+  },
+  {
+    "path": ".cache/audio/1_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_jackson_5.wav",
+    "sha256": "4d07c2dc3cf4c601fe13e0d75f389543254fbbf1ac9ee0e66654c0c8088d9380"
+  },
+  {
+    "path": ".cache/audio/1_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_jackson_6.wav",
+    "sha256": "3e47e34ebc5ace3839aa7333b0885f3f6ab07a0658e044b629dcf4a80fb0814f"
+  },
+  {
+    "path": ".cache/audio/2_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_jackson_0.wav",
+    "sha256": "214bac0c813b584410e3cb8cace2673d256b3fd735810bd516b2bfd0c2298620"
+  },
+  {
+    "path": ".cache/audio/2_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_jackson_5.wav",
+    "sha256": "49df3b86061fc8bfa2e47866b186443a1b429820e3bf38f90cd2794e12be5cd9"
+  },
+  {
+    "path": ".cache/audio/2_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_jackson_6.wav",
+    "sha256": "88be9fd5f1d1405eddf7f78234f16298fbfbe24777f19fec634c5d786ec42316"
+  },
+  {
+    "path": ".cache/audio/3_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_jackson_0.wav",
+    "sha256": "5152a17feb7dba43cfabdb4284262004da3038d5c02a6a5282e851b7ad2bb2e2"
+  },
+  {
+    "path": ".cache/audio/3_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_jackson_5.wav",
+    "sha256": "d42d9a428d72082d102197f8166ee641b4d2c099f7da85df428aeaa07bed0f13"
+  },
+  {
+    "path": ".cache/audio/3_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_jackson_6.wav",
+    "sha256": "d5a3614a128ff3d9e0e00dc6b093dc801cb62f69d95d51a4b58ee5debc4e7b8b"
+  },
+  {
+    "path": ".cache/audio/4_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_jackson_0.wav",
+    "sha256": "e0febd48e7cf7cfdca949d0d07769e0fc708fb2e8e7648691fa7e6ed7a5b1ded"
+  },
+  {
+    "path": ".cache/audio/4_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_jackson_5.wav",
+    "sha256": "7d0641a2bbbf2ab6436f822d88dcb3d87c69f101e62b1ab5f623a3d64b8acb04"
+  },
+  {
+    "path": ".cache/audio/4_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_jackson_6.wav",
+    "sha256": "f79c3108a05f9ef719130cac0c8b45093429e6c2e4bdad15691724032b7a96ad"
+  },
+  {
+    "path": ".cache/audio/5_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_jackson_0.wav",
+    "sha256": "070af5213084191c4de1156125bb792c28cea2728798043283e3def0dadd55b4"
+  },
+  {
+    "path": ".cache/audio/5_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_jackson_5.wav",
+    "sha256": "38927e6fbc6c173f6f5c9652a4d8770c6ada9a2173f3d920c487d881959ede37"
+  },
+  {
+    "path": ".cache/audio/5_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_jackson_6.wav",
+    "sha256": "e4742c83e5049afd91d9964eb9496264769365547ee9317bc7ed2066cf5e38f0"
+  },
+  {
+    "path": ".cache/audio/6_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_jackson_0.wav",
+    "sha256": "fe7705fdfaddc378d72c479664ab8aacd53fa78a99c3d130ad74b1ff40212595"
+  },
+  {
+    "path": ".cache/audio/6_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_jackson_5.wav",
+    "sha256": "f3eff4138b56c1fa374a83fe3ca337cf863ad96c9dd299f8952389b6de0c58fb"
+  },
+  {
+    "path": ".cache/audio/6_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_jackson_6.wav",
+    "sha256": "e58b2ae0b7e8928e9a14a60c341ebc5c54c33887747d8a6055e1c2350714a8ae"
+  },
+  {
+    "path": ".cache/audio/7_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_jackson_0.wav",
+    "sha256": "bd4f5fa8db9a8a8d14a88236da314cd38fce2370cc406181b2485e03437d55d3"
+  },
+  {
+    "path": ".cache/audio/7_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_jackson_5.wav",
+    "sha256": "1f67b679bcd596bb1c0aec3a00ea1f5466534fed27da8fd56b7a09b39a04ae40"
+  },
+  {
+    "path": ".cache/audio/7_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_jackson_6.wav",
+    "sha256": "c9ee7773335d7d41b7a84f0fa06007eeda28045d7557ea8f6f6b7a6703adfb45"
+  },
+  {
+    "path": ".cache/audio/8_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_jackson_0.wav",
+    "sha256": "25172d71c574ee504094d4b704efa478a253d29ee7da562ce6ec4800ffdb6eaf"
+  },
+  {
+    "path": ".cache/audio/8_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_jackson_5.wav",
+    "sha256": "58cdf40d8d2cfb2bcf1e4053a31a3b52619a0555feecbddf39bffbc62f84cb50"
+  },
+  {
+    "path": ".cache/audio/8_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_jackson_6.wav",
+    "sha256": "c8c2a95f1a92412f491d4204ba7a60545425ae749b4b81e1ef3af4e7e30fa5f8"
+  },
+  {
+    "path": ".cache/audio/9_jackson_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_jackson_0.wav",
+    "sha256": "6b25bbf21f65cf5a6c9713ecf05b5d34641bbcfaac56b9d4d694f65758e12ff0"
+  },
+  {
+    "path": ".cache/audio/9_jackson_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_jackson_5.wav",
+    "sha256": "e95d78c078540eeb7f5aecc42673b80c069342137b5bf3ac67f00107d09e5056"
+  },
+  {
+    "path": ".cache/audio/9_jackson_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_jackson_6.wav",
+    "sha256": "3fa1ecac9a5fca4a9638156f9eef7b065daba20cd592988b90ce038665e48b55"
+  },
+  {
+    "path": ".cache/audio/0_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_nicolas_0.wav",
+    "sha256": "527b1d27c2b931204b24995f035580dd248b908978a27756b4698ce0aa7e1aa8"
+  },
+  {
+    "path": ".cache/audio/0_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_nicolas_5.wav",
+    "sha256": "ac49cdc0674e77f0aae908ebffebb92c5d5568a59f19ec6b4e0ac53e9a778436"
+  },
+  {
+    "path": ".cache/audio/0_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_nicolas_6.wav",
+    "sha256": "ac48de556cd18004e3cf94f0cefae2a1c17121c4c733101f9a5fc7348c222809"
+  },
+  {
+    "path": ".cache/audio/1_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_nicolas_0.wav",
+    "sha256": "d57a29689b0abf1ab609ab401dd4053dbc18c317a4ed9ebed6a9aa034e9bab0a"
+  },
+  {
+    "path": ".cache/audio/1_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_nicolas_5.wav",
+    "sha256": "b40222f4de539a66f4e1c1e970214d9e0f5be2a27c4e0fa78868823d6ba29202"
+  },
+  {
+    "path": ".cache/audio/1_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_nicolas_6.wav",
+    "sha256": "9a904ff6c0ad5db655937244de6e4fe1cfaf8cf5b0f9e734b3ed780259b271ca"
+  },
+  {
+    "path": ".cache/audio/2_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_nicolas_0.wav",
+    "sha256": "e55aea8bd4d83d0ae4de1b5a4b67a613f17aa00406cd726c352a061001308beb"
+  },
+  {
+    "path": ".cache/audio/2_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_nicolas_5.wav",
+    "sha256": "cc455c96a7f239ac51bcb87b43e24911932234a76c39369f4c23c5a4ec85dffc"
+  },
+  {
+    "path": ".cache/audio/2_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_nicolas_6.wav",
+    "sha256": "ee6a7571be65ad00e0a23ef5caa498891b6ddc8f5b7b5eba55278de413f23f10"
+  },
+  {
+    "path": ".cache/audio/3_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_nicolas_0.wav",
+    "sha256": "5da068172b180b74cd8ed019d131679249387b0199cb972992adf18e21f1d82d"
+  },
+  {
+    "path": ".cache/audio/3_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_nicolas_5.wav",
+    "sha256": "604984e5e8fc950437eafbb3e092c2818f47a0010536cd8def452ab547c08521"
+  },
+  {
+    "path": ".cache/audio/3_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_nicolas_6.wav",
+    "sha256": "e31a6623ddb5bee30356430b423e22632bc4e534b4a462ff38952ad053226cd5"
+  },
+  {
+    "path": ".cache/audio/4_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_nicolas_0.wav",
+    "sha256": "dc6ae853b163bebf1774701a4f7e6e27bbace3472ba3628ec2d61b2e6ab1d0c7"
+  },
+  {
+    "path": ".cache/audio/4_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_nicolas_5.wav",
+    "sha256": "5a64d6f62aacf21653cdcebf7f0ec1327b44c53b5441cc1eaf063e054476ff1a"
+  },
+  {
+    "path": ".cache/audio/4_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_nicolas_6.wav",
+    "sha256": "13a7b08c037ac892db3d1f23e5626e7fc003eed606e03c3bba8f7e3de3cfdb24"
+  },
+  {
+    "path": ".cache/audio/5_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_nicolas_0.wav",
+    "sha256": "808a05f646857095e97450f6824440c271c5a17029d24065a7ff27ea7813f61d"
+  },
+  {
+    "path": ".cache/audio/5_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_nicolas_5.wav",
+    "sha256": "2bf0cf1935e5c934706f3d91658e0e000586036fb9d95647ad2e90e5e153bcd4"
+  },
+  {
+    "path": ".cache/audio/5_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_nicolas_6.wav",
+    "sha256": "3ac4877bb6349e013f723eb1cc61f81451338ce4f350977a149c541d01ac0775"
+  },
+  {
+    "path": ".cache/audio/6_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_nicolas_0.wav",
+    "sha256": "48d22b265d86c14e6b4462f51122834bc66e99e3966e95f2279a9d07ffcb9e95"
+  },
+  {
+    "path": ".cache/audio/6_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_nicolas_5.wav",
+    "sha256": "17745cd180cb7728e90661c8fa56d85d6ea852c06995d7ab4bc79711a0ba6e7d"
+  },
+  {
+    "path": ".cache/audio/6_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_nicolas_6.wav",
+    "sha256": "3e123348c20b37b9a0804aebde5e2c0a8e67c104f48e617d665ec1e784532e44"
+  },
+  {
+    "path": ".cache/audio/7_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_nicolas_0.wav",
+    "sha256": "615dc2a2ba6e915521151479bbec3724bd1f5e0c839bb57b693c45f897a174a3"
+  },
+  {
+    "path": ".cache/audio/7_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_nicolas_5.wav",
+    "sha256": "5aeb58629aa736d5f065df5a4b2ec1fe615e8f6ebb15002d8373318a4b45a6f5"
+  },
+  {
+    "path": ".cache/audio/7_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_nicolas_6.wav",
+    "sha256": "1cddb4b68ffbbfce093782773af3171f9b902fab50a73b76fa8dcbb3ee9895de"
+  },
+  {
+    "path": ".cache/audio/8_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_nicolas_0.wav",
+    "sha256": "8e2af922d9417b55344ab3ff7d14148c77551c877d5a5543103a6dc07625bc12"
+  },
+  {
+    "path": ".cache/audio/8_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_nicolas_5.wav",
+    "sha256": "9f1b80d2d7790c290b84523d3ad9cc6c5dae90bbb9aa55bac848a8d033efc9a4"
+  },
+  {
+    "path": ".cache/audio/8_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_nicolas_6.wav",
+    "sha256": "c6f06f2da6293d6d8c0e400b646757ca5500626b09c7e6c844b9ee9c01d65cc5"
+  },
+  {
+    "path": ".cache/audio/9_nicolas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_nicolas_0.wav",
+    "sha256": "44e8eb48a33839ac22c10c702963fbb53463858187a721f3addbacfe0e5cf14b"
+  },
+  {
+    "path": ".cache/audio/9_nicolas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_nicolas_5.wav",
+    "sha256": "e196c574ea058a46f32ca3942c78de537e133d16f9025532840601aa4a4ce7d5"
+  },
+  {
+    "path": ".cache/audio/9_nicolas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_nicolas_6.wav",
+    "sha256": "fb8a72ef6346e37ea33f069ee810faf3ceabd81faeba0968f8fe81f3329d726b"
+  },
+  {
+    "path": ".cache/audio/0_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_theo_0.wav",
+    "sha256": "d5833196a91e5da8703a8afe1f944cbf0d0bae55e5af6a4eb7e92e62070bf280"
+  },
+  {
+    "path": ".cache/audio/0_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_theo_5.wav",
+    "sha256": "3638ff7ee910faebc5f8615f52ced44609bbfc5b650a1c0fa4579944094e3dd8"
+  },
+  {
+    "path": ".cache/audio/0_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_theo_6.wav",
+    "sha256": "08da38e51814022360bed0c7aa74cca031b0dddb78f57d5c8f8c48ee4494703b"
+  },
+  {
+    "path": ".cache/audio/1_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_theo_0.wav",
+    "sha256": "a856fff7bcb68328a76b269c0d8b1d4269c28ac7e3d6725fe9da5bdd05405b55"
+  },
+  {
+    "path": ".cache/audio/1_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_theo_5.wav",
+    "sha256": "6894119e221e1b740d1661a44e7bd22d4c55139f3c473b49bd9cd0990bd0838c"
+  },
+  {
+    "path": ".cache/audio/1_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_theo_6.wav",
+    "sha256": "4e7bbc6bfd7175fbace5aaaec7e589bbbc3be2867c200751950a683358350786"
+  },
+  {
+    "path": ".cache/audio/2_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_theo_0.wav",
+    "sha256": "226a6abb912b3f1039a66f472748fb155cff0da00f3f2a7c091b74f937803a29"
+  },
+  {
+    "path": ".cache/audio/2_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_theo_5.wav",
+    "sha256": "c808b74a405d7d802e30e8e7c2e2961f4a4de0f59e1bb78f4cb8e4d2d74823da"
+  },
+  {
+    "path": ".cache/audio/2_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_theo_6.wav",
+    "sha256": "2e2a91beb81c2b97289ca36b597212f3310974a64d867b0885633cb42407b0f9"
+  },
+  {
+    "path": ".cache/audio/3_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_theo_0.wav",
+    "sha256": "d58347dea5ba78c84cff98c0cdc8bc133bff7d4ac379ab53f47cdadff566a9b8"
+  },
+  {
+    "path": ".cache/audio/3_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_theo_5.wav",
+    "sha256": "695d21f94c402cfd292093832ada533a8561e54e22bce0b378e5889dce7a7d63"
+  },
+  {
+    "path": ".cache/audio/3_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_theo_6.wav",
+    "sha256": "461267690a2f6aa316dc119523551350bebe6b65e06d541d747e582f393b1f21"
+  },
+  {
+    "path": ".cache/audio/4_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_theo_0.wav",
+    "sha256": "4b96496d35d799b61b8341ac42161907b0a4dac68564310016396d9c6cffebe4"
+  },
+  {
+    "path": ".cache/audio/4_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_theo_5.wav",
+    "sha256": "3e42608b1dc1ce5daa01732780f390642c1e8fae85fb5bfaaccb036013b896fc"
+  },
+  {
+    "path": ".cache/audio/4_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_theo_6.wav",
+    "sha256": "98a6954ade3ed8c841ef28eb18f2703f0576395ac93ede38fa907e7146f71919"
+  },
+  {
+    "path": ".cache/audio/5_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_theo_0.wav",
+    "sha256": "a5c0beb43ad7e0236d927481d98b6f6bb1b21fbbd7bc26e7f42fcdf6d5f307d5"
+  },
+  {
+    "path": ".cache/audio/5_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_theo_5.wav",
+    "sha256": "6c4edcd73c0c61583b7495438f96cd4709bdb80ff959d680d16f8151b006edcc"
+  },
+  {
+    "path": ".cache/audio/5_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_theo_6.wav",
+    "sha256": "4c19462907227de1c9d293c471c3264852f4209c1c07c8ed2748fcb76bb685b9"
+  },
+  {
+    "path": ".cache/audio/6_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_theo_0.wav",
+    "sha256": "f65b8fe10ffcce1e1c407c1ae1adf33af6980f1f278e481ca13f8d4bfe58a30c"
+  },
+  {
+    "path": ".cache/audio/6_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_theo_5.wav",
+    "sha256": "01f5c357bed1fec702503e9fbcb36a88064d967737e89eab4e4fee06e878ff9d"
+  },
+  {
+    "path": ".cache/audio/6_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_theo_6.wav",
+    "sha256": "3710835af1046f45a7245e8953aad8324f7523a66875352677c1898e470fb9df"
+  },
+  {
+    "path": ".cache/audio/7_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_theo_0.wav",
+    "sha256": "3074f5a5db8a3588bc8616c5888fa25bbac2c71728d14a6b413baf89d779ef70"
+  },
+  {
+    "path": ".cache/audio/7_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_theo_5.wav",
+    "sha256": "ccba509c1dbfc27df45ed6435de96c5ea8511472f0fbabc2b7cef76c0e3c07af"
+  },
+  {
+    "path": ".cache/audio/7_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_theo_6.wav",
+    "sha256": "e572e49aded16b923a5167227702787ec88fba3c4c32599e723d998d8c77ac6b"
+  },
+  {
+    "path": ".cache/audio/8_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_theo_0.wav",
+    "sha256": "24b8f7da347f041d1c5ddfa2e19984f12844b2a05ac6270de5856452092ec21f"
+  },
+  {
+    "path": ".cache/audio/8_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_theo_5.wav",
+    "sha256": "70b9f01fd002aa6dff7c6812cda7a59b8a0999f29f441255a7b56fe503dc43f2"
+  },
+  {
+    "path": ".cache/audio/8_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_theo_6.wav",
+    "sha256": "a99132022e419d0891a1632552576affb34881b26683b62eaf452b7f7e6dbe50"
+  },
+  {
+    "path": ".cache/audio/9_theo_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_theo_0.wav",
+    "sha256": "2a30491b41495dd457c496dc80c7f4066b28a8eb8bc4c57c100f4a7fa2a2e8ef"
+  },
+  {
+    "path": ".cache/audio/9_theo_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_theo_5.wav",
+    "sha256": "83ed5d40635ab333b90dc625694d868b56a53fcbd51226423b4fd1daaa1280c4"
+  },
+  {
+    "path": ".cache/audio/9_theo_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_theo_6.wav",
+    "sha256": "a5f17aacc0b1b6efbcee9be805674ee3278cf2040fde5ed33db9d628d7d61ec6"
+  },
+  {
+    "path": ".cache/audio/0_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_yweweler_0.wav",
+    "sha256": "c2d53137898d6d32ae86e9703676bcaf595080a1f4e2e3efa5ede5a49f54b6a5"
+  },
+  {
+    "path": ".cache/audio/0_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_yweweler_5.wav",
+    "sha256": "23791f95b0ac61e5bd85ab989f6ef97450ad059aa8bc9541d6ae1477e8fdd46e"
+  },
+  {
+    "path": ".cache/audio/0_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_yweweler_6.wav",
+    "sha256": "e1af67800ab993c2f0d0831094a4740ff84fe69b06f5128bc482441746627fb6"
+  },
+  {
+    "path": ".cache/audio/1_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_yweweler_0.wav",
+    "sha256": "625069e417d9f504ab6f67a1be608f28ad35fa46ae0233adf438994d442e228b"
+  },
+  {
+    "path": ".cache/audio/1_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_yweweler_5.wav",
+    "sha256": "415208532df8ea8f9a6570becd1df6b8b55975f25377afc9c4f28dbd4eac1433"
+  },
+  {
+    "path": ".cache/audio/1_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_yweweler_6.wav",
+    "sha256": "2685d5f08638f9c21c64d9b6a65461e6da9f8e9f6499b6a1dde621d76c53569f"
+  },
+  {
+    "path": ".cache/audio/2_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_yweweler_0.wav",
+    "sha256": "0d14dff97f0783d0dbbed08cd2b407dad98dda9d25e4ebf84a6bcbdb18c62d60"
+  },
+  {
+    "path": ".cache/audio/2_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_yweweler_5.wav",
+    "sha256": "964f057dc340f45f58efd47d326491001dc3d77ba6160eb9734e91765b880cab"
+  },
+  {
+    "path": ".cache/audio/2_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_yweweler_6.wav",
+    "sha256": "0230134abc5cf9ff2021fe34725ba09163adf223d44e6c5c38562f4028814ed3"
+  },
+  {
+    "path": ".cache/audio/3_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_yweweler_0.wav",
+    "sha256": "66455971b9f17337df4e48d10ca2a9fb483605ab42588d7ece2c13b5d652e107"
+  },
+  {
+    "path": ".cache/audio/3_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_yweweler_5.wav",
+    "sha256": "6ab720bfcf48676794d37fbdf44890aed1860cd600cfe1092b4063eeb492f199"
+  },
+  {
+    "path": ".cache/audio/3_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_yweweler_6.wav",
+    "sha256": "0371710c51e96f5725140672d136aacc0e376e71b67d24adf34c0e6f3c8a1e1e"
+  },
+  {
+    "path": ".cache/audio/4_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_yweweler_0.wav",
+    "sha256": "bb9eaa256fdcf0e5e07b4c0367a021896655398d33fda6da91b44a97fcbb27c7"
+  },
+  {
+    "path": ".cache/audio/4_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_yweweler_5.wav",
+    "sha256": "147f2560d1af47edef0c3ef558e8e7f7d53282fef3a2e26c48dc5cb70d6a25ea"
+  },
+  {
+    "path": ".cache/audio/4_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_yweweler_6.wav",
+    "sha256": "268140227456dd66c8482610536ef4153c13c9e86a428cc3e44be30d093662a6"
+  },
+  {
+    "path": ".cache/audio/5_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_yweweler_0.wav",
+    "sha256": "8850c7830e4a4427c1c53c6f4dad91debc90ec08f9ac104621d66e684a7cae76"
+  },
+  {
+    "path": ".cache/audio/5_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_yweweler_5.wav",
+    "sha256": "bc229d56b86e0e1c09dbd83458807f2c887213396828b62402476d5a392c660a"
+  },
+  {
+    "path": ".cache/audio/5_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_yweweler_6.wav",
+    "sha256": "961d5cca26f0fc71fb95a98d10adcf9ef399ae7c5f1b767756bf8bc9b7e74b52"
+  },
+  {
+    "path": ".cache/audio/6_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_yweweler_0.wav",
+    "sha256": "69f807440b59477df6645a02f0758e9e4f141846aa161a71a7fa4da024e94950"
+  },
+  {
+    "path": ".cache/audio/6_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_yweweler_5.wav",
+    "sha256": "3c3f3c038b0c3b918e849541f800e27a6c6c62c0ac5da151098fcdf22713cb27"
+  },
+  {
+    "path": ".cache/audio/6_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_yweweler_6.wav",
+    "sha256": "11c8ad5d3f27702c9c4bec3d38ccab4df7a14522a892a7da0c617c249a92cdde"
+  },
+  {
+    "path": ".cache/audio/7_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_yweweler_0.wav",
+    "sha256": "1ade92413c587002f728dd262068ace084088a62a216c0003d300c0d3913ade6"
+  },
+  {
+    "path": ".cache/audio/7_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_yweweler_5.wav",
+    "sha256": "983225e728ea5647a32b41bc702c934bf2db70850c1d6148c127e66ebc00d1e7"
+  },
+  {
+    "path": ".cache/audio/7_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_yweweler_6.wav",
+    "sha256": "296195ed9f88ce8bc47201c367918b0caffab1787e47edee1654c4ee0ffbff73"
+  },
+  {
+    "path": ".cache/audio/8_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_yweweler_0.wav",
+    "sha256": "ef1973bb1d3111d6b251aee38ea7afe93a987fff84b2861729648f90acfa47b3"
+  },
+  {
+    "path": ".cache/audio/8_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_yweweler_5.wav",
+    "sha256": "f97766267bdc29b1124cf060932b35b373cf30bb285a103353c84bbfb48add9b"
+  },
+  {
+    "path": ".cache/audio/8_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_yweweler_6.wav",
+    "sha256": "abf10ab096ebfbb6dd89fcf21339a69f3d133f0519159431f72a3ebc2b608406"
+  },
+  {
+    "path": ".cache/audio/9_yweweler_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_yweweler_0.wav",
+    "sha256": "3a5c85a22f6646a4fd5f51b486bb647c86dbb17b13339fd8a22ed1b307749bca"
+  },
+  {
+    "path": ".cache/audio/9_yweweler_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_yweweler_5.wav",
+    "sha256": "e68b48b98c10114d932201b19842a66d1ad1834bd51882ea3cb4e88f0c2a2d02"
+  },
+  {
+    "path": ".cache/audio/9_yweweler_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_yweweler_6.wav",
+    "sha256": "a536dd1ac501833ac6f3efe8ed53ea91d295262035df4ac41e7c6a69961c75bd"
+  },
+  {
+    "path": ".cache/audio/0_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_george_0.wav",
+    "sha256": "228ab63fccdf262d2e05817b6ec918b15e7d9e4bfb6bb20183c46ae088405240"
+  },
+  {
+    "path": ".cache/audio/0_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_george_5.wav",
+    "sha256": "6906c8b96e2e139e2408d524b22ac7b96fbc53b451cd4f7246e5f3ef410b3818"
+  },
+  {
+    "path": ".cache/audio/0_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_george_6.wav",
+    "sha256": "f286d5149bd3d24d31fee64cb767dae374ffd3404b12005e22bca27cb5346f04"
+  },
+  {
+    "path": ".cache/audio/1_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_george_0.wav",
+    "sha256": "c652e9243c5cc350063be17ebb3629ae971f2059234aa33cfec3a57ae7668efd"
+  },
+  {
+    "path": ".cache/audio/1_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_george_5.wav",
+    "sha256": "884b4b7fb1262cde07606534548e6f3367131358ee277827563faab45006378d"
+  },
+  {
+    "path": ".cache/audio/1_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_george_6.wav",
+    "sha256": "81865fb975e5d081b9ffc002f3fb64721552d4880b2dbe0a8402f95ab88a50b6"
+  },
+  {
+    "path": ".cache/audio/2_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_george_0.wav",
+    "sha256": "64e86e8aec57533dfa5b9054ca3f93f7b7da98fb41e2e1da7c9eabfb9c86792a"
+  },
+  {
+    "path": ".cache/audio/2_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_george_5.wav",
+    "sha256": "cb3e726b6b4a9039f138c98a322c65ed73621cbe6e32cf84228088bca2c90f28"
+  },
+  {
+    "path": ".cache/audio/2_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_george_6.wav",
+    "sha256": "19fb7c4ec8a19dc128ab9e655698ae432d7f70c25494e363d801d8a59c76a784"
+  },
+  {
+    "path": ".cache/audio/3_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_george_0.wav",
+    "sha256": "ab3ce6f5af0eb27f47f1d405c205fbb35776954b3e5beada8449e218fbf30b81"
+  },
+  {
+    "path": ".cache/audio/3_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_george_5.wav",
+    "sha256": "650bb00b7b9b9fe2bf5209369334589b087b86388d7d22a0e325f01c8f31fd2f"
+  },
+  {
+    "path": ".cache/audio/3_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_george_6.wav",
+    "sha256": "627418fafd788e9ea462eb29197b441f9fdbc36468e1f01bc3c72b2a34c225d5"
+  },
+  {
+    "path": ".cache/audio/4_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_george_0.wav",
+    "sha256": "caf634cb0b03955ce98239bb9ae9660445f9021049b3211ad6dc09a1765efca3"
+  },
+  {
+    "path": ".cache/audio/4_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_george_5.wav",
+    "sha256": "608ef3875f390799736ac0891a97737798178f8e01a8a08bf188ef690204f37a"
+  },
+  {
+    "path": ".cache/audio/4_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_george_6.wav",
+    "sha256": "532f7246beb3a5d44e1c2ac4182151e5c4a5897239de30f31ba9cd8fd37d8844"
+  },
+  {
+    "path": ".cache/audio/5_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_george_0.wav",
+    "sha256": "573faed14e5b9037ca124a040d87aea6bdb1852d47a106eba099cdd36701f34b"
+  },
+  {
+    "path": ".cache/audio/5_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_george_5.wav",
+    "sha256": "fcf6a40759cf6983dd5198195f4cef5778c819e46e08bc0604af63f5a28f675f"
+  },
+  {
+    "path": ".cache/audio/5_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_george_6.wav",
+    "sha256": "c56eb0bba7925fbd7c8ca8558ee7c71e025bfedfd7240093ff49cc2a18c29b1e"
+  },
+  {
+    "path": ".cache/audio/6_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_george_0.wav",
+    "sha256": "a5afa6e3dad8290335c2883434d51f45d425fe33d545d784c21f1f677712abbb"
+  },
+  {
+    "path": ".cache/audio/6_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_george_5.wav",
+    "sha256": "303339bda1b823f69de99c51af7fb9668bf63180f83b026df7f32238328e943a"
+  },
+  {
+    "path": ".cache/audio/6_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_george_6.wav",
+    "sha256": "8c4477922d1788bac5a7fd2cfc8054a2372da351cad30d8c23e8bdc140ca10a1"
+  },
+  {
+    "path": ".cache/audio/7_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_george_0.wav",
+    "sha256": "645dc7b2bd40ca8bddb2b580de6877ddffaf041a94b72a87ab9274d5345581a0"
+  },
+  {
+    "path": ".cache/audio/7_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_george_5.wav",
+    "sha256": "72db22c1e246c6f5dc85cca33956ccdd13203827df547439d8435731d6c65f2d"
+  },
+  {
+    "path": ".cache/audio/7_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_george_6.wav",
+    "sha256": "222a4e085c777f5922031813349c3002a61e8845c8de42611f8a457442cb18de"
+  },
+  {
+    "path": ".cache/audio/8_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_george_0.wav",
+    "sha256": "ad8f7a9a1212a3a46e64a8e8a81d050043503f57305ba8b8d1f3b45e78a3a7c5"
+  },
+  {
+    "path": ".cache/audio/8_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_george_5.wav",
+    "sha256": "9d9dc88be157d4f2b9596121ff182bd7a502ff3adaa694cab69d5f8e8bad5bee"
+  },
+  {
+    "path": ".cache/audio/8_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_george_6.wav",
+    "sha256": "ffd7fbb398b09345fe10efa3faf3c4a71de6b9638a2a588d28cfe40c5e235bc5"
+  },
+  {
+    "path": ".cache/audio/9_george_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_george_0.wav",
+    "sha256": "2a9e54630a64239890f4716445dfa949236841b76e2f880f38cd0c5e28a997e9"
+  },
+  {
+    "path": ".cache/audio/9_george_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_george_5.wav",
+    "sha256": "35ca3cb0f9528ce9b2af566b97dfdc344428005038571ff0dec505726e9dccec"
+  },
+  {
+    "path": ".cache/audio/9_george_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_george_6.wav",
+    "sha256": "3760cc356b389fbe92433a94082f751e8432a2c663904a86db13eade5c80653a"
+  },
+  {
+    "path": ".cache/audio/0_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_lucas_0.wav",
+    "sha256": "1d942e79c200ae1f84618314f2669d9c154718276b38ccf341630635073f7c06"
+  },
+  {
+    "path": ".cache/audio/0_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_lucas_5.wav",
+    "sha256": "c9579fd2ac366b20b215c170cad9ec121617bf40cc186ef54bdc0bca86247721"
+  },
+  {
+    "path": ".cache/audio/0_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_lucas_6.wav",
+    "sha256": "11d1a8a14c41a6bc731b9a3781171b146911f2470913b7d583fed5a1408b90d3"
+  },
+  {
+    "path": ".cache/audio/1_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_lucas_0.wav",
+    "sha256": "3be94e884747e17a3004d7c30c95cc5c9da2bf6fc3a280db5ae72822824a398b"
+  },
+  {
+    "path": ".cache/audio/1_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_lucas_5.wav",
+    "sha256": "775c58c39000dedfb88112d7d38b7ad59edccefd1e448c23a681ca3865fc25d2"
+  },
+  {
+    "path": ".cache/audio/1_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_lucas_6.wav",
+    "sha256": "8746f52d6c1566a0361a59a036c05df1ae495e7ead2e4dc2337d1b3142af3fa5"
+  },
+  {
+    "path": ".cache/audio/2_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_lucas_0.wav",
+    "sha256": "1cc45214f58b07f3188a0474060cf04c600123d1bc05c9889f81a24e77edab2f"
+  },
+  {
+    "path": ".cache/audio/2_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_lucas_5.wav",
+    "sha256": "206683caef2151020be6cbabfdff923c018fbe685dbbc96dc4bdaa415306fb55"
+  },
+  {
+    "path": ".cache/audio/2_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_lucas_6.wav",
+    "sha256": "6de89ff3009f4ca00744813f47f5e32532da7393386cf1afeaa28292700540a8"
+  },
+  {
+    "path": ".cache/audio/3_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_lucas_0.wav",
+    "sha256": "584600a1e1377935ca416db7e788c4f27888561c112c2a9a67f86919059e5417"
+  },
+  {
+    "path": ".cache/audio/3_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_lucas_5.wav",
+    "sha256": "16135d029829ba663e725e585ff2be0d2bf56662c879231df65b8ffb2f44015e"
+  },
+  {
+    "path": ".cache/audio/3_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_lucas_6.wav",
+    "sha256": "f6c03c4b2b6bb1953cb9f3a70bdb9d0da49ca124c901cc1e3e2a08bcbc77b91c"
+  },
+  {
+    "path": ".cache/audio/4_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_lucas_0.wav",
+    "sha256": "4adf59a713041d3c672d4cfed07953d53f8d15fa060f17e1a8385cae3a115382"
+  },
+  {
+    "path": ".cache/audio/4_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_lucas_5.wav",
+    "sha256": "87896070374b8ac16f5f5f7f3eebd3c9b070a27a25adf397c380d7154c626b13"
+  },
+  {
+    "path": ".cache/audio/4_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_lucas_6.wav",
+    "sha256": "ac653c7083cf9ed7762f2068fbb70ee6ba84709edfccaa1a1f6cba079adadbe9"
+  },
+  {
+    "path": ".cache/audio/5_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_lucas_0.wav",
+    "sha256": "266bab64975aebcb2f8e734cb8f4721ef362fb506190c35bd7a31c4bd9e418a2"
+  },
+  {
+    "path": ".cache/audio/5_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_lucas_5.wav",
+    "sha256": "397491e668f23c05a1684db74406c370f07380eee094e30dc23c7522cff04f89"
+  },
+  {
+    "path": ".cache/audio/5_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_lucas_6.wav",
+    "sha256": "7f136edc52a7ac20afe95c611698bd53d2dfbb2e49a1ef8c59a34e6cd7e8f1dc"
+  },
+  {
+    "path": ".cache/audio/6_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_lucas_0.wav",
+    "sha256": "199e9f44ea8c5ce3556bb8bda78e831dccc383ee1acb4c5bc22531f67d79e968"
+  },
+  {
+    "path": ".cache/audio/6_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_lucas_5.wav",
+    "sha256": "1e8bc096e3b9c39a34b0c710f28dfa66d86af4056fa6c29dfdb061e7d3443bde"
+  },
+  {
+    "path": ".cache/audio/6_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_lucas_6.wav",
+    "sha256": "a993452bf872b988655bf04936f805e87321b7deec441d9b8e8402f1efa4920d"
+  },
+  {
+    "path": ".cache/audio/7_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_lucas_0.wav",
+    "sha256": "d3dbe5d28532c1ba3a47b099477a9e0bc9697017b1d1d4458091fe54be014ee1"
+  },
+  {
+    "path": ".cache/audio/7_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_lucas_5.wav",
+    "sha256": "8b38116a18776e8d40471829c5a914c0e61b337a9947529e3d8e7c46000a2e1b"
+  },
+  {
+    "path": ".cache/audio/7_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_lucas_6.wav",
+    "sha256": "965f5adc53d2887745d5f0d09277efb794123bc8e72ac3ad3af25ed34ca71542"
+  },
+  {
+    "path": ".cache/audio/8_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_lucas_0.wav",
+    "sha256": "154cfd07257bb8488778969d694b770d6648bdc793761335115ecd2a0239de53"
+  },
+  {
+    "path": ".cache/audio/8_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_lucas_5.wav",
+    "sha256": "a9d6f4ac7267cd3f496fa7a48cd61ab15b36b2aee69a51b95e6f616400c4331d"
+  },
+  {
+    "path": ".cache/audio/8_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_lucas_6.wav",
+    "sha256": "b7b0711fa62dbea05b6754dfae55b322fc6ca63daf46f630556ba722ab9bde3d"
+  },
+  {
+    "path": ".cache/audio/9_lucas_0.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_lucas_0.wav",
+    "sha256": "6508d1d8403fdaceb221968cd0090a422645493bc24a049dda75a04b6387495c"
+  },
+  {
+    "path": ".cache/audio/9_lucas_5.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_lucas_5.wav",
+    "sha256": "1673ebfb2ef8bd9ec9e77bd9aeeea3b41c96b1a1a7a5fb4e15c16379a1a93856"
+  },
+  {
+    "path": ".cache/audio/9_lucas_6.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_lucas_6.wav",
+    "sha256": "b8eb8a5b355aeaf091491c472bc02412db228b28f6471320eb05d9cc77d7aea2"
+  }
+]

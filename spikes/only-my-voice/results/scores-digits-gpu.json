@@ -1,0 +1,3514 @@
+{
+  "compute_units": "gpu",
+  "enrollment": [
+    {
+      "inference_ms": 552.80125,
+      "seconds": 5.023625,
+      "speaker": "jackson"
+    },
+    {
+      "inference_ms": 552.4245840000001,
+      "seconds": 3.59375,
+      "speaker": "nicolas"
+    },
+    {
+      "inference_ms": 435.597208,
+      "seconds": 3.307125,
+      "speaker": "theo"
+    },
+    {
+      "inference_ms": 288.193417,
+      "seconds": 3.418375,
+      "speaker": "yweweler"
+    },
+    {
+      "inference_ms": 527.3893750000001,
+      "seconds": 5.097375,
+      "speaker": "george"
+    },
+    {
+      "inference_ms": 1074.32,
+      "seconds": 5.5685,
+      "speaker": "lucas"
+    }
+  ],
+  "hardware": "Version 26.6.2 (Build 25G83)",
+  "model_load_seconds": 1.005088541,
+  "peak_rss_bytes": 113344512,
+  "system_cpu_seconds": 1.4841739999999999,
+  "user_cpu_seconds": 10.465392,
+  "trials": [
+    {
+      "inference_ms": 200.335875,
+      "offset_seconds": 0,
+      "scores": [
+        0.4588281810283661,
+        0.18128007650375366,
+        0.06658004969358444,
+        0.29190507531166077,
+        0.23151811957359314,
+        0.24567273259162903
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 83.77137499999999,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.4654705822467804,
+        0.15172705054283142,
+        0.03995288163423538,
+        0.10705598443746567,
+        0.20807237923145294,
+        0.3112916946411133
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 100.68495800000001,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.30886319279670715,
+        0.0898248553276062,
+        0.016981184482574463,
+        0.03606095165014267,
+        0.19160421192646027,
+        0.17713117599487305
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 121.080208,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.5681215524673462,
+        0.2602594494819641,
+        0.0017142276046797633,
+        0.09675837308168411,
+        0.04260029271245003,
+        0.1176878958940506
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 157.656083,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.36467960476875305,
+        0.08481715619564056,
+        0.016463469713926315,
+        0.049734003841876984,
+        0.20313827693462372,
+        0.16926434636116028
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 136.766041,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.4066646695137024,
+        0.14439377188682556,
+        0.048604004085063934,
+        0.16011831164360046,
+        0.24725563824176788,
+        0.36685505509376526
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 244.49041599999998,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.3856009244918823,
+        0.14336560666561127,
+        -0.05465763062238693,
+        0.1625676304101944,
+        0.24857628345489502,
+        0.21314282715320587
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 70.807334,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.4724249839782715,
+        0.055100589990615845,
+        0.04441512003540993,
+        0.13572514057159424,
+        0.21957065165042877,
+        0.29616624116897583
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 85.901708,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.40207287669181824,
+        0.11168926954269409,
+        0.09242235869169235,
+        0.19060584902763367,
+        0.22535495460033417,
+        0.33067455887794495
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 147.49375,
+      "offset_seconds": 3.15,
+      "scores": [
+        0.19244977831840515,
+        0.12382467836141586,
+        0.13379345834255219,
+        0.07303862273693085,
+        0.02658829279243946,
+        0.17079438269138336
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 127.81737500000001,
+      "offset_seconds": 3.5,
+      "scores": [
+        0.4621323049068451,
+        0.0669531375169754,
+        -0.20495805144309998,
+        0.10535261034965515,
+        0.158175989985466,
+        0.1657332479953766
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 136.618375,
+      "offset_seconds": 3.85,
+      "scores": [
+        0.3821556568145752,
+        0.0571005642414093,
+        -0.03644197806715965,
+        0.34034988284111023,
+        0.19253569841384888,
+        0.27494415640830994
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 177.862958,
+      "offset_seconds": 4.2,
+      "scores": [
+        0.3597613275051117,
+        0.1943081170320511,
+        0.038755327463150024,
+        0.10488906502723694,
+        0.0575210377573967,
+        0.13541606068611145
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 69.090667,
+      "offset_seconds": 4.55,
+      "scores": [
+        0.4058692157268524,
+        0.2284478396177292,
+        -0.0003008709172718227,
+        0.1005745381116867,
+        0.3311983644962311,
+        0.2077070027589798
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 397.71495899999996,
+      "offset_seconds": 0,
+      "scores": [
+        0.6778023838996887,
+        0.07079187780618668,
+        0.0035973982885479927,
+        0.20880043506622314,
+        0.25400277972221375,
+        0.24126578867435455
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 83.20700000000001,
+      "offset_seconds": 1,
+      "scores": [
+        0.6887865662574768,
+        0.246679425239563,
+        0.039391305297613144,
+        0.13110996782779694,
+        0.24577023088932037,
+        0.21867328882217407
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 351.582667,
+      "offset_seconds": 2,
+      "scores": [
+        0.7450190186500549,
+        0.22415310144424438,
+        0.042816825211048126,
+        0.2371281534433365,
+        0.28681498765945435,
+        0.37916287779808044
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 297.948041,
+      "offset_seconds": 3,
+      "scores": [
+        0.5642373561859131,
+        0.15795454382896423,
+        -0.07395415753126144,
+        0.14571557939052582,
+        0.1256272792816162,
+        0.20707759261131287
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 145.48054199999999,
+      "offset_seconds": 4,
+      "scores": [
+        0.6731312870979309,
+        0.25748488306999207,
+        -0.08305241912603378,
+        0.22491289675235748,
+        0.23117190599441528,
+        0.19712623953819275
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 408.1105,
+      "offset_seconds": 0,
+      "scores": [
+        0.7815805673599243,
+        0.16706255078315735,
+        -0.0005910475738346577,
+        0.15495111048221588,
+        0.28437215089797974,
+        0.2566220760345459
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 256.462709,
+      "offset_seconds": 2,
+      "scores": [
+        0.7967337369918823,
+        0.21694828569889069,
+        0.002417381852865219,
+        0.204173743724823,
+        0.2475789338350296,
+        0.35402798652648926
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 343.44841599999995,
+      "offset_seconds": 0,
+      "scores": [
+        0.855565071105957,
+        0.21945005655288696,
+        0.026668719947338104,
+        0.1852390319108963,
+        0.3232804536819458,
+        0.34882864356040955
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "calibration",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 212.071125,
+      "offset_seconds": 0,
+      "scores": [
+        0.20856504142284393,
+        0.4566192924976349,
+        0.10947107523679733,
+        0.14063714444637299,
+        0.16340987384319305,
+        0.20738647878170013
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 96.83729100000001,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.30226224660873413,
+        0.3459292948246002,
+        -0.11927355825901031,
+        0.05299541354179382,
+        0.06882850080728531,
+        0.18123206496238708
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 121.192166,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.1695835292339325,
+        0.43894052505493164,
+        0.06408942490816116,
+        0.04139968007802963,
+        0.16139142215251923,
+        0.028398480266332626
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 214.697208,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.17039455473423004,
+        0.4176323115825653,
+        0.13928107917308807,
+        -0.0644119456410408,
+        0.20202717185020447,
+        0.13196370005607605
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 168.314666,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.09192990511655807,
+        0.25081560015678406,
+        -0.025623386725783348,
+        0.16813653707504272,
+        0.16441763937473297,
+        0.11492788791656494
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 188.25070799999997,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.19652795791625977,
+        0.4074612855911255,
+        0.07998104393482208,
+        0.10066431015729904,
+        0.1217389702796936,
+        0.21535858511924744
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 171.65949999999998,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.08701977878808975,
+        0.2569773495197296,
+        0.02668069116771221,
+        0.2050592303276062,
+        0.1616750806570053,
+        0.02170495316386223
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 139.57175,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.2367737889289856,
+        0.40300774574279785,
+        0.1053272932767868,
+        0.28952762484550476,
+        0.16880668699741364,
+        0.20434193313121796
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 250.10833300000002,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.2220960408449173,
+        0.34636595845222473,
+        0.08009079098701477,
+        0.011408650316298008,
+        0.16674427688121796,
+        0.3547176718711853
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 120.27912500000001,
+      "offset_seconds": 3.15,
+      "scores": [
+        0.1428247094154358,
+        0.3211897909641266,
+        -0.06091134622693062,
+        0.19601909816265106,
+        0.19660212099552155,
+        0.19438757002353668
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 278.17087499999997,
+      "offset_seconds": 0,
+      "scores": [
+        0.26181820034980774,
+        0.6501723527908325,
+        0.004240113310515881,
+        0.1592017561197281,
+        0.17823921144008636,
+        0.16463911533355713
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 113.439709,
+      "offset_seconds": 1,
+      "scores": [
+        0.20092308521270752,
+        0.633526623249054,
+        0.0883910059928894,
+        0.10077977925539017,
+        0.18635259568691254,
+        0.24468718469142914
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 203.320708,
+      "offset_seconds": 2,
+      "scores": [
+        0.25705277919769287,
+        0.5675631761550903,
+        0.11590023338794708,
+        0.25652840733528137,
+        0.21461808681488037,
+        0.12196071445941925
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 388.526083,
+      "offset_seconds": 0,
+      "scores": [
+        0.29070696234703064,
+        0.8158966898918152,
+        0.06638640910387039,
+        0.18237057328224182,
+        0.21936093270778656,
+        0.28019723296165466
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 344.401084,
+      "offset_seconds": 0,
+      "scores": [
+        0.2988640069961548,
+        0.850991427898407,
+        0.07649542391300201,
+        0.19515742361545563,
+        0.23033003509044647,
+        0.2602136433124542
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "calibration",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 190.32850000000002,
+      "offset_seconds": 0,
+      "scores": [
+        0.18170781433582306,
+        0.24196143448352814,
+        0.43344590067863464,
+        0.01889340952038765,
+        0.047108784317970276,
+        0.22734883427619934
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 131.824583,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.035056669265031815,
+        0.12333093583583832,
+        0.644808828830719,
+        0.324358195066452,
+        0.05400269478559494,
+        0.2266862392425537
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 125.08704200000001,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.08316804468631744,
+        0.03380294889211655,
+        0.16628102958202362,
+        0.2305901199579239,
+        -0.07853125035762787,
+        0.12655109167099
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 160.496833,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.11367374658584595,
+        0.06880824267864227,
+        0.2457018494606018,
+        0.08838913589715958,
+        0.08413122594356537,
+        0.07598280161619186
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 67.84400000000001,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.08020146191120148,
+        0.1935066133737564,
+        0.40229588747024536,
+        0.24372263252735138,
+        0.07896976172924042,
+        0.23024122416973114
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 150.11025,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.089358389377594,
+        0.28469714522361755,
+        0.3418233394622803,
+        0.002890076022595167,
+        0.25505194067955017,
+        0.28174659609794617
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 71.58475,
+      "offset_seconds": 2.1,
+      "scores": [
+        -0.03691895306110382,
+        0.02275705523788929,
+        0.4332555830478668,
+        0.24266891181468964,
+        0.015707898885011673,
+        0.04905065894126892
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 137.2555,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.0984058529138565,
+        0.04210469499230385,
+        0.4995371699333191,
+        0.12833085656166077,
+        -0.0022046142257750034,
+        0.18779949843883514
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 146.921583,
+      "offset_seconds": 0,
+      "scores": [
+        0.10836388915777206,
+        0.12366045266389847,
+        0.6169572472572327,
+        0.34541475772857666,
+        0.08570706844329834,
+        0.23967571556568146
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 164.72262500000002,
+      "offset_seconds": 1,
+      "scores": [
+        0.17564602196216583,
+        0.20155860483646393,
+        0.5799848437309265,
+        0.23172880709171295,
+        0.020690012723207474,
+        0.22804561257362366
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 200.917,
+      "offset_seconds": 2,
+      "scores": [
+        0.037863705307245255,
+        0.07249175012111664,
+        0.7841585874557495,
+        0.04883142560720444,
+        0.008112277835607529,
+        0.08503016829490662
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 139.531666,
+      "offset_seconds": 0,
+      "scores": [
+        0.1731807440519333,
+        0.17707419395446777,
+        0.7256028652191162,
+        0.3630257844924927,
+        0.06631236523389816,
+        0.31440627574920654
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 344.878666,
+      "offset_seconds": 0,
+      "scores": [
+        0.15954197943210602,
+        0.14370667934417725,
+        0.8409411907196045,
+        0.24946661293506622,
+        0.06969030946493149,
+        0.29692116379737854
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "calibration",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 110.38241599999999,
+      "offset_seconds": 0,
+      "scores": [
+        0.09992669522762299,
+        -0.02464301884174347,
+        0.221507728099823,
+        0.36875832080841064,
+        0.035480204969644547,
+        0.20979097485542297
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 75.34150000000001,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.10972633212804794,
+        0.2239588350057602,
+        0.0912952646613121,
+        0.5764204263687134,
+        0.07987504452466965,
+        0.23136304318904877
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 219.907375,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.24644601345062256,
+        0.12874092161655426,
+        0.0310098584741354,
+        0.4296192526817322,
+        0.2285880446434021,
+        0.30281880497932434
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 81.19224999999999,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.14856243133544922,
+        0.11624285578727722,
+        0.17603230476379395,
+        0.34240835905075073,
+        0.18203774094581604,
+        0.3683094382286072
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 100.01637500000001,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.1750788688659668,
+        0.14277097582817078,
+        0.033790573477745056,
+        0.45508724451065063,
+        0.09774364531040192,
+        0.33197081089019775
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 125.665167,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.016890179365873337,
+        -0.010610988363623619,
+        0.11380574107170105,
+        0.4369127154350281,
+        0.01626194827258587,
+        0.26112717390060425
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 149.1535,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.08429882675409317,
+        0.10270720720291138,
+        0.18662624061107635,
+        0.4742389917373657,
+        0.0744275152683258,
+        0.22974999248981476
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 125.809042,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.2404320240020752,
+        0.048371169716119766,
+        0.011053856462240219,
+        0.43962204456329346,
+        0.16291522979736328,
+        0.25940433144569397
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 163.2515,
+      "offset_seconds": 0,
+      "scores": [
+        0.2421284317970276,
+        0.12692321836948395,
+        0.15180592238903046,
+        0.6570767760276794,
+        0.2078346461057663,
+        0.4326293170452118
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 132.207875,
+      "offset_seconds": 1,
+      "scores": [
+        0.16673241555690765,
+        0.1431254744529724,
+        0.11636252701282501,
+        0.4551398754119873,
+        0.05957037955522537,
+        0.38148486614227295
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 125.014125,
+      "offset_seconds": 2,
+      "scores": [
+        0.13767889142036438,
+        0.1737271398305893,
+        0.12963613867759705,
+        0.7438876032829285,
+        0.20211419463157654,
+        0.4542361795902252
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 165.577,
+      "offset_seconds": 0,
+      "scores": [
+        0.2322118580341339,
+        0.13341212272644043,
+        0.20009922981262207,
+        0.7951761484146118,
+        0.15865373611450195,
+        0.4534435570240021
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 414.494875,
+      "offset_seconds": 0,
+      "scores": [
+        0.22346794605255127,
+        0.15803977847099304,
+        0.2153337597846985,
+        0.895577073097229,
+        0.16146010160446167,
+        0.47613978385925293
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "calibration",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 210.129917,
+      "offset_seconds": 0,
+      "scores": [
+        0.20728838443756104,
+        0.1437174528837204,
+        0.153781458735466,
+        0.1492939442396164,
+        0.5425025820732117,
+        0.1495480239391327
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 53.238459,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.20291034877300262,
+        0.17859645187854767,
+        -0.02855009399354458,
+        0.17968134582042694,
+        0.6199521422386169,
+        0.1174747571349144
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 126.37041700000002,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.13766472041606903,
+        -0.055575937032699585,
+        -0.01686808094382286,
+        0.09710992127656937,
+        0.5467789173126221,
+        0.06015615165233612
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 141.950042,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.1323608160018921,
+        0.1379571110010147,
+        -0.020004868507385254,
+        0.11733491718769073,
+        0.6352132558822632,
+        0.14546416699886322
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 152.708083,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.2200981229543686,
+        0.11674343794584274,
+        0.05522504448890686,
+        0.15146329998970032,
+        0.6054736375808716,
+        0.17889545857906342
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 107.079709,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.1246463805437088,
+        0.17425140738487244,
+        0.0803534984588623,
+        0.29024311900138855,
+        0.5756032466888428,
+        0.28793686628341675
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 53.922083,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.18803517520427704,
+        0.09090535342693329,
+        0.004004013724625111,
+        0.0940057709813118,
+        0.5576868057250977,
+        0.1981574147939682
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 130.690167,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.10089079290628433,
+        0.12532132863998413,
+        0.06849819421768188,
+        0.14788874983787537,
+        0.6470742225646973,
+        0.1317264437675476
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 153.57062499999998,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.21219180524349213,
+        0.10828454792499542,
+        0.08291435241699219,
+        0.2715897560119629,
+        0.48733484745025635,
+        0.2919529676437378
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 35.309417,
+      "offset_seconds": 3.15,
+      "scores": [
+        0.1757226437330246,
+        0.14352098107337952,
+        0.11167686432600021,
+        0.10281848907470703,
+        0.32847097516059875,
+        0.04205689579248428
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 93.50829200000001,
+      "offset_seconds": 3.5,
+      "scores": [
+        0.25740471482276917,
+        0.1793571263551712,
+        0.039837345480918884,
+        0.07282484322786331,
+        0.5253668427467346,
+        0.1556331217288971
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 70.164083,
+      "offset_seconds": 3.85,
+      "scores": [
+        0.33621785044670105,
+        0.17286744713783264,
+        -0.08994711935520172,
+        0.23894649744033813,
+        0.67516028881073,
+        0.18316717445850372
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 156.192,
+      "offset_seconds": 4.2,
+      "scores": [
+        0.1242954432964325,
+        0.07008321583271027,
+        0.016218239441514015,
+        0.15066654980182648,
+        0.5298770666122437,
+        0.03698817640542984
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 126.399875,
+      "offset_seconds": 4.55,
+      "scores": [
+        0.17259842157363892,
+        0.26865777373313904,
+        -0.03357892110943794,
+        0.08017507195472717,
+        0.5367357730865479,
+        0.10756589472293854
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 310.926458,
+      "offset_seconds": 0,
+      "scores": [
+        0.24223066866397858,
+        0.16989009082317352,
+        -0.023732177913188934,
+        0.16534775495529175,
+        0.7749635577201843,
+        0.12883210182189941
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 242.235292,
+      "offset_seconds": 1,
+      "scores": [
+        0.20409488677978516,
+        0.08133040368556976,
+        0.08332952857017517,
+        0.1814955174922943,
+        0.8209016919136047,
+        0.23387697339057922
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 90.00874999999999,
+      "offset_seconds": 2,
+      "scores": [
+        0.114762082695961,
+        0.2227865606546402,
+        0.04790402948856354,
+        0.1787189245223999,
+        0.7706510424613953,
+        0.2667918801307678
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 119.555916,
+      "offset_seconds": 3,
+      "scores": [
+        0.2708613872528076,
+        0.15787655115127563,
+        0.019187454134225845,
+        0.13275165855884552,
+        0.7206501960754395,
+        0.11780703067779541
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 152.438208,
+      "offset_seconds": 4,
+      "scores": [
+        0.15467484295368195,
+        0.2256012111902237,
+        -0.021909786388278008,
+        0.1860620677471161,
+        0.7267422676086426,
+        0.14483657479286194
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 107.17450000000001,
+      "offset_seconds": 0,
+      "scores": [
+        0.2815307080745697,
+        0.17504972219467163,
+        0.026230905205011368,
+        0.24004030227661133,
+        0.8918558359146118,
+        0.2148469239473343
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 99.82079200000001,
+      "offset_seconds": 2,
+      "scores": [
+        0.284898579120636,
+        0.23826155066490173,
+        0.036454878747463226,
+        0.18454265594482422,
+        0.8663246631622314,
+        0.26963886618614197
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 161.59141699999998,
+      "offset_seconds": 0,
+      "scores": [
+        0.2509519159793854,
+        0.20045968890190125,
+        0.013077106326818466,
+        0.2387697994709015,
+        0.9149993062019348,
+        0.25070899724960327
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "calibration",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 58.151165999999996,
+      "offset_seconds": 0,
+      "scores": [
+        0.33807092905044556,
+        0.23440146446228027,
+        0.13109742105007172,
+        0.4028106927871704,
+        0.30950406193733215,
+        0.4962634742259979
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 46.439583,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.26630210876464844,
+        0.27723073959350586,
+        0.07181054353713989,
+        0.11296054720878601,
+        0.15216559171676636,
+        0.24528849124908447
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 138.473625,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.2982349097728729,
+        0.11506528407335281,
+        0.08177490532398224,
+        0.4369596838951111,
+        0.17249315977096558,
+        0.6659901142120361
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 128.880958,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.1490594446659088,
+        0.12577249109745026,
+        0.3089558482170105,
+        0.3103145956993103,
+        0.17149098217487335,
+        0.5545701384544373
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 127.869709,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.17976152896881104,
+        0.13155603408813477,
+        0.12826146185398102,
+        0.14623770117759705,
+        0.11881915479898453,
+        0.3162198066711426
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 96.78937499999999,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.26357588171958923,
+        0.2049683779478073,
+        0.0050787064246833324,
+        0.20052357017993927,
+        0.23772047460079193,
+        0.29086530208587646
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 52.610875,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.24811086058616638,
+        0.05433551222085953,
+        0.23532788455486298,
+        0.3640613257884979,
+        0.21924826502799988,
+        0.43849441409111023
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 41.197875,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.18473677337169647,
+        0.09604515135288239,
+        0.027137042954564095,
+        0.30993250012397766,
+        0.05901167169213295,
+        0.40976130962371826
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 153.30741700000002,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.2313077598810196,
+        0.21167553961277008,
+        0.03406333923339844,
+        0.28054919838905334,
+        0.18111765384674072,
+        0.48232030868530273
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 154.57716599999998,
+      "offset_seconds": 3.15,
+      "scores": [
+        0.3300340473651886,
+        0.18449467420578003,
+        0.12032609432935715,
+        0.38695666193962097,
+        0.29255595803260803,
+        0.5345984697341919
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 98.897292,
+      "offset_seconds": 3.5,
+      "scores": [
+        0.14489313960075378,
+        0.09234527498483658,
+        -0.017264608293771744,
+        0.19987472891807556,
+        0.05717214196920395,
+        0.23672987520694733
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 44.455542,
+      "offset_seconds": 3.85,
+      "scores": [
+        0.07451287657022476,
+        0.0754522904753685,
+        0.2440975308418274,
+        0.3149529695510864,
+        0.12976282835006714,
+        0.516781210899353
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 101.13270800000001,
+      "offset_seconds": 4.2,
+      "scores": [
+        0.23165610432624817,
+        0.10591322183609009,
+        -0.006601423025131226,
+        0.14481239020824432,
+        0.326478511095047,
+        0.46232086420059204
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 108.139042,
+      "offset_seconds": 4.55,
+      "scores": [
+        0.1796235591173172,
+        0.04615027457475662,
+        0.23238863050937653,
+        0.31068336963653564,
+        0.11880085617303848,
+        0.5309947729110718
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 63.079417,
+      "offset_seconds": 0,
+      "scores": [
+        0.4347721040248871,
+        0.21308107674121857,
+        0.15181578695774078,
+        0.3955129086971283,
+        0.28309357166290283,
+        0.8108921051025391
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 206.807166,
+      "offset_seconds": 1,
+      "scores": [
+        0.25484395027160645,
+        0.16389413177967072,
+        0.3308321535587311,
+        0.4049602150917053,
+        0.24524953961372375,
+        0.7309480309486389
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 323.030875,
+      "offset_seconds": 2,
+      "scores": [
+        0.3301798105239868,
+        0.22141669690608978,
+        0.11813614517450333,
+        0.42230328917503357,
+        0.24212290346622467,
+        0.6736268997192383
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 177.664833,
+      "offset_seconds": 3,
+      "scores": [
+        0.3201504349708557,
+        0.19710157811641693,
+        0.09702956676483154,
+        0.4158472418785095,
+        0.1945241242647171,
+        0.6418216824531555
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 77.083458,
+      "offset_seconds": 4,
+      "scores": [
+        0.2275739312171936,
+        0.11852678656578064,
+        0.16436566412448883,
+        0.35674649477005005,
+        0.2239091992378235,
+        0.6710215210914612
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 234.72424999999998,
+      "offset_seconds": 0,
+      "scores": [
+        0.3425445556640625,
+        0.19639581441879272,
+        0.28767767548561096,
+        0.4192768931388855,
+        0.2887536287307739,
+        0.8520244359970093
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 127.694333,
+      "offset_seconds": 2,
+      "scores": [
+        0.36985886096954346,
+        0.21131253242492676,
+        0.15587355196475983,
+        0.45071539282798767,
+        0.18862982094287872,
+        0.7458996176719666
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 304.096167,
+      "offset_seconds": 0,
+      "scores": [
+        0.3391130566596985,
+        0.2118990421295166,
+        0.2553263008594513,
+        0.4625755846500397,
+        0.285503625869751,
+        0.8711069226264954
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "calibration",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 101.42545899999999,
+      "offset_seconds": 0,
+      "scores": [
+        0.37984439730644226,
+        0.05885596200823784,
+        0.08073494583368301,
+        0.16131940484046936,
+        0.2382512241601944,
+        0.22581282258033752
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 44.006249999999994,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.42921432852745056,
+        0.30133628845214844,
+        -0.006149751599878073,
+        0.09114322066307068,
+        0.27425453066825867,
+        0.23702317476272583
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 133.443083,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.24116049706935883,
+        0.1582040637731552,
+        0.15009328722953796,
+        -0.005688628647476435,
+        0.27564236521720886,
+        0.12095018476247787
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 90.119625,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.3475891947746277,
+        0.22565226256847382,
+        0.12299415469169617,
+        0.18723367154598236,
+        0.12743626534938812,
+        0.18806219100952148
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 56.900542,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.320346862077713,
+        0.13039915263652802,
+        0.010406874120235443,
+        -6.078369915485382e-05,
+        0.10804349929094315,
+        0.13002845644950867
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 124.276708,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.39065849781036377,
+        0.09677256643772125,
+        0.0001783822663128376,
+        0.133243128657341,
+        0.19592079520225525,
+        0.21725371479988098
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 74.278125,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.22297008335590363,
+        0.09202950447797775,
+        0.06983573734760284,
+        0.05835554376244545,
+        0.12593059241771698,
+        0.18198128044605255
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 86.382959,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.36617761850357056,
+        0.1818770468235016,
+        0.12527647614479065,
+        0.08777136355638504,
+        0.15039068460464478,
+        0.21220584213733673
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 43.630167,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.35947465896606445,
+        0.15273569524288177,
+        0.09257057309150696,
+        0.01847689598798752,
+        0.06877988576889038,
+        0.0806545689702034
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 107.53254199999999,
+      "offset_seconds": 3.15,
+      "scores": [
+        0.3925534188747406,
+        0.07904267311096191,
+        0.08706124126911163,
+        0.15749558806419373,
+        0.17193403840065002,
+        0.2611624598503113
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 127.02125000000001,
+      "offset_seconds": 3.5,
+      "scores": [
+        0.22781871259212494,
+        0.16623730957508087,
+        0.2320384383201599,
+        0.1081160455942154,
+        0.20325015485286713,
+        0.22357523441314697
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 77.266334,
+      "offset_seconds": 3.85,
+      "scores": [
+        0.29926982522010803,
+        0.1505373865365982,
+        0.035182755440473557,
+        0.05251622200012207,
+        0.23557302355766296,
+        0.19772307574748993
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 48.753541999999996,
+      "offset_seconds": 4.2,
+      "scores": [
+        0.30184125900268555,
+        0.1267583817243576,
+        0.013376882299780846,
+        0.11490512639284134,
+        0.20275463163852692,
+        0.1613699048757553
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 159.90695799999997,
+      "offset_seconds": 4.55,
+      "scores": [
+        0.3779771327972412,
+        0.2151060700416565,
+        0.062442194670438766,
+        -0.047201137989759445,
+        0.25048142671585083,
+        0.0768594741821289
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 134.17162499999998,
+      "offset_seconds": 0,
+      "scores": [
+        0.6274899840354919,
+        0.13187214732170105,
+        0.06116223707795143,
+        0.13464513421058655,
+        0.2863162159919739,
+        0.2188635915517807
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 73.284208,
+      "offset_seconds": 1,
+      "scores": [
+        0.5337164402008057,
+        0.22064705193042755,
+        0.050704266875982285,
+        0.13803817331790924,
+        0.15272156894207,
+        0.17886477708816528
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 97.282542,
+      "offset_seconds": 2,
+      "scores": [
+        0.38745877146720886,
+        0.24338600039482117,
+        0.05816347151994705,
+        0.04085772484540939,
+        0.18249958753585815,
+        0.076235830783844
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 91.693792,
+      "offset_seconds": 3,
+      "scores": [
+        0.5227566957473755,
+        0.07341013848781586,
+        0.11010195314884186,
+        -0.0015900232829153538,
+        0.12663385272026062,
+        0.24285177886486053
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 141.72137500000002,
+      "offset_seconds": 4,
+      "scores": [
+        0.35866162180900574,
+        0.2950931191444397,
+        0.16705648601055145,
+        0.030082525685429573,
+        0.21874229609966278,
+        0.2130594402551651
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 217.27966700000002,
+      "offset_seconds": 0,
+      "scores": [
+        0.7119544744491577,
+        0.22027263045310974,
+        0.06887666881084442,
+        0.1430138349533081,
+        0.3098158836364746,
+        0.32749661803245544
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 182.119458,
+      "offset_seconds": 2,
+      "scores": [
+        0.6681716442108154,
+        0.22783954441547394,
+        0.15368975698947906,
+        0.08469384163618088,
+        0.20466631650924683,
+        0.24643345177173615
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 315.426875,
+      "offset_seconds": 0,
+      "scores": [
+        0.696710467338562,
+        0.2520674169063568,
+        0.058201659470796585,
+        0.13829602301120758,
+        0.27734556794166565,
+        0.24817270040512085
+      ],
+      "speaker": "jackson",
+      "speaker_index": 0,
+      "split": "test",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 131.34004099999999,
+      "offset_seconds": 0,
+      "scores": [
+        0.36779409646987915,
+        0.3492884039878845,
+        0.09325537085533142,
+        0.13981454074382782,
+        0.28077149391174316,
+        0.2482568770647049
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 41.39,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.14473684132099152,
+        0.3614009618759155,
+        -0.04680630564689636,
+        0.15140733122825623,
+        0.23523759841918945,
+        0.15637058019638062
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 40.167125,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.15515866875648499,
+        0.32100969552993774,
+        0.13337218761444092,
+        -0.017445892095565796,
+        0.3082140386104584,
+        0.07686138153076172
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 62.50204099999999,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.09330523014068604,
+        0.34257519245147705,
+        0.15168416500091553,
+        0.03998110070824623,
+        0.1667436957359314,
+        0.0408826544880867
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 115.460958,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.08872009813785553,
+        0.3750603199005127,
+        0.1501353234052658,
+        0.12563149631023407,
+        0.08845812827348709,
+        0.15189222991466522
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 86.023334,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.19179542362689972,
+        0.37349918484687805,
+        0.10240683704614639,
+        0.2065112590789795,
+        0.11049418896436691,
+        0.24684534966945648
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 63.201083000000004,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.10119209438562393,
+        0.3518067002296448,
+        0.23225153982639313,
+        0.3066983222961426,
+        0.22978539764881134,
+        0.19004188477993011
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 171.06058399999998,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.16267670691013336,
+        0.3194548785686493,
+        0.14731372892856598,
+        0.18430131673812866,
+        0.08358444273471832,
+        0.10474039614200592
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 84.68408299999999,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.12759438157081604,
+        0.43078839778900146,
+        0.10745105892419815,
+        0.13601888716220856,
+        0.063347727060318,
+        0.12856583297252655
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 136.16704199999998,
+      "offset_seconds": 0,
+      "scores": [
+        0.3432331085205078,
+        0.6787335276603699,
+        0.02714834362268448,
+        0.21390081942081451,
+        0.29345589876174927,
+        0.21228432655334473
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 132.223,
+      "offset_seconds": 1,
+      "scores": [
+        0.30907320976257324,
+        0.676437258720398,
+        0.1377890706062317,
+        0.1262703537940979,
+        0.16346678137779236,
+        0.1749195009469986
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 148.38199999999998,
+      "offset_seconds": 2,
+      "scores": [
+        0.24224111437797546,
+        0.5171168446540833,
+        0.2707361578941345,
+        0.3038274049758911,
+        0.1884940266609192,
+        0.28769269585609436
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 162.781084,
+      "offset_seconds": 0,
+      "scores": [
+        0.34297940135002136,
+        0.7968349456787109,
+        0.12567442655563354,
+        0.16363348066806793,
+        0.2608204185962677,
+        0.20848092436790466
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 240.376042,
+      "offset_seconds": 0,
+      "scores": [
+        0.35264909267425537,
+        0.8280132412910461,
+        0.22779862582683563,
+        0.2371882200241089,
+        0.2519441246986389,
+        0.28333932161331177
+      ],
+      "speaker": "nicolas",
+      "speaker_index": 1,
+      "split": "test",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 130.731125,
+      "offset_seconds": 0,
+      "scores": [
+        0.12499456107616425,
+        0.049596156924963,
+        0.3284289836883545,
+        0.28933238983154297,
+        0.041039224714040756,
+        0.19972704350948334
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 39.101625,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.1575009822845459,
+        0.008446606807410717,
+        0.5057329535484314,
+        0.25224047899246216,
+        0.11967598646879196,
+        0.26365429162979126
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 162.85258299999998,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.04057811200618744,
+        0.11940425634384155,
+        0.20260362327098846,
+        0.20914053916931152,
+        0.09849375486373901,
+        0.21223443746566772
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 86.247083,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.05580636486411095,
+        -0.03477397561073303,
+        0.3526252508163452,
+        0.11514262855052948,
+        -0.1228170394897461,
+        0.06451275199651718
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 94.494333,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.15946832299232483,
+        0.09400468319654465,
+        0.5257701277732849,
+        0.18975260853767395,
+        0.06737907230854034,
+        0.24742326140403748
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 31.111834,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.14320999383926392,
+        0.21401341259479523,
+        0.5068992376327515,
+        0.3332314193248749,
+        0.22398348152637482,
+        0.29952719807624817
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 142.95137499999998,
+      "offset_seconds": 2.1,
+      "scores": [
+        -0.01846935600042343,
+        0.060068417340517044,
+        0.4365173876285553,
+        0.38009512424468994,
+        0.14034226536750793,
+        0.1705469936132431
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 196.422875,
+      "offset_seconds": 2.45,
+      "scores": [
+        -0.17018286883831024,
+        0.07315599173307419,
+        0.47664961218833923,
+        0.13144972920417786,
+        0.0778086930513382,
+        0.030331913381814957
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 115.635583,
+      "offset_seconds": 2.8,
+      "scores": [
+        -0.004849924240261316,
+        0.07788246870040894,
+        0.4984028935432434,
+        -0.024470916017889977,
+        0.15325713157653809,
+        0.15218062698841095
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 183.415209,
+      "offset_seconds": 0,
+      "scores": [
+        0.11723558604717255,
+        -0.020914530381560326,
+        0.5710710883140564,
+        0.3767847716808319,
+        0.16404296457767487,
+        0.2902447581291199
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 65.614125,
+      "offset_seconds": 1,
+      "scores": [
+        0.11173713952302933,
+        0.0015694003086537123,
+        0.6838224530220032,
+        0.2549406588077545,
+        -0.005894889589399099,
+        0.16598042845726013
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 94.591917,
+      "offset_seconds": 2,
+      "scores": [
+        0.04350913316011429,
+        0.17785213887691498,
+        0.7422197461128235,
+        0.2449551820755005,
+        0.07443447411060333,
+        0.2147340178489685
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 76.30575,
+      "offset_seconds": 0,
+      "scores": [
+        0.16002757847309113,
+        0.03616556525230408,
+        0.7137860059738159,
+        0.36962759494781494,
+        0.10724690556526184,
+        0.3149183690547943
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 235.703125,
+      "offset_seconds": 0,
+      "scores": [
+        0.15488581359386444,
+        0.07809258252382278,
+        0.7980015873908997,
+        0.3611906170845032,
+        0.09839919209480286,
+        0.32489117980003357
+      ],
+      "speaker": "theo",
+      "speaker_index": 2,
+      "split": "test",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 160.576875,
+      "offset_seconds": 0,
+      "scores": [
+        0.11077971011400223,
+        0.09513396769762039,
+        0.10369627922773361,
+        0.38416334986686707,
+        0.03927704691886902,
+        0.21771501004695892
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 103.786667,
+      "offset_seconds": 0.35,
+      "scores": [
+        -0.013356918469071388,
+        0.07518088072538376,
+        0.23861925303936005,
+        0.48411232233047485,
+        0.02040088176727295,
+        0.24297760426998138
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 45.328125,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.12146549671888351,
+        0.11575935781002045,
+        0.16601476073265076,
+        0.5615193843841553,
+        0.22639091312885284,
+        0.28758639097213745
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 95.176834,
+      "offset_seconds": 1.05,
+      "scores": [
+        -0.011713945306837559,
+        0.09125833958387375,
+        0.1501433551311493,
+        0.2779462933540344,
+        0.16285844147205353,
+        0.2231607437133789
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 50.997082999999996,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.18982763588428497,
+        0.16523727774620056,
+        0.09390769898891449,
+        0.5316019654273987,
+        0.005947134457528591,
+        0.3730272948741913
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 130.197584,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.037335194647312164,
+        0.176969513297081,
+        0.11042246967554092,
+        0.455472856760025,
+        0.19568073749542236,
+        0.32498061656951904
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 65.137916,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.07462683320045471,
+        -0.019613727927207947,
+        0.09898629784584045,
+        0.48339590430259705,
+        0.12757617235183716,
+        0.1320885866880417
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 64.716459,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.05342496931552887,
+        0.11728759109973907,
+        0.11173158138990402,
+        0.5055961608886719,
+        -0.004382247105240822,
+        0.13153991103172302
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 135.4505,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.17522823810577393,
+        -0.015702130272984505,
+        0.02687462419271469,
+        0.42997556924819946,
+        0.13839174807071686,
+        0.17387579381465912
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 47.039792,
+      "offset_seconds": 3.15,
+      "scores": [
+        -0.03176320344209671,
+        0.0966930016875267,
+        0.16697636246681213,
+        0.590703010559082,
+        0.11194537580013275,
+        0.18246375024318695
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 205.919917,
+      "offset_seconds": 0,
+      "scores": [
+        0.037206754088401794,
+        0.15918584167957306,
+        0.15759874880313873,
+        0.7500340938568115,
+        0.18825475871562958,
+        0.4552086591720581
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 222.93170800000001,
+      "offset_seconds": 1,
+      "scores": [
+        0.19004487991333008,
+        0.24100114405155182,
+        0.21862103044986725,
+        0.6197525858879089,
+        0.1691320240497589,
+        0.5392449498176575
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 76.795458,
+      "offset_seconds": 2,
+      "scores": [
+        0.05005740001797676,
+        0.09516756236553192,
+        0.08029395341873169,
+        0.7653061747550964,
+        0.12150143831968307,
+        0.27185314893722534
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 190.19245800000002,
+      "offset_seconds": 0,
+      "scores": [
+        0.17894917726516724,
+        0.26047518849372864,
+        0.18394511938095093,
+        0.7319228053092957,
+        0.2237989753484726,
+        0.5336803793907166
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 131.098834,
+      "offset_seconds": 0,
+      "scores": [
+        0.18860095739364624,
+        0.25285568833351135,
+        0.14678753912448883,
+        0.8135117292404175,
+        0.23505420982837677,
+        0.4872482120990753
+      ],
+      "speaker": "yweweler",
+      "speaker_index": 3,
+      "split": "test",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 85.968417,
+      "offset_seconds": 0,
+      "scores": [
+        0.16483193635940552,
+        0.1084783524274826,
+        0.15240532159805298,
+        0.1574549525976181,
+        0.3967245817184448,
+        0.16694602370262146
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 51.7385,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.19832491874694824,
+        0.11618588119745255,
+        0.1098768338561058,
+        0.1718013882637024,
+        0.4052066504955292,
+        0.12623947858810425
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 55.644417000000004,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.17154328525066376,
+        0.044005196541547775,
+        0.014300746843218803,
+        0.20436431467533112,
+        0.5523499250411987,
+        0.16421249508857727
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 59.299917,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.12762358784675598,
+        0.06786631792783737,
+        -0.08746837079524994,
+        0.24137666821479797,
+        0.49995699524879456,
+        0.1546468585729599
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 44.674083,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.2043718695640564,
+        0.10723034292459488,
+        0.07971689850091934,
+        0.14652062952518463,
+        0.5743247270584106,
+        0.15720301866531372
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 42.4895,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.1249660924077034,
+        0.15736302733421326,
+        -0.06296869367361069,
+        0.11830971390008926,
+        0.5189008712768555,
+        0.1533575803041458
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 113.23975,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.1285424828529358,
+        0.19509302079677582,
+        0.1335955113172531,
+        0.1440933346748352,
+        0.5105308890342712,
+        0.2137688547372818
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 59.155583,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.13967888057231903,
+        0.027281492948532104,
+        0.0893809124827385,
+        0.13517636060714722,
+        0.32851263880729675,
+        0.2482300102710724
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 111.03108300000001,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.21931125223636627,
+        0.22136357426643372,
+        0.02318577654659748,
+        0.11189460754394531,
+        0.5834572911262512,
+        0.13874655961990356
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 48.681542,
+      "offset_seconds": 3.15,
+      "scores": [
+        0.19042491912841797,
+        0.12520214915275574,
+        0.01908111572265625,
+        0.03470725938677788,
+        0.5144410133361816,
+        -0.03170708566904068
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 99.99404200000001,
+      "offset_seconds": 3.5,
+      "scores": [
+        0.12534132599830627,
+        0.025742968544363976,
+        -0.017442408949136734,
+        0.09258094429969788,
+        0.47779810428619385,
+        0.06351280957460403
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 157.660541,
+      "offset_seconds": 3.85,
+      "scores": [
+        0.125738725066185,
+        0.21377098560333252,
+        -0.10145077854394913,
+        0.03163422271609306,
+        0.5461481213569641,
+        0.0015393143985420465
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 47.22625,
+      "offset_seconds": 4.2,
+      "scores": [
+        0.2267669439315796,
+        0.15608052909374237,
+        0.1057642251253128,
+        0.09260237216949463,
+        0.5476080179214478,
+        0.08767428994178772
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 38.56875,
+      "offset_seconds": 4.55,
+      "scores": [
+        0.35969236493110657,
+        0.20202864706516266,
+        0.02855004370212555,
+        0.10317739099264145,
+        0.38184213638305664,
+        0.20776602625846863
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 102.262334,
+      "offset_seconds": 0,
+      "scores": [
+        0.29370832443237305,
+        0.11381422728300095,
+        0.03571222350001335,
+        0.1683088093996048,
+        0.7393065690994263,
+        0.1961624175310135
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 146.17879200000002,
+      "offset_seconds": 1,
+      "scores": [
+        0.27513980865478516,
+        0.2201496660709381,
+        0.07168202102184296,
+        0.258135050535202,
+        0.7582942843437195,
+        0.2850933074951172
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 108.893958,
+      "offset_seconds": 2,
+      "scores": [
+        0.24533358216285706,
+        0.2405000478029251,
+        0.06717371195554733,
+        0.16597290337085724,
+        0.7324504256248474,
+        0.2953793406486511
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 76.62125,
+      "offset_seconds": 3,
+      "scores": [
+        0.28746452927589417,
+        0.1189517006278038,
+        0.06540089845657349,
+        0.17243631184101105,
+        0.7222058176994324,
+        0.13666297495365143
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 168.09775,
+      "offset_seconds": 0,
+      "scores": [
+        0.33614009618759155,
+        0.21499337255954742,
+        0.03257089853286743,
+        0.2421574592590332,
+        0.879715621471405,
+        0.30213862657546997
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 114.487167,
+      "offset_seconds": 2,
+      "scores": [
+        0.29925909638404846,
+        0.22263267636299133,
+        0.08993040770292282,
+        0.1565866768360138,
+        0.8258452415466309,
+        0.2911752760410309
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 179.058292,
+      "offset_seconds": 0,
+      "scores": [
+        0.3306049406528473,
+        0.24916373193264008,
+        0.04693083465099335,
+        0.22073529660701752,
+        0.8878265023231506,
+        0.33521777391433716
+      ],
+      "speaker": "george",
+      "speaker_index": 4,
+      "split": "test",
+      "window_seconds": 3
+    },
+    {
+      "inference_ms": 64.561333,
+      "offset_seconds": 0,
+      "scores": [
+        0.389298677444458,
+        0.14641252160072327,
+        0.04978002607822418,
+        0.2601880133152008,
+        0.2730088531970978,
+        0.5361361503601074
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 86.62691699999999,
+      "offset_seconds": 0.35,
+      "scores": [
+        0.2722085118293762,
+        0.0860958993434906,
+        -0.026361282914876938,
+        0.13021399080753326,
+        0.2604452073574066,
+        0.36102235317230225
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 48.749666999999995,
+      "offset_seconds": 0.7,
+      "scores": [
+        0.28842273354530334,
+        0.06477643549442291,
+        0.06079522892832756,
+        0.23097433149814606,
+        0.11527352035045624,
+        0.5792337656021118
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 78.481,
+      "offset_seconds": 1.05,
+      "scores": [
+        0.2645079791545868,
+        0.11103906482458115,
+        0.1424432247877121,
+        0.2491912990808487,
+        0.26173487305641174,
+        0.5325324535369873
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 58.821583,
+      "offset_seconds": 1.4,
+      "scores": [
+        0.12299466133117676,
+        0.08490172028541565,
+        0.17301340401172638,
+        0.07440649718046188,
+        0.1510506123304367,
+        0.26630768179893494
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 32.861125,
+      "offset_seconds": 1.75,
+      "scores": [
+        0.2015494406223297,
+        0.11126310378313065,
+        0.060687560588121414,
+        0.25037461519241333,
+        0.3084031045436859,
+        0.5295581221580505
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 97.354375,
+      "offset_seconds": 2.1,
+      "scores": [
+        0.26416951417922974,
+        0.18572363257408142,
+        0.1923922300338745,
+        0.25582361221313477,
+        0.1769767850637436,
+        0.4848446846008301
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 159.574375,
+      "offset_seconds": 2.45,
+      "scores": [
+        0.27908894419670105,
+        0.15082193911075592,
+        0.12289201468229294,
+        0.3248193562030792,
+        0.20219860970973969,
+        0.5232422351837158
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 188.08754199999998,
+      "offset_seconds": 2.8,
+      "scores": [
+        0.2102900743484497,
+        0.20457139611244202,
+        0.22429370880126953,
+        0.3052368462085724,
+        0.13368064165115356,
+        0.4946569502353668
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 72.800084,
+      "offset_seconds": 3.15,
+      "scores": [
+        0.16563543677330017,
+        0.11054306477308273,
+        0.14989927411079407,
+        0.3439022898674011,
+        -0.027024421840906143,
+        0.3917871415615082
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 165.294042,
+      "offset_seconds": 3.5,
+      "scores": [
+        0.17412132024765015,
+        0.0554804801940918,
+        0.1750289350748062,
+        0.029261253774166107,
+        0.1316930055618286,
+        0.14582452178001404
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 103.864833,
+      "offset_seconds": 3.85,
+      "scores": [
+        0.19707266986370087,
+        0.18871459364891052,
+        0.07633031904697418,
+        0.3053133189678192,
+        0.19184376299381256,
+        0.47475704550743103
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 63.759958000000005,
+      "offset_seconds": 4.2,
+      "scores": [
+        0.11098185926675797,
+        0.05692283809185028,
+        0.016176477074623108,
+        0.11403410136699677,
+        0.2745586037635803,
+        0.2521657347679138
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 88.555334,
+      "offset_seconds": 4.55,
+      "scores": [
+        0.30612021684646606,
+        0.22786347568035126,
+        0.13883928954601288,
+        0.1578936129808426,
+        0.16528476774692535,
+        0.28216448426246643
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 126.12008399999999,
+      "offset_seconds": 4.9,
+      "scores": [
+        0.13000303506851196,
+        0.029839254915714264,
+        0.10581105947494507,
+        -0.015447023324668407,
+        0.06077870726585388,
+        0.191808819770813
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 1468.1239580000001,
+      "offset_seconds": 5.25,
+      "scores": [
+        0.29570281505584717,
+        0.20563015341758728,
+        -0.06865832954645157,
+        0.30647701025009155,
+        0.21798598766326904,
+        0.4749307930469513
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 0.35
+    },
+    {
+      "inference_ms": 7555.887957999999,
+      "offset_seconds": 0,
+      "scores": [
+        0.46351927518844604,
+        0.1899825483560562,
+        0.12475870549678802,
+        0.2737084925174713,
+        0.29190534353256226,
+        0.7604742050170898
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 2590.285542,
+      "offset_seconds": 1,
+      "scores": [
+        0.3367841839790344,
+        0.14937585592269897,
+        0.20482082664966583,
+        0.342818945646286,
+        0.29705411195755005,
+        0.7576181888580322
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 1429.695,
+      "offset_seconds": 2,
+      "scores": [
+        0.35775670409202576,
+        0.303317129611969,
+        0.2082221806049347,
+        0.43448612093925476,
+        0.27400675415992737,
+        0.6430672407150269
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 1740.2114159999999,
+      "offset_seconds": 3,
+      "scores": [
+        0.24328891932964325,
+        0.07060647010803223,
+        0.18586520850658417,
+        0.3117308020591736,
+        0.11982626467943192,
+        0.56888347864151
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 1659.968584,
+      "offset_seconds": 4,
+      "scores": [
+        0.23127545416355133,
+        0.22386960685253143,
+        0.14033716917037964,
+        0.2420099377632141,
+        0.2533593773841858,
+        0.6126852631568909
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 1
+    },
+    {
+      "inference_ms": 154.231167,
+      "offset_seconds": 0,
+      "scores": [
+        0.43853959441185,
+        0.18790730834007263,
+        0.18966299295425415,
+        0.33996912837028503,
+        0.3126866817474365,
+        0.8422773480415344
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 204.382792,
+      "offset_seconds": 2,
+      "scores": [
+        0.36759594082832336,
+        0.18835443258285522,
+        0.2275003343820572,
+        0.3699408769607544,
+        0.1874266415834427,
+        0.7308394908905029
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 2
+    },
+    {
+      "inference_ms": 188.62725,
+      "offset_seconds": 0,
+      "scores": [
+        0.4296591877937317,
+        0.24394701421260834,
+        0.19197973608970642,
+        0.3995930552482605,
+        0.33075252175331116,
+        0.8871061205863953
+      ],
+      "speaker": "lucas",
+      "speaker_index": 5,
+      "split": "test",
+      "window_seconds": 3
+    }
+  ]
+}
