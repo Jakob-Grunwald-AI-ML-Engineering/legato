@@ -241,7 +241,21 @@ public enum ComposerInsertOrigin: String, Sendable {
     private func beginHistoryComposition() {
         historyID = UUID(); historyDate = Date(); historyQueuedText = nil
     }
+    /// Set by the host before handing the microphone to a meeting. Every admission path observes it.
+    public var microphoneReserved = false
+
+    /// Release capture and warm streams while keeping the composition, history and writer intact.
+    public func suspendMicrophoneForMeeting() async {
+        microphoneReserved = true
+        if isListening { await stop() }
+        isArmed = false
+        await releaseWarmInput()
+        await mic.stop()
+        onChange?()
+    }
+
     public func arm() async {
+        guard !microphoneReserved else { return }
         guard !isArmed else { return }
         do {
             _ = try await prepareMicrophoneStream()
@@ -260,12 +274,15 @@ public enum ComposerInsertOrigin: String, Sendable {
         #endif
     }
     func prepareMicrophoneStream() async throws -> AsyncStream<AudioChunk> {
+        guard !microphoneReserved else { throw CancellationError() }
         do {
             // The keyboard starts while this host is backgrounded. Reconfiguring its
             // already-live AVAudioSession can be refused with '!int'; route the held mic.
             if isArmed { return try await mic.route() }
             try await activateAudioSession()
+            guard !microphoneReserved else { throw CancellationError() }
             let stream = try await mic.start(format: .init(sampleRate: 16000, channelCount: 1))
+            guard !microphoneReserved else { throw CancellationError() }
             isArmed = keepMicrophoneActive
             return stream
         } catch {
@@ -292,11 +309,12 @@ public enum ComposerInsertOrigin: String, Sendable {
     /// Keyboard pre-warm: build the composition (Room, cleanup pipeline, writer) without starting a take,
     /// then open its Soniox stream so the first tap only opens the gate.
     func prepareComposition() async {
+        guard !microphoneReserved else { return }
         if room == nil { await startSession(debugMode: nil, microphoneLease: false, beginsInput: false) }
         warmAgentStream()
     }
     private func startSession(debugMode: ComposerMode?, microphoneLease: Bool, beginsInput: Bool = true) async {
-        guard !isListening, status != "starting", !resuming, !preparingInsertion else { return }
+        guard !microphoneReserved, !isListening, status != "starting", !resuming, !preparingInsertion else { return }
         if let room, sessionLog != nil, await room.state != .done {
             guard beginsInput else { return }
             if prepared, debugMode == nil { await beginPreparedInput(room: room); return }
@@ -374,7 +392,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     /// Holds the next take's Soniox connection ahead of the tap (no start request, so nothing is billed),
     /// only while a keyboard session holds the input.
     func warmAgentStream() {
-        guard warmInput != nil, let room, agentWarm == nil else { return }
+        guard !microphoneReserved, warmInput != nil, let room, agentWarm == nil else { return }
         let config = inputConfig, socket = makeSocket
         let warm = WarmStream { onDrop in
             let soniox = try KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey() ?? ""
@@ -724,7 +742,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     /// without a lease the keyboard's hop path applies. False when no input could be held.
     func holdWarmInput() async -> Bool {
         if warmInput != nil { return true }
-        guard isArmed, !isListening, status != "starting", !resuming else { return false }
+        guard !microphoneReserved, isArmed, !isListening, status != "starting", !resuming else { return false }
         do {
             let stream = try await prepareMicrophoneStream()
             let token = UUID(); warmInputToken = token; route = .idle

@@ -212,7 +212,10 @@ public final class MeetingServices {
         {
             _ = try? await summarize(meetingID: id)
         }
-        _ = try? await store.update(id: id) { if $0.state == .processing { $0.state = .finished } }
+        _ = try? await store.update(id: id) {
+            // A failed conversion must remain recoverable at next launch, even if its summary succeeded.
+            if $0.state == .processing, $0.completedSteps.contains(.audio) { $0.state = .finished }
+        }
     }
 
     /// Waits for the after-stop chain of `id`, if one runs.

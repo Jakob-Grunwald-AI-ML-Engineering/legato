@@ -14,7 +14,7 @@
 # Each target carries a PrivacyInfo.xcprivacy next to its sources (App/, Widgets/, Keyboard/): the App
 # Group's UserDefaults is the required-reason API every target uses (CA92.1 own defaults, 1C8F.1 same App
 # Group); the app also reads file dates in the App Group container (C617.1) and elapsed time (35F9.1) for
-# meetings. No tracking; the app's one collected-data entry is the opt-in "Summarize with Claude" upload.
+# meetings. No tracking; audio streams to Soniox during recording and meeting summaries send transcripts to Claude when enabled or requested.
 #
 # TestFlight builds are Release builds that keep the audio diagnostics and debug switches: pass
 # OTHER_SWIFT_FLAGS='$(inherited) -D LEGATO_INTERNAL' to xcodebuild (leg 5). App Store builds don't.
@@ -67,6 +67,10 @@ targets:
       # Meetings: the session, the store and the summaries; Claude is the opt-in summary backend.
       - package: LegatoKit
         product: LegatoClaude
+      - package: LegatoKit
+        product: LegatoMeetings
+      - package: LegatoKit
+        product: LegatoSoniox
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato
@@ -93,7 +97,7 @@ targets:
         NSSupportsLiveActivities: true
         # Only Apple's own encryption (TLS, system frameworks): exempt, so App Store Connect stops asking.
         ITSAppUsesNonExemptEncryption: false
-        NSMicrophoneUsageDescription: Legato records your voice to compose text.
+        NSMicrophoneUsageDescription: Legato records your voice to compose text and records meetings you start, including while the screen is locked.
         CFBundleURLTypes:
           - CFBundleURLName: de.gruenwald.legato
             CFBundleURLSchemes: [legato]

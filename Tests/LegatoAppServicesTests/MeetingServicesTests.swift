@@ -94,6 +94,19 @@ final class TitlingClaude: LLMBackend {
 }
 
 @Suite(.serialized, .timeLimit(.minutes(1))) @MainActor struct MeetingServicesTests {
+    @Test func failedAudioProcessingStaysRecoverable() async throws {
+        let rig = ServicesRig(autoSummary: false)
+        defer { rig.cleanup() }
+        let meeting = try await rig.saved(state: .processing)
+        let folder = await rig.store.folder(for: meeting.id)
+        try Data("not an audio file".utf8).write(to: folder.appendingPathComponent("mic.caf"))
+        await rig.services.process(meeting.id)
+        let saved = try #require(try await rig.store.meeting(id: meeting.id))
+        #expect(saved.state == .processing, "A failed audio step must be retried at launch, never reported finished")
+        #expect(!saved.completedSteps.contains(.audio))
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mic.caf").path))
+    }
+
     @Test func aMeetingRecordsWithSpeakersStopsAndIsSummarized() async throws {
         let rig = ServicesRig()
         defer { rig.cleanup() }
