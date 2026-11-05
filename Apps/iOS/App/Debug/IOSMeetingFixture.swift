@@ -12,13 +12,29 @@ import LegatoSoniox
 enum IOSMeetingFixtureConfiguration {
     static let name: String? = {
         let args = ProcessInfo.processInfo.arguments
-        guard let index = args.firstIndex(of: "--meetings-fixture") else { return nil }
-        guard args.indices.contains(index + 1) else { preconditionFailure("Missing offline meeting fixture name") }
-        let name = args[index + 1]
+        let name: String
+        if let index = args.firstIndex(of: "--meetings-fixture") {
+            guard args.indices.contains(index + 1) else { preconditionFailure("Missing offline meeting fixture name") }
+            name = args[index + 1]
+        } else if let configured = Bundle.main.object(forInfoDictionaryKey: "LegatoMeetingFixtureName") {
+            guard let configured = configured as? String else { preconditionFailure("Invalid baked offline meeting fixture name") }
+            name = configured
+        } else {
+            // Widget intents and OS relaunches do not preserve launch arguments. A dedicated UAT
+            // identity must never silently become a production host or read the shared App Group.
+            guard Bundle.main.bundleIdentifier?.contains(".meetingsuat") != true else {
+                preconditionFailure("The meetings UAT app requires an offline fixture configuration")
+            }
+            return nil
+        }
         guard !name.isEmpty, name.count <= 64, name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") })
         else { preconditionFailure("Invalid offline meeting fixture name") }
         return name
     }()
+    static var realMicrophone: Bool {
+        ProcessInfo.processInfo.arguments.contains("--meetings-real-microphone")
+            || Bundle.main.object(forInfoDictionaryKey: "LegatoMeetingFixtureUsesMicrophone") as? Bool == true
+    }
     static var applicationRoot: URL? { name.map { URL.applicationSupportDirectory.appending(path: "MeetingFixtures/\($0)", directoryHint: .isDirectory) } }
     static var defaults: UserDefaults? { name.flatMap { UserDefaults(suiteName: "de.gruenwald.legato.meeting-fixture.\($0)") } }
 }
@@ -26,7 +42,7 @@ enum IOSMeetingFixtureConfiguration {
 @MainActor
 final class IOSMeetingFixture {
     static let current: IOSMeetingFixture? = IOSMeetingFixtureConfiguration.name.map {
-        IOSMeetingFixture(name: $0, realMicrophone: ProcessInfo.processInfo.arguments.contains("--meetings-real-microphone"))
+        IOSMeetingFixture(name: $0, realMicrophone: IOSMeetingFixtureConfiguration.realMicrophone)
     }
     let applicationRoot: URL
     let defaults: UserDefaults
