@@ -96,4 +96,40 @@ import Testing
         #expect(groups[0].projects[2].meetings.map(\.title) == ["b", "a"], "newest first; case does not split a folder")
         #expect(groups[2].projects[0].meetings.map(\.title) == ["f"])
     }
+
+    @Test func theAutomaticTitleFlagDecodesFalseAndAnyTitleEditClearsIt() async throws {
+        let (store, all, root) = try await filled()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "title": "Old", "date": 0, "duration": 5, "state": "finished"])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        #expect(try decoder.decode(Meeting.self, from: old).titleIsAutomatic == false)
+
+        var auto = all[3]
+        auto.titleIsAutomatic = true
+        try await store.update(auto)
+        _ = try await store.updateMetadata(id: auto.id, MeetingMetadata(title: auto.title, client: "Acme"))
+        #expect(try await store.meeting(id: auto.id)?.titleIsAutomatic == true, "filing alone keeps the title automatic")
+        _ = try await store.updateMetadata(id: auto.id, MeetingMetadata(title: "Mine"))
+        #expect(try await store.meeting(id: auto.id)?.titleIsAutomatic == false)
+    }
+
+    @Test func aStoppedMeetingIsDiscardableWhenShortOrEmpty() {
+        func meeting(_ state: Meeting.State, _ duration: TimeInterval) -> Meeting {
+            Meeting(title: "m", date: Date(), duration: duration, state: state)
+        }
+        #expect(meeting(.finished, 59).isDiscardable(transcriptIsEmpty: false))
+        #expect(meeting(.finished, 600).isDiscardable(transcriptIsEmpty: true))
+        #expect(!meeting(.finished, 60).isDiscardable(transcriptIsEmpty: false))
+        #expect(!meeting(.recording, 5).isDiscardable(transcriptIsEmpty: true))
+        #expect(!meeting(.processing, 5).isDiscardable(transcriptIsEmpty: true))
+    }
+
+    @Test func aStoreKnowsWhetherAMeetingHasSegments() async throws {
+        let (store, all, root) = try await filled()
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(await store.hasSegments(for: all[0].id) == false)
+        try await store.appendSegment(MeetingSegment(text: "Hi", start: 1, end: 2), to: all[0].id)
+        #expect(await store.hasSegments(for: all[0].id))
+    }
 }

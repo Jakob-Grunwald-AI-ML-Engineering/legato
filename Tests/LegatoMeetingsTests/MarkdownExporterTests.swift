@@ -46,6 +46,15 @@ import LegatoCore
         #expect(md == (try golden("golden-no-summary")))
     }
 
+    @Test func clientProjectAndTagsAreListedOnlyWhenPresent() {
+        let plain = MarkdownExporter.markdown(meeting: meeting, segments: [], summary: nil, timeZone: utc)
+        #expect(!plain.contains("- Client:") && !plain.contains("- Project:") && !plain.contains("- Tags:"))
+        var m = meeting
+        (m.client, m.project, m.tags) = ("Acme", "Website", ["design", "q4"])
+        let md = MarkdownExporter.markdown(meeting: m, segments: [], summary: nil, timeZone: utc)
+        #expect(md.contains("- Duration: 03:05\n- Client: Acme\n- Project: Website\n- Tags: design, q4\n"))
+    }
+
     @Test func emptyNotesLeaveOutTheNotesSection() {
         let md = MarkdownExporter.markdown(meeting: meeting, segments: segments, summary: nil, notes: " \n", timeZone: utc)
         #expect(!md.contains("## Notes"))

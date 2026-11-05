@@ -70,6 +70,8 @@ final class MeetingController {
     private(set) var notice: String?
     /// The notice stays until it is read (a start that failed).
     private(set) var noticeIsSticky = false
+    /// Stopped meetings that have no transcript segment; with the length, what makes a meeting discardable.
+    private(set) var emptyTranscripts: Set<UUID> = []
     /// Bumped when a meeting changed on disk, so open detail views reload.
     private(set) var revision = 0
     /// Set when a start should bring the Meetings window up.
@@ -242,6 +244,11 @@ final class MeetingController {
 
     func refresh() async {
         meetings = (try? await services.meetings()) ?? meetings
+        var empty = Set<UUID>()
+        for meeting in meetings where meeting.state != .recording && !(await services.store.hasSegments(for: meeting.id)) {
+            empty.insert(meeting.id)
+        }
+        emptyTranscripts = empty
         revision += 1
         if let selection, !meetings.contains(where: { $0.id == selection }) { self.selection = nil }
         search()
@@ -274,6 +281,11 @@ final class MeetingController {
             _ = try? await services.summarize(meetingID: id)
             await refresh()
         }
+    }
+
+    /// A stopped meeting too short to keep or without a transcript: Discard removes it without asking.
+    func canDiscard(_ meeting: Meeting) -> Bool {
+        meeting.id != services.activeMeetingID && meeting.isDiscardable(transcriptIsEmpty: emptyTranscripts.contains(meeting.id))
     }
 
     func delete(_ id: UUID) {

@@ -26,6 +26,23 @@ final class ScriptedClaude: LLMBackend {
     }
 }
 
+/// Claude that writes the summary and answers the title request (`title` nil: the request fails); `onTitle` runs
+/// before it answers.
+final class TitlingClaude: LLMBackend {
+    let id = "claude"
+    let maxPromptCharacters: Int? = 600_000
+    private let title: String?
+    private let onTitle: @Sendable () async -> Void
+    init(title: String?, onTitle: @escaping @Sendable () async -> Void = {}) { (self.title, self.onTitle) = (title, onTitle) }
+    var availability: LLMAvailability { get async { .available } }
+    func respond(instructions: String, prompt: String) async throws -> String {
+        guard instructions == MeetingTitle.instructions else { return "## Summary\n\nThey met." }
+        await onTitle()
+        guard let title else { throw LLMError.failed("offline") }
+        return title
+    }
+}
+
 /// `eventually` for conditions that read main-actor state.
 @MainActor private func settle(
     _ what: String, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @MainActor () async -> Bool
@@ -42,10 +59,10 @@ final class ScriptedClaude: LLMBackend {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("legato-meetings-\(UUID().uuidString)")
     let store: MeetingStore
     let sockets: MeetingSockets
-    let claude: ScriptedClaude
+    let claude: any LLMBackend
     let services: MeetingServices
 
-    init(sonioxKey: String = "sk-soniox", claude: ScriptedClaude = ScriptedClaude(), autoSummary: Bool = true) {
+    init(sonioxKey: String = "sk-soniox", claude: any LLMBackend = ScriptedClaude(), autoSummary: Bool = true) {
         store = MeetingStore(root: root)
         let sockets = MeetingSockets()
         self.sockets = sockets
@@ -58,11 +75,14 @@ final class ScriptedClaude: LLMBackend {
             claudeBackend: claude, personalPrompt: { "" }, makeSocket: { sockets.make() }, timing: .tests)
     }
 
+    var scripted: ScriptedClaude { claude as! ScriptedClaude }
+
     func cleanup() { try? FileManager.default.removeItem(at: root) }
 
     /// A meeting on disk with a short transcript of two voices.
-    func saved(state: Meeting.State, speakers: Bool = true) async throws -> Meeting {
-        var meeting = Meeting(title: "Weekly", date: Date(timeIntervalSince1970: 1_793_025_000), duration: 12, state: state)
+    func saved(state: Meeting.State, speakers: Bool = true, automaticTitle: Bool = false) async throws -> Meeting {
+        var meeting = Meeting(
+            title: "Weekly", date: Date(timeIntervalSince1970: 1_793_025_000), duration: 12, state: state, titleIsAutomatic: automaticTitle)
         if speakers {
             meeting.speakers = ["P1": SpeakerInfo(name: "Speaker 1", colorIndex: 0), "P2": SpeakerInfo(name: "Speaker 2", colorIndex: 1)]
         }
@@ -106,7 +126,7 @@ final class ScriptedClaude: LLMBackend {
             #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("\(track).caf").path), "\(track).caf is gone")
         }
         #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("log/room.jsonl").path))
-        let request = try #require(rig.claude.requests.first)
+        let request = try #require(rig.scripted.requests.first)
         #expect(request.contains("Speaker 1 [00:00]: Shall we start?") || request.contains("Speaker 1 [00:01]: Shall we start?"))
         #expect(try await rig.services.summaryText(meetingID: id)?.contains("Speaker 1 opened") == true)
         #expect(rig.services.dictationRefusal == nil)
@@ -208,10 +228,10 @@ final class ScriptedClaude: LLMBackend {
         defer { rig.cleanup() }
         let meeting = try await rig.saved(state: .processing)
         await rig.services.process(meeting.id)
-        #expect(rig.claude.requests.isEmpty)
+        #expect(rig.scripted.requests.isEmpty)
         #expect(try await rig.store.meeting(id: meeting.id)?.state == .finished)
         try await rig.services.summarize(meetingID: meeting.id)
-        #expect(rig.claude.requests.count == 1)
+        #expect(rig.scripted.requests.count == 1)
     }
 
     @Test func aMeetingCutOffWhileRecordingComesBackInterruptedWithItsAudio() async throws {
@@ -233,7 +253,7 @@ final class ScriptedClaude: LLMBackend {
 
         await rig.services.recover()  // a second launch changes nothing
         #expect(try await rig.store.meeting(id: meeting.id)?.state == .interrupted)
-        #expect(rig.claude.requests.count == 1)
+        #expect(rig.scripted.requests.count == 1)
     }
 
     @Test func aChainThatWasCutShortRunsAgainAtLaunch() async throws {
@@ -252,8 +272,47 @@ final class ScriptedClaude: LLMBackend {
         let empty = Meeting(title: "Silent", date: Date(), state: .processing)
         try await rig.store.create(empty)
         await rig.services.process(empty.id)
-        #expect(rig.claude.requests.isEmpty)
+        #expect(rig.scripted.requests.isEmpty)
         await #expect(throws: LLMError.emptyResponse) { try await rig.services.summarize(meetingID: empty.id) }
         #expect(try await rig.store.meeting(id: empty.id)?.summaryFailure == "Nothing was transcribed, so there is nothing to summarize.")
+    }
+
+    @Test func theDateTitleIsReplacedByASuggestedOneAfterTheFirstSummary() async throws {
+        let rig = ServicesRig(claude: TitlingClaude(title: "\"Launch planning\"\n"))
+        defer { rig.cleanup() }
+        #expect(rig.services.newMeeting().titleIsAutomatic && !rig.services.newMeeting(title: "Mine").titleIsAutomatic)
+        let meeting = try await rig.saved(state: .finished, automaticTitle: true)
+        try await rig.services.summarize(meetingID: meeting.id)
+        let saved = try #require(try await rig.store.meeting(id: meeting.id))
+        #expect(saved.title == "Launch planning" && !saved.titleIsAutomatic && saved.completedSteps.contains(.summary))
+    }
+
+    @Test func aTitleTheUserTypedDuringTheCallWinsAndAChosenTitleIsNeverAsked() async throws {
+        let hook = Mutex<(@Sendable () async -> Void)?>(nil)
+        let raced = ServicesRig(claude: TitlingClaude(title: "Suggested") { await hook.withLock { $0 }?() })
+        defer { raced.cleanup() }
+        let meeting = try await raced.saved(state: .finished, automaticTitle: true)
+        let store = raced.store
+        hook.withLock { $0 = { _ = try? await store.updateMetadata(id: meeting.id, MeetingMetadata(title: "My own")) } }
+        try await raced.services.summarize(meetingID: meeting.id)
+        let result = try #require(try await raced.store.meeting(id: meeting.id))
+        #expect(result.title == "My own" && !result.titleIsAutomatic)
+
+        let asked = Mutex(0)
+        let chosen = ServicesRig(claude: TitlingClaude(title: "Suggested") { asked.withLock { $0 += 1 } })
+        defer { chosen.cleanup() }
+        let kept = try await chosen.saved(state: .finished)
+        try await chosen.services.summarize(meetingID: kept.id)
+        #expect(asked.withLock { $0 } == 0 && (try await chosen.store.meeting(id: kept.id))?.title == "Weekly")
+    }
+
+    @Test func aFailedTitleRequestLeavesTheSummaryAndTheDateTitle() async throws {
+        let rig = ServicesRig(claude: TitlingClaude(title: nil))
+        defer { rig.cleanup() }
+        let meeting = try await rig.saved(state: .finished, automaticTitle: true)
+        let text = try await rig.services.summarize(meetingID: meeting.id)
+        let saved = try #require(try await rig.store.meeting(id: meeting.id))
+        #expect(saved.title == "Weekly" && saved.titleIsAutomatic && saved.summaryFailure == nil && saved.completedSteps.contains(.summary))
+        #expect(try await rig.services.summaryText(meetingID: meeting.id) == text)
     }
 }
