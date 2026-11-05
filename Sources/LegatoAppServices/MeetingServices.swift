@@ -226,7 +226,26 @@ public final class MeetingServices {
     public func recover() async {
         let live = activeMeetingID.map { Set([$0]) } ?? []
         let interrupted = (try? await MeetingRecovery.run(store: store, excluding: live)) ?? []
-        let unfinished = ((try? await store.meetings()) ?? []).filter { $0.state == .processing && !live.contains($0.id) }.map(\.id)
+        let saved = (try? await store.meetings()) ?? []
+        // Transcript timestamps stop during silence or disconnection. The recorded files, including
+        // m4a from an earlier recovery, carry the rest of the meeting's timeline.
+        for meeting in saved where meeting.state == .interrupted && !live.contains(meeting.id) {
+            let reader = MeetingAudioWriter(folder: await store.folder(for: meeting.id))
+            var duration = meeting.duration
+            for stream: TranscriptEvent.Stream in [.mic, .system, .mixed] {
+                if let seconds = try? await reader.duration(of: stream), seconds.isFinite {
+                    duration = max(duration, seconds)
+                }
+            }
+            let lastSegment = ((try? await store.segments(for: meeting.id)) ?? []).map(\.end).max() ?? 0
+            duration = max(duration, lastSegment, meeting.gaps.map(\.end).max() ?? 0,
+                meeting.pausedRanges.map(\.end).max() ?? 0, meeting.mutedRanges.map(\.end).max() ?? 0)
+            if duration > meeting.duration {
+                let recoveredDuration = duration
+                _ = try? await store.update(id: meeting.id) { $0.duration = max($0.duration, recoveredDuration) }
+            }
+        }
+        let unfinished = saved.filter { $0.state == .processing && !live.contains($0.id) }.map(\.id)
         for id in Set(interrupted + unfinished) { beginChain(id) }
     }
 

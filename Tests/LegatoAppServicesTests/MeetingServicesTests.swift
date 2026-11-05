@@ -94,6 +94,48 @@ final class TitlingClaude: LLMBackend {
 }
 
 @Suite(.serialized, .timeLimit(.minutes(1))) @MainActor struct MeetingServicesTests {
+    @Test(arguments: [Meeting.State.recording, .interrupted])
+    func recoveryUsesTheLongestAudioTrackEvenAfterAnEarlierRecovery(state: Meeting.State) async throws {
+        let rig = ServicesRig(autoSummary: false)
+        defer { rig.cleanup() }
+        let meeting = Meeting(title: "Quiet meeting", date: Date(), duration: 1, state: state,
+            completedSteps: state == .interrupted ? [.audio, .summary] : [])
+        try await rig.store.create(meeting)
+        try await rig.store.appendSegment(MeetingSegment(text: "Hello", start: 0, end: 0.5), to: meeting.id)
+        let folder = await rig.store.folder(for: meeting.id)
+        let writer = MeetingAudioWriter(folder: folder)
+        try await writer.writeSilence(seconds: 2, stream: .mic)
+        try await writer.writeSilence(seconds: 4, stream: .system)
+        try await writer.writeSilence(seconds: 3, stream: .mixed)
+        await writer.finish()
+        if state == .interrupted {
+            let report = await writer.finalize()
+            #expect(report.failed.isEmpty)
+            MeetingAudioWriter.discardLossless(in: folder)
+        }
+        let expected = try await MeetingAudioWriter(folder: folder).duration(of: .system)
+        await rig.services.recover()
+        await rig.services.waitForProcessing(meeting.id)
+        let recovered = try #require(try await rig.store.meeting(id: meeting.id))
+        #expect(abs(recovered.duration - expected) < 0.01)
+        #expect(recovered.state == .interrupted)
+        #expect(recovered.title == meeting.title)
+    }
+
+    @Test func recoveryNeverShortensAnExistingTimelineWithoutReadableAudio() async throws {
+        let rig = ServicesRig(autoSummary: false)
+        defer { rig.cleanup() }
+        let meeting = Meeting(title: "Timeline", date: Date(), duration: 60,
+            pausedRanges: [PausedRange(start: 60, end: 75)], gaps: [TranscriptGap(start: 75, end: 80)],
+            state: .interrupted, completedSteps: [.audio, .summary])
+        try await rig.store.create(meeting)
+        await rig.services.recover()
+        #expect(try await rig.store.meeting(id: meeting.id)?.duration == 80)
+        _ = try await rig.store.update(id: meeting.id) { $0.duration = 100 }
+        await rig.services.recover()
+        #expect(try await rig.store.meeting(id: meeting.id)?.duration == 100)
+    }
+
     @Test func failedAudioProcessingStaysRecoverable() async throws {
         let rig = ServicesRig(autoSummary: false)
         defer { rig.cleanup() }
