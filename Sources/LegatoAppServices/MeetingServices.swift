@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import Synchronization
 import LegatoAudio
 import LegatoClaude
 import LegatoCore
@@ -32,6 +33,10 @@ public enum MeetingServicesError: Error, Equatable, LocalizedError {
 ///   runs (``MeetingServicesError/refused(_:)``), fails before anything is recorded when the Soniox key is missing,
 ///   and returns the live session (its `snapshots` drive the transcript). ``stopMeeting()`` stops it and starts the
 ///   after-stop chain: the CAF recordings become m4a, then the Claude summary when it is automatic.
+/// - **Title.** A meeting still titled by its date gets a short title from Claude after its first summary
+///   (``Meeting/titleIsAutomatic``); the user's own title is never replaced.
+/// - **Calendar.** ``applyCalendarEvent(_:to:)`` gives a meeting still titled by its date the title and attendees of the
+///   event it is for; that title is final, so the first summary does not retitle it. The lookup is the app's.
 /// - **Dictation and composer** ask ``dictationRefusal`` and show its notice while a meeting records.
 /// - **Summary.** Claude through the user's key, one request for the transcript (map-reduce only when it would not
 ///   fit). A failed summary leaves the meeting as it is and keeps the reason in ``Meeting/summaryFailure``;
@@ -93,11 +98,12 @@ public final class MeetingServices {
 
     // MARK: Recording
 
-    /// A new meeting set up for now: titled by its date, the default summary sections ticked.
+    /// A new meeting set up for now: titled by its date (a title the first summary may replace), the default summary
+    /// sections ticked.
     public func newMeeting(id: UUID = UUID(), title: String? = nil, date: Date = Date()) -> Meeting {
         Meeting(
             id: id, title: title ?? "Meeting \(date.formatted(date: .abbreviated, time: .shortened))", date: date,
-            sections: settings.defaultSectionIDs)
+            sections: settings.defaultSectionIDs, titleIsAutomatic: title == nil)
     }
 
     /// The session for `meeting` without starting it: `mic` (and `system`) summed into one signal for one Soniox
@@ -164,6 +170,24 @@ public final class MeetingServices {
         await session.discard()
         self.session = nil
         activeMeetingID = nil
+    }
+
+    /// Titles the meeting after a calendar event: its title, with its attendees for the speaker names. Only a
+    /// meeting still titled by its date takes it (a title the user typed stays, also when typed meanwhile), and the
+    /// calendar title is not automatic any more, so the summary does not retitle it. Returns whether it was applied.
+    @discardableResult
+    public func applyCalendarEvent(_ event: CalendarEventInfo, to id: UUID) async -> Bool {
+        let title = event.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return false }
+        let applied = Mutex(false)
+        _ = try? await store.update(id: id) { m in
+            guard m.titleIsAutomatic else { return }
+            m.title = title
+            m.titleIsAutomatic = false
+            m.attendees = event.attendees
+            applied.withLock { $0 = true }
+        }
+        return applied.withLock { $0 }
     }
 
     // MARK: After stop
@@ -242,6 +266,7 @@ public final class MeetingServices {
                 m.completedSteps.insert(.summary)
                 m.summaryFailure = nil
             }
+            if meeting.titleIsAutomatic { await retitle(id, fromSummary: text, backend: backend) }
             return text
         } catch {
             if !(error is CancellationError) {
@@ -249,6 +274,18 @@ public final class MeetingServices {
                 _ = try? await store.update(id: id) { $0.summaryFailure = message }
             }
             throw error
+        }
+    }
+
+    /// Replaces the date title with one Claude suggests from the summary, when the title is still automatic. A
+    /// failed or unusable reply keeps the date title. The check is made again when saving, so a title the user
+    /// typed meanwhile stays.
+    private func retitle(_ id: UUID, fromSummary summary: String, backend: any LLMBackend) async {
+        guard let title = await MeetingTitle(backend: backend).title(forSummary: summary) else { return }
+        _ = try? await store.update(id: id) { m in
+            guard m.titleIsAutomatic else { return }
+            m.title = title
+            m.titleIsAutomatic = false
         }
     }
 

@@ -2,8 +2,8 @@
 # LegatoMac.xcodeproj and Gen/; both are gitignored. Run it from this directory.
 #
 # Non-sandboxed on purpose (Accessibility writes into other apps, a global event tap, synthesized
-# paste), so distribution is Developer ID with the hardened runtime; the only entitlement is the
-# microphone (the system-audio tap of meetings asks for its own permission at runtime). Signing, notarization and the release flow are leg 5.
+# paste), so distribution is Developer ID with the hardened runtime; the entitlements are the microphone and
+# the calendar (meeting titles; read only, opt-in). The system-audio tap of meetings asks for its own permission at runtime. Signing, notarization and the release flow are leg 5.
 name: LegatoMac
 options:
   bundleIdPrefix: de.gruenwald.legato
@@ -48,6 +48,14 @@ targets:
         product: LegatoClaude
       - package: LegatoKit
         product: LegatoMeetings
+      # The `legato` command line, copied to Contents/Helpers (not Contents/MacOS: `legato` and `Legato` are one file on a case-insensitive disk).
+      - target: LegatoCLI
+        link: false
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
     settings:
       base:
         PRODUCT_NAME: Legato
@@ -61,6 +69,7 @@ targets:
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.device.audio-input: true
+        com.apple.security.personal-information.calendars: true
         # Required by the Data Protection Keychain used for provider credentials.
         com.apple.application-identifier: "$(DEVELOPMENT_TEAM).$(PRODUCT_BUNDLE_IDENTIFIER)"
         com.apple.developer.team-identifier: "$(DEVELOPMENT_TEAM)"
@@ -74,4 +83,21 @@ targets:
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.productivity
         NSMicrophoneUsageDescription: Legato records your voice to compose text and, for meeting notes, to save your side of the meeting on this device.
+        NSCalendarsFullAccessUsageDescription: Legato reads your calendar to title a meeting after the event happening now and to suggest its attendees as speaker names. It only reads, and only when you turn this on.
         NSAudioCaptureUsageDescription: Legato records the audio your Mac plays, to transcribe the other side of a meeting.
+  # `legato meetings …` and `legato mcp`: read-only access to the meetings for agents and scripts. The same main.swift as the
+  # package's `legato` product, built here so it is signed with the app's team and hardened runtime. Target and module are not
+  # named `legato`: that is `Legato` (the app) to a case-insensitive disk, in the build folders too.
+  LegatoCLI:
+    type: tool
+    platform: macOS
+    sources: [../../Sources/legato]
+    dependencies:
+      - package: LegatoKit
+        product: LegatoMeetingsCLI
+    settings:
+      base:
+        PRODUCT_NAME: legato
+        PRODUCT_MODULE_NAME: LegatoCLITool
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.mac.cli
+        SKIP_INSTALL: YES

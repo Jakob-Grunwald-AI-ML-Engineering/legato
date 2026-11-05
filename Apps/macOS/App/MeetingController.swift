@@ -70,8 +70,13 @@ final class MeetingController {
     private(set) var notice: String?
     /// The notice stays until it is read (a start that failed).
     private(set) var noticeIsSticky = false
+    /// Stopped meetings that have no transcript segment; with the length, what makes a meeting discardable.
+    private(set) var emptyTranscripts: Set<UUID> = []
     /// Bumped when a meeting changed on disk, so open detail views reload.
     private(set) var revision = 0
+    /// The meeting that records was started by call detection, so the end of the call stops it; never true for a
+    /// meeting the user started (the prompt's Record included).
+    private(set) var startedAutomatically = false
     /// Set when a start should bring the Meetings window up.
     private(set) var windowRequests = 0
     var selection: UUID?
@@ -120,7 +125,8 @@ final class MeetingController {
 
     /// Starts a meeting. Everything that can go wrong before audio is recorded (a refusal, a missing Soniox key, a
     /// denied permission) ends up in `notice` and nothing is kept.
-    func start(dictationActive: Bool) {
+    /// - Parameter automatically: call detection starts it, which also lets the end of the call stop it.
+    func start(dictationActive: Bool, automatically: Bool = false) {
         guard phase == .idle else { return }
         phase = .starting
         notice = nil
@@ -130,6 +136,8 @@ final class MeetingController {
                 let session = try await services.startMeeting(mic: AutomaticInputSource(), system: system, dictationActive: dictationActive)
                 observe(session, system: system)
                 phase = .recording
+                startedAutomatically = automatically
+                titleFromCalendar(session.meetingID)
                 windowRequests += 1
                 await refresh()
                 selection = session.meetingID
@@ -150,6 +158,7 @@ final class MeetingController {
         Task {
             let meeting = await services.stopMeeting()
             phase = .idle
+            startedAutomatically = false
             live = nil
             await refresh()
             guard let meeting else { return }
@@ -166,8 +175,21 @@ final class MeetingController {
         Task {
             await services.discardMeeting()
             phase = .idle
+            startedAutomatically = false
             live = nil
             selection = nil
+            await refresh()
+        }
+    }
+
+    /// With the setting on and calendar access, titles the meeting after the event happening now. Started beside the
+    /// recording, never waited for; a failed or empty lookup is silent and the meeting keeps its date title.
+    private func titleFromCalendar(_ id: UUID) {
+        guard services.settings.calendarTitles, CalendarAccess.status == .granted else { return }
+        Task {
+            let now = Date()
+            let events = await Task.detached { CalendarAccess.events(around: now) }.value
+            guard let event = CalendarEventChoice.pick(from: events, at: now), await services.applyCalendarEvent(event, to: id) else { return }
             await refresh()
         }
     }
@@ -242,6 +264,11 @@ final class MeetingController {
 
     func refresh() async {
         meetings = (try? await services.meetings()) ?? meetings
+        var empty = Set<UUID>()
+        for meeting in meetings where meeting.state != .recording {
+            if !(await services.store.hasSegments(for: meeting.id)) { empty.insert(meeting.id) }
+        }
+        emptyTranscripts = empty
         revision += 1
         if let selection, !meetings.contains(where: { $0.id == selection }) { self.selection = nil }
         search()
@@ -276,6 +303,11 @@ final class MeetingController {
         }
     }
 
+    /// A stopped meeting too short to keep or without a transcript: Discard removes it without asking.
+    func canDiscard(_ meeting: Meeting) -> Bool {
+        meeting.id != services.activeMeetingID && meeting.isDiscardable(transcriptIsEmpty: emptyTranscripts.contains(meeting.id))
+    }
+
     func delete(_ id: UUID) {
         Task {
             do { try await services.deleteMeeting(id: id) } catch { flash(Self.describe(error)) }
@@ -295,9 +327,7 @@ final class MeetingController {
             var hits = Set<UUID>()
             for meeting in candidates {
                 if Task.isCancelled { return }
-                let segments = (try? await services.store.segments(for: meeting.id)) ?? []
-                let summaries = ((try? await services.store.summaries(for: meeting.id)) ?? []).map(\.text)
-                if MeetingListLogic.matches(words, meeting: meeting, summaries: summaries, notes: nil, segments: segments) { hits.insert(meeting.id) }
+                if await services.store.matches(words, meeting: meeting) { hits.insert(meeting.id) }
             }
             if !Task.isCancelled { searchHits = hits }
         }

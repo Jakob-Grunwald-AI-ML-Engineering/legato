@@ -13,9 +13,13 @@ struct MeetingListColumn: View {
                 Section(MeetingListLogic.dayLabel(day.day)) {
                     ForEach(day.meetings) { meeting in
                         MeetingRow(meeting: meeting, processing: controller.services.processing.contains(meeting.id),
-                                   summarizing: controller.services.summarizing.contains(meeting.id))
+                                   summarizing: controller.services.summarizing.contains(meeting.id),
+                                   discard: controller.canDiscard(meeting) ? { controller.delete(meeting.id) } : nil)
                             .tag(meeting.id)
                             .contextMenu {
+                                if controller.canDiscard(meeting) {
+                                    Button("Discard", role: .destructive) { controller.delete(meeting.id) }
+                                }
                                 Button("Delete…", role: .destructive) { pendingDelete = meeting.id }
                                     .disabled(meeting.id == controller.services.activeMeetingID)
                             }
@@ -52,6 +56,8 @@ private struct MeetingRow: View {
     let meeting: Meeting
     let processing: Bool
     let summarizing: Bool
+    /// One click removes the meeting; nil unless it is too short or has no transcript.
+    let discard: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -59,6 +65,11 @@ private struct MeetingRow: View {
                 Text(meeting.title).font(.headline.weight(.medium)).lineLimit(1)
                 Spacer(minLength: 4)
                 badge
+                if let discard {
+                    Button(action: discard) { Label("Discard", systemImage: "trash") }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless).foregroundStyle(.secondary)
+                        .help("Delete this short recording for good, without asking.")
+                }
             }
             Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
         }

@@ -1,6 +1,11 @@
 import Foundation
 import LegatoMeetings
 
+/// What Legato does when another app starts a call (it holds the mic and the speakers).
+public enum CallDetectionMode: String, Sendable, CaseIterable {
+    case off, prompt, autoRecord
+}
+
 /// The meeting settings in an injected `UserDefaults`. Defaults: the summary is written when a meeting ends,
 /// with the sections Summary, Decisions and Action items ticked.
 public struct MeetingSettings: Sendable {
@@ -12,6 +17,8 @@ public struct MeetingSettings: Sendable {
         static let sections = "meeting.sections"
         static let sectionOrder = "meeting.sectionOrder"
         static let defaultSections = "meeting.defaultSections"
+        static let callDetection = "meeting.callDetection"
+        static let calendarTitles = "meeting.calendarTitles"
     }
 
     public init(defaults: UserDefaults) { self.defaults = defaults }
@@ -20,6 +27,19 @@ public struct MeetingSettings: Sendable {
     public var summarizeAutomatically: Bool {
         get { defaults.object(forKey: Key.summarizeAutomatically) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Key.summarizeAutomatically) }
+    }
+
+    /// What a call in another app does. Default off: nothing watches the microphone then.
+    public var callDetection: CallDetectionMode {
+        get { defaults.string(forKey: Key.callDetection).flatMap(CallDetectionMode.init(rawValue:)) ?? .off }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.callDetection) }
+    }
+
+    /// A new meeting takes the title and attendees of the calendar event happening now. Default off; it also needs
+    /// the user's calendar access.
+    public var calendarTitles: Bool {
+        get { defaults.object(forKey: Key.calendarTitles) as? Bool ?? false }
+        nonmutating set { defaults.set(newValue, forKey: Key.calendarTitles) }
     }
 
     // MARK: Summary sections

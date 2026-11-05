@@ -12,6 +12,8 @@ struct SpeakerName: View {
     let person: PersonID
     let info: SpeakerInfo
     let rename: (PersonID, String) -> Void
+    /// Names to pick from instead of typing (the calendar event's attendees).
+    var suggestions: [String] = []
     @State private var editing = false
     @State private var draft = ""
 
@@ -27,6 +29,7 @@ struct SpeakerName: View {
                 Text("Who is this?").font(.headline)
                 TextField("Name", text: $draft).textFieldStyle(.roundedBorder).frame(width: 220).onSubmit(save)
                     .accessibilityIdentifier("meeting.speaker.name")
+                if !suggestions.isEmpty { suggestionChips }
                 Text("Giving two speakers the same name merges them.").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
@@ -36,6 +39,22 @@ struct SpeakerName: View {
                 }
             }
             .padding(16)
+        }
+    }
+
+    /// The attendees of the meeting's calendar event; a click names the person.
+    private var suggestionChips: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("From the calendar event").font(.caption).foregroundStyle(.secondary)
+            FlowLayout(spacing: 6) {
+                ForEach(suggestions, id: \.self) { name in
+                    Button(name) { editing = false; rename(person, name) }
+                        .buttonStyle(.plain).font(.caption).padding(.horizontal, 8).padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                        .accessibilityIdentifier("meeting.speaker.suggestion")
+                }
+            }
+            .frame(width: 220, alignment: .leading)
         }
     }
 
@@ -121,6 +140,12 @@ struct MeetingTranscriptView: View {
         }
     }
 
+    /// The calendar attendees nobody in the meeting is named after yet (naming one twice would merge two people).
+    private var suggestions: [String] {
+        let named = Set(meeting.speakers.values.map { $0.name.lowercased() })
+        return meeting.attendees.filter { !named.contains($0.lowercased()) }
+    }
+
     /// Turns and gaps in time order. A gap ends a turn.
     private var items: [Item] {
         let turns = MeetingTurns.merge(segments, breakingAt: meeting.gaps.map(\.start)).map(Item.turn)
@@ -132,7 +157,7 @@ struct MeetingTranscriptView: View {
             HStack(spacing: 6) {
                 if let person = turn.speaker, let info = meeting.speakers[person] {
                     Circle().fill(SpeakerPalette.color(info)).frame(width: 6, height: 6)
-                    SpeakerName(person: person, info: info, rename: rename)
+                    SpeakerName(person: person, info: info, rename: rename, suggestions: suggestions)
                 }
                 Button { seek?(turn.start) } label: {
                     Text(MeetingListLogic.clock(turn.start)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)

@@ -86,7 +86,11 @@ public actor MeetingStore {
     /// (``MeetingMetadata/normalized(fallbackTitle:)``). Returns the saved meeting, nil when it does not exist.
     @discardableResult
     public func updateMetadata(id: UUID, _ metadata: MeetingMetadata) throws -> Meeting? {
-        try update(id: id) { $0.metadata = metadata.normalized(fallbackTitle: $0.title) }
+        try update(id: id) { meeting in
+            let old = meeting.title
+            meeting.metadata = metadata.normalized(fallbackTitle: old)
+            if meeting.title != old { meeting.titleIsAutomatic = false }
+        }
     }
 
     /// What a list narrows to. Client, project and tags match ignoring case and accents; every tag must be on the
@@ -178,6 +182,12 @@ public actor MeetingStore {
 
     public func replaceSegments(_ segments: [MeetingSegment], for id: UUID) async throws {
         try await file(segmentsURL(for: id)).replaceAll(segments)
+    }
+
+    /// Whether the meeting has any transcript segment, from the size of the file alone (cheap enough for a list).
+    public func hasSegments(for id: UUID) -> Bool {
+        let size = (try? FileManager.default.attributesOfItem(atPath: segmentsURL(for: id).path)[.size] as? Int) ?? 0
+        return size > 0
     }
 
     /// Ordered by start time (arrival order breaks ties).

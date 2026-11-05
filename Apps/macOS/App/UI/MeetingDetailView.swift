@@ -177,6 +177,12 @@ struct MeetingDetailView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
+            // A slip of a recording goes in one click, no dialog.
+            if controller.canDiscard(meeting) {
+                Button { controller.delete(meeting.id) } label: { Label("Discard", systemImage: "trash") }
+                    .help("Delete this short recording for good, without asking.")
+                    .accessibilityIdentifier("meeting.discard")
+            }
             Menu {
                 Button("Copy Summary") { copy(.summary) }.disabled(summary == nil)
                 Button("Copy Transcript") { copy(.transcript) }
