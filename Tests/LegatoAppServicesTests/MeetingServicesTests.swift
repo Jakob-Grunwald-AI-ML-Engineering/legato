@@ -316,4 +316,22 @@ final class TitlingClaude: LLMBackend {
         #expect(saved.title == "Weekly" && saved.titleIsAutomatic && saved.summaryFailure == nil && saved.completedSteps.contains(.summary))
         #expect(try await rig.services.summaryText(meetingID: meeting.id) == text)
     }
+
+    @Test func aCalendarTitleReplacesTheDateTitleSoTheSummaryKeepsItAndATypedTitleStays() async throws {
+        let asked = Mutex(0)
+        let rig = ServicesRig(claude: TitlingClaude(title: "Suggested") { asked.withLock { $0 += 1 } })
+        defer { rig.cleanup() }
+        let event = CalendarEventInfo(title: " Design review ", start: Date(), end: Date().addingTimeInterval(1800), attendees: ["Ada", "Grace"])
+        let meeting = try await rig.saved(state: .finished, automaticTitle: true)
+        #expect(await rig.services.applyCalendarEvent(event, to: meeting.id))
+        let titled = try #require(try await rig.store.meeting(id: meeting.id))
+        #expect(titled.title == "Design review" && !titled.titleIsAutomatic && titled.attendees == ["Ada", "Grace"])
+        try await rig.services.summarize(meetingID: meeting.id)
+        #expect(try await rig.store.meeting(id: meeting.id)?.title == "Design review" && asked.withLock { $0 } == 0)
+
+        let typed = try await rig.saved(state: .finished)
+        #expect(await rig.services.applyCalendarEvent(event, to: typed.id) == false)
+        let kept = try #require(try await rig.store.meeting(id: typed.id))
+        #expect(kept.title == "Weekly" && kept.attendees.isEmpty)
+    }
 }

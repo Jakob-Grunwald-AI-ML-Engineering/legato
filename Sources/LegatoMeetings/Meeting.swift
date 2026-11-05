@@ -135,6 +135,9 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     /// The title is the date title the app made, not one the user chose, so the first summary may replace it
     /// (``MeetingTitle``). Any edit of the title clears it; false for meetings saved before it existed.
     public var titleIsAutomatic: Bool
+    /// Display names of the calendar event's other attendees (the user excluded), offered as speaker names. Empty
+    /// unless the title came from the calendar, and for meetings saved before it existed.
+    public var attendees: [String]
 
     public init(
         id: UUID = UUID(), title: String, client: String? = nil, project: String? = nil, tags: [String] = [],
@@ -142,7 +145,7 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         mutedRanges: [MutedRange] = [], pausedRanges: [PausedRange] = [], gaps: [TranscriptGap] = [],
         speakers: [PersonID: SpeakerInfo] = [:], mergedSpeakers: [PersonID: PersonID] = [:], locale: String? = nil,
         sections: [SectionID]? = nil, state: State = .recording, completedSteps: Set<Step> = [], summaryFailure: String? = nil,
-        titleIsAutomatic: Bool = false
+        titleIsAutomatic: Bool = false, attendees: [String] = []
     ) {
         self.id = id
         self.title = title
@@ -162,6 +165,7 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         self.completedSteps = completedSteps
         self.summaryFailure = summaryFailure
         self.titleIsAutomatic = titleIsAutomatic
+        self.attendees = attendees
     }
 
     /// A recording shorter than this is a slip of the finger, not a meeting.
@@ -200,5 +204,6 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
         completedSteps = try c.decodeIfPresent(Set<Step>.self, forKey: .completedSteps) ?? []
         summaryFailure = try c.decodeIfPresent(String.self, forKey: .summaryFailure)
         titleIsAutomatic = try c.decodeIfPresent(Bool.self, forKey: .titleIsAutomatic) ?? false
+        attendees = try c.decodeIfPresent([String].self, forKey: .attendees) ?? []
     }
 }
