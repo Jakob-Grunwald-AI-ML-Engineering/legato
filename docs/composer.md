@@ -88,6 +88,12 @@ Dictation and the composer are refused while a meeting records (`MeetingServices
 
 The Meetings window (`MeetingsWindow`, opened from the menu-bar menu) has three columns: the sidebar (`MeetingSidebar`: All Meetings, Client then Project folders, tags; the only code that knows the folder model), the day-grouped list with search over title, filing, summary and transcript, and the detail. The detail has an editable title, client, project and tags (with the values other meetings use as suggestions, editable while recording), a Summary and a Transcript tab (speaker chips rename people; gaps are marked; the live meeting follows its newest line), the audio player, and Copy Summary, Copy Transcript, Share (Markdown) and Delete. Recording state sits on the notch island (`MeetingIsland`: elapsed time, Stop, and warnings such as a silent system-audio tap or a transcription outage). Debug builds can draw the window from sample meetings without a session, a key or the network: `-LegatoMeetingsRoot <empty dir> -LegatoMeetingsShots <dir>` (`MeetingsPreview`) writes a PNG per state and quits. The first real system-audio capture needs the System Audio Recording permission.
 
+### Meetings from agents and scripts
+
+`legato` (`LegatoMeetingsCLI`; `Sources/legato` is the executable) reads the meetings folder, read-only: it never writes in it, a missing folder is an empty result, and a transcript line the app is still writing is skipped. `legato meetings list|show <id>|search <words>` take `--client`, `--project`, `--tag` (repeatable), `--root <dir>` and `--json` (Markdown/plain text otherwise); `show` accepts any unambiguous start of an id. `legato mcp` serves `list_meetings`, `show_meeting` and `search_meetings` as an MCP server on stdio (newline-delimited JSON-RPC; stdout is protocol only, it exits when stdin closes). Search is `MeetingStore.matches(_:meeting:)`, shared with the Meetings window: title, filing, speakers, summaries, notes and transcript.
+
+The Mac app bundles the binary as `Legato.app/Contents/Helpers/legato` (the `LegatoCLI` tool target in `Apps/macOS/project.yml`, copied and signed with the app; not `Contents/MacOS`, where `legato` and `Legato` are one name on a case-insensitive disk). `MeetingToolsSettings` links it to `~/.local/bin/legato` and copies the MCP configuration with the bundled path. From a checkout: `swift run legato meetings list`.
+
 ## Reading and pulling sessions
 
 The host writes `sessions/<UUID>/` beneath its Documents directory:

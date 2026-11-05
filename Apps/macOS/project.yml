@@ -48,6 +48,14 @@ targets:
         product: LegatoClaude
       - package: LegatoKit
         product: LegatoMeetings
+      # The `legato` command line, copied to Contents/Helpers (not Contents/MacOS: `legato` and `Legato` are one file on a case-insensitive disk).
+      - target: LegatoCLI
+        link: false
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
     settings:
       base:
         PRODUCT_NAME: Legato
@@ -75,3 +83,19 @@ targets:
         LSApplicationCategoryType: public.app-category.productivity
         NSMicrophoneUsageDescription: Legato records your voice to compose text and, for meeting notes, to save your side of the meeting on this device.
         NSAudioCaptureUsageDescription: Legato records the audio your Mac plays, to transcribe the other side of a meeting.
+  # `legato meetings …` and `legato mcp`: read-only access to the meetings for agents and scripts. The same main.swift as the
+  # package's `legato` product, built here so it is signed with the app's team and hardened runtime. Target and module are not
+  # named `legato`: that is `Legato` (the app) to a case-insensitive disk, in the build folders too.
+  LegatoCLI:
+    type: tool
+    platform: macOS
+    sources: [../../Sources/legato]
+    dependencies:
+      - package: LegatoKit
+        product: LegatoMeetingsCLI
+    settings:
+      base:
+        PRODUCT_NAME: legato
+        PRODUCT_MODULE_NAME: LegatoCLITool
+        PRODUCT_BUNDLE_IDENTIFIER: de.gruenwald.legato.mac.cli
+        SKIP_INSTALL: YES
