@@ -20,11 +20,16 @@ private final class TakeFixtureMessages: MessagesStreaming {
 private func takeEvent(_ name: String, _ value: JSONValue) throws -> SSEEvent {
     .init(event: name, data: String(decoding: try JSONEncoder().encode(value), as: UTF8.self))
 }
-private func takeEvents(_ payload: JSONValue, tool: String = "submit_text") throws -> [SSEEvent] {
-    [try takeEvent("content_block_start", .object(["index": .number(0), "content_block": .object([
-        "type": .string("tool_use"), "id": .string("take-tool"), "name": .string(tool), "input": payload])])),
-     try takeEvent("content_block_stop", .object(["index": .number(0)])),
-     try takeEvent("message_stop", .object(["type": .string("message_stop")]))]
+private func takeEvents(_ fragments: [String], stopReason: String = "end_turn", block: String = "text") throws -> [SSEEvent] {
+    var events = [try takeEvent("content_block_start", .object(["index": .number(0), "content_block": .object(["type": .string(block), "text": .string("")])]))]
+    for fragment in fragments {
+        events.append(try takeEvent("content_block_delta", .object(["index": .number(0), "delta": .object([
+            "type": .string("text_delta"), "text": .string(fragment)])])))
+    }
+    events.append(try takeEvent("content_block_stop", .object(["index": .number(0)])))
+    events.append(try takeEvent("message_delta", .object(["delta": .object(["stop_reason": .string(stopReason)])])))
+    events.append(try takeEvent("message_stop", .object(["type": .string("message_stop")])))
+    return events
 }
 
 /// Scripted whole-take cleaner: pops one behaviour per call (the last repeats).
@@ -100,8 +105,8 @@ private let longClean = "So I wanted to say that the meeting went well, and we a
     #expect(keyless.calls.withLock { $0 } == 1, "No key: nothing to retry")
 }
 
-@Test func theClientSubmitsTheWholeTakeThroughSubmitTextWithScaledTokens() async throws {
-    let fixture = TakeFixtureMessages(try takeEvents(.object(["sentenceID": .string("take-1"), "text": .string(longClean)])))
+@Test func theClientSendsTheWholeTakeForAPlainReplyWithScaledTokens() async throws {
+    let fixture = TakeFixtureMessages(try takeEvents([longClean]))
     let client = SentenceCleanupClient(client: fixture)
     let text = try await client.cleanTake(.init(takeID: "take-1", text: longRaw, vocabulary: ["Legato"],
                                                 recentTakes: [.init(raw: "earlier one", cleaned: "Earlier.", wasCleaned: true, date: .distantPast)], textBeforeCursor: "Hi Anna, "))
@@ -109,31 +114,28 @@ private let longClean = "So I wanted to say that the meeting went well, and we a
     let request = try JSONDecoder().decode(JSONValue.self, from: #require(fixture.requests.withLock { $0 }.first))
     #expect(request["model"] == .string(ModelChoice.haiku.rawValue))
     #expect(request["max_tokens"] == .number(Double(DictationTakeLimits.maxTokens(characters: longRaw.count))))
-    #expect(request["tool_choice"]?["name"] == .string("submit_text"))
+    #expect(request["tools"] == nil && request["tool_choice"] == nil, "A take is a plain text reply")
     let system = try #require(request["system"]).decode([JSONValue].self)
     #expect(system.first?["text"] == .string(PromptLayers.dictationTakeCleanup()))
-    let tools = try #require(request["tools"]).decode([JSONValue].self)
-    #expect(tools.first?["input_schema"]?["properties"]?["text"]?["description"] != nil, "The forced tool says the field holds the whole text")
     let messages = try #require(request["messages"]).decode([JSONValue].self)
     let content = try #require(messages.first?["content"]).decode(String.self)
-    #expect(content.contains("recentTakes") && content.contains("earlier one") && content.contains("Earlier.") && content.contains("Hi Anna, ") && content.contains("take-1"))
-    let keys = ["\"recentTakes\"", "\"sentenceID\"", "\"text\":\"\(longRaw.prefix(8))", "\"textBeforeCursor\"", "\"vocabulary\""].map { content.range(of: $0)?.lowerBound }
+    #expect(content.contains("recentTakes") && content.contains("earlier one") && content.contains("Earlier.") && content.contains("Hi Anna, "))
+    let keys = ["\"recentTakes\"", "\"text\":\"\(longRaw.prefix(8))", "\"textBeforeCursor\"", "\"vocabulary\""].map { content.range(of: $0)?.lowerBound }
     #expect(keys.allSatisfy { $0 != nil } && keys == keys.sorted { $0! < $1! }, "The fields keep one order, whatever the run")
 }
 
-@Test(arguments: ["identity", "extra-field", "empty", "control", "wrong-tool", "oversized"])
-func theClientRejectsMalformedTakeSubmissions(_ failure: String) async throws {
-    var payload: JSONValue = .object(["sentenceID": .string("take-1"), "text": .string(longClean)])
-    var tool = "submit_text"
+@Test(arguments: ["empty", "control", "oversized", "tool-block", "output-limit", "refusal"])
+func theClientRejectsMalformedTakeReplies(_ failure: String) async throws {
+    let events: [SSEEvent]
     switch failure {
-    case "identity": payload = .object(["sentenceID": .string("other"), "text": .string(longClean)])
-    case "extra-field": payload = .object(["sentenceID": .string("take-1"), "text": .string(longClean), "note": .string("x")])
-    case "empty": payload = .object(["sentenceID": .string("take-1"), "text": .string("  ")])
-    case "control": payload = .object(["sentenceID": .string("take-1"), "text": .string("bad\u{0007}text")])
-    case "wrong-tool": tool = "submit_sentence"
-    default: payload = .object(["sentenceID": .string("take-1"), "text": .string(String(repeating: "a", count: 70_000))])
+    case "empty": events = try takeEvents(["  "])
+    case "control": events = try takeEvents(["bad\u{0007}text"])
+    case "oversized": events = try takeEvents([String(repeating: "a", count: 70_000)])
+    case "tool-block": events = try takeEvents([longClean], block: "tool_use")
+    case "output-limit": events = try takeEvents([longClean], stopReason: "max_tokens")
+    default: events = try takeEvents([longClean], stopReason: "refusal")
     }
-    let client = SentenceCleanupClient(client: TakeFixtureMessages(try takeEvents(payload, tool: tool)))
+    let client = SentenceCleanupClient(client: TakeFixtureMessages(events))
     await #expect(throws: (any Error).self) { try await client.cleanTake(.init(takeID: "take-1", text: longRaw)) }
 }
 
@@ -147,17 +149,6 @@ func theClientRejectsMalformedTakeSubmissions(_ failure: String) async throws {
 
 // MARK: Streaming
 
-private func deltaEvents(_ fragments: [String]) throws -> [SSEEvent] {
-    var events = [try takeEvent("content_block_start", .object(["index": .number(0), "content_block": .object([
-        "type": .string("tool_use"), "id": .string("take-tool"), "name": .string("submit_text"), "input": .object([:])])]))]
-    for fragment in fragments {
-        events.append(try takeEvent("content_block_delta", .object(["index": .number(0), "delta": .object([
-            "type": .string("input_json_delta"), "partial_json": .string(fragment)])])))
-    }
-    events.append(try takeEvent("content_block_stop", .object(["index": .number(0)])))
-    events.append(try takeEvent("message_stop", .object(["type": .string("message_stop")])))
-    return events
-}
 private func collect(_ client: SentenceCleanupClient, _ id: String = "take-1") async throws -> [String] {
     var deltas: [String] = []
     for try await delta in client.cleanTakeStream(.init(takeID: id, text: longRaw)) { deltas.append(delta) }
@@ -165,10 +156,10 @@ private func collect(_ client: SentenceCleanupClient, _ id: String = "take-1") a
 }
 
 @Test func theClientStreamsTheTextAsItArrivesAndTheDeltasAddUpToTheResult() async throws {
-    let json = #"{"sentenceID":"take-1","text":"  So I wanted to say, \"hello\"\n\nThen we left. ä  "}"#
+    let reply = "  So I wanted to say, \"hello\"\n\nThen we left. ä  "
     for size in [1, 5, 1000] {
-        let fragments = stride(from: 0, to: json.count, by: size).map { String(json.dropFirst($0).prefix(size)) }
-        let client = SentenceCleanupClient(client: TakeFixtureMessages(try deltaEvents(fragments)))
+        let fragments = stride(from: 0, to: reply.count, by: size).map { String(reply.dropFirst($0).prefix(size)) }
+        let client = SentenceCleanupClient(client: TakeFixtureMessages(try takeEvents(fragments)))
         let deltas = try await collect(client)
         #expect(deltas.joined() == "So I wanted to say, \"hello\"\n\nThen we left. ä", "size \(size)")
         #expect(deltas.allSatisfy { !$0.isEmpty })
@@ -176,18 +167,13 @@ private func collect(_ client: SentenceCleanupClient, _ id: String = "take-1") a
     }
 }
 
-@Test func aCompleteInputWithoutDeltasStillYieldsTheTextOnce() async throws {
-    let client = SentenceCleanupClient(client: TakeFixtureMessages(try takeEvents(.object(["sentenceID": .string("take-1"), "text": .string(longClean)]))))
-    #expect(try await collect(client) == [longClean])
-}
-
 @Test func aStreamFailsAfterItsDeltasWhenTheResultIsInvalid() async throws {
-    let client = SentenceCleanupClient(client: TakeFixtureMessages(try deltaEvents([#"{"sentenceID":"other","te"#, #"xt":"Some words"}"#])))
+    let client = SentenceCleanupClient(client: TakeFixtureMessages(try takeEvents(["Some words", "\u{0007}"])))
     var deltas: [String] = []
-    await #expect(throws: SentenceCleanupError.invalidIdentity) {
+    await #expect(throws: SentenceCleanupError.invalidText) {
         for try await delta in client.cleanTakeStream(.init(takeID: "take-1", text: longRaw)) { deltas.append(delta) }
     }
-    #expect(deltas.joined() == "Some words", "Validation runs at the end; the deltas already went out")
+    #expect(deltas.joined().hasPrefix("Some words"), "Validation runs at the end; the deltas already went out")
 }
 
 @Test func theDefaultStreamYieldsTheWholeResultOnceAndThrowsItsError() async throws {
