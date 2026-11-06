@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.iOS(.v26), .macOS(.v26)],
     products: [
         .library(name: "LegatoComposerUI", targets: ["LegatoComposerUI"]),
+        .library(name: "LegatoVoiceIdentity", targets: ["LegatoVoiceIdentity"]),
         .library(name: "LegatoSoniox", targets: ["LegatoSoniox"]),
         .library(name: "LegatoAgent", targets: ["LegatoAgent"]),
         .library(name: "LegatoRoom", targets: ["LegatoRoom"]),
@@ -27,7 +28,8 @@ let package = Package(
     ],
     targets: [
         .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc", "LegatoVocabulary"]),
-        .target(name: "LegatoSoniox", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
+        .target(name: "LegatoVoiceIdentity", resources: [.copy("ModelAssets.json")]),
+        .target(name: "LegatoSoniox", dependencies: ["LegatoRoom", "LegatoComposerDoc", "LegatoVoiceIdentity"]),
         .testTarget(name: "LegatoSonioxTests", dependencies: ["LegatoSoniox", "LegatoRoom", "LegatoComposerDoc"]),
         .target(name: "LegatoComposerDoc"),
         .target(name: "LegatoAgent", dependencies: ["LegatoClaude", "LegatoRoom", "LegatoComposerDoc", "LegatoVocabulary"], resources: [.copy("Prompts")]),
@@ -46,7 +48,7 @@ let package = Package(
         .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore", "LegatoAudioBridge"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore", "LegatoAudioBridge"]),
-        .target(name: "LegatoAppServices", dependencies: ["LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings"]),
+        .target(name: "LegatoAppServices", dependencies: ["LegatoVoiceIdentity", "LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings"]),
         .testTarget(name: "LegatoAppServicesTests", dependencies: ["LegatoAppServices", "LegatoCore", "LegatoVocabulary", "LegatoMeetings"]),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),

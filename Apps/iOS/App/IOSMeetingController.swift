@@ -94,6 +94,9 @@ final class IOSMeetingController {
     }
 
     func start() {
+        guard !VoiceEnrollmentController.shared.isBusy else {
+            notice = "Finish or cancel voice profile setup first."; return
+        }
         guard ready, phase == .idle, UIApplication.shared.applicationState == .active else { return }
         guard !composer.isListening, composer.status != "starting", keyboard.route == .idle else {
             notice = "Stop dictation before starting a meeting. Your draft will be kept."; return

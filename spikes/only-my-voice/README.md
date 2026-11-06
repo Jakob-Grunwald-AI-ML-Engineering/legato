@@ -1,6 +1,8 @@
 # Only my voice: measured feasibility spike (#242)
 
-**Recommendation: keep production unchanged.** Explicit enrollment identifies the intended person more reliably than first-voice or dominant-speaker assumptions, but this CAM++ v2 gate rejects target-speaker windows or admits other-speaker windows too frequently to justify destructive dictation filtering. Three-second accumulation does not resolve the held-out failures. This is a no-go for the measured gate, not a claim that all enrollment approaches are infeasible.
+**Subsequent integration:** the app exposes the requested experimental option; see [Only my voice](../../docs/uat/voice-isolation.md). The results below remain the evidence for its accuracy limits.
+
+**Spike recommendation:** Explicit enrollment identifies the intended person more reliably than first-voice or dominant-speaker assumptions, but this CAM++ v2 gate rejects target-speaker windows or admits other-speaker windows too frequently to justify destructive dictation filtering. Three-second accumulation does not resolve the held-out failures. This is a no-go for the measured gate, not a claim that all enrollment approaches are infeasible.
 
 No provider calls, private recordings, microphones, app settings or production dependencies are involved. Provider spend: **€0**. This spike reads downloaded public corpus files locally. It does not transcribe or insert text.
 

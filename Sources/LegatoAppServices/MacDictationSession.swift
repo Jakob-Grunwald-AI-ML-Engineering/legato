@@ -24,6 +24,7 @@ import LegatoSoniox
     public private(set) var noticeID = 0
     /// The live line (Soniox partials not yet final).
     public var tail: String { engine.tail }
+    public var voiceIsolationStatus: String? { phase == .listening ? engine.voiceIsolationStatus : nil }
     public var isActive: Bool { phase != .idle }
     @ObservationIgnored public let pipeline: DictationPipeline
     @ObservationIgnored let engine: DictationEngine
@@ -86,7 +87,9 @@ import LegatoSoniox
 
     /// Starts dictating. False (with a `notice`) when it cannot.
     @discardableResult public func start() async -> Bool {
+        guard !VoiceEnrollmentController.shared.isBusy else { post("Finish or cancel voice profile setup first."); return false }
         await stopTask?.value
+        guard !VoiceEnrollmentController.shared.isBusy else { post("Finish or cancel voice profile setup first."); return false }
         guard phase == .idle else { return phase == .listening }
         phase = .starting; pendingStop = false
         guard !sonioxKey().isEmpty else {

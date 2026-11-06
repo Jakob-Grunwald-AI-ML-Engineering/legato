@@ -32,6 +32,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     public private(set) var correctionCountdownStart: Double?
     public private(set) var correctionCountdownDeadline: Double?
     public private(set) var status = "idle"
+    public private(set) var voiceIsolationStatus: String?
     public private(set) var error: String?
     public private(set) var pendingLineIDs: Set<String> = []
     public private(set) var busy = false
@@ -267,10 +268,12 @@ public enum ComposerInsertOrigin: String, Sendable {
     }
 
     public func arm() async {
+        guard !VoiceEnrollmentController.shared.isBusy else { error = "Finish or cancel voice profile setup first."; onChange?(); return }
         guard !microphoneReserved else { return }
         // A repeated ready request must not replace the stream of a running take.
         // The capture watchdog owns repair of an existing lease.
         guard !isArmed else { return }
+        status = "starting"; onChange?()
         do {
             _ = try await prepareMicrophoneStream()
             isArmed = true; error = nil; status = "ready"; onChange?()
@@ -413,6 +416,7 @@ public enum ComposerInsertOrigin: String, Sendable {
         warmAgentStream()
     }
     private func startSession(debugMode: ComposerMode?, microphoneLease: Bool, beginsInput: Bool = true) async {
+        guard debugMode != nil || !VoiceEnrollmentController.shared.isBusy else { error = "Finish or cancel voice profile setup first."; onChange?(); return }
         guard !microphoneReserved, !isListening, status != "starting", !resuming, !preparingInsertion else { return }
         if let room, sessionLog != nil, await room.state != .done {
             guard beginsInput else { return }
@@ -864,6 +868,7 @@ public enum ComposerInsertOrigin: String, Sendable {
     /// Keyboard sessions hold one microphone stream for the whole appearance. Never starts a microphone:
     /// without a lease the keyboard's hop path applies. False when no input could be held.
     func holdWarmInput() async -> Bool {
+        guard !VoiceEnrollmentController.shared.isBusy else { error = "Finish or cancel voice profile setup first."; onChange?(); return false }
         if warmInput != nil { return true }
         guard !microphoneReserved, isArmed, !isListening, status != "starting", !resuming else { return false }
         do {
@@ -1095,11 +1100,15 @@ public enum ComposerInsertOrigin: String, Sendable {
                 if instructionApplying || !lastInstruction.isEmpty { instructionFailed = true; instructionApplying = false; instructionCompleted = false }
             }
         case .session:
+            if event.payload["event"] == .string("asr.voiceIsolation"), case .string(let state) = event.payload["status"] {
+                voiceIsolationStatus = Self.voiceIsolationMessage(state)
+            }
             if case .string(let value) = event.payload["state"] {
                 // Room reopens before the new provider connects. Expose listening
                 // only when beginInput has established its actual input stream.
                 if value == "listening", resuming || status == "starting" { break }
                 status = value
+                if value != "listening" { voiceIsolationStatus = nil }
                 if value == "done" { busyParticipants = []; busy = false; pendingLineIDs = [] }
             }
             if event.payload["event"] == .string("asr.error"), case .string(let message) = event.payload["message"] { error = message; status = "error"; route = .idle; discardTakeBuffer() }
@@ -1107,6 +1116,14 @@ public enum ComposerInsertOrigin: String, Sendable {
         }
         if case .string(let value) = event.payload["mode"], let mode = ComposerMode(rawValue: value) { self.mode = mode }
         onChange?()
+    }
+    static func voiceIsolationMessage(_ state: String) -> String? {
+        switch state {
+        case "identifying": "Identifying your voice…"
+        case "matching": "Only your voice"
+        case "uncertain": "Voice uncertain — speech withheld"
+        default: nil
+        }
     }
     /// Short, human wording for a writer failure; the raw text stays in `errorDetail` and the room log.
     public nonisolated static func writerFailureMessage(_ raw: String) -> String {

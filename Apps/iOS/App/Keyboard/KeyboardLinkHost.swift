@@ -165,6 +165,8 @@ final class KeyboardLinkHost: TranscriptSink {
                     value.dictationCountdownStart = dictation.countdownStart
                     value.dictationCountdownDeadline = dictation.countdownDeadline
                 }
+                value.voiceIsolationStatus = value.audioRoute == "dictation"
+                    ? self.keyboardSession?.dictationVoiceIsolationStatus : composer.voiceIsolationStatus
                 value.dictationNotice = self.keyboardSession?.dictationNotice
                 value.dictationNoticeID = self.keyboardSession?.dictationNoticeID
                 value.muted = composer.isMuted; value.status = composer.microphoneRecovering ? "Reconnecting microphone…" : composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs

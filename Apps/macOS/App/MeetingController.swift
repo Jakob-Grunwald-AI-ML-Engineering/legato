@@ -127,6 +127,7 @@ final class MeetingController {
     /// denied permission) ends up in `notice` and nothing is kept.
     /// - Parameter automatically: call detection starts it, which also lets the end of the call stop it.
     func start(dictationActive: Bool, automatically: Bool = false) {
+        guard !VoiceEnrollmentController.shared.isBusy else { flash("Finish or cancel voice profile setup first.", seconds: nil); return }
         guard phase == .idle else { return }
         phase = .starting
         notice = nil

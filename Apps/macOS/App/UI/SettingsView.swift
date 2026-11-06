@@ -6,10 +6,11 @@ import LegatoAgent
 
 struct SettingsView: View {
     private enum Page: String, CaseIterable, Identifiable {
-        case overview = "Overview", writing = "Writing", meetings = "Meetings", keys = "API Keys", shortcut = "Shortcut"
+        case overview = "Overview", voice = "Voice", writing = "Writing", meetings = "Meetings", keys = "API Keys", shortcut = "Shortcut"
         var id: Self { self }
         var symbol: String {
             switch self {
+            case .voice: "person.wave.2"
             case .overview: "sparkles"
             case .writing: "text.alignleft"
             case .meetings: "person.2.wave.2"
@@ -19,6 +20,7 @@ struct SettingsView: View {
         }
         var subtitle: String {
             switch self {
+            case .voice: "Quietly reduce background voices while you dictate."
             case .overview: "Your voice, ready to write."
             case .writing: "Make every composition sound like you."
             case .meetings: "Record, transcribe and summarize your calls."
@@ -32,6 +34,8 @@ struct SettingsView: View {
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
     @AppStorage(InstructionSendSetting.modeKey) private var instructionSend = InstructionSendSetting.Mode.manual.rawValue
     @AppStorage(InstructionSendSetting.pauseKey) private var instructionPause = InstructionSendSetting.defaultPause
+    @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
+    @State private var enrollment = VoiceEnrollmentController.shared
     @State private var page: Page? = .overview
     @State private var claudeKey = ""
     @State private var sonioxKey = ""
@@ -66,6 +70,7 @@ struct SettingsView: View {
                         Text(currentPage.subtitle).foregroundStyle(.secondary)
                     }
                     switch currentPage {
+                    case .voice: voice
                     case .overview: overview
                     case .writing: writing
                     case .meetings: SettingsMeetingsPage()
@@ -80,6 +85,40 @@ struct SettingsView: View {
         .task { refreshKeys(); controller.permissions.refresh() }
         .onChange(of: page) { _, _ in controller.cancelRecording(); controller.permissions.refresh() }
         .onDisappear { controller.cancelRecording() }
+    }
+
+    private var voice: some View {
+        card {
+            VStack(alignment: .leading, spacing: 14) {
+
+            Toggle("Reduce background voices (experimental)", isOn: $onlyMyVoice)
+                .disabled(!enrollment.hasProfile || enrollment.isBusy)
+                .accessibilityIdentifier("settings.onlyMyVoice")
+            Text(enrollment.hasProfile ? "Voice profile saved on this device." : "Record your voice once to help reduce background voices.")
+                .font(.callout).foregroundStyle(.secondary)
+            Text("Speak alone in a quiet place for ten seconds. Try: ‘Today I’m taking a moment to describe what I’m working on and what I’d like to do next. I want my writing to sound natural and clear.’")
+                .font(.callout).foregroundStyle(.secondary)
+            if enrollment.isBusy {
+                if enrollment.isRecording { ProgressView(value: enrollment.progress) }
+                else { ProgressView() }
+                Text(enrollment.stage).font(.callout).accessibilityIdentifier("settings.voiceEnrollmentStatus")
+                Button("Cancel", role: .cancel) { enrollment.cancel() }
+            } else {
+                Button(enrollment.hasProfile ? "Record replacement voice profile" : "Record voice profile") {
+                    enrollment.record(microphoneBusy: { controller.isDictating || controller.composer.isArmed || controller.composer.holdsWarmInput || controller.dictation.isActive || controller.meetings.isRecording })
+                }.accessibilityIdentifier("settings.recordVoiceProfile")
+                if enrollment.hasProfile {
+                    Button("Delete voice profile", role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
+                        .accessibilityIdentifier("settings.deleteVoiceProfile")
+                }
+            }
+            if let message = enrollment.message {
+                Text(message).font(.callout).accessibilityIdentifier("settings.voiceEnrollmentMessage")
+            }
+            Text("Quietly reduces background voices while prioritizing your speech, without holding text back. Experimental: other voices may still get through. First setup downloads a model; only your voice profile is saved locally, not the recording. Changes apply to the next take. Meetings keep every speaker.")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
+        }.onDisappear { enrollment.cancel() }
     }
 
     private var overview: some View {

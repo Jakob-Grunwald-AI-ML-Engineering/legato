@@ -15,6 +15,8 @@ public struct ComposerPublication: Codable, Equatable, Sendable {
     public var successfulInsertionID: String?
     public var mode = "message"
     public var status = "idle"
+    /// Optional for compatibility with older hosts; never used as the session lifecycle state.
+    public var voiceIsolationStatus: String?
     public var error: String?
     public var pendingLineIDs: Set<String> = []
     public var busy = false
