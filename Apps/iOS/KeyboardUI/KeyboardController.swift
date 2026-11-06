@@ -169,7 +169,7 @@ final class KeyboardController {
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        hint ?? meetingNotice ?? takeStatus ?? composer.voiceIsolationStatus ?? dictatingStatus ?? dictationStatus
+        hint ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
     }
 
     /// The held take's phase while the ABC surface shows one (`cleaning`, `failed`), else nil.

@@ -20,7 +20,7 @@ struct SettingsView: View {
         }
         var subtitle: String {
             switch self {
-            case .voice: "Keep dictation focused on your voice."
+            case .voice: "Quietly reduce background voices while you dictate."
             case .overview: "Your voice, ready to write."
             case .writing: "Make every composition sound like you."
             case .meetings: "Record, transcribe and summarize your calls."
@@ -91,10 +91,10 @@ struct SettingsView: View {
         card {
             VStack(alignment: .leading, spacing: 14) {
 
-            Toggle("Only my voice (experimental)", isOn: $onlyMyVoice)
+            Toggle("Reduce background voices (experimental)", isOn: $onlyMyVoice)
                 .disabled(!enrollment.hasProfile || enrollment.isBusy)
                 .accessibilityIdentifier("settings.onlyMyVoice")
-            Text(enrollment.hasProfile ? "Voice profile saved on this device." : "Record your voice once to enable this filter.")
+            Text(enrollment.hasProfile ? "Voice profile saved on this device." : "Record your voice once to help reduce background voices.")
                 .font(.callout).foregroundStyle(.secondary)
             Text("Speak alone in a quiet place for ten seconds. Try: ‘Today I’m taking a moment to describe what I’m working on and what I’d like to do next. I want my writing to sound natural and clear.’")
                 .font(.callout).foregroundStyle(.secondary)
@@ -115,7 +115,7 @@ struct SettingsView: View {
             if let message = enrollment.message {
                 Text(message).font(.callout).accessibilityIdentifier("settings.voiceEnrollmentMessage")
             }
-            Text("First setup downloads a voice model. Only your voice profile is saved locally; this recording is not kept. Changes apply to the next take. Identification can delay the first words and may miss some of your speech. Overlapping voices may still get through. Meetings keep every speaker.")
+            Text("Quietly reduces background voices while prioritizing your speech, without holding text back. Experimental: other voices may still get through. First setup downloads a model; only your voice profile is saved locally, not the recording. Changes apply to the next take. Meetings keep every speaker.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
         }.onDisappear { enrollment.cancel() }

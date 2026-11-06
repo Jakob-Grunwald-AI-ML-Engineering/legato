@@ -165,7 +165,10 @@ public actor SonioxClient {
                         voiceFilter = VoiceTokenFilter(matcher: matcher)
                     }
                     try await voiceStatus("identifying")
-                } catch { throw SonioxError.voiceIsolation(error.localizedDescription) }
+                } catch {
+                    voiceFilter = nil
+                    try await voiceStatus("unavailable")
+                }
             }
             try await socket.send(.text(String(decoding: config.message(backgroundText: backgroundText), as: UTF8.self)))
             // The stream may have failed or closed while the request was in flight; that outcome stands.
@@ -316,16 +319,10 @@ public actor SonioxClient {
         if let code = response.error_code { await fail(.provider(code)); throw SonioxError.provider(code) }
         var tokens = response.tokens ?? []
         if let filter = voiceFilter {
-            do {
-                let filtered = try await filter.filter(tokens, force: response.finished == true || tokens.contains { $0.text == "<fin>" || $0.text == "<end>" })
-                guard state != .finished && state != .failed else { return }
-                tokens = filtered.tokens
-                if filtered.withheld { try await voiceStatus("uncertain") }
-                else if tokens.contains(where: { !$0.text.hasPrefix("<") }) { try await voiceStatus("matching") }
-            } catch {
-                let visible = SonioxError.voiceIsolation(error.localizedDescription)
-                await fail(visible); throw visible
-            }
+            let filtered = await filter.filter(tokens, force: response.finished == true || tokens.contains { $0.text == "<fin>" || $0.text == "<end>" })
+            guard state != .finished && state != .failed else { return }
+            tokens = filtered.tokens
+            try await voiceStatus(filtered.status)
         }
         if debugInput { debugPartialTokens = tokens.filter { !$0.isFinal && !$0.text.hasPrefix("<") } }
         try await publish(segmenter.ingest(tokens, finished: response.finished == true),

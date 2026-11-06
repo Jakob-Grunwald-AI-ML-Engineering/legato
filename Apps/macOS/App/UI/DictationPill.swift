@@ -231,14 +231,13 @@ struct DictationPillView: View {
         switch pipeline.takePhase {
         case .failed: return "Couldn't clean up. Your text is held."
         case .cleaning: return "Cleaning…"
-        case .buffering: return spoken.isEmpty ? nil : session.voiceIsolationStatus
+        case .buffering: return nil
         }
     }
     private var line: String {
         if let notice = model.notice { return notice }
         if pipeline.takePhase != .buffering { return spoken }
         if !spoken.isEmpty { return spoken }
-        if let voiceStatus = session.voiceIsolationStatus { return voiceStatus }
         switch session.phase {
         case .starting: return "Starting…"
         case .listening: return "Listening…"
