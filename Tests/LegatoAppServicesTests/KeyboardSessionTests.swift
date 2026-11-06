@@ -172,6 +172,45 @@ import LegatoSoniox
         #expect(!(await socket.sent.contains(.text(#"{"type":"finalize"}"#))))
     }
 
+    @Test func closingAndReopeningKeyboardReusesTheHeldMicrophone() async throws {
+        let (composer, keyboard) = try await openOnTyping()
+        keyboard.update(visible: false, surface: .dictation)
+        await keyboard.settle()
+        #expect(composer.isArmed)
+        keyboard.update(visible: true, surface: .dictation)
+        await keyboard.settle()
+        #expect(composer.holdsWarmInput)
+        #expect(await keyboard.openGate())
+        let socket = try #require(sockets.at(1))
+        await mic.emit()
+        try await until { await socket.audioFrames > 0 }
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        await composer.releaseMicrophone()
+    }
+
+    @Test func speechDuringTakeConnectionIsBufferedButIdleSpeechIsDiscarded() async throws {
+        let (composer, keyboard) = try await openOnTyping()
+        let socket = try #require(sockets.last)
+        let idleChunks = composer.consumedWarmInputChunks
+        await mic.emit(sample: 0.9)
+        try await until { composer.consumedWarmInputChunks > idleChunks }
+        await socket.holdConfiguration()
+        let opening = Task { await keyboard.openGate() }
+        try await until { await socket.configurationBlocked }
+        await mic.emit(sample: 0.25)
+        // Wait until the consumer has accepted the post-tap chunk, independent of the held network send.
+        try await until { composer.bufferedTakeFrames == 320 }
+        await socket.releaseConfiguration()
+        #expect(await opening.value)
+        await mic.emit(sample: 0.5)
+        try await until { await socket.audioFrames == 2 }
+        let audio = await socket.sent.compactMap { frame -> Data? in if case .binary(let data) = frame { return data }; return nil }
+        #expect(audio.count == 2)
+        #expect(audio[0] != audio[1], "The opening chunk precedes the later speech")
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        await composer.releaseMicrophone()
+    }
+
     @Test func idleDropReconnectsSilently() async throws {
         let (composer, keyboard) = try await openOnTyping()
         await sockets.last?.drop()
@@ -210,7 +249,7 @@ actor GateMicrophone: AudioSource {
         let pair = AsyncStream<AudioChunk>.makeStream(); continuation = pair.continuation
         return pair.stream
     }
-    func emit() { continuation?.yield(AudioChunk(samples: Array(repeating: 0.1, count: 320), format: .init(sampleRate: 16000, channelCount: 1))) }
+    func emit(sample: Float = 0.1) { continuation?.yield(AudioChunk(samples: Array(repeating: sample, count: 320), format: .init(sampleRate: 16000, channelCount: 1))) }
     func detach() async { continuation?.finish(); continuation = nil }
     func stop() async { continuation?.finish(); continuation = nil }
 }
@@ -238,7 +277,20 @@ actor TestSocket: SonioxSocket {
     private static func isConfig(_ frame: SonioxFrame) -> Bool { if case .text(let text) = frame { text.contains("stt-rt") } else { false } }
     var audioFrames: Int { sent.filter { if case .binary = $0 { true } else { false } }.count }
     func connect(request: URLRequest) async throws {}
-    func send(_ frame: SonioxFrame) async throws { guard !closed else { throw SonioxError.network }; sent.append(frame) }
+    private var holdConfig = false
+    private var configWaiter: CheckedContinuation<Void, Never>?
+    var configurationBlocked = false
+    func holdConfiguration() { holdConfig = true }
+    func releaseConfiguration() { holdConfig = false; configWaiter?.resume(); configWaiter = nil }
+    func send(_ frame: SonioxFrame) async throws {
+        guard !closed else { throw SonioxError.network }
+        if holdConfig && Self.isConfig(frame) {
+            configurationBlocked = true
+            await withCheckedContinuation { configWaiter = $0 }
+        }
+        guard !closed else { throw SonioxError.network }
+        sent.append(frame)
+    }
     func receive() async throws -> SonioxFrame {
         if !inbox.isEmpty { return inbox.removeFirst() }
         if dropped || closed { throw SonioxError.network }

@@ -169,7 +169,7 @@ final class KeyboardLinkHost: TranscriptSink {
                     ? self.keyboardSession?.dictationVoiceIsolationStatus : composer.voiceIsolationStatus
                 value.dictationNotice = self.keyboardSession?.dictationNotice
                 value.dictationNoticeID = self.keyboardSession?.dictationNoticeID
-                value.muted = composer.isMuted; value.status = composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
+                value.muted = composer.isMuted; value.status = composer.microphoneRecovering ? "Reconnecting microphone…" : composer.status; value.error = composer.error ?? self.composerInsertionNotice; value.busy = composer.busy; value.pendingLineIDs = composer.pendingLineIDs
                 if self.composerPublisher.publish(value, through: channel) {
                     #if DEBUG || LEGATO_INTERNAL
                     Self.log.info("composer.publish rev=\(value.snapshot.revision) session=\(value.sessionID ?? "-", privacy: .public) lines=\(value.snapshot.lines.count) tail=\(value.tail.count) insertion=\(value.successfulInsertionID ?? "-", privacy: .public) hunks=\(value.hunks.count)")

@@ -6,7 +6,7 @@ import Synchronization
 /// Converts tap buffers to a requested `AudioFormatSpec` (Float32, interleaved) and copies the
 /// samples out, since the tap reuses its buffer. The lock serializes use of the stateful converter.
 ///
-/// Input with more than two channels and a mono target is folded to mono by hand first (the system
+/// Input with multiple channels and a mono target is folded to mono by hand first (the system
 /// converter has no layout to go by). `firstChannelOnly` takes channel 0, otherwise the channels are
 /// averaged. Assumption (from the mac-audio spike, unverified on other hardware): a voice-processing
 /// input reports many channels and channel 0 carries the processed voice, so averaging would dilute it.
@@ -25,7 +25,7 @@ final class BufferConverter: Sendable {
     init?(from: AVAudioFormat, to spec: AudioFormatSpec, firstChannelOnly: Bool = false) {
         var source = from
         var fold: MonoFold?
-        if from.channelCount > 2, spec.channelCount == 1, from.commonFormat == .pcmFormatFloat32 {
+        if from.channelCount > 1, spec.channelCount == 1, from.commonFormat == .pcmFormatFloat32 {
             guard let mono = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32, sampleRate: from.sampleRate, channels: 1, interleaved: false)
             else { return nil }

@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
     @State private var enrollment = VoiceEnrollmentController.shared
     @State private var keepMicrophoneActive = ComposerMicrophonePreference.keepActive()
+    @State private var combineMicrophoneInputs = ComposerMicrophonePreference.combineInputs()
     @State private var haptics = Settings.keyboardHaptics
     @State private var clicks = Settings.keyboardClicks
     @State private var microphoneAllowed = AVAudioApplication.shared.recordPermission == .granted
@@ -119,6 +120,16 @@ struct SettingsView: View {
                 Text("Keeps a microphone session you enable available while using the keyboard or other apps. When off, switching away from Legato stops voice input. This switch never starts the microphone. Stop, clear and mute still control voice input.")
             }
             Section {
+                Toggle("Combine phone and headset microphones", isOn: $combineMicrophoneInputs)
+                    .accessibilityIdentifier("settings.combineMicrophoneInputs")
+                if controller.composer.isArmed {
+                    Button("Release microphone") { Task { await controller.releaseMicrophone() } }
+                        .accessibilityIdentifier("settings.releaseMicrophone")
+                }
+            } header: { Text("Microphone inputs") } footer: {
+                Text("Combines compatible headset and phone microphones on iOS 26.2 or later. Other apps’ music may pause while both are held. Turn off to use the phone microphone and allow music to continue. Changes apply after releasing and readying the microphone again.")
+            }
+            Section {
                 HStack {
                     Label("Microphone", systemImage: "mic")
                     Spacer()
@@ -138,6 +149,7 @@ struct SettingsView: View {
             ComposerMicrophonePreference.setKeepActive(value)
             Task { await controller.composer.setKeepMicrophoneActive(value) }
         }
+        .onChange(of: combineMicrophoneInputs) { _, value in ComposerMicrophonePreference.setCombineInputs(value) }
         .onChange(of: haptics) { _, value in Settings.keyboardHaptics = value }
         .onChange(of: clicks) { _, value in Settings.keyboardClicks = value }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in

@@ -60,16 +60,19 @@ import LegatoAudio
     #expect(await mic.stops > 0)
 }
 
-@MainActor @Test func composerLostArmedRouteClearsLeaseWithoutReactivationLoop() async throws {
+@MainActor @Test func composerLostArmedRouteRebuildsWithoutReconfiguringBackgroundSession() async throws {
     let mic = ComposerTestMicrophone()
     var activations = 0
     let session = ComposerSession(microphone: mic, activateAudioSession: { activations += 1 })
     await session.arm()
     await mic.loseRoute()
-    await #expect(throws: MicSourceError.notArmed) { _ = try await session.prepareMicrophoneStream() }
-    #expect(!session.isArmed)
-    #expect(activations == 1)
+    _ = try await session.prepareMicrophoneStream()
+    #expect(session.isArmed)
+    #expect(session.error == nil)
+    #expect(activations == 1, "Repair reuses the active audio session instead of a forbidden background reconfiguration")
+    #expect(await mic.starts == 2)
     #expect(await mic.stops == 1)
+    await session.releaseMicrophone()
 }
 
 private actor ComposerTestMicrophone: AudioSource {
@@ -82,4 +85,58 @@ private actor ComposerTestMicrophone: AudioSource {
     func route() async throws -> AsyncStream<AudioChunk> { routes += 1; if routeLost { throw MicSourceError.notArmed }; return AsyncStream { $0.finish() } }
     func detach() async {}
     func stop() async { stops += 1 }
+}
+
+@MainActor @Test func transientStartupCancellationRetriesWithoutShowingSwiftError() async {
+    let mic = TransientMicrophone()
+    let session = ComposerSession(microphone: mic, activateAudioSession: {})
+    await session.arm()
+    #expect(session.isArmed)
+    #expect(!session.microphoneRecovering)
+    #expect(session.error == nil)
+    #expect(await mic.starts == 2)
+    await session.releaseMicrophone()
+}
+
+@MainActor @Test func releasingDuringAdmissionCannotRearmOrPublishAnError() async throws {
+    let admission = MicrophoneAdmissionGate()
+    let mic = TransientMicrophone()
+    let session = ComposerSession(microphone: mic, activateAudioSession: { await admission.wait() })
+    let arm = Task { await session.arm() }
+    while !(await admission.waiting) { await Task.yield() }
+    await session.releaseMicrophone()
+    await admission.release()
+    await arm.value
+    #expect(!session.isArmed && !session.microphoneRecovering)
+    #expect(session.error == nil)
+    #expect(await mic.starts == 0)
+}
+
+private actor TransientMicrophone: AudioSource {
+    var starts = 0
+    func start(format: AudioFormatSpec) async throws -> AsyncStream<AudioChunk> {
+        starts += 1
+        if starts == 1 { throw CancellationError() }
+        return AsyncStream { $0.finish() }
+    }
+    func route() async throws -> AsyncStream<AudioChunk> { AsyncStream { $0.finish() } }
+    func detach() async {}
+    func stop() async {}
+}
+private actor MicrophoneAdmissionGate {
+    var waiting = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async { waiting = true; await withCheckedContinuation { continuation = $0 } }
+    func release() { continuation?.resume(); continuation = nil }
+}
+
+@MainActor @Test func repeatedArmDoesNotStealTheCurrentAudioStream() async {
+    let mic = ComposerTestMicrophone()
+    let session = ComposerSession(microphone: mic, activateAudioSession: {})
+    await session.arm()
+    await session.arm()
+    #expect(await mic.starts == 1)
+    #expect(await mic.routes == 0)
+    #expect(session.isArmed)
+    await session.releaseMicrophone()
 }
