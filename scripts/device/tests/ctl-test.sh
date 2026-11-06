@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
+export FIXTURE_REAL_MKTEMP="$(command -v mktemp)"
 cat > "$work/bin/xcrun" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -55,7 +56,7 @@ elif [[ "$args" == *' copy from '* ]]; then
     control)
       echo '{"id":"c-test","event":"done","accepted":true,"waitFor":"control.done"}' > "$dest"
       [ "$n" -lt 2 ] || echo '{"id":"c-test","event":"control.done","outcome":"ok"}' >> "$dest" ;;
-    failed) echo 'fixture transfer unavailable' >&2; exit 1 ;;
+    failed | deadline-race) echo 'fixture transfer unavailable' >&2; exit 1 ;;
     stalled)
       [ -n "$timeout" ] || { echo 'pull has no timeout' >&2; exit 70; }
       echo "$$" >> "$FIXTURE/children"
@@ -136,6 +137,18 @@ esac
 FAKE
 chmod +x "$work/bin/sudo"
 chmod +x "$work/bin/xcrun"
+cat > "$work/bin/mktemp" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${SCENARIO:-}" = deadline-race ] && [[ "$*" == *'/log.XXXXXX'* ]]; then
+  n=0; [ ! -f "$FIXTURE/staging-attempts" ] || n="$(cat "$FIXTURE/staging-attempts")"
+  n=$((n + 1)); echo "$n" > "$FIXTURE/staging-attempts"
+  # Spend the remaining operation budget after pull_log's guard, before dc's guard.
+  if [ "$n" -eq 2 ]; then sleep 3; fi
+fi
+exec "$FIXTURE_REAL_MKTEMP" "$@"
+FAKE
+chmod +x "$work/bin/mktemp"
 export PATH="$work/bin:$PATH"
 failures=0
 setup() {
@@ -162,6 +175,12 @@ failed_preserves() {
   # Exercise transfer classification and cache preservation, not deadline expiry.
   ! run_ctl wait c-test 3 && grep -q '"id":"other"' "$cache" && grep -q 'fixture transfer unavailable' "$FIXTURE/err"
 }
+check failed_preserves
+setup deadline-race
+SCENARIO=complete run_ctl wait c-test 2
+cache="$(printf '%s\n' "$LEGATO_DEVICE_STATE"/*/log.jsonl)"
+[ -f "$cache" ] || cache="$LEGATO_DEVICE_STATE/log.jsonl"
+echo '{"id":"other","event":"done"}' > "$cache"
 check failed_preserves
 bounded() {
   local began=$SECONDS

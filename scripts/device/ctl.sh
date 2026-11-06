@@ -229,11 +229,16 @@ pull_log() {
   local staging rc=0
   # Keep the last transfer diagnostic when the enclosing operation has exhausted its budget.
   if [ -n "${DC_DEADLINE:-}" ] && [ "$SECONDS" -ge "$DC_DEADLINE" ]; then return 124; fi
-  staging="$(mktemp -d "$STATE/log.XXXXXX")"
-  copy_from "$BRIDGE/log.jsonl" "$staging/log.jsonl" 2> "$STATE/log.error" || rc=$?
+  staging="$(mktemp -d "$STATE/log.XXXXXX")" || return 1
+  # Stage diagnostics too: the deadline can expire after the guard above but before dc starts.
+  # A budget-only failure must not truncate the last actual transfer failure.
+  copy_from "$BRIDGE/log.jsonl" "$staging/log.jsonl" 2> "$staging/error" || rc=$?
   if [ "$rc" -eq 0 ]; then
-    mv "$staging/log.jsonl" "$LOG"
-    : > "$STATE/log.error"
+    mv "$staging/log.jsonl" "$LOG" 2> "$staging/error" || rc=$?
+    if [ "$rc" -eq 0 ]; then : > "$STATE/log.error"; fi
+  fi
+  if [ "$rc" -ne 0 ] && { [ "$rc" -ne 124 ] || [ ! -s "$STATE/log.error" ]; }; then
+    mv "$staging/error" "$STATE/log.error"
   fi
   rm -rf "$staging"
   return "$rc"
