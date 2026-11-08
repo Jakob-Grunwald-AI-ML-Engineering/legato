@@ -9,6 +9,36 @@ private func run(_ shadow: String, cursor: Int? = nil, _ target: String) -> (pla
 }
 
 @Suite struct ShadowEditTests {
+    @Test func aCharacterFlipDeletesAndInsertsOnlyTheCharactersThatDiffer() {
+        let shadow = "the whether is nice"
+        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: shadow.utf16.count, target: "the weather is nice", characters: true)
+        // "whether" to "weather": "h" goes, "a" comes in; the cursor returns to the end.
+        #expect(plan.ops == [.move(-12), .insert("a"), .move(-2), .deleteBackward(1), .move(14)])
+        let result = ShadowEditPlanner.simulate(ops: plan.ops, shadow: shadow, cursor: shadow.utf16.count)
+        #expect(result.text == "the weather is nice" && result.cursor == result.text.utf16.count && plan.cursor == result.cursor)
+    }
+
+    @Test func aCharacterFlipCountsUTF16AroundEmojiAndInsertsOneCharacterPerOp() {
+        let shadow = "😀 Hallo wrld 👨‍👩‍👧 tschüss"
+        let target = "😀 Hallo wörld 👨‍👩‍👧 tschüß"
+        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: shadow.utf16.count, target: target, characters: true)
+        let result = ShadowEditPlanner.simulate(ops: plan.ops, shadow: shadow, cursor: shadow.utf16.count)
+        #expect(result.text == target && result.cursor == target.utf16.count)
+        let inserts = plan.ops.compactMap { if case .insert(let text) = $0 { text } else { nil } }
+        let deleted = plan.ops.reduce(0) { if case .deleteBackward(let n) = $1 { $0 + n } else { $0 } }
+        #expect(inserts == ["ß", "ö"] && deleted == 2, "\"ss\" becomes \"ß\", \"ö\" goes in")
+        // From the end back to "w|rld": the emoji family is 8 UTF-16 units but one character, and the move counts units.
+        #expect(plan.ops.first == .deleteBackward(2) && plan.ops.contains(.move(-19)))
+    }
+
+    @Test func aCharacterFlipTwoWordsBackLeavesTheWordsAfterItAlone() {
+        let shadow = "we met their yesterday and"
+        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: shadow.utf16.count, target: "we met there yesterday and", characters: true)
+        #expect(plan.ops == [.move(-14), .insert("e"), .move(-2), .deleteBackward(1), .move(16)])
+        let result = ShadowEditPlanner.simulate(ops: plan.ops, shadow: shadow, cursor: shadow.utf16.count)
+        #expect(result.text == "we met there yesterday and")
+    }
+
     @Test func flipsAWordInTheMiddleAndKeepsTheCursorAtTheEnd() {
         let s = "I think there going to the station. Then coffee."
         let t = "I think they're going to the station. Then coffee."

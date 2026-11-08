@@ -22,7 +22,7 @@ private func final(_ id: Int, _ text: String, cleaned: Bool = false) -> LiveSegm
 private func head(_ id: Int, _ text: String) -> LiveSegment { .init(id: id, text: text, final: false) }
 
 /// One step against `field`, applying its ops (not animated unless asked). `drain`: the field confirms at once, so
-/// keep stepping until the edit queue is empty; the steps are merged into one. `settle`: after a freeze the shadow
+/// keep stepping (a flip's typewriter pace apart) until the edit queue is empty; the steps are merged into one. `settle`: after a freeze the shadow
 /// waits for the field's report to hold still; keep stepping (100 ms apart) until it types or stops waiting.
 @discardableResult
 private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveDictationSnapshot,
@@ -37,9 +37,9 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
     }
     var merged = one(elapsedMs)
     var guardCount = 0
-    while guardCount < 50, (settle && merged.waiting) || (drain && shadow.isBusy && !merged.waiting) {
+    while guardCount < 200, (settle && merged.waiting) || (drain && shadow.isBusy && !merged.waiting) {
         guardCount += 1
-        let next = one(settle && merged.waiting ? 100 : 0)
+        let next = one(settle && merged.waiting ? 100 : RunShadow.flipCharMs)
         merged.ops += next.ops; merged.insertedChars += next.insertedChars; merged.deletedChars += next.deletedChars
         merged.rewrote = merged.rewrote || next.rewrote; merged.froze = merged.froze ?? next.froze
         merged.coalesced += next.coalesced; merged.startDetail = merged.startDetail ?? next.startDetail
@@ -77,7 +77,8 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         tick(&shadow, &field, snapshot(1, [final(0, "I think their going home."), head(1, "then we eat")]))
         let step = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat")]))
         #expect(field.text == "I think they're going home. then we eat")
-        #expect(step.rewrote && step.deletedChars == 5 && step.insertedChars == 7)
+        // Only the characters that differ: "i" goes, "y'" and "e" come in.
+        #expect(step.rewrote && step.deletedChars == 1 && step.insertedChars == 3)
         #expect(field.after.isEmpty)
     }
 
@@ -106,7 +107,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         tick(&shadow, &field, snapshot(1, [final(0, "😀 Hallo wrld 👨‍👩‍👧 tschüss"), head(1, "bis bald")]))
         let step = tick(&shadow, &field, snapshot(2, [final(0, "😀 Hallo world 👨‍👩‍👧 tschüss"), head(1, "bis bald")]))
         #expect(field.text == "😀 Hallo world 👨‍👩‍👧 tschüss bis bald")
-        #expect(step.deletedChars == 4 && step.insertedChars == 5)
+        #expect(step.deletedChars == 0 && step.insertedChars == 1, "Only the missing \"o\" goes in")
     }
 
     @Test func frozenSentencesAreNotEditedAgainAndTheHeadKeepsAppendingAtTheCursor() {
@@ -245,8 +246,8 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(waiting.waiting && waiting.ops.isEmpty && waiting.froze == nil && waiting.waitStarted)
         // Once the report confirms, the rest follows one op per step.
         var sent = 1
-        while shadow.isBusy, sent < 20 {
-            let next = tick(&shadow, &field, snap, drain: false)
+        while shadow.isBusy, sent < 40 {
+            let next = tick(&shadow, &field, snap, elapsedMs: RunShadow.flipCharMs, drain: false)
             #expect(next.ops.count == 1)
             sent += 1
         }
@@ -370,6 +371,73 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
     }
 }
 
+@Suite struct LiveUnitShadowTests {
+    @Test func theCleanedTakeReplacesItsPauseFragmentsAndDropsAnAllFillerUnit() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "Um."), final(1, "so, uh, the plan is ready now."), final(2, "Yeah.")]))
+        #expect(field.text == "Um. so, uh, the plan is ready now. Yeah.")
+        tick(&shadow, &field, snapshot(2, [
+            .init(id: 0, text: "So the plan is ready now.", cleaned: true, final: true, unit: 0, raw: "Um."),
+            .init(id: 1, text: "", cleaned: true, final: true, unit: 0, raw: "so, uh, the plan is ready now."),
+            .init(id: 2, text: "", cleaned: true, final: true),
+        ], complete: true))
+        #expect(field.text == "So the plan is ready now." && field.after.isEmpty)
+    }
+
+    @Test func aTakeOfNothingButFillerIsErasedWhenItsCleanupDropsIt() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "Hi.")
+        tick(&shadow, &field, snapshot(1, [final(0, "Um.")]))
+        #expect(field.text == "Hi. Um.")
+        // A target without words that is no cleaned take never erases anything.
+        tick(&shadow, &field, snapshot(2, [head(0, "")]))
+        #expect(field.text == "Hi. Um.")
+        tick(&shadow, &field, snapshot(3, [final(0, "", cleaned: true)], complete: true))
+        #expect(field.text == "Hi.")
+    }
+
+    @Test func aUnitWithAFrozenPartFallsBackToItsRawWords() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "Um.")]))
+        shadow.freeze(.keystroke)
+        field.before += " X"
+        tick(&shadow, &field, snapshot(2, [final(0, "Um."), final(1, "the plan is ready.")]), settle: true)
+        #expect(field.text == "Um. X the plan is ready.")
+        tick(&shadow, &field, snapshot(3, [
+            .init(id: 0, text: "The plan is ready.", cleaned: true, final: true, unit: 0, raw: "Um."),
+            .init(id: 1, text: "", cleaned: true, final: true, unit: 0, raw: "the plan is ready."),
+        ], complete: true))
+        #expect(field.text == "Um. X the plan is ready.", "Nothing of the unit is lost or typed twice")
+    }
+
+    @Test func aFlipTypesItsCharactersOneAtATimeAtTheTypewriterPace() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "I think their going home."), head(1, "then")]))
+        let snap = snapshot(2, [final(0, "I think they're going home."), head(1, "then")])
+        // 10 ms ticks: an insert that follows an insert goes out only `flipCharMs` after it.
+        var ops: [ShadowOp] = [], now = 0.0, lastInsert: Double?, previousWasInsert = false
+        var step = tick(&shadow, &field, snap, drain: false)
+        while true {
+            for op in step.ops {
+                if case .insert(let text) = op {
+                    #expect(text.count == 1, "One character per op")
+                    if previousWasInsert, let last = lastInsert { #expect(now - last >= RunShadow.flipCharMs) }
+                    lastInsert = now; previousWasInsert = true
+                } else { previousWasInsert = false }
+                ops.append(op)
+            }
+            guard shadow.isBusy, now < 2000 else { break }
+            now += 10
+            step = tick(&shadow, &field, snap, elapsedMs: 10, drain: false)
+        }
+        #expect(field.text == "I think they're going home. then" && field.after.isEmpty)
+        #expect(ops.filter { if case .insert = $0 { true } else { false } }.count == 3 && ops.contains(.deleteBackward(1)))
+        #expect(ops.last.map { if case .move(let n) = $0 { n > 0 } else { false } } == true, "The cursor jumps back to the end")
+        // The complete take goes in by words: a whole word per insert.
+        let done = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home.", cleaned: true), final(1, "Then.", cleaned: true)], complete: true))
+        #expect(field.text == "I think they're going home. Then." && done.ops.contains(.insert("Then.")))
+    }
+}
+
 @Suite struct LiveDictationRunTests {
     @Test func buildsTheTargetFromFinalsCleanedSentencesAndTheHead() {
         var run = LiveDictationRun(runID: "r")
@@ -387,15 +455,15 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
 
     @Test func allCleanedSentencesLandInTheOneSnapshotThatEndsTheTake() {
         var run = LiveDictationRun(runID: "r")
-        run.addFinal(key: 0, text: "one.")
-        run.addFinal(key: 1, text: "two.")
-        run.addFinal(key: 2, text: "three.")
+        run.addFinal(key: 0, text: "this is the first one here.")
+        run.addFinal(key: 1, text: "this is the second one here.")
+        run.addFinal(key: 2, text: "this is the third one here.")
         run.setCleaned(key: 0, text: "One.")
         run.setCleaned(key: 2, text: "Three!")
         let open = run.version
         run.finish()
         #expect(run.version == open + 1)
-        #expect(run.snapshot.segments.map(\.text) == ["One.", "two.", "Three!"])
+        #expect(run.snapshot.segments.map(\.text) == ["One.", "this is the second one here.", "Three!"])
         #expect(run.snapshot.segments.map(\.cleaned) == [true, false, true])
     }
 
@@ -425,11 +493,42 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
 
     @Test func theTextBeforeASentenceIsTheSentencesSoFar() {
         var run = LiveDictationRun(runID: "r")
-        run.addFinal(key: 4, text: "one.")
-        run.addFinal(key: 5, text: "two.")
-        run.addFinal(key: 6, text: "three.")
+        run.addFinal(key: 4, text: "this is the first one here.")
+        run.addFinal(key: 5, text: "this is the second one here.")
+        run.addFinal(key: 6, text: "this is the third one here.")
         run.setCleaned(key: 4, text: "One!")
-        #expect(run.text(before: 6) == "One! two." && run.text(before: 4) == "" && run.text(before: 99) == "")
+        #expect(run.text(before: 6) == "One! this is the second one here." && run.text(before: 4) == "" && run.text(before: 99) == "")
+    }
+
+    @Test func pauseFragmentsGroupIntoOneUnitUntilASentenceEndsAndTheTakesEndFlushesTheRest() {
+        var run = LiveDictationRun(runID: "r")
+        #expect(run.addFinal(key: 0, text: "Um.") == nil, "Too short to end a unit")
+        #expect(run.addFinal(key: 1, text: "so, uh, the plan") == nil)
+        let unit = run.addFinal(key: 2, text: "is ready for the review.")
+        #expect(unit == "Um. so, uh, the plan is ready for the review." && run.unitCount == 1 && run.unitSegments(key: 1) == 3)
+        #expect(run.addFinal(key: 3, text: "Yeah.") == nil)
+        let rest = run.flush()
+        #expect(rest?.key == 3 && rest?.text == "Yeah." && run.flush() == nil)
+        // A line break ends a unit however short; the word cap ends one without a sentence end.
+        #expect(LiveDictationRun.endsUnit("new line\n") && !LiveDictationRun.endsUnit("one two three."))
+        #expect(LiveDictationRun.endsUnit(Array(repeating: "word", count: LiveDictationRun.maxUnitWords).joined(separator: " ")))
+    }
+
+    @Test func aCleanedUnitOfSeveralSegmentsLandsOnItsFirstAndAnEmptyOneDropsItsWords() {
+        var run = LiveDictationRun(runID: "r")
+        run.addFinal(key: 0, text: "Um.")
+        run.addFinal(key: 1, text: "so, uh, the plan is ready now.")
+        run.addFinal(key: 2, text: "Yeah.")
+        _ = run.flush()
+        run.setCleaned(key: 1, text: "So the plan is ready now.")
+        run.setCleaned(key: 2, text: "")
+        #expect(run.text(before: 2) == "So the plan is ready now.")
+        run.finish()
+        #expect(run.snapshot.segments == [
+            .init(id: 0, text: "So the plan is ready now.", cleaned: true, final: true, unit: 0, raw: "Um."),
+            .init(id: 1, text: "", cleaned: true, final: true, unit: 0, raw: "so, uh, the plan is ready now."),
+            .init(id: 2, text: "", cleaned: true, final: true),
+        ])
     }
 
     @Test func aDuplicateKeyAndEmptyTextAreIgnored() {

@@ -26,10 +26,14 @@ public struct ShadowPlan: Sendable, Equatable {
 public enum ShadowEditPlanner {
     /// - Parameters:
     ///   - cursor: UTF-16 offset into `shadow` (clamped).
-    public static func plan(shadow: String, cursor: Int, target: String) -> ShadowPlan {
+    ///   - characters: refine each changed word span to the characters that differ (a character-level diff inside
+    ///     it), and insert one character per op: a typewriter edit of only what changed ("whether" to "weather"
+    ///     deletes "h" and inserts "a").
+    public static func plan(shadow: String, cursor: Int, target: String, characters: Bool = false) -> ShadowPlan {
         let old = Array(shadow), new = Array(target)
         let cursorIndex = characterIndex(ofUTF16: cursor, in: old)
-        let hunks = diff(old, new)
+        let words = diff(old, new)
+        let hunks = characters ? words.flatMap { refine($0, old: old) } : words
 
         // Logical cursor in the new text.
         var shift = 0
@@ -60,7 +64,7 @@ public enum ShadowEditPlanner {
                 at = h.start
             }
             if !h.text.isEmpty {
-                ops.append(.insert(String(h.text)))
+                if characters { ops += h.text.map { .insert(String($0)) } } else { ops.append(.insert(String(h.text))) }
                 doc.insert(contentsOf: h.text, at: at)
                 at += h.text.count
             }
@@ -155,6 +159,30 @@ public enum ShadowEditPlanner {
             po = mo + 1; pn = mn + 1
         }
         return hunks
+    }
+
+    /// A word-level hunk split into the character runs that differ (an LCS over its characters), positions in `old`.
+    static func refine(_ hunk: Hunk, old: [Character]) -> [Hunk] {
+        let a = Array(old[hunk.start..<hunk.end]), b = hunk.text
+        guard !a.isEmpty, !b.isEmpty, a.count * b.count <= 40_000 else { return [hunk] }
+        let n = a.count, m = b.count
+        var table = [[Int32]](repeating: [Int32](repeating: 0, count: m + 1), count: n + 1)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            for j in stride(from: m - 1, through: 0, by: -1) {
+                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        var out: [Hunk] = []
+        var i = 0, j = 0, pi = 0, pj = 0
+        func close(_ mi: Int, _ mj: Int) {
+            if mi > pi || mj > pj { out.append(Hunk(start: hunk.start + pi, end: hunk.start + mi, text: Array(b[pj..<mj]))) }
+        }
+        while i < n, j < m {
+            if a[i] == b[j] { close(i, j); i += 1; j += 1; pi = i; pj = j }
+            else if table[i + 1][j] >= table[i][j + 1] { i += 1 } else { j += 1 }
+        }
+        close(n, m)
+        return out
     }
 
     static func characterIndex(ofUTF16 offset: Int, in chars: [Character]) -> Int {
