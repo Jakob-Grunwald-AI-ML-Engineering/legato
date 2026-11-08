@@ -2,7 +2,7 @@
 
 All numbers below are from Jakob's iPhone 17 (physical, debug build, Legato keyboard in the host). Pure-planner unit tests (macOS, `swift test --filter ShadowEditTests`) are separate and only cover the function.
 
-Status: PARTIAL. Notes (short and long) and Messages (short) are measured. Messages long, Mail, Safari textarea and WhatsApp are not: the phone dropped off devicectl ("unavailable") during the Messages 5,000-char run, so I stopped (no retry loop).
+Status: PARTIAL. Notes (short and long) and Messages (short, and long up to the last verify) are measured. Mail, Safari textarea and WhatsApp are not: the phone dropped off devicectl ("unavailable") at the end of the Messages 5,000-char run, so I stopped (no retry loop). That run has no undo-all or summary line.
 
 ## What was built (debug only, `#if DEBUG`)
 - `Sources/LegatoKeyboardCore/Input/ShadowEdit.swift`: `ShadowEditPlanner.plan(shadow:cursor:target:)` and `simulate`. Token LCS (words, whitespace runs, single punctuation), hunks applied back-to-front, UTF-16 moves, Character deletes, logical cursor mapping.
@@ -34,8 +34,11 @@ Script: type a 134-147 char sentence in 5-char chunks every 15 ms (~0.44 s), the
 - No mismatches were logged anywhere. The applier's offline `simulate` agreed with the device in every step.
 - Edits with no pause between `adjustTextPosition` and `deleteBackward` or `insertText` were applied in order; the proxy serialises them.
 
+## Messages long field: unreliable reads (failure)
+The 5,311-char Messages body (the earlier 134-char text plus 5,000 filler plus the sentence) showed walk read errors: 7 of 9 walks had 4-5 stitch mismatches (the window before the cursor did not match the end of the text so far), and the stitched text then differed from the expected text in a few characters ("station.  We" double space, "boday" for "today", a missing "T" in "Then", "early ,because"). The next walk of the same field often came back clean, and the diffs alternated between expected and actual, so the field itself was right and the reads were wrong. Cursor offsets were correct every time. In Notes the same script gave zero mismatches over 11 long walks. Likely cause: my settle logic accepts a window pair that is stale or mid-update (the Messages composer re-lays out while the field grows); not yet proven. Consequence: a walk must be verified (read twice, or check the stitch) before it is trusted in some hosts; the applier's edits themselves were applied at the right offsets (cursor always as planned, applies 16-18 ms).
+
 ## Not measured
-- Messages long field (run was in flight when the phone went unavailable), Mail draft, Safari textarea, WhatsApp draft. Suspect risks there: web views and Mail's rich text may expose different context windows; WhatsApp may cap or reset the context.
+- Mail draft, Safari textarea, WhatsApp draft. Suspect risks there: web views and Mail's rich text may expose different context windows; WhatsApp may cap or reset the context.
 - Hosts that return nil/empty context (some secure fields, some web editors).
 - A real user selection, simultaneous user typing during an apply, IME marked text.
 - Walks while a dictation is live.
@@ -44,9 +47,9 @@ Script: type a 134-147 char sentence in 5-char chunks every 15 ms (~0.44 s), the
 Everything in `ShadowSpike.swift` and its three hooks. The planner in LegatoKeyboardCore is plain code (no UIKit) and would be kept.
 
 ## Recommendation (provisional, Notes and short Messages only)
-Viable with fallbacks. The core idea works on device: the minimal word-level edit plan applied to a tracked shadow produced exact fields with correct cursor after 7-8 revisions and a 22-29 op batch with no reads. What decides production use:
+Viable with fallbacks (Messages long reads showed the mirror can need a second read). The core idea works on device: the minimal word-level edit plan applied to a tracked shadow produced exact fields with correct cursor after 7-8 revisions and a 22-29 op batch with no reads. What decides production use:
 1. Do not re-walk per revision: a full walk of a long field costs seconds. Take one walk at dictation start (or only a bounded window around the cursor; the hunks near the tail only need the last ~1-2 windows) and keep the shadow from our own edits.
-2. Detect drift cheaply: compare `documentContextBeforeInput` with the shadow's tail on every `textDidChange`/`selectionDidChange`; on a mismatch, stop editing earlier text, fall back to the existing tail-only `ProxyEditPlanner`, and optionally re-walk when idle.
+2. Treat a walk as untrusted until it is self-consistent (stitch check or two matching reads). Detect drift cheaply: compare `documentContextBeforeInput` with the shadow's tail on every `textDidChange`/`selectionDidChange`; on a mismatch, stop editing earlier text, fall back to the existing tail-only `ProxyEditPlanner`, and optionally re-walk when idle.
 3. Fall back to the current planner for hosts with empty or capped contexts.
 4. Before committing, finish Mail, Safari, WhatsApp and a live-dictation run.
 
@@ -55,5 +58,5 @@ Raw STT goes in immediately via `insertText` and is appended to `shadow`. When t
 
 ## Scratch state left on the phone (could not clean: device unavailable)
 - Notes: a new note starting "Legato spike" with the replay text (Notes, today).
-- Messages: an unsent "New Message" draft with no recipient containing replay text, and possibly ~5,000 chars of filler if the long run was still typing. Nothing was sent. Close it with the X and "Delete Draft".
+- Messages: an unsent "New Message" draft with no recipient containing about 5,300 chars of replay text. Nothing was sent. Close it with the X and "Delete Draft".
 - Legato debug build (with the spike) is installed on the phone, replacing the previous build.
