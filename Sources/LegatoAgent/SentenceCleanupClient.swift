@@ -117,9 +117,10 @@ public struct SentenceCleanupClient: SentenceCleaning {
               let sequence = try? fields["sequence"]?.decode(Int.self),
               sentenceID == input.sentenceID, sequence == input.sequence else { throw SentenceCleanupError.invalidIdentity }
         guard case .string(let output) = fields["text"] else { throw SentenceCleanupError.invalidText }
-        // A dictated line may be just a line break ("new line"): keep newlines, trim only spaces.
+        // A dictated line may be just a line break ("new line"): keep newlines, trim only spaces. A dictated line of
+        // nothing but filler comes back empty: that is a result (the line is dropped), left to the guard to judge.
         let text = input.dictation == nil ? output.trimmingCharacters(in: .whitespacesAndNewlines) : output.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty, text.utf8.count <= Self.maximumTextBytes,
+        guard !text.isEmpty || input.dictation != nil, text.utf8.count <= Self.maximumTextBytes,
               text.unicodeScalars.allSatisfy({ $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t" }) else {
             throw SentenceCleanupError.invalidText
         }

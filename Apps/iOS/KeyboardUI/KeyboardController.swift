@@ -807,6 +807,16 @@ final class KeyboardController {
         liveStep(elapsedMs: 0)
     }
 
+    #if DEBUG
+    /// Debug harness: the field is cleared; the live run typed into it is no longer this keyboard's to edit.
+    func debugForgetLiveRun() {
+        ignoredLiveRunID = liveShadow?.runID ?? liveSnapshot?.runID ?? ignoredLiveRunID
+        liveShadow = nil; liveSnapshot = nil; liveSeen = nil
+        stopLiveTicker()
+        setLiveRunning(false)
+    }
+    #endif
+
     private func setLiveRunning(_ value: Bool) {
         guard liveRunning != value else { return }
         liveRunning = value
