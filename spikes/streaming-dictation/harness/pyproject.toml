@@ -1,0 +1,9 @@
+[project]
+name = "streaming-dictation-spike"
+version = "0.1.0"
+description = "Measurement harness: Soniox real-time configs vs post-passes for streaming dictation"
+requires-python = ">=3.12,<3.13"
+dependencies = ["anthropic==1.0.0", "httpx>=0.27", "websockets>=14"]
+
+[tool.ruff.lint]
+unfixable = ["F401", "F841", "B007"]

@@ -11,6 +11,9 @@ final class KeyboardViewController: UIInputViewController {
     private static var autoFillHandoff = AutoFillHandoff()
     private var handoffVisible = false
     private var controller: KeyboardController?
+    #if DEBUG
+    private var shadowSpike: ShadowSpike?
+    #endif
     private var heightConstraint: NSLayoutConstraint?
 
     private static let portraitHeight = KeyGeometry.height(landscape: false)
@@ -35,6 +38,9 @@ final class KeyboardViewController: UIInputViewController {
         controller.inputModeTarget = self
         controller.showsGlobe = needsInputModeSwitchKey
         self.controller = controller
+        #if DEBUG
+        shadowSpike = ShadowSpike(proxy: { [weak self] in self?.textDocumentProxy })
+        #endif
 
         let host = UIHostingController(rootView: KeyboardRootView(controller: controller))
         host.view.backgroundColor = .clear
@@ -110,12 +116,18 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         handoffVisible = true
+        #if DEBUG
+        shadowSpike?.start()
+        #endif
         controller?.refreshTraits()
         switchForAutoFillIfNeeded()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         handoffVisible = false
+        #if DEBUG
+        shadowSpike?.stop()
+        #endif
         super.viewWillDisappear(animated)
     }
 

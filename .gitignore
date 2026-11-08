@@ -9,3 +9,6 @@ build/
 .claude/worktrees/
 Apps/iOS/Gen/
 Apps/iOS/*.xcodeproj
+
+# Local API keys for spikes (main checkout only)
+.env
