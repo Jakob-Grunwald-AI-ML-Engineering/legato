@@ -143,6 +143,12 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         other.freeze(.cursor)
         tick(&other, &second, snapshot(2, [head(0, "we met there yesterday and talked")]), settle: true)
         #expect(second.text == "we met their yest yesterday and talked")
+        // And when cleanup changed the cut word's case.
+        var third = RunShadow(runID: "r"), field3 = Field(before: "")
+        tick(&third, &field3, snapshot(1, [head(0, "and then w")]))
+        third.freeze(.cursor)
+        tick(&third, &field3, snapshot(2, [final(0, "And Then We Can Go.", cleaned: true)], complete: true), settle: true)
+        #expect(field3.text == "and then w We Can Go.")
     }
 
     @Test func aTapIntoTheTypedTextFreezesAsACursorMoveAndTheRestFollowsAtTheNewCursor() {

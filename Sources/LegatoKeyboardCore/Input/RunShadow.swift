@@ -275,11 +275,11 @@ public struct RunShadow: Sendable, Equatable {
                                          : words.dropFirst(typed.count).joined(separator: " ")
         }
         // The frozen part ends in `last`: if the sentence's word there is longer, it was cut off; only its first
-        // characters are in the field.
+        // characters are in the field (cleanup may have changed its case since).
         guard typed.count <= words.count else { return "" }
         let word = words[typed.count - 1]
         var rest = Array(words.dropFirst(typed.count))
-        if word.hasPrefix(last), word.count > last.count {
+        if word.lowercased().hasPrefix(last.lowercased()), word.count > last.count {
             let tail = word.dropFirst(last.count)
             // A word that goes on is typed whole; punctuation stuck to a finished word is not typed on its own.
             if let first = tail.first, first.isLetter || first.isNumber { rest.insert(word, at: 0) }
