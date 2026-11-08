@@ -47,7 +47,11 @@ final class AppController {
         #if LEGATO_INTERNAL
         dictation.diagnostics = { event, fields in AudioDiagnostics.log(event, fields) }
         #endif
-        keyboardSession = KeyboardSession(composer: composer, sink: dictation)
+        keyboardSession = KeyboardSession(composer: composer, sink: dictation,
+                                          instruction: InstructionSession(vocabularyURL: root.appending(path: "vocabulary.json"), history: history))
+        #if LEGATO_INTERNAL
+        keyboardSession.instruction.diagnostics = { event, fields in AudioDiagnostics.log(event, fields) }
+        #endif
         holdActivity = HoldActivityPresenter(composer: composer)
         #if LEGATO_INTERNAL
         keyboardHost = IOSMeetingFixture.current == nil ? KeyboardLinkHost() : nil

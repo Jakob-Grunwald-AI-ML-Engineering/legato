@@ -292,7 +292,7 @@ import LegatoVocabulary
 
     /// The keyboard's presence reported the magic toggle: only a change acts on it.
     public func magicReported(_ toggle: MagicToggle) {
-        guard toggle != reportedMagic else { return }
+        guard isOpen, toggle != reportedMagic else { return }
         reportedMagic = toggle
         setMagic(toggle)
     }
@@ -366,6 +366,11 @@ import LegatoVocabulary
         try await dictation.debugReplay(timeline, speed: speed)
         await dictation.waitForFinish(timeout: .seconds(3))
         await sink.finishTake()
+    }
+    /// Debug bridge: the magic toggle as if the keyboard set it (`off`, `latched`, `held`); it stays until either changes it.
+    public func debugMagic(_ toggle: MagicToggle) throws {
+        guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        setMagic(toggle)
     }
     public enum DebugDictationError: Error, CustomStringConvertible, Sendable {
         case notOnDictationSurface, empty
