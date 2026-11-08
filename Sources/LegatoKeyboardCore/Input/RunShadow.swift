@@ -19,7 +19,8 @@ import Foundation
 /// - Frozen text is never edited again. Changes the target makes to a frozen sentence are dropped, except growth
 ///   of a sentence that was still being spoken: what follows the frozen part is appended at the cursor.
 public struct RunShadow: Sendable, Equatable {
-    public enum FreezeCause: String, Sendable { case keystroke, cursor, selection, drift, field }
+    /// `instruction`: an instruction's edit is about to change the text before the cursor.
+    public enum FreezeCause: String, Sendable { case keystroke, cursor, selection, drift, field, instruction }
 
     public struct Step: Sendable, Equatable {
         public var ops: [ShadowOp] = []

@@ -117,6 +117,7 @@ final class KeyboardController {
         link.observeHost { [weak self] in self?.hostDidChange() }
         link.observeComposer { [weak self] in self?.composerNoteArrived() }
         link.observeLiveDictation { [weak self] in self?.receiveLiveDictation() }
+        link.observeInstruction { [weak self] in self?.receiveInstruction() }
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
     }
@@ -170,7 +171,7 @@ final class KeyboardController {
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        hint ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
+        hint ?? (isReadingField ? "Reading the text…" : nil) ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
     }
 
     /// The held take's phase while the ABC surface shows one (`cleaning`, `failed`), else nil.
@@ -245,7 +246,8 @@ final class KeyboardController {
     /// before the cursor that the dictated lines are cleaned against. Never from a secure field.
     private func writePresence(notify: Bool) {
         let context = surface == .typing && fullAccess && !document.isSecureTextEntry ? typing.contextBefore : nil
-        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: surface, contextBefore: context)
+        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: surface, contextBefore: context,
+                           magic: magic, magicAt: magicAt)
     }
     /// The host routes the mic by surface, so it learns of a switch at once (presence plus its note).
     func show(_ value: KeyboardSurface) {
@@ -347,6 +349,7 @@ final class KeyboardController {
                 self.pollComposer()
                 self.receiveDictation()
                 self.receiveLiveDictation()
+                self.receiveInstruction()
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
@@ -384,6 +387,8 @@ final class KeyboardController {
         liveStep(elapsedMs: 0, flush: true)
         stopLiveTicker()
         isVisible = false
+        magic = .off
+        sessionSpan.broken()
         wordRow.interruptTyping()
         typing.disappeared()
         heartbeat?.cancel()
@@ -420,6 +425,8 @@ final class KeyboardController {
     /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
     /// extension's `textDidChange` and `selectionDidChange` both come here.
     func documentDidChange() {
+        // A walk moves the cursor on purpose: nothing of it is the user's.
+        guard !isReadingField else { return }
         if isVisible { writePresence(notify: false) }
         refreshTraits()
         typing.documentChanged()
@@ -434,6 +441,7 @@ final class KeyboardController {
     private func trackContext() {
         let id = document.documentID
         if id != lastDocumentID {
+            sessionSpan.broken()
             typing.closeEmojiPanel()
             lastDocumentID = id
             history.clear()
@@ -811,6 +819,7 @@ final class KeyboardController {
 
     /// The user took over: what the run typed stays as it is and is never edited again.
     private func freezeLiveRun(_ cause: RunShadow.FreezeCause) {
+        if cause != .instruction { sessionSpan.broken() }
         guard var shadow = liveShadow else { return }
         let froze = shadow.freeze(cause)
         liveShadow = shadow
@@ -831,6 +840,7 @@ final class KeyboardController {
 
     /// One step of the run against the field. `flush` (the keyboard goes away) types everything now.
     private func liveStep(elapsedMs: Double, flush: Bool = false) {
+        guard !isReadingField else { return }
         guard !isTornDown, let snapshot = liveSnapshot, var shadow = liveShadow, snapshot.runID == shadow.runID,
               let documentID = document.documentID, !document.isSecureTextEntry else { return stopLiveTicker() }
         if documentID != liveDocumentID {
@@ -846,6 +856,7 @@ final class KeyboardController {
         if let start = step.startDetail { liveStats.lastStart = start; writeLiveAck(version: nil, complete: false) }
         if let cause = step.froze {
             liveStats.lastDrift = step.driftDetail ?? liveStats.lastDrift
+            if cause != .instruction { sessionSpan.broken() }
             noteLiveFreeze(cause)
         }
         if !step.ops.isEmpty {
@@ -866,6 +877,7 @@ final class KeyboardController {
             versions = nil
             liveStats.applies += 1; liveStats.insertedChars += step.insertedChars; liveStats.deletedChars += step.deletedChars
             if step.rewrote { liveStats.rewrites += 1 }
+            sessionSpan.track(runID: shadow.runID, anchor: shadow.anchor, region: shadow.region)
         }
         if step.applied, let version = step.version, version != liveAckedVersion {
             liveAckedVersion = version
@@ -893,6 +905,158 @@ final class KeyboardController {
     private func stopLiveTicker() {
         liveTicker?.cancel()
         liveTicker = nil
+    }
+
+    // MARK: Instruction mode
+
+    /// The magic key: `latched` (tapped on), `held` (while the finger is down) or `off`. The app tags speech with it and
+    /// runs the instruction when it goes off; the change goes out at once with the presence.
+    private(set) var magic = MagicToggle.off
+    @ObservationIgnored private var magicAt: Date?
+    /// What the app wants the instruction strip to show (nil: nothing published).
+    private(set) var instructionStrip: InstructionStrip?
+    /// The keyboard walks the field for an instruction: the cursor moves visibly, keys are held back.
+    private(set) var isReadingField = false
+    /// The text Legato typed in this appearance that still ends at the cursor: the instruction scope `session`.
+    @ObservationIgnored private var sessionSpan = SessionSpan()
+    /// What the last read showed for an instruction, so `read_more` continues from it.
+    @ObservationIgnored private var fieldRead: (instructionID: String, documentID: String?, reply: FieldReadReply)?
+    @ObservationIgnored private var serving = false
+
+    /// The magic key's state changed (the key's view calls this on tap, press and release).
+    func setMagicToggle(_ value: MagicToggle) {
+        guard value != magic else { return }
+        magic = value; magicAt = Date()
+        trace?("magic value=\(value.rawValue)")
+        if isVisible { writePresence(notify: true) }
+    }
+
+    /// A tap on the instruction strip: run (again), undo, accept, or dismiss what it shows.
+    func instructionIntent(_ action: InstructionIntent.Action) {
+        guard fullAccess else { show("Allow Full Access to use instructions."); return }
+        link.sendInstructionIntent(InstructionIntent(action: action, instructionID: instructionStrip?.instructionID))
+    }
+
+    /// The app's notes and the poll: the strip, a read to serve, an edit to land.
+    private func receiveInstruction() {
+        guard !isTornDown else { return }
+        let strip = link.readInstructionStrip()
+        if strip != instructionStrip { instructionStrip = strip }
+        guard isVisible, !serving else { return }
+        if let request = link.takeReadRequest() {
+            serving = true
+            Task { [weak self] in
+                await self?.serveRead(request)
+                self?.serving = false
+                self?.receiveInstruction()
+            }
+        } else if let edit = link.takeInstructionEdit() {
+            landInstructionEdit(edit)
+        }
+    }
+
+    /// Reads the field for the app (`link.read`). The context comes from what is known without moving the cursor (the
+    /// windows around it, the session's text) and walks only when no session text exists and the field shows more.
+    private func serveRead(_ request: FieldReadRequest) async {
+        guard Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge, let documentID = document.documentID, !document.isSecureTextEntry else {
+            return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
+        }
+        // What is still being typed goes in first: the read sees the field as the user will.
+        liveStep(elapsedMs: 0, flush: true)
+        let before = document.contextBefore, after = document.contextAfter
+        let selection = document.selectedText.flatMap { $0.isEmpty ? nil : $0 }
+        let paragraphEnd = after.firstIndex(where: \.isNewline) ?? after.endIndex
+        let below = String(after[..<paragraphEnd])
+        let moreBelow = !after.isEmpty && (paragraphEnd < after.endIndex || below.count >= 40)
+        var reply = FieldReadReply(id: request.id, state: .done, below: below, selection: selection, moreBelow: moreBelow, documentID: documentID)
+        switch request.kind {
+        case .context:
+            if selection != nil {
+                // A walk would collapse the selection: only the windows around it, and only the selection is edited.
+                reply.above = before; reply.stop = .unread; reply.moreAbove = !before.isEmpty
+            } else if !sessionSpan.text.isEmpty, OwnEditEcho.isSame(expected: sessionSpan.text, reported: before) {
+                let session = sessionSpan.text
+                reply.above = before.count > session.count ? before : session
+                reply.sessionLength = session.count
+                let atStart = sessionSpan.startsField && reply.above == session
+                reply.stop = atStart ? .start : .unread; reply.moreAbove = !atStart
+            } else if before.isEmpty {
+                reply.stop = .start
+            } else {
+                guard let read = await walk(request, known: "", limit: .cap) else { return }
+                reply.above = read.text; reply.stop = read.stop; reply.moreAbove = read.moreRemains
+            }
+        case .more, .toCap:
+            guard let last = fieldRead, last.instructionID == request.instructionID, last.documentID == documentID else {
+                return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "The text changed while it was read."))
+            }
+            reply = last.reply; reply.id = request.id
+            guard selection == nil, last.reply.moreAbove else { return link.writeReadReply(reply) }
+            guard let read = await walk(request, known: last.reply.above, limit: request.kind == .more ? .block : .cap) else { return }
+            reply.above = read.text; reply.stop = read.stop; reply.moreAbove = read.moreRemains
+        }
+        fieldRead = (request.instructionID, documentID, reply)
+        trace?("instruction read kind=\(request.kind.rawValue) above=\(reply.above.count) stop=\(reply.stop.rawValue) session=\(reply.sessionLength)")
+        link.writeReadReply(reply)
+    }
+
+    /// The self-verifying walk (`FieldReader`), with the strip's "reading" state; a failure is answered (no partial text).
+    private func walk(_ request: FieldReadRequest, known: String, limit: FieldReader.Limit) async -> FieldReader.Result? {
+        link.writeReadReply(FieldReadReply(id: request.id, state: .reading))
+        isReadingField = true
+        syncRowTakeover()
+        let started = Date()
+        let result = await FieldReader(settleMilliseconds: 25).readUp(DocumentWindows(document), known: known, limit: limit)
+        isReadingField = false
+        // The cursor is back where it was: the keyboard catches up with the field once.
+        documentDidChange()
+        syncRowTakeover()
+        switch result {
+        case .success(let read):
+            trace?("instruction walk ok added=\(read.added) steps=\(read.steps) rereads=\(read.rereads) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
+            return read
+        case .failure(let failure):
+            trace?("instruction walk failed reason=\(String(describing: failure)) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
+            link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: failure.message))
+            return nil
+        }
+    }
+
+    /// Lands an instruction's result (or its undo) as word-level edits of exactly the scope, once the field still shows it.
+    private func landInstructionEdit(_ edit: ScopedEdit) {
+        guard let documentID = document.documentID, edit.documentID == nil || edit.documentID == documentID, !document.isSecureTextEntry else {
+            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
+        }
+        liveStep(elapsedMs: 0, flush: true)
+        let windowBefore = document.contextBefore
+        switch ScopedEditPlanner.plan(edit, windowBefore: windowBefore, windowAfter: document.contextAfter, selected: document.selectedText) {
+        case .failure(let refusal):
+            trace?("instruction edit refused reason=\(refusal)")
+            link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: refusal.message))
+        case .success(let plan):
+            // The live run's text stays as it is now; the run goes on at the cursor afterwards.
+            freezeLiveRun(.instruction)
+            let kept = edit.selected == nil ? String(windowBefore.dropLast(min(windowBefore.count, edit.before.count))) : windowBefore
+            let expected = kept + plan.targetBefore
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            clearWatch.ownEdit(at: Date())
+            history.cursorMoved()
+            wordRow.interruptTyping()
+            for op in plan.ops {
+                switch op {
+                case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
+                case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
+                case .insert(let text): document.insert(text)
+                }
+            }
+            typing.hostEdited()
+            typing.ownEdit(contextBefore: expected)
+            versions = nil
+            if edit.selected == nil { sessionSpan.edited(before: edit.before, newBefore: plan.targetBefore) } else { sessionSpan.broken() }
+            fieldRead = nil
+            trace?("instruction edit applied ops=\(plan.ops.count) chars=\(edit.scopeText.count)->\(edit.target.count)")
+            link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: plan.cursor))
+        }
     }
 
     // MARK: Cursor control
@@ -925,6 +1089,7 @@ final class KeyboardController {
     /// A Return holds no clear back (`ClearWatch.returnTyped`): in a chat app it sends and empties the field.
     /// `contextBefore`: the text before the cursor as the typing model tracks it (the field's own report lags).
     func type(_ text: String, contextBefore: String? = nil) {
+        guard !isReadingField else { return } // the cursor is somewhere above while the field is read
         versions = nil // the user moved on from the dictation
         interruptDictation()
         resolveHeldClear()
@@ -946,6 +1111,7 @@ final class KeyboardController {
     }
 
     func deleteBackward(contextBefore: String? = nil) {
+        guard !isReadingField else { return }
         versions = nil
         interruptDictation()
         resolveHeldClear()
@@ -1342,4 +1508,14 @@ final class KeyboardController {
             self?.syncRowTakeover()
         }
     }
+}
+
+/// The field's windows for `FieldReader`, over the keyboard's document.
+@MainActor private final class DocumentWindows: FieldWindowProxy {
+    private let document: any TextDocument
+    init(_ document: any TextDocument) { self.document = document }
+    var windowBefore: String { document.contextBefore }
+    var windowAfter: String { document.contextAfter }
+    func move(by units: Int) { document.adjustTextPosition(byCharacterOffset: units) }
+    func pause(milliseconds: Int) async { try? await Task.sleep(for: .milliseconds(milliseconds)) }
 }
