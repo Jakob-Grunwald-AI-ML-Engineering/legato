@@ -37,8 +37,11 @@ Script: type a 134-147 char sentence in 5-char chunks every 15 ms (~0.44 s), the
 ## Messages long field: unreliable reads (failure)
 The 5,311-char Messages body (the earlier 134-char text plus 5,000 filler plus the sentence) showed walk read errors: 7 of 9 walks had 4-5 stitch mismatches (the window before the cursor did not match the end of the text so far), and the stitched text then differed from the expected text in a few characters ("station.  We" double space, "boday" for "today", a missing "T" in "Then", "early ,because"). The next walk of the same field often came back clean, and the diffs alternated between expected and actual, so the field itself was right and the reads were wrong. Cursor offsets were correct every time. In Notes the same script gave zero mismatches over 11 long walks. Likely cause: my settle logic accepts a window pair that is stale or mid-update (the Messages composer re-lays out while the field grows); not yet proven. Consequence: a walk must be verified (read twice, or check the stitch) before it is trusted in some hosts; the applier's edits themselves were applied at the right offsets (cursor always as planned, applies 16-18 ms).
 
+## Messages long field, second attempt (self-verifying walk)
+Walk changed to accept a window pair only after two consecutive identical reads that also stitch onto the text so far (up to 10 re-reads of 15 ms). Result on the 5,442-5,578 char Messages body: the first two walks were clean (0 stitch mismatches, 0-1 re-reads) and the typed text verified, but the first walk after the first revision again failed: 2 stitch mismatches after 21 re-reads (re-reads do not fix it), reading "station.  e should" (a character lost and a space doubled) at the same sentence boundary (offset ~47, "station. We") as in the first attempt. So the cause is not a stale read that settles: at that boundary the proxy returned a window pair that does not tile with the cursor offset (suspect: Messages' text view reports a context cut at sentence/line boundaries and the move by the window size lands one character off there). Cursor offsets were still right and the apply (18 ms) was right. The run then stopped logging after that step (no further verify lines, no summary), and I could not tell whether the keyboard extension was killed or my native-control keyboard switch (which timed out twice) interfered. Treat Messages long as: reads unreliable at boundaries, so the stitch check must make the walk fail loudly and fall back.
+
 ## Not measured
-- Mail draft, Safari textarea, WhatsApp draft. Suspect risks there: web views and Mail's rich text may expose different context windows; WhatsApp may cap or reset the context.
+- Mail draft (not attempted: native-control keyboard switching timed out twice, so I stopped driving the phone), Safari textarea, WhatsApp draft. Suspect risks there: web views and Mail's rich text may expose different context windows; WhatsApp may cap or reset the context.
 - Hosts that return nil/empty context (some secure fields, some web editors).
 - A real user selection, simultaneous user typing during an apply, IME marked text.
 - Walks while a dictation is live.
@@ -56,7 +59,7 @@ Viable with fallbacks (Messages long reads showed the mirror can need a second r
 ## Sketch: wiring into live dictation (not built)
 Raw STT goes in immediately via `insertText` and is appended to `shadow`. When tokens revise (volatile or newly final), build `target = shadow` with the span replaced, call `plan(shadow:cursor:target:)`, execute ops, and set `shadow = target`, `cursor = plan.cursor`. Own edits are tagged so `textDidChange` from them is ignored; any other change triggers the drift check in point 2.
 
-## Scratch state left on the phone (could not clean: device unavailable)
-- Notes: a new note starting "Legato spike" with the replay text (Notes, today).
-- Messages: an unsent "New Message" draft with no recipient containing about 5,300 chars of replay text. Nothing was sent. Close it with the X and "Delete Draft".
-- Legato debug build (with the spike) is installed on the phone, replacing the previous build.
+## Scratch state / cleanup
+- Notes: my "Legato spike" note was deleted with More > Delete (it sits in Recently Deleted for 30 days). Notes then displayed one of Jakob's existing notes; I did not touch it.
+- Messages: the New Message sheet was closed with X and no draft is listed in the Messages list afterwards (no prompt appeared). Nothing was sent.
+- The debug Legato build with the spike (self-verifying walk) is installed on the phone, replacing the previous build.
