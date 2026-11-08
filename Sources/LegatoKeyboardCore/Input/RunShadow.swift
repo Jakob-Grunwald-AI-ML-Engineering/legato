@@ -13,8 +13,10 @@ import Foundation
 ///   the text before the cursor wherever it was on its way). A snapshot that arrives while the queue is busy is not
 ///   diffed: the newest one is diffed against the shadow once the queue is empty (older ones are dropped, never replayed).
 /// - Appends (the target only grows the region) go out a slice at a time through `TypewriterDrain`, a slice per
-///   confirmed op. Anything else (a Soniox revision, a cleaned sentence, a changed head) is a word-level diff
-///   (`ShadowEditPlanner`): its ops, back to front, with the cursor returning to the end of the region.
+///   confirmed op. A flip while the take runs (Soniox revising a word, a changed head) is a character-level diff
+///   (`ShadowEditPlanner`, `characters`): the cursor moves to the first character that differs, only the differing
+///   characters are deleted, the new ones go in one per op at least `flipCharMs` apart, and the cursor returns to the
+///   end of the region. The cleaned take at the end (a complete snapshot) is a word-level diff, back to front.
 /// - Drift: a report that does not confirm within `confirmLimitMs`, or a selection, means the user moved on (or the
 ///   host lost an op): everything typed so far is frozen, the rest of the queue is dropped, and the run goes on
 ///   appending at the cursor once the field's report has stopped changing, so the separator and capital are judged
@@ -63,6 +65,10 @@ public struct RunShadow: Sendable, Equatable {
     private var confirming = false
     /// The edit queue: ops of the edit in progress not sent yet.
     private var queue: [ShadowOp] = []
+    /// The queue is a flip typed at typewriter pace: an insert follows an insert only `flipCharMs` after it.
+    private var paced = false
+    private var sinceSendMs = 0.0
+    private var lastSentInsert = false
     /// The region's part of the field as the shadow expects it after the last op sent (it may end in a space Legato
     /// put after the region), and the cursor in it (UTF-16).
     private var work = ""
@@ -104,6 +110,8 @@ public struct RunShadow: Sendable, Equatable {
             var start: Int
             /// The span continues a frozen, half-typed word: no separator in front of it.
             var continuation: Bool
+            /// The span holds a cleaned unit's text: the ids of the unit's other (empty) segments.
+            var members: [Int] = []
         }
         var spans: [Span] = []
         /// Characters of separator and the like the prepared text has before the spans' text.
@@ -116,6 +124,8 @@ public struct RunShadow: Sendable, Equatable {
     public static let confirmLimitMs = 800.0
     /// How long the report must stay unchanged after a freeze before the run types again.
     public static let stableMs = 150.0
+    /// The typewriter pace of a flip's characters.
+    public static let flipCharMs = 30.0
 
     /// Ops are queued: a new snapshot waits until they went out.
     public var isBusy: Bool { !queue.isEmpty }
@@ -179,6 +189,7 @@ public struct RunShadow: Sendable, Equatable {
         } else {
             waitedMs = 0; confirming = false
         }
+        sinceSendMs += elapsedMs
 
         if !queue.isEmpty {
             // Busy: a newer snapshot is only noted; the newest is diffed once the queue is empty.
@@ -186,15 +197,16 @@ public struct RunShadow: Sendable, Equatable {
                 if heldVersion != nil { step.coalesced += 1 }
                 heldVersion = snapshot.version
             }
-            send(&step)
+            send(&step, flush: flush)
             guard flush else { return step }
-            while !queue.isEmpty { send(&step) }
+            while !queue.isEmpty { send(&step, flush: true) }
         }
         heldVersion = nil
 
         let target = prepared(snapshot, capitalization: capitalization)
-        // A target without any words never erases what is typed.
-        if target == region || target.isEmpty {
+        // A target without any words never erases what is typed, unless the cleaned take dropped every word (all filler).
+        let dropsAll = snapshot.complete && !snapshot.segments.isEmpty && snapshot.segments.allSatisfy { $0.final && $0.cleaned }
+        if target == region || (target.isEmpty && !dropsAll) {
             step.applied = true; step.version = snapshot.version
             return step
         }
@@ -213,15 +225,18 @@ public struct RunShadow: Sendable, Equatable {
             } else {
                 queue = [.insert(slice)]
             }
+            paced = false
             region += slice
             inFlightWhole = region == target; self.target = target
         } else {
-            queue = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count, target: target).ops
+            // A flip while the take runs is typed character by character; the cleaned take at the end goes in by words.
+            paced = !snapshot.complete; lastSentInsert = false
+            queue = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count, target: target, characters: paced).ops
             step.rewrote = true
             region = target; inFlightWhole = true; self.target = target
         }
-        send(&step)
-        if flush { while !queue.isEmpty { send(&step) } }
+        send(&step, flush: flush)
+        if flush { while !queue.isEmpty { send(&step, flush: true) } }
         return step
     }
 
@@ -248,10 +263,17 @@ public struct RunShadow: Sendable, Equatable {
         work = ""; workCursor = 0
     }
 
-    /// Sends the next queued op: the shadow's model of the field moves on, and the field has to confirm it.
-    private mutating func send(_ step: inout Step) {
-        guard !queue.isEmpty else { return }
+    /// Sends the next queued op: the shadow's model of the field moves on, and the field has to confirm it. A flip's
+    /// insert right after an insert waits for `flipCharMs` (the typewriter pace), unless flushing.
+    private mutating func send(_ step: inout Step, flush: Bool = false) {
+        guard let next = queue.first else { return }
+        if paced, !flush, lastSentInsert, case .insert = next, sinceSendMs < Self.flipCharMs {
+            step.needsTicks = true
+            return
+        }
         let op = queue.removeFirst()
+        sinceSendMs = 0
+        if case .insert = op { lastSentInsert = true } else { lastSentInsert = false }
         (work, workCursor) = ShadowEditPlanner.simulate(ops: [op], shadow: work, cursor: workCursor)
         switch op {
         case .deleteBackward(let count): step.deletedChars += count
@@ -269,7 +291,7 @@ public struct RunShadow: Sendable, Equatable {
     public mutating func freeze(_ cause: FreezeCause) -> Bool {
         defer {
             reseed = true; region = ""; waitedMs = 0; confirming = false; built = Built(); settling = true; lastReport = nil; stableForMs = 0
-            queue = []; work = ""; workCursor = 0; inFlightVersion = nil; heldVersion = nil
+            queue = []; work = ""; workCursor = 0; inFlightVersion = nil; heldVersion = nil; paced = false; lastSentInsert = false
         }
         guard !region.isEmpty else { return false }
         let typed = max(0, region.count - built.prefix)
@@ -279,7 +301,10 @@ public struct RunShadow: Sendable, Equatable {
             let part = String(span.text.prefix(count))
             let known = frozen[span.id]
             let joined = known.map { $0.text + (span.continuation ? "" : " ") + part } ?? part
-            frozen[span.id] = Frozen(text: joined, closed: count == span.text.count && span.final)
+            let closed = count == span.text.count && span.final
+            frozen[span.id] = Frozen(text: joined, closed: closed)
+            // A cleaned unit typed whole is closed with all its segments: their raw words are in its text, never typed again.
+            if closed { for member in span.members { frozen[member] = Frozen(text: "", closed: true) } }
         }
         return true
     }
@@ -348,8 +373,11 @@ public struct RunShadow: Sendable, Equatable {
         var raw = ""
         var spans: [Built.Span] = []
         var continuation = false
+        // A cleaned unit of several segments with a frozen part cannot be edited whole: its segments go back to their raw words.
+        // (A unit frozen whole after its cleaned text was typed is closed in every segment: it is skipped either way.)
+        let touched = Set(snapshot.segments.compactMap { $0.unit != nil && frozen[$0.id] != nil ? $0.unit : nil })
         for segment in snapshot.segments {
-            var text = segment.text.trimmingCharacters(in: .whitespaces)
+            var text = (segment.unit.map(touched.contains) == true ? segment.raw ?? segment.text : segment.text).trimmingCharacters(in: .whitespaces)
             var continues = false
             if let known = frozen[segment.id] {
                 if known.closed { continue }
@@ -358,7 +386,8 @@ public struct RunShadow: Sendable, Equatable {
             guard !text.isEmpty else { continue }
             if raw.isEmpty { continuation = continues }
             else if let last = raw.last, !last.isWhitespace, let first = text.first, !first.isNewline, !continues { raw += " " }
-            spans.append(.init(id: segment.id, text: text, final: segment.final, start: raw.count, continuation: continues))
+            let members = segment.unit == segment.id ? snapshot.segments.filter { $0.unit == segment.id && $0.id != segment.id }.map(\.id) : []
+            spans.append(.init(id: segment.id, text: text, final: segment.final, start: raw.count, continuation: continues, members: members))
             raw += text
         }
         guard !raw.isEmpty else { built = Built(spans: [], prefix: 0); return "" }
