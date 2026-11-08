@@ -22,7 +22,7 @@ private func routeLine(_ sequence: Int, _ text: String, reason: String = "endpoi
     .init(sequence: sequence, text: text, words: text.split(separator: " ").map { Word(text: String($0)) }, reason: reason)
 }
 @MainActor private func until(_ condition: @MainActor () -> Bool) async throws {
-    for _ in 0..<1000 { if condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
+    for _ in 0..<5000 { if condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
     Issue.record("Timed out waiting for condition")
 }
 

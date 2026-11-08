@@ -225,7 +225,7 @@ import LegatoSoniox
 }
 
 @MainActor private func until(_ condition: @MainActor () async -> Bool) async throws {
-    for _ in 0..<500 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
+    for _ in 0..<5000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) } // ~1 s timed out on loaded CI runners
     Issue.record("Timed out waiting for condition")
     throw CancellationError()
 }
