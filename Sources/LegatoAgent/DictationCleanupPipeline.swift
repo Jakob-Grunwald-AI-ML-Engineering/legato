@@ -17,9 +17,29 @@ public struct DictationCleanedLine: Sendable, Equatable {
 /// Cheap sanity checks on a cleanup result. Cleanup only punctuates, recases, drops fillers and fixes sounds, so
 /// the result keeps the raw line's words in order; anything that looks like an answer, an expansion or a rewrite
 /// is dropped for the raw line.
+///
+/// An empty result (nothing but whitespace) drops the line. It is accepted only for a line that can carry no
+/// meaning: every word a filler (`fillers`), or at most `droppableWords` words; a longer line that comes back empty
+/// is rejected (the model lost it). Callers that cannot drop a line treat an empty result as a failure.
 public enum DictationCleanupGuard {
+    /// A line of at most this many words may be dropped whole (an empty cleanup result).
+    public static let droppableWords = 3
+    /// Words that carry no meaning alone (English and German speech tics), lowercased.
+    public static let fillers: Set<String> = [
+        "um", "umm", "ummm", "uhm", "uh", "uhh", "er", "erm", "ah", "ahh", "eh", "oh", "hm", "hmm", "mm", "mhm", "mmh",
+        "yeah", "yep", "ok", "okay", "so", "well", "like", "right", "you", "know", "i", "mean", "basically", "and",
+        "äh", "ähm", "öh", "öhm", "ja", "ne", "na", "naja", "also", "halt", "sozusagen", "quasi", "genau",
+    ]
+
+    /// Whether dropping `raw` entirely (an empty cleanup result) is a sane cleanup of it.
+    public static func acceptsDrop(raw: String) -> Bool {
+        let source = tokens(raw)
+        return source.count <= droppableWords || source.allSatisfy(fillers.contains)
+    }
+
     public static func accepts(raw: String, cleaned: String) -> Bool {
         let source = tokens(raw), result = tokens(cleaned)
+        if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cleaned.contains(where: \.isNewline) { return acceptsDrop(raw: raw) }
         guard !cleaned.isEmpty, cleaned.count <= max(48, raw.count * 3 / 2 + 24) else { return false }
         if result.isEmpty { return true } // a bare line break or punctuation from a spoken command
         // A few words: too few to count overlap, so the result must sound like them (an ASR fix) or share a word.
@@ -56,7 +76,7 @@ public enum DictationCleanupGuard {
 /// A line whose call fails, is rejected by the guard or takes longer than `timeout` goes on raw: dictation never
 /// waits on the model beyond that.
 public actor DictationCleanupPipeline {
-    private struct Pending { let sequence: Int; let lineID: String; let raw: String; let textBefore: String }
+    private struct Pending { let sequence: Int; let lineID: String; let raw: String; let textBefore: String; let allowsEmpty: Bool }
     private let cleaner: any SentenceCleaning
     private let vocabulary: [String]
     private let timeout: Duration
@@ -84,14 +104,16 @@ public actor DictationCleanupPipeline {
 
     public func warm() async { await cleaner.warmDictation() }
 
-    /// `textBefore`: the field's text before the cursor now (`documentContextBeforeInput`).
-    public func submit(sequence: Int, lineID: String, raw: String, textBefore: String) async {
+    /// `textBefore`: the field's text before the cursor now (`documentContextBeforeInput`). `allowsEmpty`: the caller
+    /// can drop the line, so an empty result the guard accepts is delivered as cleaned empty text; otherwise an empty
+    /// result is a failure (`invalidText`) and the raw line goes on.
+    public func submit(sequence: Int, lineID: String, raw: String, textBefore: String, allowsEmpty: Bool = false) async {
         // Lines that never came here (another send mode took them) leave a gap: with nothing waiting, start at this one.
         if firstSequence == nil || (queue.isEmpty && inFlight.isEmpty && finished.isEmpty && sequence != nextDelivery) {
             firstSequence = firstSequence ?? sequence; nextDelivery = sequence
         }
         known[sequence] = raw
-        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600))))
+        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600)), allowsEmpty: allowsEmpty))
         queue.sort { $0.sequence < $1.sequence }
         pump()
     }
@@ -107,7 +129,7 @@ public actor DictationCleanupPipeline {
         while inFlight.count < concurrency, !queue.isEmpty {
             let line = queue.removeFirst()
             inFlight.insert(line.sequence)
-            let previous = known.filter { $0.key < line.sequence }.sorted { $0.key < $1.key }.suffix(2).map(\.value)
+            let previous = known.filter { $0.key < line.sequence }.sorted { $0.key < $1.key }.map(\.value).filter { !$0.isEmpty }.suffix(2).map { $0 }
             let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore)
             let token = generation
             tasks[line.sequence] = Task { [cleaner, vocabulary, timeout] in
@@ -143,7 +165,10 @@ public actor DictationCleanupPipeline {
         tasks[line.sequence] = nil; inFlight.remove(line.sequence)
         var result = DictationCleanedLine(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: nil)
         switch outcome {
+        case .cleaned(let text) where !line.allowsEmpty && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline):
+            result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "failed", detail: "\(SentenceCleanupError.invalidText)")
         case .cleaned(let text) where DictationCleanupGuard.accepts(raw: line.raw, cleaned: text):
+            let text = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline) ? "" : text
             result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: text, status: .cleaned, reason: nil)
         case .cleaned: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "rejected")
         case .timedOut: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "timeout")

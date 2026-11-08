@@ -181,3 +181,37 @@ private final class CapturingMessages: MessagesStreaming {
     let tool = try #require(try toolsValue.decode([JSONValue].self).first)
     #expect(tool["input_schema"]?["properties"]?["sentenceID"]?["enum"] == JSONValue.array([.string("s")]))
 }
+
+@Test func anEmptyResultDropsOnlyAFillerOrVeryShortLine() {
+    #expect(DictationCleanupGuard.accepts(raw: "Um.", cleaned: ""))
+    #expect(DictationCleanupGuard.accepts(raw: "Yeah.", cleaned: "  "))
+    #expect(DictationCleanupGuard.accepts(raw: "um, uh, so yeah, you know, like, äh", cleaned: ""), "All fillers, however many")
+    #expect(DictationCleanupGuard.accepts(raw: "I think.", cleaned: ""), "At most three words")
+    #expect(!DictationCleanupGuard.accepts(raw: "um so the plan is ready for review", cleaned: ""), "Meaning would be lost")
+    #expect(!DictationCleanupGuard.accepts(raw: "i will be late today", cleaned: ""))
+    #expect(DictationCleanupGuard.accepts(raw: "new line", cleaned: "\n"), "A line break is no drop")
+    #expect(!DictationTakeGuard.accepts(raw: "Um.", cleaned: ""), "A whole take is never dropped")
+}
+
+@Test func anEmptyResultIsDeliveredOnlyWhereTheCallerCanDropTheLine() async throws {
+    let out = Collected()
+    let cleaner = ScriptedCleaner(override: [0: "", 1: "", 2: ""])
+    let pipeline = DictationCleanupPipeline(cleaner: cleaner) { out.add($0) }
+    await pipeline.submit(sequence: 0, lineID: "a", raw: "Um.", textBefore: "", allowsEmpty: true)
+    await pipeline.submit(sequence: 1, lineID: "b", raw: "the plan is ready for review", textBefore: "", allowsEmpty: true)
+    await pipeline.submit(sequence: 2, lineID: "c", raw: "Um.", textBefore: "")
+    try await waitFor(3, out)
+    let lines = out.all
+    #expect(lines[0].status == .cleaned && lines[0].text == "")
+    #expect(lines[1].status == .raw && lines[1].reason == "rejected" && lines[1].text == "the plan is ready for review")
+    #expect(lines[2].status == .raw && lines[2].reason == "failed" && lines[2].detail == "invalidText", "Line by line keeps its old outcome")
+}
+
+@Test func anEmptyDictationResultIsAResultButAnEmptyCopyeditIsNot() async throws {
+    let client = SentenceCleanupClient(client: CapturingMessages(text: " "))
+    let line = try await client.clean(.init(sentenceID: "s-0", sequence: 0, text: "Um.", vocabulary: [], dictation: .init()))
+    #expect(line.text == "")
+    await #expect(throws: SentenceCleanupError.invalidText) {
+        _ = try await client.clean(.init(sentenceID: "s-1", sequence: 1, text: "Um.", vocabulary: []))
+    }
+}

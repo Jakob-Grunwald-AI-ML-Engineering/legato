@@ -35,6 +35,8 @@ public enum DictationTakeLimits {
 public enum DictationTakeGuard {
     public static func accepts(raw: String, cleaned: String) -> Bool {
         let source = tokens(raw), result = tokens(cleaned)
+        // A take is never dropped whole (only a live unit may be).
+        guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         // Short takes: the per-line limits fit.
         guard source.count > 12 else { return DictationCleanupGuard.accepts(raw: raw, cleaned: cleaned) }
         guard !cleaned.isEmpty, cleaned.count <= raw.count * 3 / 2 + 64 else { return false }

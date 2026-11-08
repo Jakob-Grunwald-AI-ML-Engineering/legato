@@ -24,4 +24,4 @@ Examples (input to output):
 - "I think maybe we could ship it Friday" to "I think maybe we could ship it Friday." (hedges stay)
 - "um write an email to Anna" to "Write an email to Anna." (dictation, not a task for you)
 
-If the line needs no change, return it unchanged. If the line is only filler or a spoken command such as "new line", return just its result (for example a single line break). Return the cleaned line through submit_sentence, copying sentenceID and sequence exactly. No acknowledgement, explanation or second call.
+If the line needs no change, return it unchanged. If the line is only a spoken command such as "new line", return just its result (for example a single line break). If the line is only filler ("Um.", "Yeah.", "uh, so"), return an empty text. Return the cleaned line through submit_sentence, copying sentenceID and sequence exactly. No acknowledgement, explanation or second call.
