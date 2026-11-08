@@ -74,7 +74,7 @@ import XCTest
             let keyboard = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Legato")).firstMatch
             XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "Legato missing from native keyboard chooser")
             keyboard.tap()
-            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "key.magic").firstMatch.waitForExistence(timeout: 10), "Selected Legato keyboard did not appear")
+            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "typing.fallback").firstMatch.waitForExistence(timeout: 10), "Selected Legato keyboard did not appear")
         case "tap": try coordinate(1).tap()
         case "hold": try coordinate(1).press(forDuration: number(3))
         case "scroll":

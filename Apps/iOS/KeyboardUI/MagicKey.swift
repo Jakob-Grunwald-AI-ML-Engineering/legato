@@ -15,7 +15,7 @@ struct MagicKey: View {
     @State private var holdTimer: Task<Void, Never>?
 
     /// How long the finger stays down before the press is a hold rather than a tap.
-    private static let holdDelay = Duration.milliseconds(300)
+    private static let holdDelay = Duration.milliseconds(450)
 
     var body: some View {
         let magic = controller.magic
