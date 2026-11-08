@@ -150,6 +150,8 @@ public struct LiveDictationRun: Sendable, Equatable {
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }
+    /// Words are still being spoken (a head or cut-short parts): their final segment is still to come.
+    public var isSpeaking: Bool { !head.isEmpty || !open.isEmpty }
     public var unitCount: Int { units.count }
 
     /// A segment in speaking order; `key` names it. Its words leave the head. `closes` false: the segmenter cut the

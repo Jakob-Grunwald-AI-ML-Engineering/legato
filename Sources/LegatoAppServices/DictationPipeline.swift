@@ -329,6 +329,21 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         // is cleaned once, whole.
         guard let unit else { return }
         await submitLive(unit, key: sequence, run: run)
+        // A straggler of a finished take: the short take is cleaned whole again with it, landing as one more diff.
+        if run.complete { await cleanWholeLate(run) }
+    }
+
+    /// The whole-take pass for a finished take that a late segment joined (the stop could not wait for it).
+    private func cleanWholeLate(_ run: LiveDictationRun) async {
+        let whole = run.wholeRaw, runID = run.runID
+        guard run.unitCount > 1, whole.words <= Self.wholeTakeWords else { return }
+        let input = await wholeInput(whole.text)
+        Task { [weak self] in
+            guard let self, let text = await self.cleanWhole(input, late: true) else { return }
+            // A newer straggler runs its own pass; this one is stale then.
+            guard var run = self.liveRun, run.runID == runID, run.wholeRaw.finals == whole.finals else { return }
+            if run.setWhole(SentenceStart.capitalized(text, after: self.liveAnchor), finals: whole.finals) { self.publishLive(run) }
+        }
     }
 
     /// Sends a closed unit (`key`: its last segment) to cleanup, against the text before the run and the units so far.
@@ -354,8 +369,16 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// ("…to Tuesday." / "Uh, no sorry, Wednesday.") can replace what it corrects; the units' results are the fallback.
     public static let wholeTakeWords = 80
 
+    /// How long the stop waits for the final segment of words still being spoken.
+    private static let speakingGrace = Duration.milliseconds(1500)
+
     private func finishLive() async {
         let stoppedAt = ContinuousClock.now
+        // Words still in the head: their final segment is on its way. It belongs in the units and the whole pass.
+        let speakingDeadline = stoppedAt + Self.speakingGrace
+        while let run = liveRun, !run.complete, run.isSpeaking, ContinuousClock.now < speakingDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
         // The open unit (words since the last sentence end) is cleaned now; the wait below covers it.
         if var run = liveRun, !run.complete, let open = run.flush() {
             liveRun = run
@@ -414,7 +437,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 
     /// The whole take's cleanup: the guarded text (empty: every word dropped), or nil when it failed, timed out or was
     /// rejected (the units' results stand).
-    private func cleanWhole(_ input: SentenceCleanupInput) async -> String? {
+    private func cleanWhole(_ input: SentenceCleanupInput, late: Bool = false) async -> String? {
         var cleaner: any SentenceCleaning = self.cleaner
         #if DEBUG || LEGATO_INTERNAL
         if let scripted = debugStreamCleaner { cleaner = scripted }
@@ -432,7 +455,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         case nil: break
         }
         let parts = started.duration(to: .now).components
-        diagnostics?("live2.whole", ["landed": text != nil, "reason": text == nil ? reason : "", "changed": text.map { $0 != raw } as Any,
+        diagnostics?("live2.whole", ["late": late, "landed": text != nil, "reason": text == nil ? reason : "", "changed": text.map { $0 != raw } as Any,
                                      "rawChars": raw.count, "chars": text?.count as Any,
                                      "ms": Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)])
         return text

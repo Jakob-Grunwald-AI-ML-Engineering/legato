@@ -295,6 +295,31 @@ extension DictationPipelineTests {
         #expect(pipeline.liveRun?.snapshot.segments.last?.cleaned == true, "The late segment's unit is cleaned before the take ends")
     }
 
+    @Test func theStopWaitsForTheFinalOfWordsStillSpokenAndCleansTheTakeWholeWithThem() async throws {
+        let cleaner = FnCleaner { $0.text.replacingOccurrences(of: "we could we could", with: "we could").capitalized }
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        await pipeline.receive(routeLine(0, "the draft is done and reviewed now."))
+        pipeline.tailChanged("we could we could")
+        let stop = Task { await pipeline.finishTake() }
+        try await Task.sleep(for: .milliseconds(100))
+        await pipeline.receive(routeLine(1, "we could we could send it today"))
+        await stop.value
+        let texts = cleaner.inputs.withLock { $0.map(\.text) }
+        #expect(texts.contains("the draft is done and reviewed now. we could we could send it today"), "The whole pass has the late final")
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["The Draft Is Done And Reviewed Now. We Could Send It Today", ""])
+    }
+
+    @Test func aStragglerAfterTheEndOfAShortTakeRunsTheWholePassAgain() async throws {
+        let cleaner = FnCleaner { $0.text.replacingOccurrences(of: "we could we could", with: "we could").uppercased() }
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        await pipeline.receive(routeLine(0, "the draft is done and reviewed now."))
+        await pipeline.finishTake()
+        #expect(pipeline.liveRun?.complete == true && pipeline.liveRun?.unitCount == 1)
+        await pipeline.receive(routeLine(1, "we could we could send it today"))
+        try await until { pipeline.liveRun?.snapshot.segments.first?.text == "THE DRAFT IS DONE AND REVIEWED NOW. WE COULD SEND IT TODAY" }
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["THE DRAFT IS DONE AND REVIEWED NOW. WE COULD SEND IT TODAY", ""])
+    }
+
     @Test func aLongTakeKeepsItsUnits() async throws {
         let cleaner = FnCleaner { $0.text.uppercased() }
         let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
