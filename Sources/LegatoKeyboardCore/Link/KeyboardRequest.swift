@@ -39,16 +39,16 @@ public struct KeyboardAck: Codable, Sendable, Equatable {
     }
 }
 
-/// The keyboard surface on screen. It decides the mode: typing dictates into the field, the composer
-/// talks to the agent.
-public enum KeyboardSurface: String, Codable, Sendable, Equatable { case typing, composer }
+/// The keyboard surface on screen: typing, which dictates into the field. The one surface there is (the iOS composer
+/// screen is retired); the instruction mode is the magic key, not a surface. Kept as the wire value of `KeyboardPresence`.
+public enum KeyboardSurface: String, Codable, Sendable, Equatable { case typing }
 
 /// keyboard -> app (`link.presence`): the keyboard is on screen, refreshed while it is.
 public struct KeyboardPresence: Codable, Sendable, Equatable {
     public var visible: Bool
     public var at: Date
     public var documentID: String?
-    /// nil decodes presences written before surfaces were reported (the composer).
+    /// nil decodes presences written before surfaces were reported.
     public var surface: KeyboardSurface?
     /// The end of `documentContextBeforeInput` (at most `contextLimit` characters), context for cleaning the
     /// dictated lines. nil for a secure field and before this was reported.

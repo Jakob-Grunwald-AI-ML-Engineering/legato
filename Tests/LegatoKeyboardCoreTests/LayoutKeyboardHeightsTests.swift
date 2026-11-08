@@ -81,27 +81,3 @@ import Testing
         #expect(StripHeight.requested(row: 1) == 1)
     }
 }
-
-@Suite struct ComposerKeyboardLayoutTests {
-    @Test func portraitComposerIsFiftyFivePercentOfTheScreen() {
-        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 874, systemOverhead: 92) - 480.7) < 0.01)
-        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 667, systemOverhead: 92) - 366.85) < 0.01)
-    }
-
-    @Test func requestedFractionIsClampedToFiftyToSixtyPercent() {
-        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 800, systemOverhead: 0, fraction: 0.2) - 400) < 0.01)
-        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 800, systemOverhead: 0, fraction: 0.9) - 480) < 0.01)
-        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 800, systemOverhead: 0, fraction: 0.58) - 464) < 0.01)
-    }
-
-    @Test func composerNeverExceedsWhatTheSystemLeaves() {
-        #expect(ComposerKeyboardLayout.height(screenHeight: 500, systemOverhead: 300) == 140)
-        #expect(ComposerKeyboardLayout.height(screenHeight: 100, systemOverhead: 92) == 0)
-    }
-
-    @Test func landscapeKeepsTheCompactHeightAndAbcKeepsTheTypingHeight() {
-        #expect(abs(ComposerKeyboardLayout.height(screenHeight: 402, systemOverhead: 21, landscape: true) - 215.32) < 0.01)
-        #expect(ComposerKeyboardLayout.typingHeight(landscape: false) == 243)
-        #expect(KeyboardHeights.height(landscape: false) == 297)
-    }
-}
