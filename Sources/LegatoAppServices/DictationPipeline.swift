@@ -354,7 +354,9 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         }
         guard var run = liveRun, let key = liveKeys.removeValue(forKey: line.sequence) else { return }
         if line.status == .cleaned {
-            let changed = run.setCleaned(key: key, text: line.text)
+            // The model sometimes leaves a sentence start lowercase after a sentence end: that is fixed here.
+            let before = [liveAnchor, run.text(before: key)].filter { !$0.isEmpty }.joined(separator: " ")
+            let changed = run.setCleaned(key: key, text: SentenceStart.capitalized(line.text, after: before))
             diagnostics?("live2.cleanup", ["landed": true, "changed": changed, "rawChars": line.raw.count, "chars": line.text.count, "ms": ms as Any])
             if changed { publishLive(run) } else { liveRun = run }
         } else {

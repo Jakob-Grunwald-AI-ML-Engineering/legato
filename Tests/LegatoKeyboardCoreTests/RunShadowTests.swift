@@ -368,3 +368,26 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
     }
 
 }
+
+@Suite struct SentenceStartCapitalTests {
+    @Test func aLowercaseStartAfterASentenceEndOrNothingGetsACapital() {
+        #expect(SentenceStart.capitalized("we should go.", after: "") == "We should go.")
+        #expect(SentenceStart.capitalized("we should go.", after: "Okay.") == "We should go.")
+        #expect(SentenceStart.capitalized("we should go.", after: "Really?! ") == "We should go.")
+        #expect(SentenceStart.capitalized("we should go.", after: "He said \"stop.\"") == "We should go.")
+        #expect(SentenceStart.capitalized("we should go.", after: "Done.)\n") == "We should go.")
+        #expect(SentenceStart.capitalized("élan is back.", after: "") == "Élan is back.")
+    }
+
+    @Test func aStartInsideASentenceOrWithIntendedLowercaseStays() {
+        #expect(SentenceStart.capitalized("and then we left.", after: "We came in,") == "and then we left.")
+        #expect(SentenceStart.capitalized("and then we left.", after: "Hello") == "and then we left.")
+        #expect(SentenceStart.capitalized("iPhone sales rose.", after: "Okay.") == "iPhone sales rose.")
+        #expect(SentenceStart.capitalized("eBay is down.", after: "") == "eBay is down.")
+        #expect(SentenceStart.capitalized("github.com/x is up.", after: "Okay.") == "github.com/x is up.")
+        #expect(SentenceStart.capitalized("@sarah wrote back.", after: "Okay.") == "@sarah wrote back.")
+        #expect(SentenceStart.capitalized("www.example.com works.", after: "Okay.") == "www.example.com works.")
+        #expect(SentenceStart.capitalized("1 more thing.", after: "Okay.") == "1 more thing.")
+        #expect(SentenceStart.capitalized("Already fine.", after: "Okay.") == "Already fine.")
+    }
+}
