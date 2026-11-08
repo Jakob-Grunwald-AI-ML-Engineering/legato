@@ -161,6 +161,7 @@ import LegatoVocabulary
             let text = (try? event.payload["text"]?.decode(String.self)) ?? ""
             tail = text
             onTail?(text)
+            sink.tailChanged(text)
             if !text.isEmpty { sink.speechActivity() }
         default: break
         }
@@ -184,6 +185,7 @@ import LegatoVocabulary
     public func debugTail(_ text: String) {
         tail = text
         onTail?(text)
+        sink.tailChanged(text)
         if !text.isEmpty { sink.speechActivity() }
     }
     #endif

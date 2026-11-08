@@ -48,7 +48,7 @@ let package = Package(
         .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore", "LegatoAudioBridge"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore", "LegatoAudioBridge"]),
-        .target(name: "LegatoAppServices", dependencies: ["LegatoVoiceIdentity", "LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings"]),
+        .target(name: "LegatoAppServices", dependencies: ["LegatoVoiceIdentity", "LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings", "LegatoKeyboardCore"]),
         .testTarget(name: "LegatoAppServicesTests", dependencies: ["LegatoAppServices", "LegatoCore", "LegatoVocabulary", "LegatoMeetings"]),
         .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
