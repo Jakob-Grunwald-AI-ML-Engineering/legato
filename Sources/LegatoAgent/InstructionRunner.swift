@@ -46,7 +46,12 @@ public struct InstructionContext: Sendable, Equatable {
         if selection != nil { return [.selection] }
         var scopes: [InstructionScope] = []
         if sessionLength > 0 { scopes.append(.session) }
-        if !(above + below).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { scopes += [.paragraph, .above, .all] }
+        // `above` only with text before the cursor: an empty one would land its rewrite as an insert at the cursor.
+        if !(above + below).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            scopes.append(.paragraph)
+            if !above.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { scopes.append(.above) }
+            scopes.append(.all)
+        }
         return scopes
     }
 }
@@ -146,7 +151,8 @@ enum InstructionGuard {
         if scope != .all {
             let words = Self.words(target)
             let outside = String(context.above.dropLast(range.before.count)) + "\n" + String(context.below.dropFirst(range.after.count))
-            if words.count >= 6, let best = paragraphs(outside).map({ containment(words, in: Self.words($0)) }).max() {
+            // Against each other paragraph and all of them together (a rewrite of several put in this one's place).
+            if words.count >= 6, let best = (paragraphs(outside) + [outside]).map({ containment(words, in: Self.words($0)) }).max() {
                 let own = containment(words, in: Self.words(range.text))
                 if best >= 0.6, best > own + 0.25 { return true }
             }
@@ -442,7 +448,10 @@ public struct InstructionRunner: Sendable {
         case .unknown(let name): throw InstructionFailure.unknownScope(name)
         case .scope(let value): scope = value
         }
-        guard let range = scope.range(in: context) else { throw InstructionFailure.unavailableScope(scope) }
+        guard let range = scope.range(in: context) else {
+            // Not offered: with a selection that is the user's to fix; otherwise the reply is unusable.
+            throw scope == .selection || context.selection != nil ? InstructionFailure.unavailableScope(scope) : InstructionFailure.unknownScope(scope.rawValue)
+        }
         let hasText = !range.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         // An empty body deletes the scope; an empty scope has nothing to delete.
         guard hasText || !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw InstructionFailure.emptyText }
@@ -477,9 +486,17 @@ public struct InstructionRunner: Sendable {
         var parts = ["<instruction>\n\(instruction)\n</instruction>", "<field>\n\(field)\n</field>"]
         if let selection = context.selection { parts.append("<selection>\n\(selection)\n</selection>") }
         if context.sessionLength > 0 { parts.append("<session>\n\(context.session)\n</session>") }
-        let scopes = context.scopes.map(\.rawValue).joined(separator: ", ")
-        parts.append("Offered scopes: \(scopes.isEmpty ? "none (the field is empty: use all)" : scopes)")
+        // Each scope with what it holds, so the choice is made against the text it replaces, not its name.
+        let scopes = context.scopes.compactMap { scope in scope.range(in: context).map { "- \(scope.rawValue): \(Self.preview($0.text))" } }
+        parts.append(scopes.isEmpty ? "Offered scopes: none" : "Offered scopes (each replaces exactly this text):\n" + scopes.joined(separator: "\n"))
         return parts.joined(separator: "\n\n")
+    }
+
+    /// A scope's text in one short line: whole when short, else its start and end, with its length.
+    static func preview(_ text: String) -> String {
+        let flat = text.split(whereSeparator: \.isNewline).joined(separator: " / ").trimmingCharacters(in: .whitespaces)
+        let shown = flat.count <= 70 ? flat : flat.prefix(35).trimmingCharacters(in: .whitespaces) + " … " + flat.suffix(30).trimmingCharacters(in: .whitespaces)
+        return "\"\(shown)\" (\(text.count) characters)"
     }
 
     public static let readMoreTool: JSONValue = .object([

@@ -182,6 +182,11 @@ import UIKit
         harness.register("harness-retry") { _ in KeyboardHarnessModel.shared.press { $0.retryTake() } }
         harness.register("harness-insert-raw") { _ in KeyboardHarnessModel.shared.press { $0.insertTakeRaw() } }
         harness.register("harness-clear") { _ in KeyboardHarnessModel.shared.clearDocument() }
+        // The field's text, set at once (synthetic fixtures; `\n` is a line break): `harness-text <text>`.
+        harness.register("harness-text") { command in
+            guard !command.args.isEmpty else { throw Usage.invalid }
+            return KeyboardHarnessModel.shared.setDocument(command.args.joined(separator: " "))
+        }
         // A tap in the field: the cursor goes to this UTF-16 offset.
         harness.register("harness-cursor") { command in
             guard command.args.count == 1, let offset = Int(command.args[0]), offset >= 0 else { throw Usage.invalid }

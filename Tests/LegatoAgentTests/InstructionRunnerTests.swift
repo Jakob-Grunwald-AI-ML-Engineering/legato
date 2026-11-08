@@ -114,6 +114,14 @@ private let shortNote = InstructionContext(above: "Shopping list\nhey we need mi
         }
     }
 
+    @Test func aRewriteOfSeveralParagraphsInOnesPlaceIsRefused() {
+        let lines = Self.threeParagraphs.above.components(separatedBy: "\n")
+        let both = lines[0] + " " + lines[1].replacingOccurrences(of: ", which nobody wants", with: "")
+        #expect(throws: InstructionFailure.overreach) {
+            try InstructionRunner.outcome(reply: "SCOPE: paragraph\n\(both)", context: Self.threeParagraphs, instruction: "make the second paragraph more concise")
+        }
+    }
+
     @Test func aLocalInstructionMustKeepTheOtherParagraphs() throws {
         let lines = Self.threeParagraphs.above.components(separatedBy: "\n")
         let concise = "On the budget: we'd like to move the dredging forward three weeks, while the contractor is free in early March."
@@ -162,6 +170,9 @@ private let shortNote = InstructionContext(above: "Shopping list\nhey we need mi
         let start = InstructionContext(above: "", below: "Hi Sam,\nthe survey is in.", moreBelow: true)
         #expect(InstructionScope.all.read(for: start) == .toCap)
         #expect(InstructionScope.paragraph.read(for: start) == nil, "The paragraph's end was shown")
+        #expect(!start.scopes.contains(.above), "Nothing above the cursor: no scope that would land as an insert there")
+        #expect(throws: InstructionFailure.unknownScope("above")) { try InstructionRunner.outcome(reply: "SCOPE: above\nHi Sam,", context: start) }
+        #expect(InstructionRunner.prompt(instruction: "x", context: start).contains("- paragraph: \"Hi Sam,\" (7 characters)"))
         #expect(throws: InstructionFailure.partialScope(.all)) { try InstructionRunner.outcome(reply: "SCOPE: all\nDear Sam,\nthe survey is in.", context: start) }
         // Read to the cap on one side: still partial.
         let capped = InstructionContext(above: "…the end", below: "", moreAbove: true, aboveFinal: true, aboveComplete: false)

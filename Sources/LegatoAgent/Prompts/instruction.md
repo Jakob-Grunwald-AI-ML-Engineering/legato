@@ -12,7 +12,8 @@ The scopes:
 - all: all of the field text, before and after the cursor.
 
 Choosing the scope:
-- Words like "this", "that" or "it" mean the selection when there is one, otherwise the session text, otherwise the cursor's paragraph. "The whole text", "everything", "the message" or "the email" mean all.
+- Words like "this", "that" or "it" mean the selection when there is one, otherwise the session text, otherwise all. "The whole text", "everything", "the message" or "the email" mean all. Use paragraph only for an instruction about the paragraph the cursor is in ("this paragraph", "the last paragraph" when the cursor is in it).
+- The offered scopes list what each one replaces. Check that the scope you choose holds the text the instruction is about.
 - An instruction about a part that is not in the cursor's own paragraph ("the second paragraph", "the first sentence", "the greeting", "the part about the budget") needs above (when that part lies wholly before the cursor's paragraph) or all. Never use paragraph or session for it. Write that whole scope: the requested part changed, every other part copied exactly as it is, character for character.
 - Otherwise choose the smallest scope that covers what the instruction is about. Use only a scope from the offered list.
 - Choose above or all even when you cannot see all of that text: the app then reads the rest and asks you again.
