@@ -829,10 +829,32 @@ final class KeyboardController {
         link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats))
     }
 
-    /// One step of the run against the field. `flush` (the keyboard goes away) types everything now.
+    @ObservationIgnored private var liveStepping = false
+    /// Queued ops a step may send while the field confirms each one at once (a host that answers synchronously).
+    private static let liveOpsPerStep = 64
+
+    /// Steps of the run against the field: one op per step, and the next at once while the field already confirms
+    /// the last (a lagging host waits for the next tick). `flush` (the keyboard goes away) types everything now.
+    /// Not reentrant: the field's change notes during an op come back here and are left to the loop.
     private func liveStep(elapsedMs: Double, flush: Bool = false) {
+        guard !liveStepping else { return }
+        liveStepping = true
+        defer { liveStepping = false }
+        var elapsed = elapsedMs
+        for _ in 0..<Self.liveOpsPerStep {
+            guard let step = liveStepOnce(elapsedMs: elapsed, flush: flush) else { return stopLiveTicker() }
+            elapsed = 0
+            guard !flush, !step.ops.isEmpty, !step.waiting, liveShadow?.isBusy == true else {
+                if step.needsTicks, isVisible, !flush { startLiveTicker() } else { stopLiveTicker() }
+                return
+            }
+        }
+        startLiveTicker()
+    }
+
+    private func liveStepOnce(elapsedMs: Double, flush: Bool) -> RunShadow.Step? {
         guard !isTornDown, let snapshot = liveSnapshot, var shadow = liveShadow, snapshot.runID == shadow.runID,
-              let documentID = document.documentID, !document.isSecureTextEntry else { return stopLiveTicker() }
+              let documentID = document.documentID, !document.isSecureTextEntry else { return nil }
         if documentID != liveDocumentID {
             liveDocumentID = documentID
             if shadow.freeze(.field) { liveShadow = shadow; noteLiveFreeze(.field) }
@@ -875,7 +897,7 @@ final class KeyboardController {
             liveAckedVersion = version
             writeLiveAck(version: version, complete: snapshot.complete)
         }
-        if step.needsTicks, isVisible, !flush { startLiveTicker() } else { stopLiveTicker() }
+        return step
     }
 
     private func startLiveTicker() {
