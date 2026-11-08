@@ -29,10 +29,15 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
 
 /// What the keyboard did so far in a run: counts and characters only, never text.
 public struct LiveDictationStats: Codable, Equatable, Sendable {
-    /// Edit batches applied (appends and rewrites).
+    /// Edit ops sent to the field (one at a time through the edit queue).
     public var applies = 0
-    /// Batches that changed text already in the field.
+    /// Edits that changed text already in the field (each a diff of one or more ops).
     public var rewrites = 0
+    /// Times the queue waited for the field to confirm an op, and waits that ran out (each froze the run).
+    public var waits = 0
+    public var confirmTimeouts = 0
+    /// Snapshots dropped undiffed because a newer one arrived while the queue was busy.
+    public var coalesced = 0
     public var insertedChars = 0
     public var deletedChars = 0
     public var freezes = 0

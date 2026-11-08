@@ -21,25 +21,32 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], complete: Bool 
 private func final(_ id: Int, _ text: String, cleaned: Bool = false) -> LiveSegment { .init(id: id, text: text, cleaned: cleaned, final: true) }
 private func head(_ id: Int, _ text: String) -> LiveSegment { .init(id: id, text: text, final: false) }
 
-/// One step against `field`, applying its ops (not animated unless asked). `settle`: after a freeze the shadow waits
-/// for the field's report to hold still; keep stepping (100 ms apart) until it types or stops waiting.
+/// One step against `field`, applying its ops (not animated unless asked). `drain`: the field confirms at once, so
+/// keep stepping until the edit queue is empty; the steps are merged into one. `settle`: after a freeze the shadow
+/// waits for the field's report to hold still; keep stepping (100 ms apart) until it types or stops waiting.
 @discardableResult
 private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveDictationSnapshot,
-                  animated: Bool = false, elapsedMs: Double = 0, reported: String? = nil, selection: Bool = false,
-                  settle: Bool = false) -> RunShadow.Step {
-    var step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
-                           hasSelection: selection, capitalization: .none, elapsedMs: elapsedMs, animated: animated,
-                           followingCharacter: field.after.first)
-    field.apply(step.ops)
-    var guardCount = 0
-    while settle, step.waiting, guardCount < 10 {
-        guardCount += 1
-        step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
-                           hasSelection: selection, capitalization: .none, elapsedMs: 100, animated: animated,
-                           followingCharacter: field.after.first)
+                  animated: Bool = false, elapsedMs: Double = 0, reported: String? = nil, reportedAfter: String? = nil,
+                  selection: Bool = false, settle: Bool = false, drain: Bool = true) -> RunShadow.Step {
+    func one(_ elapsedMs: Double) -> RunShadow.Step {
+        let step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
+                               reportedAfter: reportedAfter ?? field.after, hasSelection: selection, capitalization: .none,
+                               elapsedMs: elapsedMs, animated: animated, followingCharacter: field.after.first)
         field.apply(step.ops)
+        return step
     }
-    return step
+    var merged = one(elapsedMs)
+    var guardCount = 0
+    while guardCount < 50, (settle && merged.waiting) || (drain && shadow.isBusy && !merged.waiting) {
+        guardCount += 1
+        let next = one(settle && merged.waiting ? 100 : 0)
+        merged.ops += next.ops; merged.insertedChars += next.insertedChars; merged.deletedChars += next.deletedChars
+        merged.rewrote = merged.rewrote || next.rewrote; merged.froze = merged.froze ?? next.froze
+        merged.coalesced += next.coalesced; merged.startDetail = merged.startDetail ?? next.startDetail
+        merged.applied = merged.applied || next.applied; merged.version = next.version ?? merged.version
+        merged.waiting = next.waiting; merged.needsTicks = next.needsTicks
+    }
+    return merged
 }
 
 @Suite struct RunShadowTests {
@@ -199,22 +206,75 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(shadow.frozenSegments == 1)
     }
 
-    @Test func aLongBatchGetsLongerToEchoAndAMidBatchReportIsNotDrift() {
+    @Test func editsGoOutOneAtATimeAndEachWaitsForTheFieldToConfirmIt() {
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         tick(&shadow, &field, snapshot(1, [final(0, "I think their going home."), head(1, "then we eat")]))
-        let rewrite = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat and sleep")]))
-        #expect(rewrite.rewrote && rewrite.ops.count >= 3)
-        // While the host works through the batch it reports the text before the moved cursor: a prefix of the shadow.
-        let midBatch = String(field.before.dropLast(16))
-        let waiting = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat and sleep")]), elapsedMs: 800, reported: midBatch)
-        #expect(waiting.waiting && waiting.froze == nil)
-        let done = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat and sleep")]), elapsedMs: 100)
-        #expect(done.froze == nil && done.applied)
-        // A report that never comes back is the user's: after the cap it freezes.
-        let cut = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home."), head(1, "then we eat and sleep well")]), elapsedMs: 100)
-        #expect(cut.ops.count == 1)
-        let stuck = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home."), head(1, "then we eat and sleep well")]), elapsedMs: 1600, reported: midBatch)
-        #expect(stuck.froze == .cursor, "A report stuck at an earlier point of the text is the cursor there")
+        let snap = snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat and sleep")])
+        let stale = field
+        let first = tick(&shadow, &field, snap, drain: false)
+        #expect(first.rewrote && first.ops.count == 1 && shadow.isBusy)
+        // The host still reports the field as it was: nothing more goes out, and it is no drift yet.
+        let waiting = tick(&shadow, &field, snap, elapsedMs: 500, reported: stale.before, reportedAfter: stale.after, drain: false)
+        #expect(waiting.waiting && waiting.ops.isEmpty && waiting.froze == nil && waiting.waitStarted)
+        // Once the report confirms, the rest follows one op per step.
+        var sent = 1
+        while shadow.isBusy, sent < 20 {
+            let next = tick(&shadow, &field, snap, drain: false)
+            #expect(next.ops.count == 1)
+            sent += 1
+        }
+        #expect(sent >= 4 && field.text == "I think they're going home. then we eat and sleep" && field.after.isEmpty)
+        // A report that never confirms an op freezes after the limit, and the rest of the queue never goes out.
+        let flip = snapshot(3, [final(0, "I think they are going home."), head(1, "then we eat and sleep")])
+        let before = field
+        let next = tick(&shadow, &field, flip, drain: false)
+        #expect(next.ops.count == 1 && shadow.isBusy)
+        let stuck = tick(&shadow, &field, flip, elapsedMs: 900, reported: before.before, reportedAfter: before.after, drain: false)
+        #expect(stuck.froze == .drift && stuck.confirmTimedOut && !shadow.isBusy && field.text == before.text)
+    }
+
+    @Test func snapshotsThatArriveWhileTheQueueIsBusyAreCoalescedToTheNewest() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "we met their yesterday."), head(1, "and")]))
+        let first = tick(&shadow, &field, snapshot(2, [final(0, "we met there yesterday."), head(1, "and")]), drain: false)
+        #expect(first.ops.count == 1 && shadow.isBusy)
+        // Two more snapshots arrive while the flip goes out: v3 is dropped for v4 and its diff never runs.
+        var coalesced = 0
+        for snap in [snapshot(3, [final(0, "we met they're yesterday."), head(1, "and")]),
+                     snapshot(4, [final(0, "we met there yesterday."), head(1, "and talked")])] {
+            let step = tick(&shadow, &field, snap, drain: false)
+            coalesced += step.coalesced
+            #expect(!field.text.contains("they're"))
+        }
+        let v4 = snapshot(4, [final(0, "we met there yesterday."), head(1, "and talked")])
+        let last = tick(&shadow, &field, v4)
+        #expect(coalesced + last.coalesced == 1)
+        tick(&shadow, &field, v4)
+        #expect(field.text == "we met there yesterday. and talked" && !field.text.contains("they're"))
+    }
+
+    @Test func aFlushSendsTheRestOfTheQueueAndTheNewestTargetAtOnce() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "their going home."), head(1, "then")]))
+        tick(&shadow, &field, snapshot(2, [final(0, "They're going home."), head(1, "then")]), drain: false)
+        #expect(shadow.isBusy)
+        let step = shadow.step(snapshot: snapshot(3, [final(0, "They're going home."), head(1, "then we eat")]),
+                               contextBefore: field.before, reportedBefore: field.before, reportedAfter: field.after,
+                               hasSelection: false, capitalization: .none, elapsedMs: 0, animated: false, flush: true)
+        field.apply(step.ops)
+        #expect(field.text == "They're going home. then we eat" && field.after.isEmpty && !shadow.isBusy && step.applied)
+    }
+
+    @Test func confirmationReadsBothSidesOfTheCursor() {
+        #expect(RunShadow.confirms(expectedBefore: "Hi. we met", expectedAfter: " there", reportedBefore: "we met", reportedAfter: " there and"),
+                "A trimmed report before the cursor, text that follows the region after it")
+        #expect(!RunShadow.confirms(expectedBefore: "Hi. we met", expectedAfter: " there", reportedBefore: "Hi. we met", reportedAfter: " their"))
+        #expect(!RunShadow.confirms(expectedBefore: "go", expectedAfter: " go", reportedBefore: "go go", reportedAfter: ""),
+                "The cursor has not moved back yet")
+        #expect(RunShadow.confirms(expectedBefore: "Hi. we met", expectedAfter: " there", reportedBefore: "Hi. we met", reportedAfter: ""),
+                "A host that reports nothing after the cursor")
+        #expect(RunShadow.confirms(expectedBefore: "Hi. we met", expectedAfter: "", reportedBefore: "Hi. we met", reportedAfter: " Best"))
+        #expect(!RunShadow.confirms(expectedBefore: "Hi. we met", expectedAfter: "", reportedBefore: "Hi. we", reportedAfter: " met"))
     }
 
     @Test func afterAFreezeTheRunWaitsForTheReportToHoldStillAndSeedsFromIt() {

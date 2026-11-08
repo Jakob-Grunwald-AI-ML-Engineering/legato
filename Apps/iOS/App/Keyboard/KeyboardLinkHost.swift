@@ -234,7 +234,8 @@ final class KeyboardLinkHost: TranscriptSink {
         liveAckSeen = ack
         var fields: [String: Any] = ["run": String(ack.runID.prefix(8)), "complete": ack.complete, "applies": ack.stats.applies,
                                      "rewrites": ack.stats.rewrites, "inserted": ack.stats.insertedChars, "deleted": ack.stats.deletedChars,
-                                     "freezes": ack.stats.freezes, "drifts": ack.stats.drifts]
+                                     "freezes": ack.stats.freezes, "drifts": ack.stats.drifts, "waits": ack.stats.waits,
+                                     "confirmTimeouts": ack.stats.confirmTimeouts, "coalesced": ack.stats.coalesced]
         if let cause = ack.stats.lastFreeze { fields["lastFreeze"] = cause }
         if let drift = ack.stats.lastDrift { fields["drift"] = drift }
         if let start = ack.stats.lastStart { fields["start"] = start }

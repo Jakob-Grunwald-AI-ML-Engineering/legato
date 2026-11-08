@@ -769,9 +769,9 @@ final class KeyboardController {
     // MARK: Live dictation
 
     /// The send mode `live`: the app publishes where the run's text should stand (`LiveDictationSnapshot`), the
-    /// shadow (`RunShadow`) plans the word-level edits against what this keyboard typed, and this carries them out.
-    /// Appends drain with the typewriter; revisions and cleaned sentences apply at once. A key, a cursor move, a
-    /// selection or any change the keyboard did not make freezes what is typed; the run goes on at the cursor.
+    /// shadow (`RunShadow`) plans the word-level edits against what this keyboard typed and queues them, and this
+    /// carries out the one op each step hands over; the next waits for the field to confirm it. A key, a cursor
+    /// move, a selection or any change the keyboard did not make freezes what is typed; the run goes on at the cursor.
     @ObservationIgnored private var liveShadow: RunShadow?
     @ObservationIgnored private var liveSnapshot: LiveDictationSnapshot?
     @ObservationIgnored private var liveSeen: LiveDictationSnapshot?
@@ -837,19 +837,23 @@ final class KeyboardController {
             liveDocumentID = documentID
             if shadow.freeze(.field) { liveShadow = shadow; noteLiveFreeze(.field) }
         }
+        let after = document.contextAfter
         let step = shadow.step(
-            snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore,
+            snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore, reportedAfter: after,
             hasSelection: document.selectedText?.isEmpty == false, capitalization: autocapitalization,
-            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled,
-            followingCharacter: document.contextAfter.first)
+            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled, flush: flush,
+            followingCharacter: after.first)
         liveShadow = shadow
+        if step.waitStarted { liveStats.waits += 1 }
+        if step.confirmTimedOut { liveStats.confirmTimeouts += 1 }
+        liveStats.coalesced += step.coalesced
         if let start = step.startDetail { liveStats.lastStart = start; writeLiveAck(version: nil, complete: false) }
         if let cause = step.froze {
             liveStats.lastDrift = step.driftDetail ?? liveStats.lastDrift
             noteLiveFreeze(cause)
         }
         if !step.ops.isEmpty {
-            let expected = shadow.anchor + shadow.region
+            let expected = shadow.expectedBefore
             wordRow.willApplyOwnEdit(expectedContextBefore: expected)
             clearWatch.ownEdit(at: Date())
             history.cursorMoved()
@@ -864,7 +868,7 @@ final class KeyboardController {
             typing.hostEdited()
             typing.ownEdit(contextBefore: expected)
             versions = nil
-            liveStats.applies += 1; liveStats.insertedChars += step.insertedChars; liveStats.deletedChars += step.deletedChars
+            liveStats.applies += step.ops.count; liveStats.insertedChars += step.insertedChars; liveStats.deletedChars += step.deletedChars
             if step.rewrote { liveStats.rewrites += 1 }
         }
         if step.applied, let version = step.version, version != liveAckedVersion {
