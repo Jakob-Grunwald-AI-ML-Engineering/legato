@@ -154,7 +154,9 @@ private func paragraphs(_ count: Int) -> String {
         let r = try land(edit, field: field, cursor: field.count)
         #expect(r.text == head + "Hello, could you come tomorrow? We start at nine.")
         #expect(r.cursor == r.text.utf16.count)
-        #expect(r.plan.ops.contains { if case .move = $0 { return true }; return false }, "Edited word by word, not retyped")
+        // Changes three words or fewer apart join: one replace inside the scope, the earlier text never deleted.
+        #expect(r.plan.ops.count <= 4)
+        #expect(r.plan.ops.allSatisfy { if case .deleteBackward(let n) = $0 { return n <= scope.count }; return true })
     }
 
     @Test func scopeAroundTheCursorKeepsTheCursorInPlace() throws {
@@ -187,6 +189,35 @@ private func paragraphs(_ count: Int) -> String {
         let undo = ScopedEditPlanner.undo(of: edit, cursor: landed.plan.cursor)
         let back = try land(undo, field: landed.text, cursor: landed.text.count)
         #expect(back.text == field)
+    }
+
+    private func inserted(_ plan: ScopedEditPlanner.Plan) -> Int {
+        plan.ops.reduce(0) { if case .insert(let text) = $1 { return $0 + text.count }; return $0 }
+    }
+
+    @Test func aRewriteIsOneReplaceAndSoIsItsUndo() throws {
+        let scope = "So The Plan For The Garden Is Pretty Simple. First We Move Two Big Pots, Then We Fix The Gate."
+        let target = "The plan for the garden is quite simple. First, we move two large pots, then we repair the gate."
+        let field = "Notes: " + scope
+        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
+        let landed = try land(edit, field: field, cursor: field.count)
+        #expect(landed.text == "Notes: " + target && landed.cursor == landed.text.utf16.count)
+        #expect(landed.plan.ops.count <= 4, "Mostly rewritten: one delete and one insert, not word by word")
+        let back = try land(ScopedEditPlanner.undo(of: edit, cursor: landed.plan.cursor), field: landed.text, cursor: landed.text.count)
+        #expect(back.text == field && back.plan.ops.count <= 4)
+    }
+
+    @Test func nearbyChangesJoinAndASmallFixStaysWordLevel() throws {
+        let scope = "We meet on monday at the old office. Bring the notes from last week and the slides. Lunch is on us."
+        let target = "We meet on Monday at the new office. Bring the notes from last week and the slides. Lunch is on us."
+        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
+        let r = try land(edit, field: scope, cursor: scope.count)
+        #expect(r.text == target)
+        // "monday" and "old" are three words apart: one replace of "monday at the old", nothing else retyped.
+        #expect(r.plan.ops.filter { if case .insert = $0 { return true }; return false }.count == 1)
+        #expect(inserted(r.plan) == "Monday at the new".count)
+        let fine = ShadowEditPlanner.plan(shadow: scope, cursor: scope.utf16.count, target: target)
+        #expect(r.plan.ops.count < fine.ops.count)
     }
 
     @Test func sessionSpanFollowsRunsAndEditsAndEndsWithTheUser() {

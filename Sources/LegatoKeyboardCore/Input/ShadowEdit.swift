@@ -23,23 +23,32 @@ public struct ShadowPlan: Sendable, Equatable {
 /// words, whitespace runs and single punctuation marks; an LCS over tokens picks the tokens that stay;
 /// the rest becomes hunks, applied back-to-front so earlier offsets stay valid. The cursor goes back to
 /// its logical place: shifted by edits before it, at the end of the replacement when it sat inside one.
+///
+/// `coarse` (an instruction's rewrite, where every op is one round trip to a slow host): neighbouring hunks with at most
+/// `mergeGapWords` unchanged words between them become one replace, and when more than `wholeShare` of the words
+/// change, everything from the first change to the last is one delete and one insert. A small edit stays word-level.
 public enum ShadowEditPlanner {
+    public static let mergeGapWords = 3
+    public static let wholeShare = 0.5
+
     /// - Parameters:
     ///   - cursor: UTF-16 offset into `shadow` (clamped).
-    public static func plan(shadow: String, cursor: Int, target: String) -> ShadowPlan {
+    public static func plan(shadow: String, cursor: Int, target: String, coarse: Bool = false) -> ShadowPlan {
         let old = Array(shadow), new = Array(target)
         let cursorIndex = characterIndex(ofUTF16: cursor, in: old)
-        let hunks = diff(old, new)
+        let fine = diff(old, new)
 
         // Logical cursor in the new text.
         var shift = 0
         var newCursor: Int?
-        for h in hunks {
+        for h in fine {
             if cursorIndex < h.start || (cursorIndex == h.start && h.end > h.start) { break }
             if cursorIndex <= h.end { newCursor = h.start + shift + h.text.count; break }
             shift += h.text.count - (h.end - h.start)
         }
         let newCursorIndex = newCursor ?? cursorIndex + shift
+        // The cursor's place comes from the word-level hunks; merged hunks only change how the text gets there.
+        let hunks = coarse ? merged(fine, old: old) : fine
 
         var doc = old
         var at = cursorIndex
@@ -155,6 +164,24 @@ public enum ShadowEditPlanner {
             po = mo + 1; pn = mn + 1
         }
         return hunks
+    }
+
+    /// Hunks joined into fewer replaces (see `coarse`); the unchanged text between two joined hunks is retyped.
+    static func merged(_ hunks: [Hunk], old: [Character]) -> [Hunk] {
+        guard hunks.count > 1, let first = hunks.first else { return hunks }
+        func words(_ range: Range<Int>) -> Int {
+            tokenize(Array(old[range])).filter { $0.text.first.map { $0.isLetter || $0.isNumber } == true }.count
+        }
+        func join(_ a: Hunk, _ b: Hunk) -> Hunk { Hunk(start: a.start, end: b.end, text: a.text + old[a.end..<b.start] + b.text) }
+        let total = words(0..<old.count)
+        let changed = hunks.reduce(0) { $0 + words($1.start..<$1.end) }
+        // Mostly rewritten (or only inserted into): one replace from the first change to the last.
+        if total == 0 || Double(changed) > Double(total) * wholeShare { return [hunks.dropFirst().reduce(first, join)] }
+        var out = [first]
+        for h in hunks.dropFirst() {
+            if words(out[out.count - 1].end..<h.start) <= mergeGapWords { out[out.count - 1] = join(out[out.count - 1], h) } else { out.append(h) }
+        }
+        return out
     }
 
     static func characterIndex(ofUTF16 offset: Int, in chars: [Character]) -> Int {

@@ -1,8 +1,8 @@
 import Foundation
 
 /// Lands an instruction's `ScopedEdit` in the field: checks that the field still shows the scope the model was shown,
-/// then word-diffs the target into it with the bundle 1 planner (`ShadowEditPlanner`), back to front, the cursor
-/// returning to its logical place. Pure: the keyboard feeds it the windows and carries out the ops.
+/// then diffs the target into it with the bundle 1 planner (`ShadowEditPlanner`, `coarse`: few ops, a slow host confirms
+/// each one), back to front, the cursor returning to its logical place. Pure: the keyboard feeds it the windows and carries out the ops.
 public enum ScopedEditPlanner {
     public struct Plan: Sendable, Equatable {
         public var ops: [ShadowOp]
@@ -37,7 +37,7 @@ public enum ScopedEditPlanner {
               agrees(scope: edit.before, window: windowBefore, atEnd: true),
               agrees(scope: edit.after, window: windowAfter, atEnd: false) else { return .failure(.changed) }
         let shadow = edit.before + edit.after
-        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count, target: edit.target)
+        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count, target: edit.target, coarse: true)
         let before = String(decoding: Array(edit.target.utf16.prefix(plan.cursor)), as: UTF16.self)
         return .success(Plan(ops: plan.ops, cursor: plan.cursor, targetBefore: before))
     }
