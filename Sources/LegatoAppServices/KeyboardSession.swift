@@ -59,6 +59,8 @@ import LegatoVocabulary
     @ObservationIgnored private let modeSink: SpeechModeSink
     /// The keyboard's instruction mode (the magic toggle's speech, its run, the strip).
     @ObservationIgnored public let instruction: InstructionSession
+    /// The live run being ended for an instruction (`finishLiveRun`), awaited before the field is read.
+    @ObservationIgnored private var finishingDictation: Task<Void, Never>?
     /// The magic toggle as the keyboard last reported it: only a change acts (a debug override then stays).
     @ObservationIgnored private var reportedMagic = MagicToggle.off
     /// Applies the toggle's change when the stream's cut does not come through in time.
@@ -98,15 +100,22 @@ import LegatoVocabulary
         let instructionSession = self.instruction
         modeSink.onInstructionLine = { line in instructionSession.hear(line) }
         modeSink.onInstructionTail = { text in instructionSession.hearTail(text) }
-        modeSink.onTransition = { transition in
-            if transition.to == .instruction { instructionSession.begin() } else { instructionSession.end() }
+        let pipeline = sink as? DictationPipeline
+        modeSink.onTransition = { [weak self] transition in
+            if transition.to == .instruction {
+                instructionSession.begin()
+                // Every dictation word before the cut is in: the run ends now (its held cleanup and whole-take pass run
+                // while the instruction is spoken), and nothing of the instruction's speech can join it.
+                if let pipeline { self?.finishingDictation = Task { await pipeline.finishLiveRun() } }
+            } else { instructionSession.end() }
         }
-        if instructionSession.beforeRun == nil, let pipeline = sink as? DictationPipeline {
-            // The dictation just before the instruction lands first (a live run's cleanup is held until its end, so the
-            // run ends here), then the field is read.
-            instructionSession.beforeRun = {
+        if instructionSession.beforeRun == nil, let pipeline {
+            // The dictation just before the instruction lands first (a live run's cleanup is held until its end), then
+            // the field is read.
+            instructionSession.beforeRun = { [weak self] in
+                if let finishing = self?.finishingDictation { await finishing.value } else { await pipeline.finishLiveRun() }
+                self?.finishingDictation = nil
                 _ = await pipeline.settle(timeout: .seconds(3))
-                await pipeline.finishLiveRun()
                 try? await Task.sleep(for: .milliseconds(150))
             }
         }

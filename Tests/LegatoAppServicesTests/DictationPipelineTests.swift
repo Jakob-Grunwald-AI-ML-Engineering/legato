@@ -320,6 +320,21 @@ extension DictationPipelineTests {
         #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["THE DRAFT IS DONE AND REVIEWED NOW. WE COULD SEND IT TODAY", ""])
     }
 
+    @Test func anInstructionEndsAndSealsTheRun() async throws {
+        let pipeline = live()
+        var published: [LiveDictationSnapshot?] = []
+        pipeline.onLiveChange = { published.append($0) }
+        await pipeline.receive(routeLine(0, "first part of it."))
+        await pipeline.receive(routeLine(1, "second part here."))
+        await pipeline.finishLiveRun()
+        let sealed = try #require(pipeline.liveRun?.snapshot)
+        #expect(sealed.complete && sealed.segments.allSatisfy(\.cleaned), "The instruction reads the cleaned take")
+        // A segment right after (within the straggler grace) never joins the sealed run or its whole-take pass.
+        await pipeline.receive(routeLine(2, "after the instruction."))
+        #expect(pipeline.liveRun?.runID != sealed.runID)
+        #expect(!published.contains { $0?.runID == sealed.runID && $0 != sealed && $0?.version ?? 0 > sealed.version })
+    }
+
     @Test func aLongTakeKeepsItsUnits() async throws {
         let cleaner = FnCleaner { $0.text.uppercased() }
         let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))

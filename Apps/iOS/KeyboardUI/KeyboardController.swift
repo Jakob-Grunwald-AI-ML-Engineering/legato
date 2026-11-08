@@ -781,13 +781,27 @@ final class KeyboardController {
 
     #if DEBUG
     /// Debug harness: the field is cleared; the live run typed into it is no longer this keyboard's to edit.
-    func debugForgetLiveRun() {
+    func debugForgetLiveRun() { forgetLiveRun() }
+    #endif
+
+    /// The live run is no longer this keyboard's to edit: what it typed stays, and nothing more of it is typed.
+    private func forgetLiveRun() {
         ignoredLiveRunID = liveShadow?.runID ?? liveSnapshot?.runID ?? ignoredLiveRunID
-        liveShadow = nil; liveSnapshot = nil; liveSeen = nil
+        liveShadow = nil; liveSnapshot = nil; liveSeen = nil; liveSettled = true
         stopLiveTicker()
         setLiveRunning(false)
     }
-    #endif
+
+    /// Before an instruction reads or edits the field: the live run is typed in full and confirmed (`settleLive`). A run
+    /// that did not settle in time is let go (frozen where it is, never typed into again): its ops can then not land
+    /// between the read and the edit, nor among the edit's ops.
+    private func settleLiveForInstruction() async {
+        await settleLive()
+        guard !liveSettled, liveShadow != nil else { return }
+        freezeLiveRun(.instruction)
+        forgetLiveRun()
+        trace?("live let go for instruction")
+    }
 
     private func setLiveRunning(_ value: Bool) {
         guard liveRunning != value else { return }
@@ -1052,7 +1066,7 @@ final class KeyboardController {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
         }
         // What is still being typed goes in first, confirmed: the read sees the field as the user will.
-        await settleLive()
+        await settleLiveForInstruction()
         guard document.documentID == documentID else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
         }
@@ -1137,7 +1151,7 @@ final class KeyboardController {
         guard let documentID = document.documentID, edit.documentID == nil || edit.documentID == documentID, !document.isSecureTextEntry else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
         }
-        await settleLive()
+        await settleLiveForInstruction()
         let windowBefore = document.contextBefore
         guard document.documentID == documentID else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
