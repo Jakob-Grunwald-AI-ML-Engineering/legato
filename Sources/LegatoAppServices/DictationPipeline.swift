@@ -220,7 +220,11 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if let pipeline { return pipeline }
         let terms = await loadTerms()
         if let pipeline { return pipeline }
-        let created = DictationCleanupPipeline(cleaner: cleaner, vocabulary: terms, timeout: mode == .live ? liveTimeout : timeout) { [weak self] line in
+        var lineCleaner: any SentenceCleaning = cleaner
+        #if DEBUG || LEGATO_INTERNAL
+        if let scripted = debugStreamCleaner { lineCleaner = scripted }
+        #endif
+        let created = DictationCleanupPipeline(cleaner: lineCleaner, vocabulary: terms, timeout: mode == .live ? liveTimeout : timeout) { [weak self] line in
             await self?.deliver(line)
         }
         pipeline = created
