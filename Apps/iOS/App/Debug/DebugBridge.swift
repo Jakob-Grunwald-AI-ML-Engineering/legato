@@ -1,6 +1,7 @@
 #if LEGATO_INTERNAL
 import Foundation
 import LegatoDevHarness
+import LegatoAgent
 import LegatoAppServices
 import LegatoKeyboardCore
 import UIKit
@@ -81,6 +82,12 @@ import UIKit
         harness.register("dictation-debug-mode") { command in
             guard command.args.count == 1, let mode = DictationSendSetting.Mode(rawValue: command.args[0]) else { throw Usage.invalid }
             AppGroup.defaults.set(mode.rawValue, forKey: DictationSendSetting.modeKey)
+            return AppController.shared.dictation.takeState
+        }
+        // The cleanup model of the sentence/line cleanup (App Group): `haiku` or `sonnet`.
+        harness.register("dictation-debug-model") { command in
+            guard command.args.count == 1, let model = ModelChoice(settingValue: command.args[0]) else { throw Usage.invalid }
+            AppGroup.defaults.set(model.settingValue, forKey: DictationSendSetting.cleanupModelKey)
             return AppController.shared.dictation.takeState
         }
         harness.register("dictation-state") { _ in AppController.shared.dictation.takeState }

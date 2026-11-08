@@ -842,7 +842,10 @@ final class KeyboardController {
             hasSelection: document.selectedText?.isEmpty == false, capitalization: autocapitalization,
             elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled)
         liveShadow = shadow
-        if let cause = step.froze { noteLiveFreeze(cause) }
+        if let cause = step.froze {
+            liveStats.lastDrift = step.driftDetail ?? liveStats.lastDrift
+            noteLiveFreeze(cause)
+        }
         if !step.ops.isEmpty {
             let expected = shadow.anchor + shadow.region
             wordRow.willApplyOwnEdit(expectedContextBefore: expected)

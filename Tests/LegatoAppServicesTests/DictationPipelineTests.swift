@@ -170,7 +170,7 @@ extension DictationPipelineTests {
         try await until { cleaner.inputs.withLock { $0.count } == 2 }
         let inputs = cleaner.inputs.withLock { $0 }
         #expect(inputs.first { $0.sequence == 0 }?.dictation?.textBeforeCursor == "Hi Anna,")
-        #expect(inputs.first { $0.sequence == 1 }?.dictation?.textBeforeCursor == "Hi Anna, hello world")
+        #expect(inputs.first { $0.sequence == 1 }?.dictation?.textBeforeCursor == "Hi Anna, hello world.", "A closed sentence is shown as finished")
     }
 
     @Test func aSentenceTheSegmenterCutShortIsCleanedOnceWhole() async throws {

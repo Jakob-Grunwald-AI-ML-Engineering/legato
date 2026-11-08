@@ -327,7 +327,11 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         pending += 1
         liveSubmitted[id] = .now
         // What stands before this sentence if the run were typed clean: the text before the run, then the sentences so far.
-        let before = [liveAnchor, run.text(before: sequence)].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
+        // A sentence the segmenter closed is a sentence even when its raw words carry no final punctuation yet (they are
+        // still in cleanup): the cleaner must not take it for an unfinished one and continue in lowercase.
+        var prior = run.text(before: sequence)
+        if let last = prior.last, last.isLetter || last.isNumber { prior += "." }
+        let before = [liveAnchor, prior].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
         let pipeline = await current()
         await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: sentence, textBefore: before)
     }

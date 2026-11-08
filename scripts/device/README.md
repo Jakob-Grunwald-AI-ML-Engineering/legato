@@ -125,6 +125,7 @@ Live dictation (the "Send dictation" setting `As you speak`, the iOS default: th
 
 ```bash
 ctl=scripts/device/ctl.sh
+$ctl send dictation-debug-model sonnet                   # cleanup model (App Group): haiku | sonnet
 $ctl send dictation-debug-mode live                      # the setting (App Group); `onStop`, `afterPause`, `lineByLine` for the others
 id=$($ctl send dictation-debug-replay replay.json 1)     # <file> [speed]; speed 2 replays twice as fast
 $ctl wait "$id"                                          # accepted at once; `control.done` follows when the take is written

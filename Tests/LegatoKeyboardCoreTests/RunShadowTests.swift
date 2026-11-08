@@ -21,13 +21,22 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], complete: Bool 
 private func final(_ id: Int, _ text: String, cleaned: Bool = false) -> LiveSegment { .init(id: id, text: text, cleaned: cleaned, final: true) }
 private func head(_ id: Int, _ text: String) -> LiveSegment { .init(id: id, text: text, final: false) }
 
-/// One step against `field`, applying its ops (not animated unless asked).
+/// One step against `field`, applying its ops (not animated unless asked). `settle`: after a freeze the shadow waits
+/// for the field's report to hold still; keep stepping (100 ms apart) until it types or stops waiting.
 @discardableResult
 private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveDictationSnapshot,
-                  animated: Bool = false, elapsedMs: Double = 0, reported: String? = nil, selection: Bool = false) -> RunShadow.Step {
-    let step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
+                  animated: Bool = false, elapsedMs: Double = 0, reported: String? = nil, selection: Bool = false,
+                  settle: Bool = false) -> RunShadow.Step {
+    var step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
                            hasSelection: selection, capitalization: .none, elapsedMs: elapsedMs, animated: animated)
     field.apply(step.ops)
+    var guardCount = 0
+    while settle, step.waiting, guardCount < 10 {
+        guardCount += 1
+        step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
+                           hasSelection: selection, capitalization: .none, elapsedMs: 100, animated: animated)
+        field.apply(step.ops)
+    }
     return step
 }
 
@@ -98,7 +107,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(froze)
         // The user types a word of their own; the cursor is at the end of the field.
         field.before += " X"
-        tick(&shadow, &field, snapshot(2, [final(0, "They're going home.", cleaned: true), head(1, "then we eat")]))
+        tick(&shadow, &field, snapshot(2, [final(0, "They're going home.", cleaned: true), head(1, "then we eat")]), settle: true)
         #expect(field.text == "their going home. then X we eat")
         #expect(shadow.frozenSegments == 2)
     }
@@ -108,7 +117,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         tick(&shadow, &field, snapshot(1, [final(0, "first sentence.")]))
         shadow.freeze(.cursor)
         field.before = "first sentence. Z"
-        tick(&shadow, &field, snapshot(2, [final(0, "First sentence!", cleaned: true), final(1, "second one.")]))
+        tick(&shadow, &field, snapshot(2, [final(0, "First sentence!", cleaned: true), final(1, "second one.")]), settle: true)
         #expect(field.text == "first sentence. Z second one.")
     }
 
@@ -116,7 +125,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         tick(&shadow, &field, snapshot(1, [head(0, "Hello wor")]))
         shadow.freeze(.keystroke)
-        tick(&shadow, &field, snapshot(2, [head(0, "Hello world and")]))
+        tick(&shadow, &field, snapshot(2, [head(0, "Hello world and")]), settle: true)
         #expect(field.text == "Hello world and")
     }
 
@@ -125,7 +134,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         tick(&shadow, &field, snapshot(1, [head(0, "we met their yesterday")]))
         shadow.freeze(.keystroke)
         field.before += "!"
-        tick(&shadow, &field, snapshot(2, [head(0, "we met there yesterday and talked")]))
+        tick(&shadow, &field, snapshot(2, [head(0, "we met there yesterday and talked")]), settle: true)
         #expect(field.text == "we met their yesterday! and talked")
     }
 
@@ -136,10 +145,43 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         let waiting = tick(&shadow, &field, snapshot(2, [head(0, "hello world")]), elapsedMs: 100, reported: "")
         #expect(waiting.waiting && waiting.ops.isEmpty && field.text == "hello")
         // It never catches up: the user moved. Typing goes on at the cursor, frozen text stays.
-        let drift = tick(&shadow, &field, snapshot(2, [head(0, "hello world")]), elapsedMs: 300, reported: "somewhere else")
-        #expect(drift.froze == .drift)
+        let drift = tick(&shadow, &field, snapshot(2, [head(0, "hello world")]), elapsedMs: 700, reported: "somewhere else")
+        #expect(drift.froze == .drift && drift.driftDetail?.contains("wsOnly=0") == true)
+        tick(&shadow, &field, snapshot(2, [head(0, "hello world")]), reported: "somewhere else", settle: true)
         #expect(field.text == "hello world")
         #expect(shadow.frozenSegments == 1)
+    }
+
+    @Test func aLongBatchGetsLongerToEchoAndAMidBatchReportIsNotDrift() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "I think their going home."), head(1, "then we eat")]))
+        let rewrite = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat and sleep")]))
+        #expect(rewrite.rewrote && rewrite.ops.count >= 3)
+        // While the host works through the batch it reports the text before the moved cursor: a prefix of the shadow.
+        let midBatch = String(field.before.dropLast(16))
+        let waiting = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat and sleep")]), elapsedMs: 800, reported: midBatch)
+        #expect(waiting.waiting && waiting.froze == nil)
+        let done = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat and sleep")]), elapsedMs: 100)
+        #expect(done.froze == nil && done.applied)
+        // A report that never comes back is the user's: after the cap it freezes.
+        let cut = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home."), head(1, "then we eat and sleep well")]), elapsedMs: 100)
+        #expect(cut.ops.count == 1)
+        let stuck = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home."), head(1, "then we eat and sleep well")]), elapsedMs: 1600, reported: midBatch)
+        #expect(stuck.froze == .drift)
+    }
+
+    @Test func afterAFreezeTheRunWaitsForTheReportToHoldStillAndSeedsFromIt() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "first.")]))
+        shadow.freeze(.keystroke)
+        // The report is still catching up with the user's text: no separator is judged against it yet.
+        field.before = "first. A"
+        let early = tick(&shadow, &field, snapshot(2, [final(0, "first."), head(1, "second")]), elapsedMs: 100, reported: "first.")
+        #expect(early.waiting && early.ops.isEmpty)
+        let still = tick(&shadow, &field, snapshot(2, [final(0, "first."), head(1, "second")]), elapsedMs: 100, reported: "first. A")
+        #expect(still.waiting && still.ops.isEmpty)
+        let typed = tick(&shadow, &field, snapshot(2, [final(0, "first."), head(1, "second")]), elapsedMs: 200, reported: "first. A")
+        #expect(typed.ops == [.insert(" second")] && field.text == "first. A second")
     }
 
     @Test func aMatchingReportedContextAfterALagIsNotDrift() {

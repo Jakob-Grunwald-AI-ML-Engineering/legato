@@ -236,6 +236,7 @@ final class KeyboardLinkHost: TranscriptSink {
                                      "rewrites": ack.stats.rewrites, "inserted": ack.stats.insertedChars, "deleted": ack.stats.deletedChars,
                                      "freezes": ack.stats.freezes, "drifts": ack.stats.drifts]
         if let cause = ack.stats.lastFreeze { fields["lastFreeze"] = cause }
+        if let drift = ack.stats.lastDrift { fields["drift"] = drift }
         if let version = ack.version {
             fields["v"] = version
             if let at = liveVersionTimes[version] {

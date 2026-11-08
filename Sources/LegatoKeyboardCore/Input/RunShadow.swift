@@ -10,9 +10,12 @@ import Foundation
 /// - Appends (the target only grows the region) go out a slice at a time through `TypewriterDrain`. Anything else
 ///   (a Soniox revision, a cleaned sentence, a changed head) is a word-level diff (`ShadowEditPlanner`) applied
 ///   at once, back to front, with the cursor returning to the end of the region.
-/// - Drift: after our own edits the field's context must show anchor + region (`OwnEditEcho`, given
-///   `TypewriterReveal.settleLimitMs` to catch up). If it does not, or a selection appears, the user moved on:
-///   everything typed so far is frozen, and the run goes on appending at the cursor.
+/// - Drift: after our own edits the field's context must show anchor + region (`OwnEditEcho`). The host reports
+///   it late (Safari's web process answers a batch of moves, deletes and inserts only when all of them ran, and the
+///   report in between is the text before the cursor wherever it is on its way), so a mismatch is given
+///   `echoLimitMs` to resolve. If it does not, or a selection appears, the user moved on: everything typed so far
+///   is frozen, and the run goes on appending at the cursor once the field's report has stopped changing, so the
+///   separator and capital are judged against the text that really is there.
 /// - Frozen text is never edited again. Changes the target makes to a frozen sentence are dropped, except growth
 ///   of a sentence that was still being spoken: what follows the frozen part is appended at the cursor.
 public struct RunShadow: Sendable, Equatable {
@@ -26,6 +29,8 @@ public struct RunShadow: Sendable, Equatable {
         public var deletedChars = 0
         /// Set when this step froze the region (drift, or a selection).
         public var froze: FreezeCause?
+        /// Why a drift was declared: lengths and character kinds only, never text.
+        public var driftDetail: String?
         /// The field's context does not echo the last edit yet: nothing was done, call again.
         public var waiting = false
         /// The field shows the whole target of `version` (and nothing was left to type).
@@ -43,6 +48,12 @@ public struct RunShadow: Sendable, Equatable {
     /// Ready to be seeded from the field at the next step (a new run, or right after a freeze).
     private var reseed = true
     private var waitedMs = 0.0
+    /// Operations of the last batch: a longer batch takes the host longer to echo.
+    private var lastOps = 0
+    /// After a freeze: the field's report must hold still for `stableMs` before it seeds the new anchor.
+    private var settling = false
+    private var lastReport: String?
+    private var stableForMs = 0.0
     private var frozen: [Int: Frozen] = [:]
     private var built = Built()
 
@@ -71,6 +82,14 @@ public struct RunShadow: Sendable, Equatable {
 
     public var frozenSegments: Int { frozen.count }
 
+    /// How long a field's report may disagree with the shadow before it counts as the user's edit.
+    public static let echoBaseMs = 500.0
+    public static let echoPerOpMs = 120.0
+    public static let echoCapMs = 1500.0
+    /// How long the report must stay unchanged after a freeze before the run types again.
+    public static let stableMs = 150.0
+    var echoLimitMs: Double { min(Self.echoCapMs, Self.echoBaseMs + Self.echoPerOpMs * Double(lastOps)) }
+
     // MARK: Step
 
     /// - Parameters:
@@ -88,13 +107,20 @@ public struct RunShadow: Sendable, Equatable {
             step.needsTicks = true
             return step
         }
-        if reseed || region.isEmpty { anchor = contextBefore; reseed = false; waitedMs = 0 }
+        if settling {
+            if reportedBefore == lastReport { stableForMs += elapsedMs } else { lastReport = reportedBefore; stableForMs = 0 }
+            if stableForMs < Self.stableMs { step.waiting = true; step.needsTicks = true; return step }
+            settling = false
+            anchor = reportedBefore; reseed = false; waitedMs = 0
+        } else if reseed || region.isEmpty { anchor = contextBefore; reseed = false; waitedMs = 0 }
         else if !OwnEditEcho.isSame(expected: anchor + region, reported: reportedBefore) {
             waitedMs += elapsedMs
-            if waitedMs < TypewriterReveal.settleLimitMs { step.waiting = true; step.needsTicks = true; return step }
+            if waitedMs < echoLimitMs { step.waiting = true; step.needsTicks = true; return step }
+            step.driftDetail = Self.describeMismatch(expected: anchor + region, reported: reportedBefore)
             _ = freeze(.drift)
             step.froze = .drift
-            anchor = contextBefore; reseed = false
+            step.waiting = true; step.needsTicks = true
+            return step
         } else {
             waitedMs = 0
         }
@@ -112,6 +138,7 @@ public struct RunShadow: Sendable, Equatable {
             if !slice.isEmpty {
                 step.ops = [.insert(slice)]; step.insertedChars = slice.count
                 region += slice
+                lastOps = 1
             }
             if region == target { step.applied = true; step.version = snapshot.version } else { step.needsTicks = true }
             return step
@@ -125,6 +152,7 @@ public struct RunShadow: Sendable, Equatable {
             }
         }
         step.ops = plan.ops; step.rewrote = true
+        lastOps = plan.ops.count
         region = target
         step.applied = true; step.version = snapshot.version
         return step
@@ -134,7 +162,7 @@ public struct RunShadow: Sendable, Equatable {
     /// whether anything was frozen. The next step seeds a new anchor at the cursor.
     @discardableResult
     public mutating func freeze(_ cause: FreezeCause) -> Bool {
-        defer { reseed = true; region = ""; waitedMs = 0; built = Built() }
+        defer { reseed = true; region = ""; waitedMs = 0; built = Built(); settling = true; lastReport = nil; stableForMs = 0 }
         guard !region.isEmpty else { return false }
         let typed = max(0, region.count - built.prefix)
         for span in built.spans {
@@ -146,6 +174,32 @@ public struct RunShadow: Sendable, Equatable {
             frozen[span.id] = Frozen(text: joined, closed: count == span.text.count && span.final)
         }
         return true
+    }
+
+    /// Where the field's report and the shadow part ways, without any text: both lengths, how many characters
+    /// agree at the end, whether they agree once whitespace is normalised, and the kinds of the first characters that differ.
+    static func describeMismatch(expected: String, reported: String) -> String {
+        let e = Array(expected), r = Array(reported)
+        var common = 0
+        while common < min(e.count, r.count), e[e.count - 1 - common] == r[r.count - 1 - common] { common += 1 }
+        func kind(_ chars: [Character], _ back: Int) -> String {
+            guard back < chars.count else { return "none" }
+            let c = chars[chars.count - 1 - back]
+            if c == "\u{00A0}" { return "nbsp" }
+            if c.isNewline { return "newline" }
+            if c.isWhitespace { return "space" }
+            if c.isLetter { return "letter" }
+            if c.isNumber { return "digit" }
+            return c.isASCII ? "punct" : "other"
+        }
+        func normalized(_ text: String) -> String {
+            text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+        // The report found inside the shadow, how many characters before its end: a lagging report is an older state.
+        let found = expected.range(of: reported).map { expected.distance(from: $0.upperBound, to: expected.endIndex) } ?? -1
+        let ne = normalized(expected), nr = normalized(reported)
+        let alike = ne.hasSuffix(nr) || nr.hasSuffix(ne)
+        return "e=\(e.count) r=\(r.count) common=\(common) wsOnly=\(alike ? 1 : 0) reportInShadowFromEnd=\(found) expectedKind=\(kind(e, common)) reportedKind=\(kind(r, common)) endsSpace=\(e.last?.isWhitespace == true ? 1 : 0)/\(r.last?.isWhitespace == true ? 1 : 0)"
     }
 
     // MARK: Target

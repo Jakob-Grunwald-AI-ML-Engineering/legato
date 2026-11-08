@@ -39,6 +39,8 @@ public struct LiveDictationStats: Codable, Equatable, Sendable {
     /// The last freeze, by cause (`keystroke`, `cursor`, `selection`, `drift`, `field`).
     public var lastFreeze: String?
     public var drifts = 0
+    /// How the last drift looked (lengths and character kinds, no text).
+    public var lastDrift: String?
     public init() {}
 }
 
