@@ -121,6 +121,27 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(shadow.frozenSegments == 2)
     }
 
+    @Test func aKeyWhileAWordIsHalfRevealedFinishesTheWordFirst() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        let snap = snapshot(1, [head(0, "enough soil for the beds")])
+        // The typewriter has revealed "enough so".
+        while field.text != "enough so" { tick(&shadow, &field, snap, animated: true, elapsedMs: 1) }
+        let op = shadow.finishWord(beforeKey: "X", reportedBefore: field.before, reportedAfter: field.after)
+        #expect(op == .insert("il "))
+        field.apply(op.map { [$0] } ?? [])
+        shadow.freeze(.keystroke)
+        field.before += "XY "
+        tick(&shadow, &field, snap, settle: true)
+        #expect(field.text == "enough soil XY for the beds")
+        // Nothing is cut off at a word end, and a key that is no letter gets no space.
+        var other = RunShadow(runID: "r"), second = Field(before: "")
+        tick(&other, &second, snapshot(1, [head(0, "hello")]))
+        #expect(other.finishWord(beforeKey: "X", reportedBefore: second.before, reportedAfter: "") == nil)
+        var third = RunShadow(runID: "r"), field3 = Field(before: "")
+        while field3.text != "hel" { tick(&third, &field3, snapshot(1, [head(0, "hello, you")]), animated: true, elapsedMs: 1) }
+        #expect(third.finishWord(beforeKey: ".", reportedBefore: field3.before, reportedAfter: "") == .insert("lo,"))
+    }
+
     @Test func aClosedFrozenSentenceIsNeverTypedAgainButNewSentencesFollow() {
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         tick(&shadow, &field, snapshot(1, [final(0, "first sentence.")]))

@@ -297,8 +297,9 @@ final class TypingModel {
 
     private func insert(_ text: String) {
         let before = context().before
-        controller?.type(text, contextBefore: before)
-        shadow = (before + text, now())
+        // A live word the controller finished first comes before the key: its own edit set the context.
+        let finished = controller?.type(text, contextBefore: before) ?? false
+        shadow = ((finished ? context().before : before) + text, now())
     }
 
     private func deleteOne() {
