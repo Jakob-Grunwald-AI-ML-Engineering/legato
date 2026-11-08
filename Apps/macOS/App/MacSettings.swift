@@ -35,7 +35,9 @@ import Observation
         hotkey = panel
         dictationHotkey = Self.initialDictationHotkey(defaults, panel: panel)
         gestureMode = defaults.string(forKey: "gestureMode").flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
-        dictationSend = DictationSendSetting.mode(in: defaults)
+        // `live` is the iOS keyboard's: here the unset default stays what it was, a take written on stop.
+        let send = DictationSendSetting.mode(in: defaults)
+        dictationSend = send == .live ? .onStop : send
         dictationPause = DictationSendSetting.pause(in: defaults)
         insertionMode = defaults.string(forKey: "insertionMode").flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         typewriter = defaults.object(forKey: "typewriterInsertion") as? Bool ?? true

@@ -42,7 +42,11 @@ final class AppController {
         composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
         dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
-                                      recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults)
+                                      recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults,
+                                      supportsLive: true)
+        #if LEGATO_INTERNAL
+        dictation.diagnostics = { event, fields in AudioDiagnostics.log(event, fields) }
+        #endif
         keyboardSession = KeyboardSession(composer: composer, sink: dictation)
         holdActivity = HoldActivityPresenter(composer: composer)
         #if LEGATO_INTERNAL
