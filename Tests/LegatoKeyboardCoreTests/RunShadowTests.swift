@@ -28,13 +28,15 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
                   animated: Bool = false, elapsedMs: Double = 0, reported: String? = nil, selection: Bool = false,
                   settle: Bool = false) -> RunShadow.Step {
     var step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
-                           hasSelection: selection, capitalization: .none, elapsedMs: elapsedMs, animated: animated)
+                           hasSelection: selection, capitalization: .none, elapsedMs: elapsedMs, animated: animated,
+                           followingCharacter: field.after.first)
     field.apply(step.ops)
     var guardCount = 0
     while settle, step.waiting, guardCount < 10 {
         guardCount += 1
         step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: reported ?? field.before,
-                           hasSelection: selection, capitalization: .none, elapsedMs: 100, animated: animated)
+                           hasSelection: selection, capitalization: .none, elapsedMs: 100, animated: animated,
+                           followingCharacter: field.after.first)
         field.apply(step.ops)
     }
     return step
@@ -121,12 +123,57 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(field.text == "first sentence. Z second one.")
     }
 
-    @Test func aHalfTypedWordContinuesWithoutASeparator() {
+    @Test func aWordCutOffByTheFreezeIsTypedWholeAtTheNewCursorNotLost() {
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         tick(&shadow, &field, snapshot(1, [head(0, "Hello wor")]))
         shadow.freeze(.keystroke)
+        field.before += "!"
         tick(&shadow, &field, snapshot(2, [head(0, "Hello world and")]), settle: true)
-        #expect(field.text == "Hello world and")
+        #expect(field.text == "Hello wor! world and")
+        // The same when the sentence changed under the frozen part meanwhile.
+        var other = RunShadow(runID: "r"), second = Field(before: "")
+        tick(&other, &second, snapshot(1, [head(0, "we met their yest")]))
+        other.freeze(.cursor)
+        tick(&other, &second, snapshot(2, [head(0, "we met there yesterday and talked")]), settle: true)
+        #expect(second.text == "we met their yest yesterday and talked")
+    }
+
+    @Test func aTapIntoTheTypedTextFreezesAsACursorMoveAndTheRestFollowsAtTheNewCursor() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [head(0, "The sheet is ready")]))
+        // The user taps after "The": the field now reports only the text before that cursor.
+        field = Field(before: "The", after: " sheet is ready")
+        let frozen = tick(&shadow, &field, snapshot(2, [head(0, "The sheet is ready and then")]), elapsedMs: 1600, reported: "The")
+        #expect(frozen.froze == .cursor)
+        tick(&shadow, &field, snapshot(2, [head(0, "The sheet is ready and then")]), settle: true)
+        #expect(field.text == "The and then sheet is ready")
+        #expect(field.before == "The and then", "Nothing of the sentence is lost and the cursor ends after what was typed")
+        _ = shadow
+    }
+
+    @Test func aReportThatMatchesNothingTypedIsDriftNotACursorMove() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [head(0, "hello world")]))
+        let frozen = tick(&shadow, &field, snapshot(1, [head(0, "hello world")]), elapsedMs: 1600, reported: "something else")
+        #expect(frozen.froze == .drift)
+    }
+
+    @Test func aRunInTheMiddleOfTextGetsOneSpaceBeforeWhatFollowsAndKeepsTypingInFrontOfIt() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "Start here. ", after: "End here.")
+        tick(&shadow, &field, snapshot(1, [head(0, "Bring the")]))
+        #expect(field.text == "Start here. Bring the End here." && field.before == "Start here. Bring the")
+        tick(&shadow, &field, snapshot(2, [final(0, "Bring the laptop.")]))
+        #expect(field.text == "Start here. Bring the laptop. End here.", "One space, not one per step")
+        tick(&shadow, &field, snapshot(3, [final(0, "Bring the laptop."), head(1, "and chargers")]))
+        #expect(field.text == "Start here. Bring the laptop. and chargers End here.")
+    }
+
+    @Test func noSpaceIsAddedBeforeAWhitespaceOrClosingMarkOrAtTheEndOfTheField() {
+        for after in [" End", ".", ")", "\nNext", ""] {
+            var shadow = RunShadow(runID: "r"), field = Field(before: "Start. ", after: after)
+            tick(&shadow, &field, snapshot(1, [final(0, "Hello there.")]))
+            #expect(field.text == "Start. Hello there." + after, "after: \(after.debugDescription)")
+        }
     }
 
     @Test func aHeadThatChangedUnderTheFrozenPartAppendsOnlyTheNewWords() {
@@ -167,7 +214,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         let cut = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home."), head(1, "then we eat and sleep well")]), elapsedMs: 100)
         #expect(cut.ops.count == 1)
         let stuck = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home."), head(1, "then we eat and sleep well")]), elapsedMs: 1600, reported: midBatch)
-        #expect(stuck.froze == .drift)
+        #expect(stuck.froze == .cursor, "A report stuck at an earlier point of the text is the cursor there")
     }
 
     @Test func afterAFreezeTheRunWaitsForTheReportToHoldStillAndSeedsFromIt() {
@@ -182,6 +229,18 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(still.waiting && still.ops.isEmpty)
         let typed = tick(&shadow, &field, snapshot(2, [final(0, "first."), head(1, "second")]), elapsedMs: 200, reported: "first. A")
         #expect(typed.ops == [.insert(" second")] && field.text == "first. A second")
+    }
+
+    @Test func aRunThatSettlesFirstDoesNotJudgeTheSeparatorAgainstAReportThatIsStillCatchingUp() {
+        var shadow = RunShadow(runID: "r", settlesFirst: true), field = Field(before: "Start here. ")
+        let snap = snapshot(1, [head(0, "So I wanted")])
+        // Right after the tap the host still reports the text before the cursor without its trailing space.
+        let stale = tick(&shadow, &field, snap, elapsedMs: 100, reported: "Start here.")
+        #expect(stale.waiting && stale.ops.isEmpty)
+        let caughtUp = tick(&shadow, &field, snap, elapsedMs: 100, reported: "Start here. ")
+        #expect(caughtUp.waiting && caughtUp.ops.isEmpty)
+        let typed = tick(&shadow, &field, snap, elapsedMs: 200, reported: "Start here. ")
+        #expect(typed.ops == [.insert("So I wanted")] && field.text == "Start here. So I wanted")
     }
 
     @Test func aMatchingReportedContextAfterALagIsNotDrift() {

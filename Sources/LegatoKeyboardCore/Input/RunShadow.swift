@@ -31,6 +31,8 @@ public struct RunShadow: Sendable, Equatable {
         public var froze: FreezeCause?
         /// Why a drift was declared: lengths and character kinds only, never text.
         public var driftDetail: String?
+        /// Set on the step that types the first characters of a region: what it was anchored to (lengths and kinds only).
+        public var startDetail: String?
         /// The field's context does not echo the last edit yet: nothing was done, call again.
         public var waiting = false
         /// The field shows the whole target of `version` (and nothing was left to type).
@@ -51,13 +53,19 @@ public struct RunShadow: Sendable, Equatable {
     /// Operations of the last batch: a longer batch takes the host longer to echo.
     private var lastOps = 0
     /// After a freeze: the field's report must hold still for `stableMs` before it seeds the new anchor.
-    private var settling = false
+    private var settling: Bool
     private var lastReport: String?
     private var stableForMs = 0.0
     private var frozen: [Int: Frozen] = [:]
     private var built = Built()
+    /// The character after the cursor where the region began.
+    private var following: Character?
+    private static let closingMarks: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "%", "…", "\u{2019}", "\u{201D}"]
 
-    public init(runID: String) { self.runID = runID }
+    /// `settlesFirst`: the run starts typing only once the field's report has held still for `stableMs`. Right after a
+    /// tap or a focus the host can still report the text before the cursor as it was a moment ago (a missing trailing
+    /// space would then be added again).
+    public init(runID: String, settlesFirst: Bool = false) { self.runID = runID; settling = settlesFirst }
 
     /// What a sentence (by segment id) already has in the field and may not be edited any more.
     struct Frozen: Equatable, Sendable {
@@ -96,9 +104,11 @@ public struct RunShadow: Sendable, Equatable {
     ///   - contextBefore: where the region would start now (the keyboard's tracked context, which includes its
     ///     own latest edit); used to seed the anchor and to place the first slice.
     ///   - reportedBefore: the field's own report, which lags behind edits; the drift check reads it.
+    ///   - followingCharacter: the character right after the cursor (`documentContextAfterInput`), read only where
+    ///     the run begins typing: text that follows without a space gets one from the run's first insert.
     public mutating func step(
         snapshot: LiveDictationSnapshot, contextBefore: String, reportedBefore: String, hasSelection: Bool,
-        capitalization: AutoCapitalizationType, elapsedMs: Double, animated: Bool
+        capitalization: AutoCapitalizationType, elapsedMs: Double, animated: Bool, followingCharacter: Character? = nil
     ) -> Step {
         var step = Step()
         if hasSelection {
@@ -111,14 +121,16 @@ public struct RunShadow: Sendable, Equatable {
             if reportedBefore == lastReport { stableForMs += elapsedMs } else { lastReport = reportedBefore; stableForMs = 0 }
             if stableForMs < Self.stableMs { step.waiting = true; step.needsTicks = true; return step }
             settling = false
-            anchor = reportedBefore; reseed = false; waitedMs = 0
-        } else if reseed || region.isEmpty { anchor = contextBefore; reseed = false; waitedMs = 0 }
+            anchor = reportedBefore; reseed = false; waitedMs = 0; following = followingCharacter
+        } else if reseed || region.isEmpty { anchor = contextBefore; reseed = false; waitedMs = 0; following = followingCharacter }
         else if !OwnEditEcho.isSame(expected: anchor + region, reported: reportedBefore) {
             waitedMs += elapsedMs
             if waitedMs < echoLimitMs { step.waiting = true; step.needsTicks = true; return step }
             step.driftDetail = Self.describeMismatch(expected: anchor + region, reported: reportedBefore)
-            _ = freeze(.drift)
-            step.froze = .drift
+            // The report shows the text up to somewhere earlier in what was typed: the cursor moved, the text is as it was.
+            let cause: FreezeCause = Self.cursorMoved(expected: anchor + region, reported: reportedBefore) ? .cursor : .drift
+            _ = freeze(cause)
+            step.froze = cause
             step.waiting = true; step.needsTicks = true
             return step
         } else {
@@ -136,9 +148,18 @@ public struct RunShadow: Sendable, Equatable {
             let next = animated ? TypewriterDrain.step(revealed: revealed, target: total, dtMs: elapsedMs) : total
             let slice = String(target.dropFirst(revealed).prefix(next - revealed))
             if !slice.isEmpty {
-                step.ops = [.insert(slice)]; step.insertedChars = slice.count
+                if region.isEmpty {
+                    step.startDetail = "anchor=\(anchor.count) endsSpace=\(anchor.last?.isWhitespace == true ? 1 : 0) reported=\(reportedBefore.count) reportedEndsSpace=\(reportedBefore.last?.isWhitespace == true ? 1 : 0) following=\(following.map { $0.isWhitespace ? "space" : "char" } ?? "none") first=\(slice.first?.isWhitespace == true ? "space" : "char")"
+                }
+                if region.isEmpty, let next = following, !next.isWhitespace, !Self.closingMarks.contains(next) {
+                    // The run starts in front of text that follows without a space: one goes in behind it, once, and the
+                    // cursor stays in front of that space, so the run keeps typing where it is.
+                    step.ops = [.insert(slice + " "), .move(-1)]; lastOps = 2
+                } else {
+                    step.ops = [.insert(slice)]; lastOps = 1
+                }
+                step.insertedChars = slice.count
                 region += slice
-                lastOps = 1
             }
             if region == target { step.applied = true; step.version = snapshot.version } else { step.needsTicks = true }
             return step
@@ -174,6 +195,36 @@ public struct RunShadow: Sendable, Equatable {
             frozen[span.id] = Frozen(text: joined, closed: count == span.text.count && span.final)
         }
         return true
+    }
+
+    /// What of a sentence still has to be typed after its frozen part. A frozen part that ends inside a word leaves that
+    /// fragment where it is (the cursor is no longer there): the whole word is typed again with what follows. Words after
+    /// the frozen part that the sentence changed under are matched by position.
+    static func unfrozenRest(of text: String, frozen: String) -> String {
+        let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
+        let typed = frozen.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let last = typed.last, !frozen.hasSuffix(" ") else {
+            return text.hasPrefix(frozen) ? String(text.dropFirst(frozen.count)).trimmingCharacters(in: .whitespaces)
+                                         : words.dropFirst(typed.count).joined(separator: " ")
+        }
+        // The frozen part ends in `last`: if the sentence's word there is longer, it was cut off; only its first
+        // characters are in the field.
+        guard typed.count <= words.count else { return "" }
+        let word = words[typed.count - 1]
+        var rest = Array(words.dropFirst(typed.count))
+        if word.hasPrefix(last), word.count > last.count {
+            let tail = word.dropFirst(last.count)
+            // A word that goes on is typed whole; punctuation stuck to a finished word is not typed on its own.
+            if let first = tail.first, first.isLetter || first.isNumber { rest.insert(word, at: 0) }
+        }
+        return rest.joined(separator: " ")
+    }
+
+    /// Whether the report is the shadow's text up to a point before its end, which is what the host reports when the
+    /// cursor sits there: the user tapped into what was typed.
+    static func cursorMoved(expected: String, reported: String) -> Bool {
+        guard !reported.isEmpty, reported != expected, let range = expected.range(of: reported) else { return false }
+        return range.upperBound < expected.endIndex
     }
 
     /// Where the field's report and the shadow part ways, without any text: both lengths, how many characters
@@ -215,16 +266,7 @@ public struct RunShadow: Sendable, Equatable {
             var continues = false
             if let known = frozen[segment.id] {
                 if known.closed { continue }
-                if text.hasPrefix(known.text) {
-                    let rest = String(text.dropFirst(known.text.count))
-                    continues = !rest.isEmpty && !known.text.hasSuffix(" ") && !(rest.first?.isWhitespace ?? true)
-                    text = rest.trimmingCharacters(in: .whitespaces)
-                } else {
-                    // The words moved under the frozen part: only the words after the ones already typed are new.
-                    let words = text.split(whereSeparator: \.isWhitespace)
-                    let typedWords = known.text.split(whereSeparator: \.isWhitespace).count
-                    text = words.dropFirst(typedWords).joined(separator: " ")
-                }
+                text = Self.unfrozenRest(of: text, frozen: known.text)
             }
             guard !text.isEmpty else { continue }
             if raw.isEmpty { continuation = continues }

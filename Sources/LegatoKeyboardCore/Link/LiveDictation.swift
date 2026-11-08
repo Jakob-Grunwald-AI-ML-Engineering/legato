@@ -41,6 +41,8 @@ public struct LiveDictationStats: Codable, Equatable, Sendable {
     public var drifts = 0
     /// How the last drift looked (lengths and character kinds, no text).
     public var lastDrift: String?
+    /// What the last region was anchored to when it began typing (lengths and kinds, no text).
+    public var lastStart: String?
     public init() {}
 }
 

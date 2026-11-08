@@ -793,7 +793,7 @@ final class KeyboardController {
         guard snapshot != liveSeen, snapshot.runID != ignoredLiveRunID else { return }
         liveSeen = snapshot
         if snapshot.runID != liveShadow?.runID {
-            liveShadow = RunShadow(runID: snapshot.runID)
+            liveShadow = RunShadow(runID: snapshot.runID, settlesFirst: true)
             liveStats = LiveDictationStats(); liveAckedVersion = nil
             liveDocumentID = document.documentID
             trace?("live run start")
@@ -840,8 +840,10 @@ final class KeyboardController {
         let step = shadow.step(
             snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore,
             hasSelection: document.selectedText?.isEmpty == false, capitalization: autocapitalization,
-            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled)
+            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled,
+            followingCharacter: document.contextAfter.first)
         liveShadow = shadow
+        if let start = step.startDetail { liveStats.lastStart = start; writeLiveAck(version: nil, complete: false) }
         if let cause = step.froze {
             liveStats.lastDrift = step.driftDetail ?? liveStats.lastDrift
             noteLiveFreeze(cause)
