@@ -235,13 +235,35 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(run.finalCount == 1)
     }
 
-    @Test func finishingKeepsTheHeadAsAFinalSentenceAndStopsTakingWords() {
+    @Test func finishingLeavesTheHeadAsShownAndALateSegmentStillLandsInTheRun() {
         var run = LiveDictationRun(runID: "r")
         run.setHead("half said")
         run.finish()
-        #expect(run.complete && run.snapshot.segments == [.init(id: 0, text: "half said", final: true)])
+        #expect(run.complete && run.snapshot.segments == [.init(id: 0, text: "half said", final: false)])
         let v = run.version
         run.setHead("late")
-        #expect(run.version == v)
+        #expect(run.version == v, "No new words after the end")
+        // The segment of those words arrives late: it replaces the head in place and keeps the segment id.
+        let sentence = run.addFinal(key: 3, text: "half said.")
+        #expect(sentence == "half said." && run.snapshot.segments == [.init(id: 0, text: "half said.", final: true)] && run.complete)
+        let late = run.setCleaned(key: 3, text: "Half said.")
+        #expect(late)
     }
+
+    @Test func aCutShortSegmentWaitsInTheHeadAndTheSentenceIsCleanedWhole() {
+        var run = LiveDictationRun(runID: "r")
+        run.setHead("one two three")
+        let first = run.addFinal(key: 0, text: "one two three", closes: false)
+        #expect(first == nil && run.finalCount == 0)
+        run.setHead("four five")
+        #expect(run.snapshot.segments == [.init(id: 0, text: "one two three four five", final: false)])
+        let whole = run.addFinal(key: 1, text: "four five six.")
+        #expect(whole == "one two three four five six." && run.finalCount == 1)
+        #expect(run.snapshot.segments == [.init(id: 0, text: "one two three four five six.", final: true)], "The head keeps its id when the sentence closes")
+        let cleaned = run.setCleaned(key: 1, text: "One two three, four five six.")
+        #expect(cleaned)
+        run.addFinal(key: 2, text: "next one.")
+        #expect(run.text(before: 2) == "One two three, four five six.")
+    }
+
 }

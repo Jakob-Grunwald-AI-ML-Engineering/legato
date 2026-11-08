@@ -87,7 +87,7 @@ public actor DictationCleanupPipeline {
     /// `textBefore`: the field's text before the cursor now (`documentContextBeforeInput`).
     public func submit(sequence: Int, lineID: String, raw: String, textBefore: String) async {
         // Lines that never came here (another send mode took them) leave a gap: with nothing waiting, start at this one.
-        if firstSequence == nil || (queue.isEmpty && inFlight.isEmpty && finished.isEmpty && sequence > nextDelivery) {
+        if firstSequence == nil || (queue.isEmpty && inFlight.isEmpty && finished.isEmpty && sequence != nextDelivery) {
             firstSequence = firstSequence ?? sequence; nextDelivery = sequence
         }
         known[sequence] = raw

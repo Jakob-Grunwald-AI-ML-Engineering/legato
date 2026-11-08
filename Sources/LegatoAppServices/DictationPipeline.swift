@@ -114,6 +114,13 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// Counts and timings, never text: `live2.*` lines for the internal builds' diagnostics.
     @ObservationIgnored public var diagnostics: (@MainActor (_ event: String, _ fields: [String: Any]) -> Void)?
     @ObservationIgnored private var liveSubmitted: [Int: ContinuousClock.Instant] = [:]
+    /// Live sentences are cleaned under a counter of their own (a cut-short segment is no sentence): cleanup
+    /// sequence -> the key of the segment that closed the sentence in the run.
+    @ObservationIgnored private var liveKeys: [Int: Int] = [:]
+    @ObservationIgnored private var liveCleanupSequence = 0
+    /// When the run's take ended: a segment or cleanup that arrives within `liveStragglerGrace` still belongs to it.
+    @ObservationIgnored private var liveFinishedAt: ContinuousClock.Instant?
+    private static let liveStragglerGrace = Duration.seconds(3)
     /// The field's text before the cursor when the run began: the context its sentences are cleaned against. The
     /// field now holds the run's own words, which the cleaner must not see as "already typed" (it would drop them).
     @ObservationIgnored private var liveAnchor = ""
@@ -161,7 +168,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     public func receive(_ line: DictationRouteLine) async {
         let raw = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
-        if mode == .live { await receiveLive(raw, sequence: line.sequence); return }
+        if mode == .live { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason)); return }
         if mode != .lineByLine { bufferLine(raw); return }
         pending += 1
         let pipeline = await current()
@@ -284,7 +291,12 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         await runTake(raw)
     }
     public func finishTake() async {
-        if mode == .live { await finishLive() } else { await sendTake() }
+        switch mode {
+        case .live: await finishLive()
+        // The last line is still in cleanup: the stop is done when it has been handed to the keyboard.
+        case .lineByLine: _ = await settle()
+        default: await sendTake()
+        }
     }
 
     // MARK: Live (the keyboard types the run as it is spoken)
@@ -294,21 +306,30 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         guard mode == .live else { return }
         let head = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if head.isEmpty, liveRun == nil || liveRun?.complete == true { return }
-        var run = currentLiveRun()
+        // Words spoken after the take's end are a new take (late segments come with an empty head).
+        var run = currentLiveRun(straggler: false)
         run.setHead(head)
         publishLive(run)
     }
 
-    private func receiveLive(_ raw: String, sequence: Int) async {
+    /// Segment reasons that cut a sentence short (`Segmenter.maxWords`, `maxDuration`), not end it.
+    private static let forcedSplits: Set<String> = ["words", "duration"]
+
+    private func receiveLive(_ raw: String, sequence: Int, forced: Bool) async {
         var run = currentLiveRun()
-        run.addFinal(key: sequence, text: raw)
+        let sentence = run.addFinal(key: sequence, text: raw, closes: !forced)
         publishLive(run)
+        // A cut-short segment waits for the rest of its sentence; the sentence is cleaned once, whole.
+        guard let sentence else { return }
+        let id = liveCleanupSequence
+        liveCleanupSequence += 1
+        liveKeys[id] = sequence
         pending += 1
-        liveSubmitted[sequence] = .now
+        liveSubmitted[id] = .now
         // What stands before this sentence if the run were typed clean: the text before the run, then the sentences so far.
         let before = [liveAnchor, run.text(before: sequence)].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
         let pipeline = await current()
-        await pipeline.submit(sequence: sequence, lineID: "\(sessionID)-\(sequence)", raw: raw, textBefore: before)
+        await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: sentence, textBefore: before)
     }
 
     /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete.
@@ -316,6 +337,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         _ = await settle(timeout: liveTimeout + .seconds(1))
         guard var run = liveRun, !run.complete else { return }
         run.finish()
+        liveFinishedAt = .now
         publishLive(run)
         diagnostics?("live2.run.end", ["run": String(run.runID.prefix(8)), "sentences": run.finalCount, "chars": run.snapshot.segments.reduce(0) { $0 + $1.text.count }])
     }
@@ -326,9 +348,9 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             let parts = start.duration(to: .now).components
             return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
         }
-        guard var run = liveRun else { return }
+        guard var run = liveRun, let key = liveKeys.removeValue(forKey: line.sequence) else { return }
         if line.status == .cleaned {
-            let changed = run.setCleaned(key: line.sequence, text: line.text)
+            let changed = run.setCleaned(key: key, text: line.text)
             diagnostics?("live2.cleanup", ["landed": true, "changed": changed, "rawChars": line.raw.count, "chars": line.text.count, "ms": ms as Any])
             if changed { publishLive(run) } else { liveRun = run }
         } else {
@@ -337,8 +359,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     }
 
     /// The run in progress, or a new one when none runs or the last is complete.
-    private func currentLiveRun() -> LiveDictationRun {
-        if let run = liveRun, !run.complete { return run }
+    private func currentLiveRun(straggler: Bool = true) -> LiveDictationRun {
+        // A segment can reach the sink after the take's end was seen (its event is still on its way): it belongs to the run.
+        let late = straggler && liveFinishedAt.map { $0.duration(to: .now) < Self.liveStragglerGrace } == true
+        if let run = liveRun, !run.complete || late { return run }
         let run = LiveDictationRun()
         liveRun = run
         liveAnchor = String(contextBefore().suffix(600))
@@ -352,7 +376,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     }
 
     private func endLiveRun() {
-        liveSubmitted = [:]
+        liveSubmitted = [:]; liveKeys = [:]; liveFinishedAt = nil
         guard liveRun != nil else { return }
         liveRun = nil
         onLiveChange?(nil)

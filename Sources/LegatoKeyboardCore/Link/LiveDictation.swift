@@ -67,6 +67,9 @@ public struct LiveDictationLink: Sendable {
 
 /// The app's model of one live run: the finished sentences (raw until their cleanup lands) and the speaking
 /// head, as the target the keyboard should show. Every change that alters the target bumps `version`.
+///
+/// A sentence the segmenter cut short (a forced split at 25 words or 8 s) is not finished: its words stay in the
+/// speaking head until the segment that really ends it arrives, and the sentence is cleaned as a whole.
 public struct LiveDictationRun: Sendable, Equatable {
     public let runID: String
     public private(set) var version = 0
@@ -74,25 +77,40 @@ public struct LiveDictationRun: Sendable, Equatable {
     private var finals: [LiveSegment] = []
     private var keys: [Int: Int] = [:]
     private var head = ""
+    /// Cut-short parts of the sentence being spoken, with the keys of their segments.
+    private var open: [String] = []
+    private var openKeys: [Int] = []
 
     public init(runID: String = UUID().uuidString) { self.runID = runID }
 
     public var snapshot: LiveDictationSnapshot {
         var segments = finals
-        if !head.isEmpty { segments.append(.init(id: finals.count, text: head, final: false)) }
+        let speaking = (open + [head]).filter { !$0.isEmpty }.joined(separator: " ")
+        if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
         return .init(runID: runID, version: version, segments: segments, complete: complete)
     }
-    public var isEmpty: Bool { finals.isEmpty && head.isEmpty }
+    public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }
 
-    /// A finished sentence in speaking order; `key` names it for its cleanup. Its words leave the head.
-    public mutating func addFinal(key: Int, text: String) {
+    /// A segment in speaking order; `key` names it. Its words leave the head. `closes` false: the segmenter cut the
+    /// sentence short, so the words wait with the head. Returns the whole sentence once a segment closes it (the text
+    /// to clean), else nil.
+    @discardableResult
+    public mutating func addFinal(key: Int, text: String, closes: Bool = true) -> String? {
         let text = text.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty, keys[key] == nil else { return }
-        keys[key] = finals.count
-        finals.append(.init(id: finals.count, text: text, final: true))
+        guard !text.isEmpty, keys[key] == nil, !openKeys.contains(key) else { return nil }
         head = ""
+        guard closes else {
+            open.append(text); openKeys.append(key)
+            version += 1
+            return nil
+        }
+        let sentence = (open + [text]).joined(separator: " ")
+        for k in openKeys + [key] { keys[k] = finals.count }
+        finals.append(.init(id: finals.count, text: sentence, final: true))
+        open = []; openKeys = []
         version += 1
+        return sentence
     }
 
     /// The cleaned sentence replaces its raw words. False when nothing changed (no such sentence, or the same text).
@@ -106,7 +124,7 @@ public struct LiveDictationRun: Sendable, Equatable {
         return changed
     }
 
-    /// The run's sentences before sentence `key`, as they stand now, joined like the field shows them.
+    /// The run's sentences before the one `key` belongs to, as they stand now, joined like the field shows them.
     public func text(before key: Int) -> String {
         guard let index = keys[key] else { return "" }
         return finals[..<index].map(\.text).joined(separator: " ")
@@ -120,10 +138,10 @@ public struct LiveDictationRun: Sendable, Equatable {
         version += 1
     }
 
-    /// The take ended: words still in the head stay as they were shown and count as finished.
+    /// The take ended. Words still speaking stay as the keyboard showed them; a segment that arrives late
+    /// (`addFinal`) still lands in this run, and so does a late cleanup.
     public mutating func finish() {
         guard !complete else { return }
-        if !head.isEmpty { finals.append(.init(id: finals.count, text: head, final: true)); head = "" }
         complete = true
         version += 1
     }
