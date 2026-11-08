@@ -18,6 +18,15 @@ private final class StubCleaner: SentenceCleaning {
     }
     func warmDictation() async { warms.withLock { $0 += 1 } }
 }
+private final class FnCleaner: SentenceCleaning {
+    let inputs = Mutex<[SentenceCleanupInput]>([])
+    let transform: @Sendable (SentenceCleanupInput) -> String
+    init(_ transform: @escaping @Sendable (SentenceCleanupInput) -> String) { self.transform = transform }
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        inputs.withLock { $0.append(input) }
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: transform(input))
+    }
+}
 /// Drops fillers the way the model does: an all-filler unit comes back empty.
 private final class UnitCleaner: SentenceCleaning {
     let inputs = Mutex<[SentenceCleanupInput]>([])
@@ -118,7 +127,8 @@ extension DictationPipelineTests {
     }
 
     @Test func theTargetIsRawFinalsThenTheHeadAndCleanedSentencesLandOnceTheTakeEnds() async throws {
-        let cleaner = StubCleaner(slow: [0])
+        // Call 2 is the whole take's cleanup at the stop: it times out too, so the units' results stand.
+        let cleaner = StubCleaner(slow: [0, 2])
         let pipeline = live(cleaner)
         var published: [LiveDictationSnapshot?] = []
         pipeline.onLiveChange = { published.append($0) }
@@ -236,7 +246,8 @@ extension DictationPipelineTests {
         await pipeline.receive(routeLine(3, "Yeah."))
         await pipeline.finishTake()
         let texts = cleaner.inputs.withLock { $0.map(\.text) }
-        #expect(texts == ["Um. so, uh, the plan is ready for the review.", "Yeah."])
+        #expect(texts == ["Um. so, uh, the plan is ready for the review.", "Yeah.", "Um. so, uh, the plan is ready for the review. Yeah."],
+                "The units, then the short take whole")
         let snapshot = try #require(pipeline.liveRun?.snapshot)
         #expect(snapshot.complete && snapshot.segments.map(\.text) == ["The plan is ready for the review.", "", "", ""])
         let allCleaned = snapshot.segments.allSatisfy { $0.cleaned }
@@ -245,6 +256,33 @@ extension DictationPipelineTests {
         let changedWhileHeld = diagnostics.allSatisfy { $0["changed"] as? Bool == true && $0["held"] as? Bool == true }
         #expect(diagnostics.count == 2 && changedWhileHeld)
         #expect(diagnostics.last?["dropped"] as? Bool == true && diagnostics.first?["segments"] as? Int == 3)
+    }
+
+    @Test func aShortTakeIsCleanedWholeAtTheStopSoACorrectionInALaterUnitReplacesWhatItCorrects() async throws {
+        let cleaner = FnCleaner { input in
+            input.text.contains("Wednesday") && input.text.contains("Tuesday") ? "We moved the review to Wednesday." : input.text
+        }
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        var ends: [[String: Any]] = []
+        pipeline.diagnostics = { event, fields in if event == "live2.run.end" { ends.append(fields) } }
+        await pipeline.receive(routeLine(0, "we moved the review to Tuesday."))
+        await pipeline.receive(routeLine(1, "Uh,"))
+        await pipeline.receive(routeLine(2, "no sorry Wednesday."))
+        await pipeline.finishTake()
+        let snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(snapshot.segments.map(\.text) == ["We moved the review to Wednesday.", "", ""])
+        #expect(ends.first?["whole"] as? String == "landed" && ends.first?["stopMs"] is Int)
+    }
+
+    @Test func aLongTakeKeepsItsUnits() async throws {
+        let cleaner = FnCleaner { $0.text.uppercased() }
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        let sentence = Array(repeating: "word", count: 45).joined(separator: " ") + "."
+        await pipeline.receive(routeLine(0, sentence))
+        await pipeline.receive(routeLine(1, sentence))
+        await pipeline.finishTake()
+        #expect(cleaner.inputs.withLock { $0.count } == 2, "No whole call over \(DictationPipeline.wholeTakeWords) words")
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == [sentence.uppercased(), sentence.uppercased()])
     }
 
     @Test func lineByLineStopWaitsForTheLastLineToBeCleaned() async {

@@ -109,6 +109,9 @@ public struct LiveDictationRun: Sendable, Equatable {
     private var openUnit = false
     /// Cleaned text by unit index, shown from `finish()` on.
     private var cleaned: [Int: String] = [:]
+    /// The whole take cleaned in one call (`setWhole`): it replaces the finals before `end` and their units.
+    private var whole: Whole?
+    private struct Whole: Sendable, Equatable { var end: Int; var text: String }
     private var keys: [Int: Int] = [:]
     private var head = ""
     /// Cut-short parts of the sentence being spoken, with the keys of their segments.
@@ -120,7 +123,15 @@ public struct LiveDictationRun: Sendable, Equatable {
     public var snapshot: LiveDictationSnapshot {
         var segments = finals
         if complete {
-            for (index, text) in cleaned {
+            if let whole {
+                for i in 0..<whole.end {
+                    segments[i].raw = finals[i].text
+                    segments[i].text = i == 0 ? whole.text : ""
+                    segments[i].cleaned = true; segments[i].unit = 0
+                }
+                if whole.end == 1 { segments[0].raw = nil; segments[0].unit = nil }
+            }
+            for (index, text) in cleaned where units[index].lowerBound >= (whole?.end ?? 0) {
                 let range = units[index]
                 if range.count == 1 {
                     segments[range.lowerBound].text = text; segments[range.lowerBound].cleaned = true
@@ -191,6 +202,22 @@ public struct LiveDictationRun: Sendable, Equatable {
     private func rawText(_ unit: Int) -> String { finals[units[unit]].map(\.text).joined(separator: " ") }
     private func shownText(_ unit: Int) -> String { cleaned[unit] ?? rawText(unit) }
 
+    /// The raw words of every final so far, and how many finals and words that is: what `setWhole` replaces.
+    public var wholeRaw: (finals: Int, words: Int, text: String) {
+        let text = finals.map(\.text).joined(separator: " ")
+        return (finals.count, text.split(whereSeparator: \.isWhitespace).count, text)
+    }
+
+    /// The whole take, cleaned in one call at its end: replaces the first `finals` finals (all units within them)
+    /// once the take is complete. An empty text drops them. False for no finals or a count that no longer fits.
+    @discardableResult
+    public mutating func setWhole(_ text: String, finals count: Int) -> Bool {
+        guard count > 0, count <= finals.count, units.allSatisfy({ $0.upperBound <= count || $0.lowerBound >= count }) else { return false }
+        whole = Whole(end: count, text: text.trimmingCharacters(in: .whitespaces))
+        if complete { version += 1 }
+        return true
+    }
+
     /// How many segments the unit `key` belongs to holds (0: no such unit).
     public func unitSegments(key: Int) -> Int { unitIndex(ofKey: key).map { units[$0].count } ?? 0 }
 
@@ -203,7 +230,8 @@ public struct LiveDictationRun: Sendable, Equatable {
         guard let unit = unitIndex(ofKey: key) else { return false }
         let shown = shownText(unit)
         cleaned[unit] = text
-        guard complete, shown != text else { return false }
+        // A unit the whole take's cleanup covers is shown by that.
+        guard complete, shown != text, units[unit].lowerBound >= (whole?.end ?? 0) else { return false }
         version += 1
         return true
     }

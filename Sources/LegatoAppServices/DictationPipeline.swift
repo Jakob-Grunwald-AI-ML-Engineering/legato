@@ -350,18 +350,85 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 
     /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete
     /// with all cleaned sentences in one snapshot.
+    /// A take of at most this many words is cleaned again as a whole when it ends, so a correction in a later sentence
+    /// ("…to Tuesday." / "Uh, no sorry, Wednesday.") can replace what it corrects; the units' results are the fallback.
+    public static let wholeTakeWords = 80
+
     private func finishLive() async {
+        let stoppedAt = ContinuousClock.now
         // The open unit (words since the last sentence end) is cleaned now; the wait below covers it.
         if var run = liveRun, !run.complete, let open = run.flush() {
             liveRun = run
             await submitLive(open.text, key: open.key, run: run)
         }
+        // A short take of several units is also cleaned whole, in parallel with the units still in cleanup.
+        var wholeTask: Task<String?, Never>?
+        var wholeFinals = 0
+        if let run = liveRun, !run.complete, run.unitCount > 1 {
+            let whole = run.wholeRaw
+            if whole.words <= Self.wholeTakeWords {
+                wholeFinals = whole.finals
+                let input = await wholeInput(whole.text)
+                wholeTask = Task { [weak self] in await self?.cleanWhole(input) }
+            }
+        }
         _ = await settle(timeout: liveTimeout + .seconds(1))
+        let wholeText = await wholeTask?.value
         guard var run = liveRun, !run.complete else { return }
+        if let wholeText {
+            let before = liveAnchor
+            run.setWhole(SentenceStart.capitalized(wholeText, after: before), finals: wholeFinals)
+        }
         run.finish()
         liveFinishedAt = .now
         publishLive(run)
-        diagnostics?("live2.run.end", ["run": String(run.runID.prefix(8)), "sentences": run.finalCount, "chars": run.snapshot.segments.reduce(0) { $0 + $1.text.count }])
+        let parts = stoppedAt.duration(to: .now).components
+        diagnostics?("live2.run.end", ["run": String(run.runID.prefix(8)), "sentences": run.finalCount, "units": run.unitCount,
+                                       "whole": wholeTask == nil ? "none" : wholeText == nil ? "fallback" : "landed",
+                                       "stopMs": Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000),
+                                       "chars": run.snapshot.segments.reduce(0) { $0 + $1.text.count }])
+    }
+
+    /// The cleanup call or nil once `timeout` passed.
+    nonisolated private static func race(cleaner: any SentenceCleaning, input: SentenceCleanupInput, timeout: Duration) async -> Result<String, any Error>? {
+        await withTaskGroup(of: Result<String, any Error>?.self) { group in
+            group.addTask { do { return .success(try await cleaner.clean(input).text) } catch { return .failure(error) } }
+            group.addTask { try? await Task.sleep(for: timeout); return nil }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    private func wholeInput(_ raw: String) async -> SentenceCleanupInput {
+        .init(sentenceID: "\(sessionID)-whole-\(liveCleanupSequence)", sequence: liveCleanupSequence, text: raw,
+              vocabulary: Array(await loadTerms().prefix(200)), dictation: .init(previousLines: [], textBeforeCursor: String(liveAnchor.suffix(600))))
+    }
+
+    /// The whole take's cleanup: the guarded text (empty: every word dropped), or nil when it failed, timed out or was
+    /// rejected (the units' results stand).
+    private func cleanWhole(_ input: SentenceCleanupInput) async -> String? {
+        var cleaner: any SentenceCleaning = self.cleaner
+        #if DEBUG || LEGATO_INTERNAL
+        if let scripted = debugStreamCleaner { cleaner = scripted }
+        #endif
+        let started = ContinuousClock.now, raw = input.text
+        let result = await Self.race(cleaner: cleaner, input: input, timeout: liveTimeout)
+        var text: String?, reason = "timeout"
+        switch result {
+        case .success(let cleaned):
+            let empty = cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !cleaned.contains(where: \.isNewline)
+            let accepted = empty ? DictationCleanupGuard.acceptsDrop(raw: raw)
+                : DictationTakeGuard.accepts(raw: raw, cleaned: cleaned)
+            if accepted { text = empty ? "" : cleaned } else { reason = "rejected" }
+        case .failure: reason = "failed"
+        case nil: break
+        }
+        let parts = started.duration(to: .now).components
+        diagnostics?("live2.whole", ["landed": text != nil, "reason": text == nil ? reason : "", "changed": text.map { $0 != raw } as Any,
+                                     "rawChars": raw.count, "chars": text?.count as Any,
+                                     "ms": Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)])
+        return text
     }
 
     /// A cleaned sentence is kept for the run's end (or replaces its raw words at once after it); a sentence whose
