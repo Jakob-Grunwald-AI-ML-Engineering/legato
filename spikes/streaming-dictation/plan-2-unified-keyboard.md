@@ -46,7 +46,7 @@ Constraints:
 1. **Mode-tagged speech.** `KeyboardSession`/`DictationPipeline` carry a mode per segment, driven by the toggle state the keyboard publishes. Dictation segments flow into bundle 1's `live` target. Instruction segments collect into an instruction buffer that's shown in the strip.
    Files: `Sources/LegatoAppServices/{KeyboardSession,DictationPipeline}.swift`, `Sources/LegatoKeyboardCore/Link/` (toggle state in presence).
    Depends on: bundle 1.
-2. **Magic toggle UI.** A key for tap-latch and hold-momentary, plus strip states: instruction transcript, running, accept/undo. It takes the place of the surface toggle. Remove `KeyboardSurface.composer` and its view from the keyboard. Reuse `MicKeyMode` patterns.
+2. **Magic toggle UI.** A key for tap-latch and hold-momentary in place of the surface toggle, plus strip states: instruction transcript, running, accept/undo (kept until the next keystroke). Remove `KeyboardSurface.composer` and its view from the keyboard. Reuse `MicKeyMode` patterns.
    Files: `Apps/iOS/KeyboardUI/{KeyboardController,MicKey,…}.swift`, `Apps/iOS/Keyboard/KeyboardRootView.swift`, `Sources/LegatoKeyboardCore/Layout/KeyboardStrip.swift`.
    Depends on: 1 (state contract).
 3. **Field reads.** The keyboard implements the self-verifying walk: block reads upward, stopping at structural stops, with the cap and loud failure. It serves `link.read` requests. Pure stitching and stop detection go in core with unit tests.
@@ -74,7 +74,7 @@ Constraints:
 
 The Legato iPhone keyboard has a new magic key: with it on (tap) or held, what you say becomes an instruction for the text in the field ("make this more formal", "turn this into bullet points"), and the field is edited in place, with undo. The separate composer screen is gone. Reach it on Jakob's iPhone with the Legato keyboard in Notes, Messages, Mail, Safari and WhatsApp; without a microphone, use the replay bridge command for speech (`scripts/device/README.md`). Mix dictation and instructions, try a selection, a short note and a long email-like text. Use only notes and drafts you create; never send anything; never edit Jakob's existing content; delete them afterwards. Report what the field showed versus what you expected, with screenshots and diagnostics.
 
-## Open questions for Jakob (before the go)
+## Decided (Jakob, 2026-11-08)
 
-- Where does the magic key go? Recommended: in place of the current composer/surface switch.
-- Should accept/undo stay in the strip until the next keystroke? Or should the change be auto-accepted, with undo shown for a few seconds?
+- The magic key replaces the current composer/surface switch.
+- Accept/undo stays in the strip until the next keystroke.
