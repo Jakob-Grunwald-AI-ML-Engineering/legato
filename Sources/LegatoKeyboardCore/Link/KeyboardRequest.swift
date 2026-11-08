@@ -54,13 +54,20 @@ public struct KeyboardPresence: Codable, Sendable, Equatable {
     /// dictated lines. nil for a secure field and before this was reported.
     public var contextBefore: String?
     public static let contextLimit = 400
+    /// The magic key (instruction mode); nil decodes presences written before it existed (off).
+    public var magic: MagicToggle?
+    /// When `magic` last changed (the keyboard's clock).
+    public var magicAt: Date?
 
-    public init(visible: Bool, at: Date, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil) {
+    public init(visible: Bool, at: Date, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil,
+                magic: MagicToggle? = nil, magicAt: Date? = nil) {
         self.visible = visible
         self.at = at
         self.documentID = documentID
         self.surface = surface
         self.contextBefore = contextBefore.map { String($0.suffix(Self.contextLimit)) }
+        self.magic = magic
+        self.magicAt = magicAt
     }
 
     public func isFresh(now: Date) -> Bool {
