@@ -218,6 +218,15 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(run.version == w)
     }
 
+    @Test func theTextBeforeASentenceIsTheSentencesSoFar() {
+        var run = LiveDictationRun(runID: "r")
+        run.addFinal(key: 4, text: "one.")
+        run.addFinal(key: 5, text: "two.")
+        run.addFinal(key: 6, text: "three.")
+        run.setCleaned(key: 4, text: "One!")
+        #expect(run.text(before: 6) == "One! two." && run.text(before: 4) == "" && run.text(before: 99) == "")
+    }
+
     @Test func aDuplicateKeyAndEmptyTextAreIgnored() {
         var run = LiveDictationRun(runID: "r")
         run.addFinal(key: 0, text: "one.")

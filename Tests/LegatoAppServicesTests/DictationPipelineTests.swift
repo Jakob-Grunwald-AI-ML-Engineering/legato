@@ -86,6 +86,21 @@ private func routeLine(_ sequence: Int, _ text: String) -> DictationRouteLine {
     }
 }
 
+extension DictationPipelineTests {
+    @Test func lineByLineDeliversAfterLinesWentToAnotherSendMode() async throws {
+        nonisolated(unsafe) var mode = DictationSendSetting.Mode.lineByLine
+        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { mode })
+        await pipeline.receive(routeLine(0, "first"))
+        try await until { pipeline.outbox.count == 1 }
+        mode = .onStop // the route keeps counting lines the cleanup pipeline never sees
+        await pipeline.receive(routeLine(1, "held"))
+        await pipeline.receive(routeLine(2, "held too"))
+        mode = .lineByLine
+        await pipeline.receive(routeLine(3, "fourth"))
+        try await until { pipeline.outbox.contains { $0.sequence == 3 } }
+    }
+}
+
 @MainActor @Suite(.timeLimit(.minutes(1))) struct LiveDictationPipelineTests {
     private func live(_ cleaner: StubCleaner = StubCleaner(), supportsLive: Bool = true, timeout: Duration = .milliseconds(200)) -> DictationPipeline {
         DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: supportsLive, liveTimeout: timeout)
@@ -130,6 +145,32 @@ private func routeLine(_ sequence: Int, _ text: String) -> DictationRouteLine {
         await pipeline.reset()
         #expect(pipeline.liveRun == nil)
         #expect(last == .some(nil), "The link's run is removed")
+    }
+
+    @Test func switchingFromLiveToLineByLineKeepsDeliveringLines() async throws {
+        nonisolated(unsafe) var mode = DictationSendSetting.Mode.live
+        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { mode }, supportsLive: true, liveTimeout: .milliseconds(200))
+        await pipeline.receive(routeLine(0, "first"))
+        await pipeline.receive(routeLine(1, "second"))
+        try await until { pipeline.liveRun?.snapshot.segments.allSatisfy { $0.cleaned } == true }
+        mode = .lineByLine
+        await pipeline.receive(routeLine(2, "third"))
+        try await until { pipeline.outbox.count == 1 }
+        #expect(pipeline.outbox[0].sequence == 2 && pipeline.outbox[0].text == "Third.")
+    }
+
+    @Test func sentencesAreCleanedAgainstTheTextBeforeTheRunNotTheFieldTheRunIsTyping() async throws {
+        let cleaner = StubCleaner(slow: [0])
+        let pipeline = live(cleaner)
+        nonisolated(unsafe) var field = "Hi Anna,"
+        pipeline.contextBefore = { field }
+        await pipeline.receive(routeLine(0, "hello world"))
+        field = "Hi Anna, hello world and then it" // the keyboard has typed the run's words into the field
+        await pipeline.receive(routeLine(1, "second one"))
+        try await until { cleaner.inputs.withLock { $0.count } == 2 }
+        let inputs = cleaner.inputs.withLock { $0 }
+        #expect(inputs.first { $0.sequence == 0 }?.dictation?.textBeforeCursor == "Hi Anna,")
+        #expect(inputs.first { $0.sequence == 1 }?.dictation?.textBeforeCursor == "Hi Anna, hello world")
     }
 
     @Test func withoutLiveSupportTheSettingActsAsOnStop() async {

@@ -114,6 +114,9 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// Counts and timings, never text: `live2.*` lines for the internal builds' diagnostics.
     @ObservationIgnored public var diagnostics: (@MainActor (_ event: String, _ fields: [String: Any]) -> Void)?
     @ObservationIgnored private var liveSubmitted: [Int: ContinuousClock.Instant] = [:]
+    /// The field's text before the cursor when the run began: the context its sentences are cleaned against. The
+    /// field now holds the run's own words, which the cleaner must not see as "already typed" (it would drop them).
+    @ObservationIgnored private var liveAnchor = ""
     #if DEBUG || LEGATO_INTERNAL
     /// Debug bridge: the next this many take cleanups fail (both attempts), so the failed state is reachable offline.
     @ObservationIgnored public var debugFailTakes = 0
@@ -302,8 +305,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         publishLive(run)
         pending += 1
         liveSubmitted[sequence] = .now
+        // What stands before this sentence if the run were typed clean: the text before the run, then the sentences so far.
+        let before = [liveAnchor, run.text(before: sequence)].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
         let pipeline = await current()
-        await pipeline.submit(sequence: sequence, lineID: "\(sessionID)-\(sequence)", raw: raw, textBefore: contextBefore())
+        await pipeline.submit(sequence: sequence, lineID: "\(sessionID)-\(sequence)", raw: raw, textBefore: before)
     }
 
     /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete.
@@ -327,7 +332,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             diagnostics?("live2.cleanup", ["landed": true, "changed": changed, "rawChars": line.raw.count, "chars": line.text.count, "ms": ms as Any])
             if changed { publishLive(run) } else { liveRun = run }
         } else {
-            diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "rawChars": line.raw.count, "ms": ms as Any])
+            diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count, "ms": ms as Any])
         }
     }
 
@@ -336,6 +341,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if let run = liveRun, !run.complete { return run }
         let run = LiveDictationRun()
         liveRun = run
+        liveAnchor = String(contextBefore().suffix(600))
         diagnostics?("live2.run.start", ["run": String(run.runID.prefix(8))])
         return run
     }

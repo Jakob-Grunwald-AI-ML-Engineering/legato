@@ -106,6 +106,12 @@ public struct LiveDictationRun: Sendable, Equatable {
         return changed
     }
 
+    /// The run's sentences before sentence `key`, as they stand now, joined like the field shows them.
+    public func text(before key: Int) -> String {
+        guard let index = keys[key] else { return "" }
+        return finals[..<index].map(\.text).joined(separator: " ")
+    }
+
     /// The speaking head (the non-final words); empty when none.
     public mutating func setHead(_ text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
