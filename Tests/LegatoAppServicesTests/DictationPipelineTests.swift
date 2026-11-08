@@ -106,7 +106,7 @@ extension DictationPipelineTests {
         DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: supportsLive, liveTimeout: timeout)
     }
 
-    @Test func theTargetIsRawFinalsThenTheHeadAndCleanedSentencesReplaceTheirRawWords() async throws {
+    @Test func theTargetIsRawFinalsThenTheHeadAndCleanedSentencesLandOnceTheTakeEnds() async throws {
         let cleaner = StubCleaner(slow: [0])
         let pipeline = live(cleaner)
         var published: [LiveDictationSnapshot?] = []
@@ -116,10 +116,17 @@ extension DictationPipelineTests {
         pipeline.tailChanged("and then")
         let run = try #require(pipeline.liveRun)
         #expect(run.snapshot.segments == [.init(id: 0, text: "hello world", final: true), .init(id: 1, text: "and then", final: false)])
-        // Sentence 1 is cleaned first (sentence 0 is slow); both land as replacements of the raw words.
+        // Sentence 1 is cleaned (sentence 0 is slow) but held back while the mic is open.
         await pipeline.receive(routeLine(1, "second one"))
-        try await until { pipeline.liveRun?.snapshot.segments.contains { $0.cleaned } == true }
-        #expect(pipeline.liveRun?.snapshot.segments.first { $0.id == 1 }?.text == "Second One.")
+        try await until { pipeline.pending < 2 }
+        #expect(pipeline.liveRun?.snapshot.segments.contains { $0.cleaned } == false)
+        #expect(published.allSatisfy { $0?.segments.contains { $0.cleaned } != true })
+        // The stop waits for cleanup (sentence 0 times out: raw), then publishes one target with the cleaned sentences.
+        let before = published.count
+        await pipeline.finishTake()
+        #expect(published.count == before + 1)
+        let last = try #require(published.last ?? nil)
+        #expect(last.complete && last.segments == [.init(id: 0, text: "hello world", final: true), .init(id: 1, text: "Second One.", cleaned: true, final: true)])
         #expect(pipeline.outbox.isEmpty, "Live never uses the line outbox")
         #expect(published.compactMap { $0?.version } == published.compactMap { $0?.version }.sorted())
     }
@@ -152,7 +159,7 @@ extension DictationPipelineTests {
         let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { mode }, supportsLive: true, liveTimeout: .milliseconds(200))
         await pipeline.receive(routeLine(0, "first"))
         await pipeline.receive(routeLine(1, "second"))
-        try await until { pipeline.liveRun?.snapshot.segments.allSatisfy { $0.cleaned } == true }
+        try await until { pipeline.pending == 0 }
         mode = .lineByLine
         await pipeline.receive(routeLine(2, "third"))
         try await until { pipeline.outbox.count == 1 }
@@ -180,7 +187,8 @@ extension DictationPipelineTests {
         await pipeline.receive(routeLine(1, "by next tuesday or else", reason: "duration"))
         #expect(cleaner.inputs.withLock { $0.count } == 0, "Nothing is cleaned until the sentence ends")
         await pipeline.receive(routeLine(2, "the client leaves", reason: "punctuation"))
-        try await until { pipeline.liveRun?.snapshot.segments.first?.cleaned == true }
+        await pipeline.finishTake()
+        #expect(pipeline.liveRun?.snapshot.segments.first?.cleaned == true)
         let inputs = cleaner.inputs.withLock { $0 }
         #expect(inputs.count == 1 && inputs[0].text == "we need the report by next tuesday or else the client leaves")
         #expect(pipeline.liveRun?.snapshot.segments.count == 1)

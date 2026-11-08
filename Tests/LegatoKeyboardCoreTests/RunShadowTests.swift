@@ -290,9 +290,26 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         run.addFinal(key: 10, text: "hello world.")
         run.setHead("and then")
         #expect(run.snapshot.segments == [.init(id: 0, text: "hello world.", final: true), .init(id: 1, text: "and then", final: false)])
+        let v = run.version
         let changed = run.setCleaned(key: 10, text: "Hello, world.")
-        #expect(changed)
+        #expect(!changed && run.version == v, "While the take runs the cleaned sentence is held back")
+        #expect(run.snapshot.segments[0] == .init(id: 0, text: "hello world.", final: true))
+        run.finish()
         #expect(run.snapshot.segments[0] == .init(id: 0, text: "Hello, world.", cleaned: true, final: true))
+    }
+
+    @Test func allCleanedSentencesLandInTheOneSnapshotThatEndsTheTake() {
+        var run = LiveDictationRun(runID: "r")
+        run.addFinal(key: 0, text: "one.")
+        run.addFinal(key: 1, text: "two.")
+        run.addFinal(key: 2, text: "three.")
+        run.setCleaned(key: 0, text: "One.")
+        run.setCleaned(key: 2, text: "Three!")
+        let open = run.version
+        run.finish()
+        #expect(run.version == open + 1)
+        #expect(run.snapshot.segments.map(\.text) == ["One.", "two.", "Three!"])
+        #expect(run.snapshot.segments.map(\.cleaned) == [true, false, true])
     }
 
     @Test func aFinalTakesOverTheHeadWithTheSameId() {
@@ -362,7 +379,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(whole == "one two three four five six." && run.finalCount == 1)
         #expect(run.snapshot.segments == [.init(id: 0, text: "one two three four five six.", final: true)], "The head keeps its id when the sentence closes")
         let cleaned = run.setCleaned(key: 1, text: "One two three, four five six.")
-        #expect(cleaned)
+        #expect(!cleaned, "Held until the take ends")
         run.addFinal(key: 2, text: "next one.")
         #expect(run.text(before: 2) == "One two three, four five six.")
     }

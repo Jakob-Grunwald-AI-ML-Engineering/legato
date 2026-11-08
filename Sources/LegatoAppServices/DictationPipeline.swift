@@ -33,9 +33,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 /// through its own call (`DictationCleanupPipeline`). Either way the result waits in an ordered outbox until the
 /// writer or keyboard acknowledges having typed it. The keyboard session resets it when the keyboard disappears.
 ///
-/// In `live` (iOS keyboard only) nothing waits: the run's target text (raw words as spoken, each finished sentence
-/// replaced by its cleaned version once that lands, then the speaking head) is published as a `LiveDictationRun`
-/// snapshot, and the keyboard types it and edits it word by word. Cleanup per sentence is the line pipeline's.
+/// In `live` (iOS keyboard only) nothing waits: the run's target text (raw words as spoken, then the speaking head)
+/// is published as a `LiveDictationRun` snapshot, and the keyboard types it and edits it word by word. Each finished
+/// sentence is cleaned in the background (the line pipeline's); the cleaned sentences go into the target once, when
+/// the take ends (`finishLive`).
 @MainActor @Observable public final class DictationPipeline: DictationRouteSink {
     /// Names this keyboard session on the link; lines count from 0 within it.
     public private(set) var sessionID = UUID().uuidString
@@ -336,7 +337,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: sentence, textBefore: before)
     }
 
-    /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete.
+    /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete
+    /// with all cleaned sentences in one snapshot.
     private func finishLive() async {
         _ = await settle(timeout: liveTimeout + .seconds(1))
         guard var run = liveRun, !run.complete else { return }
@@ -346,7 +348,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         diagnostics?("live2.run.end", ["run": String(run.runID.prefix(8)), "sentences": run.finalCount, "chars": run.snapshot.segments.reduce(0) { $0 + $1.text.count }])
     }
 
-    /// A cleaned sentence replaces its raw words in the target; a sentence whose cleanup failed stays raw.
+    /// A cleaned sentence is kept for the run's end (or replaces its raw words at once after it); a sentence whose
+    /// cleanup failed stays raw.
     private func landLive(_ line: DictationCleanedLine) {
         let ms = liveSubmitted.removeValue(forKey: line.sequence).map { start in
             let parts = start.duration(to: .now).components
@@ -357,7 +360,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             // The model sometimes leaves a sentence start lowercase after a sentence end: that is fixed here.
             let before = [liveAnchor, run.text(before: key)].filter { !$0.isEmpty }.joined(separator: " ")
             let changed = run.setCleaned(key: key, text: SentenceStart.capitalized(line.text, after: before))
-            diagnostics?("live2.cleanup", ["landed": true, "changed": changed, "rawChars": line.raw.count, "chars": line.text.count, "ms": ms as Any])
+            diagnostics?("live2.cleanup", ["landed": true, "changed": changed, "held": !run.complete, "rawChars": line.raw.count, "chars": line.text.count, "ms": ms as Any])
             if changed { publishLive(run) } else { liveRun = run }
         } else {
             diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count, "ms": ms as Any])

@@ -69,8 +69,12 @@ public struct LiveDictationLink: Sendable {
     public func acknowledged() -> LiveDictationAck? { store.read(LiveDictationAck.self, forKey: LinkChannel.Key.dictationLiveAck) }
 }
 
-/// The app's model of one live run: the finished sentences (raw until their cleanup lands) and the speaking
-/// head, as the target the keyboard should show. Every change that alters the target bumps `version`.
+/// The app's model of one live run: the finished sentences and the speaking head, as the target the keyboard
+/// should show. Every change that alters the target bumps `version`.
+///
+/// Cleaned sentences are held back while the take runs: the target is the raw finals and the head, so the field
+/// only changes at its live end. `finish()` puts every cleaned sentence in at once (one diff); a cleanup that lands
+/// after the end goes in when it lands.
 ///
 /// A sentence the segmenter cut short (a forced split at 25 words or 8 s) is not finished: its words stay in the
 /// speaking head until the segment that really ends it arrives, and the sentence is cleaned as a whole.
@@ -79,6 +83,8 @@ public struct LiveDictationRun: Sendable, Equatable {
     public private(set) var version = 0
     public private(set) var complete = false
     private var finals: [LiveSegment] = []
+    /// Cleaned text by index into `finals`, shown from `finish()` on.
+    private var cleaned: [Int: String] = [:]
     private var keys: [Int: Int] = [:]
     private var head = ""
     /// Cut-short parts of the sentence being spoken, with the keys of their segments.
@@ -89,6 +95,7 @@ public struct LiveDictationRun: Sendable, Equatable {
 
     public var snapshot: LiveDictationSnapshot {
         var segments = finals
+        if complete { for (index, text) in cleaned { segments[index].text = text; segments[index].cleaned = true } }
         let speaking = (open + [head]).filter { !$0.isEmpty }.joined(separator: " ")
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
         return .init(runID: runID, version: version, segments: segments, complete: complete)
@@ -117,21 +124,24 @@ public struct LiveDictationRun: Sendable, Equatable {
         return sentence
     }
 
-    /// The cleaned sentence replaces its raw words. False when nothing changed (no such sentence, or the same text).
+    /// The cleaned sentence for its raw words; it shows from `finish()` on (at once after it). True when the target
+    /// changed now: false while the take runs, and for no such sentence or the same text.
     @discardableResult
     public mutating func setCleaned(key: Int, text: String) -> Bool {
         let text = text.trimmingCharacters(in: .whitespaces)
-        guard let index = keys[key], !text.isEmpty, finals[index].text != text || !finals[index].cleaned else { return false }
-        let changed = finals[index].text != text
-        finals[index].text = text; finals[index].cleaned = true
-        if changed { version += 1 }
-        return changed
+        guard let index = keys[key], !text.isEmpty else { return false }
+        let shown = cleaned[index] ?? finals[index].text
+        cleaned[index] = text
+        guard complete, shown != text else { return false }
+        version += 1
+        return true
     }
 
-    /// The run's sentences before the one `key` belongs to, as they stand now, joined like the field shows them.
+    /// The run's sentences before the one `key` belongs to, cleaned where cleanup landed, joined like the field
+    /// will show them.
     public func text(before key: Int) -> String {
         guard let index = keys[key] else { return "" }
-        return finals[..<index].map(\.text).joined(separator: " ")
+        return (0..<index).map { cleaned[$0] ?? finals[$0].text }.joined(separator: " ")
     }
 
     /// The speaking head (the non-final words); empty when none.
@@ -142,8 +152,8 @@ public struct LiveDictationRun: Sendable, Equatable {
         version += 1
     }
 
-    /// The take ended. Words still speaking stay as the keyboard showed them; a segment that arrives late
-    /// (`addFinal`) still lands in this run, and so does a late cleanup.
+    /// The take ended: the cleaned sentences go into the target. Words still speaking stay as the keyboard showed
+    /// them; a segment that arrives late (`addFinal`) still lands in this run, and so does a late cleanup.
     public mutating func finish() {
         guard !complete else { return }
         complete = true
