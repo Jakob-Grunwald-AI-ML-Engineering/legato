@@ -34,9 +34,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 /// writer or keyboard acknowledges having typed it. The keyboard session resets it when the keyboard disappears.
 ///
 /// In `live` (iOS keyboard only) nothing waits: the run's target text (raw words as spoken, then the speaking head)
-/// is published as a `LiveDictationRun` snapshot, and the keyboard types it and edits it word by word. Each finished
-/// sentence is cleaned in the background (the line pipeline's); the cleaned sentences go into the target once, when
-/// the take ends (`finishLive`).
+/// is published as a `LiveDictationRun` snapshot, and the keyboard types it and edits it. The run's segments are
+/// grouped into cleanup units (whole sentences, not the endpointer's pause fragments); each closed unit is cleaned in
+/// the background (the line pipeline's, which may drop an all-filler unit); the cleaned units go into the target
+/// once, when the take ends (`finishLive`).
 @MainActor @Observable public final class DictationPipeline: DictationRouteSink {
     /// Names this keyboard session on the link; lines count from 0 within it.
     public private(set) var sessionID = UUID().uuidString
@@ -322,10 +323,16 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 
     private func receiveLive(_ raw: String, sequence: Int, forced: Bool) async {
         var run = currentLiveRun()
-        let sentence = run.addFinal(key: sequence, text: raw, closes: !forced)
+        let unit = run.addFinal(key: sequence, text: raw, closes: !forced)
         publishLive(run)
-        // A cut-short segment waits for the rest of its sentence; the sentence is cleaned once, whole.
-        guard let sentence else { return }
+        // A cut-short segment waits for the rest of its sentence, a pause fragment for the rest of its unit; the unit
+        // is cleaned once, whole.
+        guard let unit else { return }
+        await submitLive(unit, key: sequence, run: run)
+    }
+
+    /// Sends a closed unit (`key`: its last segment) to cleanup, against the text before the run and the units so far.
+    private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun) async {
         let id = liveCleanupSequence
         liveCleanupSequence += 1
         liveKeys[id] = sequence
@@ -338,12 +345,17 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if let last = prior.last, last.isLetter || last.isNumber { prior += "." }
         let before = [liveAnchor, prior].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
         let pipeline = await current()
-        await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: sentence, textBefore: before)
+        await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: unit, textBefore: before, allowsEmpty: true)
     }
 
     /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete
     /// with all cleaned sentences in one snapshot.
     private func finishLive() async {
+        // The open unit (words since the last sentence end) is cleaned now; the wait below covers it.
+        if var run = liveRun, !run.complete, let open = run.flush() {
+            liveRun = run
+            await submitLive(open.text, key: open.key, run: run)
+        }
         _ = await settle(timeout: liveTimeout + .seconds(1))
         guard var run = liveRun, !run.complete else { return }
         run.finish()
@@ -363,9 +375,13 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if line.status == .cleaned {
             // The model sometimes leaves a sentence start lowercase after a sentence end: that is fixed here.
             let before = [liveAnchor, run.text(before: key)].filter { !$0.isEmpty }.joined(separator: " ")
-            let changed = run.setCleaned(key: key, text: SentenceStart.capitalized(line.text, after: before))
-            diagnostics?("live2.cleanup", ["landed": true, "changed": changed, "held": !run.complete, "rawChars": line.raw.count, "chars": line.text.count, "ms": ms as Any])
-            if changed { publishLive(run) } else { liveRun = run }
+            let text = SentenceStart.capitalized(line.text, after: before)
+            let segments = run.unitSegments(key: key)
+            let shown = run.setCleaned(key: key, text: text)
+            // `changed`: the cleaned unit differs from its raw words (held or not); `shown`: the target changed now.
+            diagnostics?("live2.cleanup", ["landed": true, "changed": text != line.raw, "dropped": text.isEmpty, "shown": shown, "held": !run.complete,
+                                           "segments": segments, "rawChars": line.raw.count, "chars": text.count, "ms": ms as Any])
+            if shown { publishLive(run) } else { liveRun = run }
         } else {
             diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count, "ms": ms as Any])
         }

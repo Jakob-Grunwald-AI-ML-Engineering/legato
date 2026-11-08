@@ -18,6 +18,17 @@ private final class StubCleaner: SentenceCleaning {
     }
     func warmDictation() async { warms.withLock { $0 += 1 } }
 }
+/// Drops fillers the way the model does: an all-filler unit comes back empty.
+private final class UnitCleaner: SentenceCleaning {
+    let inputs = Mutex<[SentenceCleanupInput]>([])
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        inputs.withLock { $0.append(input) }
+        let fillers: Set<String> = ["um", "uh", "so", "yeah"]
+        let words = input.text.split(separator: " ").map(String.init).filter { !fillers.contains($0.lowercased().trimmingCharacters(in: .punctuationCharacters)) }
+        let text = words.joined(separator: " ")
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: text.prefix(1).uppercased() + text.dropFirst())
+    }
+}
 private func routeLine(_ sequence: Int, _ text: String, reason: String = "endpoint") -> DictationRouteLine {
     .init(sequence: sequence, text: text, words: text.split(separator: " ").map { Word(text: String($0)) }, reason: reason)
 }
@@ -112,12 +123,12 @@ extension DictationPipelineTests {
         var published: [LiveDictationSnapshot?] = []
         pipeline.onLiveChange = { published.append($0) }
         pipeline.tailChanged("hello wor")
-        await pipeline.receive(routeLine(0, "hello world"))
+        await pipeline.receive(routeLine(0, "hello world this is sentence one."))
         pipeline.tailChanged("and then")
         let run = try #require(pipeline.liveRun)
-        #expect(run.snapshot.segments == [.init(id: 0, text: "hello world", final: true), .init(id: 1, text: "and then", final: false)])
+        #expect(run.snapshot.segments == [.init(id: 0, text: "hello world this is sentence one.", final: true), .init(id: 1, text: "and then", final: false)])
         // Sentence 1 is cleaned (sentence 0 is slow) but held back while the mic is open.
-        await pipeline.receive(routeLine(1, "second one"))
+        await pipeline.receive(routeLine(1, "and this is the second one."))
         try await until { pipeline.pending < 2 }
         #expect(pipeline.liveRun?.snapshot.segments.contains { $0.cleaned } == false)
         #expect(published.allSatisfy { $0?.segments.contains { $0.cleaned } != true })
@@ -126,7 +137,8 @@ extension DictationPipelineTests {
         await pipeline.finishTake()
         #expect(published.count == before + 1)
         let last = try #require(published.last ?? nil)
-        #expect(last.complete && last.segments == [.init(id: 0, text: "hello world", final: true), .init(id: 1, text: "Second One.", cleaned: true, final: true)])
+        #expect(last.complete && last.segments == [.init(id: 0, text: "hello world this is sentence one.", final: true),
+                                                   .init(id: 1, text: "And This Is The Second One..", cleaned: true, final: true)])
         #expect(pipeline.outbox.isEmpty, "Live never uses the line outbox")
         #expect(published.compactMap { $0?.version } == published.compactMap { $0?.version }.sorted())
     }
@@ -146,9 +158,9 @@ extension DictationPipelineTests {
         let pipeline = live(StubCleaner(slow: [0]), timeout: .milliseconds(30))
         var last: LiveDictationSnapshot?? = .none
         pipeline.onLiveChange = { last = .some($0) }
-        await pipeline.receive(routeLine(0, "slow words"))
+        await pipeline.receive(routeLine(0, "slow words that end a sentence."))
         try await until { pipeline.fallbacks == ["timeout"] }
-        #expect(pipeline.liveRun?.snapshot.segments == [.init(id: 0, text: "slow words", final: true)])
+        #expect(pipeline.liveRun?.snapshot.segments == [.init(id: 0, text: "slow words that end a sentence.", final: true)])
         await pipeline.reset()
         #expect(pipeline.liveRun == nil)
         #expect(last == .some(nil), "The link's run is removed")
@@ -173,6 +185,8 @@ extension DictationPipelineTests {
         pipeline.contextBefore = { field }
         await pipeline.receive(routeLine(0, "hello world"))
         field = "Hi Anna, hello world and then it" // the keyboard has typed the run's words into the field
+        // The take's end closes the unit; a late segment is a unit of its own.
+        await pipeline.finishTake()
         await pipeline.receive(routeLine(1, "second one"))
         try await until { cleaner.inputs.withLock { $0.count } == 2 }
         let inputs = cleaner.inputs.withLock { $0 }
@@ -208,6 +222,29 @@ extension DictationPipelineTests {
         #expect(pipeline.liveRun?.runID == runID, "No second run for the straggler")
         #expect(pipeline.liveRun?.snapshot.segments.map(\.final) == [true, true])
         #expect(pipeline.liveRun?.snapshot.segments.last?.text == "last words.")
+    }
+
+    @Test func pauseFragmentsAreCleanedAsOneUnitAndAnAllFillerUnitIsDropped() async throws {
+        let cleaner = UnitCleaner()
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        var diagnostics: [[String: Any]] = []
+        pipeline.diagnostics = { event, fields in if event == "live2.cleanup" { diagnostics.append(fields) } }
+        await pipeline.receive(routeLine(0, "Um."))
+        await pipeline.receive(routeLine(1, "so, uh, the plan"))
+        #expect(cleaner.inputs.withLock { $0.count } == 0, "A pause fragment is not cleaned alone")
+        await pipeline.receive(routeLine(2, "is ready for the review."))
+        await pipeline.receive(routeLine(3, "Yeah."))
+        await pipeline.finishTake()
+        let texts = cleaner.inputs.withLock { $0.map(\.text) }
+        #expect(texts == ["Um. so, uh, the plan is ready for the review.", "Yeah."])
+        let snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(snapshot.complete && snapshot.segments.map(\.text) == ["The plan is ready for the review.", "", "", ""])
+        let allCleaned = snapshot.segments.allSatisfy { $0.cleaned }
+        #expect(allCleaned)
+        // `changed` says whether the cleaned unit differs from its raw words, held or not.
+        let changedWhileHeld = diagnostics.allSatisfy { $0["changed"] as? Bool == true && $0["held"] as? Bool == true }
+        #expect(diagnostics.count == 2 && changedWhileHeld)
+        #expect(diagnostics.last?["dropped"] as? Bool == true && diagnostics.first?["segments"] as? Int == 3)
     }
 
     @Test func lineByLineStopWaitsForTheLastLineToBeCleaned() async {
