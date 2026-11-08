@@ -50,9 +50,11 @@ private final class UnitCleaner: SentenceCleaning {
 private func routeLine(_ sequence: Int, _ text: String, reason: String = "endpoint") -> DictationRouteLine {
     .init(sequence: sequence, text: text, words: text.split(separator: " ").map { Word(text: String($0)) }, reason: reason)
 }
+/// Polls until `condition` holds, for at most 10 s of real time (a slow runner fails fast instead of hanging the suite).
 @MainActor private func until(_ condition: @MainActor () -> Bool) async throws {
-    for _ in 0..<5000 { if condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
-    Issue.record("Timed out waiting for condition")
+    let deadline = ContinuousClock.now + .seconds(10)
+    while ContinuousClock.now < deadline { if condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
+    if !condition() { Issue.record("Timed out waiting for condition") }
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct DictationPipelineTests {
@@ -207,7 +209,9 @@ extension DictationPipelineTests {
         // The take's end closes the unit; a late segment is a unit of its own.
         await pipeline.finishTake()
         await pipeline.receive(routeLine(1, "second one"))
-        try await until { cleaner.inputs.withLock { $0.count } == 2 }
+        // The late segment also reruns the short take's whole pass (a third call, sequence 2): wait for the unit's call
+        // by sequence, never for an exact count, which the third call can overtake.
+        try await until { cleaner.inputs.withLock { inputs in inputs.contains { $0.sequence == 1 } } }
         let inputs = cleaner.inputs.withLock { $0 }
         #expect(inputs.first { $0.sequence == 0 }?.dictation?.textBeforeCursor == "Hi Anna,")
         #expect(inputs.first { $0.sequence == 1 }?.dictation?.textBeforeCursor == "Hi Anna, hello world.", "A closed sentence is shown as finished")
