@@ -103,3 +103,11 @@ Walking moves the host's visible cursor, so the product walks only when it must:
 - Drift check: compare the proxy's window around the cursor with the shadow after each edit; walk only the mismatched stretch.
 - Full-field walk only when an instruction targets the whole field without a selection (once, with a "reading" state). With a selection, use `selectedText`.
 - Far edits move the cursor to the edit point and back without reading in between.
+
+## Instruction mode: context and edits (Jakob, 2026-11-08)
+
+Three layers, all designed to work with small models:
+1. **Structural prefetch (start):** session text + cursor paragraph + back to the nearest structural stop (field start, quote header, signature `-- `, char cap). Walk only if no shadow exists yet and the proxy shows more text.
+2. **Edit as plain text:** the reply starts `SCOPE: selection|session|paragraph|above|all`, then the rewritten text for that scope; the word-diff applier lands it. No line IDs or edit tools; unread text is untouched by construction.
+3. **More context:** one argument-free `read_more()` tool, each call extends the read by one block (capped), reporting whether more remains.
+No keyword matching on the instruction.
