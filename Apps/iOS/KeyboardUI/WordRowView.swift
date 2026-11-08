@@ -20,6 +20,9 @@ struct WordRowView: View {
         Group {
             if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
                 AutoFillSwitchKey(target: target)
+            } else if controller.hint == nil, let presentation = controller.instructionPresentation {
+                InstructionRowView(controller: controller, presentation: presentation, fontSize: fontSize)
+                    .transition(.opacity)
             } else if let status = controller.statusText {
                 HStack(spacing: 8) {
                     Text(status)

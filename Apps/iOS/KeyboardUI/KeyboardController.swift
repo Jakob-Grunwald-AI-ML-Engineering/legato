@@ -171,19 +171,19 @@ final class KeyboardController {
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        hint ?? (isReadingField ? "Reading the text…" : nil) ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
+        hint ?? instructionPresentation?.text ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
     }
 
-    /// The held take's phase while the ABC surface shows one (`cleaning`, `failed`), else nil.
+    /// The held take's phase while one is held (`cleaning`, `failed`), else nil.
     private var takePhase: String? {
-        guard surface == .typing, let phase = composer.dictationTakePhase, phase != "buffering" else { return nil }
+        guard let phase = composer.dictationTakePhase, phase != "buffering" else { return nil }
         return phase
     }
     /// A failed take cleanup: the word row offers Retry and Insert as-is.
     var takeFailed: Bool { takePhase == "failed" }
     /// The countdown rim over the word row (after-a-pause mode), host uptime.
     var takeCountdown: (start: Double, deadline: Double)? {
-        guard surface == .typing, let start = composer.dictationCountdownStart, let deadline = composer.dictationCountdownDeadline else { return nil }
+        guard let start = composer.dictationCountdownStart, let deadline = composer.dictationCountdownDeadline else { return nil }
         return (start, deadline)
     }
     /// The take's cleanup runs, or failed and holds the raw text: the word row says so.
@@ -197,9 +197,9 @@ final class KeyboardController {
     func retryTake() { composerIntent("dictation-retry") }
     func insertTakeRaw() { composerIntent("dictation-insert-raw") }
 
-    /// While the ABC surface dictates: the take held so far plus the live tail take the word row's place.
+    /// While dictating: the take held so far plus the live tail take the word row's place.
     private var dictatingStatus: String? {
-        guard surface == .typing, routeOpen else { return nil }
+        guard routeOpen else { return nil }
         // The live mode types the words into the field as they come: the row only says that it listens.
         if liveRunning { return "Listening…" }
         let tail = (composer.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -235,33 +235,15 @@ final class KeyboardController {
     private(set) var composer = ComposerPublication()
     /// The last dictation notice (`dictationNoticeID`) already shown; the first publication seen only sets it.
     @ObservationIgnored private var seenDictationNoticeID: Int?
-    /// The surface on screen; it decides the mode (typing dictates, the composer instructs the agent).
-    /// The keyboard reopens on the surface it was last left on (extension-local defaults, no Full Access needed).
-    private(set) var surface = KeyboardController.lastSurface
-    private static let surfaceKey = "keyboardSurface"
-    private static var lastSurface: KeyboardSurface {
-        UserDefaults.standard.string(forKey: surfaceKey).flatMap(KeyboardSurface.init(rawValue:)) ?? .composer
-    }
-    /// The presence the app follows: visibility, field, surface and, for the typing surface (dictation), the text
-    /// before the cursor that the dictated lines are cleaned against. Never from a secure field.
+    /// The presence the app follows: visibility, field and the text before the cursor that the dictated lines are
+    /// cleaned against (never from a secure field), plus the magic key.
     private func writePresence(notify: Bool) {
-        let context = surface == .typing && fullAccess && !document.isSecureTextEntry ? typing.contextBefore : nil
-        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: surface, contextBefore: context,
+        let context = fullAccess && !document.isSecureTextEntry ? typing.contextBefore : nil
+        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: .typing, contextBefore: context,
                            magic: magic, magicAt: magicAt)
-    }
-    /// The host routes the mic by surface, so it learns of a switch at once (presence plus its note).
-    func show(_ value: KeyboardSurface) {
-        guard value != surface else { return }
-        surface = value
-        UserDefaults.standard.set(value.rawValue, forKey: Self.surfaceKey)
-        syncRowTakeover()
-        onLayoutChange?("surface")
-        if isVisible { writePresence(notify: true) }
     }
     /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
     var routeOpen: Bool { (composer.audioRoute ?? "idle") != "idle" }
-    private(set) var pendingComposerInsert: String?
-    private var pendingComposerDocumentID: String?
     @ObservationIgnored private var composerPoll: Task<Void, Never>?
     private let composerLink = UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) }
     @ObservationIgnored private var composerReader = ComposerPublicationReader()
@@ -269,20 +251,10 @@ final class KeyboardController {
     @ObservationIgnored private var composerWatch = ComposerPollWatch()
     private static let composerLog = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-composer")
     #endif
-    func composerIntent(_ action: String, lineID: String? = nil, wordID: String? = nil, endLineID: String? = nil, endWordID: String? = nil, text: String? = nil) {
-        guard fullAccess else { show("Allow Full Access to connect to the composer."); return }
-        composerLink?.send(.init(action: action, lineID: lineID, wordID: wordID, endLineID: endLineID, endWordID: endWordID, text: text))
-        DarwinObserver.post(LinkChannel.Note.composerIntent)
-    }
-    func insertComposer() {
-        guard pendingComposerInsert == nil, fullAccess, let documentID = document.documentID,
-              let channel = composerLink, !composer.snapshot.lines.isEmpty || !composer.tail.isEmpty else { return }
-        // The host flushes transcription and finishes authoring before publishing the insertion.
-        // Reuse the acknowledged keyboard delivery path; never type the pre-authoring snapshot.
-        let intent = ComposerIntent(action: "insert", sessionID: composer.sessionID)
-        pendingComposerInsert = intent.id
-        pendingComposerDocumentID = documentID
-        channel.send(intent)
+    /// An action for the host's composer session (`stop`, `dictation-retry`, `dictation-insert-raw`).
+    func composerIntent(_ action: String) {
+        guard fullAccess else { show("Allow Full Access to connect to Legato."); return }
+        composerLink?.send(.init(action: action))
         DarwinObserver.post(LinkChannel.Note.composerIntent)
     }
     /// One read of the stored composer publication, from the 100 ms poll and from the host's `Note.composer`.
@@ -305,11 +277,6 @@ final class KeyboardController {
         #if DEBUG || LEGATO_INTERNAL
         Self.composerLog.info("composer.read rev=\(value.snapshot.revision) session=\(value.sessionID ?? "-", privacy: .public) lines=\(value.snapshot.lines.count) tail=\(value.tail.count) insertion=\(value.successfulInsertionID ?? "-", privacy: .public) was=\(self.composer.snapshot.lines.count)")
         #endif
-        if let pending = pendingComposerInsert,
-           value.insertedIntentID == pending || value.sessionID != composer.sessionID {
-            pendingComposerInsert = nil
-            pendingComposerDocumentID = nil
-        }
         if let id = value.dictationNoticeID, let seen = seenDictationNoticeID, id != seen, let text = value.dictationNotice {
             show(text)
         }
@@ -584,10 +551,6 @@ final class KeyboardController {
     /// `elapsedMs`, the time since its last tick) reveals it. `flush` (and Reduce Motion) types it all now.
     private func applyHost(elapsedMs: Double = 0, flush: Bool = false) {
         guard !isTornDown else { return }
-        // Authoring can take a moment. A field switch during that wait must not send into
-        // whichever field happens to be focused when the final text arrives.
-        if host?.insertAt != nil, let requestedDocument = pendingComposerDocumentID,
-           document.documentID != requestedDocument { return }
         let decision = HostApplyDecision.decide(
             host: host, cursor: cursor, visible: isVisible, documentID: document.documentID, now: Date())
         guard case .apply = decision, let host, checkForClear() != .held else {
@@ -602,7 +565,7 @@ final class KeyboardController {
         let before = cursor
         let plan = reveal.plan(
             state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID,
-            animated: !flush && !(pendingComposerInsert != nil && host.insertAt != nil) && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs)
+            animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs)
         perform(plan.ops)
         startTickerIfNeeded()
         if let updated = plan.cursor, updated != before {
@@ -1003,8 +966,43 @@ final class KeyboardController {
         guard value != magic else { return }
         magic = value; magicAt = Date()
         trace?("magic value=\(value.rawValue)")
+        syncRowTakeover()
         if isVisible { writePresence(notify: true) }
     }
+
+    /// The magic key goes on (a tap latches it, a hold holds it): speech is an instruction from now on, and the mic
+    /// opens if it is not open, as a tap on the mic key would. Without Full Access the app cannot hear the key.
+    func engageMagic(_ value: MagicToggle) {
+        guard value.isOn else { return releaseMagic() }
+        guard fullAccess else { return show("Turn on Allow Full Access for Legato in Settings > General > Keyboard to give instructions.") }
+        setMagicToggle(value)
+        guard !isCapturing, pendingRemoteStartID == nil else { return }
+        reloadHost()
+        switch micMode {
+        case .remote(.start), .needsFullAccess: micTapped()
+        // Opening the app takes a real tap on the mic key's link.
+        case .openApp: show("Tap the mic once to wake Legato, then use the magic key.")
+        case .remote(.stop): break
+        }
+    }
+
+    /// The magic key goes off (tapped off, or the hold let go): the app runs the instruction once its last words are in.
+    /// The mic stays as it is: dictation goes on after the instruction.
+    func releaseMagic() { setMagicToggle(.off) }
+
+    /// What the word row shows for instruction mode, nil when it shows words.
+    var instructionPresentation: InstructionStripPresentation? {
+        InstructionStripPresentation(strip: instructionStrip, isReadingField: isReadingField, magic: magic)
+    }
+
+    /// The first key after a result or a failure keeps (or lets go of) it, as a tap on the strip's button would.
+    private func settleInstructionRow() {
+        guard let action = instructionPresentation?.keystrokeAction, let strip = instructionStrip,
+              settledInstructionID != strip.instructionID, fullAccess else { return }
+        settledInstructionID = strip.instructionID
+        instructionIntent(action)
+    }
+    @ObservationIgnored private var settledInstructionID: String?
 
     /// A tap on the instruction strip: run (again), undo, accept, or dismiss what it shows.
     func instructionIntent(_ action: InstructionIntent.Action) {
@@ -1016,7 +1014,7 @@ final class KeyboardController {
     private func receiveInstruction() {
         guard !isTornDown else { return }
         let strip = link.readInstructionStrip()
-        if strip != instructionStrip { instructionStrip = strip }
+        if strip != instructionStrip { instructionStrip = strip; syncRowTakeover() }
         guard isVisible, !serving else { return }
         // One at a time: a read never walks while an edit's ops are still landing, and the other way round.
         if let request = link.takeReadRequest() {
@@ -1322,10 +1320,8 @@ final class KeyboardController {
     // MARK: Undo and redo
 
     /// ↶ ↷ undo and redo the keyboard's own edits; dimmed while a run is active.
-    private var composerOwnsHistory: Bool { surface == .composer && composer.sessionID != nil }
-    var canUndo: Bool { composerOwnsHistory ? !composer.snapshot.lines.isEmpty : undoAvailable && !runActive }
-    // Composer currently supports Undo only; never send host Redo while editing its document.
-    var canRedo: Bool { !composerOwnsHistory && redoAvailable && !runActive }
+    var canUndo: Bool { undoAvailable && !runActive }
+    var canRedo: Bool { redoAvailable && !runActive }
 
     private func syncHistory() {
         if undoAvailable != history.canUndo { undoAvailable = history.canUndo }
@@ -1334,7 +1330,6 @@ final class KeyboardController {
 
     func undo() {
         guard canUndo else { return }
-        if composerOwnsHistory { composerIntent("undo"); return }
         prepareHistoryStep(discardingTyped: true)
         guard let step = history.undo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
@@ -1378,6 +1373,7 @@ final class KeyboardController {
     /// The user types into a run's text: the tentative text comes out first so the key lands after the
     /// committed text; `applyHost` puts it back after the key.
     private func beforeUserEdit() {
+        settleInstructionRow()
         // Committed text still to be revealed goes in first, so the key does not land in the middle of it.
         if reveal.needsTicks { applyHost(flush: true) }
         guard let current = cursor, let documentID = document.documentID, current.documentID == documentID,

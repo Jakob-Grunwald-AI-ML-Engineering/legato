@@ -111,7 +111,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 // Presence drives the keyboard session: appear opens and pre-warms, disappear closes.
                 if let session = self.keyboardSession {
                     let presence = self.link.keyboardPresence()
-                    session.update(visible: presence != nil, surface: presence?.surface == .typing ? .dictation : .agent)
+                    session.update(visible: presence != nil, surface: .dictation)
                     // A keyboard that went away says nothing about the toggle: closing the session drops the instruction.
                     if let presence { session.magicReported(presence.magic ?? .off) }
                     for intent in instructionChannel.drainIntents() { session.handle(intent) }

@@ -178,13 +178,7 @@ import UIKit
         // The keyboard comes on screen / leaves it, as the extension's viewWillAppear / viewDidDisappear.
         harness.register("harness-visible") { _ in KeyboardHarnessModel.shared.setVisible(true) }
         harness.register("harness-hidden") { _ in KeyboardHarnessModel.shared.setVisible(false) }
-        // The surface on screen: `composer` or `typing` (ABC, the dictation surface).
-        harness.register("harness-surface") { command in
-            guard command.args.count == 1, let surface = KeyboardSurface(rawValue: command.args[0]) else { throw Usage.invalid }
-            return KeyboardHarnessModel.shared.show(surface)
-        }
-        // The composer's Send key, and the take's Retry / Insert as-is buttons: the keyboard's intents over the link.
-        harness.register("harness-send") { _ in KeyboardHarnessModel.shared.press { $0.insertComposer() } }
+        // The take's Retry / Insert as-is buttons: the keyboard's intents over the link.
         harness.register("harness-retry") { _ in KeyboardHarnessModel.shared.press { $0.retryTake() } }
         harness.register("harness-insert-raw") { _ in KeyboardHarnessModel.shared.press { $0.insertTakeRaw() } }
         harness.register("harness-clear") { _ in KeyboardHarnessModel.shared.clearDocument() }

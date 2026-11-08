@@ -215,24 +215,17 @@ final class KeyboardHarnessModel {
 
     // MARK: Bridge drive (scripts/e2e/ios-sim.sh)
 
-    /// What the scenarios read: the field, the surface, the composer the keyboard shows and the held take.
+    /// What the scenarios read: the field, the held take and the instruction strip's phase.
     var state: [String: Any] {
         let published = controller.composer
-        return ["text": document.text, "visible": controller.isVisible, "surface": controller.surface.rawValue,
-                "composerText": published.snapshot.lines.map(\.text).joined(separator: "\n"),
-                "composerLines": published.snapshot.lines.count, "composerSession": published.sessionID ?? "",
-                "pendingInsert": controller.pendingComposerInsert != nil,
+        return ["text": document.text, "visible": controller.isVisible,
+                "magic": controller.magic.rawValue, "instruction": controller.instructionStrip?.phase.rawValue ?? "idle",
                 "takePhase": published.dictationTakePhase ?? "", "takeText": published.dictationTake ?? "",
                 "takeFailed": controller.takeFailed, "status": controller.statusText ?? ""]
     }
 
     func setVisible(_ visible: Bool) -> [String: Any] {
         if visible { appeared() } else { controller.disappeared() }
-        return state
-    }
-
-    func show(_ surface: KeyboardSurface) -> [String: Any] {
-        controller.show(surface)
         return state
     }
 
@@ -303,7 +296,7 @@ struct KeyboardHarness: View {
                     let length = geometry.size.height
                     VStack(spacing: 0) {
                         HarnessTextView(textView: model.document.textView).padding(8)
-                        keyboard.frame(height: ComposerKeyboardLayout.typingHeight(landscape: true) + ComposerKeyboardLayout.additionalComposerHeight).background(Self.backdrop)
+                        keyboard.frame(height: KeyboardHeights.height(landscape: true)).background(Self.backdrop)
                     }
                     .frame(width: length, height: geometry.size.width)
                     .background(.background)
@@ -325,16 +318,13 @@ struct KeyboardHarness: View {
         }
         .preferredColorScheme(scheme)
         // In system-field mode the real extension is the keyboard; a second in-process controller would write
-        // its own (composer) presence over the extension's and flip the host's surface.
+        // its own presence over the extension's.
         .onAppear { if !Self.flag("LegatoHarnessSystemField") { model.appeared() } }
         .onDisappear { if !Self.flag("LegatoHarnessSystemField") { model.controller.disappeared() } }
     }
 
-    /// The harness uses the extension's portrait heights: ABC's, or the composer's share of the screen.
-    private var portraitHeight: CGFloat {
-        if model.controller.surface == .typing { return CGFloat(KeyboardHeights.height(landscape: false)) }
-        return CGFloat(ComposerKeyboardLayout.height(screenHeight: Double(UIScreen.main.bounds.height), systemOverhead: 92))
-    }
+    /// The harness uses the extension's portrait height.
+    private var portraitHeight: CGFloat { CGFloat(KeyboardHeights.height(landscape: false)) }
 
     private var keyboard: some View {
         KeyboardRootView(controller: model.controller)
