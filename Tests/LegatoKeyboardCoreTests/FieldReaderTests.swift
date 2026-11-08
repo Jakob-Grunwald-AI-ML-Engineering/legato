@@ -198,6 +198,10 @@ private func paragraphs(_ count: Int) -> String {
         #expect(span.text == "Dear Anna,")
         span.track(runID: "a", anchor: "Dear Anna,", region: " See you soon.")
         #expect(span.text == "Dear Anna, See you soon.", "The run goes on after the edit: still one session")
+        // The field was emptied behind the keyboard's back: a new region does not continue the old session.
+        span.edited(before: " See you soon.", newBefore: " See you soon.")
+        span.track(runID: "c", anchor: "", region: "Fresh start")
+        #expect(span.text == "Fresh start" && span.startsField)
         span.track(runID: "b", anchor: "x", region: "")
         span.broken()
         span.track(runID: "b", anchor: "Dear Anna, See you soon. typed", region: "New words")

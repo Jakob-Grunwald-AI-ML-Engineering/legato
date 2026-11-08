@@ -485,6 +485,7 @@ final class KeyboardController {
     /// first word, a held delete, undoing a dictation) it is still good, and redo is exactly what is wanted.
     private func takeClear(_ sent: AppliedCursor?) -> ClearCheck {
         cancelClearRecheck()
+        sessionSpan.broken() // the session's text left with the cleared field
         if versions?.documentID == document.documentID { versions = nil }
         if clearWatch.hostEmptiedField {
             history.clear()

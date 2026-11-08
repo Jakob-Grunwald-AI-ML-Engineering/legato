@@ -82,9 +82,11 @@ public struct SessionSpan: Sendable, Equatable {
     public mutating func track(runID: String, anchor: String, region: String) {
         if region.isEmpty { self.region = ""; return }
         if self.region.isEmpty || runID != self.runID {
-            // A region begins: it continues the session only when nothing broke it since the session text ended.
-            base = contiguous ? text : ""
-            if base.isEmpty { startsField = anchor.isEmpty }
+            // A region begins: it continues the session only when nothing broke it since, and the field before it still
+            // ends with the session text (the host may have changed the field without the keyboard, e.g. emptied it).
+            let continues = contiguous && !text.isEmpty && OwnEditEcho.isSame(expected: text, reported: anchor)
+            base = continues ? text : ""
+            if !continues { startsField = anchor.isEmpty }
             contiguous = true
         }
         self.runID = runID; self.region = region
