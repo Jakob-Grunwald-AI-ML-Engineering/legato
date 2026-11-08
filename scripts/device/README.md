@@ -141,7 +141,7 @@ Instruction mode (the keyboard's magic key; iOS Debug builds): with the toggle o
 ```bash
 $ctl put scripts/device/fixtures/instruction-replay-formal.json formal.json
 $ctl send instruction-mode latched                       # speech is now an instruction
-id=$($ctl send dictation-debug-replay formal.json 1); $ctl wait control.done 60
+$ctl send dictation-debug-replay formal.json 1; sleep 5  # a 3 s instruction; instruction-state then shows transcriptChars
 $ctl send instruction-mode off                           # runs it: reads the field, asks the model, lands the edit
 $ctl send instruction-state                              # phase listening|reading|running|result|undone|failed, scope, message, canUndo
 $ctl send instruction-intent undo                        # the strip's taps: run | undo | accept | dismiss
