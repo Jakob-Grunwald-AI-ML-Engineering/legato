@@ -58,6 +58,25 @@ import UIKit
             try AppController.shared.keyboardSession.debugDictationStop()
             return AppController.shared.dictation.takeState
         }
+        // A recorded Soniox token timeline (a file in the bridge directory, put there with `ctl.sh put`) replaces the
+        // microphone: `<file> [speed]`. Returns at once; `control.done` follows when the take is written.
+        harness.register("dictation-debug-replay") { command in
+            guard (1...2).contains(command.args.count), !command.args[0].contains("/"), !command.args[0].hasPrefix("."),
+                  let speed = command.args.count == 2 ? Double(command.args[1]) : 1, speed > 0, speed.isFinite else { throw Usage.invalid }
+            let timeline = try DictationReplayTimeline.parse(try Data(contentsOf: root.appending(path: command.args[0])))
+            return try harness.acceptOperation(command, reserve: {
+                guard harness.pendingOperationCommands.contains("dictation-debug-replay") == false else { throw Usage.busy }
+            }) {
+                try await AppController.shared.keyboardSession.debugDictationReplay(timeline, speed: speed)
+                var state = AppController.shared.dictation.takeState
+                state["frames"] = timeline.frames.count; state["seconds"] = timeline.duration
+                return state
+            }
+        }
+        harness.register("dictation-debug-replay-cancel") { _ in
+            harness.cancelOperations(commands: ["dictation-debug-replay"])
+            return AppController.shared.dictation.takeState
+        }
         harness.register("dictation-state") { _ in AppController.shared.dictation.takeState }
         // The next N take cleanups (default 1) fail twice, so the failed state is reachable without network faults.
         harness.register("dictation-debug-fail-take") { command in
@@ -139,6 +158,6 @@ import UIKit
         harness.start()
     }
     static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
-    enum Usage: Error { case invalid }
+    enum Usage: Error { case invalid, busy }
 }
 #endif

@@ -116,6 +116,7 @@ final class KeyboardController {
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
         link.observeComposer { [weak self] in self?.composerNoteArrived() }
+        link.observeLiveDictation { [weak self] in self?.receiveLiveDictation() }
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
     }
@@ -198,6 +199,8 @@ final class KeyboardController {
     /// While the ABC surface dictates: the take held so far plus the live tail take the word row's place.
     private var dictatingStatus: String? {
         guard surface == .typing, routeOpen else { return nil }
+        // The live mode types the words into the field as they come: the row only says that it listens.
+        if liveRunning { return "Listening…" }
         let tail = (composer.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let spoken = [(composer.dictationTake ?? "").trimmingCharacters(in: .whitespacesAndNewlines), tail].filter { !$0.isEmpty }.joined(separator: " ")
         guard !spoken.isEmpty else { return "Listening…" }
@@ -343,9 +346,12 @@ final class KeyboardController {
                 guard let self else { return }
                 self.pollComposer()
                 self.receiveDictation()
+                self.receiveLiveDictation()
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
+        // A live run that began before this appearance is not this keyboard's to type.
+        ignoredLiveRunID = link.readLiveDictation()?.runID
         // A return from the app is a new attempt, even before the previous tap's URL-settle timer.
         openAppRequestID = UUID().uuidString
         refreshPreferences()
@@ -375,6 +381,8 @@ final class KeyboardController {
         stopTicker()
         dictationStep(elapsedMs: 0, flush: true)
         stopDictationTicker()
+        liveStep(elapsedMs: 0, flush: true)
+        stopLiveTicker()
         isVisible = false
         wordRow.interruptTyping()
         typing.disappeared()
@@ -395,6 +403,7 @@ final class KeyboardController {
         isTornDown = true
         stopTicker()
         stopDictationTicker()
+        stopLiveTicker()
         link.stopObserving()
         heartbeat?.cancel()
         reapply?.cancel()
@@ -417,6 +426,7 @@ final class KeyboardController {
         if let versions, versions.documentID != document.documentID { self.versions = nil }
         if checkForClear() == .sent { applyHost() }
         trackContext()
+        liveStep(elapsedMs: 0)
     }
 
     /// A new field starts over (no history, no row); a cursor move or text change the keyboard didn't make
@@ -691,7 +701,8 @@ final class KeyboardController {
 
     /// A key, a completion or a cursor pan: the user took over, so the rest of the line being typed is dropped and
     /// the following lines go in at the new cursor.
-    private func interruptDictation() {
+    private func interruptDictation(_ cause: RunShadow.FreezeCause = .keystroke) {
+        freezeLiveRun(cause)
         guard let upTo = typist.interrupt() else { return }
         acknowledgeDictation(upTo: upTo)
         if !typist.needsTicks { stopDictationTicker() }
@@ -754,12 +765,137 @@ final class KeyboardController {
         dictationTicker = nil
     }
 
+
+    // MARK: Live dictation
+
+    /// The send mode `live`: the app publishes where the run's text should stand (`LiveDictationSnapshot`), the
+    /// shadow (`RunShadow`) plans the word-level edits against what this keyboard typed, and this carries them out.
+    /// Appends drain with the typewriter; revisions and cleaned sentences apply at once. A key, a cursor move, a
+    /// selection or any change the keyboard did not make freezes what is typed; the run goes on at the cursor.
+    @ObservationIgnored private var liveShadow: RunShadow?
+    @ObservationIgnored private var liveSnapshot: LiveDictationSnapshot?
+    @ObservationIgnored private var liveSeen: LiveDictationSnapshot?
+    @ObservationIgnored private var ignoredLiveRunID: String?
+    @ObservationIgnored private var liveDocumentID: String?
+    @ObservationIgnored private var liveStats = LiveDictationStats()
+    @ObservationIgnored private var liveAckedVersion: Int?
+    @ObservationIgnored private var liveTicker: Task<Void, Never>?
+    /// A live run is being typed (the word row says "Listening…" instead of the words).
+    private(set) var liveRunning = false
+
+    /// From the 100 ms poll and the app's note: a new snapshot of the run.
+    private func receiveLiveDictation() {
+        guard !isTornDown else { return }
+        guard let snapshot = link.readLiveDictation() else {
+            if liveSeen != nil { liveSeen = nil; liveSnapshot = nil; setLiveRunning(false) }
+            return
+        }
+        guard snapshot != liveSeen, snapshot.runID != ignoredLiveRunID else { return }
+        liveSeen = snapshot
+        if snapshot.runID != liveShadow?.runID {
+            liveShadow = RunShadow(runID: snapshot.runID)
+            liveStats = LiveDictationStats(); liveAckedVersion = nil
+            liveDocumentID = document.documentID
+            trace?("live run start")
+        }
+        liveSnapshot = snapshot
+        setLiveRunning(!snapshot.complete)
+        liveStep(elapsedMs: 0)
+    }
+
+    private func setLiveRunning(_ value: Bool) {
+        guard liveRunning != value else { return }
+        liveRunning = value
+        syncRowTakeover()
+    }
+
+    /// The user took over: what the run typed stays as it is and is never edited again.
+    private func freezeLiveRun(_ cause: RunShadow.FreezeCause) {
+        guard var shadow = liveShadow else { return }
+        let froze = shadow.freeze(cause)
+        liveShadow = shadow
+        if froze { noteLiveFreeze(cause) }
+    }
+
+    private func noteLiveFreeze(_ cause: RunShadow.FreezeCause) {
+        liveStats.freezes += 1; liveStats.lastFreeze = cause.rawValue
+        if cause == .drift { liveStats.drifts += 1 }
+        trace?("live frozen cause=\(cause.rawValue)")
+        writeLiveAck(version: nil, complete: false)
+    }
+
+    private func writeLiveAck(version: Int?, complete: Bool) {
+        guard let runID = liveShadow?.runID else { return }
+        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats))
+    }
+
+    /// One step of the run against the field. `flush` (the keyboard goes away) types everything now.
+    private func liveStep(elapsedMs: Double, flush: Bool = false) {
+        guard !isTornDown, let snapshot = liveSnapshot, var shadow = liveShadow, snapshot.runID == shadow.runID,
+              let documentID = document.documentID, !document.isSecureTextEntry else { return stopLiveTicker() }
+        if documentID != liveDocumentID {
+            liveDocumentID = documentID
+            if shadow.freeze(.field) { liveShadow = shadow; noteLiveFreeze(.field) }
+        }
+        let step = shadow.step(
+            snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore,
+            hasSelection: document.selectedText?.isEmpty == false, capitalization: autocapitalization,
+            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled)
+        liveShadow = shadow
+        if let cause = step.froze { noteLiveFreeze(cause) }
+        if !step.ops.isEmpty {
+            let expected = shadow.anchor + shadow.region
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            clearWatch.ownEdit(at: Date())
+            history.cursorMoved()
+            wordRow.interruptTyping() // what was typed so far is learned; the dictation is not typing
+            for op in step.ops {
+                switch op {
+                case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
+                case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
+                case .insert(let text): document.insert(text)
+                }
+            }
+            typing.hostEdited()
+            typing.ownEdit(contextBefore: expected)
+            versions = nil
+            liveStats.applies += 1; liveStats.insertedChars += step.insertedChars; liveStats.deletedChars += step.deletedChars
+            if step.rewrote { liveStats.rewrites += 1 }
+        }
+        if step.applied, let version = step.version, version != liveAckedVersion {
+            liveAckedVersion = version
+            writeLiveAck(version: version, complete: snapshot.complete)
+        }
+        if step.needsTicks, isVisible, !flush { startLiveTicker() } else { stopLiveTicker() }
+    }
+
+    private func startLiveTicker() {
+        guard liveTicker == nil else { return }
+        liveTicker = Task { [weak self] in
+            let clock = ContinuousClock()
+            var last = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.tickInterval)
+                guard !Task.isCancelled, let self else { return }
+                let now = clock.now
+                let parts = last.duration(to: now).components
+                last = now
+                self.liveStep(elapsedMs: Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15)
+            }
+        }
+    }
+
+    private func stopLiveTicker() {
+        liveTicker?.cancel()
+        liveTicker = nil
+    }
+
     // MARK: Cursor control
 
     @ObservationIgnored private var cursorPanSession: SpaceCursorPan.Session?
 
     func cursorPanBegan() {
-        interruptDictation()
+        interruptDictation(.cursor)
         // A selection omits its contents from the surrounding context; decline ambiguous movement.
         cursorPanSession = document.selectedText?.isEmpty == false ? nil :
             SpaceCursorPan.Session(before: document.contextBefore, after: document.contextAfter)

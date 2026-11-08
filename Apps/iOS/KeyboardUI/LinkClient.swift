@@ -32,6 +32,13 @@ final class LinkClient {
         })
     }
 
+    /// Calls `handler` on the main actor for every `link.dictation.live` note (the app published the live run).
+    func observeLiveDictation(_ handler: @escaping @MainActor () -> Void) {
+        observers.append(DarwinObserver(name: LinkChannel.Note.dictationLive) {
+            Task { @MainActor in handler() }
+        })
+    }
+
     /// Stops the `link.host` observation; the handlers never run again.
     func stopObserving() { observers.removeAll() }
 
@@ -65,6 +72,14 @@ final class LinkClient {
         guard let store else { return }
         DictationLink(store: store).acknowledge(ack)
         DarwinObserver.post(LinkChannel.Note.dictationAck)
+    }
+
+    /// The live run the app wants in the field (`link.dictation.live`); nil when there is none.
+    func readLiveDictation() -> LiveDictationSnapshot? { store.map { LiveDictationLink(store: $0).read() } ?? nil }
+    /// What the keyboard applied of the live run. The app only logs it, so no note follows.
+    func writeLiveDictationAck(_ ack: LiveDictationAck) {
+        guard let store else { return }
+        LiveDictationLink(store: store).acknowledge(ack)
     }
 
     func send(_ command: RequestCommand, id: String) {
