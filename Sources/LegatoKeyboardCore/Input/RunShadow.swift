@@ -7,15 +7,18 @@ import Foundation
 /// - Lazy shadow: no walking and no full-field read. The *region* is the text Legato typed since the run began (or
 ///   since the last freeze) and ends at the cursor; the *anchor* is what the field held before it (seeded from
 ///   `documentContextBeforeInput`). Text after the cursor is never touched, so it is never read.
-/// - Appends (the target only grows the region) go out a slice at a time through `TypewriterDrain`. Anything else
-///   (a Soniox revision, a cleaned sentence, a changed head) is a word-level diff (`ShadowEditPlanner`) applied
-///   at once, back to front, with the cursor returning to the end of the region.
-/// - Drift: after our own edits the field's context must show anchor + region (`OwnEditEcho`). The host reports
-///   it late (Safari's web process answers a batch of moves, deletes and inserts only when all of them ran, and the
-///   report in between is the text before the cursor wherever it is on its way), so a mismatch is given
-///   `echoLimitMs` to resolve. If it does not, or a selection appears, the user moved on: everything typed so far
-///   is frozen, and the run goes on appending at the cursor once the field's report has stopped changing, so the
-///   separator and capital are judged against the text that really is there.
+/// - Edit queue: every change goes out as single ops (`ShadowOp`), one in flight at a time. After each op the field's
+///   report must confirm it (`confirms`: the text before the cursor, and after it where the op left region text
+///   there) before the next op goes; the host reports late (Safari answers a move or a delete a moment later, with
+///   the text before the cursor wherever it was on its way). A snapshot that arrives while the queue is busy is not
+///   diffed: the newest one is diffed against the shadow once the queue is empty (older ones are dropped, never replayed).
+/// - Appends (the target only grows the region) go out a slice at a time through `TypewriterDrain`, a slice per
+///   confirmed op. Anything else (a Soniox revision, a cleaned sentence, a changed head) is a word-level diff
+///   (`ShadowEditPlanner`): its ops, back to front, with the cursor returning to the end of the region.
+/// - Drift: a report that does not confirm within `confirmLimitMs`, or a selection, means the user moved on (or the
+///   host lost an op): everything typed so far is frozen, the rest of the queue is dropped, and the run goes on
+///   appending at the cursor once the field's report has stopped changing, so the separator and capital are judged
+///   against the text that really is there.
 /// - Frozen text is never edited again. Changes the target makes to a frozen sentence are dropped, except growth
 ///   of a sentence that was still being spoken: what follows the frozen part is appended at the cursor.
 public struct RunShadow: Sendable, Equatable {
@@ -33,12 +36,18 @@ public struct RunShadow: Sendable, Equatable {
         public var driftDetail: String?
         /// Set on the step that types the first characters of a region: what it was anchored to (lengths and kinds only).
         public var startDetail: String?
-        /// The field's context does not echo the last edit yet: nothing was done, call again.
+        /// The field's context does not confirm the last op yet: nothing was done, call again.
         public var waiting = false
+        /// This step began a wait for the field to confirm an op.
+        public var waitStarted = false
+        /// The field did not confirm within `confirmLimitMs` (the step froze).
+        public var confirmTimedOut = false
+        /// Snapshots dropped undiffed because a newer one arrived while the queue was busy.
+        public var coalesced = 0
         /// The field shows the whole target of `version` (and nothing was left to type).
         public var applied = false
         public var version: Int?
-        /// More steps are needed: text is left to reveal, or the field has to catch up.
+        /// More steps are needed: text is left to reveal, ops are queued, or the field has to confirm the last one.
         public var needsTicks = false
     }
 
@@ -50,8 +59,20 @@ public struct RunShadow: Sendable, Equatable {
     /// Ready to be seeded from the field at the next step (a new run, or right after a freeze).
     private var reseed = true
     private var waitedMs = 0.0
-    /// Operations of the last batch: a longer batch takes the host longer to echo.
-    private var lastOps = 0
+    private var confirming = false
+    /// The edit queue: ops of the edit in progress not sent yet.
+    private var queue: [ShadowOp] = []
+    /// The region's part of the field as the shadow expects it after the last op sent (it may end in a space Legato
+    /// put after the region), and the cursor in it (UTF-16).
+    private var work = ""
+    private var workCursor = 0
+    /// The version the edit in progress brings the field to, and whether the region then holds all of it.
+    private var inFlightVersion: Int?
+    private var inFlightWhole = false
+    /// A version seen while the queue was busy and not diffed yet.
+    private var heldVersion: Int?
+    /// The target the region is being brought to (the last one diffed).
+    private var target = ""
     /// After a freeze: the field's report must hold still for `stableMs` before it seeds the new anchor.
     private var settling: Bool
     private var lastReport: String?
@@ -90,25 +111,42 @@ public struct RunShadow: Sendable, Equatable {
 
     public var frozenSegments: Int { frozen.count }
 
-    /// How long a field's report may disagree with the shadow before it counts as the user's edit.
-    public static let echoBaseMs = 500.0
-    public static let echoPerOpMs = 120.0
-    public static let echoCapMs = 1500.0
+    /// How long the field's report may take to confirm an op before it counts as the user's edit (drift).
+    public static let confirmLimitMs = 800.0
     /// How long the report must stay unchanged after a freeze before the run types again.
     public static let stableMs = 150.0
-    var echoLimitMs: Double { min(Self.echoCapMs, Self.echoBaseMs + Self.echoPerOpMs * Double(lastOps)) }
+
+    /// Ops are queued: a new snapshot waits until they went out.
+    public var isBusy: Bool { !queue.isEmpty }
+    /// What the field should report before and after the cursor once it shows the last op sent (after: only the
+    /// region's own text there).
+    public var expectedBefore: String { anchor + String(decoding: Array(work.utf16.prefix(workCursor)), as: UTF16.self) }
+    public var expectedAfter: String { String(decoding: Array(work.utf16.dropFirst(workCursor)), as: UTF16.self) }
+
+    /// Whether the field's report shows what the shadow expects. Before the cursor a suffix match counts (hosts trim
+    /// their context). After it, the report must start with the region's text there, or be a trimmed part of it; a
+    /// host that reports nothing after the cursor must at least not report text past it (a report from before a move).
+    static func confirms(expectedBefore: String, expectedAfter: String, reportedBefore: String, reportedAfter: String) -> Bool {
+        guard OwnEditEcho.isSame(expected: expectedBefore, reported: reportedBefore) else { return false }
+        guard !expectedAfter.isEmpty else { return true }
+        if reportedAfter.isEmpty { return reportedBefore.count <= expectedBefore.count }
+        return reportedAfter.hasPrefix(expectedAfter) || expectedAfter.hasPrefix(reportedAfter)
+    }
 
     // MARK: Step
 
     /// - Parameters:
     ///   - contextBefore: where the region would start now (the keyboard's tracked context, which includes its
     ///     own latest edit); used to seed the anchor and to place the first slice.
-    ///   - reportedBefore: the field's own report, which lags behind edits; the drift check reads it.
+    ///   - reportedBefore, reportedAfter: the field's own report around the cursor, which lags behind edits; the
+    ///     confirmation reads it.
+    ///   - flush: the keyboard goes away: no waiting, everything left goes out now (unless the field disagrees).
     ///   - followingCharacter: the character right after the cursor (`documentContextAfterInput`), read only where
     ///     the run begins typing: text that follows without a space gets one from the run's first insert.
     public mutating func step(
-        snapshot: LiveDictationSnapshot, contextBefore: String, reportedBefore: String, hasSelection: Bool,
-        capitalization: AutoCapitalizationType, elapsedMs: Double, animated: Bool, followingCharacter: Character? = nil
+        snapshot: LiveDictationSnapshot, contextBefore: String, reportedBefore: String, reportedAfter: String = "",
+        hasSelection: Bool, capitalization: AutoCapitalizationType, elapsedMs: Double, animated: Bool, flush: Bool = false,
+        followingCharacter: Character? = nil
     ) -> Step {
         var step = Step()
         if hasSelection {
@@ -121,21 +159,37 @@ public struct RunShadow: Sendable, Equatable {
             if reportedBefore == lastReport { stableForMs += elapsedMs } else { lastReport = reportedBefore; stableForMs = 0 }
             if stableForMs < Self.stableMs { step.waiting = true; step.needsTicks = true; return step }
             settling = false
-            anchor = reportedBefore; reseed = false; waitedMs = 0; following = followingCharacter
-        } else if reseed || region.isEmpty { anchor = contextBefore; reseed = false; waitedMs = 0; following = followingCharacter }
-        else if !OwnEditEcho.isSame(expected: anchor + region, reported: reportedBefore) {
+            seed(reportedBefore, following: followingCharacter)
+        } else if queue.isEmpty, reseed || region.isEmpty { seed(contextBefore, following: followingCharacter) }
+        else if !Self.confirms(expectedBefore: expectedBefore, expectedAfter: expectedAfter, reportedBefore: reportedBefore, reportedAfter: reportedAfter) {
+            // No time to wait when flushing, and nothing is typed over a field that does not show what is expected.
+            if flush { step.waiting = true; return step }
+            if !confirming { confirming = true; step.waitStarted = true }
             waitedMs += elapsedMs
-            if waitedMs < echoLimitMs { step.waiting = true; step.needsTicks = true; return step }
-            step.driftDetail = Self.describeMismatch(expected: anchor + region, reported: reportedBefore)
+            if waitedMs < Self.confirmLimitMs { step.waiting = true; step.needsTicks = true; return step }
+            let expected = expectedBefore
+            step.driftDetail = Self.describeMismatch(expected: expected, reported: reportedBefore)
             // The report shows the text up to somewhere earlier in what was typed: the cursor moved, the text is as it was.
-            let cause: FreezeCause = Self.cursorMoved(expected: anchor + region, reported: reportedBefore) ? .cursor : .drift
+            let cause: FreezeCause = Self.cursorMoved(expected: expected, reported: reportedBefore) ? .cursor : .drift
             _ = freeze(cause)
-            step.froze = cause
+            step.froze = cause; step.confirmTimedOut = true
             step.waiting = true; step.needsTicks = true
             return step
         } else {
-            waitedMs = 0
+            waitedMs = 0; confirming = false
         }
+
+        if !queue.isEmpty {
+            // Busy: a newer snapshot is only noted; the newest is diffed once the queue is empty.
+            if snapshot.version != inFlightVersion, snapshot.version != heldVersion {
+                if heldVersion != nil { step.coalesced += 1 }
+                heldVersion = snapshot.version
+            }
+            send(&step)
+            guard flush else { return step }
+            while !queue.isEmpty { send(&step) }
+        }
+        heldVersion = nil
 
         let target = prepared(snapshot, capitalization: capitalization)
         // A target without any words never erases what is typed.
@@ -143,47 +197,79 @@ public struct RunShadow: Sendable, Equatable {
             step.applied = true; step.version = snapshot.version
             return step
         }
+        inFlightVersion = snapshot.version
         if target.hasPrefix(region) {
             let revealed = region.count, total = target.count
             let next = animated ? TypewriterDrain.step(revealed: revealed, target: total, dtMs: elapsedMs) : total
             let slice = String(target.dropFirst(revealed).prefix(next - revealed))
-            if !slice.isEmpty {
-                if region.isEmpty {
-                    step.startDetail = "anchor=\(anchor.count) endsSpace=\(anchor.last?.isWhitespace == true ? 1 : 0) reported=\(reportedBefore.count) reportedEndsSpace=\(reportedBefore.last?.isWhitespace == true ? 1 : 0) following=\(following.map { $0.isWhitespace ? "space" : "char" } ?? "none") first=\(slice.first?.isWhitespace == true ? "space" : "char")"
-                }
-                if region.isEmpty, let next = following, !next.isWhitespace, !Self.closingMarks.contains(next) {
-                    // The run starts in front of text that follows without a space: one goes in behind it, once, and the
-                    // cursor stays in front of that space, so the run keeps typing where it is.
-                    step.ops = [.insert(slice + " "), .move(-1)]; lastOps = 2
-                } else {
-                    step.ops = [.insert(slice)]; lastOps = 1
-                }
-                step.insertedChars = slice.count
-                region += slice
+            if region.isEmpty {
+                step.startDetail = "anchor=\(anchor.count) endsSpace=\(anchor.last?.isWhitespace == true ? 1 : 0) reported=\(reportedBefore.count) reportedEndsSpace=\(reportedBefore.last?.isWhitespace == true ? 1 : 0) following=\(following.map { $0.isWhitespace ? "space" : "char" } ?? "none") first=\(slice.first?.isWhitespace == true ? "space" : "char")"
             }
-            if region == target { step.applied = true; step.version = snapshot.version } else { step.needsTicks = true }
-            return step
-        }
-        let plan = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count, target: target)
-        for op in plan.ops {
-            switch op {
-            case .deleteBackward(let count): step.deletedChars += count
-            case .insert(let text): step.insertedChars += text.count
-            case .move: break
+            if region.isEmpty, let next = following, !next.isWhitespace, !Self.closingMarks.contains(next) {
+                // The run starts in front of text that follows without a space: one goes in behind it, once, and the
+                // cursor stays in front of that space, so the run keeps typing where it is.
+                queue = [.insert(slice + " "), .move(-1)]
+            } else {
+                queue = [.insert(slice)]
             }
+            region += slice
+            inFlightWhole = region == target; self.target = target
+        } else {
+            queue = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count, target: target).ops
+            step.rewrote = true
+            region = target; inFlightWhole = true; self.target = target
         }
-        step.ops = plan.ops; step.rewrote = true
-        lastOps = plan.ops.count
-        region = target
-        step.applied = true; step.version = snapshot.version
+        send(&step)
+        if flush { while !queue.isEmpty { send(&step) } }
         return step
+    }
+
+    /// A key of this keyboard is about to freeze the run (`freeze(.keystroke)`) while the typewriter has revealed only
+    /// part of a word: the op that types the rest of it first (with marks stuck to it, and a space when `key` starts
+    /// with a letter or digit), so the key lands after the word. Nil when nothing is cut off, ops are queued, or the
+    /// field does not confirm the last op.
+    public mutating func finishWord(beforeKey key: String, reportedBefore: String, reportedAfter: String) -> ShadowOp? {
+        guard queue.isEmpty, !settling, let last = region.last, last.isLetter || last.isNumber,
+              target.count > region.count, target.hasPrefix(region),
+              Self.confirms(expectedBefore: expectedBefore, expectedAfter: expectedAfter, reportedBefore: reportedBefore, reportedAfter: reportedAfter)
+        else { return nil }
+        var rest = String(target.dropFirst(region.count).prefix { !$0.isWhitespace })
+        guard let first = rest.first, first.isLetter || first.isNumber else { return nil }
+        if let k = key.first, k.isLetter || k.isNumber { rest += " " }
+        (work, workCursor) = ShadowEditPlanner.simulate(ops: [.insert(rest)], shadow: work, cursor: workCursor)
+        region += rest
+        return .insert(rest)
+    }
+
+    /// Takes a new anchor at the cursor; the region starts empty there.
+    private mutating func seed(_ before: String, following next: Character?) {
+        anchor = before; reseed = false; waitedMs = 0; confirming = false; following = next
+        work = ""; workCursor = 0
+    }
+
+    /// Sends the next queued op: the shadow's model of the field moves on, and the field has to confirm it.
+    private mutating func send(_ step: inout Step) {
+        guard !queue.isEmpty else { return }
+        let op = queue.removeFirst()
+        (work, workCursor) = ShadowEditPlanner.simulate(ops: [op], shadow: work, cursor: workCursor)
+        switch op {
+        case .deleteBackward(let count): step.deletedChars += count
+        case .insert(let text): step.insertedChars += text.count
+        case .move: break
+        }
+        step.ops.append(op)
+        step.needsTicks = true
+        if queue.isEmpty, inFlightWhole, let version = inFlightVersion { step.applied = true; step.version = version }
     }
 
     /// The user took over (a key, a cursor move, another field): what is typed so far stays as it is. Returns
     /// whether anything was frozen. The next step seeds a new anchor at the cursor.
     @discardableResult
     public mutating func freeze(_ cause: FreezeCause) -> Bool {
-        defer { reseed = true; region = ""; waitedMs = 0; built = Built(); settling = true; lastReport = nil; stableForMs = 0 }
+        defer {
+            reseed = true; region = ""; waitedMs = 0; confirming = false; built = Built(); settling = true; lastReport = nil; stableForMs = 0
+            queue = []; work = ""; workCursor = 0; inFlightVersion = nil; heldVersion = nil
+        }
         guard !region.isEmpty else { return false }
         let typed = max(0, region.count - built.prefix)
         for span in built.spans {
@@ -208,11 +294,11 @@ public struct RunShadow: Sendable, Equatable {
                                          : words.dropFirst(typed.count).joined(separator: " ")
         }
         // The frozen part ends in `last`: if the sentence's word there is longer, it was cut off; only its first
-        // characters are in the field.
+        // characters are in the field (cleanup may have changed its case since).
         guard typed.count <= words.count else { return "" }
         let word = words[typed.count - 1]
         var rest = Array(words.dropFirst(typed.count))
-        if word.hasPrefix(last), word.count > last.count {
+        if word.lowercased().hasPrefix(last.lowercased()), word.count > last.count {
             let tail = word.dropFirst(last.count)
             // A word that goes on is typed whole; punctuation stuck to a finished word is not typed on its own.
             if let first = tail.first, first.isLetter || first.isNumber { rest.insert(word, at: 0) }

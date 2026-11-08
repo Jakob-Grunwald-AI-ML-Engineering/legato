@@ -17,7 +17,10 @@ public final class DebugStreamingCleaner: SentenceCleaning, @unchecked Sendable 
         chunkDelay = .milliseconds(max(0, chunkMilliseconds)); self.failAfter = failAfterChunks; self.chunkSize = max(1, chunkSize)
     }
 
-    public func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence { throw SentenceCleanupError.invalidInput }
+    /// A sentence (line by line, live), capitalized like a take, so a cleanup that lands shows word by word.
+    public func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text.capitalized)
+    }
     public func cleanTake(_ input: DictationTakeInput) async throws -> String { input.text.capitalized }
 
     public func cleanTakeStream(_ input: DictationTakeInput) -> AsyncThrowingStream<String, any Error> {

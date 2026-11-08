@@ -26,8 +26,8 @@ public enum DictationCleanupGuard {
         guard source.count > 3 else {
             return result.count <= source.count + 3 && (!Set(source).isDisjoint(with: result) || resembles(source.joined(), result.joined()))
         }
-        guard result.count <= source.count + 4, result.count * 5 >= source.count * 2 else { return false }
-        // Most of the result's words must be words the speaker said (ASR fixes and spoken commands may differ).
+        guard result.count <= source.count + 4, result.count * 5 >= source.count else { return false }
+        // A line that was mostly filler may shrink to a fifth of its words. Most of the result's words must be words the speaker said (ASR fixes and spoken commands may differ).
         let said = Set(source)
         let known = result.filter { said.contains($0) }.count
         return known * 2 >= result.count

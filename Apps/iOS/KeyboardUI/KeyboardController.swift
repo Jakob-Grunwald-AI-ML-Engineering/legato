@@ -700,13 +700,17 @@ final class KeyboardController {
     }
 
     /// A key, a completion or a cursor pan: the user took over, so the rest of the line being typed is dropped and
-    /// the following lines go in at the new cursor.
-    private func interruptDictation(_ cause: RunShadow.FreezeCause = .keystroke) {
+    /// the following lines go in at the new cursor. `key`: the text a key is about to type; a word of the live run the
+    /// typewriter has only half revealed is finished first, so the key lands after it. Returns whether that typed.
+    @discardableResult
+    private func interruptDictation(_ cause: RunShadow.FreezeCause = .keystroke, key: String? = nil) -> Bool {
+        let finished = key.map(finishLiveWord(beforeKey:)) ?? false
         freezeLiveRun(cause)
-        guard let upTo = typist.interrupt() else { return }
+        guard let upTo = typist.interrupt() else { return finished }
         acknowledgeDictation(upTo: upTo)
         if !typist.needsTicks { stopDictationTicker() }
         trace?("dictation interrupted")
+        return finished
     }
 
     private func acknowledgeDictation(upTo: Int) {
@@ -769,9 +773,9 @@ final class KeyboardController {
     // MARK: Live dictation
 
     /// The send mode `live`: the app publishes where the run's text should stand (`LiveDictationSnapshot`), the
-    /// shadow (`RunShadow`) plans the word-level edits against what this keyboard typed, and this carries them out.
-    /// Appends drain with the typewriter; revisions and cleaned sentences apply at once. A key, a cursor move, a
-    /// selection or any change the keyboard did not make freezes what is typed; the run goes on at the cursor.
+    /// shadow (`RunShadow`) plans the word-level edits against what this keyboard typed and queues them, and this
+    /// carries out the one op each step hands over; the next waits for the field to confirm it. A key, a cursor
+    /// move, a selection or any change the keyboard did not make freezes what is typed; the run goes on at the cursor.
     @ObservationIgnored private var liveShadow: RunShadow?
     @ObservationIgnored private var liveSnapshot: LiveDictationSnapshot?
     @ObservationIgnored private var liveSeen: LiveDictationSnapshot?
@@ -809,6 +813,18 @@ final class KeyboardController {
         syncRowTakeover()
     }
 
+    private func finishLiveWord(beforeKey key: String) -> Bool {
+        guard !liveStepping, var shadow = liveShadow, liveSnapshot?.runID == shadow.runID, document.documentID == liveDocumentID,
+              let op = shadow.finishWord(beforeKey: key, reportedBefore: document.contextBefore, reportedAfter: document.contextAfter)
+        else { return false }
+        liveShadow = shadow
+        liveStepping = true
+        defer { liveStepping = false }
+        performLive([op], expected: shadow.expectedBefore)
+        if case .insert(let text) = op { liveStats.applies += 1; liveStats.insertedChars += text.count }
+        return true
+    }
+
     /// The user took over: what the run typed stays as it is and is never edited again.
     private func freezeLiveRun(_ cause: RunShadow.FreezeCause) {
         guard var shadow = liveShadow else { return }
@@ -829,49 +845,79 @@ final class KeyboardController {
         link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats))
     }
 
-    /// One step of the run against the field. `flush` (the keyboard goes away) types everything now.
+    @ObservationIgnored private var liveStepping = false
+    /// Queued ops a step may send while the field confirms each one at once (a host that answers synchronously).
+    private static let liveOpsPerStep = 64
+
+    /// Steps of the run against the field: one op per step, and the next at once while the field already confirms
+    /// the last (a lagging host waits for the next tick). `flush` (the keyboard goes away) types everything now.
+    /// Not reentrant: the field's change notes during an op come back here and are left to the loop.
     private func liveStep(elapsedMs: Double, flush: Bool = false) {
+        guard !liveStepping else { return }
+        liveStepping = true
+        defer { liveStepping = false }
+        var elapsed = elapsedMs
+        for _ in 0..<Self.liveOpsPerStep {
+            guard let step = liveStepOnce(elapsedMs: elapsed, flush: flush) else { return stopLiveTicker() }
+            elapsed = 0
+            guard !flush, !step.ops.isEmpty, !step.waiting, liveShadow?.isBusy == true else {
+                if step.needsTicks, isVisible, !flush { startLiveTicker() } else { stopLiveTicker() }
+                return
+            }
+        }
+        startLiveTicker()
+    }
+
+    private func liveStepOnce(elapsedMs: Double, flush: Bool) -> RunShadow.Step? {
         guard !isTornDown, let snapshot = liveSnapshot, var shadow = liveShadow, snapshot.runID == shadow.runID,
-              let documentID = document.documentID, !document.isSecureTextEntry else { return stopLiveTicker() }
+              let documentID = document.documentID, !document.isSecureTextEntry else { return nil }
         if documentID != liveDocumentID {
             liveDocumentID = documentID
             if shadow.freeze(.field) { liveShadow = shadow; noteLiveFreeze(.field) }
         }
+        let after = document.contextAfter
         let step = shadow.step(
-            snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore,
+            snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore, reportedAfter: after,
             hasSelection: document.selectedText?.isEmpty == false, capitalization: autocapitalization,
-            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled,
-            followingCharacter: document.contextAfter.first)
+            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled, flush: flush,
+            followingCharacter: after.first)
         liveShadow = shadow
+        if step.waitStarted { liveStats.waits += 1 }
+        if step.confirmTimedOut { liveStats.confirmTimeouts += 1 }
+        liveStats.coalesced += step.coalesced
         if let start = step.startDetail { liveStats.lastStart = start; writeLiveAck(version: nil, complete: false) }
         if let cause = step.froze {
             liveStats.lastDrift = step.driftDetail ?? liveStats.lastDrift
             noteLiveFreeze(cause)
         }
         if !step.ops.isEmpty {
-            let expected = shadow.anchor + shadow.region
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            clearWatch.ownEdit(at: Date())
-            history.cursorMoved()
-            wordRow.interruptTyping() // what was typed so far is learned; the dictation is not typing
-            for op in step.ops {
-                switch op {
-                case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
-                case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
-                case .insert(let text): document.insert(text)
-                }
-            }
-            typing.hostEdited()
-            typing.ownEdit(contextBefore: expected)
-            versions = nil
-            liveStats.applies += 1; liveStats.insertedChars += step.insertedChars; liveStats.deletedChars += step.deletedChars
+            performLive(step.ops, expected: shadow.expectedBefore)
+            liveStats.applies += step.ops.count; liveStats.insertedChars += step.insertedChars; liveStats.deletedChars += step.deletedChars
             if step.rewrote { liveStats.rewrites += 1 }
         }
         if step.applied, let version = step.version, version != liveAckedVersion {
             liveAckedVersion = version
             writeLiveAck(version: version, complete: snapshot.complete)
         }
-        if step.needsTicks, isVisible, !flush { startLiveTicker() } else { stopLiveTicker() }
+        return step
+    }
+
+    /// The run's ops into the field; `expected`: the text before the cursor once they ran.
+    private func performLive(_ ops: [ShadowOp], expected: String) {
+        wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+        clearWatch.ownEdit(at: Date())
+        history.cursorMoved()
+        wordRow.interruptTyping() // what was typed so far is learned; the dictation is not typing
+        for op in ops {
+            switch op {
+            case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
+            case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
+            case .insert(let text): document.insert(text)
+            }
+        }
+        typing.hostEdited()
+        typing.ownEdit(contextBefore: expected)
+        versions = nil
     }
 
     private func startLiveTicker() {
@@ -924,12 +970,15 @@ final class KeyboardController {
 
     /// A Return holds no clear back (`ClearWatch.returnTyped`): in a chat app it sends and empties the field.
     /// `contextBefore`: the text before the cursor as the typing model tracks it (the field's own report lags).
-    func type(_ text: String, contextBefore: String? = nil) {
+    /// Returns whether a half-revealed live word was finished in front of the key (the context moved).
+    @discardableResult
+    func type(_ text: String, contextBefore: String? = nil) -> Bool {
         versions = nil // the user moved on from the dictation
-        interruptDictation()
+        // A live word finished first moves the cursor: the caller's context is from before it.
+        let finished = interruptDictation(key: text)
         resolveHeldClear()
         beforeUserEdit()
-        let before = contextBefore ?? document.contextBefore
+        let before = finished ? typing.contextBefore : contextBefore ?? document.contextBefore
         let selected = document.selectedText
         document.insert(text)
         if text == "\n" { clearWatch.returnTyped(at: Date()) } else { clearWatch.ownEdit(at: Date()) }
@@ -943,6 +992,7 @@ final class KeyboardController {
         syncHistory()
         wordRow.keystroke(contextBefore: before + text)
         afterUserEdit()
+        return finished
     }
 
     func deleteBackward(contextBefore: String? = nil) {
