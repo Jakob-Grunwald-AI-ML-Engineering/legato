@@ -94,3 +94,12 @@ uv run python -m streaming_spike.run run --parallel 1        # full run (about 2
 uv run python -m streaming_spike.run report                  # tables
 ```
 Keys: `SONIOX_API_KEY` / `ANTHROPIC_API_KEY` from env or the keys file; estimate guard aborts above EUR 5.
+
+## Product rule: walk lazily (Jakob, 2026-11-08)
+
+Walking moves the host's visible cursor, so the product walks only when it must:
+- Seed the shadow from the free before/after-cursor context; no walk at session start.
+- Apply every Legato edit to the shadow directly; no read-back.
+- Drift check: compare the proxy's window around the cursor with the shadow after each edit; walk only the mismatched stretch.
+- Full-field walk only when an instruction targets the whole field without a selection (once, with a "reading" state). With a selection, use `selectedText`.
+- Far edits move the cursor to the edit point and back without reading in between.

@@ -169,9 +169,19 @@ final class ShadowSpike {
         var text = ""
         guardCount = 0
         var stitchMismatch = 0
+        var rereads = 0
         while guardCount < 4000 {
             guardCount += 1
-            let snap = snapshot()
+            var snap = snapshot()
+            // Re-read while the window before the cursor disagrees with the text so far (a stale pair).
+            var tries = 0
+            while tries < 10 {
+                try? await Task.sleep(for: .milliseconds(15))
+                let again = snapshot()
+                // Accept only two consecutive identical reads that also stitch onto the text so far.
+                if again == snap, snap.before.isEmpty || text.hasSuffix(snap.before) { break }
+                snap = again; tries += 1; rereads += 1
+            }
             afterSizes.append(snap.after.utf16.count)
             // Consistency: what the field says is before the cursor must be the end of what we have.
             let b = snap.before
@@ -209,7 +219,7 @@ final class ShadowSpike {
             "stepsBack": backSteps, "stepsFwd": fwdSteps, "origOffset": origOffset,
             "beforeWindows": stat(beforeSizes), "afterWindows": stat(afterSizes),
             "initialBefore": s0.before.utf16.count, "initialAfter": s0.after.utf16.count,
-            "stitchMismatch": stitchMismatch, "origMatchesInitialWindows": beforeOK && afterOK,
+            "stitchMismatch": stitchMismatch, "rereads": rereads, "origMatchesInitialWindows": beforeOK && afterOK,
             "cursorExact": cursorExact, "selBefore": sel0.utf16.count, "selAfter": sel1.utf16.count,
             "selectionPreserved": sel0 == sel1,
             "settleAvgMs": proxyWaits.isEmpty ? 0 : Int(proxyWaits.reduce(0, +) / Double(proxyWaits.count)),
