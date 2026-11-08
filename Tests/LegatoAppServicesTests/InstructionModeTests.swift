@@ -154,6 +154,27 @@ private final class MemoryHistory: HistoryStore, @unchecked Sendable {
         #expect(session.strip.message == InstructionFailure.malformedReply.message)
     }
 
+    @Test func deletingEverythingLandsEmptyAndUndoPutsItBack() async throws {
+        let field = FakeField(text: "Notes\nhey can you send the file", sessionLength: 25)
+        let session = InstructionSession(runner: FixedRunner(reply: "SCOPE: all\n"))
+        session.field = field
+        session.begin(); session.hear(line("delete everything")); session.end()
+        try await until { session.strip.phase == .result }
+        #expect(field.text == "" && session.strip.message == "Deleted the whole text.")
+        session.handle(InstructionIntent(action: .undo, instructionID: session.strip.instructionID))
+        try await until { session.strip.phase == .undone }
+        #expect(field.text == "Notes\nhey can you send the file")
+    }
+
+    @Test func aNoOpSaysSoWithoutRetry() async throws {
+        let field = FakeField(text: "Some text", sessionLength: 9)
+        let session = InstructionSession(runner: FixedRunner(reply: "SCOPE: session\nSome text"))
+        session.field = field
+        session.begin(); session.hear(line("banana")); session.end()
+        try await until { session.strip.phase == .failed }
+        #expect(session.strip.message == "Nothing to change for that instruction." && session.strip.canRetry == false)
+    }
+
     @Test func anEditThatStoppedPartwayCanStillBeUndone() async throws {
         let field = FakeField(text: "Notes\nhey can you send the file", sessionLength: 25)
         field.stopWith = "Could you send the file"

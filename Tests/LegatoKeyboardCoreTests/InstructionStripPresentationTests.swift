@@ -36,6 +36,9 @@ import Testing
         let failed = present(.failed, message: "The text changed.", canUndo: true)
         #expect(failed?.showsRetry == true && failed?.showsUndo == true && failed?.showsAccept == false)
         #expect(present(.failed)?.showsUndo == false)
+        let nothing = InstructionStripPresentation(strip: InstructionStrip(phase: .failed, message: "Nothing to change for that instruction.", canRetry: false),
+                                                   isReadingField: false, magic: .off)
+        #expect(nothing?.showsRetry == false, "Running a no-op again changes nothing")
     }
 
     @Test func aKeystrokeKeepsAResultAndLetsAFailureGo() {

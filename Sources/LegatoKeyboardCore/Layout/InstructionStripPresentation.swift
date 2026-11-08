@@ -13,7 +13,7 @@ public struct InstructionStripPresentation: Equatable, Sendable {
         /// The result is in the field: Accept and Undo.
         case result
         case undone
-        /// Nothing changed: the message, Retry, and Undo when the field may hold a partial edit.
+        /// Nothing changed: the message, Retry when running again could help, and Undo when the field may hold a partial edit.
         case failed
     }
 
@@ -54,7 +54,8 @@ public struct InstructionStripPresentation: Equatable, Sendable {
         case .undone:
             self.init(kind: .undone, text: message ?? "Undone.")
         case .failed:
-            self.init(kind: .failed, text: message ?? "That didn't work.", showsUndo: strip?.canUndo ?? false, showsRetry: true)
+            self.init(kind: .failed, text: message ?? "That didn't work.", showsUndo: strip?.canUndo ?? false,
+                      showsRetry: strip?.canRetry != false)
         }
     }
 

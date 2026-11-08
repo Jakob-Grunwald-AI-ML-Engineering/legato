@@ -170,7 +170,7 @@ extension InstructionRunner: InstructionRunning {}
                 self.words = []
                 await self.save(original: edit.scopeText, result: edit.target)
                 self.update(InstructionStrip(instructionID: id, phase: .result, transcript: transcript, scope: outcome.scope.rawValue,
-                                             message: Self.done(outcome.scope), canUndo: true))
+                                             message: Self.done(outcome.scope, deleted: edit.target.isEmpty), canUndo: true))
                 self.diagnostics?("instruction.run", ["ok": true, "scope": outcome.scope.rawValue, "reads": outcome.reads,
                                                       "chars": edit.scopeText.count, "newChars": edit.target.count, "ms": Self.ms(since: started)])
             } catch is CancellationError {
@@ -180,7 +180,8 @@ extension InstructionRunner: InstructionRunning {}
                 let failure = error as? InstructionFailure ?? .provider(String(describing: type(of: error)))
                 Self.log.error("instruction failed: \(String(describing: failure).prefix(200), privacy: .public)")
                 self.diagnostics?("instruction.run", ["ok": false, "reason": Self.reason(failure), "ms": Self.ms(since: started)])
-                self.update(InstructionStrip(instructionID: id, phase: .failed, transcript: transcript, message: failure.message))
+                self.update(InstructionStrip(instructionID: id, phase: .failed, transcript: transcript, message: failure.message,
+                                             canRetry: failure.canRetry))
             }
         }
     }
@@ -224,22 +225,26 @@ extension InstructionRunner: InstructionRunning {}
 
     /// What the model is shown, from the keyboard's read.
     static func context(_ reply: FieldReadReply) -> InstructionContext {
-        let final: Bool = switch reply.stop {
-        case .start, .quote, .signature, .cap: true
-        case .block, .unread: !reply.moreAbove
-        }
+        // Final: nothing more is read on that side. Complete: the shown text reaches the end of the user's text there.
+        func final(_ stop: FieldStop, more: Bool) -> Bool { [.start, .quote, .signature, .cap].contains(stop) || !more }
+        func complete(_ stop: FieldStop, more: Bool) -> Bool { [.start, .quote, .signature].contains(stop) || !more }
+        let below = reply.stopBelow ?? .unread
         return InstructionContext(above: reply.above, below: reply.below, selection: reply.selection, sessionLength: reply.sessionLength,
-                                  moreAbove: reply.moreAbove, moreBelow: reply.moreBelow, aboveFinal: final)
+                                  moreAbove: reply.moreAbove, moreBelow: reply.moreBelow,
+                                  aboveFinal: final(reply.stop, more: reply.moreAbove), belowFinal: final(below, more: reply.moreBelow),
+                                  aboveComplete: complete(reply.stop, more: reply.moreAbove), belowComplete: complete(below, more: reply.moreBelow))
     }
 
-    private static func done(_ scope: InstructionScope) -> String {
-        switch scope {
-        case .selection: "Rewrote the selection."
-        case .session: "Rewrote what you dictated."
-        case .paragraph: "Rewrote the paragraph."
-        case .above: "Rewrote the text above the cursor."
-        case .all: "Rewrote the text."
+    /// The strip's line for a landed result: what was done, to which part.
+    static func done(_ scope: InstructionScope, deleted: Bool) -> String {
+        let part = switch scope {
+        case .selection: "the selection"
+        case .session: "what you dictated"
+        case .paragraph: "the paragraph"
+        case .above: "the text above"
+        case .all: "the whole text"
         }
+        return (deleted ? "Deleted " : "Rewrote ") + part + "."
     }
 
     private static func reason(_ failure: InstructionFailure) -> String {
@@ -251,6 +256,10 @@ extension InstructionRunner: InstructionRunning {}
         case .unavailableScope(let scope): "unavailable-\(scope.rawValue)"
         case .emptyText: "empty"
         case .unchanged: "unchanged"
+        case .noText: "noText"
+        case .commentary: "commentary"
+        case .partialScope(let scope): "partial-\(scope.rawValue)"
+        case .overreach: "overreach"
         case .read: "read"
         }
     }
@@ -275,7 +284,8 @@ extension InstructionRunner: InstructionRunning {}
         var value = value
         value.revision = strip.revision + 1
         guard value.phase != strip.phase || value.transcript != strip.transcript || value.message != strip.message
-                || value.instructionID != strip.instructionID || value.canUndo != strip.canUndo || value.scope != strip.scope else { return }
+                || value.instructionID != strip.instructionID || value.canUndo != strip.canUndo || value.scope != strip.scope
+                || value.canRetry != strip.canRetry else { return }
         strip = value
         field?.publish(value)
     }
