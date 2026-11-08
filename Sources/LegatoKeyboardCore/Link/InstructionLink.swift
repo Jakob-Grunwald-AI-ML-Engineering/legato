@@ -50,10 +50,12 @@ public struct InstructionStrip: Codable, Sendable, Equatable {
     /// A short status or error line for the strip ("Rewrote the paragraph.", "The text changed, so nothing was edited.").
     public var message: String?
     public var canUndo: Bool
+    /// On `failed`: running the same instruction again could help (false for "nothing to change", "no text"; nil: true).
+    public var canRetry: Bool?
     public init(revision: Int = 0, instructionID: String? = nil, phase: Phase = .idle, transcript: String = "",
-                scope: String? = nil, message: String? = nil, canUndo: Bool = false) {
+                scope: String? = nil, message: String? = nil, canUndo: Bool = false, canRetry: Bool? = nil) {
         self.revision = revision; self.instructionID = instructionID; self.phase = phase; self.transcript = transcript
-        self.scope = scope; self.message = message; self.canUndo = canUndo
+        self.scope = scope; self.message = message; self.canUndo = canUndo; self.canRetry = canRetry
     }
 }
 
@@ -104,7 +106,7 @@ public struct FieldReadRequest: Codable, Sendable, Equatable {
         case context
         /// One more block above what was read (`read_more`): a paragraph group of at most `FieldReader.blockLimit`.
         case more
-        /// Everything above what was read, up to the cap.
+        /// Everything above and then below what was read, up to the cap in all.
         case toCap
     }
     public var id: String
@@ -129,13 +131,16 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
     public var state: State
     /// Verified text above the cursor, from `stop` (or what was read) down to the cursor.
     public var above: String
-    /// From the cursor to the end of its paragraph, as far as the field showed it.
+    /// From the cursor down: the host's window after it, or what a downward read verified (to `stopBelow`).
     public var below: String
     /// The selected text; with a selection nothing is walked and only the selection can be edited.
     public var selection: String?
     /// How many characters at the end of `above` Legato itself typed in this keyboard session (0: none known).
     public var sessionLength: Int
     public var stop: FieldStop
+    /// How the text below ended: `.start` for the field's end, `.quote`/`.signature`/`.cap` after a downward read;
+    /// nil (or `.unread`) when only the host's window is known.
+    public var stopBelow: FieldStop?
     /// Text continues above `above` / below `below` that was not read.
     public var moreAbove: Bool
     public var moreBelow: Bool
@@ -143,9 +148,10 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
     public var error: String?
     public var documentID: String?
     public init(id: String, state: State, above: String = "", below: String = "", selection: String? = nil, sessionLength: Int = 0,
-                stop: FieldStop = .unread, moreAbove: Bool = false, moreBelow: Bool = false, error: String? = nil, documentID: String? = nil) {
+                stop: FieldStop = .unread, stopBelow: FieldStop? = nil, moreAbove: Bool = false, moreBelow: Bool = false, error: String? = nil,
+                documentID: String? = nil) {
         self.id = id; self.state = state; self.above = above; self.below = below; self.selection = selection
-        self.sessionLength = sessionLength; self.stop = stop; self.moreAbove = moreAbove; self.moreBelow = moreBelow
+        self.sessionLength = sessionLength; self.stop = stop; self.stopBelow = stopBelow; self.moreAbove = moreAbove; self.moreBelow = moreBelow
         self.error = error; self.documentID = documentID
     }
 }

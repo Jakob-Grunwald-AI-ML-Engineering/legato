@@ -13,7 +13,8 @@ import Foundation
     func pause(milliseconds: Int) async
 }
 
-/// Reads the field upward from the cursor, a window at a time, and returns the cursor where it was.
+/// Reads the field upward (`readUp`) or downward (`readDown`) from the cursor, a window at a time, and returns the
+/// cursor where it was.
 ///
 /// Walking is rare (it visibly moves the cursor) and self-verifying: a window pair counts only after two identical
 /// consecutive reads that also stitch onto the text read so far (the window after the new position must start with
@@ -145,9 +146,77 @@ import Foundation
         return .success(result)
     }
 
+    /// Extends `known` (text that starts at the cursor, as the host's window after it showed it; empty for none)
+    /// downward, the same self-verifying way as `readUp`: a window counts after two identical reads whose window
+    /// before the new position ends with the text read so far. `room` caps the characters below the cursor. Stops at
+    /// the field's end (`.start` stands for it here: nothing more), at a structural stop below (a quote header, quoted
+    /// lines, a signature: the text from that line on is not the user's), or at `room`. The cursor goes back where it was.
+    public func readDown(_ proxy: any FieldWindowProxy, known: String, room: Int) async -> Swift.Result<Result, Failure> {
+        guard known.isEmpty || Self.stitches(after: proxy.windowAfter, onto: known) else { return .failure(.changed) }
+        let origin = proxy.windowBefore
+        var text = known
+        var moved = 0
+        var result = Result(text: known, added: 0, stop: .start, moreRemains: false)
+        if !known.isEmpty {
+            // The text already known is jumped over in one move.
+            moved = known.utf16.count
+            proxy.move(by: moved)
+        }
+        var failure: Failure?
+        while true {
+            switch await stablePair(proxy, offset: moved, result: &result, stitches: { Self.stitches(before: $0.before, onto: text) }) {
+            case .failure(let reason): failure = reason
+            case .success(let pair):
+                result.steps += 1
+                var window = pair.after
+                if window.isEmpty { result.stop = .start; result.moreRemains = false; break }
+                let left = room - text.count
+                let clipped = window.count >= left
+                if clipped { window = String(window.prefix(max(0, left))) }
+                text += window
+                if let stop = Self.structuralStopBelow(in: text) {
+                    text = String(text[..<stop.index])
+                    result.stop = stop.kind; result.moreRemains = true
+                    break
+                }
+                if clipped {
+                    text = Self.trimToLineEnd(text: text, keeping: known.count)
+                    result.stop = .cap; result.moreRemains = true
+                    break
+                }
+                let units = window.utf16.count
+                proxy.move(by: units)
+                moved += units
+                continue
+            }
+            break
+        }
+        if moved > 0 { proxy.move(by: -moved) }
+        if let failure { return .failure(failure) }
+        // Back at the cursor: two reads that agree, the window after starting with what was read, the one before as it was.
+        var back: (before: String, after: String)?
+        var last: (String, String)?
+        for _ in 0...(maxRereads + 1) {
+            await proxy.pause(milliseconds: settleMilliseconds)
+            let pair = (proxy.windowBefore, proxy.windowAfter)
+            if let last, last == pair { back = pair; break }
+            last = pair
+        }
+        guard let back, text.isEmpty ? back.after.isEmpty : Self.stitches(after: back.after, onto: text),
+              origin.isEmpty ? back.before.isEmpty : Self.stitches(before: back.before, onto: origin) else { return .failure(.cursorLost) }
+        result.text = text
+        result.added = max(0, text.count - known.count)
+        return .success(result)
+    }
+
     /// Two identical consecutive reads that stitch onto `text` (the window after the position starts with it).
     private func stablePair(_ proxy: any FieldWindowProxy, stitching text: String, offset: Int,
                             result: inout Result) async -> Swift.Result<(before: String, after: String), Failure> {
+        await stablePair(proxy, offset: offset, result: &result) { Self.stitches(after: $0.after, onto: text) }
+    }
+
+    private func stablePair(_ proxy: any FieldWindowProxy, offset: Int, result: inout Result,
+                            stitches: ((before: String, after: String)) -> Bool) async -> Swift.Result<(before: String, after: String), Failure> {
         var last: (String, String)?
         var failure = Failure.unstable(offset: offset)
         for attempt in 0...(maxRereads + 1) {
@@ -155,7 +224,7 @@ import Foundation
             let pair = (proxy.windowBefore, proxy.windowAfter)
             if attempt > 1 { result.rereads += 1 }
             if let previous = last, previous == pair {
-                if Self.stitches(after: pair.1, onto: text) { return .success((pair.0, pair.1)) }
+                if stitches((pair.0, pair.1)) { return .success((pair.0, pair.1)) }
                 failure = .stitch(offset: offset)
             }
             last = pair
@@ -168,6 +237,13 @@ import Foundation
         if text.isEmpty { return true }
         if window.isEmpty { return false }
         return text.hasPrefix(window) || window.hasPrefix(text)
+    }
+
+    /// The window before a position must end with the text read above it (each side may be cut short).
+    public static func stitches(before window: String, onto text: String) -> Bool {
+        if text.isEmpty { return true }
+        if window.isEmpty { return false }
+        return text.hasSuffix(window) || window.hasSuffix(text)
     }
 
     // MARK: Structural stops
@@ -199,6 +275,18 @@ import Foundation
         return nil
     }
 
+    /// The nearest structural stop below the start of `text` (read downward from the cursor): where its line begins.
+    /// The cursor's own line and a last line that may be cut off (no line break after it yet) never count.
+    public static func structuralStopBelow(in text: String) -> Stop? {
+        guard var start = text.firstIndex(where: \.isNewline).map({ text.index(after: $0) }) else { return nil }
+        while start < text.endIndex {
+            guard let end = text[start...].firstIndex(where: \.isNewline) else { return nil }
+            if let kind = stopKind(of: text[start..<end]) { return Stop(index: start, kind: kind) }
+            start = text.index(after: end)
+        }
+        return nil
+    }
+
     static func stopKind(of line: Substring) -> FieldStop? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if line == "-- " || trimmed == "--" { return .signature }
@@ -226,6 +314,16 @@ import Foundation
         guard added.count >= blockMinimum, let newline = added.firstIndex(where: \.isNewline) else { return nil }
         let start = added.index(after: newline)
         return added.distance(from: start, to: added.endIndex) >= blockMinimum ? start : nil
+    }
+
+    /// A downward read cut by its room ends at a line end close to the cut, else at a word end; the first `keeping`
+    /// characters (known before the read) always stay.
+    static func trimToLineEnd(text: String, keeping: Int) -> String {
+        let floor = text.index(text.startIndex, offsetBy: min(keeping, text.count))
+        let tail = text[floor...]
+        if let newline = tail.suffix(300).lastIndex(where: \.isNewline) { return String(text[..<newline]) }
+        if let space = tail.lastIndex(where: \.isWhitespace) { return String(text[..<space]) }
+        return text
     }
 
     /// A read that was cut by a limit starts at a line start when the newly read part has one, else at a word start.

@@ -117,6 +117,34 @@ private func paragraphs(_ count: Int) -> String {
         #expect(result.moreRemains)
     }
 
+    @Test func readsDownFromTheCursorToTheFieldsEndAndReturns() async throws {
+        let text = paragraphs(8)
+        let field = FakeField(text, cursor: 0)
+        field.staleReads = 1
+        let known = String(text.prefix(65))
+        let result = try await FieldReader(settleMilliseconds: 0).readDown(field, known: known, room: 10_000).get()
+        #expect(result.text == text)
+        #expect(result.stop == .start && !result.moreRemains, "The field's end")
+        #expect(field.cursor == 0)
+        let mid = text.count / 2
+        let middle = FakeField(text, cursor: mid)
+        let rest = try await FieldReader(settleMilliseconds: 0).readDown(middle, known: "", room: 10_000).get()
+        #expect(rest.text == String(text.dropFirst(mid)) && middle.cursor == mid)
+    }
+
+    @Test func readingDownStopsAtTheRoomOrAQuoteBelow() async throws {
+        let text = paragraphs(30)
+        let capped = try await FieldReader(settleMilliseconds: 0).readDown(FakeField(text, cursor: 0), known: "", room: 1000).get()
+        #expect(capped.stop == .cap && capped.moreRemains)
+        #expect(capped.text.count <= 1000 && text.hasPrefix(capped.text) && text.dropFirst(capped.text.count).hasPrefix("\n"),
+                "A capped read down ends at a line end")
+        let mail = "Sounds good, see you then.\nJo\n\nOn Mon, 3 Nov 2026 at 10:12, Anna <anna@example.com> wrote:\n> Shall we meet at nine?\n"
+        let quoted = try await FieldReader(settleMilliseconds: 0).readDown(FakeField(mail, cursor: 0), known: "", room: 3000).get()
+        #expect(quoted.text == "Sounds good, see you then.\nJo\n\n" && quoted.stop == .quote && quoted.moreRemains)
+        let changed = await FieldReader(settleMilliseconds: 0).readDown(FakeField(mail, cursor: 0), known: "Something else", room: 3000)
+        #expect(changed == .failure(.changed))
+    }
+
     @Test func structuralStopsAreFoundByLine() {
         func below(_ text: String) -> String? {
             FieldReader.structuralStop(in: text, atFieldStart: true).map { String(text[$0.index...]) }

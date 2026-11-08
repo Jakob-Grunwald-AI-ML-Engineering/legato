@@ -1035,7 +1035,8 @@ final class KeyboardController {
     }
 
     /// Reads the field for the app (`link.read`). The context comes from what is known without moving the cursor (the
-    /// windows around it, the session's text) and walks only when no session text exists and the field shows more.
+    /// windows around it, the session's text) and walks up only when no session text exists and the field shows more.
+    /// `toCap` walks up and then down (below the cursor only the host's window is known until then), to the cap in all.
     private func serveRead(_ request: FieldReadRequest) async {
         guard Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge, let documentID = document.documentID, !document.isSecureTextEntry else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
@@ -1047,10 +1048,10 @@ final class KeyboardController {
         }
         let before = document.contextBefore, after = document.contextAfter
         let selection = document.selectedText.flatMap { $0.isEmpty ? nil : $0 }
-        let paragraphEnd = after.firstIndex(where: \.isNewline) ?? after.endIndex
-        let below = String(after[..<paragraphEnd])
-        let moreBelow = !after.isEmpty && (paragraphEnd < after.endIndex || below.count >= 40)
-        var reply = FieldReadReply(id: request.id, state: .done, below: below, selection: selection, moreBelow: moreBelow, documentID: documentID)
+        // Below the cursor: the host's window, unverified (whether the field ends there is known only after a walk down).
+        let below = String(after.prefix(FieldReader.defaultCap))
+        var reply = FieldReadReply(id: request.id, state: .done, below: below, selection: selection,
+                                   stopBelow: after.isEmpty ? .start : .unread, moreBelow: !after.isEmpty, documentID: documentID)
         switch request.kind {
         case .context:
             if selection != nil {
@@ -1065,7 +1066,7 @@ final class KeyboardController {
             } else if before.isEmpty {
                 reply.stop = .start
             } else {
-                guard let read = await walk(request, known: "", limit: .cap) else { return }
+                guard let read = await walk(request, run: { reader, proxy in await reader.readUp(proxy, known: "", limit: .cap) }) else { return }
                 reply.above = read.text; reply.stop = read.stop; reply.moreAbove = read.moreRemains
             }
         case .more, .toCap:
@@ -1073,22 +1074,37 @@ final class KeyboardController {
                 return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "The text changed while it was read."))
             }
             reply = last.reply; reply.id = request.id
-            guard selection == nil, last.reply.moreAbove else { return link.writeReadReply(reply) }
-            guard let read = await walk(request, known: last.reply.above, limit: request.kind == .more ? .block : .cap) else { return }
-            reply.above = read.text; reply.stop = read.stop; reply.moreAbove = read.moreRemains
+            guard selection == nil else { return link.writeReadReply(reply) }
+            // A stop that is not the cap's or a block's ends the text the user is working on: nothing more there to read.
+            let openAbove = reply.moreAbove && [.unread, .block].contains(reply.stop)
+            let openBelow = request.kind == .toCap && reply.moreBelow && [.unread, .block].contains(reply.stopBelow ?? .unread)
+            if openAbove {
+                let known = reply.above
+                guard let read = await walk(request, run: { reader, proxy in
+                    await reader.readUp(proxy, known: known, limit: request.kind == .more ? .block : .cap)
+                }) else { return }
+                reply.above = read.text; reply.stop = read.stop; reply.moreAbove = read.moreRemains
+            }
+            let room = FieldReader.defaultCap - reply.above.count
+            if openBelow, room > reply.below.count {
+                let known = reply.below
+                guard let read = await walk(request, run: { reader, proxy in await reader.readDown(proxy, known: known, room: room) }) else { return }
+                reply.below = read.text; reply.stopBelow = read.stop; reply.moreBelow = read.moreRemains
+            }
         }
         fieldRead = (request.instructionID, documentID, reply)
-        trace?("instruction read kind=\(request.kind.rawValue) above=\(reply.above.count) stop=\(reply.stop.rawValue) session=\(reply.sessionLength)")
+        trace?("instruction read kind=\(request.kind.rawValue) above=\(reply.above.count) stop=\(reply.stop.rawValue) below=\(reply.below.count) stopBelow=\(reply.stopBelow?.rawValue ?? "unread") session=\(reply.sessionLength)")
         link.writeReadReply(reply)
     }
 
     /// The self-verifying walk (`FieldReader`), with the strip's "reading" state; a failure is answered (no partial text).
-    private func walk(_ request: FieldReadRequest, known: String, limit: FieldReader.Limit) async -> FieldReader.Result? {
+    private func walk(_ request: FieldReadRequest,
+                      run: (FieldReader, any FieldWindowProxy) async -> Result<FieldReader.Result, FieldReader.Failure>) async -> FieldReader.Result? {
         link.writeReadReply(FieldReadReply(id: request.id, state: .reading))
         isReadingField = true
         syncRowTakeover()
         let started = Date()
-        let result = await FieldReader(settleMilliseconds: 25).readUp(DocumentWindows(document), known: known, limit: limit)
+        let result = await run(FieldReader(settleMilliseconds: 25), DocumentWindows(document))
         isReadingField = false
         // The cursor is back where it was: the keyboard catches up with the field once.
         documentDidChange()
