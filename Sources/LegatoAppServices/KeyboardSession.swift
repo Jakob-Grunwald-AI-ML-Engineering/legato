@@ -1,8 +1,10 @@
 import Foundation
 import Observation
 import os
+import LegatoAgent
 import LegatoClaude
 import LegatoComposerDoc
+import LegatoKeyboardCore
 import LegatoRoom
 import LegatoSoniox
 import LegatoVocabulary
@@ -15,6 +17,9 @@ import LegatoVocabulary
 /// Surfaces decide routes: typing → `dictation`, whose finalized lines go to a `DictationRouteSink`
 /// through a Room of their own; composer → `agent`, the existing composition. Dictation audio never
 /// reaches the composition.
+///
+/// On the dictation route the keyboard's magic toggle tags speech (`SpeechModeSink`): dictation goes to the sink,
+/// instruction speech to `instruction`, which runs it when the toggle goes off.
 @MainActor @Observable public final class KeyboardSession {
     public private(set) var isOpen = false
     public private(set) var meetingSuspended = false
@@ -50,6 +55,15 @@ import LegatoVocabulary
     public private(set) var probes: [TapLatencyProbe.Result] = []
     @ObservationIgnored private let composer: ComposerSession
     @ObservationIgnored private let sink: any DictationRouteSink
+    /// In front of `sink`: speech in instruction mode goes to `instruction` instead.
+    @ObservationIgnored private let modeSink: SpeechModeSink
+    /// The keyboard's instruction mode (the magic toggle's speech, its run, the strip).
+    @ObservationIgnored public let instruction: InstructionSession
+    /// The magic toggle as the keyboard last reported it: only a change acts (a debug override then stays).
+    @ObservationIgnored private var reportedMagic = MagicToggle.off
+    /// Applies the toggle's change when the stream's cut does not come through in time.
+    @ObservationIgnored private var cutTimeout: Task<Void, Never>?
+    public var speechMode: SpeechMode { modeSink.target }
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
     @ObservationIgnored private let makeSocket: @Sendable () -> any SonioxSocket
     @ObservationIgnored private let warmConnection: @Sendable () async -> Void
@@ -67,18 +81,33 @@ import LegatoVocabulary
     @ObservationIgnored private var takeFinish: Task<Void, Never>?
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-session")
 
-    public convenience init(composer: ComposerSession, sink: any DictationRouteSink = DiscardingDictationSink()) {
-        self.init(composer: composer, sink: sink,
+    public convenience init(composer: ComposerSession, sink: any DictationRouteSink = DiscardingDictationSink(), instruction: InstructionSession? = nil) {
+        self.init(composer: composer, sink: sink, instruction: instruction ?? InstructionSession(vocabularyURL: composer.vocabularyURL),
                   sonioxKey: { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" },
                   makeSocket: { URLSessionSonioxSocket() }, warmConnection: { await Self.warmClaudeConnection() })
     }
-    init(composer: ComposerSession, sink: any DictationRouteSink, sonioxKey: @escaping @MainActor () -> String,
+    init(composer: ComposerSession, sink: any DictationRouteSink, instruction: InstructionSession? = nil, sonioxKey: @escaping @MainActor () -> String,
          makeSocket: @escaping @Sendable () -> any SonioxSocket, warmConnection: @escaping @Sendable () async -> Void,
          now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime }) {
         self.composer = composer; self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
         self.warmConnection = warmConnection; self.now = now
+        self.instruction = instruction ?? InstructionSession(runner: InstructionRunner(client: MessagesStream(keyStore: KeychainKeyStore()), model: { .haiku }))
+        modeSink = SpeechModeSink(dictation: sink)
         composer.makeSocket = makeSocket
-        dictation = DictationEngine(sink: sink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: composer.vocabularyURL, now: now)
+        dictation = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: composer.vocabularyURL, now: now)
+        let instructionSession = self.instruction
+        modeSink.onInstructionLine = { line in instructionSession.hear(line) }
+        modeSink.onInstructionTail = { text in instructionSession.hearTail(text) }
+        modeSink.onTransition = { transition in
+            if transition.to == .instruction { instructionSession.begin() } else { instructionSession.end() }
+        }
+        if instructionSession.beforeRun == nil, let pipeline = sink as? DictationPipeline {
+            // The dictation just before the instruction lands first (its last sentence's cleanup), then the field is read.
+            instructionSession.beforeRun = {
+                _ = await pipeline.settle(timeout: .seconds(3))
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
         dictation.onTail = { [weak self] text in self?.observeTail(text, route: .dictation) }
         composer.onTail = { [weak self] text in self?.observeTail(text, route: .agent) }
         composer.keyboardDiagnostics = { [weak self] in self?.diagnostics ?? [:] }
@@ -145,8 +174,10 @@ import LegatoVocabulary
         isOpen = false; probe.cancel()
         // The take is the keyboard appearance's: closing mid-take drops what was not sent.
         takeFinish?.cancel(); takeFinish = nil
+        cutTimeout?.cancel(); cutTimeout = nil; reportedMagic = .off
         await closeDictation()
-        await sink.reset()
+        await modeSink.reset()
+        instruction.reset()
         dictation.resetSequence()
         composer.dictationAudio = nil
         await composer.endKeyboardSession()
@@ -257,6 +288,39 @@ import LegatoVocabulary
         probe.cancel()
     }
 
+    // MARK: Instruction mode
+
+    /// The keyboard's presence reported the magic toggle: only a change acts on it.
+    public func magicReported(_ toggle: MagicToggle) {
+        guard toggle != reportedMagic else { return }
+        reportedMagic = toggle
+        setMagic(toggle)
+    }
+
+    /// The magic toggle: on, speech from now on is an instruction; off, the instruction runs once its last words are
+    /// through. Words on their way when it changes keep the mode they were spoken in (the stream is cut first).
+    public func setMagic(_ toggle: MagicToggle) {
+        guard isOpen, !meetingSuspended else { return }
+        let mode: SpeechMode = toggle.isOn ? .instruction : .dictation
+        guard mode != modeSink.target else { return }
+        let dictation = self.dictation
+        let cut = gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying
+        modeSink.toggle(to: mode, cut: cut)
+        guard cut else { return }
+        Task { [weak self] in
+            if !(await dictation.finalizeChunk()) { self?.modeSink.flushCuts() }
+        }
+        cutTimeout?.cancel()
+        cutTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.modeSink.flushCuts()
+        }
+    }
+
+    /// A tap on the instruction strip.
+    public func handle(_ intent: InstructionIntent) { instruction.handle(intent) }
+
     // MARK: Dictation route
 
     private func openDictation() { dictation.open() }
@@ -326,7 +390,7 @@ import LegatoVocabulary
     }
 
     var diagnostics: [String: Any] {
-        ["open": isOpen, "surface": gate.surface.rawValue, "route": gate.route.rawValue,
+        ["open": isOpen, "surface": gate.surface.rawValue, "route": gate.route.rawValue, "speechMode": modeSink.target.rawValue,
          "dictationStreamLive": dictation.isLive, "dictationReconnects": dictation.reconnects,
          "probes": probes.map(\.fields)]
     }
