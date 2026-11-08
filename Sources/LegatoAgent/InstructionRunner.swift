@@ -8,26 +8,39 @@ import LegatoRoom
 public struct InstructionContext: Sendable, Equatable {
     /// From where the read stopped down to the cursor.
     public var above: String
-    /// From the cursor to the end of its paragraph, as far as the field showed it.
+    /// From the cursor down, as far as the field showed it or a read down verified it.
     public var below: String
     /// The selected text, if any: then only the selection can be edited.
     public var selection: String?
     /// Characters at the end of `above` that were dictated in this keyboard session (0: none).
     public var sessionLength: Int
-    /// The field has text above / below the shown part.
+    /// The field has text above / below the shown part (or may have: below the host's window nothing is known).
     public var moreAbove: Bool
     public var moreBelow: Bool
-    /// Reading further up is not wanted or not possible (the field's start, a structural stop, the cap).
+    /// Reading further up / down is not wanted or not possible (the field's start or end, a structural stop, the cap).
     public var aboveFinal: Bool
+    public var belowFinal: Bool
+    /// The shown text reaches the start / end of the user's text: the field's own, or a structural stop (a quote, a
+    /// signature). Not after the cap. A scope that runs to that end (`above`, `all`) is complete only then.
+    public var aboveComplete: Bool
+    public var belowComplete: Bool
     public init(above: String = "", below: String = "", selection: String? = nil, sessionLength: Int = 0,
-                moreAbove: Bool = false, moreBelow: Bool = false, aboveFinal: Bool = true) {
+                moreAbove: Bool = false, moreBelow: Bool = false, aboveFinal: Bool = true, belowFinal: Bool? = nil,
+                aboveComplete: Bool? = nil, belowComplete: Bool? = nil) {
         self.above = above; self.below = below; self.selection = selection?.isEmpty == false ? selection : nil
         self.sessionLength = min(max(0, sessionLength), above.count)
         self.moreAbove = moreAbove; self.moreBelow = moreBelow; self.aboveFinal = aboveFinal
+        self.belowFinal = belowFinal ?? !moreBelow
+        self.aboveComplete = aboveComplete ?? !moreAbove
+        self.belowComplete = belowComplete ?? !moreBelow
     }
     /// More can be read above (`read_more`, or a read up to the cap).
     public var canReadAbove: Bool { selection == nil && moreAbove && !aboveFinal }
+    /// More can be read below (a read to the cap reads down after reading up).
+    public var canReadBelow: Bool { selection == nil && moreBelow && !belowFinal }
     public var session: String { String(above.suffix(sessionLength)) }
+    /// No text to work on: nothing selected, and nothing around the cursor.
+    public var isEmpty: Bool { selection == nil && (above + below).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !moreAbove && !moreBelow }
     /// The scopes this context offers, smallest first.
     public var scopes: [InstructionScope] {
         if selection != nil { return [.selection] }
@@ -61,11 +74,24 @@ public enum InstructionScope: String, CaseIterable, Sendable, Equatable {
 
     /// A reply for this scope needs more than the model was shown: the read to make before asking again.
     public func read(for context: InstructionContext) -> InstructionRead? {
-        guard context.canReadAbove else { return nil }
         switch self {
         case .selection, .session: return nil
-        case .paragraph: return context.above.contains(where: \.isNewline) ? nil : .block
-        case .above, .all: return .toCap
+        case .paragraph:
+            // The paragraph runs on past the shown text: below only a read to the cap reads down.
+            if context.canReadBelow, !context.below.contains(where: \.isNewline) { return .toCap }
+            return context.canReadAbove && !context.above.contains(where: \.isNewline) ? .block : nil
+        case .above: return context.canReadAbove ? .toCap : nil
+        case .all: return context.canReadAbove || context.canReadBelow ? .toCap : nil
+        }
+    }
+
+    /// The scope reaches past what was read (`above` or `all` cut by the cap or not read to its end): landing it would
+    /// claim the whole text while editing a part of it.
+    public func isPartial(in context: InstructionContext) -> Bool {
+        switch self {
+        case .selection, .session, .paragraph: false
+        case .above: !context.aboveComplete
+        case .all: !context.aboveComplete || !context.belowComplete
         }
     }
 }
@@ -77,11 +103,13 @@ public struct InstructionScopeRange: Sendable, Equatable {
     public init(before: String, after: String, selected: String? = nil) { self.before = before; self.after = after; self.selected = selected }
     public var text: String { selected ?? (before + after) }
 
-    /// The reply's text as the scope's replacement: the scope's own leading and trailing whitespace stays.
+    /// The reply's text as the scope's replacement: the scope's own leading and trailing whitespace stays. An empty
+    /// reply deletes the scope, whitespace and all.
     public func target(for reply: String) -> String {
         let text = self.text
-        let lead = text.prefix(while: \.isWhitespace), trail = String(text.reversed().prefix(while: \.isWhitespace).reversed())
         let body = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return "" }
+        let lead = text.prefix(while: \.isWhitespace), trail = String(text.reversed().prefix(while: \.isWhitespace).reversed())
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return lead + body }
         return lead + body + trail
     }
@@ -93,6 +121,67 @@ public enum InstructionRead: String, Sendable, Equatable {
     case block
     /// Everything above up to the cap.
     case toCap
+}
+
+/// Cheap checks on a reply before it lands: a remark instead of text, and a rewrite of more (or of another part) than
+/// the instruction is about. Both err on the side of landing: a whole-text rewrite ("make this more formal") passes.
+enum InstructionGuard {
+    /// One parenthesised, bracketed or starred remark on one line: "(The field is emptied.)", "[deleted]".
+    static func isRemark(_ text: String) -> Bool {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 3, !text.contains(where: \.isNewline) else { return false }
+        for (open, close) in [("(", ")"), ("[", "]"), ("*", "*")] as [(Character, Character)] where text.first == open && text.last == close {
+            let inner = text.dropFirst().dropLast()
+            if !inner.contains(open), !inner.contains(close) { return true }
+        }
+        return false
+    }
+
+    /// The target is no edit of the scope it replaces: it resembles another shown paragraph much more than the scope
+    /// (the cursor's paragraph replaced by a rewrite of the one above), or an instruction about one part (a paragraph,
+    /// a sentence) rewrote nearly every paragraph of a long `above`/`all`.
+    static func overreaches(instruction: String, scope: InstructionScope, range: InstructionScopeRange, target: String,
+                            context: InstructionContext) -> Bool {
+        guard range.selected == nil, !target.isEmpty else { return false }
+        if scope != .all {
+            let words = Self.words(target)
+            let outside = String(context.above.dropLast(range.before.count)) + "\n" + String(context.below.dropFirst(range.after.count))
+            if words.count >= 6, let best = paragraphs(outside).map({ containment(words, in: Self.words($0)) }).max() {
+                let own = containment(words, in: Self.words(range.text))
+                if best >= 0.6, best > own + 0.25 { return true }
+            }
+        }
+        if scope == .above || scope == .all, range.text.count >= 400, isLocal(instruction) {
+            let source = paragraphs(range.text)
+            let kept = Set(paragraphs(target))
+            if source.count >= 3, source.filter(kept.contains).count * 3 < source.count { return true }
+        }
+        return false
+    }
+
+    /// Names one part of the text ("the second paragraph", "the last sentence"), not all of it or each part.
+    static func isLocal(_ instruction: String) -> Bool {
+        let tokens = Set(instruction.lowercased().split(whereSeparator: { !$0.isLetter && $0 != "-" }).map(String.init))
+        let parts: Set<String> = ["paragraph", "sentence", "line", "word", "greeting", "salutation", "closing", "sign-off", "signoff",
+                                  "subject", "bullet", "intro", "introduction", "ending", "opening", "absatz", "satz", "zeile", "wort",
+                                  "anrede", "grußformel", "einleitung", "schluss", "schlusssatz"]
+        let whole: Set<String> = ["each", "every", "all", "whole", "entire", "everything", "paragraphs", "sentences", "lines",
+                                  "jeden", "jede", "jeder", "alle", "ganze", "ganzen", "gesamte", "gesamten", "absätze", "sätze", "zeilen"]
+        return !tokens.isDisjoint(with: parts) && tokens.isDisjoint(with: whole)
+    }
+
+    static func paragraphs(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// Content words (four letters and up: short function words say little about which paragraph this is).
+    static func words(_ text: String) -> Set<String> {
+        Set(text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init).filter { $0.count >= 4 })
+    }
+
+    static func containment(_ words: Set<String>, in other: Set<String>) -> Double {
+        words.isEmpty ? 0 : Double(words.intersection(other).count) / Double(words.count)
+    }
 }
 
 /// The model's plain-text reply: `SCOPE: <name>` on the first line, then the new text for that scope.
@@ -162,9 +251,18 @@ public enum InstructionFailure: Error, Sendable, Equatable {
     case unknownScope(String)
     /// The reply named a scope this context does not offer (`selection` without one, or another scope with one).
     case unavailableScope(InstructionScope)
+    /// An empty reply for a scope that is empty already.
     case emptyText
     /// The new text is the scope's text: nothing to edit.
     case unchanged
+    /// The field has no text, and nothing is selected.
+    case noText
+    /// The reply is a remark about the text ("(The field is emptied.)"), not text.
+    case commentary
+    /// `above` or `all` reaches past what could be read (the cap): only part of it was shown.
+    case partialScope(InstructionScope)
+    /// The reply rewrote much more than the instruction is about, or put another part of the text in this scope's place.
+    case overreach
     /// The keyboard could not read the field (`message` says why).
     case read(String)
 
@@ -173,11 +271,22 @@ public enum InstructionFailure: Error, Sendable, Equatable {
         switch self {
         case .missingKey: "Add your Claude API key in the Legato app to use instructions."
         case .provider: "The instruction didn't go through. Try again."
-        case .malformedReply, .unknownScope, .emptyText: "The instruction gave no usable result. Nothing was changed."
+        case .malformedReply, .unknownScope, .emptyText, .commentary: "The instruction gave no usable result. Nothing was changed."
         case .unavailableScope(let scope): scope == .selection ? "Select the text first, then say the instruction."
             : "With text selected, an instruction edits only the selection."
-        case .unchanged: "Nothing to change."
+        case .unchanged: "Nothing to change for that instruction."
+        case .noText: "There's no text to work on."
+        case .partialScope: "The text is too long to edit here. Select the part to change, then say the instruction."
+        case .overreach: "The result changed more than the instruction asked for, so nothing was changed."
         case .read(let message): message
+        }
+    }
+
+    /// Running the same instruction on the same text again could give another result.
+    public var canRetry: Bool {
+        switch self {
+        case .unchanged, .noText, .partialScope, .unavailableScope, .missingKey: false
+        case .provider, .malformedReply, .unknownScope, .emptyText, .commentary, .overreach, .read: true
         }
     }
 }
@@ -212,6 +321,7 @@ public struct InstructionRunner: Sendable {
     ///   - instruction: the spoken instruction (confidence marks allowed).
     ///   - read: reads more of the field; returns the whole context grown by that read.
     public func run(instruction: String, context: InstructionContext, read: Reader) async throws -> InstructionOutcome {
+        guard !context.isEmpty else { throw InstructionFailure.noText }
         let model = model()
         let system = Self.system(personal: personalPrompt(), vocabulary: await vocabulary())
         var context = context
@@ -236,12 +346,16 @@ public struct InstructionRunner: Sendable {
                         if let block = value["content_block"] { blocks[index] = block }
                         guard let delta = value["delta"] else { continue }
                         if case .string(let fragment) = delta["partial_json"] { inputs[index, default: ""] += fragment }
+                        // Thinking blocks go back with a tool result as they came (their text and signature).
+                        if case .object(var block) = blocks[index] {
+                            for key in ["text", "thinking", "signature"] {
+                                guard case .string(let fragment) = delta[key] else { continue }
+                                if case .string(let old) = block[key] { block[key] = .string(old + fragment) } else { block[key] = .string(fragment) }
+                            }
+                            blocks[index] = .object(block)
+                        }
                         if case .string(let fragment) = delta["text"] {
                             text += fragment
-                            if case .object(var block) = blocks[index] {
-                                if case .string(let old) = block["text"] { block["text"] = .string(old + fragment) } else { block["text"] = .string(fragment) }
-                                blocks[index] = .object(block)
-                            }
                             // The header decides early: a scope bigger than what was shown is read now, not after the whole rewrite.
                             if !headerSeen, text.contains(where: \.isNewline),
                                let (header, end) = InstructionReply.firstHeader(in: text), end < text.endIndex {
@@ -265,7 +379,16 @@ public struct InstructionRunner: Sendable {
                     guard case .string("tool_use") = blocks[key]?["type"], case .string(let id) = blocks[key]?["id"] else { return nil }
                     return (key, id)
                 }
-                guard !calls.isEmpty else { return try outcome(text, context: context, reads: reads) }
+                guard !calls.isEmpty else {
+                    // A reply whose header never had a line after it (a deletion: "SCOPE: all" alone) is read for here.
+                    if !headerSeen, !reasked, let (header, _) = InstructionReply.firstHeader(in: text), case .scope(let scope) = header,
+                       let more = scope.read(for: context) {
+                        context = try await readField(more, read: read)
+                        reads += 1; reasked = true
+                        continue ask
+                    }
+                    return try Self.outcome(reply: text, context: context, reads: reads, instruction: instruction)
+                }
                 // `read_more()`: one more block above, as the tool's result. A failed read is a tool error, never partial text.
                 var content: [JSONValue] = []
                 for key in blocks.keys.sorted() {
@@ -309,12 +432,9 @@ public struct InstructionRunner: Sendable {
         catch { throw InstructionFailure.read(String(describing: error)) }
     }
 
-    private func outcome(_ reply: String, context: InstructionContext, reads: Int) throws -> InstructionOutcome {
-        try Self.outcome(reply: reply, context: context, reads: reads)
-    }
 
     /// The reply against the context: the scope's range and its replacement, or why nothing is edited.
-    public static func outcome(reply: String, context: InstructionContext, reads: Int = 0) throws -> InstructionOutcome {
+    public static func outcome(reply: String, context: InstructionContext, reads: Int = 0, instruction: String = "") throws -> InstructionOutcome {
         let (header, body) = InstructionReply.parse(reply)
         let scope: InstructionScope
         switch header {
@@ -323,9 +443,16 @@ public struct InstructionRunner: Sendable {
         case .scope(let value): scope = value
         }
         guard let range = scope.range(in: context) else { throw InstructionFailure.unavailableScope(scope) }
-        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw InstructionFailure.emptyText }
+        let hasText = !range.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // An empty body deletes the scope; an empty scope has nothing to delete.
+        guard hasText || !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw InstructionFailure.emptyText }
+        guard !scope.isPartial(in: context) else { throw InstructionFailure.partialScope(scope) }
+        if hasText, InstructionGuard.isRemark(body), !InstructionGuard.isRemark(range.text) { throw InstructionFailure.commentary }
         let target = range.target(for: body)
         guard target != range.text else { throw InstructionFailure.unchanged }
+        if InstructionGuard.overreaches(instruction: instruction, scope: scope, range: range, target: target, context: context) {
+            throw InstructionFailure.overreach
+        }
         return InstructionOutcome(scope: scope, range: range, target: target, context: context, reads: reads)
     }
 
@@ -363,8 +490,9 @@ public struct InstructionRunner: Sendable {
 
     public static func request(model: ModelChoice, system: String, messages: [JSONValue], tools: Bool) throws -> Data {
         var fields: [String: JSONValue] = ["model": .string(model.rawValue), "max_tokens": .number(4096), "stream": .bool(true),
-            // A rewrite needs no thinking, and no thinking keeps the first words (the header) quick on every model.
-            "thinking": .object(["type": .string("disabled")]), "system": .string(system), "messages": .array(messages),
+            // A rewrite needs no thinking: Haiku has it off. Sonnet 5.5 rejects `disabled` and thinks only between tool
+            // calls (`between_tools`); Opus is adaptive at low effort (`ModelChoice.thinking`, as cleanup and the composer).
+            "thinking": model.thinking, "system": .string(system), "messages": .array(messages),
             "cache_control": .object(["type": .string("ephemeral")])]
         if tools {
             fields["tools"] = .array([readMoreTool])
