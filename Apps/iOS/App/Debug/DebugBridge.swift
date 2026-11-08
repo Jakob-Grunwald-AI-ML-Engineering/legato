@@ -77,6 +77,12 @@ import UIKit
             harness.cancelOperations(commands: ["dictation-debug-replay"])
             return AppController.shared.dictation.takeState
         }
+        // The "Send dictation" setting (App Group), so a run does not depend on what the phone was left on.
+        harness.register("dictation-debug-mode") { command in
+            guard command.args.count == 1, let mode = DictationSendSetting.Mode(rawValue: command.args[0]) else { throw Usage.invalid }
+            AppGroup.defaults.set(mode.rawValue, forKey: DictationSendSetting.modeKey)
+            return AppController.shared.dictation.takeState
+        }
         harness.register("dictation-state") { _ in AppController.shared.dictation.takeState }
         // The next N take cleanups (default 1) fail twice, so the failed state is reachable without network faults.
         harness.register("dictation-debug-fail-take") { command in
