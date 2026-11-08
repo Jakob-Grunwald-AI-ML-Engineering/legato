@@ -341,6 +341,13 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: sentence, textBefore: before)
     }
 
+    /// An instruction is about to read the field: a live run's held cleanup lands now (the run is complete; speech after
+    /// the instruction is a new run). Other modes only settle.
+    public func finishLiveRun() async {
+        guard mode == .live else { return }
+        await finishLive()
+    }
+
     /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete
     /// with all cleaned sentences in one snapshot.
     private func finishLive() async {

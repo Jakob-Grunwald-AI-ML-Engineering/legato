@@ -102,9 +102,11 @@ import LegatoVocabulary
             if transition.to == .instruction { instructionSession.begin() } else { instructionSession.end() }
         }
         if instructionSession.beforeRun == nil, let pipeline = sink as? DictationPipeline {
-            // The dictation just before the instruction lands first (its last sentence's cleanup), then the field is read.
+            // The dictation just before the instruction lands first (a live run's cleanup is held until its end, so the
+            // run ends here), then the field is read.
             instructionSession.beforeRun = {
                 _ = await pipeline.settle(timeout: .seconds(3))
+                await pipeline.finishLiveRun()
                 try? await Task.sleep(for: .milliseconds(150))
             }
         }
