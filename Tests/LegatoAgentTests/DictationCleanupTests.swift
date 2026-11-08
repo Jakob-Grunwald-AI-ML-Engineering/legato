@@ -215,3 +215,13 @@ private final class CapturingMessages: MessagesStreaming {
         _ = try await client.clean(.init(sentenceID: "s-1", sequence: 1, text: "Um.", vocabulary: []))
     }
 }
+
+@Test func aGermanUmBeforeATimeIsAWordNotAFiller() {
+    #expect(!DictationCleanupGuard.accepts(raw: "wir treffen uns am Bahnhof so um sechs Uhr", cleaned: "Wir treffen uns am Bahnhof so sechs Uhr."))
+    #expect(DictationCleanupGuard.accepts(raw: "wir treffen uns am Bahnhof so um sechs Uhr", cleaned: "Wir treffen uns am Bahnhof so um sechs Uhr."))
+    #expect(DictationCleanupGuard.accepts(raw: "um drei nein sorry um vier", cleaned: "Um vier."), "A self-correction may drop one")
+    #expect(DictationCleanupGuard.accepts(raw: "um so I think we go", cleaned: "I think we go."), "The English filler still goes")
+    #expect(!DictationCleanupGuard.accepts(raw: "um 10 Uhr", cleaned: ""), "Never dropped whole")
+    #expect(!DictationTakeGuard.accepts(raw: Array(repeating: "wir kommen um 10 Uhr", count: 4).joined(separator: " "),
+                                        cleaned: Array(repeating: "Wir kommen 10 Uhr.", count: 4).joined(separator: " ")))
+}

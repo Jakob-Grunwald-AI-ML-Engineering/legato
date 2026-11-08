@@ -34,11 +34,31 @@ public enum DictationCleanupGuard {
     /// Whether dropping `raw` entirely (an empty cleanup result) is a sane cleanup of it.
     public static func acceptsDrop(raw: String) -> Bool {
         let source = tokens(raw)
-        return source.count <= droppableWords || source.allSatisfy(fillers.contains)
+        return prepositionalUm(raw) == 0 && (source.count <= droppableWords || source.allSatisfy(fillers.contains))
+    }
+
+    /// Words after which a German "um" is a preposition (a time, a number, an amount), not a filler.
+    private static let umObjects: Set<String> = [
+        "null", "eins", "ein", "eine", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf", "zwölf",
+        "zwanzig", "dreißig", "vierzig", "fünfzig", "hundert", "tausend", "halb", "viertel", "punkt", "mitternacht", "mittag",
+        "wie", "welche", "wieviel", "wie viel", "ca", "circa", "etwa", "die", "den", "das", "dich", "mich", "uns", "euch", "ihn", "sie", "es",
+    ]
+    /// How many times `um` stands as a German preposition in `text`: before a digit, a number word or a time word.
+    static func prepositionalUm(_ text: String) -> Int {
+        let words = tokens(text)
+        return words.indices.dropLast().filter { i in
+            words[i] == "um" && (words[i + 1].first?.isNumber == true || umObjects.contains(words[i + 1]))
+        }.count
+    }
+    /// A cleanup may not drop every German "um" that is a preposition ("um sechs Uhr"): it is no filler. One may go
+    /// in a self-correction ("um drei, nein, um vier").
+    public static func keepsPrepositions(raw: String, cleaned: String) -> Bool {
+        prepositionalUm(raw) == 0 || prepositionalUm(cleaned) > 0
     }
 
     public static func accepts(raw: String, cleaned: String) -> Bool {
         let source = tokens(raw), result = tokens(cleaned)
+        guard keepsPrepositions(raw: raw, cleaned: cleaned) else { return false }
         if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cleaned.contains(where: \.isNewline) { return acceptsDrop(raw: raw) }
         guard !cleaned.isEmpty, cleaned.count <= max(48, raw.count * 3 / 2 + 24) else { return false }
         if result.isEmpty { return true } // a bare line break or punctuation from a spoken command
@@ -52,7 +72,7 @@ public enum DictationCleanupGuard {
         let known = result.filter { said.contains($0) }.count
         return known * 2 >= result.count
     }
-    private static func tokens(_ text: String) -> [String] {
+    static func tokens(_ text: String) -> [String] {
         text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
     }
     /// At most half of the longer text differs (Levenshtein distance).
