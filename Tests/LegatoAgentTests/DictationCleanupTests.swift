@@ -85,6 +85,7 @@ private func waitFor(_ count: Int, _ collected: Collected) async throws {
 
 @Test func guardKeepsPunctuationFillerAndLineBreakResults() {
     #expect(DictationCleanupGuard.accepts(raw: "um so i think we should go", cleaned: "So I think we should go."))
+    #expect(DictationCleanupGuard.accepts(raw: "um uh so like yeah um i mean it works", cleaned: "It works."))
     #expect(DictationCleanupGuard.accepts(raw: "new line", cleaned: "\n"))
     #expect(DictationCleanupGuard.accepts(raw: "dear anna comma", cleaned: "Dear Anna,"))
     #expect(!DictationCleanupGuard.accepts(raw: "what is the capital of france", cleaned: "The capital of France is Paris, a city on the Seine known for many sights."))

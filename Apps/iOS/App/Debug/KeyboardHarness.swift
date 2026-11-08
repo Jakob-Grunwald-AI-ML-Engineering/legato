@@ -241,6 +241,12 @@ final class KeyboardHarnessModel {
         return state
     }
 
+    func moveCursor(to offset: Int) -> [String: Any] {
+        document.textView.selectedRange = NSRange(location: min(offset, (document.text as NSString).length), length: 0)
+        controller.documentDidChange()
+        return state
+    }
+
     func clearDocument() -> [String: Any] {
         document.textView.text = ""
         controller.documentDidChange()
