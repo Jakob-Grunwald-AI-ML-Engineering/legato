@@ -18,6 +18,15 @@ private final class StubCleaner: SentenceCleaning {
     }
     func warmDictation() async { warms.withLock { $0 += 1 } }
 }
+/// The first two calls take 200 ms, later ones return at once; everything is upper-cased.
+private final class SlowFirstCleaner: SentenceCleaning {
+    let inputs = Mutex<[SentenceCleanupInput]>([])
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        let n = inputs.withLock { $0.append(input); return $0.count }
+        if n <= 2 { try await Task.sleep(for: .milliseconds(200)) }
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text.uppercased())
+    }
+}
 private final class FnCleaner: SentenceCleaning {
     let inputs = Mutex<[SentenceCleanupInput]>([])
     let transform: @Sendable (SentenceCleanupInput) -> String
@@ -272,6 +281,18 @@ extension DictationPipelineTests {
         let snapshot = try #require(pipeline.liveRun?.snapshot)
         #expect(snapshot.segments.map(\.text) == ["We moved the review to Wednesday.", "", ""])
         #expect(ends.first?["whole"] as? String == "landed" && ends.first?["stopMs"] is Int)
+    }
+
+    @Test func aSegmentThatArrivesWhileTheStopWaitsIsCleanedToo() async throws {
+        let cleaner = SlowFirstCleaner()
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        await pipeline.receive(routeLine(0, "we moved the review to next week."))
+        await pipeline.receive(routeLine(1, "and the budget"))
+        let stop = Task { await pipeline.finishTake() }
+        try await until { cleaner.inputs.withLock { $0.count } >= 2 }
+        await pipeline.receive(routeLine(2, "Yeah."))
+        await stop.value
+        #expect(pipeline.liveRun?.snapshot.segments.last?.cleaned == true, "The late segment's unit is cleaned before the take ends")
     }
 
     @Test func aLongTakeKeepsItsUnits() async throws {

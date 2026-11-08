@@ -373,6 +373,13 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             }
         }
         _ = await settle(timeout: liveTimeout + .seconds(1))
+        // A segment that arrived during the wait opened a unit of its own: it is cleaned too (the whole call does not
+        // cover it), bounded the same way.
+        if var run = liveRun, !run.complete, let late = run.flush() {
+            liveRun = run
+            await submitLive(late.text, key: late.key, run: run)
+            _ = await settle(timeout: liveTimeout + .seconds(1))
+        }
         let wholeText = await wholeTask?.value
         guard var run = liveRun, !run.complete else { return }
         if let wholeText {
