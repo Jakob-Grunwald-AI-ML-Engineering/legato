@@ -87,7 +87,7 @@ private func routeLine(_ sequence: Int, _ text: String) -> DictationRouteLine {
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct LiveDictationPipelineTests {
-    private func live(_ cleaner: StubCleaner = StubCleaner(), supportsLive: Bool = true, timeout: Duration = .milliseconds(2500)) -> DictationPipeline {
+    private func live(_ cleaner: StubCleaner = StubCleaner(), supportsLive: Bool = true, timeout: Duration = .milliseconds(200)) -> DictationPipeline {
         DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: supportsLive, liveTimeout: timeout)
     }
 
