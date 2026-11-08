@@ -329,7 +329,8 @@ private actor TakeHistory: HistoryStore {
     // MARK: Streaming
 
     @MainActor private func streaming(_ cleaner: StreamingCleaner, _ raw: String = "one two three") async -> (DictationPipeline, Task<Void, Never>) {
-        let pipeline = DictationPipeline(cleaner: cleaner, vocabulary: { [] }, sendMode: { .onStop })
+        // The tests end the stream themselves; the real-clock take timeout (4 s here) fired on loaded CI runners.
+        let pipeline = DictationPipeline(cleaner: cleaner, vocabulary: { [] }, sendMode: { .onStop }, takeTimeout: { _ in .seconds(60) })
         await pipeline.receive(routeLine(0, raw))
         let sending = Task { @MainActor in await pipeline.finishTake() }
         await until("the attempt started") { cleaner.calls == 1 }
