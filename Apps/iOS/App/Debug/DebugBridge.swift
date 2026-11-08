@@ -91,6 +91,27 @@ import UIKit
             return AppController.shared.dictation.takeState
         }
         harness.register("dictation-state") { _ in AppController.shared.dictation.takeState }
+        // Instruction mode without the magic key: the toggle as the keyboard would set it (`off`, `latched`, `held`).
+        // Speech then comes from `dictation-debug-replay` (an instruction fixture) or `dictation-debug-line`; `off` runs it.
+        harness.register("instruction-mode") { command in
+            guard command.args.count == 1, let toggle = MagicToggle(rawValue: command.args[0]) else { throw Usage.invalid }
+            try AppController.shared.keyboardSession.debugMagic(toggle)
+            return instructionState()
+        }
+        // A typed instruction runs as a spoken one would (begin, words, end): `instruction-debug <text>`.
+        harness.register("instruction-debug") { command in
+            guard !command.args.isEmpty else { throw Usage.invalid }
+            AppController.shared.keyboardSession.instruction.debugInstruction(command.args.joined(separator: " "))
+            return instructionState()
+        }
+        // The strip's taps: `run`, `undo`, `accept`, `dismiss`.
+        harness.register("instruction-intent") { command in
+            guard command.args.count == 1, let action = InstructionIntent.Action(rawValue: command.args[0]) else { throw Usage.invalid }
+            let session = AppController.shared.keyboardSession
+            session.handle(InstructionIntent(action: action, instructionID: session.instruction.strip.instructionID))
+            return instructionState()
+        }
+        harness.register("instruction-state") { _ in instructionState() }
         // The next N take cleanups (default 1) fail twice, so the failed state is reachable without network faults.
         harness.register("dictation-debug-fail-take") { command in
             guard command.args.count <= 1, let count = command.args.first.map({ Int($0) }) ?? 1, count >= 0 else { throw Usage.invalid }
@@ -170,6 +191,14 @@ import UIKit
         #endif
         harness.start()
     }
+    #if DEBUG
+    /// The instruction's state for the bridge: counts and phases, never the field's text.
+    private static func instructionState() -> [String: Any] {
+        var state = AppController.shared.keyboardSession.instruction.debugState
+        state["speechMode"] = AppController.shared.keyboardSession.speechMode.rawValue
+        return state
+    }
+    #endif
     static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
     enum Usage: Error { case invalid, busy }
 }
