@@ -31,6 +31,10 @@ public enum LinkChannel {
         public static let dictation = "link.dictation"
         /// keyboard -> app: `DictationAck`.
         public static let dictationAck = "link.dictation.ack"
+        /// app -> keyboard: `LiveDictationSnapshot` (the live send mode's run target).
+        public static let dictationLive = "link.dictation.live"
+        /// keyboard -> app: `LiveDictationAck`.
+        public static let dictationLiveAck = "link.dictation.live.ack"
     }
 
     /// Darwin notification names, one per key.
@@ -47,6 +51,8 @@ public enum LinkChannel {
         public static let choice = "\(RuntimeIdentity.current.notificationNamespace).link.choice"
         public static let dictation = "\(RuntimeIdentity.current.notificationNamespace).link.dictation"
         public static let dictationAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.ack"
+        public static let dictationLive = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.live"
+        public static let dictationLiveAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.live.ack"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.

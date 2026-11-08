@@ -244,7 +244,7 @@ if [ "$mode" = release-check ]; then
     harness-state harness-visible harness-hidden harness-surface harness-send harness-retry harness-insert-raw harness-clear
     harness.edit LegatoHarnessAppearance LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape
     LegatoHarnessAutocap LegatoHarnessSuggestions LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
-    harness-mic-hop-retry dictation-debug-stream dictation-debug-fail-take composer-debug-seed
+    harness-mic-hop-retry dictation-debug-stream dictation-debug-mode dictation-debug-model dictation-debug-replay dictation-debug-replay-cancel dictation-debug-fail-take composer-debug-seed
 )
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
@@ -429,6 +429,8 @@ open_dictation() {
   bridge harness-clear
   bridge harness-surface typing && bridge harness-visible
   check_kbd "keyboard is visible on the ABC dictation surface" visible true
+  # These legs exercise the take path; the default mode types as you speak (`live`).
+  bridge dictation-debug-mode onStop || record FAIL "set the send mode" "$REPLY"
   bridge dictation-debug-stream "$@" || record FAIL "scripted streaming cleaner" "$REPLY"
 }
 # take <text>: speak one line and end the take as the mic key does.

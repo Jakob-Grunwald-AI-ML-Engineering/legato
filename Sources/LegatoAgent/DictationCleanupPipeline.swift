@@ -10,6 +10,8 @@ public struct DictationCleanedLine: Sendable, Equatable {
     public let status: Status
     /// Why the raw line was used (`timeout`, `failed`, `rejected`); nil when cleaned. No dictated text.
     public let reason: String?
+    /// What failed, for diagnostics (an error case or type name, never text); nil when cleaned or timed out.
+    public var detail: String? = nil
 }
 
 /// Cheap sanity checks on a cleanup result. Cleanup only punctuates, recases, drops fillers and fixes sounds, so
@@ -84,7 +86,10 @@ public actor DictationCleanupPipeline {
 
     /// `textBefore`: the field's text before the cursor now (`documentContextBeforeInput`).
     public func submit(sequence: Int, lineID: String, raw: String, textBefore: String) async {
-        if firstSequence == nil { firstSequence = sequence; nextDelivery = sequence }
+        // Lines that never came here (another send mode took them) leave a gap: with nothing waiting, start at this one.
+        if firstSequence == nil || (queue.isEmpty && inFlight.isEmpty && finished.isEmpty && sequence != nextDelivery) {
+            firstSequence = firstSequence ?? sequence; nextDelivery = sequence
+        }
         known[sequence] = raw
         queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600))))
         queue.sort { $0.sequence < $1.sequence }
@@ -113,17 +118,21 @@ public actor DictationCleanupPipeline {
         }
     }
 
-    private enum Outcome { case cleaned(String), failed, timedOut }
+    private enum Outcome { case cleaned(String), failed(String), timedOut }
+    private static func describe(_ error: any Error) -> String {
+        if let known = error as? SentenceCleanupError { return "\(known)" }
+        return String(describing: type(of: error)) + ((error as NSError).code != 0 ? "#\((error as NSError).code)" : "")
+    }
     private static func race(cleaner: any SentenceCleaning, timeout: Duration, input: SentenceCleanupInput) async -> Outcome {
         await withTaskGroup(of: Outcome.self) { group in
             group.addTask {
-                do { return .cleaned(try await cleaner.clean(input).text) } catch { return .failed }
+                do { return .cleaned(try await cleaner.clean(input).text) } catch { return .failed(Self.describe(error)) }
             }
             group.addTask {
                 try? await Task.sleep(for: timeout)
                 return .timedOut
             }
-            let first = await group.next() ?? .failed
+            let first = await group.next() ?? .failed("none")
             group.cancelAll()
             return first
         }
@@ -138,7 +147,7 @@ public actor DictationCleanupPipeline {
             result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: text, status: .cleaned, reason: nil)
         case .cleaned: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "rejected")
         case .timedOut: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "timeout")
-        case .failed: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "failed")
+        case .failed(let detail): result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "failed", detail: detail)
         }
         known[line.sequence] = result.text
         finished[line.sequence] = result

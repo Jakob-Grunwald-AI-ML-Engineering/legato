@@ -22,6 +22,8 @@ public struct DictationRouteLine: Sendable, Equatable {
     func warm() async
     /// The route heard speech (a new live tail): a pause timer restarts here.
     func speechActivity()
+    /// The route's live tail changed (the words Soniox has not finalized, empty when none).
+    func tailChanged(_ text: String)
     /// The take ended (stop): whatever was buffered is cleaned and written now.
     func finishTake() async
     /// Recent written takes, newest last, sent to Soniox as background text when a take starts.
@@ -31,6 +33,7 @@ public extension DictationRouteSink {
     func warm() async {}
     var backgroundText: String { "" }
     func speechActivity() {}
+    func tailChanged(_ text: String) {}
     func finishTake() async {}
 }
 

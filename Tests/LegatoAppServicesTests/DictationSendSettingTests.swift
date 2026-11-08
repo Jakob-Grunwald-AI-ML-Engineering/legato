@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LegatoAppServices
+import LegatoAgent
 
 @Suite struct DictationSendSettingTests {
     private func defaults() -> UserDefaults {
@@ -10,10 +11,20 @@ import Testing
         return defaults
     }
 
-    @Test func defaultsToOnStopWithAFiveSecondPause() {
+    @Test func defaultsToLiveWithAFiveSecondPauseAndHaikuCleanup() {
         let store = defaults()
-        #expect(DictationSendSetting.mode(in: store) == .onStop)
+        #expect(DictationSendSetting.mode(in: store) == .live)
         #expect(DictationSendSetting.pause(in: store) == 5)
+        #expect(DictationSendSetting.cleanupModel(in: store) == .haiku)
+    }
+
+    @Test func theCleanupModelIsHaikuOrSonnet() {
+        let store = defaults()
+        store.set("sonnet", forKey: DictationSendSetting.cleanupModelKey)
+        #expect(DictationSendSetting.cleanupModel(in: store) == .sonnet)
+        store.set("opus", forKey: DictationSendSetting.cleanupModelKey)
+        #expect(DictationSendSetting.cleanupModel(in: store) == .haiku)
+        #expect(ModelChoice.cleanupChoices.map(\.settingValue) == ["haiku", "sonnet"])
     }
 
     @Test func storedModesRoundTripAndUnknownValuesFallBack() {
@@ -23,7 +34,7 @@ import Testing
             #expect(DictationSendSetting.mode(in: store) == mode)
         }
         store.set("nonsense", forKey: DictationSendSetting.modeKey)
-        #expect(DictationSendSetting.mode(in: store) == .onStop)
+        #expect(DictationSendSetting.mode(in: store) == .live)
     }
 
     @Test func thePauseIsClampedToOneToTenSeconds() {

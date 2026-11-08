@@ -50,6 +50,14 @@ final class KeyboardLinkHost: TranscriptSink {
     /// Open while the keyboard is on screen; its surface decides where a mic tap routes audio.
     private(set) var keyboardSession: KeyboardSession?
     private var dictationPublished: (sessionID: String, lines: [DictationDelivery])?
+    /// Live dictation (the send mode `live`): the run's snapshot goes to the link at most every `minPublishInterval`
+    /// (the latest wins), and the keyboard's ack is only read for diagnostics.
+    private var liveLatest: LiveDictationSnapshot?
+    private var liveWritten: LiveDictationSnapshot?
+    private var liveLastWrite = ContinuousClock.now - .seconds(1)
+    private var liveWriteTask: Task<Void, Never>?
+    private var liveVersionTimes: [Int: ContinuousClock.Instant] = [:]
+    private var liveAckSeen: LiveDictationAck?
     func attach(_ composer: ComposerSession, keyboardSession: KeyboardSession? = nil, dictation: DictationPipeline? = nil) {
         self.keyboardSession = keyboardSession
         dictation?.contextBefore = { [weak self] in self?.link.keyboardPresence()?.contextBefore ?? "" }
@@ -88,6 +96,10 @@ final class KeyboardLinkHost: TranscriptSink {
             }
         }
         dictation?.onChange = publishDictation
+        let liveChannel = LiveDictationLink(store: LinkStore(backing))
+        dictation?.onLiveChange = { [weak self, weak dictation] snapshot in
+            self?.publishLive(snapshot, through: liveChannel, diagnostics: dictation?.diagnostics)
+        }
         composerTask = Task { [weak self, weak composer] in
             while !Task.isCancelled {
                 guard let self, let composer else { return }
@@ -98,6 +110,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 }
                 if let dictation {
                     if let ack = dictationChannel.acknowledged() { dictation.acknowledge(sessionID: ack.sessionID, upTo: ack.upTo) }
+                    self.logLiveAck(liveChannel.acknowledged(), diagnostics: dictation.diagnostics)
                     publishDictation()
                 }
                 for intent in channel.drainIntents() {
@@ -180,6 +193,59 @@ final class KeyboardLinkHost: TranscriptSink {
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
+    }
+
+    private func publishLive(_ snapshot: LiveDictationSnapshot?, through channel: LiveDictationLink,
+                             diagnostics: (@MainActor (String, [String: Any]) -> Void)?) {
+        liveLatest = snapshot
+        guard let snapshot else {
+            liveWriteTask?.cancel(); liveWriteTask = nil
+            liveWritten = nil; liveVersionTimes = [:]
+            channel.clear()
+            DarwinObserver.post(LinkChannel.Note.dictationLive)
+            return
+        }
+        let wait = LinkChannel.minPublishInterval - Double(liveLastWrite.duration(to: .now).components.attoseconds) / 1e18
+            - Double(liveLastWrite.duration(to: .now).components.seconds)
+        if wait <= 0 { writeLive(channel, diagnostics: diagnostics); return }
+        guard liveWriteTask == nil else { return }
+        liveWriteTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled, let self else { return }
+            self.liveWriteTask = nil
+            self.writeLive(channel, diagnostics: diagnostics)
+        }
+    }
+
+    private func writeLive(_ channel: LiveDictationLink, diagnostics: (@MainActor (String, [String: Any]) -> Void)?) {
+        guard let snapshot = liveLatest, snapshot != liveWritten else { return }
+        liveWritten = snapshot; liveLastWrite = .now
+        liveVersionTimes[snapshot.version] = .now
+        if liveVersionTimes.count > 64 { liveVersionTimes = liveVersionTimes.filter { $0.key > snapshot.version - 32 } }
+        channel.publish(snapshot)
+        DarwinObserver.post(LinkChannel.Note.dictationLive)
+        diagnostics?("live2.publish", ["run": String(snapshot.runID.prefix(8)), "v": snapshot.version, "segments": snapshot.segments.count,
+                                       "chars": snapshot.segments.reduce(0) { $0 + $1.text.count }, "complete": snapshot.complete])
+    }
+
+    /// The keyboard's counters (what it applied, flipped, froze), logged when they change; no text.
+    private func logLiveAck(_ ack: LiveDictationAck?, diagnostics: (@MainActor (String, [String: Any]) -> Void)?) {
+        guard let ack, ack != liveAckSeen else { return }
+        liveAckSeen = ack
+        var fields: [String: Any] = ["run": String(ack.runID.prefix(8)), "complete": ack.complete, "applies": ack.stats.applies,
+                                     "rewrites": ack.stats.rewrites, "inserted": ack.stats.insertedChars, "deleted": ack.stats.deletedChars,
+                                     "freezes": ack.stats.freezes, "drifts": ack.stats.drifts]
+        if let cause = ack.stats.lastFreeze { fields["lastFreeze"] = cause }
+        if let drift = ack.stats.lastDrift { fields["drift"] = drift }
+        if let start = ack.stats.lastStart { fields["start"] = start }
+        if let version = ack.version {
+            fields["v"] = version
+            if let at = liveVersionTimes[version] {
+                let parts = at.duration(to: .now).components
+                fields["ms"] = Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
+            }
+        }
+        diagnostics?("live2.ack", fields)
     }
 
     /// nil when the App Group is unavailable (misconfigured signing): the keyboard link is then off.

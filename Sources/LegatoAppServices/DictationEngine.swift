@@ -31,6 +31,10 @@ import LegatoVocabulary
     @ObservationIgnored private var sending = false
     @ObservationIgnored private var finishing: Task<Void, Never>?
     @ObservationIgnored private var lineSequence = 0
+    #if DEBUG || LEGATO_INTERNAL
+    /// The scripted stream of `debugReplay` while it runs.
+    @ObservationIgnored private var replaying: SonioxClient?
+    #endif
     /// Every live tail (the owner's latency probe or HUD).
     @ObservationIgnored public var onTail: (@MainActor (String) -> Void)?
 
@@ -133,6 +137,9 @@ import LegatoVocabulary
     }
 
     public func close() async {
+        #if DEBUG || LEGATO_INTERNAL
+        await replaying?.close(); replaying = nil
+        #endif
         let stream = self.stream, room = self.room, take = active
         self.stream = nil; self.room = nil; backlog = []; active = nil
         await take?.close()
@@ -161,6 +168,7 @@ import LegatoVocabulary
             let text = (try? event.payload["text"]?.decode(String.self)) ?? ""
             tail = text
             onTail?(text)
+            sink.tailChanged(text)
             if !text.isEmpty { sink.speechActivity() }
         default: break
         }
@@ -172,6 +180,27 @@ import LegatoVocabulary
     }
 
     #if DEBUG || LEGATO_INTERNAL
+    /// Debug bridge: a recorded token timeline stands in for the Soniox socket. Every response goes through the
+    /// provider decoder and segmenter (`SonioxClient.injectDebugFrame`), so segments, the live tail and the sink
+    /// see exactly what a spoken take produces; then the take is finalized like a stop. `speed` 2 replays twice as
+    /// fast. Needs the open route (the keyboard on the typing surface).
+    public func debugReplay(_ timeline: DictationReplayTimeline, speed: Double = 1) async throws {
+        guard let room else { throw DictationReplayTimeline.ReplayError.routeClosed }
+        await replaying?.close()
+        let client = SonioxClient(room: room, config: SonioxConfig(mode: "Dictation"), quietFailure: .always)
+        replaying = client
+        try await client.startDebug()
+        var last = 0.0
+        for frame in timeline.frames {
+            let wait = (frame.at - last) / max(0.1, speed)
+            if wait > 0.001 { try await Task.sleep(for: .seconds(wait)) }
+            last = frame.at
+            try await client.injectDebugFrame(frame.json)
+        }
+        try await client.finish(micOff: false)
+        replaying = nil
+    }
+
     /// Debug bridge: a finalized line enters exactly where a Soniox segment does (the sink).
     @discardableResult public func debugLine(_ text: String) async -> Bool {
         let words = text.split(whereSeparator: \.isWhitespace).map { Word(text: String($0), confidence: 0.95, language: "de") }
@@ -184,6 +213,7 @@ import LegatoVocabulary
     public func debugTail(_ text: String) {
         tail = text
         onTail?(text)
+        sink.tailChanged(text)
         if !text.isEmpty { sink.speechActivity() }
     }
     #endif

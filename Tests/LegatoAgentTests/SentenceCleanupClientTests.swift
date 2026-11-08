@@ -175,3 +175,29 @@ private final class HangingSentenceMessages: MessagesStreaming {
         }
     }
 }
+
+@Test func sonnetDictationCleanupUsesBetweenToolsAndAnUnforcedToolAndSkipsALeadingTextBlock() async throws {
+    // Sonnet 5.5 rejects `thinking: disabled` and a forced tool_choice (HTTP 400), and may write text before the call.
+    var events = [try sentenceEvent("content_block_start", .object(["index": .number(0), "content_block": .object(["type": .string("text"), "text": .string("")])])),
+                  try sentenceEvent("content_block_delta", .object(["index": .number(0), "delta": .object(["type": .string("text_delta"), "text": .string("Cleaning.")])])),
+                  try sentenceEvent("content_block_stop", .object(["index": .number(0)]))]
+    for event in try sentenceToolEvents(sentencePayload(text: "Hello."), fragments: nil) {
+        // The tool block follows as block 1.
+        var data = event.data
+        data = data.replacingOccurrences(of: "\"index\":0", with: "\"index\":1")
+        events.append(.init(event: event.event, data: data))
+    }
+    let fixture = SentenceFixtureMessages(events)
+    let client = SentenceCleanupClient(client: fixture, model: { .sonnet })
+    let result = try await client.clean(.init(sentenceID: "sentence-a", sequence: 7, text: "hello", vocabulary: [], dictation: .init()))
+    #expect(result.text == "Hello.")
+    let request = try JSONDecoder().decode(JSONValue.self, from: #require(fixture.requests.withLock { $0 }.first))
+    #expect(request["model"] == .string(ModelChoice.sonnet.rawValue))
+    #expect(request["thinking"]?["type"] == .string("between_tools"))
+    #expect(request["tool_choice"]?["type"] == .string("auto"))
+    // Haiku keeps `disabled` and the forced call.
+    let haiku = SentenceFixtureMessages(try sentenceToolEvents(sentencePayload(text: "Hello.")))
+    _ = try await SentenceCleanupClient(client: haiku).clean(.init(sentenceID: "sentence-a", sequence: 7, text: "hello", vocabulary: [], dictation: .init()))
+    let haikuRequest = try JSONDecoder().decode(JSONValue.self, from: #require(haiku.requests.withLock { $0 }.first))
+    #expect(haikuRequest["thinking"]?["type"] == .string("disabled") && haikuRequest["tool_choice"]?["type"] == .string("tool"))
+}

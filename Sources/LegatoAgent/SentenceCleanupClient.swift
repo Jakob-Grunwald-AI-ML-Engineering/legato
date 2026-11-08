@@ -89,12 +89,16 @@ struct StreamTrimmer {
 public struct SentenceCleanupClient: SentenceCleaning {
     private let client: any MessagesStreaming
     private let onUsage: @Sendable (String, Int, JSONValue) async -> Void
+    /// The model for dictation cleanup, read per request so a settings change applies to the next sentence.
+    private let model: @Sendable () -> ModelChoice
     private static let maximumTextBytes = 8192
     private static let maximumToolBytes = 65_536
     /// Reports cumulative numeric token metadata once for each attempted provider request,
     /// including partial counters on failure. Empty counters mean unavailable, not zero cost.
-    public init(client: any MessagesStreaming, onUsage: @escaping @Sendable (String, Int, JSONValue) async -> Void = { _, _, _ in }) {
-        self.client = client; self.onUsage = onUsage
+    /// `model` only applies to dictation (lines and takes); the composer's sentence copyedit stays on Haiku.
+    public init(client: any MessagesStreaming, model: @escaping @Sendable () -> ModelChoice = { .haiku },
+                onUsage: @escaping @Sendable (String, Int, JSONValue) async -> Void = { _, _, _ in }) {
+        self.client = client; self.model = model; self.onUsage = onUsage
     }
 
     public func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
@@ -105,7 +109,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
               input.text.utf8.count <= Self.maximumTextBytes,
               input.vocabulary.count <= 200,
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
-        let submitted = try await submission(of: try Self.request(input), tool: "submit_sentence", maxToolBytes: Self.maximumToolBytes,
+        let submitted = try await submission(of: try Self.request(input, model: input.dictation == nil ? .haiku : model()), tool: "submit_sentence", maxToolBytes: Self.maximumToolBytes,
                                              usageID: input.sentenceID, usageSequence: input.sequence)
         guard case .object(let fields) = submitted,
               Set(fields.keys) == ["sentenceID", "sequence", "text"],
@@ -125,6 +129,9 @@ public struct SentenceCleanupClient: SentenceCleaning {
     private func submission(of request: Data, tool: String, maxToolBytes: Int, usageID: String, usageSequence: Int,
                             onFragment: ((String) async -> Void)? = nil) async throws -> JSONValue {
         var index: Int?, initial: JSONValue?, fragments = "", closed = false, stopped = false
+        // Blocks that are not the tool call (a model that cannot be forced to call the tool may write a short
+        // text or thinking block first): their events are skipped.
+        var skipped: Set<Int> = []
         var usageFields: [String: JSONValue] = [:]
         do {
             for try await event in client.stream(request: request) {
@@ -136,6 +143,13 @@ public struct SentenceCleanupClient: SentenceCleaning {
                     throw SentenceCleanupError.unexpectedResponse
                 }
                 Self.collectUsage(value, into: &usageFields)
+                if ["content_block_start", "content_block_delta", "content_block_stop"].contains(event.event),
+                   let i = Self.blockIndex(value) {
+                    if event.event == "content_block_start", value["content_block"]?["type"] != .string("tool_use"), index == nil || i != index {
+                        skipped.insert(i); continue
+                    }
+                    if skipped.contains(i) { continue }
+                }
                 switch event.event {
                 case "content_block_start":
                     guard index == nil, let i = Self.blockIndex(value),
@@ -286,7 +300,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
               input.vocabulary.count <= 200,
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
         var trimmer = StreamTrimmer()
-        let output = try await reply(to: try Self.takeRequest(input), usageID: input.takeID, onFragment: onDelta == nil ? nil : { fragment in
+        let output = try await reply(to: try Self.takeRequest(input, model: model()), usageID: input.takeID, onFragment: onDelta == nil ? nil : { fragment in
             let delta = trimmer.push(fragment)
             if !delta.isEmpty { onDelta?(delta) }
         })
@@ -303,13 +317,13 @@ public struct SentenceCleanupClient: SentenceCleaning {
     private static let takePrompt: String = PromptLayers.dictationTakeCleanup()
     /// A line's call is forced, so the model cannot decline in words: this field must say what it always has to hold.
     private static let cleanedTextDescription = "The complete cleaned text, every meaningful word of the input in order, however long or unusual. Never a placeholder, stub, summary or note."
-    private static func takeRequest(_ input: DictationTakeInput) throws -> Data {
+    private static func takeRequest(_ input: DictationTakeInput, model: ModelChoice) throws -> Data {
         let source: JSONValue = .object(["text": .string(input.text),
             "recentTakes": .array(input.recentTakes.map { .object(["raw": .string($0.raw), "cleaned": .string($0.cleaned)]) }), "textBeforeCursor": .string(String(input.textBeforeCursor.suffix(600))),
             "vocabulary": .array(input.vocabulary.map(JSONValue.string))])
         let request: JSONValue = .object([
-            "model": .string(ModelChoice.haiku.rawValue), "max_tokens": .number(Double(DictationTakeLimits.maxTokens(characters: input.text.count))),
-            "stream": .bool(true), "thinking": ModelChoice.haiku.thinking,
+            "model": .string(model.rawValue), "max_tokens": .number(Double(DictationTakeLimits.maxTokens(characters: input.text.count))),
+            "stream": .bool(true), "thinking": Self.thinking(model),
             "system": .array([.object(["type": .string("text"), "text": .string(takePrompt), "cache_control": .object(["type": .string("ephemeral")])])]),
             "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try encoder.encode(source), as: UTF8.self))])])])
         return try encoder.encode(request)
@@ -320,9 +334,16 @@ public struct SentenceCleanupClient: SentenceCleaning {
     public func warmDictation() async {
         _ = try? await clean(.init(sentenceID: "warm", sequence: 0, text: "Okay.", vocabulary: [], dictation: .init()))
     }
+    /// Cleanup needs no thinking. Haiku takes `disabled`; Sonnet 5.5 rejects it and wants `between_tools` (the model
+    /// config's own value), and it does not support a forced tool call either (`toolChoice`).
+    private static func thinking(_ model: ModelChoice) -> JSONValue { model.thinking }
+    /// Haiku is forced to call the tool; models that cannot be forced are asked to (a text block before the call is skipped).
+    private static func toolChoice(_ model: ModelChoice) -> JSONValue {
+        model == .haiku ? .object(["type": .string("tool"), "name": .string("submit_sentence")]) : .object(["type": .string("auto")])
+    }
     /// The prompt cache needs 512 tokens on Haiku 5.5 (prompt-caching docs); the prompt and tool are above it.
     private static let dictationPrompt: String = PromptLayers.dictationCleanup()
-    private static func request(_ input: SentenceCleanupInput) throws -> Data {
+    private static func request(_ input: SentenceCleanupInput, model: ModelChoice) throws -> Data {
         typealias Schema = ToolSchema.Schema
         // Dictation keeps the tool byte-identical between requests (the identity enum would change the cached prefix).
         let tool = ToolSchema(name: "submit_sentence", description: "Submit this sentence's local copyedit once. Copy sentenceID and sequence exactly.",
@@ -342,12 +363,12 @@ public struct SentenceCleanupClient: SentenceCleaning {
         Return only the locally corrected plain text through submit_sentence, copying the supplied sentenceID and sequence exactly. If no useful local improvement is needed, submit the same sentence. No acknowledgement, explanation, formatting wrapper or second call is needed.
         """
         let request: JSONValue = .object([
-            "model": .string(ModelChoice.haiku.rawValue), "max_tokens": .number(1024), "stream": .bool(true),
-            "thinking": ModelChoice.haiku.thinking,
+            "model": .string(model.rawValue), "max_tokens": .number(1024), "stream": .bool(true),
+            "thinking": Self.thinking(model),
             "system": input.dictation == nil ? .string(instruction)
                 : .array([.object(["type": .string("text"), "text": .string(dictationPrompt), "cache_control": .object(["type": .string("ephemeral")])])]),
             "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try encoder.encode(source), as: UTF8.self))])]),
-            "tools": try .encoding([tool]), "tool_choice": .object(["type": .string("tool"), "name": .string("submit_sentence")])])
+            "tools": try .encoding([tool]), "tool_choice": Self.toolChoice(model)])
         return try encoder.encode(request)
     }
 }

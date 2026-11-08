@@ -4,6 +4,7 @@ import os
 import LegatoAgent
 import LegatoClaude
 import LegatoCore
+import LegatoKeyboardCore
 import LegatoVocabulary
 
 /// A cleaned line waiting for the keyboard to type it.
@@ -31,6 +32,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 /// cleaned in ONE cleanup-only call (on stop, or after a pause), or (line by line) every finalized line goes
 /// through its own call (`DictationCleanupPipeline`). Either way the result waits in an ordered outbox until the
 /// writer or keyboard acknowledges having typed it. The keyboard session resets it when the keyboard disappears.
+///
+/// In `live` (iOS keyboard only) nothing waits: the run's target text (raw words as spoken, each finished sentence
+/// replaced by its cleaned version once that lands, then the speaking head) is published as a `LiveDictationRun`
+/// snapshot, and the keyboard types it and edits it word by word. Cleanup per sentence is the line pipeline's.
 @MainActor @Observable public final class DictationPipeline: DictationRouteSink {
     /// Names this keyboard session on the link; lines count from 0 within it.
     public private(set) var sessionID = UUID().uuidString
@@ -74,6 +79,9 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored private let cleaner: any SentenceCleaning
     @ObservationIgnored private let vocabulary: @Sendable () async -> [String]
     @ObservationIgnored private let timeout: Duration
+    /// How long a live sentence's cleanup may take before its raw words stand: the sentence lands as a small
+    /// edit whenever it is ready, so it may take longer than a line of the other modes waits.
+    @ObservationIgnored private let liveTimeout: Duration
     @ObservationIgnored private var pipeline: DictationCleanupPipeline?
     @ObservationIgnored private var terms: [String]?
     @ObservationIgnored private var lastWarm: Date?
@@ -97,6 +105,25 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "dictation-pipeline")
     @ObservationIgnored private var nextTakeSequence = 0
     @ObservationIgnored private var suppressed = false
+    /// Whether `live` may run here: the iOS keyboard link publishes it. Elsewhere (the Mac) `live` acts as `onStop`.
+    @ObservationIgnored private let supportsLive: Bool
+    /// The run being typed in `live` (nil between runs); a new one starts with the first words after a finished one.
+    @ObservationIgnored public private(set) var liveRun: LiveDictationRun?
+    /// The run's snapshot changed (nil: no run, remove it from the link). Called on every change; the host throttles.
+    @ObservationIgnored public var onLiveChange: (@MainActor (LiveDictationSnapshot?) -> Void)?
+    /// Counts and timings, never text: `live2.*` lines for the internal builds' diagnostics.
+    @ObservationIgnored public var diagnostics: (@MainActor (_ event: String, _ fields: [String: Any]) -> Void)?
+    @ObservationIgnored private var liveSubmitted: [Int: ContinuousClock.Instant] = [:]
+    /// Live sentences are cleaned under a counter of their own (a cut-short segment is no sentence): cleanup
+    /// sequence -> the key of the segment that closed the sentence in the run.
+    @ObservationIgnored private var liveKeys: [Int: Int] = [:]
+    @ObservationIgnored private var liveCleanupSequence = 0
+    /// When the run's take ended: a segment or cleanup that arrives within `liveStragglerGrace` still belongs to it.
+    @ObservationIgnored private var liveFinishedAt: ContinuousClock.Instant?
+    private static let liveStragglerGrace = Duration.seconds(3)
+    /// The field's text before the cursor when the run began: the context its sentences are cleaned against. The
+    /// field now holds the run's own words, which the cleaner must not see as "already typed" (it would drop them).
+    @ObservationIgnored private var liveAnchor = ""
     #if DEBUG || LEGATO_INTERNAL
     /// Debug bridge: the next this many take cleanups fail (both attempts), so the failed state is reachable offline.
     @ObservationIgnored public var debugFailTakes = 0
@@ -107,28 +134,41 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     private static let warmInterval: TimeInterval = 240
 
     /// `defaults` holds the send setting: the Mac app's standard defaults, or the App Group on iOS.
-    public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard) {
-        self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), history: history, cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore())),
+    /// `supportsLive`: the iOS keyboard link is there to carry the live mode.
+    public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard,
+                            supportsLive: Bool = false) {
+        // `UserDefaults` is thread-safe by contract; the model is read on the cleanup call's thread.
+        nonisolated(unsafe) let store = defaults
+        self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), history: history,
+                  cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) }),
                   vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
-                  sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) })
+                  sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
+                  supportsLive: supportsLive)
     }
     public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
                 sendMode: @escaping @MainActor () -> DictationSendSetting.Mode = { .lineByLine },
                 pauseSeconds: @escaping @MainActor () -> Double = { DictationSendSetting.defaultPause },
                 clock: any Clock<Duration> = ContinuousClock(),
-                takeTimeout: (@Sendable (Int) -> Duration)? = nil) {
+                takeTimeout: (@Sendable (Int) -> Duration)? = nil,
+                supportsLive: Bool = false,
+                liveTimeout: Duration = .seconds(6)) {
+        self.supportsLive = supportsLive; self.liveTimeout = liveTimeout
         self.recentTakes = recentTakes; self.history = history
         self.cleaner = cleaner; self.vocabulary = vocabulary; self.timeout = timeout
         self.sendMode = sendMode; self.pauseSeconds = pauseSeconds; self.clock = clock; self.takeTimeout = takeTimeout
     }
 
-    /// The send setting now; `lineByLine` keeps the per-line path.
-    public var mode: DictationSendSetting.Mode { sendMode() }
+    /// The send setting now; `lineByLine` keeps the per-line path. `live` only where `supportsLive` (else `onStop`).
+    public var mode: DictationSendSetting.Mode {
+        let mode = sendMode()
+        return mode == .live && !supportsLive ? .onStop : mode
+    }
 
     public func receive(_ line: DictationRouteLine) async {
         let raw = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
+        if mode == .live { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason)); return }
         if mode != .lineByLine { bufferLine(raw); return }
         pending += 1
         let pipeline = await current()
@@ -138,7 +178,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     public func warm() async {
         if let lastWarm, Date().timeIntervalSince(lastWarm) < Self.warmInterval { return }
         lastWarm = Date()
-        if mode == .lineByLine { await current().warm() } else { await cleaner.warmDictationTake() }
+        if mode == .lineByLine || mode == .live { await current().warm() } else { await cleaner.warmDictationTake() }
     }
 
     /// A new session: drops the outbox, lines in cleanup and the unsent take. `keepFailedTake` keeps the raw text
@@ -153,6 +193,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         sessionID = UUID().uuidString
         outbox = []; fallbacks = []; pending = 0
         nextTakeSequence = 0; takeLines = []
+        endLiveRun()
         if let kept { failedText = kept; takePhase = .failed }
         await old?.reset()
         onChange?()
@@ -178,7 +219,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if let pipeline { return pipeline }
         let terms = await loadTerms()
         if let pipeline { return pipeline }
-        let created = DictationCleanupPipeline(cleaner: cleaner, vocabulary: terms, timeout: timeout) { [weak self] line in
+        let created = DictationCleanupPipeline(cleaner: cleaner, vocabulary: terms, timeout: mode == .live ? liveTimeout : timeout) { [weak self] line in
             await self?.deliver(line)
         }
         pipeline = created
@@ -249,7 +290,103 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         takeLines = []
         await runTake(raw)
     }
-    public func finishTake() async { await sendTake() }
+    public func finishTake() async {
+        switch mode {
+        case .live: await finishLive()
+        // The last line is still in cleanup: the stop is done when it has been handed to the keyboard.
+        case .lineByLine: _ = await settle()
+        default: await sendTake()
+        }
+    }
+
+    // MARK: Live (the keyboard types the run as it is spoken)
+
+    /// The speaking head changed (the route's live tail). Words only; the head is empty when nothing is spoken.
+    public func tailChanged(_ text: String) {
+        guard mode == .live else { return }
+        let head = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if head.isEmpty, liveRun == nil || liveRun?.complete == true { return }
+        // Words spoken after the take's end are a new take (late segments come with an empty head).
+        var run = currentLiveRun(straggler: false)
+        run.setHead(head)
+        publishLive(run)
+    }
+
+    /// Segment reasons that cut a sentence short (`Segmenter.maxWords`, `maxDuration`), not end it.
+    private static let forcedSplits: Set<String> = ["words", "duration"]
+
+    private func receiveLive(_ raw: String, sequence: Int, forced: Bool) async {
+        var run = currentLiveRun()
+        let sentence = run.addFinal(key: sequence, text: raw, closes: !forced)
+        publishLive(run)
+        // A cut-short segment waits for the rest of its sentence; the sentence is cleaned once, whole.
+        guard let sentence else { return }
+        let id = liveCleanupSequence
+        liveCleanupSequence += 1
+        liveKeys[id] = sequence
+        pending += 1
+        liveSubmitted[id] = .now
+        // What stands before this sentence if the run were typed clean: the text before the run, then the sentences so far.
+        // A sentence the segmenter closed is a sentence even when its raw words carry no final punctuation yet (they are
+        // still in cleanup): the cleaner must not take it for an unfinished one and continue in lowercase.
+        var prior = run.text(before: sequence)
+        if let last = prior.last, last.isLetter || last.isNumber { prior += "." }
+        let before = [liveAnchor, prior].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
+        let pipeline = await current()
+        await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: sentence, textBefore: before)
+    }
+
+    /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete.
+    private func finishLive() async {
+        _ = await settle(timeout: liveTimeout + .seconds(1))
+        guard var run = liveRun, !run.complete else { return }
+        run.finish()
+        liveFinishedAt = .now
+        publishLive(run)
+        diagnostics?("live2.run.end", ["run": String(run.runID.prefix(8)), "sentences": run.finalCount, "chars": run.snapshot.segments.reduce(0) { $0 + $1.text.count }])
+    }
+
+    /// A cleaned sentence replaces its raw words in the target; a sentence whose cleanup failed stays raw.
+    private func landLive(_ line: DictationCleanedLine) {
+        let ms = liveSubmitted.removeValue(forKey: line.sequence).map { start in
+            let parts = start.duration(to: .now).components
+            return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
+        }
+        guard var run = liveRun, let key = liveKeys.removeValue(forKey: line.sequence) else { return }
+        if line.status == .cleaned {
+            // The model sometimes leaves a sentence start lowercase after a sentence end: that is fixed here.
+            let before = [liveAnchor, run.text(before: key)].filter { !$0.isEmpty }.joined(separator: " ")
+            let changed = run.setCleaned(key: key, text: SentenceStart.capitalized(line.text, after: before))
+            diagnostics?("live2.cleanup", ["landed": true, "changed": changed, "rawChars": line.raw.count, "chars": line.text.count, "ms": ms as Any])
+            if changed { publishLive(run) } else { liveRun = run }
+        } else {
+            diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count, "ms": ms as Any])
+        }
+    }
+
+    /// The run in progress, or a new one when none runs or the last is complete.
+    private func currentLiveRun(straggler: Bool = true) -> LiveDictationRun {
+        // A segment can reach the sink after the take's end was seen (its event is still on its way): it belongs to the run.
+        let late = straggler && liveFinishedAt.map { $0.duration(to: .now) < Self.liveStragglerGrace } == true
+        if let run = liveRun, !run.complete || late { return run }
+        let run = LiveDictationRun()
+        liveRun = run
+        liveAnchor = String(contextBefore().suffix(600))
+        diagnostics?("live2.run.start", ["run": String(run.runID.prefix(8))])
+        return run
+    }
+
+    private func publishLive(_ run: LiveDictationRun) {
+        liveRun = run
+        onLiveChange?(run.snapshot)
+    }
+
+    private func endLiveRun() {
+        liveSubmitted = [:]; liveKeys = [:]; liveFinishedAt = nil
+        guard liveRun != nil else { return }
+        liveRun = nil
+        onLiveChange?(nil)
+    }
 
     /// The user chose Retry after a failed cleanup.
     public func retry() async {
@@ -420,12 +557,23 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 
     /// Debug bridge and tests: the take's state.
     public var takeState: [String: Any] {
-        ["takePhase": takePhase.rawValue, "takeLength": takeLength, "takeLines": takeLines.count,
+        var state: [String: Any] = ["takePhase": takePhase.rawValue, "takeLength": takeLength, "takeLines": takeLines.count,
          "countdownDeadline": countdownDeadline as Any? ?? NSNull(), "mode": mode.rawValue]
+        if let run = liveRun {
+            state["liveRun"] = String(run.runID.prefix(8)); state["liveVersion"] = run.version
+            state["liveSentences"] = run.finalCount; state["liveComplete"] = run.complete
+        }
+        return state
     }
 
     private func deliver(_ line: DictationCleanedLine) {
         pending = max(0, pending - 1)
+        if mode == .live {
+            landLive(line)
+            if let reason = line.reason { fallbacks.append(reason); if fallbacks.count > 20 { fallbacks.removeFirst() } }
+            Task { [weak self] in await self?.save(id: UUID(), raw: line.raw, text: line.text, fallback: line.reason != nil) }
+            return
+        }
         outbox.append(.init(lineID: line.lineID, sequence: line.sequence, raw: line.raw, text: line.text, cleaned: line.status == .cleaned))
         if let reason = line.reason { fallbacks.append(reason); if fallbacks.count > 20 { fallbacks.removeFirst() } }
         onChange?()

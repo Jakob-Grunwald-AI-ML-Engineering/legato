@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
     @AppStorage(DictationSendSetting.modeKey, store: AppGroup.defaults) private var dictationSend = DictationSendSetting.defaultMode.rawValue
     @AppStorage(DictationSendSetting.pauseKey, store: AppGroup.defaults) private var dictationPause = DictationSendSetting.defaultPause
+    @AppStorage(DictationSendSetting.cleanupModelKey, store: AppGroup.defaults) private var cleanupModel = DictationSendSetting.defaultCleanupModel.settingValue
     @AppStorage(InstructionSendSetting.modeKey) private var instructionSend = InstructionSendSetting.Mode.manual.rawValue
     @AppStorage(InstructionSendSetting.pauseKey) private var instructionPause = InstructionSendSetting.defaultPause
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
@@ -71,6 +72,7 @@ struct SettingsView: View {
             }
             Section {
                 Picker("Send dictation", selection: $dictationSend) {
+                    Text("As you speak").tag(DictationSendSetting.Mode.live.rawValue)
                     Text("On stop").tag(DictationSendSetting.Mode.onStop.rawValue)
                     Text("After a pause").tag(DictationSendSetting.Mode.afterPause.rawValue)
                     Text("Line by line").tag(DictationSendSetting.Mode.lineByLine.rawValue)
@@ -82,8 +84,13 @@ struct SettingsView: View {
                         LabeledContent("Pause before sending", value: "\(Int(DictationSendSetting.clampedPause(dictationPause))) s")
                     }.accessibilityIdentifier("settings.dictationPause")
                 }
+                if dictationSend == DictationSendSetting.Mode.live.rawValue || dictationSend == DictationSendSetting.Mode.lineByLine.rawValue {
+                    Picker("Cleanup model", selection: $cleanupModel) {
+                        ForEach(ModelChoice.cleanupChoices, id: \.settingValue) { Text($0.label).tag($0.settingValue) }
+                    }.accessibilityIdentifier("settings.dictationCleanupModel")
+                }
             } header: { Text("Dictation") } footer: {
-                Text("On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Line by line cleans and types each sentence as you speak.")
+                Text("As you speak types your words into the field at once and corrects single words as they firm up; each finished sentence is then tidied in place. On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Line by line cleans and types each sentence as you speak. Haiku is quicker, Sonnet more careful.")
             }
             Section {
                 Picker("Send instructions", selection: $instructionSend) {

@@ -295,6 +295,14 @@ import LegatoVocabulary
         dictation.debugTail("")
         finishDictationTake(waitingForWords: false)
     }
+    /// Debug bridge: replays a recorded Soniox token timeline into the dictation route (no microphone), then ends the
+    /// take as the mic key's stop does. Returns when the take is written.
+    public func debugDictationReplay(_ timeline: DictationReplayTimeline, speed: Double = 1) async throws {
+        guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        try await dictation.debugReplay(timeline, speed: speed)
+        await dictation.waitForFinish(timeout: .seconds(3))
+        await sink.finishTake()
+    }
     public enum DebugDictationError: Error, CustomStringConvertible, Sendable {
         case notOnDictationSurface, empty
         public var description: String {

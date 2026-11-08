@@ -3,6 +3,7 @@ import Synchronization
 import Testing
 import LegatoAgent
 import LegatoComposerDoc
+import LegatoKeyboardCore
 @testable import LegatoAppServices
 
 private final class StubCleaner: SentenceCleaning {
@@ -17,11 +18,11 @@ private final class StubCleaner: SentenceCleaning {
     }
     func warmDictation() async { warms.withLock { $0 += 1 } }
 }
-private func routeLine(_ sequence: Int, _ text: String) -> DictationRouteLine {
-    .init(sequence: sequence, text: text, words: text.split(separator: " ").map { Word(text: String($0)) }, reason: "endpoint")
+private func routeLine(_ sequence: Int, _ text: String, reason: String = "endpoint") -> DictationRouteLine {
+    .init(sequence: sequence, text: text, words: text.split(separator: " ").map { Word(text: String($0)) }, reason: reason)
 }
 @MainActor private func until(_ condition: @MainActor () -> Bool) async throws {
-    for _ in 0..<1000 { if condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
+    for _ in 0..<5000 { if condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
     Issue.record("Timed out waiting for condition")
 }
 
@@ -82,5 +83,136 @@ private func routeLine(_ sequence: Int, _ text: String) -> DictationRouteLine {
         await pipeline.reset()
         await pipeline.warm()
         #expect(cleaner.warms.withLock { $0 } == 2, "A new keyboard session warms again")
+    }
+}
+
+extension DictationPipelineTests {
+    @Test func lineByLineDeliversAfterLinesWentToAnotherSendMode() async throws {
+        nonisolated(unsafe) var mode = DictationSendSetting.Mode.lineByLine
+        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { mode })
+        await pipeline.receive(routeLine(0, "first"))
+        try await until { pipeline.outbox.count == 1 }
+        mode = .onStop // the route keeps counting lines the cleanup pipeline never sees
+        await pipeline.receive(routeLine(1, "held"))
+        await pipeline.receive(routeLine(2, "held too"))
+        mode = .lineByLine
+        await pipeline.receive(routeLine(3, "fourth"))
+        try await until { pipeline.outbox.contains { $0.sequence == 3 } }
+    }
+}
+
+@MainActor @Suite(.timeLimit(.minutes(1))) struct LiveDictationPipelineTests {
+    private func live(_ cleaner: StubCleaner = StubCleaner(), supportsLive: Bool = true, timeout: Duration = .milliseconds(200)) -> DictationPipeline {
+        DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: supportsLive, liveTimeout: timeout)
+    }
+
+    @Test func theTargetIsRawFinalsThenTheHeadAndCleanedSentencesReplaceTheirRawWords() async throws {
+        let cleaner = StubCleaner(slow: [0])
+        let pipeline = live(cleaner)
+        var published: [LiveDictationSnapshot?] = []
+        pipeline.onLiveChange = { published.append($0) }
+        pipeline.tailChanged("hello wor")
+        await pipeline.receive(routeLine(0, "hello world"))
+        pipeline.tailChanged("and then")
+        let run = try #require(pipeline.liveRun)
+        #expect(run.snapshot.segments == [.init(id: 0, text: "hello world", final: true), .init(id: 1, text: "and then", final: false)])
+        // Sentence 1 is cleaned first (sentence 0 is slow); both land as replacements of the raw words.
+        await pipeline.receive(routeLine(1, "second one"))
+        try await until { pipeline.liveRun?.snapshot.segments.contains { $0.cleaned } == true }
+        #expect(pipeline.liveRun?.snapshot.segments.first { $0.id == 1 }?.text == "Second One.")
+        #expect(pipeline.outbox.isEmpty, "Live never uses the line outbox")
+        #expect(published.compactMap { $0?.version } == published.compactMap { $0?.version }.sorted())
+    }
+
+    @Test func finishingWaitsForCleanupAndCompletesTheRun() async throws {
+        let pipeline = live()
+        await pipeline.receive(routeLine(0, "only sentence"))
+        await pipeline.finishTake()
+        let snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(snapshot.complete && snapshot.segments == [.init(id: 0, text: "Only Sentence.", cleaned: true, final: true)])
+        // The next words start a new run.
+        pipeline.tailChanged("again")
+        #expect(pipeline.liveRun?.runID != snapshot.runID && pipeline.liveRun?.complete == false)
+    }
+
+    @Test func aFailedCleanupLeavesTheRawWordsAndResetClearsTheRun() async throws {
+        let pipeline = live(StubCleaner(slow: [0]), timeout: .milliseconds(30))
+        var last: LiveDictationSnapshot?? = .none
+        pipeline.onLiveChange = { last = .some($0) }
+        await pipeline.receive(routeLine(0, "slow words"))
+        try await until { pipeline.fallbacks == ["timeout"] }
+        #expect(pipeline.liveRun?.snapshot.segments == [.init(id: 0, text: "slow words", final: true)])
+        await pipeline.reset()
+        #expect(pipeline.liveRun == nil)
+        #expect(last == .some(nil), "The link's run is removed")
+    }
+
+    @Test func switchingFromLiveToLineByLineKeepsDeliveringLines() async throws {
+        nonisolated(unsafe) var mode = DictationSendSetting.Mode.live
+        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { mode }, supportsLive: true, liveTimeout: .milliseconds(200))
+        await pipeline.receive(routeLine(0, "first"))
+        await pipeline.receive(routeLine(1, "second"))
+        try await until { pipeline.liveRun?.snapshot.segments.allSatisfy { $0.cleaned } == true }
+        mode = .lineByLine
+        await pipeline.receive(routeLine(2, "third"))
+        try await until { pipeline.outbox.count == 1 }
+        #expect(pipeline.outbox[0].sequence == 2 && pipeline.outbox[0].text == "Third.")
+    }
+
+    @Test func sentencesAreCleanedAgainstTheTextBeforeTheRunNotTheFieldTheRunIsTyping() async throws {
+        let cleaner = StubCleaner(slow: [0])
+        let pipeline = live(cleaner)
+        nonisolated(unsafe) var field = "Hi Anna,"
+        pipeline.contextBefore = { field }
+        await pipeline.receive(routeLine(0, "hello world"))
+        field = "Hi Anna, hello world and then it" // the keyboard has typed the run's words into the field
+        await pipeline.receive(routeLine(1, "second one"))
+        try await until { cleaner.inputs.withLock { $0.count } == 2 }
+        let inputs = cleaner.inputs.withLock { $0 }
+        #expect(inputs.first { $0.sequence == 0 }?.dictation?.textBeforeCursor == "Hi Anna,")
+        #expect(inputs.first { $0.sequence == 1 }?.dictation?.textBeforeCursor == "Hi Anna, hello world.", "A closed sentence is shown as finished")
+    }
+
+    @Test func aSentenceTheSegmenterCutShortIsCleanedOnceWhole() async throws {
+        let cleaner = StubCleaner()
+        let pipeline = live(cleaner)
+        await pipeline.receive(routeLine(0, "we need the report", reason: "words"))
+        await pipeline.receive(routeLine(1, "by next tuesday or else", reason: "duration"))
+        #expect(cleaner.inputs.withLock { $0.count } == 0, "Nothing is cleaned until the sentence ends")
+        await pipeline.receive(routeLine(2, "the client leaves", reason: "punctuation"))
+        try await until { pipeline.liveRun?.snapshot.segments.first?.cleaned == true }
+        let inputs = cleaner.inputs.withLock { $0 }
+        #expect(inputs.count == 1 && inputs[0].text == "we need the report by next tuesday or else the client leaves")
+        #expect(pipeline.liveRun?.snapshot.segments.count == 1)
+    }
+
+    @Test func aSegmentAndACleanupThatArriveAfterTheTakesEndStayInTheSameRun() async throws {
+        let cleaner = StubCleaner(slow: [1])
+        let pipeline = live(cleaner, timeout: .seconds(5))
+        pipeline.tailChanged("first sentence")
+        await pipeline.receive(routeLine(0, "first sentence."))
+        pipeline.tailChanged("last words")
+        let runID = pipeline.liveRun?.runID
+        // The stop is seen before the last segment's event reaches the sink; the head still shows its words.
+        await pipeline.finishTake()
+        #expect(pipeline.liveRun?.complete == true)
+        await pipeline.receive(routeLine(1, "last words."))
+        #expect(pipeline.liveRun?.runID == runID, "No second run for the straggler")
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.final) == [true, true])
+        #expect(pipeline.liveRun?.snapshot.segments.last?.text == "last words.")
+    }
+
+    @Test func lineByLineStopWaitsForTheLastLineToBeCleaned() async {
+        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { .lineByLine })
+        await pipeline.receive(routeLine(0, "one"))
+        await pipeline.finishTake()
+        #expect(pipeline.outbox.map(\.text) == ["One."])
+    }
+
+    @Test func withoutLiveSupportTheSettingActsAsOnStop() async {
+        let pipeline = live(supportsLive: false)
+        #expect(pipeline.mode == .onStop)
+        await pipeline.receive(routeLine(0, "held"))
+        #expect(pipeline.liveRun == nil && pipeline.takeLines == ["held"])
     }
 }

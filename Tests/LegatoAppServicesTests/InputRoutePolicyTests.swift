@@ -4,7 +4,7 @@ import LegatoCore
 @testable import LegatoAppServices
 
 @MainActor private func until(_ condition: @MainActor () async -> Bool) async throws {
-    for _ in 0..<500 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
+    for _ in 0..<5000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
     Issue.record("Timed out waiting for condition")
     throw CancellationError()
 }

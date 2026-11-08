@@ -9,6 +9,8 @@
 #   install                  install the last build on the device
 #   launch [args...]        (re)start Legato, e.g. launch -LegatoFakeEngine "hello world"; Debug builds start the bridge
 #   import-keys <0600-json-file>  one-time private keychain import; never passes keys in arguments
+#   put <local-file> <name>  copy a file into the app's bridge directory under <name> (a plain file name), e.g. a
+#                            dictation replay timeline for `send dictation-debug-replay <name> [speed]`
 #   send <command> [args...] queue a bridge command, print its id
 #   wait <id|event> [secs] [--ack]   wait (default 30) for a command's done/error line, or for a new line with that event
 #   log                      print the bridge log lines not shown yet
@@ -414,6 +416,14 @@ cmd_import_keys() {
   cmd_wait "$id"
 }
 
+# A test input for a bridge command that reads a file by name (dictation-debug-replay); never credentials.
+cmd_put() {
+  [ $# -eq 2 ] && [ -f "$1" ] || die "usage: put <local-file> <name>"
+  case "$2" in '' | .* | */* | *..*) die "<name> must be a plain file name" ;; esac
+  require_device
+  copy_to "$1" "$BRIDGE/$2"
+}
+
 cmd_say() { cmd_send say "$@"; }
 cmd_status() { cmd_send status "$@"; }
 cmd_clear() { cmd_send clear; }
@@ -601,6 +611,6 @@ case "$sub" in
   import-keys) cmd_import_keys "$@" ;;
   pull-sessions) cmd_pull "$@" ;;
   device-logs) cmd_device_logs "$@" ;;
-  devices | build | install | launch | send | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
+  devices | build | install | launch | send | put | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;
 esac
