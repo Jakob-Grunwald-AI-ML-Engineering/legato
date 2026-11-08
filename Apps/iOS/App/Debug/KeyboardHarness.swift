@@ -248,6 +248,8 @@ final class KeyboardHarnessModel {
     }
 
     func clearDocument() -> [String: Any] {
+        // The last live run is let go first, so it cannot type into the cleared field again.
+        controller.debugForgetLiveRun()
         document.textView.text = ""
         controller.documentDidChange()
         return state

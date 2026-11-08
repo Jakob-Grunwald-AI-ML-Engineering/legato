@@ -109,6 +109,8 @@ public struct RunShadow: Sendable, Equatable {
             var start: Int
             /// The span continues a frozen, half-typed word: no separator in front of it.
             var continuation: Bool
+            /// The span holds a cleaned unit's text: the ids of the unit's other (empty) segments.
+            var members: [Int] = []
         }
         var spans: [Span] = []
         /// Characters of separator and the like the prepared text has before the spans' text.
@@ -298,7 +300,10 @@ public struct RunShadow: Sendable, Equatable {
             let part = String(span.text.prefix(count))
             let known = frozen[span.id]
             let joined = known.map { $0.text + (span.continuation ? "" : " ") + part } ?? part
-            frozen[span.id] = Frozen(text: joined, closed: count == span.text.count && span.final)
+            let closed = count == span.text.count && span.final
+            frozen[span.id] = Frozen(text: joined, closed: closed)
+            // A cleaned unit typed whole is closed with all its segments: their raw words are in its text, never typed again.
+            if closed { for member in span.members { frozen[member] = Frozen(text: "", closed: true) } }
         }
         return true
     }
@@ -368,6 +373,7 @@ public struct RunShadow: Sendable, Equatable {
         var spans: [Built.Span] = []
         var continuation = false
         // A cleaned unit of several segments with a frozen part cannot be edited whole: its segments go back to their raw words.
+        // (A unit frozen whole after its cleaned text was typed is closed in every segment: it is skipped either way.)
         let touched = Set(snapshot.segments.compactMap { $0.unit != nil && frozen[$0.id] != nil ? $0.unit : nil })
         for segment in snapshot.segments {
             var text = (segment.unit.map(touched.contains) == true ? segment.raw ?? segment.text : segment.text).trimmingCharacters(in: .whitespaces)
@@ -379,7 +385,8 @@ public struct RunShadow: Sendable, Equatable {
             guard !text.isEmpty else { continue }
             if raw.isEmpty { continuation = continues }
             else if let last = raw.last, !last.isWhitespace, let first = text.first, !first.isNewline, !continues { raw += " " }
-            spans.append(.init(id: segment.id, text: text, final: segment.final, start: raw.count, continuation: continues))
+            let members = segment.unit == segment.id ? snapshot.segments.filter { $0.unit == segment.id && $0.id != segment.id }.map(\.id) : []
+            spans.append(.init(id: segment.id, text: text, final: segment.final, start: raw.count, continuation: continues, members: members))
             raw += text
         }
         guard !raw.isEmpty else { built = Built(spans: [], prefix: 0); return "" }

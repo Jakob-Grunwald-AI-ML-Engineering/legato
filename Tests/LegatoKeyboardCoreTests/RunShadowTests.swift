@@ -384,6 +384,23 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(field.text == "So the plan is ready now." && field.after.isEmpty)
     }
 
+    @Test func aFreezeAfterTheCleanedTakeNeverTypesItsFragmentsRawWordsAgain() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "")
+        tick(&shadow, &field, snapshot(1, [final(0, "Um."), final(1, "so, uh, the plan is ready now.")]))
+        let cleaned = snapshot(2, [
+            .init(id: 0, text: "The plan is ready now.", cleaned: true, final: true, unit: 0, raw: "Um."),
+            .init(id: 1, text: "", cleaned: true, final: true, unit: 0, raw: "so, uh, the plan is ready now."),
+        ], complete: true)
+        tick(&shadow, &field, cleaned)
+        #expect(field.text == "The plan is ready now.")
+        // The field is cleared (or edited) after the take: the run freezes and must not type anything again.
+        field = Field(before: "")
+        let frozen = tick(&shadow, &field, cleaned, elapsedMs: 900)
+        #expect(frozen.froze != nil)
+        tick(&shadow, &field, cleaned, settle: true)
+        #expect(field.text == "", "Nothing of the old run comes back")
+    }
+
     @Test func aTakeOfNothingButFillerIsErasedWhenItsCleanupDropsIt() {
         var shadow = RunShadow(runID: "r"), field = Field(before: "Hi.")
         tick(&shadow, &field, snapshot(1, [final(0, "Um.")]))
