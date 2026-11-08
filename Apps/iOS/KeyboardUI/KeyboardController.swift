@@ -425,8 +425,8 @@ final class KeyboardController {
     /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
     /// extension's `textDidChange` and `selectionDidChange` both come here.
     func documentDidChange() {
-        // A walk moves the cursor on purpose: nothing of it is the user's.
-        guard !isReadingField else { return }
+        // A walk moves the cursor on purpose, an instruction's edit changes the text op by op: nothing of it is the user's.
+        guard !isFieldBusy else { return }
         if isVisible { writePresence(notify: false) }
         refreshTraits()
         typing.documentChanged()
@@ -840,20 +840,24 @@ final class KeyboardController {
     }
 
     @ObservationIgnored private var liveStepping = false
+    /// The last step found nothing left to do: the field shows the whole target, every op confirmed (or no run).
+    @ObservationIgnored private var liveSettled = true
     /// Queued ops a step may send while the field confirms each one at once (a host that answers synchronously).
     private static let liveOpsPerStep = 64
 
     /// Steps of the run against the field: one op per step, and the next at once while the field already confirms
-    /// the last (a lagging host waits for the next tick). `flush` (the keyboard goes away) types everything now.
-    /// Not reentrant: the field's change notes during an op come back here and are left to the loop.
-    private func liveStep(elapsedMs: Double, flush: Bool = false) {
-        guard !isReadingField, !liveStepping else { return }
+    /// the last (a lagging host waits for the next tick). `flush` (the keyboard goes away) types everything now;
+    /// `reveal: false` types what is left at once, still op by op. Not reentrant: the field's change notes during an
+    /// op come back here and are left to the loop. Held while an instruction reads or edits the field.
+    private func liveStep(elapsedMs: Double, flush: Bool = false, reveal: Bool = true) {
+        guard !isFieldBusy, !liveStepping else { return }
         liveStepping = true
         defer { liveStepping = false }
         var elapsed = elapsedMs
         for _ in 0..<Self.liveOpsPerStep {
-            guard let step = liveStepOnce(elapsedMs: elapsed, flush: flush) else { return stopLiveTicker() }
+            guard let step = liveStepOnce(elapsedMs: elapsed, flush: flush, reveal: reveal) else { liveSettled = true; return stopLiveTicker() }
             elapsed = 0
+            liveSettled = !step.needsTicks
             guard !flush, !step.ops.isEmpty, !step.waiting, liveShadow?.isBusy == true else {
                 if step.needsTicks, isVisible, !flush { startLiveTicker() } else { stopLiveTicker() }
                 return
@@ -862,7 +866,28 @@ final class KeyboardController {
         startLiveTicker()
     }
 
-    private func liveStepOnce(elapsedMs: Double, flush: Bool) -> RunShadow.Step? {
+    /// Before an instruction reads or edits the field: what the run still has to type goes in, op by op, until the
+    /// field confirms the last one (a drift freezes on the way, as always). Bounded: past `limit` the read goes on with
+    /// the field as it is (the walk verifies what it reads, and an edit checks the windows around the cursor).
+    private func settleLive(limit: Duration = .milliseconds(2500)) async {
+        let clock = ContinuousClock(), start = clock.now
+        var last = start
+        liveStep(elapsedMs: 0, reveal: false)
+        while !liveSettled, !isTornDown, clock.now - start < limit {
+            try? await Task.sleep(for: Self.tickInterval)
+            let now = clock.now
+            liveStep(elapsedMs: Self.milliseconds(now - last), reveal: false)
+            last = now
+        }
+        if !liveSettled { trace?("live settle timed out") }
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        let parts = duration.components
+        return Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15
+    }
+
+    private func liveStepOnce(elapsedMs: Double, flush: Bool, reveal: Bool) -> RunShadow.Step? {
         guard !isTornDown, let snapshot = liveSnapshot, var shadow = liveShadow, snapshot.runID == shadow.runID,
               let documentID = document.documentID, !document.isSecureTextEntry else { return nil }
         if documentID != liveDocumentID {
@@ -873,7 +898,7 @@ final class KeyboardController {
         let step = shadow.step(
             snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore, reportedAfter: after,
             hasSelection: document.selectedText?.isEmpty == false, capitalization: autocapitalization,
-            elapsedMs: elapsedMs, animated: !flush && !UIAccessibility.isReduceMotionEnabled, flush: flush,
+            elapsedMs: elapsedMs, animated: reveal && !flush && !UIAccessibility.isReduceMotionEnabled, flush: flush,
             followingCharacter: after.first)
         liveShadow = shadow
         if step.waitStarted { liveStats.waits += 1 }
@@ -943,6 +968,10 @@ final class KeyboardController {
     private(set) var instructionStrip: InstructionStrip?
     /// The keyboard walks the field for an instruction: the cursor moves visibly, keys are held back.
     private(set) var isReadingField = false
+    /// An instruction's edit (or its undo) goes into the field op by op (`ScopedEditQueue`): keys are held back.
+    @ObservationIgnored private var isEditingField = false
+    /// Nothing else touches the field meanwhile: no keys, no live ops, no reaction to the field's change notes.
+    private var isFieldBusy: Bool { isReadingField || isEditingField }
     /// The text Legato typed in this appearance that still ends at the cursor: the instruction scope `session`.
     @ObservationIgnored private var sessionSpan = SessionSpan()
     /// What the last read showed for an instruction, so `read_more` continues from it.
@@ -969,6 +998,7 @@ final class KeyboardController {
         let strip = link.readInstructionStrip()
         if strip != instructionStrip { instructionStrip = strip }
         guard isVisible, !serving else { return }
+        // One at a time: a read never walks while an edit's ops are still landing, and the other way round.
         if let request = link.takeReadRequest() {
             serving = true
             Task { [weak self] in
@@ -977,7 +1007,12 @@ final class KeyboardController {
                 self?.receiveInstruction()
             }
         } else if let edit = link.takeInstructionEdit() {
-            landInstructionEdit(edit)
+            serving = true
+            Task { [weak self] in
+                await self?.landInstructionEdit(edit)
+                self?.serving = false
+                self?.receiveInstruction()
+            }
         }
     }
 
@@ -987,8 +1022,11 @@ final class KeyboardController {
         guard Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge, let documentID = document.documentID, !document.isSecureTextEntry else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
         }
-        // What is still being typed goes in first: the read sees the field as the user will.
-        liveStep(elapsedMs: 0, flush: true)
+        // What is still being typed goes in first, confirmed: the read sees the field as the user will.
+        await settleLive()
+        guard document.documentID == documentID else {
+            return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
+        }
         let before = document.contextBefore, after = document.contextAfter
         let selection = document.selectedText.flatMap { $0.isEmpty ? nil : $0 }
         let paragraphEnd = after.firstIndex(where: \.isNewline) ?? after.endIndex
@@ -1048,41 +1086,97 @@ final class KeyboardController {
         }
     }
 
-    /// Lands an instruction's result (or its undo) as word-level edits of exactly the scope, once the field still shows it.
-    private func landInstructionEdit(_ edit: ScopedEdit) {
+    /// Lands an instruction's result (or its undo) as word-level edits of exactly the scope, once the field still shows
+    /// it: one op at a time, the next once the field confirms the last (`ScopedEditQueue`), like the live run's ops. A
+    /// field that does not keep up stops the edit; the ack then says how far it got (`partial`), so undo still works.
+    private func landInstructionEdit(_ edit: ScopedEdit) async {
         guard let documentID = document.documentID, edit.documentID == nil || edit.documentID == documentID, !document.isSecureTextEntry else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
         }
-        liveStep(elapsedMs: 0, flush: true)
+        await settleLive()
         let windowBefore = document.contextBefore
+        guard document.documentID == documentID else {
+            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
+        }
+        let plan: ScopedEditPlanner.Plan
         switch ScopedEditPlanner.plan(edit, windowBefore: windowBefore, windowAfter: document.contextAfter, selected: document.selectedText) {
         case .failure(let refusal):
             trace?("instruction edit refused reason=\(refusal)")
-            link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: refusal.message))
-        case .success(let plan):
-            // The live run's text stays as it is now; the run goes on at the cursor afterwards.
-            freezeLiveRun(.instruction)
-            let kept = edit.selected == nil ? String(windowBefore.dropLast(min(windowBefore.count, edit.before.count))) : windowBefore
-            let expected = kept + plan.targetBefore
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            clearWatch.ownEdit(at: Date())
-            history.cursorMoved()
-            wordRow.interruptTyping()
-            for op in plan.ops {
-                switch op {
-                case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
-                case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
-                case .insert(let text): document.insert(text)
+            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: refusal.message))
+        case .success(let landed): plan = landed
+        }
+        // The live run's text stays as it is now; the run goes on at the cursor afterwards.
+        freezeLiveRun(.instruction)
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: windowBefore)
+        isEditingField = true
+        clearWatch.ownEdit(at: Date())
+        history.cursorMoved()
+        wordRow.interruptTyping()
+        let clock = ContinuousClock(), started = clock.now
+        var last = started, elapsed = 0.0, sent = 0, fieldGone = false
+        var outcome: ScopedEditQueue.Action = .wait
+        loop: while true {
+            // Ops the field confirms at once go out in one go; a lagging field is looked at again on the next tick.
+            for _ in 0..<Self.liveOpsPerStep {
+                guard !isTornDown, document.documentID == documentID else { outcome = .stopped(nil); fieldGone = true; break loop }
+                let action = queue.step(reportedBefore: document.contextBefore, reportedAfter: document.contextAfter,
+                                        hasSelection: document.selectedText?.isEmpty == false, elapsedMs: elapsed)
+                elapsed = 0
+                switch action {
+                case .send(let op):
+                    sent += 1
+                    switch op {
+                    case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
+                    case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
+                    case .insert(let text): document.insert(text)
+                    }
+                    clearWatch.ownEdit(at: Date())
+                case .wait: break
+                case .done, .stopped: outcome = action; break loop
                 }
+                if action == .wait { break }
             }
+            try? await Task.sleep(for: Self.tickInterval)
+            let now = clock.now
+            elapsed = Self.milliseconds(now - last)
+            last = now
+        }
+        isEditingField = false
+        let ms = Int(Self.milliseconds(clock.now - started))
+        if outcome == .done {
+            let expected = queue.expectedBefore
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
             typing.hostEdited()
             typing.ownEdit(contextBefore: expected)
             versions = nil
             if edit.selected == nil { sessionSpan.edited(before: edit.before, newBefore: plan.targetBefore) } else { sessionSpan.broken() }
             fieldRead = nil
-            trace?("instruction edit applied ops=\(plan.ops.count) chars=\(edit.scopeText.count)->\(edit.target.count)")
-            link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: plan.cursor))
+            documentDidChange()
+            trace?("instruction edit applied ops=\(plan.ops.count) waits=\(queue.waits) ms=\(ms) chars=\(edit.scopeText.count)->\(edit.target.count)")
+            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: plan.cursor))
         }
+        // Stopped: what landed stays; the field's report decides what Legato knows of it.
+        typing.hostEdited()
+        versions = nil
+        sessionSpan.broken()
+        fieldRead = nil
+        documentDidChange()
+        var partial: ScopedEditQueue.Partial?
+        if case .stopped(let known) = outcome { partial = known }
+        trace?("instruction edit stopped sent=\(sent)/\(plan.ops.count) waits=\(queue.waits) known=\(partial == nil ? 0 : 1) ms=\(ms)")
+        let ack: ScopedEditAck = switch partial {
+        case .some(let partial) where partial.text == edit.scopeText:
+            ScopedEditAck(id: edit.id, applied: false, reason: "The text field didn't keep up, so nothing was edited.")
+        case .some(let partial):
+            ScopedEditAck(id: edit.id, applied: false, cursor: partial.cursor,
+                          reason: "The text field didn't keep up, so the edit stopped partway.", partial: partial.text, stopped: true)
+        case .none:
+            ScopedEditAck(id: edit.id, applied: false, reason: fieldGone
+                              ? "The text field went away, so the edit stopped partway and can't be undone. Check the text."
+                              : "The text field didn't keep up, so the edit stopped partway and can't be undone. Check the text.",
+                          stopped: true)
+        }
+        link.writeInstructionEditAck(ack)
     }
 
     // MARK: Cursor control
@@ -1115,7 +1209,7 @@ final class KeyboardController {
     /// A Return holds no clear back (`ClearWatch.returnTyped`): in a chat app it sends and empties the field.
     /// `contextBefore`: the text before the cursor as the typing model tracks it (the field's own report lags).
     func type(_ text: String, contextBefore: String? = nil) {
-        guard !isReadingField else { return } // the cursor is somewhere above while the field is read
+        guard !isFieldBusy else { return } // the cursor is somewhere above while the field is read, or an edit is landing
         versions = nil // the user moved on from the dictation
         interruptDictation()
         resolveHeldClear()
@@ -1137,7 +1231,7 @@ final class KeyboardController {
     }
 
     func deleteBackward(contextBefore: String? = nil) {
-        guard !isReadingField else { return }
+        guard !isFieldBusy else { return }
         versions = nil
         interruptDictation()
         resolveHeldClear()
@@ -1165,6 +1259,7 @@ final class KeyboardController {
     /// completion, which the row follows up with predictions and which counts as typed text. `record: false`
     /// is for undo and redo, which move the history themselves.
     func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) {
+        guard !isFieldBusy else { return }
         interruptDictation()
         resolveHeldClear()
         beforeUserEdit()

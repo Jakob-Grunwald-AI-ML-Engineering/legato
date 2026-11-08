@@ -208,3 +208,89 @@ private func paragraphs(_ count: Int) -> String {
         #expect(span.text == "New words" && !span.startsField)
     }
 }
+
+/// A host that shows each op only `lag` reports later (Safari's proxy): the queue must not send the next op before then.
+private struct LaggingField {
+    var text: String
+    var cursor: Int
+    var lag: Int
+    private var pending: [(ShadowOp, Int)] = []
+    private(set) var reported: (before: String, after: String)
+    init(text: String, cursor: Int, lag: Int) {
+        self.text = text; self.cursor = cursor; self.lag = lag
+        let units = Array(text.utf16)
+        reported = (String(decoding: units[..<cursor], as: UTF16.self), String(decoding: units[cursor...], as: UTF16.self))
+    }
+    var inFlight: Int { pending.count }
+    mutating func perform(_ op: ShadowOp) { pending.append((op, lag)) }
+    /// One report later; `lose` drops the op in flight (a host that never shows it).
+    mutating func tick(lose: Bool = false) {
+        if lose { pending.removeAll() }
+        pending = pending.map { ($0.0, $0.1 - 1) }
+        while let first = pending.first, first.1 <= 0 {
+            (text, cursor) = ShadowEditPlanner.simulate(ops: [first.0], shadow: text, cursor: cursor)
+            pending.removeFirst()
+        }
+        let units = Array(text.utf16)
+        reported = (String(decoding: units[..<cursor], as: UTF16.self), String(decoding: units[cursor...], as: UTF16.self))
+    }
+}
+
+@Suite struct ScopedEditQueueTests {
+    private let head = "Earlier text. "
+    private let scope = "hey can you send the file we need it by nine"
+    private var edit: ScopedEdit {
+        ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "Could you send the file? We need it by 9:00.")
+    }
+
+    /// Runs the queue against the field until it finishes; `loseAfter` loses the op sent after that many confirmed ones.
+    private func run(_ edit: ScopedEdit, on field: inout LaggingField, loseAfter: Int? = nil) throws -> (ScopedEditQueue.Action, sent: Int) {
+        let plan = try ScopedEditPlanner.plan(edit, windowBefore: field.reported.before, windowAfter: field.reported.after, selected: nil).get()
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: field.reported.before)
+        var sent = 0
+        for _ in 0..<2000 {
+            let action = queue.step(reportedBefore: field.reported.before, reportedAfter: field.reported.after, hasSelection: false, elapsedMs: 33)
+            switch action {
+            case .send(let op):
+                #expect(field.inFlight == 0, "Never a second op before the field showed the first")
+                field.perform(op); sent += 1
+            case .wait: break
+            case .done, .stopped: return (action, sent)
+            }
+            field.tick(lose: loseAfter.map { sent == $0 + 1 } ?? false)
+        }
+        Issue.record("The queue never finished"); return (.wait, sent)
+    }
+
+    @Test func aLaggingFieldGetsOneConfirmedOpAtATimeAndEndsRight() throws {
+        var field = LaggingField(text: head + scope, cursor: (head + scope).utf16.count, lag: 3)
+        let (outcome, sent) = try run(edit, on: &field)
+        #expect(outcome == .done && sent > 1)
+        #expect(field.text == head + edit.target)
+    }
+
+    @Test func aLostOpStopsTheEditAndUndoStillRestoresTheScope() throws {
+        let original = head + scope
+        var field = LaggingField(text: original, cursor: original.utf16.count, lag: 2)
+        let half = try ScopedEditPlanner.plan(edit, windowBefore: original, windowAfter: "", selected: nil).get().ops.count / 2
+        let (outcome, sent) = try run(edit, on: &field, loseAfter: half)
+        guard case .stopped(let partial?) = outcome else { Issue.record("Stopped with a known state, got \(outcome)"); return }
+        #expect(sent == half + 1, "Nothing goes out after the op the field did not show")
+        #expect(field.text == head + partial.text, "The partial text is what the field shows")
+        #expect(partial.text != scope && partial.text != edit.target)
+        // The app's undo of a stopped edit: from what landed back to the scope, through the same queue.
+        let stranded = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: partial.text)
+        let (back, _) = try run(ScopedEditPlanner.undo(of: stranded, cursor: partial.cursor), on: &field)
+        #expect(back == .done && field.text == original)
+    }
+
+    @Test func aFieldThatShowsNeitherStateIsUnknown() throws {
+        let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: scope)
+        guard case .send = queue.step(reportedBefore: scope, reportedAfter: "", hasSelection: false, elapsedMs: 0) else { Issue.record("First op"); return }
+        var outcome = ScopedEditQueue.Action.wait
+        while outcome == .wait { outcome = queue.step(reportedBefore: "the user typed this", reportedAfter: "", hasSelection: false, elapsedMs: 100) }
+        #expect(outcome == .stopped(nil))
+        #expect(queue.waits == 1)
+    }
+}

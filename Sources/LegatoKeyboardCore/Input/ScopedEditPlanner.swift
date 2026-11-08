@@ -61,6 +61,109 @@ public enum ScopedEditPlanner {
     }
 }
 
+/// Carries out a `ScopedEditPlanner.Plan` like the live run's edit queue (`RunShadow`): one op in flight, the next only
+/// once the field's report shows the last one (`RunShadow.confirms`), so a host that reports late never gets an op at a
+/// wrong offset. Pure: the keyboard feeds it the field's report and carries out the op it hands over.
+///
+/// An op the field does not confirm within `RunShadow.confirmLimitMs` (or a selection that appears or stays), or an edit
+/// past `limitMs`, stops it: the rest is never sent. Where the field then shows what was expected after the last confirmed op, `Partial` is
+/// the scope's text there (the scope itself when nothing landed), so the app can still undo; otherwise it is unknown.
+public struct ScopedEditQueue: Sendable, Equatable {
+    public enum Action: Sendable, Equatable {
+        /// Carry out this op; the next step checks that the field shows it.
+        case send(ShadowOp)
+        /// The field has not confirmed the last op yet: step again on the next tick.
+        case wait
+        /// Every op went out and the field confirmed the last one.
+        case done
+        /// The field did not confirm in time; nothing more is sent. Nil: the field shows neither state.
+        case stopped(Partial?)
+    }
+
+    /// The scope's text as the field shows it where the edit stopped, and the cursor in it (UTF-16).
+    public struct Partial: Sendable, Equatable {
+        public var text: String
+        public var cursor: Int
+    }
+
+    /// The scope around the cursor before any op and after each one. `selected`: the scope is still selected (`before`
+    /// is the selection then, and the field's text before the cursor ends before it).
+    struct State: Sendable, Equatable {
+        var before: String
+        var after: String
+        var selected: Bool
+    }
+
+    private let kept: String
+    private let ops: [ShadowOp]
+    private let states: [State]
+    private var sent = 0
+    private var confirmed = 0
+    private var waitedMs = 0.0
+    private var totalMs = 0.0
+    private var stopped = false
+    /// The whole edit's budget: past it no further op is sent (the app waits `LinkChannel.editLandTimeout` for the ack).
+    public static let limitMs = 20_000.0
+    /// Ops that had to wait for the field to confirm them.
+    public private(set) var waits = 0
+
+    /// `windowBefore`: the field's text before the cursor when the plan was made (the scope's `before` ends it).
+    public init(_ edit: ScopedEdit, plan: ScopedEditPlanner.Plan, windowBefore: String) {
+        ops = plan.ops
+        if let selection = edit.selected {
+            // The host replaces the selection with the insert (or deletes it); the cursor ends after the new text.
+            kept = windowBefore
+            states = [State(before: selection, after: "", selected: true), State(before: edit.target, after: "", selected: false)]
+        } else {
+            kept = String(windowBefore.dropLast(min(windowBefore.count, edit.before.count)))
+            var text = edit.before + edit.after, cursor = edit.before.utf16.count
+            var states = [State(before: edit.before, after: edit.after, selected: false)]
+            for op in plan.ops {
+                (text, cursor) = ShadowEditPlanner.simulate(ops: [op], shadow: text, cursor: cursor)
+                let units = Array(text.utf16)
+                states.append(State(before: String(decoding: units[..<cursor], as: UTF16.self),
+                                    after: String(decoding: units[cursor...], as: UTF16.self), selected: false))
+            }
+            self.states = states
+        }
+    }
+
+    /// The field's text before the cursor once the whole edit landed.
+    public var expectedBefore: String { kept + (states.last?.before ?? "") }
+
+    public mutating func step(reportedBefore: String, reportedAfter: String, hasSelection: Bool, elapsedMs: Double) -> Action {
+        guard !stopped else { return .stopped(nil) }
+        totalMs += elapsedMs
+        if confirmed < sent {
+            guard shows(states[sent], reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else {
+                if waitedMs == 0 { waits += 1 }
+                waitedMs += elapsedMs
+                guard waitedMs >= RunShadow.confirmLimitMs else { return .wait }
+                stopped = true
+                // The op in flight may still land, or was lost: only a field that shows the last confirmed state is known.
+                let last = states[confirmed]
+                guard shows(last, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else { return .stopped(nil) }
+                return .stopped(Partial(text: last.before + last.after, cursor: last.selected ? 0 : last.before.utf16.count))
+            }
+            confirmed = sent; waitedMs = 0
+        }
+        guard sent < ops.count else { return .done }
+        if totalMs >= Self.limitMs {
+            stopped = true
+            let last = states[confirmed]
+            return .stopped(Partial(text: last.before + last.after, cursor: last.selected ? 0 : last.before.utf16.count))
+        }
+        sent += 1
+        return .send(ops[sent - 1])
+    }
+
+    private func shows(_ state: State, reportedBefore: String, reportedAfter: String, hasSelection: Bool) -> Bool {
+        guard state.selected == hasSelection else { return false }
+        return RunShadow.confirms(expectedBefore: kept + (state.selected ? "" : state.before), expectedAfter: state.after,
+                                  reportedBefore: reportedBefore, reportedAfter: reportedAfter)
+    }
+}
+
 /// The text Legato typed in this keyboard appearance that still ends at the cursor: the instruction scope `session`.
 /// Live runs extend it; an instruction's edit rewrites it; anything the user does at the cursor (a key, a move, a
 /// selection, another field) ends it.

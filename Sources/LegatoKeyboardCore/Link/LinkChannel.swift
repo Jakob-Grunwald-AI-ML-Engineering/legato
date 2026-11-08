@@ -102,6 +102,9 @@ public enum LinkChannel {
     public static let readAckTimeout: TimeInterval = 1.5
     /// How long a field read that walks may take (a long field costs about 1.5 ms per character).
     public static let readTimeout: TimeInterval = 15
-    /// How long the app waits for the keyboard to land an instruction's edit.
+    /// How long the app waits for the keyboard to take an instruction's edit.
     public static let editTimeout: TimeInterval = 4
+    /// How long the app waits for the ack of an edit the keyboard took: its ops land one confirmed op at a time
+    /// (`ScopedEditQueue.limitMs`, after the live run settles).
+    public static let editLandTimeout: TimeInterval = 30
 }

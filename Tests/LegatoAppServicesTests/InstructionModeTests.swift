@@ -74,6 +74,8 @@ import LegatoKeyboardCore
     var reads: [FieldReadRequest.Kind] = []
     var edits: [ScopedEdit] = []
     var refuse = false
+    /// The next edit stops partway (the field did not keep up) with the scope showing this.
+    var stopWith: String?
     init(text: String, sessionLength: Int) {
         self.text = text
         reply = FieldReadReply(id: "r", state: .done, above: text, sessionLength: sessionLength, stop: .start)
@@ -85,6 +87,11 @@ import LegatoKeyboardCore
     func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
         edits.append(edit)
         guard !refuse, text.hasSuffix(edit.before) else { return ScopedEditAck(id: edit.id, applied: false, reason: "The text changed, so nothing was edited.") }
+        if let partial = stopWith {
+            stopWith = nil
+            text = String(text.dropLast(edit.before.count)) + partial
+            return ScopedEditAck(id: edit.id, applied: false, cursor: partial.utf16.count, reason: "Stopped partway.", partial: partial, stopped: true)
+        }
         text = String(text.dropLast(edit.before.count)) + edit.target
         return ScopedEditAck(id: edit.id, applied: true, cursor: edit.target.utf16.count)
     }
@@ -145,6 +152,21 @@ private final class MemoryHistory: HistoryStore, @unchecked Sendable {
         try await until { session.strip.phase == .failed }
         #expect(field.edits.isEmpty && field.text == "Some text")
         #expect(session.strip.message == InstructionFailure.malformedReply.message)
+    }
+
+    @Test func anEditThatStoppedPartwayCanStillBeUndone() async throws {
+        let field = FakeField(text: "Notes\nhey can you send the file", sessionLength: 25)
+        field.stopWith = "Could you send the file"
+        let history = MemoryHistory()
+        let session = InstructionSession(runner: FixedRunner(reply: "SCOPE: session\nCould you send the file, please?"), history: history)
+        session.field = field
+        session.begin(); session.hear(line("make this polite")); session.end()
+        try await until { session.strip.phase == .failed }
+        #expect(session.strip.canUndo && session.strip.message?.hasPrefix("Stopped partway.") == true)
+        #expect(history.entries.isEmpty, "A stopped edit is not a result")
+        session.handle(InstructionIntent(action: .undo, instructionID: session.strip.instructionID))
+        try await until { session.strip.phase == .undone }
+        #expect(field.text == "Notes\nhey can you send the file")
     }
 
     @Test func aFieldThatChangedRefusesTheEdit() async throws {

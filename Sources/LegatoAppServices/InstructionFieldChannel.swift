@@ -11,12 +11,14 @@ import LegatoKeyboardCore
     private let ackTimeout: TimeInterval
     private let readTimeout: TimeInterval
     private let editTimeout: TimeInterval
+    private let landTimeout: TimeInterval
 
     public init(store: LinkStore, post: @escaping @Sendable (String) -> Void = { DarwinObserver.post($0) }, poll: Duration = .milliseconds(30),
                 ackTimeout: TimeInterval = LinkChannel.readAckTimeout, readTimeout: TimeInterval = LinkChannel.readTimeout,
-                editTimeout: TimeInterval = LinkChannel.editTimeout) {
+                editTimeout: TimeInterval = LinkChannel.editTimeout, landTimeout: TimeInterval = LinkChannel.editLandTimeout) {
         link = InstructionLink(store: store); self.post = post; self.poll = poll
         self.ackTimeout = ackTimeout; self.readTimeout = readTimeout; self.editTimeout = editTimeout
+        self.landTimeout = landTimeout
     }
 
     public func publish(_ strip: InstructionStrip) {
@@ -58,13 +60,13 @@ import LegatoKeyboardCore
         link.publish(edit)
         post(LinkChannel.Note.instructionEdit)
         let start = ContinuousClock.now
-        var deadline = editTimeout
+        var deadline = editTimeout, landing = false
         while true {
             if let ack = link.takeAck(id: edit.id) { return ack }
             if Self.seconds(since: start) >= deadline {
-                // Still unread: taken back, so it can never land late. Already taken: it is landing; wait once more.
-                if link.takeEdit() != nil || deadline > editTimeout { return nil }
-                deadline += editTimeout
+                // Still unread: taken back, so it can never land late. Already taken: it is landing op by op; wait for it.
+                if landing || link.takeEdit() != nil { return nil }
+                landing = true; deadline = editTimeout + landTimeout
             }
             try? await Task.sleep(for: poll)
         }

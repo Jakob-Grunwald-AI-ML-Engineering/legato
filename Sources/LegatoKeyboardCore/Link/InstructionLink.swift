@@ -176,12 +176,18 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
 public struct ScopedEditAck: Codable, Sendable, Equatable {
     public var id: String
     public var applied: Bool
-    /// Where the cursor ended, in UTF-16 units into `target` (the undo splits the target there).
+    /// Where the cursor ended, in UTF-16 units into `target` (the undo splits the target there), or into `partial`.
     public var cursor: Int?
-    /// Why nothing was edited (no field text).
+    /// Why nothing (or not all) was edited (no field text).
     public var reason: String?
-    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil) {
-        self.id = id; self.applied = applied; self.cursor = cursor; self.reason = reason
+    /// Not applied, but stopped partway (the field did not keep up, `ScopedEditQueue`): the scope's text as the field
+    /// shows it now, so an undo can still put the original back. Nil with `applied` false: the field is as it was, or
+    /// its text is unknown (`reason` says which).
+    public var partial: String?
+    /// Ops went out and the edit stopped before the end; without `partial` the field's text is unknown.
+    public var stopped: Bool?
+    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil) {
+        self.id = id; self.applied = applied; self.cursor = cursor; self.reason = reason; self.partial = partial; self.stopped = stopped
     }
 }
 

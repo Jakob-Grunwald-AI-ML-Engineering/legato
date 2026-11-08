@@ -155,6 +155,13 @@ extension InstructionRunner: InstructionRunning {}
                 let edit = ScopedEdit(instructionID: id, documentID: documentID, before: outcome.range.before, after: outcome.range.after,
                                       selected: outcome.range.selected, target: outcome.target)
                 let ack = await field.apply(edit)
+                if let ack, !ack.applied, let partial = ack.partial {
+                    // Stopped partway: what landed stays, and undo puts the original back.
+                    guard self.strip.instructionID == id else { return }
+                    self.stranded(original: edit.scopeText, partial: partial, documentID: edit.documentID, ack: ack, id: id)
+                    self.diagnostics?("instruction.run", ["ok": false, "reason": "partial", "ms": Self.ms(since: started)])
+                    return
+                }
                 guard let ack, ack.applied else {
                     throw InstructionFailure.read(ack?.reason ?? "The keyboard didn't answer, so nothing was edited.")
                 }
@@ -188,16 +195,29 @@ extension InstructionRunner: InstructionRunning {}
             defer { if self.generation == generation { self.task = nil } }
             let ack = await field.apply(edit)
             guard self.strip.instructionID == id else { return }
-            if ack?.applied == true {
+            if let ack, !ack.applied, let partial = ack.partial {
+                // The undo stopped partway: undo again goes on from what landed.
+                self.stranded(original: edit.target, partial: partial, documentID: edit.documentID, ack: ack, id: id)
+            } else if ack?.applied == true {
                 self.landed = nil
                 self.update(InstructionStrip(instructionID: id, phase: .undone, transcript: self.strip.transcript, scope: self.strip.scope,
                                              message: "Undone.", canUndo: false))
             } else {
                 self.landed = nil
                 self.update(InstructionStrip(instructionID: id, phase: .failed, transcript: self.strip.transcript,
-                                             message: "The text changed, so there is nothing to undo."))
+                                             message: ack?.stopped == true ? ack?.reason : "The text changed, so there is nothing to undo."))
             }
         }
+    }
+
+    /// An edit stopped partway (the field did not keep up): the field shows `partial` where the scope was. `landed`
+    /// becomes an edit from `original` to it, so undo puts `original` back; the instruction is not run again on its own.
+    private func stranded(original: String, partial: String, documentID: String?, ack: ScopedEditAck, id: String) {
+        landed = (ScopedEdit(instructionID: id, documentID: documentID, before: original, after: "", target: partial),
+                  ack.cursor ?? partial.utf16.count)
+        words = []
+        update(InstructionStrip(instructionID: id, phase: .failed, transcript: strip.transcript, scope: strip.scope,
+                                message: (ack.reason ?? "The edit stopped partway.") + " Undo puts the text back.", canUndo: true))
     }
 
     // MARK: Helpers
