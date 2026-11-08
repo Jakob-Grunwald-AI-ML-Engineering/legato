@@ -72,6 +72,8 @@ public struct RunShadow: Sendable, Equatable {
     private var inFlightWhole = false
     /// A version seen while the queue was busy and not diffed yet.
     private var heldVersion: Int?
+    /// The target the region is being brought to (the last one diffed).
+    private var target = ""
     /// After a freeze: the field's report must hold still for `stableMs` before it seeds the new anchor.
     private var settling: Bool
     private var lastReport: String?
@@ -212,15 +214,32 @@ public struct RunShadow: Sendable, Equatable {
                 queue = [.insert(slice)]
             }
             region += slice
-            inFlightWhole = region == target
+            inFlightWhole = region == target; self.target = target
         } else {
             queue = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count, target: target).ops
             step.rewrote = true
-            region = target; inFlightWhole = true
+            region = target; inFlightWhole = true; self.target = target
         }
         send(&step)
         if flush { while !queue.isEmpty { send(&step) } }
         return step
+    }
+
+    /// A key of this keyboard is about to freeze the run (`freeze(.keystroke)`) while the typewriter has revealed only
+    /// part of a word: the op that types the rest of it first (with marks stuck to it, and a space when `key` starts
+    /// with a letter or digit), so the key lands after the word. Nil when nothing is cut off, ops are queued, or the
+    /// field does not confirm the last op.
+    public mutating func finishWord(beforeKey key: String, reportedBefore: String, reportedAfter: String) -> ShadowOp? {
+        guard queue.isEmpty, !settling, let last = region.last, last.isLetter || last.isNumber,
+              target.count > region.count, target.hasPrefix(region),
+              Self.confirms(expectedBefore: expectedBefore, expectedAfter: expectedAfter, reportedBefore: reportedBefore, reportedAfter: reportedAfter)
+        else { return nil }
+        var rest = String(target.dropFirst(region.count).prefix { !$0.isWhitespace })
+        guard let first = rest.first, first.isLetter || first.isNumber else { return nil }
+        if let k = key.first, k.isLetter || k.isNumber { rest += " " }
+        (work, workCursor) = ShadowEditPlanner.simulate(ops: [.insert(rest)], shadow: work, cursor: workCursor)
+        region += rest
+        return .insert(rest)
     }
 
     /// Takes a new anchor at the cursor; the region starts empty there.
