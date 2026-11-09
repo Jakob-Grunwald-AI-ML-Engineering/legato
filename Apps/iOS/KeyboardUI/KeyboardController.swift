@@ -894,6 +894,7 @@ final class KeyboardController {
         liveShadow = shadow
         if step.waitStarted { liveStats.waits += 1 }
         if step.confirmTimedOut { liveStats.confirmTimeouts += 1 }
+        if step.moveResent { trace?("live move resent") }
         liveStats.coalesced += step.coalesced
         if let start = step.startDetail { liveStats.lastStart = start; writeLiveAck(version: nil, complete: false) }
         if let cause = step.froze {
