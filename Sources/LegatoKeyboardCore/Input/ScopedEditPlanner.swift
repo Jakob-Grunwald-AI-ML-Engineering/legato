@@ -36,11 +36,20 @@ public enum ScopedEditPlanner {
         guard selected?.isEmpty != false,
               agrees(scope: edit.before, window: windowBefore, atEnd: true),
               agrees(scope: edit.after, window: windowAfter, atEnd: false) else { return .failure(.changed) }
+        if edit.after.isEmpty, let ops = ShadowEditPlanner.retypeTail(shadow: edit.before, target: edit.target, limit: retypeChars) {
+            // The cursor ends the scope and the first change is near it: delete back to it and type the rest. No moves,
+            // so nothing a page can put back after its input events (a controlled text area moves its caret silently).
+            return .success(Plan(ops: ops, cursor: edit.target.utf16.count, targetBefore: edit.target))
+        }
         let shadow = edit.before + edit.after
         let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count, target: edit.target, coarse: true)
         let before = String(decoding: Array(edit.target.utf16.prefix(plan.cursor)), as: UTF16.self)
         return .success(Plan(ops: plan.ops, cursor: plan.cursor, targetBefore: before))
     }
+
+    /// An edit whose first change is at most this far back from the cursor (at the scope's end) is retyped from there;
+    /// a smaller change further back goes by words, with moves.
+    public static let retypeChars = 400
 
     /// A window (cut short by the host) and the scope agree where they overlap: next to the cursor. An empty window
     /// agrees only with an empty scope side: "nothing before the cursor" is not the end of any text.

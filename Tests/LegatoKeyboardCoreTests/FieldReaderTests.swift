@@ -288,8 +288,10 @@ private extension String {
     }
 
     @Test func nearbyChangesJoinAndASmallFixStaysWordLevel() throws {
-        let scope = "We meet on monday at the old office. Bring the notes from last week and the slides. Lunch is on us."
-        let target = "We meet on Monday at the new office. Bring the notes from last week and the slides. Lunch is on us."
+        // Far from the cursor (past `retypeChars`): by words.
+        let tail = String(repeating: " Then we go through the plan together.", count: 12)
+        let scope = "We meet on monday at the old office. Bring the notes from last week and the slides. Lunch is on us." + tail
+        let target = "We meet on Monday at the new office. Bring the notes from last week and the slides. Lunch is on us." + tail
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
         let r = try land(edit, field: scope, cursor: scope.count)
         #expect(r.text == target)
@@ -383,8 +385,9 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
 
     @Test func aPageThatPutsItsCaretBackGetsTheRestRetypedAndUndoToo() throws {
         // The first change is far from the end: the coarse plan moves there first; the page puts the caret back.
-        let scope = "we meet on monday at the office and bring the slides from last week please"
-        let target = "We meet on Tuesday at the office and bring the slides from last week, please."
+        let tail = String(repeating: " Then we go through the plan together.", count: 12)
+        let scope = "we meet on monday at the office and bring the slides from last week" + tail
+        let target = "We meet on Tuesday at the office and bring the slides from last week" + tail
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
         var field = LaggingField(text: head + scope, cursor: (head + scope).utf16.count, lag: 1)
         field.resetsCaret = true
@@ -395,6 +398,13 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         var moves = 0
         let (back, _) = try run(ScopedEditPlanner.undo(of: edit, cursor: lastQueue?.finalCursor ?? 0), on: &field, avoidsMoves: true, moves: &moves)
         #expect(back == .done && field.text == head + scope && moves == 0)
+    }
+
+    @Test func aChangeNearTheCursorIsRetypedWithoutMoves() throws {
+        let scope = "we meet at nine and bring the slides"
+        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "We meet at 9:00 and bring the slides.")
+        let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
+        #expect(plan.ops == [.deleteBackward(scope.count), .insert(edit.target)] && plan.cursor == edit.target.utf16.count)
     }
 
     @Test func withoutMovesAChangeAfterTheCursorIsNotMadeAtAll() throws {
