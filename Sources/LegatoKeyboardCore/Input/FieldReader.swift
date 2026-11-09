@@ -49,6 +49,13 @@ import Foundation
         /// Windows accepted, and reads beyond the first of each.
         public var steps = 0
         public var rereads = 0
+        /// Whether the field shows a paragraph break as "\n\n" while it moves over it as one unit (Safari's
+        /// `contenteditable` with `<p>` paragraphs): then `text` holds one "\n" per break, as the field counts it. Nil:
+        /// no doubled break was seen.
+        public var collapsesBreaks: Bool?
+        /// Whether the field moves the cursor one unit per character (Safari: an emoji is one unit) rather than per
+        /// UTF-16 unit (UIKit: an emoji is two). Nil: no character of more than one unit was moved over.
+        public var movesByCharacters: Bool?
     }
 
     public enum Failure: Error, Sendable, Equatable {
@@ -90,33 +97,119 @@ import Foundation
     public var maxRereads: Int
     public var settleMilliseconds: Int
 
-    public init(cap: Int = FieldReader.defaultCap, blockLimit: Int = FieldReader.blockLimit, maxRereads: Int = 10, settleMilliseconds: Int = 15) {
+    /// Known from an earlier read of this field (`Result.collapsesBreaks`); nil: found out on the way.
+    public var collapsesBreaks: Bool?
+    /// Known from an earlier read of this field (`Result.movesByCharacters`); nil: found out on the way.
+    public var movesByCharacters: Bool?
+
+    public init(cap: Int = FieldReader.defaultCap, blockLimit: Int = FieldReader.blockLimit, maxRereads: Int = 10, settleMilliseconds: Int = 15,
+                collapsesBreaks: Bool? = nil, movesByCharacters: Bool? = nil) {
         self.cap = cap; self.blockLimit = blockLimit; self.maxRereads = maxRereads; self.settleMilliseconds = settleMilliseconds
+        self.collapsesBreaks = collapsesBreaks; self.movesByCharacters = movesByCharacters
+    }
+
+    /// The cursor movement over `text`, in the field's units.
+    static func units(_ text: some StringProtocol, byCharacters: Bool) -> Int { byCharacters ? text.count : text.utf16.count }
+
+    /// Whether the field moves the cursor one unit per character (an emoji is one unit) rather than per UTF-16 unit: the
+    /// cursor goes back over the last such character in `text` (which ends at the cursor) by its UTF-16 length. A UTF-16
+    /// field lands right before it; a character field one character further. The cursor comes back. Nil: nothing to tell by.
+    static func movesOneUnitPerCharacter(_ proxy: any FieldWindowProxy, before text: String, settle: Int) async -> Bool? {
+        guard let wide = text.lastIndex(where: { $0.utf16.count > 1 }), text.distance(from: text.startIndex, to: wide) > 6 else { return nil }
+        let distance = text[wide...].utf16.count
+        proxy.move(by: -distance)
+        var window: String?, previous: String?
+        for _ in 0..<12 {
+            await proxy.pause(milliseconds: settle)
+            let now = proxy.windowBefore
+            if now == previous { window = now; break }
+            previous = now
+        }
+        let shown = window ?? previous ?? ""
+        let preceding = text[..<wide]
+        let byUnits = shown.hasSuffix(preceding.suffix(6))
+        let byCharacters = !byUnits && shown.hasSuffix(preceding.dropLast(text[wide].utf16.count - 1).suffix(6))
+        // Back by the same count, as this field moves.
+        proxy.move(by: distance)
+        await proxy.pause(milliseconds: settle)
+        return byUnits ? false : (byCharacters ? true : nil)
+    }
+
+    /// `window` with each doubled line break ("\n\n", one paragraph break in a `<p>` field) as one.
+    public static func collapsed(_ window: String) -> String { window.replacingOccurrences(of: "\n\n", with: "\n") }
+
+    /// Whether a doubled line break in the windows is one unit of cursor movement (a `<p>` boundary) rather than two line
+    /// breaks: the cursor goes to just past the break (`behind` units back) or just before it (`ahead` units on), steps
+    /// one unit over it, and the window there shows whether a line break is left. The cursor comes back.
+    static func breakIsOneUnit(_ proxy: any FieldWindowProxy, behind: Int = 0, ahead: Int = 0, settle: Int) async -> Bool {
+        let back = behind > 0 || ahead == 0
+        let distance = (back ? behind : ahead) + 1
+        proxy.move(by: back ? -distance : distance)
+        var window: String?, previous: String?
+        for _ in 0..<12 {
+            await proxy.pause(milliseconds: settle)
+            let now = back ? proxy.windowBefore : proxy.windowAfter
+            if now == previous { window = now; break }
+            previous = now
+        }
+        proxy.move(by: back ? distance : -distance)
+        await proxy.pause(milliseconds: settle)
+        let shown = window ?? previous ?? ""
+        // Two real line breaks leave one next to the cursor; a paragraph boundary leaves the paragraph's text.
+        return back ? shown.last?.isNewline != true : shown.first?.isNewline != true
     }
 
     /// Extends `known` (verified text that ends at the cursor; empty for a first read) upward.
     public func readUp(_ proxy: any FieldWindowProxy, known: String, limit: Limit) async -> Swift.Result<Result, Failure> {
         // What was read before must still be what the field shows before the cursor.
-        guard known.isEmpty || OwnEditEcho.isSame(expected: known, reported: proxy.windowBefore) else { return .failure(.changed) }
+        let reported = collapsesBreaks == true ? Self.collapsed(proxy.windowBefore) : proxy.windowBefore
+        guard known.isEmpty || OwnEditEcho.isSame(expected: known, reported: reported) else { return .failure(.changed) }
         var text = known
         var added = ""
         var moved = 0
         var result = Result(text: known, added: 0, stop: .start, moreRemains: false)
+        var byCharacters = movesByCharacters ?? false, unitsKnown = movesByCharacters != nil
+        if !unitsKnown, let probed = await Self.movesOneUnitPerCharacter(proxy, before: reported, settle: settleMilliseconds) {
+            byCharacters = probed; unitsKnown = true
+        }
         if !known.isEmpty {
             // The text already read is jumped over in one move: no reads in between.
-            moved = known.utf16.count
+            moved = Self.units(known, byCharacters: byCharacters)
             proxy.move(by: -moved)
+            if !unitsKnown, known.utf16.count != known.count {
+                // A wide character beyond the window: whichever count lands where the text read shows after the cursor.
+                let landed = await stablePair(proxy, offset: moved, result: &result) { Self.stitches(after: $0.after, onto: known) }
+                if case .failure = landed {
+                    let other = known.count
+                    proxy.move(by: moved - other); moved = other
+                    byCharacters = true
+                }
+                unitsKnown = true
+            }
         }
         var failure: Failure?
+        // Doubled breaks: taken as they show until a move over one shows otherwise (then one unit each, for good).
+        var collapse = collapsesBreaks ?? false, decided = collapsesBreaks != nil
         while true {
             let pair: (before: String, after: String)
-            switch await stablePair(proxy, stitching: text, offset: moved, result: &result) {
+            let read = text
+            switch await stablePair(proxy, offset: moved, result: &result, stitches: {
+                Self.stitches(after: collapse ? Self.collapsed($0.after) : $0.after, onto: read)
+            }) {
             case .failure(let reason):
                 // Nothing above the cursor was accepted after a move: the move itself went elsewhere.
                 if case .stitch = reason, result.steps == 1, known.isEmpty { failure = .firstMove } else { failure = reason }
             case .success(let value): pair = value; result.steps += 1
                 if pair.before.isEmpty { result.stop = .start; result.moreRemains = false; break }
-                var window = String(Self.trusted(before: pair.before))
+                if !unitsKnown, let probed = await Self.movesOneUnitPerCharacter(proxy, before: String(Self.trusted(before: pair.before)), settle: settleMilliseconds) {
+                    byCharacters = probed; unitsKnown = true
+                }
+                if !decided, let shown = Optional(Self.trusted(before: pair.before)), let cut = shown.range(of: "\n\n", options: .backwards) {
+                    // How many units is a doubled break? Two moves next to the last one tell (and come back).
+                    collapse = await Self.breakIsOneUnit(proxy, behind: shown[cut.upperBound...].utf16.count, settle: settleMilliseconds)
+                    decided = true
+                }
+                var window = String(Self.trusted(before: collapse ? Self.collapsed(pair.before) : pair.before))
                 // Only a block boundary in view: it is crossed on its own, as the one unit it moves.
                 if window.isEmpty { window = "\n" }
                 let room = limit == .cap ? cap - text.count : blockLimit - added.count
@@ -142,24 +235,26 @@ import Foundation
                     result.stop = .block; result.moreRemains = true
                     break
                 }
-                let units = window.utf16.count
+                let units = Self.units(window, byCharacters: byCharacters)
                 proxy.move(by: -units)
                 moved += units
                 continue
             }
             break
         }
+        if decided { result.collapsesBreaks = collapse }
+        if unitsKnown { result.movesByCharacters = byCharacters }
         // Back to the cursor in one move, then make sure it is there.
         if moved > 0 { proxy.move(by: moved) }
         if let failure { return .failure(failure) }
         // The host reports the cursor's return late as well: two reads that agree.
         var back: String?
-        var last: String?
+        var previous: String?
         for _ in 0...(maxRereads + 1) {
             await proxy.pause(milliseconds: settleMilliseconds)
-            let window = proxy.windowBefore
-            if window == last { back = window; break }
-            last = window
+            let window = collapse ? Self.collapsed(proxy.windowBefore) : proxy.windowBefore
+            if window == previous { back = window; break }
+            previous = window
         }
         guard let back, text.isEmpty ? back.isEmpty : OwnEditEcho.isSame(expected: text, reported: back) else { return .failure(.cursorLost) }
         result.text = text
@@ -173,23 +268,31 @@ import Foundation
     /// the field's end (`.start` stands for it here: nothing more), at a structural stop below (a quote header, quoted
     /// lines, a signature: the text from that line on is not the user's), or at `room`. The cursor goes back where it was.
     public func readDown(_ proxy: any FieldWindowProxy, known: String, room: Int) async -> Swift.Result<Result, Failure> {
-        guard known.isEmpty || Self.stitches(after: proxy.windowAfter, onto: known) else { return .failure(.changed) }
-        let origin = proxy.windowBefore
+        var collapse = collapsesBreaks ?? false, decided = collapsesBreaks != nil
+        func shown(_ window: String) -> String { collapse ? Self.collapsed(window) : window }
+        guard known.isEmpty || Self.stitches(after: shown(proxy.windowAfter), onto: known) else { return .failure(.changed) }
+        let originWindow = proxy.windowBefore
         var text = known
         var moved = 0
         var result = Result(text: known, added: 0, stop: .start, moreRemains: false)
+        let byCharacters = movesByCharacters ?? false
         if !known.isEmpty {
             // The text already known is jumped over in one move.
-            moved = known.utf16.count
+            moved = Self.units(known, byCharacters: byCharacters)
             proxy.move(by: moved)
         }
         var failure: Failure?
         while true {
-            switch await stablePair(proxy, offset: moved, result: &result, stitches: { Self.stitches(before: $0.before, onto: text) }) {
+            let read = text
+            switch await stablePair(proxy, offset: moved, result: &result, stitches: { Self.stitches(before: shown($0.before), onto: read) }) {
             case .failure(let reason): failure = reason
             case .success(let pair):
                 result.steps += 1
-                var window = pair.after
+                if !decided, let cut = pair.after.range(of: "\n\n") {
+                    collapse = await Self.breakIsOneUnit(proxy, ahead: pair.after[..<cut.lowerBound].utf16.count, settle: settleMilliseconds)
+                    decided = true
+                }
+                var window = shown(pair.after)
                 if window.isEmpty {
                     // The end of the field, or of a block (the host's window stops there): one unit on tells them apart.
                     guard let crossed = await crossBlockEnd(proxy, before: pair.before, offset: moved, result: &result) else {
@@ -218,26 +321,27 @@ import Foundation
                     result.stop = .cap; result.moreRemains = true
                     break
                 }
-                let units = window.utf16.count
+                let units = Self.units(window, byCharacters: byCharacters)
                 proxy.move(by: units)
                 moved += units
                 continue
             }
             break
         }
+        if decided { result.collapsesBreaks = collapse }
         if moved > 0 { proxy.move(by: -moved) }
         if let failure { return .failure(failure) }
         // Back at the cursor: two reads that agree, the window after starting with what was read, the one before as it was.
         var back: (before: String, after: String)?
-        var last: (String, String)?
+        var previous: (String, String)?
         for _ in 0...(maxRereads + 1) {
             await proxy.pause(milliseconds: settleMilliseconds)
-            let pair = (proxy.windowBefore, proxy.windowAfter)
-            if let last, last == pair { back = pair; break }
-            last = pair
+            let pair = (shown(proxy.windowBefore), shown(proxy.windowAfter))
+            if let previous, previous == pair { back = pair; break }
+            previous = pair
         }
         guard let back, text.isEmpty ? back.after.isEmpty : Self.stitches(after: back.after, onto: text),
-              origin.isEmpty ? back.before.isEmpty : Self.stitches(before: back.before, onto: origin) else { return .failure(.cursorLost) }
+              shown(originWindow).isEmpty ? back.before.isEmpty : Self.stitches(before: back.before, onto: shown(originWindow)) else { return .failure(.cursorLost) }
         result.text = text
         result.added = max(0, text.count - known.count)
         return .success(result)

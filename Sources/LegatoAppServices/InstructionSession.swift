@@ -165,7 +165,9 @@ extension InstructionRunner: InstructionRunning {}
                 guard let ack, ack.applied else {
                     let reason = ack?.reason ?? "The keyboard didn't answer, so nothing was edited."
                     // An edit that stopped partway is not run again over a field in an unknown state.
-                    throw ack?.stopped == true ? InstructionFailure.unreadable(reason) : InstructionFailure.read(reason)
+                    // The keyboard answered and refused (the text changed) or stopped partway: running the same again on the
+                    // same field cannot help. No answer at all can be retried.
+                    throw ack == nil ? InstructionFailure.read(reason) : InstructionFailure.unreadable(reason)
                 }
                 guard self.strip.instructionID == id else { return }
                 self.landed = (edit, ack.cursor ?? edit.target.utf16.count)

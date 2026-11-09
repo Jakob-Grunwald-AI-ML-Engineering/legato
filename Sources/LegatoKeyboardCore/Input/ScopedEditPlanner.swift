@@ -124,7 +124,10 @@ public struct ScopedEditQueue: Sendable, Equatable {
         var selected: Bool
     }
 
-    private let kept: String
+    /// The field's text before the scope, as far as it was shown. Grows when a report shows more (the scope was longer
+    /// than the host's window), so the cursor can be pinned once little of the scope is left before it.
+    private var kept: String
+    private let movesByCharacters: Bool
     private let target: String
     private var ops: [ShadowOp]
     private var states: [State]
@@ -154,8 +157,12 @@ public struct ScopedEditQueue: Sendable, Equatable {
 
     /// `windowBefore`: the field's text before the cursor when the plan was made (the scope's `before` ends it).
     /// `avoidsMoves`: the field is known to put its caret back after a move.
-    public init(_ edit: ScopedEdit, plan: ScopedEditPlanner.Plan, windowBefore: String, avoidsMoves: Bool = false) {
+    /// `keptBefore`: the field's text before the scope, read for this edit (the scope reaches past the host's window).
+    /// `movesByCharacters`: the field moves one unit per character (an emoji is one, not two; `FieldReader`).
+    public init(_ edit: ScopedEdit, plan: ScopedEditPlanner.Plan, windowBefore: String, avoidsMoves: Bool = false, keptBefore: String? = nil,
+                movesByCharacters: Bool = false) {
         target = edit.target
+        self.movesByCharacters = movesByCharacters
         if let selection = edit.selected {
             // The host replaces the selection with the insert (or deletes it); the cursor ends after the new text.
             kept = windowBefore
@@ -163,7 +170,7 @@ public struct ScopedEditQueue: Sendable, Equatable {
             states = [State(before: selection, after: "", selected: true), State(before: edit.target, after: "", selected: false)]
             return
         }
-        kept = String(windowBefore.dropLast(min(windowBefore.count, edit.before.count)))
+        kept = keptBefore ?? String(windowBefore.dropLast(min(windowBefore.count, edit.before.count)))
         let start = State(before: edit.before, after: edit.after, selected: false)
         ops = []; states = [start]
         if avoidsMoves, plan.ops.contains(where: { if case .move = $0 { true } else { false } }) {
@@ -259,6 +266,7 @@ public struct ScopedEditQueue: Sendable, Equatable {
                 return .stopped(partial(last))
             }
             confirmed = sent; waitedMs = 0; resetReport = nil; resetReports = 0; resetMs = 0
+            learnKept(from: reportedBefore, at: states[sent])
             if let back = rollback {
                 // Put back: nothing more goes out.
                 stopped = true; textChanged = true
@@ -272,6 +280,16 @@ public struct ScopedEditQueue: Sendable, Equatable {
         return next(reportedBefore: reportedBefore)
     }
 
+    /// A confirmed report that reaches back past the known text shows the text before the scope: it is kept.
+    private mutating func learnKept(from reportedBefore: String, at state: State) {
+        guard !state.selected, kept.count < Self.keptWanted else { return }
+        let shown = String(FieldReader.trusted(before: reportedBefore))
+        let known = kept + state.before
+        guard shown.count > known.count, shown.hasSuffix(known) else { return }
+        kept = String(shown.dropLast(state.before.count))
+    }
+    static let keptWanted = 40
+
     /// The next op. A delete never takes more than the field's report (the field pins the cursor in the known text, so
     /// the report is that text) shows before the cursor: a longer one goes in parts, each shown first. Text the report did
     /// not show is never deleted; where it differs, the next part does not confirm and the edit stops.
@@ -281,12 +299,21 @@ public struct ScopedEditQueue: Sendable, Equatable {
             // Never across a block's boundary: a window that starts at its block ("\n ") shows the block, not the break.
             let shown = FieldReader.trusted(before: reportedBefore).count
             guard shown > 0 else { stopped = true; return .stopped(partial(states[sent])) }
-            if count > shown {
+            var part = min(count, shown)
+            // With little known before the scope, a delete stops while enough of the scope is left before the cursor to
+            // pin it by (`RunShadow.reverseMatchChars`); the report there shows the text before the scope, which is kept.
+            let left = states[sent].before.count - part, floor = RunShadow.reverseMatchChars
+            if kept.count < floor, left < floor, states[sent].before.count - floor > 0, part > states[sent].before.count - floor { part = states[sent].before.count - floor }
+            if part < count {
                 let rest = Array(ops[(sent + 1)...])
-                replan(from: states[sent], ops: [.deleteBackward(shown), .deleteBackward(count - shown)] + rest)
+                replan(from: states[sent], ops: [.deleteBackward(part), .deleteBackward(count - part)] + rest)
             }
         }
         sent += 1
+        if movesByCharacters, case .move = ops[sent - 1], !states[sent - 1].selected {
+            // The plan counts UTF-16 units; this field counts characters.
+            return .send(.move(states[sent].before.count - states[sent - 1].before.count))
+        }
         return .send(ops[sent - 1])
     }
 

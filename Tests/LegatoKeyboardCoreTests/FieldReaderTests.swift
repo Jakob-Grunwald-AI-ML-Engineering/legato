@@ -66,7 +66,69 @@ private func paragraphs(_ count: Int) -> String {
     func pause(milliseconds: Int) async {}
 }
 
+/// Safari's `contenteditable` with `<p>` paragraphs (measured): a paragraph break shows as "\n\n" in the windows but
+/// the cursor moves over it as one unit. `text` holds one "\n" per break, as the field counts.
+@MainActor private final class ParagraphField: FieldWindowProxy {
+    var text: [Character]
+    var cursor: Int
+    var size: Int
+    init(_ text: String, cursor: Int? = nil, size: Int) { self.text = Array(text); self.cursor = cursor ?? text.count; self.size = size }
+    private func shown(_ part: ArraySlice<Character>) -> String { String(part).replacingOccurrences(of: "\n", with: "\n\n") }
+    var windowBefore: String { String(shown(text[max(0, cursor - size)..<cursor]).suffix(size)) }
+    var windowAfter: String { String(shown(text[cursor..<min(text.count, cursor + size)]).prefix(size)) }
+    func move(by units: Int) { cursor = min(text.count, max(0, cursor + units)) }
+    func pause(milliseconds: Int) async {}
+}
+
+/// Safari's text fields (measured): the cursor moves one unit per character, an emoji included.
+@MainActor private final class CharacterField: FieldWindowProxy {
+    var text: [Character]
+    var cursor: Int
+    var size: Int
+    init(_ text: String, cursor: Int? = nil, size: Int) { self.text = Array(text); self.cursor = cursor ?? text.count; self.size = size }
+    var windowBefore: String { String(text[max(0, cursor - size)..<cursor]) }
+    var windowAfter: String { String(text[cursor..<min(text.count, cursor + size)]) }
+    func move(by units: Int) { cursor = min(text.count, max(0, cursor + units)) }
+    func pause(milliseconds: Int) async {}
+}
+
 @MainActor @Suite struct FieldReaderTests {
+    @Test func learnsThatAnEmojiIsOneUnitAndReadsOverIt() async throws {
+        let scope = " Hey, could you take a look at the release notes? Thanks so much! Don't forget the screenshots 😊 one more thing, the demo is at noon."
+        let text = "Hi team, the release is on friday. Thanks, Jakob" + scope
+        // The emoji is beyond the 40-character window: the jump over the known scope finds it out.
+        let far = CharacterField(text, size: 40)
+        let above = try await FieldReader(settleMilliseconds: 0).readUp(far, known: scope, limit: .block).get()
+        #expect(above.text == text && above.movesByCharacters == true && far.cursor == text.count)
+        // In view: two small moves next to it tell.
+        let near = CharacterField(text, size: 80)
+        let read = try await FieldReader(settleMilliseconds: 0).readUp(near, known: "", limit: .cap).get()
+        #expect(read.text == text && read.movesByCharacters == true && near.cursor == text.count)
+        // UIKit's fields move by UTF-16 units: the same text reads the same, as two units.
+        let uikit = FakeField(text, sizes: [80])
+        let plain = try await FieldReader(settleMilliseconds: 0).readUp(uikit, known: "", limit: .cap).get()
+        #expect(plain.text == text && plain.movesByCharacters == false)
+    }
+
+    @Test func readsParagraphsShownAsDoubledBreaksAsTheFieldCountsThem() async throws {
+        let text = "First paragraph here about cats.\nSecond paragraph is about dogs and is rather long winded for what it says.\nThird paragraph about birds."
+        for size in [62, 40, 100] {
+            let middle = 60
+            let field = ParagraphField(text, cursor: middle, size: size)
+            let upResult = await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap)
+            guard case .success(let up) = upResult else { Issue.record("up \(size) \(upResult) cursor=\(field.cursor)"); continue }
+            #expect(up.text == String(text.prefix(middle)) && up.collapsesBreaks == true && field.cursor == middle, "size \(size)")
+            let downResult = await FieldReader(settleMilliseconds: 0).readDown(field, known: "", room: 10_000)
+            guard case .success(let down) = downResult else { Issue.record("down \(size) \(downResult) cursor=\(field.cursor)"); continue }
+            #expect(down.text == String(text.dropFirst(middle)) && field.cursor == middle, "size \(size)")
+        }
+        // A text area's blank line is two real line breaks: read as it shows.
+        let blank = "Dear Anna,\n\nthe plan is ready and the boat is fixed.\n\nBest, Jakob"
+        let plain = FakeField(blank, sizes: [30])
+        let read = try await FieldReader(settleMilliseconds: 0).readUp(plain, known: "", limit: .cap).get()
+        #expect(read.text == blank && read.collapsesBreaks == false)
+    }
+
     @Test func readsBlocksWhoseWindowsStartWithABoundaryArtifact() async throws {
         let text = "The garden plan is simple and we start on Saturday morning.\nWe need to move the two big pots away from the fence first, and then we can fix the gate.\n\nAfter that it is coffee and cake on the terrace."
         #expect(BlockField(text, sizes: [48]).windowBefore.hasPrefix("\n After"), "The host's window at the end, as measured")
@@ -431,6 +493,40 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         atCursor.window = 20; atCursor.tick()
         let (refused, none) = try run(edit, on: &atCursor, plannedWith: (String(scope.suffix(20)), ""))
         #expect(refused == .stopped(.init(text: scope, cursor: scope.utf16.count)) && none == 0 && atCursor.text == typed)
+    }
+
+    @Test func aScopeLongerThanTheWindowIsDeletedInPartsThatStayPinned() throws {
+        // A session of dictation and an earlier result, longer than the host's 60-character window, retyped whole.
+        let head = "Hi team, the release is on friday. Thanks, Jakob"
+        let scope = " Hey, could you please check the release notes before you start? Thanks so much! And remember to update the screenshots"
+        let target = " Hey there! Could you check the release notes and update the screenshots before you start? Thanks so much!"
+        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
+        var field = LaggingField(text: head + scope, cursor: (head + scope).utf16.count, lag: 1)
+        field.window = 60; field.tick()
+        let (outcome, _) = try run(edit, on: &field)
+        #expect(outcome == .done && field.text == head + target)
+    }
+
+    @Test func aFieldThatMovesByCharactersGetsMovesInCharacters() throws {
+        // A change before an emoji, far from the cursor: the plan moves over the emoji in UTF-16 units (two); this field
+        // counts it as one, and the queue sends the move as such.
+        let tail = String(repeating: " and we go through the plan together", count: 12)
+        let scope = "we meet on monday 😊" + tail
+        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "We meet on Tuesday 😊" + tail)
+        let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
+        #expect(plan.ops.contains { if case .move = $0 { return true }; return false })
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: scope, movesByCharacters: true)
+        var field = Array(scope), cursor = field.count, outcome = ScopedEditQueue.Action.wait
+        for _ in 0..<200 {
+            outcome = queue.step(reportedBefore: String(field[..<cursor]), reportedAfter: String(field[cursor...]), hasSelection: false, elapsedMs: 33)
+            guard case .send(let op) = outcome else { if outcome == .wait { continue }; break }
+            switch op {
+            case .move(let n): cursor = min(field.count, max(0, cursor + n))
+            case .deleteBackward(let n): field.removeSubrange((cursor - n)..<cursor); cursor -= n
+            case .insert(let t): field.insert(contentsOf: t, at: cursor); cursor += t.count
+            }
+        }
+        #expect(outcome == .done && String(field) == edit.target && cursor == field.count)
     }
 
     @Test func withoutMovesAChangeAfterTheCursorIsNotMadeAtAll() throws {

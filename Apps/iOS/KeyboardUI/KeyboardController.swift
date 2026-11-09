@@ -1000,18 +1000,52 @@ final class KeyboardController {
     /// Nothing else touches the field meanwhile: no keys, no live ops, no reaction to the field's change notes.
     private var isFieldBusy: Bool { isReadingField || isEditingField || isNudging }
     @ObservationIgnored private var isNudging = false
+    /// The field (document) that shows each paragraph break as "\n\n" but counts it as one unit (`FieldReader`).
+    @ObservationIgnored private var collapsingField: String?
+
+    /// The field (document) that moves the cursor one unit per character, an emoji included (`FieldReader`).
+    @ObservationIgnored private var charactersField: String?
+
+    /// A reader that knows what earlier reads found out about this field.
+    private func reader(for field: String?) -> FieldReader {
+        FieldReader(settleMilliseconds: 25, collapsesBreaks: field != nil && collapsingField == field ? true : nil,
+                    movesByCharacters: field != nil && charactersField == field ? true : nil)
+    }
+
+    private func learn(_ read: FieldReader.Result, field: String?) {
+        if let collapses = read.collapsesBreaks { if collapses { collapsingField = field } else if collapsingField == field { collapsingField = nil } }
+        if let characters = read.movesByCharacters { if characters { charactersField = field } else if charactersField == field { charactersField = nil } }
+    }
+
+    /// The host's window as instructions count it: one line break per paragraph break in a `<p>` field.
+    private func shown(_ window: String) -> String {
+        collapsingField != nil && collapsingField == document.documentID ? FieldReader.collapsed(window) : window
+    }
 
     /// Makes the host report the field as it is now. Safari keeps the context it last reported to the keyboard when text
     /// comes in another way (a hardware keyboard, a paste): the windows then show text that is no longer there. A move
     /// of one character and back makes it report afresh. Not with a selection (a move would collapse it).
     private func refreshContext() async {
         guard document.selectedText?.isEmpty != false else { return }
-        let step = !document.contextBefore.isEmpty ? -1 : (!document.contextAfter.isEmpty ? 1 : 0)
-        guard step != 0 else { return }
         isNudging = true
-        document.adjustTextPosition(byCharacterOffset: step)
-        try? await Task.sleep(for: .milliseconds(30))
-        document.adjustTextPosition(byCharacterOffset: -step)
+        if !document.contextBefore.isEmpty || !document.contextAfter.isEmpty {
+            let step = !document.contextBefore.isEmpty ? -1 : 1
+            document.adjustTextPosition(byCharacterOffset: step)
+            try? await Task.sleep(for: .milliseconds(30))
+            document.adjustTextPosition(byCharacterOffset: -step)
+        } else {
+            // Nothing reported either side: an empty field, or one whose text came in another way (an `<input>` keeps
+            // reporting nothing). A step back shows text after the cursor, a step on text before it; each comes back.
+            document.adjustTextPosition(byCharacterOffset: -1)
+            try? await Task.sleep(for: .milliseconds(40))
+            if !document.contextAfter.isEmpty {
+                document.adjustTextPosition(byCharacterOffset: 1)
+            } else {
+                document.adjustTextPosition(byCharacterOffset: 1)
+                try? await Task.sleep(for: .milliseconds(40))
+                if !document.contextBefore.isEmpty { document.adjustTextPosition(byCharacterOffset: -1) }
+            }
+        }
         try? await Task.sleep(for: .milliseconds(40))
         isNudging = false
         // Anything that changed outside the keyboard shows now: the session text is checked against it.
@@ -1142,7 +1176,7 @@ final class KeyboardController {
         guard document.documentID == documentID else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
         }
-        let before = document.contextBefore, after = document.contextAfter
+        let before = shown(document.contextBefore), after = shown(document.contextAfter)
         let selection = document.selectedText.flatMap { $0.isEmpty ? nil : $0 }
         #if DEBUG
         WindowProbe.log("read kind=\(request.kind.rawValue) selected=\(WindowProbe.show(document.selectedText)) before=\(WindowProbe.show(before)) after=\(WindowProbe.show(after))")
@@ -1211,7 +1245,9 @@ final class KeyboardController {
         #else
         let windows: any FieldWindowProxy = DocumentWindows(document)
         #endif
-        let result = await run(FieldReader(settleMilliseconds: 25), windows)
+        let field = document.documentID
+        let result = await run(reader(for: field), windows)
+        if case .success(let read) = result { learn(read, field: field) }
         isReadingField = false
         // The cursor is back where it was: the keyboard catches up with the field once.
         documentDidChange()
@@ -1238,12 +1274,12 @@ final class KeyboardController {
         }
         await settleLiveForInstruction()
         await refreshContext()
-        let windowBefore = document.contextBefore
+        let windowBefore = shown(document.contextBefore)
         guard document.documentID == documentID else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
         }
         let plan: ScopedEditPlanner.Plan
-        switch ScopedEditPlanner.plan(edit, windowBefore: windowBefore, windowAfter: document.contextAfter, selected: document.selectedText) {
+        switch ScopedEditPlanner.plan(edit, windowBefore: windowBefore, windowAfter: shown(document.contextAfter), selected: document.selectedText) {
         case .failure(let refusal):
             trace?("instruction edit refused reason=\(refusal)")
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: refusal.message))
@@ -1251,8 +1287,27 @@ final class KeyboardController {
         }
         // The live run's text stays as it is now; the run goes on at the cursor afterwards.
         freezeLiveRun(.instruction)
+        // A scope longer than the host's window: the text before it is read (over the scope, which the read checks), so
+        // every step of the edit can be pinned down to the scope's start. A scope that no longer matches is not edited.
+        var keptBefore: String?
+        if edit.selected == nil, !edit.before.isEmpty, FieldReader.trusted(before: windowBefore).count < edit.before.count + RunShadow.reverseMatchChars {
+            isNudging = true
+            let read = await reader(for: documentID).readUp(ShownWindows(document, shown: shown), known: edit.before, limit: .block)
+            isNudging = false
+            switch read {
+            case .success(let above): keptBefore = String(above.text.dropLast(edit.before.count)); learn(above, field: documentID)
+            case .failure(.changed), .failure(.firstMove), .failure(.stitch):
+                trace?("instruction edit refused reason=scope")
+                #if DEBUG
+                WindowProbe.log("scope refused \(read) scope=\(WindowProbe.show(edit.before)) window=\(WindowProbe.show(windowBefore))")
+                #endif
+                return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text changed, so nothing was edited."))
+            case .failure: break
+            }
+        }
         // A field that puts its caret back after a move gets the edit by retyping at the cursor.
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: windowBefore, avoidsMoves: liveFieldResetsCaret)
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: windowBefore, avoidsMoves: liveFieldResetsCaret, keptBefore: keptBefore,
+                                    movesByCharacters: charactersField != nil && charactersField == documentID)
         isEditingField = true
         clearWatch.ownEdit(at: Date())
         history.cursorMoved()
@@ -1265,7 +1320,7 @@ final class KeyboardController {
             // Ops the field confirms at once go out in one go; a lagging field is looked at again on the next tick.
             for _ in 0..<Self.liveOpsPerStep {
                 guard !isTornDown, document.documentID == documentID else { outcome = .stopped(nil); fieldGone = true; break loop }
-                let action = queue.step(reportedBefore: document.contextBefore, reportedAfter: document.contextAfter,
+                let action = queue.step(reportedBefore: shown(document.contextBefore), reportedAfter: shown(document.contextAfter),
                                         hasSelection: document.selectedText?.isEmpty == false, elapsedMs: elapsed)
                 #if DEBUG
                 WindowProbe.log("edit before=\(WindowProbe.show(String(document.contextBefore.suffix(60)))) after=\(WindowProbe.show(String(document.contextAfter.prefix(30)))) -> \(action)")
@@ -1814,6 +1869,17 @@ final class KeyboardController {
     func pause(milliseconds: Int) async { await base.pause(milliseconds: milliseconds) }
 }
 #endif
+
+/// The field's windows as instructions count them (`KeyboardController.shown`).
+@MainActor private final class ShownWindows: FieldWindowProxy {
+    private let document: any TextDocument
+    private let shown: (String) -> String
+    init(_ document: any TextDocument, shown: @escaping (String) -> String) { self.document = document; self.shown = shown }
+    var windowBefore: String { shown(document.contextBefore) }
+    var windowAfter: String { shown(document.contextAfter) }
+    func move(by units: Int) { document.adjustTextPosition(byCharacterOffset: units) }
+    func pause(milliseconds: Int) async { try? await Task.sleep(for: .milliseconds(milliseconds)) }
+}
 
 @MainActor private final class DocumentWindows: FieldWindowProxy {
     private let document: any TextDocument

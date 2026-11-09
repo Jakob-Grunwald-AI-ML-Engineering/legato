@@ -197,7 +197,7 @@ public struct RunShadow: Sendable, Equatable {
 
     /// The reverse match (the report reaches back past the known text) needs this much known text before the cursor:
     /// a report that merely ends in the first few characters of the known text says nothing about where it is.
-    static let reverseMatchChars = 12
+    public static let reverseMatchChars = 12
 
     /// Every cursor position (characters into `text`) the field's report fits. Before the cursor the report is the
     /// known text's end there (hosts trim their context), or reaches back past the start of the known text; nothing
