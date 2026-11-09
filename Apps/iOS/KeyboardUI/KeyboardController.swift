@@ -329,6 +329,10 @@ final class KeyboardController {
         typing.appeared()
         wordRow.appeared()
         writePresence(notify: true)
+        // A result, an undo or a failure from before this appearance is about a field the user has left.
+        instructionStrip = link.readInstructionStrip()
+        if instructionPresentation?.keystrokeAction != nil { settleInstructionRow() }
+        applyPendingMagic()
         trace?("visible value=1")
         heartbeat?.cancel()
         heartbeat = Task { [weak self] in
@@ -409,6 +413,8 @@ final class KeyboardController {
         let id = document.documentID
         if id != lastDocumentID {
             sessionSpan.broken()
+            // A result, an undo or a failure belongs to the field it was about.
+            if lastDocumentID != nil, instructionPresentation?.keystrokeAction != nil { settleInstructionRow() }
             typing.closeEmojiPanel()
             lastDocumentID = id
             history.clear()
@@ -421,6 +427,13 @@ final class KeyboardController {
             history.cursorMoved()
             wordRow.interruptTyping()
             settleInstructionRowOnMove()
+        }
+        // Text typed, pasted or moved past by anything but this keyboard (a hardware keyboard, a tap): the session text no
+        // longer ends at the cursor, and an instruction must read the field again rather than trust it.
+        if !sessionSpan.text.isEmpty, liveSettled, liveShadow?.isBusy != true,
+           !OwnEditEcho.isSame(expected: sessionSpan.text, reported: document.contextBefore) {
+            sessionSpan.broken()
+            trace?("session ended by a change outside the keyboard")
         }
     }
 
@@ -864,7 +877,8 @@ final class KeyboardController {
         for _ in 0..<Self.liveOpsPerStep {
             guard let step = liveStepOnce(elapsedMs: elapsed, flush: flush, reveal: reveal) else { liveSettled = true; return stopLiveTicker() }
             elapsed = 0
-            liveSettled = !step.needsTicks
+            // A selection holds the run (nothing is typed over it): settled, as far as a read or an edit goes.
+            liveSettled = !step.needsTicks || document.selectedText?.isEmpty == false
             guard !flush, !step.ops.isEmpty, !step.waiting, liveShadow?.isBusy == true else {
                 if step.needsTicks, isVisible, !flush { startLiveTicker() } else { stopLiveTicker() }
                 return
@@ -984,7 +998,25 @@ final class KeyboardController {
     /// An instruction's edit (or its undo) goes into the field op by op (`ScopedEditQueue`): keys are held back.
     @ObservationIgnored private var isEditingField = false
     /// Nothing else touches the field meanwhile: no keys, no live ops, no reaction to the field's change notes.
-    private var isFieldBusy: Bool { isReadingField || isEditingField }
+    private var isFieldBusy: Bool { isReadingField || isEditingField || isNudging }
+    @ObservationIgnored private var isNudging = false
+
+    /// Makes the host report the field as it is now. Safari keeps the context it last reported to the keyboard when text
+    /// comes in another way (a hardware keyboard, a paste): the windows then show text that is no longer there. A move
+    /// of one character and back makes it report afresh. Not with a selection (a move would collapse it).
+    private func refreshContext() async {
+        guard document.selectedText?.isEmpty != false else { return }
+        let step = !document.contextBefore.isEmpty ? -1 : (!document.contextAfter.isEmpty ? 1 : 0)
+        guard step != 0 else { return }
+        isNudging = true
+        document.adjustTextPosition(byCharacterOffset: step)
+        try? await Task.sleep(for: .milliseconds(30))
+        document.adjustTextPosition(byCharacterOffset: -step)
+        try? await Task.sleep(for: .milliseconds(40))
+        isNudging = false
+        // Anything that changed outside the keyboard shows now: the session text is checked against it.
+        documentDidChange()
+    }
     /// The text Legato typed in this appearance that still ends at the cursor: the instruction scope `session`.
     @ObservationIgnored private var sessionSpan = SessionSpan()
     /// What the last read showed for an instruction, so `read_more` continues from it.
@@ -1010,15 +1042,32 @@ final class KeyboardController {
         reloadHost()
         switch micMode {
         case .remote(.start), .needsFullAccess: micTapped()
-        // Opening the app takes a real tap on the mic key's link.
-        case .openApp: show("Tap the mic once to wake Legato, then use the magic key.")
+        // Opening the app takes a real tap on the mic key's link. The key stays on, and comes back on when the keyboard
+        // returns from the app (a new keyboard), so the first words after the wake are the instruction, never typed.
+        case .openApp:
+            Self.pendingMagic = Date()
+            show("Tap the mic to wake Legato. Your next words are the instruction.")
         case .remote(.stop): break
         }
     }
 
+    /// A wand tap that had to wake the app first, kept across the keyboard's recreation (the app opens in between).
+    private static var pendingMagic: Date? {
+        get { UserDefaults.standard.object(forKey: "magic.pending") as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: "magic.pending") }
+    }
+
+    /// On appearing: a wand tap from the last two minutes that woke the app latches the key again.
+    private func applyPendingMagic() {
+        guard let at = Self.pendingMagic else { return }
+        Self.pendingMagic = nil
+        guard Date().timeIntervalSince(at) < 120, fullAccess, !magic.isOn else { return }
+        setMagicToggle(.latched)
+    }
+
     /// The magic key goes off (tapped off, or the hold let go): the app runs the instruction once its last words are in.
     /// The mic stays as it is: dictation goes on after the instruction.
-    func releaseMagic() { setMagicToggle(.off) }
+    func releaseMagic() { Self.pendingMagic = nil; setMagicToggle(.off) }
 
     /// What the word row shows for instruction mode, nil when it shows words.
     var instructionPresentation: InstructionStripPresentation? {
@@ -1084,8 +1133,12 @@ final class KeyboardController {
         guard Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge, let documentID = document.documentID, !document.isSecureTextEntry else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
         }
-        // What is still being typed goes in first, confirmed: the read sees the field as the user will.
+        // What is still being typed goes in first, confirmed: the read sees the field as the user will. That can take
+        // longer than the app waits for a first answer: it hears that the read is under way.
+        liveStep(elapsedMs: 0, reveal: false)
+        if !liveSettled { link.writeReadReply(FieldReadReply(id: request.id, state: .reading)) }
         await settleLiveForInstruction()
+        await refreshContext()
         guard document.documentID == documentID else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
         }
@@ -1184,6 +1237,7 @@ final class KeyboardController {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
         }
         await settleLiveForInstruction()
+        await refreshContext()
         let windowBefore = document.contextBefore
         guard document.documentID == documentID else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
@@ -1206,16 +1260,20 @@ final class KeyboardController {
         let clock = ContinuousClock(), started = clock.now
         var last = started, elapsed = 0.0, sent = 0, fieldGone = false
         var outcome: ScopedEditQueue.Action = .wait
+        var waitingSince: ContinuousClock.Instant?, nudged = false
         loop: while true {
             // Ops the field confirms at once go out in one go; a lagging field is looked at again on the next tick.
             for _ in 0..<Self.liveOpsPerStep {
                 guard !isTornDown, document.documentID == documentID else { outcome = .stopped(nil); fieldGone = true; break loop }
                 let action = queue.step(reportedBefore: document.contextBefore, reportedAfter: document.contextAfter,
                                         hasSelection: document.selectedText?.isEmpty == false, elapsedMs: elapsed)
+                #if DEBUG
+                WindowProbe.log("edit before=\(WindowProbe.show(String(document.contextBefore.suffix(60)))) after=\(WindowProbe.show(String(document.contextAfter.prefix(30)))) -> \(action)")
+                #endif
                 elapsed = 0
                 switch action {
                 case .send(let op):
-                    sent += 1
+                    sent += 1; waitingSince = nil; nudged = false
                     switch op {
                     case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
                     case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
@@ -1227,6 +1285,9 @@ final class KeyboardController {
                 }
                 if action == .wait { break }
             }
+            // Safari can keep reporting a stale context after the keyboard's own delete: a nudge makes it report afresh.
+            if let since = waitingSince, !nudged, clock.now - since > .milliseconds(250) { nudged = true; await refreshContext() }
+            if waitingSince == nil { waitingSince = clock.now }
             try? await Task.sleep(for: Self.tickInterval)
             let now = clock.now
             elapsed = Self.milliseconds(now - last)
@@ -1259,7 +1320,8 @@ final class KeyboardController {
         trace?("instruction edit stopped sent=\(sent)/\(plan.ops.count) waits=\(queue.waits) known=\(partial == nil ? 0 : 1) ms=\(ms)")
         let ack: ScopedEditAck = switch partial {
         case .some(let partial) where partial.text == edit.scopeText:
-            ScopedEditAck(id: edit.id, applied: false, reason: queue.needsMoves || queue.caretReset
+            ScopedEditAck(id: edit.id, applied: false, reason: queue.textChanged ? "The text changed, so nothing was edited."
+                              : queue.needsMoves || queue.caretReset
                               ? "This app puts the cursor back after each move, so this edit can't be made here. Nothing was changed."
                               : "The text field didn't keep up, so nothing was edited.")
         case .some(let partial):

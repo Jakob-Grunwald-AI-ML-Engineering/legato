@@ -36,7 +36,7 @@ public enum ScopedEditPlanner {
         guard selected?.isEmpty != false,
               agrees(scope: edit.before, window: windowBefore, atEnd: true),
               agrees(scope: edit.after, window: windowAfter, atEnd: false) else { return .failure(.changed) }
-        if edit.after.isEmpty, let ops = ShadowEditPlanner.retypeTail(shadow: edit.before, target: edit.target, limit: retypeChars) {
+        if edit.after.isEmpty, let ops = lineRetype(edit.before, to: edit.target, limit: retypeChars) {
             // The cursor ends the scope and the first change is near it: delete back to it and type the rest. No moves,
             // so nothing a page can put back after its input events (a controlled text area moves its caret silently).
             return .success(Plan(ops: ops, cursor: edit.target.utf16.count, targetBefore: edit.target))
@@ -45,6 +45,15 @@ public enum ScopedEditPlanner {
         let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count, target: edit.target, coarse: true)
         let before = String(decoding: Array(edit.target.utf16.prefix(plan.cursor)), as: UTF16.self)
         return .success(Plan(ops: plan.ops, cursor: plan.cursor, targetBefore: before))
+    }
+
+    /// `ShadowEditPlanner.retypeTail` within one line: the deleted part holds no line break. Deleting across one in a
+    /// block-based host (Safari's `contenteditable`) can leave an empty block, which takes more deletes than characters
+    /// and whose window shows nothing to confirm by.
+    static func lineRetype(_ shadow: String, to target: String, limit: Int) -> [ShadowOp]? {
+        guard let ops = ShadowEditPlanner.retypeTail(shadow: shadow, target: target, limit: limit) else { return nil }
+        let deleted = ops.reduce(0) { if case .deleteBackward(let n) = $1 { return $0 + n }; return $0 }
+        return shadow.suffix(deleted).contains(where: \.isNewline) ? nil : ops
     }
 
     /// An edit whose first change is at most this far back from the cursor (at the scope's end) is retyped from there;
@@ -127,6 +136,9 @@ public struct ScopedEditQueue: Sendable, Equatable {
     private var resetReport: String?
     private var resetReports = 0
     private var resetMs = 0.0
+    private var started = false
+    /// A delete was put back (`step`): the state it restores.
+    private var rollback: State?
     /// The whole edit's budget: past it no further op is sent (the app waits `LinkChannel.editLandTimeout` for the ack).
     public static let limitMs = 20_000.0
     /// Ops that had to wait for the field to confirm them.
@@ -137,6 +149,8 @@ public struct ScopedEditQueue: Sendable, Equatable {
     public private(set) var retypes = false
     /// The edit needs moves the field does not keep, and retyping cannot stand in: nothing was sent.
     public private(set) var needsMoves = false
+    /// The field did not show the text the plan was made for before the first op: nothing was sent.
+    public private(set) var textChanged = false
 
     /// `windowBefore`: the field's text before the cursor when the plan was made (the scope's `before` ends it).
     /// `avoidsMoves`: the field is known to put its caret back after a move.
@@ -167,7 +181,7 @@ public struct ScopedEditQueue: Sendable, Equatable {
         guard target.hasSuffix(state.after) else { return nil }
         let newBefore = String(target.dropLast(state.after.count))
         if newBefore == state.before { return [] }
-        return ShadowEditPlanner.retypeTail(shadow: state.before, target: newBefore, limit: RunShadow.cleanupRetypeChars)
+        return ScopedEditPlanner.lineRetype(state.before, to: newBefore, limit: RunShadow.cleanupRetypeChars)
     }
 
     private mutating func replan(from state: State, ops: [ShadowOp]) {
@@ -188,8 +202,19 @@ public struct ScopedEditQueue: Sendable, Equatable {
     public var finalCursor: Int { states.last.map { $0.selected ? target.utf16.count : $0.before.utf16.count } ?? 0 }
 
     public mutating func step(reportedBefore: String, reportedAfter: String, hasSelection: Bool, elapsedMs: Double) -> Action {
-        guard !stopped else { return .stopped(needsMoves ? partial(states[0]) : nil) }
+        guard !stopped else { return .stopped(needsMoves || textChanged ? partial(states[0]) : nil) }
         totalMs += elapsedMs
+        if !started {
+            // Nothing goes out before the field pins the cursor in the text the plan was made for: text typed or changed
+            // since the read (another keyboard, a paste) refuses the edit untouched.
+            guard shows(states[0], reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else {
+                waitedMs += elapsedMs
+                guard waitedMs >= RunShadow.confirmLimitMs else { return .wait }
+                stopped = true; textChanged = true
+                return .stopped(partial(states[0]))
+            }
+            started = true; waitedMs = 0
+        }
         if confirmed < sent {
             guard shows(states[sent], reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else {
                 if waitedMs == 0 { waits += 1 }
@@ -205,29 +230,62 @@ public struct ScopedEditQueue: Sendable, Equatable {
                         guard let retype = Self.retype(from: before, to: target) else { stopped = true; return .stopped(partial(before)) }
                         retypes = true
                         replan(from: before, ops: retype)
-                        return next()
+                        return next(reportedBefore: reportedBefore)
                     }
                 } else {
                     resetReport = nil; resetReports = 0; resetMs = 0
                 }
                 guard waitedMs >= RunShadow.confirmLimitMs else { return .wait }
+                if case .deleteBackward(let count) = ops[sent - 1], rollback == nil, !before.selected,
+                   !FieldReader.trusted(before: reportedBefore).hasSuffix(before.before.suffix(count)) {
+                    // The delete went, but the text before it is not what the plan was made for (changed outside the
+                    // keyboard). The deleted characters were shown before they went: they go back, the field is as it was.
+                    let restore = String(before.before.suffix(count))
+                    rollback = before
+                    ops = Array(ops[..<sent]) + [.insert(restore)]
+                    states = Array(states[...sent]) + [before]
+                    waitedMs = 0
+                    sent += 1
+                    return .send(.insert(restore))
+                }
                 stopped = true
+                if let back = rollback {
+                    textChanged = true
+                    return .stopped(shows(back, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) ? partial(back) : nil)
+                }
                 // The op in flight may still land, or was lost: only a field that shows the last confirmed state is known.
                 let last = states[confirmed]
                 guard shows(last, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else { return .stopped(nil) }
                 return .stopped(partial(last))
             }
             confirmed = sent; waitedMs = 0; resetReport = nil; resetReports = 0; resetMs = 0
+            if let back = rollback {
+                // Put back: nothing more goes out.
+                stopped = true; textChanged = true
+                return .stopped(partial(back))
+            }
         }
         if sent < ops.count, totalMs >= Self.limitMs {
             stopped = true
             return .stopped(partial(states[confirmed]))
         }
-        return next()
+        return next(reportedBefore: reportedBefore)
     }
 
-    private mutating func next() -> Action {
+    /// The next op. A delete never takes more than the field's report (the field pins the cursor in the known text, so
+    /// the report is that text) shows before the cursor: a longer one goes in parts, each shown first. Text the report did
+    /// not show is never deleted; where it differs, the next part does not confirm and the edit stops.
+    private mutating func next(reportedBefore: String) -> Action {
         guard sent < ops.count else { return .done }
+        if case .deleteBackward(let count) = ops[sent], !states[sent].selected {
+            // Never across a block's boundary: a window that starts at its block ("\n ") shows the block, not the break.
+            let shown = FieldReader.trusted(before: reportedBefore).count
+            guard shown > 0 else { stopped = true; return .stopped(partial(states[sent])) }
+            if count > shown {
+                let rest = Array(ops[(sent + 1)...])
+                replan(from: states[sent], ops: [.deleteBackward(shown), .deleteBackward(count - shown)] + rest)
+            }
+        }
         sent += 1
         return .send(ops[sent - 1])
     }

@@ -292,7 +292,11 @@ import Foundation
     public static func stitches(before window: String, onto text: String) -> Bool {
         if text.isEmpty { return true }
         if window.isEmpty { return false }
-        return text.hasSuffix(window) || window.hasSuffix(text)
+        if text.hasSuffix(window) || window.hasSuffix(text) { return true }
+        // A window that starts at its block ("\n "): its block is the end of the text, after a line break there.
+        let trusted = trusted(before: window)
+        guard !trusted.isEmpty, trusted.count < window.count, text.hasSuffix(trusted) else { return false }
+        return text.dropLast(trusted.count).last?.isNewline == true
     }
 
     /// The part of a window before the cursor that is the field's text: all of it, unless it starts with a line break

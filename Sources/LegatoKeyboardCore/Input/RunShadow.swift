@@ -209,7 +209,14 @@ public struct RunShadow: Sendable, Equatable {
     static func positions(in text: [Character], reportedBefore: String, reportedAfter: String) -> [Int] {
         let exact = fits(in: text, reportedBefore: Array(reportedBefore), reportedAfter: Array(reportedAfter))
         let trusted = Array(FieldReader.trusted(before: reportedBefore))
-        guard exact.isEmpty, !trusted.isEmpty, trusted.count < reportedBefore.count else { return exact }
+        guard exact.isEmpty, trusted.count < reportedBefore.count, reportedBefore.first?.isNewline == true else { return exact }
+        if trusted.isEmpty {
+            // Only the boundary: the cursor is in an empty block, a line break before it and one (or the end) after it.
+            guard reportedAfter.isEmpty else { return [] }
+            return (1...max(1, text.count)).filter { p in
+                p <= text.count && text[p - 1].isNewline && (p == text.count || text[p].isNewline)
+            }
+        }
         return fits(in: text, reportedBefore: trusted, reportedAfter: Array(reportedAfter)).filter { p in
             let start = p - trusted.count
             return start > 0 && text[start - 1].isNewline

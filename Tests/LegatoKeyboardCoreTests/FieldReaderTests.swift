@@ -76,6 +76,10 @@ private func paragraphs(_ count: Int) -> String {
             #expect(result.text == text, "sizes \(sizes)")
             #expect(result.stop == .start && field.cursor == text.count)
         }
+        // Down from the middle of a block, across blocks, to the field's end (whose window starts with "\n ").
+        let middle = BlockField(text, cursor: 80, sizes: [48])
+        let rest = try await FieldReader(settleMilliseconds: 0).readDown(middle, known: "", room: 10_000).get()
+        #expect(rest.text == String(text.dropFirst(80)) && rest.stop == .start && middle.cursor == 80)
         // Down from the first block's end, across blocks, to the field's end.
         let start = BlockField(text, cursor: 59, sizes: [50, 100, 55])
         let below = try await FieldReader(settleMilliseconds: 0).readDown(start, known: "", room: 10_000).get()
@@ -329,6 +333,8 @@ private struct LaggingField {
     var lag: Int
     /// A page that re-renders its text area: a move shows for a moment, then the caret is back where it was.
     var resetsCaret = false
+    /// Characters reported before the cursor (a web view's short window).
+    var window = Int.max
     private var pending: [(ShadowOp, Int)] = []
     private(set) var reported: (before: String, after: String)
     init(text: String, cursor: Int, lag: Int) {
@@ -348,7 +354,7 @@ private struct LaggingField {
             pending.removeFirst()
         }
         let units = Array(text.utf16)
-        reported = (String(decoding: units[..<cursor], as: UTF16.self), String(decoding: units[cursor...], as: UTF16.self))
+        reported = (String(String(decoding: units[..<cursor], as: UTF16.self).suffix(window)), String(decoding: units[cursor...], as: UTF16.self))
     }
 }
 
@@ -363,9 +369,10 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
 
     /// Runs the queue against the field until it finishes; `loseAfter` loses the op sent after that many confirmed ones.
     private func run(_ edit: ScopedEdit, on field: inout LaggingField, loseAfter: Int? = nil, avoidsMoves: Bool = false,
-                     moves: UnsafeMutablePointer<Int>? = nil) throws -> (ScopedEditQueue.Action, sent: Int) {
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: field.reported.before, windowAfter: field.reported.after, selected: nil).get()
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: field.reported.before, avoidsMoves: avoidsMoves)
+                     moves: UnsafeMutablePointer<Int>? = nil, plannedWith windows: (String, String)? = nil) throws -> (ScopedEditQueue.Action, sent: Int) {
+        let (wb, wa) = windows ?? (field.reported.before, field.reported.after)
+        let plan = try ScopedEditPlanner.plan(edit, windowBefore: wb, windowAfter: wa, selected: nil).get()
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: wb, avoidsMoves: avoidsMoves)
         var sent = 0
         defer { lastQueue = queue }
         for _ in 0..<2000 {
@@ -407,6 +414,25 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         #expect(plan.ops == [.deleteBackward(scope.count), .insert(edit.target)] && plan.cursor == edit.target.utf16.count)
     }
 
+    @Test func textChangedOutsideTheKeyboardIsNeverDeletedAndTheFieldStaysAsItWas() throws {
+        // The scope as read; since then another keyboard typed "TYPED" into it, beyond the host's 20-character window.
+        let scope = "the release is on friday please review the page before then"
+        let field = "the release is on friday TYPED please review the page before then"
+        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "The release is Friday. Review the page before then.")
+        var lagging = LaggingField(text: field, cursor: field.utf16.count, lag: 1)
+        lagging.window = 20; lagging.tick()
+        let (outcome, sent) = try run(edit, on: &lagging)
+        #expect(lagging.text == field, "What was deleted (only what the window showed) went back")
+        #expect(outcome == .stopped(.init(text: scope, cursor: scope.utf16.count)) && lastQueue?.textChanged == true)
+        #expect(sent == 2, "One verified part of the delete, then its rollback")
+        // Text typed at the cursor since the read: nothing goes out at all.
+        let typed = scope + " ok"
+        var atCursor = LaggingField(text: typed, cursor: typed.utf16.count, lag: 1)
+        atCursor.window = 20; atCursor.tick()
+        let (refused, none) = try run(edit, on: &atCursor, plannedWith: (String(scope.suffix(20)), ""))
+        #expect(refused == .stopped(.init(text: scope, cursor: scope.utf16.count)) && none == 0 && atCursor.text == typed)
+    }
+
     @Test func withoutMovesAChangeAfterTheCursorIsNotMadeAtAll() throws {
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: "first half ", after: "second half", target: "First half, second half.")
         var field = LaggingField(text: "first half second half", cursor: "first half ".utf16.count, lag: 1)
@@ -422,6 +448,8 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
             let start = chars[..<cursor].lastIndex(of: "\n").map { $0 + 1 } ?? 0
             let end = chars[cursor...].firstIndex(of: "\n") ?? chars.count
             // At a block's very start the window reaches into the block above (measured); else it starts at the block.
+            // An emptied block shows only its boundary.
+            if cursor == start, start > 0, end == cursor { return ("\n ", "") }
             if cursor == start { return (String(chars[..<cursor]), String(chars[cursor..<end])) }
             return ((start > 0 ? "\n " : "") + String(chars[start..<cursor]), String(chars[cursor..<end]))
         }
@@ -436,11 +464,12 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         for _ in 0..<100 {
             let (b, a) = report(field, cursor)
             outcome = queue.step(reportedBefore: b, reportedAfter: a, hasSelection: false, elapsedMs: 33)
+            if outcome == .wait { continue }
             guard case .send(let op) = outcome else { break }
             let (t, c) = ShadowEditPlanner.simulate(ops: [op], shadow: String(field), cursor: String(field[..<cursor]).utf16.count)
             field = Array(t); cursor = String(t).utf16Offset(toCharacter: c)
         }
-        #expect(outcome == .done && String(field) == edit.target)
+        #expect(outcome == .done && String(field) == edit.target, "\(outcome) \(String(field))")
     }
 
     @Test func aLaggingFieldGetsOneConfirmedOpAtATimeAndEndsRight() throws {
@@ -469,9 +498,13 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
         var queue = ScopedEditQueue(edit, plan: plan, windowBefore: scope)
         guard case .send = queue.step(reportedBefore: scope, reportedAfter: "", hasSelection: false, elapsedMs: 0) else { Issue.record("First op"); return }
-        var outcome = ScopedEditQueue.Action.wait
-        while outcome == .wait { outcome = queue.step(reportedBefore: "the user typed this", reportedAfter: "", hasSelection: false, elapsedMs: 100) }
+        var outcome = ScopedEditQueue.Action.wait, sends: [ShadowOp] = []
+        while true {
+            outcome = queue.step(reportedBefore: "the user typed this", reportedAfter: "", hasSelection: false, elapsedMs: 100)
+            if case .send(let op) = outcome { sends.append(op); continue }
+            if outcome != .wait { break }
+        }
         #expect(outcome == .stopped(nil))
-        #expect(queue.waits == 1)
+        #expect(sends.count == 1, "What the delete took goes back, once; nothing else goes out")
     }
 }

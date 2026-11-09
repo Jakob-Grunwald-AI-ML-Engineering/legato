@@ -163,14 +163,17 @@ extension InstructionRunner: InstructionRunning {}
                     return
                 }
                 guard let ack, ack.applied else {
-                    throw InstructionFailure.read(ack?.reason ?? "The keyboard didn't answer, so nothing was edited.")
+                    let reason = ack?.reason ?? "The keyboard didn't answer, so nothing was edited."
+                    // An edit that stopped partway is not run again over a field in an unknown state.
+                    throw ack?.stopped == true ? InstructionFailure.unreadable(reason) : InstructionFailure.read(reason)
                 }
                 guard self.strip.instructionID == id else { return }
                 self.landed = (edit, ack.cursor ?? edit.target.utf16.count)
                 self.words = []
                 await self.save(original: edit.scopeText, result: edit.target)
                 self.update(InstructionStrip(instructionID: id, phase: .result, transcript: transcript, scope: outcome.scope.rawValue,
-                                             message: Self.done(outcome.scope, deleted: edit.target.isEmpty), canUndo: true))
+                                             message: Self.done(Self.changedScope(outcome.scope, original: edit.scopeText, result: edit.target),
+                                                                deleted: edit.target.isEmpty), canUndo: true))
                 self.diagnostics?("instruction.run", ["ok": true, "scope": outcome.scope.rawValue, "reads": outcome.reads,
                                                       "chars": edit.scopeText.count, "newChars": edit.target.count, "ms": Self.ms(since: started)])
             } catch is CancellationError {
@@ -206,7 +209,8 @@ extension InstructionRunner: InstructionRunning {}
             } else {
                 self.landed = nil
                 self.update(InstructionStrip(instructionID: id, phase: .failed, transcript: self.strip.transcript,
-                                             message: ack?.stopped == true ? ack?.reason : "The text changed, so there is nothing to undo."))
+                                             message: ack?.stopped == true ? ack?.reason : "The text changed, so there is nothing to undo.",
+                                             canRetry: false))
             }
         }
     }
@@ -218,10 +222,24 @@ extension InstructionRunner: InstructionRunning {}
                   ack.cursor ?? partial.utf16.count)
         words = []
         update(InstructionStrip(instructionID: id, phase: .failed, transcript: strip.transcript, scope: strip.scope,
-                                message: (ack.reason ?? "The edit stopped partway.") + " Undo puts the text back.", canUndo: true))
+                                message: (ack.reason ?? "The edit stopped partway.") + " Undo puts the text back.", canUndo: true,
+                                canRetry: false))
     }
 
     // MARK: Helpers
+
+    /// The scope the strip names: a change that stays within one paragraph of a larger scope is "the paragraph".
+    static func changedScope(_ scope: InstructionScope, original: String, result: String) -> InstructionScope {
+        guard scope == .above || scope == .all, original.contains(where: \.isNewline), !result.isEmpty else { return scope }
+        let old = Array(original), new = Array(result)
+        var start = 0
+        while start < min(old.count, new.count), old[start] == new[start] { start += 1 }
+        var end = 0
+        while end < min(old.count, new.count) - start, old[old.count - 1 - end] == new[new.count - 1 - end] { end += 1 }
+        // The changed part of the original, widened to whole lines: one paragraph, or more.
+        let changed = old[start..<(old.count - end)].contains(where: \.isNewline) || new[start..<(new.count - end)].contains(where: \.isNewline)
+        return changed ? scope : .paragraph
+    }
 
     /// The instruction is about selected text: its first read must not move the cursor (a walk would lose the selection).
     static func mentionsSelection(_ instruction: String) -> Bool {
