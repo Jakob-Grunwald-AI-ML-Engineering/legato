@@ -20,9 +20,9 @@ import Foundation
 ///   is near the end or the take is short (`retypeTailChars`, `shortTakeChars`: no cursor moves at all), else a
 ///   word-level diff, back to front.
 /// - Confirmation pins the cursor: the report must fit the shadow at the expected position and nowhere else (a web
-///   view's few words before the cursor may fit where the cursor was before a move too). A move must stay shown for
-///   `moveHoldMs` before the next op (a page may put its caret back a moment later); a move the report shows was not
-///   made goes out once more, and anything else that does not confirm freezes at `confirmLimitMs`.
+///   view's few words before the cursor may fit where the cursor was before a move too). A move the report shows was
+///   not made (the cursor pinned where it was) goes out once more; anything else that does not confirm freezes at
+///   `confirmLimitMs`.
 /// - Drift: a report that does not confirm within `confirmLimitMs`, or a selection, means the user moved on (or the
 ///   host lost an op): everything typed so far is frozen, the rest of the queue is dropped, and the run goes on
 ///   appending at the cursor once the field's report has stopped changing, so the separator and capital are judged
@@ -76,11 +76,10 @@ public struct RunShadow: Sendable, Equatable {
     private var paced = false
     private var sinceSendMs = 0.0
     private var lastSentInsert = false
-    /// The last op sent was this move, from `movedFrom` (the cursor in `work` before it): nothing goes out until the
-    /// field has shown it for `moveHoldMs`; a field that shows the cursor still at `movedFrom` gets it once more.
+    /// The last op sent was this move, from `movedFrom` (the cursor in `work` before it): a field that shows the cursor
+    /// still at `movedFrom` gets it once more.
     private var lastMove: ShadowOp?
     private var movedFrom = 0
-    private var moveShownMs = 0.0
     private var moveResent = false
     /// The region's part of the field as the shadow expects it after the last op sent (it may end in a space Legato
     /// put after the region), and the cursor in it (UTF-16).
@@ -139,10 +138,6 @@ public struct RunShadow: Sendable, Equatable {
     public static let stableMs = 150.0
     /// The typewriter pace of a flip's characters.
     public static let flipCharMs = 30.0
-    /// How long the field must show a move before the next op goes. A page may put the caret back where its last
-    /// input event left it (a controlled textarea that re-renders a moment later), after the report already showed
-    /// the move: the next op would land at the old place.
-    public static let moveHoldMs = 150.0
     /// How long a move may go unseen before it is sent once more (only when the report pins the cursor where it was).
     public static let moveResendMs = 400.0
     /// The cleaned take lands without cursor moves (delete back to the first change, type the rest) when that tail
@@ -152,8 +147,6 @@ public struct RunShadow: Sendable, Equatable {
 
     /// Ops are queued: a new snapshot waits until they went out.
     public var isBusy: Bool { !queue.isEmpty }
-    /// The last op was a move the field has not shown for `moveHoldMs` yet: call again before anything else.
-    public var isHolding: Bool { lastMove != nil }
     /// What the field should report before and after the cursor once it shows the last op sent (after: only the
     /// region's own text there).
     public var expectedBefore: String { anchor + String(decoding: Array(work.utf16.prefix(workCursor)), as: UTF16.self) }
@@ -230,7 +223,6 @@ public struct RunShadow: Sendable, Equatable {
             if flush { step.waiting = true; return step }
             if !confirming { confirming = true; step.waitStarted = true }
             waitedMs += elapsedMs
-            moveShownMs = 0
             if let move = lastMove, !moveResent, waitedMs >= Self.moveResendMs,
                Self.pins(text: Array(anchor) + Array(work), cursor: anchor.count + Self.characters(ofUTF16: movedFrom, in: work),
                          reportedBefore: reportedBefore, reportedAfter: reportedAfter) {
@@ -254,20 +246,13 @@ public struct RunShadow: Sendable, Equatable {
             waitedMs = 0; confirming = false
         }
         sinceSendMs += elapsedMs
-        // A move must stay shown for a while before anything else goes out (unless the keyboard goes away).
-        var holding = false
-        if lastMove != nil {
-            moveShownMs += elapsedMs
-            if moveShownMs < Self.moveHoldMs, !flush { holding = true } else { lastMove = nil }
-        }
 
-        if !queue.isEmpty || holding {
+        if !queue.isEmpty {
             // Busy: a newer snapshot is only noted; the newest is diffed once the queue is empty.
             if snapshot.version != inFlightVersion, snapshot.version != heldVersion {
                 if heldVersion != nil { step.coalesced += 1 }
                 heldVersion = snapshot.version
             }
-            if holding { step.needsTicks = true; return step }
             send(&step, flush: flush)
             guard flush else { return step }
             while !queue.isEmpty { send(&step, flush: true) }
@@ -352,7 +337,7 @@ public struct RunShadow: Sendable, Equatable {
         let op = queue.removeFirst()
         sinceSendMs = 0
         if case .insert = op { lastSentInsert = true } else { lastSentInsert = false }
-        if case .move = op { lastMove = op; movedFrom = workCursor; moveShownMs = 0; moveResent = false } else { lastMove = nil }
+        if case .move = op { lastMove = op; movedFrom = workCursor; moveResent = false } else { lastMove = nil }
         (work, workCursor) = ShadowEditPlanner.simulate(ops: [op], shadow: work, cursor: workCursor)
         switch op {
         case .deleteBackward(let count): step.deletedChars += count

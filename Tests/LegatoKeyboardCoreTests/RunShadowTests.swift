@@ -22,7 +22,7 @@ private func final(_ id: Int, _ text: String, cleaned: Bool = false) -> LiveSegm
 private func head(_ id: Int, _ text: String) -> LiveSegment { .init(id: id, text: text, final: false) }
 
 /// One step against `field`, applying its ops (not animated unless asked). `drain`: the field confirms at once, so
-/// keep stepping (a flip's typewriter pace apart) until the edit queue is empty and no move is held; the steps are merged into one. `settle`: after a freeze the shadow
+/// keep stepping (a flip's typewriter pace apart) until the edit queue is empty; the steps are merged into one. `settle`: after a freeze the shadow
 /// waits for the field's report to hold still; keep stepping (100 ms apart) until it types or stops waiting.
 @discardableResult
 private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveDictationSnapshot,
@@ -37,7 +37,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
     }
     var merged = one(elapsedMs)
     var guardCount = 0
-    while guardCount < 200, (settle && merged.waiting) || (drain && (shadow.isBusy || shadow.isHolding) && !merged.waiting) {
+    while guardCount < 200, (settle && merged.waiting) || (drain && shadow.isBusy && !merged.waiting) {
         guardCount += 1
         let next = one(settle && merged.waiting ? 100 : RunShadow.flipCharMs)
         merged.ops += next.ops; merged.insertedChars += next.insertedChars; merged.deletedChars += next.deletedChars
@@ -244,12 +244,12 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         // The host still reports the field as it was: nothing more goes out, and it is no drift yet.
         let waiting = tick(&shadow, &field, snap, elapsedMs: 200, reported: stale.before, reportedAfter: stale.after, drain: false)
         #expect(waiting.waiting && waiting.ops.isEmpty && waiting.froze == nil && waiting.waitStarted)
-        // Once the report confirms, the rest follows one op per step (a move is held a while before the next op).
-        var sent = 1, steps = 0
-        while shadow.isBusy || shadow.isHolding, steps < 80 {
+        // Once the report confirms, the rest follows one op per step.
+        var sent = 1
+        while shadow.isBusy, sent < 40 {
             let next = tick(&shadow, &field, snap, elapsedMs: RunShadow.flipCharMs, drain: false)
-            #expect(next.ops.count <= 1)
-            sent += next.ops.count; steps += 1
+            #expect(next.ops.count == 1)
+            sent += 1
         }
         #expect(sent >= 4 && field.text == "I think they're going home. then we eat and sleep" && field.after.isEmpty)
         // A report that never confirms an op freezes after the limit, and the rest of the queue never goes out. A move
@@ -672,7 +672,7 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
         field.render()
         field.apply(step.ops)
         steps.append(step)
-        if step.froze != nil || (step.applied && !shadow.isBusy && !shadow.isHolding) { break }
+        if step.froze != nil || (step.applied && !shadow.isBusy) { break }
     }
     return steps
 }
@@ -721,21 +721,20 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
         #expect(steps.flatMap(\.ops).contains { if case .move = $0 { true } else { false } }, "A long take still lands with moves")
     }
 
-    @Test func aPageThatPutsItsCaretBackGetsTheMoveAgainAndTheEditLandsInPlace() {
-        // The report shows each move at once; the page's render then puts the caret back where its last input left it.
-        var shadow = RunShadow(runID: "r"), field = WebField(restoresCaret: true)
+    @Test func aMoveTheFieldDropsGoesOutOnceMoreWhenTheReportPinsTheOldPlace() {
+        var shadow = RunShadow(runID: "r"), field = WebField(dropsMoves: [2])
         drive(&shadow, &field, snapshot(1, [final(0, Self.raw)]))
         let steps = drive(&shadow, &field, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
         #expect(field.full == Self.cleaned && field.cursor == field.text.count)
-        #expect(steps.contains { $0.moveResent } && steps.allSatisfy { $0.froze == nil })
+        #expect(steps.filter(\.moveResent).count == 1 && steps.allSatisfy { $0.froze == nil })
     }
 
-    @Test func aLiveFlipInAPageThatPutsItsCaretBackStillLandsInPlace() {
-        var shadow = RunShadow(runID: "r"), field = WebField(restoresCaret: true)
-        drive(&shadow, &field, snapshot(1, [final(0, "I think their going home."), head(1, "then we")]))
-        drive(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we")]))
-        drive(&shadow, &field, snapshot(3, [final(0, "I think they're going home."), head(1, "then we eat")]))
-        #expect(field.full == "I think they're going home. then we eat" && field.cursor == field.text.count)
+    @Test func aMoveTheFieldDropsTwiceFreezesWithNothingTypedAtTheOldPlace() {
+        var shadow = RunShadow(runID: "r"), field = WebField(dropsMoves: [2, 3])
+        drive(&shadow, &field, snapshot(1, [final(0, Self.raw)]))
+        let steps = drive(&shadow, &field, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
+        #expect(steps.contains { $0.froze != nil })
+        #expect(field.full == Self.raw.replacingOccurrences(of: " ?", with: "?"))
     }
 
     @Test func theCleanedShortTakeIsRetypedFromItsFirstChangeWithoutMoves() {
