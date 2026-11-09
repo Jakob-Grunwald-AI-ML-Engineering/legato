@@ -46,6 +46,8 @@ import LegatoSoniox
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
         try await until { await sockets.last?.held == true }
+        // The keepalive goes out while connecting; the route is warm once the held connection fills its slot.
+        try await until { keyboard.diagnostics["dictationStreamLive"] as? Bool == true }
         return (composer, keyboard)
     }
 
@@ -180,10 +182,13 @@ import LegatoSoniox
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
         #expect(composer.holdsWarmInput)
+        // Tapped while the reopened keyboard's connection is still being held: the take waits for it.
         #expect(await keyboard.openGate())
+        #expect(keyboard.dictationNotice == nil)
         let socket = try #require(sockets.at(1))
-        // The gate's audio route attaches asynchronously: a single frame can arrive before it and be dropped.
-        try await until { await mic.emit(); return await socket.audioFrames > 0 }
+        #expect(await socket.configured, "The take starts on the reopened keyboard's held connection")
+        await mic.emit()
+        try await until { await socket.audioFrames > 0 }
         keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
         await composer.releaseMicrophone()
     }
