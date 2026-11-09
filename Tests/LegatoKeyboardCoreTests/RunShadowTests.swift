@@ -632,7 +632,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
 /// A web view's field: it reports only `window` characters before the cursor (and as many after it, or nothing), may
 /// drop a move, and may be a page that puts its caret back where its last input event left it a moment later (a
 /// controlled textarea that re-renders two steps after the input), after the report already showed the keyboard's
-/// next op. ASCII text only.
+/// next op. A lagging field reports the cursor where it was before a move for a few reads after showing it. ASCII only.
 private struct WebField {
     var text: [Character] = []
     var cursor = 0
@@ -641,14 +641,25 @@ private struct WebField {
     var restoresCaret = false
     /// The moves (counted from 1) the field ignores.
     var dropsMoves: Set<Int> = []
+    /// After a move: the first read shows it, the next `lagReads` reads show the cursor before it again.
+    var lagReads = 0
     private var moves = 0
+    private var lagFrom: Int?
+    private var lagFresh = 0
+    private var lagLeft = 0
     private var caretAfterInput: Int?
     private var rendersLeft = 0
 
     var full: String { String(text) }
     var before: String { String(text[..<cursor]) }
-    var reportedBefore: String { String(text[..<cursor].suffix(window)) }
-    var reportedAfter: String { reportsAfter ? String(text[cursor...].prefix(window)) : "" }
+    /// What the field reports now (a lagging field may report an older cursor).
+    mutating func report() -> (before: String, after: String) {
+        var at = cursor
+        if let from = lagFrom {
+            if lagFresh > 0 { lagFresh -= 1 } else if lagLeft > 0 { lagLeft -= 1; at = from } else { lagFrom = nil }
+        }
+        return (String(text[..<at].suffix(window)), reportsAfter ? String(text[at...].prefix(window)) : "")
+    }
 
     /// The page's render after an input event: the caret goes back where that event left it.
     mutating func render() {
@@ -661,7 +672,10 @@ private struct WebField {
             switch op {
             case .move(let units):
                 moves += 1
-                if !dropsMoves.contains(moves) { cursor = max(0, min(text.count, cursor + units)) }
+                if !dropsMoves.contains(moves) {
+                    if lagReads > 0 { lagFrom = cursor; lagFresh = 1; lagLeft = lagReads }
+                    cursor = max(0, min(text.count, cursor + units))
+                }
             case .deleteBackward(let count):
                 let n = min(count, cursor)
                 text.removeSubrange((cursor - n)..<cursor); cursor -= n
@@ -680,8 +694,9 @@ private struct WebField {
 private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: LiveDictationSnapshot, limit: Int = 400) -> [RunShadow.Step] {
     var steps: [RunShadow.Step] = []
     for _ in 0..<limit {
-        let step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: field.reportedBefore,
-                               reportedAfter: field.reportedAfter, hasSelection: false, capitalization: .none,
+        let report = field.report()
+        let step = shadow.step(snapshot: snap, contextBefore: field.before, reportedBefore: report.before,
+                               reportedAfter: report.after, hasSelection: false, capitalization: .none,
                                elapsedMs: RunShadow.flipCharMs, animated: false)
         field.render()
         field.apply(step.ops)
@@ -692,9 +707,8 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
 }
 
 @Suite struct WebFieldMoveTests {
-    /// A long take (more than `shortTakeChars`): the cleanup's first change is far from the end, so it lands with
-    /// cursor moves.
-    static let middle = (1...12).map { "Sentence number \($0) talks about step \($0) of the long checklist." }.joined(separator: " ")
+    /// A long take (its cleanup's first change more than `cleanupRetypeChars` from the end): it lands with cursor moves.
+    static let middle = (1...40).map { "Sentence number \($0) talks about step \($0) of the long checklist." }.joined(separator: " ")
     static let raw = "Lina we ship it today. " + middle + " Or do we wait for Lina ?"
     static let cleaned = "Lina, we ship it today. " + middle + " Or do we wait for Lina?"
 
@@ -750,6 +764,28 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
         let steps = drive(&shadow, &field, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
         #expect(steps.contains { $0.froze != nil })
         #expect(field.full == Self.raw.replacingOccurrences(of: " ?", with: "?"))
+        // The report pins the cursor (still before "?"): it goes back to the end of the run, not left mid-text.
+        #expect(field.cursor == field.text.count && steps.last?.driftDetail?.contains("cleanup=parked") == true)
+    }
+
+    @Test func aLaggingReportThatShowsTheOldPlaceForAMomentIsNoCaretReset() {
+        // Each move shows at once, then the report falls back to the old place for two reads, then catches up.
+        var shadow = RunShadow(runID: "r"), field = WebField(lagReads: 2)
+        drive(&shadow, &field, snapshot(1, [final(0, Self.raw)]))
+        let steps = drive(&shadow, &field, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
+        #expect(field.full == Self.cleaned && field.cursor == field.text.count)
+        #expect(steps.allSatisfy { $0.froze == nil } && !shadow.avoidsMoves)
+    }
+
+    @Test func aCleanedTakeOfSomeHundredWordsIsRetypedWithoutMovesInLargeInserts() {
+        let middle = (1...20).map { "Sentence number \($0) talks about step \($0)." }.joined(separator: " ")
+        let raw = "Lina we ship it today. " + middle + " Or do we wait for Lina ?"
+        let cleaned = "Lina, we ship it today. " + middle + " Or do we wait for Lina?"
+        var shadow = RunShadow(runID: "r"), field = WebField(window: 40, restoresCaret: true)
+        drive(&shadow, &field, snapshot(1, [final(0, raw)]))
+        let ops = drive(&shadow, &field, snapshot(2, [final(0, cleaned, cleaned: true)], complete: true)).flatMap(\.ops)
+        #expect(field.full == cleaned && field.cursor == field.text.count)
+        #expect(ops == [.deleteBackward(raw.count - 4), .insert(String(cleaned.dropFirst(4)))])
     }
 
     @Test func aPageThatPutsItsCaretBackAfterAMoveFreezesTheRunAndTurnsMovesOff() {
@@ -759,12 +795,12 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
         let steps = drive(&shadow, &field, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
         #expect(steps.last?.froze == .caretReset && steps.last?.caretReset == true && shadow.avoidsMoves)
         #expect([Self.raw, Self.raw.replacingOccurrences(of: " ?", with: "?")].contains(field.full), "Nothing landed at the old place")
-        // The next run in that field (moves off for the session) retypes the cleaned take at the end instead.
+        #expect(field.cursor == field.text.count, "The cursor is put back at the end of the run")
+        // The next run in that field (moves off for the session) leaves a take too long to retype as typed.
         var next = RunShadow(runID: "s", avoidsMoves: true), fresh = WebField(restoresCaret: true)
         drive(&next, &fresh, snapshot(1, [final(0, Self.raw)]))
-        let retyped = drive(&next, &fresh, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
-        #expect(fresh.full == Self.cleaned && fresh.cursor == fresh.text.count)
-        #expect(!retyped.flatMap(\.ops).contains { if case .move = $0 { true } else { false } })
+        let left = drive(&next, &fresh, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
+        #expect(fresh.full == Self.raw && fresh.cursor == fresh.text.count && left.flatMap(\.ops).isEmpty)
     }
 
     @Test func theCleanedShortTakeIsRetypedFromItsFirstChangeWithoutMoves() {
