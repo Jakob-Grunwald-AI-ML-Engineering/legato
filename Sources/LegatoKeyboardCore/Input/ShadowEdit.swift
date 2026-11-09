@@ -84,6 +84,35 @@ public enum ShadowEditPlanner {
         return ShadowPlan(ops: ops, cursor: String(new.prefix(newCursorIndex)).utf16.count)
     }
 
+    /// The edit as ops at the end of `shadow` (the cursor there): delete back to the first character that differs and
+    /// type the rest of `target` (one character per insert with `characters`). Nil when more than `limit` characters
+    /// would be deleted, or nothing differs.
+    public static func retypeTail(shadow: String, target: String, limit: Int, characters: Bool = false) -> [ShadowOp]? {
+        let old = Array(shadow), new = Array(target)
+        guard old != new else { return nil }
+        var common = 0
+        while common < min(old.count, new.count), old[common] == new[common] { common += 1 }
+        let deleted = old.count - common
+        guard deleted <= limit else { return nil }
+        var ops: [ShadowOp] = []
+        if deleted > 0 { ops.append(.deleteBackward(deleted)) }
+        if common < new.count {
+            if characters { ops += new[common...].map { .insert(String($0)) } } else { ops.append(.insert(String(new[common...]))) }
+        }
+        return ops
+    }
+
+    /// `shadow` with only the word-level changes toward `target` that start within its last `window` characters (the
+    /// rest stays as it is).
+    public static func endGoal(shadow: String, target: String, window: Int) -> String {
+        let old = Array(shadow)
+        var doc = old
+        for h in diff(old, Array(target)).reversed() where h.start >= old.count - window {
+            doc.replaceSubrange(h.start..<h.end, with: h.text)
+        }
+        return String(doc)
+    }
+
     /// Runs `ops` against a model of the proxy (text + UTF-16 cursor), the way the keyboard would.
     public static func simulate(ops: [ShadowOp], shadow: String, cursor: Int) -> (text: String, cursor: Int) {
         var doc = Array(shadow)
