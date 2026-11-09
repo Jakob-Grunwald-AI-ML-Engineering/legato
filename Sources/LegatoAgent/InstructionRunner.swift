@@ -271,6 +271,8 @@ public enum InstructionFailure: Error, Sendable, Equatable {
     case overreach
     /// The keyboard could not read the field (`message` says why).
     case read(String)
+    /// The keyboard cannot read this app's text reliably (`message` says what to do instead): running again cannot help.
+    case unreadable(String)
 
     /// For the strip: what happened, in the user's terms. Nothing was edited in every case.
     public var message: String {
@@ -278,20 +280,20 @@ public enum InstructionFailure: Error, Sendable, Equatable {
         case .missingKey: "Add your Claude API key in the Legato app to use instructions."
         case .provider: "The instruction didn't go through. Try again."
         case .malformedReply, .unknownScope, .emptyText, .commentary: "The instruction gave no usable result. Nothing was changed."
-        case .unavailableScope(let scope): scope == .selection ? "Select the text first, then say the instruction."
+        case .unavailableScope(let scope): scope == .selection ? "Can't read a selection here. Put the cursor in the paragraph instead."
             : "With text selected, an instruction edits only the selection."
         case .unchanged: "Nothing to change for that instruction."
         case .noText: "There's no text to work on."
         case .partialScope: "The text is too long to edit here. Select the part to change, then say the instruction."
         case .overreach: "The result changed more than the instruction asked for, so nothing was changed."
-        case .read(let message): message
+        case .read(let message), .unreadable(let message): message
         }
     }
 
     /// Running the same instruction on the same text again could give another result.
     public var canRetry: Bool {
         switch self {
-        case .unchanged, .noText, .partialScope, .unavailableScope, .missingKey: false
+        case .unchanged, .noText, .partialScope, .unavailableScope, .missingKey, .unreadable: false
         case .provider, .malformedReply, .unknownScope, .emptyText, .commentary, .overreach, .read: true
         }
     }

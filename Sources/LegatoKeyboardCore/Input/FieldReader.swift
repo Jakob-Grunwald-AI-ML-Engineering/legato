@@ -21,6 +21,13 @@ import Foundation
 /// it). Some hosts return windows that do not tile at some boundaries (long Messages fields): re-reading does not fix
 /// that, so a pair that never stitches ends the read with an error, never with partial or wrong text.
 ///
+/// Block-based hosts (Safari's `contenteditable`, WebKit text areas) stop their windows at a block: the window after the
+/// cursor ends at its block's end, and a window before that starts right at a block's start begins with the boundary
+/// as "\n " (a space the text does not hold; moving across the boundary counts one unit, as "\n"). So a window that
+/// starts with a line break is trusted only after that break and its blanks (`trusted(before:)`): the rest is read again
+/// from further up, and the boundary itself is crossed one unit at a time. An empty window after a position counts as
+/// the end of a block when the text read below it starts with a line break.
+///
 /// The read stops at the nearest structural stop above the cursor (the field's start, a quote header, quoted lines,
 /// a signature delimiter), at `cap` characters, or after one block for `read_more`.
 @MainActor public struct FieldReader {
@@ -53,12 +60,22 @@ import Foundation
         case stitch(offset: Int)
         /// After the walk the cursor is not back where it was.
         case cursorLost
+        /// The first move up did not land where the windows said: the host shows windows for a cursor that is not where
+        /// a move starts from. Safari does this with a selection it does not report (`selectedText` nil after Select All):
+        /// the move collapses the selection at its end.
+        case firstMove
+
+        /// The host's windows never agreed: reading again cannot help.
+        public var isLasting: Bool {
+            switch self { case .unstable, .stitch, .firstMove: true; case .changed, .cursorLost: false }
+        }
 
         public var message: String {
             switch self {
             case .changed: "The text changed while it was read."
-            case .unstable, .stitch: "This app's text could not be read reliably."
+            case .unstable, .stitch: "Can't read this app's text reliably. Instructions still work on text you dictate with Legato."
             case .cursorLost: "The cursor moved while the text was read."
+            case .firstMove: "Can't read this app's text from here. If text was selected, put the cursor in the paragraph instead."
             }
         }
     }
@@ -94,10 +111,14 @@ import Foundation
         while true {
             let pair: (before: String, after: String)
             switch await stablePair(proxy, stitching: text, offset: moved, result: &result) {
-            case .failure(let reason): failure = reason
+            case .failure(let reason):
+                // Nothing above the cursor was accepted after a move: the move itself went elsewhere.
+                if case .stitch = reason, result.steps == 1, known.isEmpty { failure = .firstMove } else { failure = reason }
             case .success(let value): pair = value; result.steps += 1
-                var window = pair.before
-                if window.isEmpty { result.stop = .start; result.moreRemains = false; break }
+                if pair.before.isEmpty { result.stop = .start; result.moreRemains = false; break }
+                var window = String(Self.trusted(before: pair.before))
+                // Only a block boundary in view: it is crossed on its own, as the one unit it moves.
+                if window.isEmpty { window = "\n" }
                 let room = limit == .cap ? cap - text.count : blockLimit - added.count
                 let clipped = window.count >= room
                 if clipped { window = String(window.suffix(max(0, room))) }
@@ -169,7 +190,20 @@ import Foundation
             case .success(let pair):
                 result.steps += 1
                 var window = pair.after
-                if window.isEmpty { result.stop = .start; result.moreRemains = false; break }
+                if window.isEmpty {
+                    // The end of the field, or of a block (the host's window stops there): one unit on tells them apart.
+                    guard let crossed = await crossBlockEnd(proxy, before: pair.before, offset: moved, result: &result) else {
+                        result.stop = .start; result.moreRemains = false; break
+                    }
+                    switch crossed {
+                    case .failure(let reason): failure = reason
+                    case .success:
+                        text += "\n"; moved += 1
+                        guard text.count < room else { result.stop = .cap; result.moreRemains = true; break }
+                        continue
+                    }
+                    break
+                }
                 let left = room - text.count
                 let clipped = window.count >= left
                 if clipped { window = String(window.prefix(max(0, left))) }
@@ -209,6 +243,20 @@ import Foundation
         return .success(result)
     }
 
+    /// At an empty window after the cursor: moves one unit on. Nil when the cursor did not move (the field's end); else
+    /// success when the window before now ends with a line break (a block boundary was crossed), a failure otherwise.
+    private func crossBlockEnd(_ proxy: any FieldWindowProxy, before: String, offset: Int,
+                               result: inout Result) async -> Swift.Result<Void, Failure>? {
+        proxy.move(by: 1)
+        switch await stablePair(proxy, offset: offset + 1, result: &result, stitches: { _ in true }) {
+        case .failure(let reason): proxy.move(by: -1); return .failure(reason)
+        case .success(let pair):
+            if pair.before == before { return nil }
+            guard pair.before.last?.isNewline == true else { proxy.move(by: -1); return .failure(.stitch(offset: offset)) }
+            return .success(())
+        }
+    }
+
     /// Two identical consecutive reads that stitch onto `text` (the window after the position starts with it).
     private func stablePair(_ proxy: any FieldWindowProxy, stitching text: String, offset: Int,
                             result: inout Result) async -> Swift.Result<(before: String, after: String), Failure> {
@@ -232,10 +280,11 @@ import Foundation
         return .failure(failure)
     }
 
-    /// The window after a position must start with the text read below it (each side may be cut short).
+    /// The window after a position must start with the text read below it (each side may be cut short). An empty
+    /// window right before a line break is a block's end (block-based hosts stop the window there).
     public static func stitches(after window: String, onto text: String) -> Bool {
         if text.isEmpty { return true }
-        if window.isEmpty { return false }
+        if window.isEmpty { return text.first?.isNewline == true }
         return text.hasPrefix(window) || window.hasPrefix(text)
     }
 
@@ -244,6 +293,13 @@ import Foundation
         if text.isEmpty { return true }
         if window.isEmpty { return false }
         return text.hasSuffix(window) || window.hasSuffix(text)
+    }
+
+    /// The part of a window before the cursor that is the field's text: all of it, unless it starts with a line break
+    /// (a block-based host's boundary, "\n " in WebKit): then what follows the break and its blanks.
+    nonisolated public static func trusted(before window: String) -> Substring {
+        guard window.first?.isNewline == true else { return Substring(window) }
+        return window.drop { $0.isNewline || $0 == " " || $0 == "\t" }
     }
 
     // MARK: Structural stops

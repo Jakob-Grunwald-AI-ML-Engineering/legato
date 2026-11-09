@@ -104,6 +104,9 @@ public struct FieldReadRequest: Codable, Sendable, Equatable {
         /// The structural prefetch: selection, the session's text, the cursor paragraph, and above back to the nearest
         /// structural stop or the cap. Walks only when no session text exists and the field shows more than is known.
         case context
+        /// `context` without moving the cursor (no walk): the instruction is about a selection, which a walk would
+        /// collapse in a host that does not report it (Safari gives no `selectedText`).
+        case contextInPlace
         /// One more block above what was read (`read_more`): a paragraph group of at most `FieldReader.blockLimit`.
         case more
         /// Everything above and then below what was read, up to the cap in all.
@@ -146,6 +149,8 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
     public var moreBelow: Bool
     /// Why the read failed (no field text).
     public var error: String?
+    /// The failure lies in how this app shows its text (its windows never agreed): reading again cannot help.
+    public var lasting: Bool?
     public var documentID: String?
     public init(id: String, state: State, above: String = "", below: String = "", selection: String? = nil, sessionLength: Int = 0,
                 stop: FieldStop = .unread, stopBelow: FieldStop? = nil, moreAbove: Bool = false, moreBelow: Bool = false, error: String? = nil,

@@ -7,6 +7,9 @@ public enum OwnEditEcho {
     public static func isSame(expected: String, reported: String) -> Bool {
         if expected == reported { return true }
         guard !expected.isEmpty, !reported.isEmpty else { return false }
-        return expected.hasSuffix(reported) || reported.hasSuffix(expected)
+        if expected.hasSuffix(reported) || reported.hasSuffix(expected) { return true }
+        // A block-based host starts a window at a block's start with "\n " (`FieldReader.trusted(before:)`).
+        let trusted = FieldReader.trusted(before: reported)
+        return trusted.count < reported.count && !trusted.isEmpty && expected.hasSuffix(trusted)
     }
 }

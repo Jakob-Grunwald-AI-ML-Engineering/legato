@@ -420,6 +420,7 @@ final class KeyboardController {
         if wordRow.contextChanged() {
             history.cursorMoved()
             wordRow.interruptTyping()
+            settleInstructionRowOnMove()
         }
     }
 
@@ -1027,6 +1028,19 @@ final class KeyboardController {
         instructionIntent(action)
     }
     @ObservationIgnored private var settledInstructionID: String?
+    @ObservationIgnored private var instructionStripAt = Date.distantPast
+
+    /// The user moved the cursor or selected text: a status that no longer applies goes ("Undone.", a failure with
+    /// nothing to undo). A result stays (its Undo still works), and so does a row that is still working. A strip that
+    /// just arrived is kept: the field's late notes for the keyboard's own read or edit are no move of the user's.
+    private func settleInstructionRowOnMove() {
+        guard let presentation = instructionPresentation, Date().timeIntervalSince(instructionStripAt) > 0.7 else { return }
+        switch presentation.kind {
+        case .undone: settleInstructionRow()
+        case .failed where !presentation.showsUndo: settleInstructionRow()
+        default: break
+        }
+    }
 
     /// A tap on the instruction strip: run (again), undo, accept, or dismiss what it shows.
     func instructionIntent(_ action: InstructionIntent.Action) {
@@ -1038,7 +1052,7 @@ final class KeyboardController {
     private func receiveInstruction() {
         guard !isTornDown else { return }
         let strip = link.readInstructionStrip()
-        if strip != instructionStrip { instructionStrip = strip; syncRowTakeover() }
+        if strip != instructionStrip { instructionStrip = strip; instructionStripAt = Date(); syncRowTakeover() }
         guard isVisible, !serving else { return }
         // One at a time: a read never walks while an edit's ops are still landing, and the other way round.
         if let request = link.takeReadRequest() {
@@ -1072,12 +1086,15 @@ final class KeyboardController {
         }
         let before = document.contextBefore, after = document.contextAfter
         let selection = document.selectedText.flatMap { $0.isEmpty ? nil : $0 }
+        #if DEBUG
+        WindowProbe.log("read kind=\(request.kind.rawValue) selected=\(WindowProbe.show(document.selectedText)) before=\(WindowProbe.show(before)) after=\(WindowProbe.show(after))")
+        #endif
         // Below the cursor: the host's window, unverified (whether the field ends there is known only after a walk down).
         let below = String(after.prefix(FieldReader.defaultCap))
         var reply = FieldReadReply(id: request.id, state: .done, below: below, selection: selection,
                                    stopBelow: after.isEmpty ? .start : .unread, moreBelow: !after.isEmpty, documentID: documentID)
         switch request.kind {
-        case .context:
+        case .context, .contextInPlace:
             if selection != nil {
                 // A walk would collapse the selection: only the windows around it, and only the selection is edited.
                 reply.above = before; reply.stop = .unread; reply.moreAbove = !before.isEmpty
@@ -1089,6 +1106,9 @@ final class KeyboardController {
                 reply.stop = atStart ? .start : .unread; reply.moreAbove = !atStart
             } else if before.isEmpty {
                 reply.stop = .start
+            } else if request.kind == .contextInPlace {
+                // No walk: a selection the host does not report would be lost. Only the window, trusted from its start.
+                reply.above = String(FieldReader.trusted(before: before)); reply.stop = .unread; reply.moreAbove = true
             } else {
                 guard let read = await walk(request, run: { reader, proxy in await reader.readUp(proxy, known: "", limit: .cap) }) else { return }
                 reply.above = read.text; reply.stop = read.stop; reply.moreAbove = read.moreRemains
@@ -1128,7 +1148,12 @@ final class KeyboardController {
         isReadingField = true
         syncRowTakeover()
         let started = Date()
-        let result = await run(FieldReader(settleMilliseconds: 25), DocumentWindows(document))
+        #if DEBUG
+        let windows: any FieldWindowProxy = WindowProbe.enabled ? WindowProbe(DocumentWindows(document)) : DocumentWindows(document)
+        #else
+        let windows: any FieldWindowProxy = DocumentWindows(document)
+        #endif
+        let result = await run(FieldReader(settleMilliseconds: 25), windows)
         isReadingField = false
         // The cursor is back where it was: the keyboard catches up with the field once.
         documentDidChange()
@@ -1139,7 +1164,9 @@ final class KeyboardController {
             return read
         case .failure(let failure):
             trace?("instruction walk failed reason=\(String(describing: failure)) ms=\(Int(Date().timeIntervalSince(started) * 1000))")
-            link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: failure.message))
+            var reply = FieldReadReply(id: request.id, state: .failed, error: failure.message)
+            reply.lasting = failure.isLasting
+            link.writeReadReply(reply)
             return nil
         }
     }
@@ -1692,6 +1719,30 @@ final class KeyboardController {
 }
 
 /// The field's windows for `FieldReader`, over the keyboard's document.
+#if DEBUG
+/// Debug: logs every window the walk reads and every move (`defaults write <keyboard bundle> LegatoWindowProbe -bool YES`;
+/// synthetic text only, on a simulator).
+@MainActor private final class WindowProbe: FieldWindowProxy {
+    static var enabled: Bool { UserDefaults.standard.bool(forKey: "LegatoWindowProbe") }
+    private static let logger = Logger(subsystem: "de.gruenwald.legato", category: "probe")
+    static func log(_ message: String) { guard enabled else { return }; logger.debug("\(message, privacy: .public)") }
+    static func show(_ text: String?) -> String {
+        guard let text else { return "nil" }
+        let escaped = text.unicodeScalars.map { s -> String in
+            switch s { case "\n": "<NL>"; case "\u{2029}": "<PS>"; case "\u{2028}": "<LS>"; case "\u{FFFC}": "<OBJ>"; case "\u{A0}": "<NBSP>"
+            default: s.value < 32 ? String(format: "<%02X>", s.value) : String(s) }
+        }.joined()
+        return "\(text.utf16.count)|\(escaped)|"
+    }
+    private let base: any FieldWindowProxy
+    init(_ base: any FieldWindowProxy) { self.base = base }
+    var windowBefore: String { let w = base.windowBefore; Self.log("  before=\(Self.show(w))"); return w }
+    var windowAfter: String { let w = base.windowAfter; Self.log("  after=\(Self.show(w))"); return w }
+    func move(by units: Int) { Self.log("  move \(units)"); base.move(by: units) }
+    func pause(milliseconds: Int) async { await base.pause(milliseconds: milliseconds) }
+}
+#endif
+
 @MainActor private final class DocumentWindows: FieldWindowProxy {
     private let document: any TextDocument
     init(_ document: any TextDocument) { self.document = document }

@@ -140,7 +140,7 @@ extension InstructionRunner: InstructionRunning {}
                 await self.beforeRun?()
                 guard let field = self.field else { throw InstructionFailure.read("Legato's keyboard isn't connected.") }
                 try Task.checkCancellation()
-                let reply = try await field.read(.context, instructionID: id) { [weak self] in self?.setPhase(.reading, id: id) }
+                let reply = try await field.read(Self.mentionsSelection(transcript) ? .contextInPlace : .context, instructionID: id) { [weak self] in self?.setPhase(.reading, id: id) }
                 self.setPhase(.running, id: id)
                 // The edit goes to the field that was read (the keyboard refuses it in another one).
                 let documentID = reply.documentID
@@ -223,6 +223,15 @@ extension InstructionRunner: InstructionRunning {}
 
     // MARK: Helpers
 
+    /// The instruction is about selected text: its first read must not move the cursor (a walk would lose the selection).
+    static func mentionsSelection(_ instruction: String) -> Bool {
+        let words = instruction.lowercased().split { !$0.isLetter }
+        return words.contains { word in
+            ["selection", "selected", "highlighted", "auswahl", "markierung"].contains(word)
+                || word.hasPrefix("markiert") || word.hasPrefix("ausgewählt")
+        }
+    }
+
     /// What the model is shown, from the keyboard's read.
     static func context(_ reply: FieldReadReply) -> InstructionContext {
         // Final: nothing more is read on that side. Complete: the shown text reaches the end of the user's text there.
@@ -261,6 +270,7 @@ extension InstructionRunner: InstructionRunning {}
         case .partialScope(let scope): "partial-\(scope.rawValue)"
         case .overreach: "overreach"
         case .read: "read"
+        case .unreadable: "unreadable"
         }
     }
 

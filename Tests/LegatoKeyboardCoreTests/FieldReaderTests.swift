@@ -43,7 +43,48 @@ private func paragraphs(_ count: Int) -> String {
         .joined(separator: "\n")
 }
 
+/// Safari's `contenteditable` (measured on the simulator): blocks separated by one unit; a window before the cursor starts
+/// at a word start, and one that starts right at a block's start begins with "\n " (the boundary, plus a space the text
+/// does not hold); the window after the cursor stops at its block's end.
+@MainActor private final class BlockField: FieldWindowProxy {
+    var text: [Character]
+    var cursor: Int
+    var sizes: [Int]
+    init(_ text: String, cursor: Int? = nil, sizes: [Int]) { self.text = Array(text); self.cursor = cursor ?? text.count; self.sizes = sizes }
+    private var size: Int { sizes[cursor % sizes.count] }
+    var windowBefore: String {
+        var start = max(0, cursor - size)
+        while start > 0, start < cursor, !text[start - 1].isWhitespace { start += 1 }
+        let window = String(text[start..<cursor])
+        return start > 0 && text[start - 1] == "\n" ? "\n " + window : window
+    }
+    var windowAfter: String {
+        let end = text[cursor...].firstIndex(of: "\n") ?? text.count
+        return String(text[cursor..<min(end, cursor + 100)])
+    }
+    func move(by units: Int) { cursor = min(text.count, max(0, cursor + units)) }
+    func pause(milliseconds: Int) async {}
+}
+
 @MainActor @Suite struct FieldReaderTests {
+    @Test func readsBlocksWhoseWindowsStartWithABoundaryArtifact() async throws {
+        let text = "The garden plan is simple and we start on Saturday morning.\nWe need to move the two big pots away from the fence first, and then we can fix the gate.\n\nAfter that it is coffee and cake on the terrace."
+        #expect(BlockField(text, sizes: [48]).windowBefore.hasPrefix("\n After"), "The host's window at the end, as measured")
+        for sizes in [[48], [49], [50, 100, 55], [12, 30, 7], [200]] {
+            let field = BlockField(text, sizes: sizes)
+            let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
+            #expect(result.text == text, "sizes \(sizes)")
+            #expect(result.stop == .start && field.cursor == text.count)
+        }
+        // Down from the first block's end, across blocks, to the field's end.
+        let start = BlockField(text, cursor: 59, sizes: [50, 100, 55])
+        let below = try await FieldReader(settleMilliseconds: 0).readDown(start, known: "", room: 10_000).get()
+        #expect(below.text == String(text.dropFirst(59)) && below.stop == .start && start.cursor == 59)
+        // The echo of an edit and the scope check look past the artifact.
+        #expect(OwnEditEcho.isSame(expected: "the gate.\n\nAfter that it is", reported: "\n After that it is"))
+        #expect(!OwnEditEcho.isSame(expected: "the gate.\nBefore that it is", reported: "\n After that it is"))
+    }
+
     @Test func readsAShortFieldToItsStartAndReturnsTheCursor() async throws {
         let field = FakeField("Hello Anna, the meeting moved to Thursday. Can you make it?")
         let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
@@ -73,7 +114,13 @@ private func paragraphs(_ count: Int) -> String {
         let result = await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap)
         guard case .failure(let failure) = result else { Issue.record("expected a failure, got \(result)"); return }
         guard case .stitch = failure else { Issue.record("expected a stitch failure, got \(failure)"); return }
+        #expect(failure.isLasting)
         #expect(field.cursor == text.count, "The cursor goes back even when the read fails")
+        // Windows at the cursor that a move does not start from (Safari's hidden selection): the first move fails.
+        let hidden = FakeField(text)
+        hidden.brokenAt = [text.count]
+        let lost = await FieldReader(settleMilliseconds: 0).readUp(hidden, known: "", limit: .cap)
+        #expect(lost == .failure(.firstMove))
     }
 
     @Test func capEndsAtALineStartAndSaysMoreRemains() async throws {

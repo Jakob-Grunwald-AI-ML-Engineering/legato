@@ -44,7 +44,9 @@ import LegatoKeyboardCore
                 switch reply.state {
                 case .reading: if !walking { walking = true; reading() }
                 case .done: return reply
-                case .failed: throw InstructionFailure.read(reply.error ?? "The text could not be read.")
+                case .failed:
+                    let message = reply.error ?? "The text could not be read."
+                    throw reply.lasting == true ? InstructionFailure.unreadable(message) : InstructionFailure.read(message)
                 }
             }
             if Self.seconds(since: start) >= (walking ? readTimeout : ackTimeout) {

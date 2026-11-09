@@ -1,6 +1,7 @@
 import LegatoKeyboardCore
 import SwiftUI
 import UIKit
+import os
 
 /// The Legato keyboard. A `.keyboard`-style input view hosting the SwiftUI key grid. It compiles only
 /// `Keyboard/` and `KeyboardUI/` (never `Shared/`: the AppIntents there would run in this process,
@@ -32,6 +33,13 @@ final class KeyboardViewController: UIInputViewController {
         let document = ProxyDocument(proxy: { [weak self] in self?.textDocumentProxy })
         let controller = KeyboardController(
             document: document, link: LinkClient(), hasFullAccess: { [weak self] in self?.hasFullAccess ?? false })
+        #if DEBUG
+        // Debug: the controller's trace in the log (`defaults write <keyboard bundle> LegatoWindowProbe -bool YES`).
+        if UserDefaults.standard.bool(forKey: "LegatoWindowProbe") {
+            let logger = Logger(subsystem: "de.gruenwald.legato", category: "probe")
+            controller.trace = { logger.debug("trace \($0, privacy: .public)") }
+        }
+        #endif
         controller.inputModeTarget = self
         controller.showsGlobe = needsInputModeSwitchKey
         self.controller = controller

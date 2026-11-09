@@ -47,7 +47,12 @@ public enum ScopedEditPlanner {
     static func agrees(scope: String, window: String, atEnd: Bool) -> Bool {
         if scope.isEmpty { return true }
         if window.isEmpty { return false }
-        return atEnd ? (scope.hasSuffix(window) || window.hasSuffix(scope)) : (scope.hasPrefix(window) || window.hasPrefix(scope))
+        if atEnd {
+            // A block-based host's window may start with its boundary as "\n " (`FieldReader.trusted(before:)`).
+            let trusted = FieldReader.trusted(before: window)
+            return scope.hasSuffix(window) || window.hasSuffix(scope) || (!trusted.isEmpty && scope.hasSuffix(trusted))
+        }
+        return scope.hasPrefix(window) || window.hasPrefix(scope)
     }
 
     /// The undo of a landed edit: the text the edit produced (split where the cursor ended) goes back to what it replaced.

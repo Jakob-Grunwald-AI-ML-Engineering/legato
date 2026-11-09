@@ -13,9 +13,13 @@ struct MagicKey: View {
     /// The key was latched when this press began: the press is a tap off, never a hold.
     @State private var startedLatched = false
     @State private var holdTimer: Task<Void, Never>?
+    @State private var pressedAt = Date.distantPast
 
     /// How long the finger stays down before the press is a hold rather than a tap.
     private static let holdDelay = Duration.milliseconds(450)
+    /// A hold let go within this, with nothing heard yet, was a slow tap: the key latches instead of running nothing
+    /// (the mic would stay open in dictation, and the next words would be typed).
+    private static let slowTap = 1.2
 
     var body: some View {
         let magic = controller.magic
@@ -47,6 +51,7 @@ struct MagicKey: View {
     private func press() {
         controller.typing.feedback.tick()
         held = false
+        pressedAt = Date()
         startedLatched = controller.magic == .latched
         holdTimer?.cancel()
         guard !startedLatched else { return }
@@ -61,7 +66,9 @@ struct MagicKey: View {
     /// The touch is over, however it ended: a hold lets go (the instruction runs).
     private func release() {
         holdTimer?.cancel(); holdTimer = nil
-        if held, controller.magic == .held { controller.releaseMagic() }
+        guard held, controller.magic == .held else { return }
+        let heard = controller.instructionStrip.map { !$0.transcript.trimmingCharacters(in: .whitespaces).isEmpty } ?? false
+        if !heard, Date().timeIntervalSince(pressedAt) < Self.slowTap { controller.engageMagic(.latched) } else { controller.releaseMagic() }
     }
 
     private func tap() {
