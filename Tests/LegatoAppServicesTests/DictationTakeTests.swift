@@ -229,7 +229,8 @@ private actor TakeHistory: HistoryStore {
 
     @Test func historyMarksATakeThatStayedRaw() async throws {
         let history = TakeHistory()
-        let failing = DictationPipeline(history: history, cleaner: TakeCleaner([.fail, .fail, .ok]), sendMode: { .onStop }, takeTimeout: { _ in .milliseconds(20) })
+        // No short timeout: failures throw at once, and the retry's clean call must not time out on a loaded runner.
+        let failing = DictationPipeline(history: history, cleaner: TakeCleaner([.fail, .fail, .ok]), sendMode: { .onStop })
         await failing.receive(routeLine(0, thirteenWords))
         await failing.sendTake()
         #expect(try await history.recent(limit: 1).first?.cleanupFallback == true)
