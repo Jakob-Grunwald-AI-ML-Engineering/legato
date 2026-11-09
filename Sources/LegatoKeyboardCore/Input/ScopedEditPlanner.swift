@@ -67,12 +67,18 @@ public enum ScopedEditPlanner {
 }
 
 /// Carries out a `ScopedEditPlanner.Plan` like the live run's edit queue (`RunShadow`): one op in flight, the next only
-/// once the field's report shows the last one (`RunShadow.confirms`), so a host that reports late never gets an op at a
-/// wrong offset. Pure: the keyboard feeds it the field's report and carries out the op it hands over.
+/// once the field's report pins the cursor where the last one leaves it (`RunShadow.confirms`, strict: at that place and
+/// no other), so a host that reports late never gets an op at a wrong offset. Pure: the keyboard feeds it the field's
+/// report and carries out the op it hands over.
 ///
-/// An op the field does not confirm within `RunShadow.confirmLimitMs` (or a selection that appears or stays), or an edit
-/// past `limitMs`, stops it: the rest is never sent. Where the field then shows what was expected after the last confirmed op, `Partial` is
-/// the scope's text there (the scope itself when nothing landed), so the app can still undo; otherwise it is unknown.
+/// A page that puts its caret back after a move (a re-rendered, controlled text area) is met like in the live run: a
+/// field known to do so (`avoidsMoves`), or a move whose old place the report keeps pinning (`RunShadow.caretResetReports`
+/// over `caretResetMs`), turns the rest of the edit into a retype at the cursor (`ShadowEditPlanner.retypeTail`: delete
+/// back to the first change, type the new text; no moves). That needs the text after the cursor to stay as it is and at
+/// most `RunShadow.cleanupRetypeChars` deleted; otherwise the edit stops, as it does when an op does not confirm within
+/// `RunShadow.confirmLimitMs` (or a selection appears or stays), or past `limitMs`: the rest is never sent. Where the
+/// field then shows a known state, `Partial` is the scope's text there (the scope itself when nothing landed), so the
+/// app can still undo; otherwise it is unknown.
 public struct ScopedEditQueue: Sendable, Equatable {
     public enum Action: Sendable, Equatable {
         /// Carry out this op; the next step checks that the field shows it.
@@ -81,7 +87,8 @@ public struct ScopedEditQueue: Sendable, Equatable {
         case wait
         /// Every op went out and the field confirmed the last one.
         case done
-        /// The field did not confirm in time; nothing more is sent. Nil: the field shows neither state.
+        /// The field did not confirm in time, or the edit needs moves the field undoes; nothing more is sent. Nil: the
+        /// field shows no known state.
         case stopped(Partial?)
     }
 
@@ -100,66 +107,124 @@ public struct ScopedEditQueue: Sendable, Equatable {
     }
 
     private let kept: String
-    private let ops: [ShadowOp]
-    private let states: [State]
+    private let target: String
+    private var ops: [ShadowOp]
+    private var states: [State]
     private var sent = 0
     private var confirmed = 0
     private var waitedMs = 0.0
     private var totalMs = 0.0
     private var stopped = false
+    private var resetReport: String?
+    private var resetReports = 0
+    private var resetMs = 0.0
     /// The whole edit's budget: past it no further op is sent (the app waits `LinkChannel.editLandTimeout` for the ack).
     public static let limitMs = 20_000.0
     /// Ops that had to wait for the field to confirm them.
     public private(set) var waits = 0
+    /// The field put its caret back after a move (seen during this edit): the keyboard should avoid moves from now on.
+    public private(set) var caretReset = false
+    /// The edit lands (or landed) by retyping at the cursor, without moves.
+    public private(set) var retypes = false
+    /// The edit needs moves the field does not keep, and retyping cannot stand in: nothing was sent.
+    public private(set) var needsMoves = false
 
     /// `windowBefore`: the field's text before the cursor when the plan was made (the scope's `before` ends it).
-    public init(_ edit: ScopedEdit, plan: ScopedEditPlanner.Plan, windowBefore: String) {
-        ops = plan.ops
+    /// `avoidsMoves`: the field is known to put its caret back after a move.
+    public init(_ edit: ScopedEdit, plan: ScopedEditPlanner.Plan, windowBefore: String, avoidsMoves: Bool = false) {
+        target = edit.target
         if let selection = edit.selected {
             // The host replaces the selection with the insert (or deletes it); the cursor ends after the new text.
             kept = windowBefore
+            ops = plan.ops
             states = [State(before: selection, after: "", selected: true), State(before: edit.target, after: "", selected: false)]
+            return
+        }
+        kept = String(windowBefore.dropLast(min(windowBefore.count, edit.before.count)))
+        let start = State(before: edit.before, after: edit.after, selected: false)
+        ops = []; states = [start]
+        if avoidsMoves, plan.ops.contains(where: { if case .move = $0 { true } else { false } }) {
+            guard let retype = Self.retype(from: start, to: edit.target) else { needsMoves = true; stopped = true; return }
+            retypes = true
+            replan(from: start, ops: retype)
         } else {
-            kept = String(windowBefore.dropLast(min(windowBefore.count, edit.before.count)))
-            var text = edit.before + edit.after, cursor = edit.before.utf16.count
-            var states = [State(before: edit.before, after: edit.after, selected: false)]
-            for op in plan.ops {
-                (text, cursor) = ShadowEditPlanner.simulate(ops: [op], shadow: text, cursor: cursor)
-                let units = Array(text.utf16)
-                states.append(State(before: String(decoding: units[..<cursor], as: UTF16.self),
-                                    after: String(decoding: units[cursor...], as: UTF16.self), selected: false))
-            }
-            self.states = states
+            replan(from: start, ops: plan.ops)
+        }
+    }
+
+    /// Ops that bring `state` to `target` by deleting back from the cursor and typing, with the text after the cursor
+    /// kept; nil when that text changes or the deletion is too long.
+    static func retype(from state: State, to target: String) -> [ShadowOp]? {
+        guard target.hasSuffix(state.after) else { return nil }
+        let newBefore = String(target.dropLast(state.after.count))
+        if newBefore == state.before { return [] }
+        return ShadowEditPlanner.retypeTail(shadow: state.before, target: newBefore, limit: RunShadow.cleanupRetypeChars)
+    }
+
+    private mutating func replan(from state: State, ops: [ShadowOp]) {
+        self.ops = ops; sent = 0; confirmed = 0; waitedMs = 0
+        var text = state.before + state.after, cursor = state.before.utf16.count
+        states = [state]
+        for op in ops {
+            (text, cursor) = ShadowEditPlanner.simulate(ops: [op], shadow: text, cursor: cursor)
+            let units = Array(text.utf16)
+            states.append(State(before: String(decoding: units[..<cursor], as: UTF16.self),
+                                after: String(decoding: units[cursor...], as: UTF16.self), selected: false))
         }
     }
 
     /// The field's text before the cursor once the whole edit landed.
     public var expectedBefore: String { kept + (states.last?.before ?? "") }
+    /// Where the cursor ends, in UTF-16 units into the target (the undo splits the target there).
+    public var finalCursor: Int { states.last.map { $0.selected ? target.utf16.count : $0.before.utf16.count } ?? 0 }
 
     public mutating func step(reportedBefore: String, reportedAfter: String, hasSelection: Bool, elapsedMs: Double) -> Action {
-        guard !stopped else { return .stopped(nil) }
+        guard !stopped else { return .stopped(needsMoves ? partial(states[0]) : nil) }
         totalMs += elapsedMs
         if confirmed < sent {
             guard shows(states[sent], reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else {
                 if waitedMs == 0 { waits += 1 }
                 waitedMs += elapsedMs
+                let before = states[sent - 1]
+                if case .move = ops[sent - 1], shows(before, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) {
+                    // The report keeps the cursor where it was before the move: lagging for a moment, or a page that put
+                    // its caret back. Held steady, it is the page: the rest goes in by retyping at the cursor.
+                    let report = reportedBefore + "\u{0}" + reportedAfter
+                    if report == resetReport { resetReports += 1; resetMs += elapsedMs } else { resetReport = report; resetReports = 1; resetMs = 0 }
+                    if resetReports >= RunShadow.caretResetReports, resetMs >= RunShadow.caretResetMs {
+                        caretReset = true; resetReport = nil; resetReports = 0; resetMs = 0
+                        guard let retype = Self.retype(from: before, to: target) else { stopped = true; return .stopped(partial(before)) }
+                        retypes = true
+                        replan(from: before, ops: retype)
+                        return next()
+                    }
+                } else {
+                    resetReport = nil; resetReports = 0; resetMs = 0
+                }
                 guard waitedMs >= RunShadow.confirmLimitMs else { return .wait }
                 stopped = true
                 // The op in flight may still land, or was lost: only a field that shows the last confirmed state is known.
                 let last = states[confirmed]
                 guard shows(last, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else { return .stopped(nil) }
-                return .stopped(Partial(text: last.before + last.after, cursor: last.selected ? 0 : last.before.utf16.count))
+                return .stopped(partial(last))
             }
-            confirmed = sent; waitedMs = 0
+            confirmed = sent; waitedMs = 0; resetReport = nil; resetReports = 0; resetMs = 0
         }
-        guard sent < ops.count else { return .done }
-        if totalMs >= Self.limitMs {
+        if sent < ops.count, totalMs >= Self.limitMs {
             stopped = true
-            let last = states[confirmed]
-            return .stopped(Partial(text: last.before + last.after, cursor: last.selected ? 0 : last.before.utf16.count))
+            return .stopped(partial(states[confirmed]))
         }
+        return next()
+    }
+
+    private mutating func next() -> Action {
+        guard sent < ops.count else { return .done }
         sent += 1
         return .send(ops[sent - 1])
+    }
+
+    private func partial(_ state: State) -> Partial {
+        Partial(text: state.before + state.after, cursor: state.selected ? 0 : state.before.utf16.count)
     }
 
     private func shows(_ state: State, reportedBefore: String, reportedAfter: String, hasSelection: Bool) -> Bool {

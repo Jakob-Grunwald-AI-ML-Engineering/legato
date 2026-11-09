@@ -1197,7 +1197,8 @@ final class KeyboardController {
         }
         // The live run's text stays as it is now; the run goes on at the cursor afterwards.
         freezeLiveRun(.instruction)
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: windowBefore)
+        // A field that puts its caret back after a move gets the edit by retyping at the cursor.
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: windowBefore, avoidsMoves: liveFieldResetsCaret)
         isEditingField = true
         clearWatch.ownEdit(at: Date())
         history.cursorMoved()
@@ -1232,6 +1233,7 @@ final class KeyboardController {
             last = now
         }
         isEditingField = false
+        if queue.caretReset, !liveFieldResetsCaret { liveFieldResetsCaret = true; trace?("instruction caret reset: moves off") }
         let ms = Int(Self.milliseconds(clock.now - started))
         if outcome == .done {
             let expected = queue.expectedBefore
@@ -1239,11 +1241,12 @@ final class KeyboardController {
             typing.hostEdited()
             typing.ownEdit(contextBefore: expected)
             versions = nil
-            if edit.selected == nil { sessionSpan.edited(before: edit.before, newBefore: plan.targetBefore) } else { sessionSpan.broken() }
+            let newBefore = String(decoding: Array(edit.target.utf16.prefix(queue.finalCursor)), as: UTF16.self)
+            if edit.selected == nil { sessionSpan.edited(before: edit.before, newBefore: newBefore) } else { sessionSpan.broken() }
             fieldRead = nil
             documentDidChange()
-            trace?("instruction edit applied ops=\(plan.ops.count) waits=\(queue.waits) ms=\(ms) chars=\(edit.scopeText.count)->\(edit.target.count)")
-            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: plan.cursor))
+            trace?("instruction edit applied ops=\(sent) retyped=\(queue.retypes ? 1 : 0) waits=\(queue.waits) ms=\(ms) chars=\(edit.scopeText.count)->\(edit.target.count)")
+            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: queue.finalCursor))
         }
         // Stopped: what landed stays; the field's report decides what Legato knows of it.
         typing.hostEdited()
@@ -1256,7 +1259,9 @@ final class KeyboardController {
         trace?("instruction edit stopped sent=\(sent)/\(plan.ops.count) waits=\(queue.waits) known=\(partial == nil ? 0 : 1) ms=\(ms)")
         let ack: ScopedEditAck = switch partial {
         case .some(let partial) where partial.text == edit.scopeText:
-            ScopedEditAck(id: edit.id, applied: false, reason: "The text field didn't keep up, so nothing was edited.")
+            ScopedEditAck(id: edit.id, applied: false, reason: queue.needsMoves || queue.caretReset
+                              ? "This app puts the cursor back after each move, so this edit can't be made here. Nothing was changed."
+                              : "The text field didn't keep up, so nothing was edited.")
         case .some(let partial):
             ScopedEditAck(id: edit.id, applied: false, cursor: partial.cursor,
                           reason: "The text field didn't keep up, so the edit stopped partway.", partial: partial.text, stopped: true)

@@ -203,8 +203,20 @@ public struct RunShadow: Sendable, Equatable {
     /// known text's end there (hosts trim their context), or reaches back past the start of the known text; nothing
     /// reported before it fits only the start. After the cursor the report starts with the known text there, or is a
     /// trimmed part of it, or goes on past it (text after the region); nothing reported after it fits anywhere.
+    ///
+    /// A block-based host's window that starts at a block's start begins with "\n " (`FieldReader.trusted(before:)`):
+    /// when the report fits nowhere as it is, its trusted part counts, at positions where a line break precedes it.
     static func positions(in text: [Character], reportedBefore: String, reportedAfter: String) -> [Int] {
-        let rb = Array(reportedBefore), ra = Array(reportedAfter)
+        let exact = fits(in: text, reportedBefore: Array(reportedBefore), reportedAfter: Array(reportedAfter))
+        let trusted = Array(FieldReader.trusted(before: reportedBefore))
+        guard exact.isEmpty, !trusted.isEmpty, trusted.count < reportedBefore.count else { return exact }
+        return fits(in: text, reportedBefore: trusted, reportedAfter: Array(reportedAfter)).filter { p in
+            let start = p - trusted.count
+            return start > 0 && text[start - 1].isNewline
+        }
+    }
+
+    private static func fits(in text: [Character], reportedBefore rb: [Character], reportedAfter ra: [Character]) -> [Int] {
         func beforeFits(_ p: Int) -> Bool {
             if rb.isEmpty { return p == 0 }
             if p >= rb.count { return text[(p - rb.count)..<p].elementsEqual(rb) }
