@@ -650,6 +650,12 @@ private struct WebField {
     private var caretAfterInput: Int?
     private var rendersLeft = 0
 
+    // Spelled out: older compilers make the memberwise initializer private because of the private state above.
+    init(window: Int = 1000, reportsAfter: Bool = true, restoresCaret: Bool = false, dropsMoves: Set<Int> = [], lagReads: Int = 0) {
+        self.window = window; self.reportsAfter = reportsAfter; self.restoresCaret = restoresCaret
+        self.dropsMoves = dropsMoves; self.lagReads = lagReads
+    }
+
     var full: String { String(text) }
     var before: String { String(text[..<cursor]) }
     /// What the field reports now (a lagging field may report an older cursor).
