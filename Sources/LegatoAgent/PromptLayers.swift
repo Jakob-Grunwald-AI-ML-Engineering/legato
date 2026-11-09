@@ -9,6 +9,8 @@ public enum PromptLayers {
     public static func dictationCleanup() -> String { read("dictation-cleanup") }
     /// The cleanup-only prompt for a whole dictation take sent in one call (on stop or after a pause).
     public static func dictationTakeCleanup() -> String { read("dictation-take-cleanup") }
+    /// The keyboard's instruction mode: one spoken instruction rewrites one scope of the field (`InstructionRunner`).
+    public static func instructionMode() -> String { read("instruction") }
     public static func instruction(for phase: WritingPhase) -> String {
         switch phase {
         case .quick:

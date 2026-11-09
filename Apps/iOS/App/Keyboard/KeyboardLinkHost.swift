@@ -58,6 +58,8 @@ final class KeyboardLinkHost: TranscriptSink {
     private var liveWriteTask: Task<Void, Never>?
     private var liveVersionTimes: [Int: ContinuousClock.Instant] = [:]
     private var liveAckSeen: LiveDictationAck?
+    /// Instruction mode's end of the link (reads, scoped edits, the strip); the session holds it weakly.
+    private var instructionChannel: InstructionFieldChannel?
     func attach(_ composer: ComposerSession, keyboardSession: KeyboardSession? = nil, dictation: DictationPipeline? = nil) {
         self.keyboardSession = keyboardSession
         dictation?.contextBefore = { [weak self] in self?.link.keyboardPresence()?.contextBefore ?? "" }
@@ -96,6 +98,9 @@ final class KeyboardLinkHost: TranscriptSink {
             }
         }
         dictation?.onChange = publishDictation
+        let instructionChannel = InstructionFieldChannel(store: LinkStore(backing))
+        self.instructionChannel = instructionChannel
+        keyboardSession?.instruction.field = instructionChannel
         let liveChannel = LiveDictationLink(store: LinkStore(backing))
         dictation?.onLiveChange = { [weak self, weak dictation] snapshot in
             self?.publishLive(snapshot, through: liveChannel, diagnostics: dictation?.diagnostics)
@@ -106,7 +111,10 @@ final class KeyboardLinkHost: TranscriptSink {
                 // Presence drives the keyboard session: appear opens and pre-warms, disappear closes.
                 if let session = self.keyboardSession {
                     let presence = self.link.keyboardPresence()
-                    session.update(visible: presence != nil, surface: presence?.surface == .typing ? .dictation : .agent)
+                    session.update(visible: presence != nil, surface: .dictation)
+                    // A keyboard that went away says nothing about the toggle: closing the session drops the instruction.
+                    if let presence { session.magicReported(presence.magic ?? .off) }
+                    for intent in instructionChannel.drainIntents() { session.handle(intent) }
                 }
                 if let dictation {
                     if let ack = dictationChannel.acknowledged() { dictation.acknowledge(sessionID: ack.sessionID, upTo: ack.upTo) }
@@ -286,8 +294,21 @@ final class KeyboardLinkHost: TranscriptSink {
             DarwinObserver(name: LinkChannel.Note.choice) { [weak self] in
                 Task { @MainActor in self?.drainChoices() }
             },
+            // The magic key and the strip's taps act at once, not at the next pass of the loop.
+            DarwinObserver(name: LinkChannel.Note.presence) { [weak self] in
+                Task { @MainActor in self?.instructionNote() }
+            },
+            DarwinObserver(name: LinkChannel.Note.instructionIntent) { [weak self] in
+                Task { @MainActor in self?.instructionNote() }
+            },
         ]
         drainChoices() // choices made while the app was away
+    }
+
+    private func instructionNote() {
+        guard let session = keyboardSession, session.isOpen else { return }
+        if let presence = link.keyboardPresence() { session.magicReported(presence.magic ?? .off) }
+        for intent in instructionChannel?.drainIntents() ?? [] { session.handle(intent) }
     }
 
     /// Reads the queued choices now (the app came to the foreground; the Darwin note can be missed in the background).

@@ -39,28 +39,35 @@ public struct KeyboardAck: Codable, Sendable, Equatable {
     }
 }
 
-/// The keyboard surface on screen. It decides the mode: typing dictates into the field, the composer
-/// talks to the agent.
-public enum KeyboardSurface: String, Codable, Sendable, Equatable { case typing, composer }
+/// The keyboard surface on screen: typing, which dictates into the field. The one surface there is (the iOS composer
+/// screen is retired); the instruction mode is the magic key, not a surface. Kept as the wire value of `KeyboardPresence`.
+public enum KeyboardSurface: String, Codable, Sendable, Equatable { case typing }
 
 /// keyboard -> app (`link.presence`): the keyboard is on screen, refreshed while it is.
 public struct KeyboardPresence: Codable, Sendable, Equatable {
     public var visible: Bool
     public var at: Date
     public var documentID: String?
-    /// nil decodes presences written before surfaces were reported (the composer).
+    /// nil decodes presences written before surfaces were reported.
     public var surface: KeyboardSurface?
     /// The end of `documentContextBeforeInput` (at most `contextLimit` characters), context for cleaning the
     /// dictated lines. nil for a secure field and before this was reported.
     public var contextBefore: String?
     public static let contextLimit = 400
+    /// The magic key (instruction mode); nil decodes presences written before it existed (off).
+    public var magic: MagicToggle?
+    /// When `magic` last changed (the keyboard's clock).
+    public var magicAt: Date?
 
-    public init(visible: Bool, at: Date, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil) {
+    public init(visible: Bool, at: Date, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil,
+                magic: MagicToggle? = nil, magicAt: Date? = nil) {
         self.visible = visible
         self.at = at
         self.documentID = documentID
         self.surface = surface
         self.contextBefore = contextBefore.map { String($0.suffix(Self.contextLimit)) }
+        self.magic = magic
+        self.magicAt = magicAt
     }
 
     public func isFresh(now: Date) -> Bool {

@@ -39,6 +39,14 @@ final class LinkClient {
         })
     }
 
+    /// Calls `handler` on the main actor for every note of instruction mode the app posts: the strip changed
+    /// (`link.instruction`), a field read is asked for (`link.read`), an edit is to land (`link.instruction.edit`).
+    func observeInstruction(_ handler: @escaping @MainActor () -> Void) {
+        for name in [LinkChannel.Note.instruction, LinkChannel.Note.read, LinkChannel.Note.instructionEdit] {
+            observers.append(DarwinObserver(name: name) { Task { @MainActor in handler() } })
+        }
+    }
+
     /// Stops the `link.host` observation; the handlers never run again.
     func stopObserving() { observers.removeAll() }
 
@@ -59,8 +67,10 @@ final class LinkClient {
     }
 
     /// `notify`: also post the note (on a change of visibility; the 1 s refreshes stay quiet).
-    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil) {
-        store?.write(KeyboardPresence(visible: visible, at: Date(), documentID: documentID, surface: surface, contextBefore: contextBefore), forKey: LinkChannel.Key.presence)
+    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil,
+                       magic: MagicToggle? = nil, magicAt: Date? = nil) {
+        store?.write(KeyboardPresence(visible: visible, at: Date(), documentID: documentID, surface: surface, contextBefore: contextBefore,
+                                      magic: magic, magicAt: magicAt), forKey: LinkChannel.Key.presence)
         if notify { DarwinObserver.post(LinkChannel.Note.presence) }
     }
 
@@ -80,6 +90,29 @@ final class LinkClient {
     func writeLiveDictationAck(_ ack: LiveDictationAck) {
         guard let store else { return }
         LiveDictationLink(store: store).acknowledge(ack)
+    }
+
+    // MARK: Instruction mode
+
+    private var instruction: InstructionLink? { store.map(InstructionLink.init) }
+    /// What the app wants the instruction strip to show; nil when nothing is published.
+    func readInstructionStrip() -> InstructionStrip? { instruction?.strip() }
+    /// A tap on the strip, for the app.
+    func sendInstructionIntent(_ intent: InstructionIntent) {
+        instruction?.send(intent)
+        DarwinObserver.post(LinkChannel.Note.instructionIntent)
+    }
+    /// The app's pending field read, removed as it is taken.
+    func takeReadRequest() -> FieldReadRequest? { instruction?.takeRequest() }
+    func writeReadReply(_ reply: FieldReadReply) {
+        instruction?.reply(reply)
+        DarwinObserver.post(LinkChannel.Note.readAck)
+    }
+    /// The app's pending scoped edit, removed as it is taken.
+    func takeInstructionEdit() -> ScopedEdit? { instruction?.takeEdit() }
+    func writeInstructionEditAck(_ ack: ScopedEditAck) {
+        instruction?.acknowledge(ack)
+        DarwinObserver.post(LinkChannel.Note.instructionEditAck)
     }
 
     func send(_ command: RequestCommand, id: String) {

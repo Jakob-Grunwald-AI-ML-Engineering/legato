@@ -3,12 +3,11 @@ import SwiftUI
 import UIKit
 
 /// The ABC surface, which dictates into the target field: the word row (live words while dictating), the tool row
-/// (undo, redo, the way back to the composer and the dictation mic) and the native key grid, at the pre-offshoot
+/// (undo, redo, the magic key and the dictation mic) and the native key grid, at the pre-offshoot
 /// height (`KeyboardHeights.height`). Reuses the original keyboard's touch surface, repeat-delete, cursor pan,
 /// alternates and field traits. Geometry: `KeyboardMetrics.swift`.
 struct TypingFallbackView: View {
     let controller: KeyboardController
-    let onReturn: () -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -49,19 +48,14 @@ struct TypingFallbackView: View {
         }
     }
 
-    /// Undo, redo and the composer key; the mic is the fourth key of the row.
+    /// Undo, redo and the magic key; the mic is the fourth key of the row.
     private static let toolKeys = 3
 
     private var toolKeys: some View {
         HStack(spacing: 6) {
             key("Undo", symbol: "arrow.uturn.backward", id: "keyboard.hotkey.undo", enabled: controller.canUndo, action: controller.undo)
             key("Redo", symbol: "arrow.uturn.forward", id: "keyboard.hotkey.redo", enabled: controller.canRedo, action: controller.redo)
-            key("Composer", symbol: "waveform", id: "typing.composer", enabled: true) {
-                controller.typing.endDelete()
-                controller.typing.cancelCursorPan()
-                controller.typing.closeEmojiPanel()
-                onReturn()
-            }
+            MagicKey(controller: controller)
         }
     }
 

@@ -48,6 +48,14 @@ import LegatoVocabulary
 
     public var isOpen: Bool { stream != nil }
     public var hasActiveTake: Bool { active != nil }
+    /// A debug replay stands in for the microphone now.
+    var isReplaying: Bool {
+        #if DEBUG || LEGATO_INTERNAL
+        replaying != nil
+        #else
+        false
+        #endif
+    }
     var liveSince: Double? { stream?.liveSince }
     var reconnects: Int { stream?.reconnects ?? 0 }
     var isLive: Bool { stream?.isLive ?? false }
@@ -59,7 +67,7 @@ import LegatoVocabulary
         let room = Room(segmentRouting: .intercepted)
         self.room = room
         events = Task { [weak self] in
-            let events = await room.subscribe(participant: .ui, channels: [.asrSegment, .asrRawTail, .session], buffering: .unbounded)
+            let events = await room.subscribe(participant: .ui, channels: [.asrSegment, .asrRawTail, .asrBoundary, .session], buffering: .unbounded)
             for await event in events {
                 guard !Task.isCancelled, let self else { return }
                 await self.receive(event, room: room)
@@ -115,6 +123,17 @@ import LegatoVocabulary
         finishing = Task { try? await take.finish(micOff: false) }
     }
 
+    /// Cuts the stream now (Soniox `finalize`) without ending the take: every word spoken so far becomes final, and the
+    /// sink gets a `finalize` boundary once they are all through. False when no stream would answer (nothing to cut).
+    public func finalizeChunk() async -> Bool {
+        #if DEBUG || LEGATO_INTERNAL
+        if let replaying { return (try? await replaying.finalizeChunk()) ?? false }
+        #endif
+        guard let take = active else { return false }
+        await flush()
+        return (try? await take.finalizeChunk()) ?? false
+    }
+
     /// Waits for the last finalized take to end (its words are final), at most `timeout`.
     public func waitForFinish(timeout: Duration) async {
         guard let finishing else { return }
@@ -164,6 +183,8 @@ import LegatoVocabulary
             guard let words = try? event.payload["words"]?.decode([Word].self), !words.isEmpty else { return }
             let reason = (try? event.payload["metadata"]?["reason"]?.decode(String.self)) ?? ""
             await deliver(words: words, reason: reason)
+        case .asrBoundary:
+            if case .string(let reason) = event.payload["reason"], reason == "finalize" || reason == "finished" { sink.boundary(reason) }
         case .asrRawTail:
             let text = (try? event.payload["text"]?.decode(String.self)) ?? ""
             tail = text

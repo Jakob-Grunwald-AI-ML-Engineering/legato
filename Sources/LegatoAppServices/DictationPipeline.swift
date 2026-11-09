@@ -122,6 +122,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored private var liveCleanupSequence = 0
     /// When the run's take ended: a segment or cleanup that arrives within `liveStragglerGrace` still belongs to it.
     @ObservationIgnored private var liveFinishedAt: ContinuousClock.Instant?
+    /// A run an instruction ended (`finishLiveRun`): nothing changes it any more (no late segment, unit or whole pass).
+    @ObservationIgnored private var sealedLiveRunID: String?
     private static let liveStragglerGrace = Duration.seconds(3)
     /// The field's text before the cursor when the run began: the context its sentences are cleaned against. The
     /// field now holds the run's own words, which the cleaner must not see as "already typed" (it would drop them).
@@ -340,8 +342,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         let input = await wholeInput(whole.text)
         Task { [weak self] in
             guard let self, let text = await self.cleanWhole(input, late: true) else { return }
-            // A newer straggler runs its own pass; this one is stale then.
-            guard var run = self.liveRun, run.runID == runID, run.wholeRaw.finals == whole.finals else { return }
+            // A newer straggler runs its own pass; this one is stale then. An instruction's run is not edited again.
+            guard var run = self.liveRun, run.runID == runID, run.runID != self.sealedLiveRunID, run.wholeRaw.finals == whole.finals else { return }
             if run.setWhole(SentenceStart.capitalized(text, after: self.liveAnchor), finals: whole.finals) { self.publishLive(run) }
         }
     }
@@ -363,6 +365,17 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: unit, textBefore: before, allowsEmpty: true)
     }
 
+    /// An instruction is about to read the field: a live run's held cleanup lands now, whole-take pass and the wait for
+    /// a final still on its way included (bounded like the stop). The run is then sealed: a late segment starts a new
+    /// run, and a late unit or whole-take result is dropped, so nothing changes the field under the instruction.
+    public func finishLiveRun() async {
+        guard mode == .live else { return }
+        await finishLive()
+        guard let run = liveRun, run.complete else { return }
+        sealedLiveRunID = run.runID
+        liveFinishedAt = nil
+    }
+
     /// The take ended: every sentence has landed or been left raw (waits for cleanup, bounded), and the run is complete
     /// with all cleaned sentences in one snapshot.
     /// A take of at most this many words is cleaned again as a whole when it ends, so a correction in a later sentence
@@ -372,7 +385,18 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// How long the stop waits for the final segment of words still being spoken.
     private static let speakingGrace = Duration.milliseconds(1500)
 
+    /// One end at a time: a stop while an instruction ends the run (or the other way round) waits for that end.
+    @ObservationIgnored private var liveFinishing: Task<Void, Never>?
+
     private func finishLive() async {
+        if let running = liveFinishing { return await running.value }
+        let task = Task { await self.endLive() }
+        liveFinishing = task
+        await task.value
+        liveFinishing = nil
+    }
+
+    private func endLive() async {
         let stoppedAt = ContinuousClock.now
         // Words still in the head: their final segment is on its way. It belongs in the units and the whole pass.
         let speakingDeadline = stoppedAt + Self.speakingGrace
@@ -469,6 +493,10 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
         }
         guard var run = liveRun, let key = liveKeys.removeValue(forKey: line.sequence) else { return }
+        if run.runID == sealedLiveRunID {
+            diagnostics?("live2.cleanup", ["landed": false, "reason": "sealed", "rawChars": line.raw.count, "ms": ms as Any])
+            return
+        }
         if line.status == .cleaned {
             // The model sometimes leaves a sentence start lowercase after a sentence end: that is fixed here.
             let before = [liveAnchor, run.text(before: key)].filter { !$0.isEmpty }.joined(separator: " ")

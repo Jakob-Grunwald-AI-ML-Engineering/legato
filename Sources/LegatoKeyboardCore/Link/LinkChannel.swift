@@ -35,6 +35,18 @@ public enum LinkChannel {
         public static let dictationLive = "link.dictation.live"
         /// keyboard -> app: `LiveDictationAck`.
         public static let dictationLiveAck = "link.dictation.live.ack"
+        /// app -> keyboard: `InstructionStrip` (instruction mode's strip).
+        public static let instruction = "link.instruction"
+        /// keyboard -> app: one `InstructionIntent` per tap, `link.instruction.intent.<uuid>` (the app removes each once read).
+        public static let instructionIntentPrefix = "link.instruction.intent."
+        /// app -> keyboard: `FieldReadRequest` (the keyboard removes it once read).
+        public static let read = "link.read"
+        /// keyboard -> app: `FieldReadReply` (the app removes a finished one once read).
+        public static let readAck = "link.read.ack"
+        /// app -> keyboard: `ScopedEdit` (an instruction's result or its undo; the keyboard removes it once read).
+        public static let instructionEdit = "link.instruction.edit"
+        /// keyboard -> app: `ScopedEditAck`.
+        public static let instructionEditAck = "link.instruction.edit.ack"
     }
 
     /// Darwin notification names, one per key.
@@ -53,6 +65,12 @@ public enum LinkChannel {
         public static let dictationAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.ack"
         public static let dictationLive = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.live"
         public static let dictationLiveAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.live.ack"
+        public static let instruction = "\(RuntimeIdentity.current.notificationNamespace).link.instruction"
+        public static let instructionIntent = "\(RuntimeIdentity.current.notificationNamespace).link.instruction.intent"
+        public static let read = "\(RuntimeIdentity.current.notificationNamespace).link.read"
+        public static let readAck = "\(RuntimeIdentity.current.notificationNamespace).link.read.ack"
+        public static let instructionEdit = "\(RuntimeIdentity.current.notificationNamespace).link.instruction.edit"
+        public static let instructionEditAck = "\(RuntimeIdentity.current.notificationNamespace).link.instruction.edit.ack"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.
@@ -80,4 +98,13 @@ public enum LinkChannel {
     /// How long the keyboard waits for a refined text once the app acked the request (a language model
     /// that loads cold takes a while).
     public static let refineTimeout: TimeInterval = 20
+    /// How long the app waits for the keyboard's first answer to a field read (`reading` or the result).
+    public static let readAckTimeout: TimeInterval = 1.5
+    /// How long a field read that walks may take (a long field costs about 1.5 ms per character).
+    public static let readTimeout: TimeInterval = 15
+    /// How long the app waits for the keyboard to take an instruction's edit.
+    public static let editTimeout: TimeInterval = 4
+    /// How long the app waits for the ack of an edit the keyboard took: its ops land one confirmed op at a time
+    /// (`ScopedEditQueue.limitMs`, after the live run settles).
+    public static let editLandTimeout: TimeInterval = 30
 }

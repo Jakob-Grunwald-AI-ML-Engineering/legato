@@ -59,7 +59,7 @@ struct SettingsView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             } header: { Text("Background voices") }
             Section {
-                Picker("Writing model", selection: $liveModel) {
+                Picker("Instruction model", selection: $liveModel) {
                     ForEach(ModelChoice.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
                 }
                 NavigationLink {
@@ -67,8 +67,8 @@ struct SettingsView: View {
                 } label: {
                     LabeledContent("Personal instructions", value: personalPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Optional" : "Added")
                 }.accessibilityIdentifier("settings.personalInstructionsLink")
-            } header: { Text("Writing") } footer: {
-                Text("One model handles corrections and composes at pauses. Changes apply to your next session.")
+            } header: { Text("Instructions") } footer: {
+                Text("The model that follows your spoken instructions: the magic key on the keyboard and the Compose tab. Dictation cleanup has its own model below. Changes apply to your next session.")
             }
             Section {
                 Picker("Send dictation", selection: $dictationSend) {
@@ -85,7 +85,7 @@ struct SettingsView: View {
                     }.accessibilityIdentifier("settings.dictationPause")
                 }
                 if dictationSend == DictationSendSetting.Mode.live.rawValue || dictationSend == DictationSendSetting.Mode.lineByLine.rawValue {
-                    Picker("Cleanup model", selection: $cleanupModel) {
+                    Picker("Dictation cleanup model", selection: $cleanupModel) {
                         ForEach(ModelChoice.cleanupChoices, id: \.settingValue) { Text($0.label).tag($0.settingValue) }
                     }.accessibilityIdentifier("settings.dictationCleanupModel")
                 }
@@ -104,8 +104,8 @@ struct SettingsView: View {
                         LabeledContent("Pause before sending", value: String(format: "%.1f s", InstructionSendSetting.clampedPause(instructionPause)))
                     }.accessibilityIdentifier("settings.instructionPause")
                 }
-            } header: { Text("Instructions") } footer: {
-                Text("Speech builds one instruction until you tap Send in the strip. Automatic sends it after the pause; speaking again restarts the wait.")
+            } header: { Text("Compose tab") } footer: {
+                Text("In the Compose tab, speech builds one instruction until you tap Send in the strip. Automatic sends it after the pause; speaking again restarts the wait. On the keyboard, the magic key runs its instruction when you tap it off or let go.")
             }
             Section {
                 ProviderKeyRow(name: "Claude", service: "de.gruenwald.legato.claude")

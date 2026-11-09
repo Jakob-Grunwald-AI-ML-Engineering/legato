@@ -57,6 +57,8 @@ public final class HostLink {
         store.remove(forKey: LinkChannel.Key.applied)
         store.remove(forKey: LinkChannel.Key.refine)
         store.remove(forKey: LinkChannel.Key.refined)
+        // An earlier process's instruction (its strip, a read or an edit carrying field text) is stale too.
+        InstructionLink(store: store).clearAll()
         post(LinkChannel.Note.host)
     }
 

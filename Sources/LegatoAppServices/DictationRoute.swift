@@ -26,6 +26,9 @@ public struct DictationRouteLine: Sendable, Equatable {
     func tailChanged(_ text: String)
     /// The take ended (stop): whatever was buffered is cleaned and written now.
     func finishTake() async
+    /// The stream reached a boundary of its own (`finalize`: a requested cut is through; `finished`: the stream ended).
+    /// Every segment spoken before it has been received.
+    func boundary(_ reason: String)
     /// Recent written takes, newest last, sent to Soniox as background text when a take starts.
     var backgroundText: String { get }
 }
@@ -35,6 +38,7 @@ public extension DictationRouteSink {
     func speechActivity() {}
     func tailChanged(_ text: String) {}
     func finishTake() async {}
+    func boundary(_ reason: String) {}
 }
 
 /// Counts finalized lines and does nothing else (the default for sessions without a keyboard link).

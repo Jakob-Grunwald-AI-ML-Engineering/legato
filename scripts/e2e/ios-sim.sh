@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Headless end-to-end check of the iOS app on a simulator: the composer keyboard link and whole-take dictation.
+# Headless end-to-end check of the iOS app on a simulator: the keyboard link and whole-take dictation.
 #
 # Usage: ios-sim.sh [run|release-check|list]
 #   run             (default) build the Debug app, run the scenarios, print a PASS/FAIL table.
@@ -9,15 +9,14 @@
 #
 # The keyboard extension cannot be loaded headless, so the app is launched with -LegatoKeyboardHarness YES: the
 # real KeyboardController and KeyboardRootView over a text view, inside the app (Apps/iOS/App/Debug/KeyboardHarness.swift).
-# They talk to the app's own composer and dictation through the real App Group values and Darwin notes, like the
+# They talk to the app's own dictation through the real App Group values and Darwin notes, like the
 # extension does. Nothing here is faked on the link: the host publishes, the keyboard polls, applies and acknowledges.
-# SpeechTranscriber, Soniox and Haiku are never called: the composer draft is seeded (composer-debug-seed) and the
+# SpeechTranscriber, Soniox and Haiku are never called: the
 # dictation cleanup is a scripted streaming cleaner (dictation-debug-stream) that capitalizes the take in chunks
 # and can fail on cue. The scenarios are driven by `scripts/device/ctl.sh --target sim send <command>` (the bridge
-# in Apps/iOS/App/Debug/DebugBridge.swift) and assert on the bridge's replies (harness-state: the field, the surface,
-# the draft the keyboard shows, the held take) and on the app's `e2e` os_log lines (subsystem de.gruenwald.legato).
+# in Apps/iOS/App/Debug/DebugBridge.swift) and assert on the bridge's replies (harness-state: the field, the held take, the instruction strip) and on the app's `e2e` os_log lines (subsystem de.gruenwald.legato).
 #
-# Scenarios (names for LEGATO_E2E_ONLY): composer, take_stream, take_retry, take_insert_raw, take_fail_hook.
+# Scenarios (names for LEGATO_E2E_ONLY): keyboard_session, take_stream, take_retry, take_insert_raw, take_fail_hook.
 #
 # Environment:
 #   LEGATO_E2E_UDID      use this (already created) simulator; it is shut down afterwards only if the script booted it
@@ -29,7 +28,7 @@
 #   LEGATO_E2E_KEEP=1    keep the work directory (logs) and print its path; kept dirs are swept after
 #                        LEGATO_E2E_KEEP_DAYS (default 7)
 #   LEGATO_CACHE_DIR     root of the shared build caches (default: ~/Library/Caches/legato)
-#   LEGATO_E2E_ONLY      space-separated scenario names to run (for example "composer take_retry"); default: all.
+#   LEGATO_E2E_ONLY      space-separated scenario names to run (for example "keyboard_session take_retry"); default: all.
 #                        An unknown name, or a selection that runs nothing, fails the run.
 # Without LEGATO_E2E_UDID a simulator named "legato-e2e" is created once (iPhone, newest iOS 26+ runtime),
 # reused by later runs, and shut down at the end.
@@ -53,7 +52,7 @@ mode="${1:-run}"
 
 # The scenarios, in run order. Each name has a function scenario_<name> below; scripts/e2e/tests/dispatch-test.sh
 # checks that the list is not empty and matches the functions.
-SCENARIOS=(composer take_stream take_retry take_insert_raw take_fail_hook)
+SCENARIOS=(keyboard_session take_stream take_retry take_insert_raw take_fail_hook)
 case "$mode" in
   run | release-check | list) ;;
   *) echo "usage: ios-sim.sh [run|release-check|list]"; exit 2 ;;
@@ -241,7 +240,7 @@ if [ "$mode" = release-check ]; then
   # Identifiers that exist only in the e2e hooks. Positive control (no Debug build): each must still occur in
   # the iOS sources, or the needle is stale (renamed/removed) and the scan would pass vacuously.
   needles=(KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers
-    harness-state harness-visible harness-hidden harness-surface harness-send harness-retry harness-insert-raw harness-clear
+    harness-state harness-visible harness-hidden harness-retry harness-insert-raw harness-clear
     harness.edit LegatoHarnessAppearance LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape
     LegatoHarnessAutocap LegatoHarnessSuggestions LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
     harness-mic-hop-retry dictation-debug-stream dictation-debug-mode dictation-debug-model dictation-debug-replay dictation-debug-replay-cancel dictation-debug-fail-take composer-debug-seed
@@ -396,39 +395,24 @@ await_host_open() {
   done
 }
 
-scenario_composer() {
-  # The composer surface: the host's draft reaches the keyboard over the link, the keyboard's presence reaches the
-  # host, and Send types the draft into the field exactly once.
-  begin composer || return
-  local draft="Meet at noon and bring the budget"
-  bridge harness-surface composer && bridge harness-visible
-  check_kbd "keyboard is visible on the composer surface" visible true
-  assert_eq "keyboard surface" composer "$(kbd surface)"
+scenario_keyboard_session() {
+  # The keyboard's presence reaches the host: it opens a session when the keyboard appears and closes it when it hides.
+  begin keyboard_session || return
+  bridge harness-visible
+  check_kbd "keyboard is visible" visible true
   if await_host_open true; then record PASS "host sees the keyboard appear"; else record FAIL "host sees the keyboard appear" "keyboardSession.open stayed false"; fi
-  bridge composer-debug-seed "$draft" || { record FAIL "seed a draft" "$REPLY"; return; }
-  check_kbd "keyboard shows the host's draft" composerText "$draft"
   bridge harness-hidden
   check_kbd "keyboard hides" visible false
   if await_host_open false; then record PASS "host sees the keyboard hide"; else record FAIL "host sees the keyboard hide" "keyboardSession.open stayed true"; fi
-  # A new appearance starts a fresh composition on the host, so the draft is seeded again.
   bridge harness-visible
   if await_host_open true; then record PASS "host sees the keyboard reappear"; else record FAIL "host sees the keyboard reappear" "keyboardSession.open stayed false"; fi
-  bridge composer-debug-seed "$draft" || { record FAIL "seed the draft again" "$REPLY"; return; }
-  check_kbd "keyboard shows the draft again" composerText "$draft"
-  assert_eq "nothing typed before Send" "" "$(kbd text)"
-  bridge harness-send
-  check_kbd "Send types the draft into the field" text "$draft"
-  check_kbd "Send is acknowledged by the host" pendingInsert false
-  sleep 2
-  assert_eq "the draft is in the field exactly once" "$draft" "$(kbd text)"
-  assert_log "keyboard logged the typing" "harness.edit"
 }
 
-# Open the dictation surface and wait until the host accepts debug lines (it has noticed the keyboard).
+# Show the keyboard and wait until the host accepts debug lines (it has noticed the keyboard).
 open_dictation() {
   bridge harness-clear
-  bridge harness-surface typing && bridge harness-visible
-  check_kbd "keyboard is visible on the ABC dictation surface" visible true
+  bridge harness-visible
+  check_kbd "keyboard is visible" visible true
   # These legs exercise the take path; the default mode types as you speak (`live`).
   bridge dictation-debug-mode onStop || record FAIL "set the send mode" "$REPLY"
   bridge dictation-debug-stream "$@" || record FAIL "scripted streaming cleaner" "$REPLY"

@@ -58,15 +58,28 @@ final class HarnessDocument: TextDocument {
 
     var text: String { textView.text ?? "" }
 
+    /// `-LegatoHarnessWindow <n>`: the windows around the cursor hold at most n UTF-16 units, as a host's do (Notes
+    /// gives about 70 to 120), so reads have to walk. Unset: the whole text.
+    private static let window = argument("LegatoHarnessWindow").flatMap(Int.init)
+
     var contextBefore: String {
         let ns = text as NSString
-        return ns.substring(to: min(textView.selectedRange.location, ns.length))
+        let end = min(textView.selectedRange.location, ns.length)
+        let start = Self.window.map { max(0, end - $0) } ?? 0
+        return Self.substring(ns, start, end)
     }
 
     var contextAfter: String {
         let ns = text as NSString
-        let end = min(textView.selectedRange.location + textView.selectedRange.length, ns.length)
-        return ns.substring(from: end)
+        let start = min(textView.selectedRange.location + textView.selectedRange.length, ns.length)
+        let end = Self.window.map { min(ns.length, start + $0) } ?? ns.length
+        return Self.substring(ns, start, end)
+    }
+
+    /// `start..<end`, widened to whole characters when a window cuts one (an empty range stays empty).
+    private static func substring(_ ns: NSString, _ start: Int, _ end: Int) -> String {
+        guard end > start else { return "" }
+        return ns.substring(with: ns.rangeOfComposedCharacterSequences(for: NSRange(location: start, length: end - start)))
     }
 
     var selectedText: String? {
@@ -215,24 +228,17 @@ final class KeyboardHarnessModel {
 
     // MARK: Bridge drive (scripts/e2e/ios-sim.sh)
 
-    /// What the scenarios read: the field, the surface, the composer the keyboard shows and the held take.
+    /// What the scenarios read: the field, the held take and the instruction strip's phase.
     var state: [String: Any] {
         let published = controller.composer
-        return ["text": document.text, "visible": controller.isVisible, "surface": controller.surface.rawValue,
-                "composerText": published.snapshot.lines.map(\.text).joined(separator: "\n"),
-                "composerLines": published.snapshot.lines.count, "composerSession": published.sessionID ?? "",
-                "pendingInsert": controller.pendingComposerInsert != nil,
+        return ["text": document.text, "visible": controller.isVisible,
+                "magic": controller.magic.rawValue, "instruction": controller.instructionStrip?.phase.rawValue ?? "idle",
                 "takePhase": published.dictationTakePhase ?? "", "takeText": published.dictationTake ?? "",
                 "takeFailed": controller.takeFailed, "status": controller.statusText ?? ""]
     }
 
     func setVisible(_ visible: Bool) -> [String: Any] {
         if visible { appeared() } else { controller.disappeared() }
-        return state
-    }
-
-    func show(_ surface: KeyboardSurface) -> [String: Any] {
-        controller.show(surface)
         return state
     }
 
@@ -243,6 +249,14 @@ final class KeyboardHarnessModel {
 
     func moveCursor(to offset: Int) -> [String: Any] {
         document.textView.selectedRange = NSRange(location: min(offset, (document.text as NSString).length), length: 0)
+        controller.documentDidChange()
+        return state
+    }
+
+    /// Debug bridge: the field holds `text` (`\\n` in it is a line break), the cursor at its end.
+    func setDocument(_ text: String) -> [String: Any] {
+        document.textView.text = text.replacingOccurrences(of: "\\n", with: "\n")
+        document.textView.selectedRange = NSRange(location: (document.text as NSString).length, length: 0)
         controller.documentDidChange()
         return state
     }
@@ -305,7 +319,7 @@ struct KeyboardHarness: View {
                     let length = geometry.size.height
                     VStack(spacing: 0) {
                         HarnessTextView(textView: model.document.textView).padding(8)
-                        keyboard.frame(height: ComposerKeyboardLayout.typingHeight(landscape: true) + ComposerKeyboardLayout.additionalComposerHeight).background(Self.backdrop)
+                        keyboard.frame(height: KeyboardHeights.height(landscape: true)).background(Self.backdrop)
                     }
                     .frame(width: length, height: geometry.size.width)
                     .background(.background)
@@ -327,16 +341,13 @@ struct KeyboardHarness: View {
         }
         .preferredColorScheme(scheme)
         // In system-field mode the real extension is the keyboard; a second in-process controller would write
-        // its own (composer) presence over the extension's and flip the host's surface.
+        // its own presence over the extension's.
         .onAppear { if !Self.flag("LegatoHarnessSystemField") { model.appeared() } }
         .onDisappear { if !Self.flag("LegatoHarnessSystemField") { model.controller.disappeared() } }
     }
 
-    /// The harness uses the extension's portrait heights: ABC's, or the composer's share of the screen.
-    private var portraitHeight: CGFloat {
-        if model.controller.surface == .typing { return CGFloat(KeyboardHeights.height(landscape: false)) }
-        return CGFloat(ComposerKeyboardLayout.height(screenHeight: Double(UIScreen.main.bounds.height), systemOverhead: 92))
-    }
+    /// The harness uses the extension's portrait height.
+    private var portraitHeight: CGFloat { CGFloat(KeyboardHeights.height(landscape: false)) }
 
     private var keyboard: some View {
         KeyboardRootView(controller: model.controller)
