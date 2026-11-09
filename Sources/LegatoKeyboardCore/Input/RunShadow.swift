@@ -13,16 +13,16 @@ import Foundation
 ///   the text before the cursor wherever it was on its way). A snapshot that arrives while the queue is busy is not
 ///   diffed: the newest one is diffed against the shadow once the queue is empty (older ones are dropped, never replayed).
 /// - Appends (the target only grows the region) go out a slice at a time through `TypewriterDrain`, a slice per
-///   confirmed op. A flip while the take runs (Soniox revising a word, a changed head) is a character-level diff
-///   (`ShadowEditPlanner`, `characters`): the cursor moves to the first character that differs, only the differing
-///   characters are deleted, the new ones go in one per op at least `flipCharMs` apart, and the cursor returns to the
-///   end of the region. The cleaned take at the end (a complete snapshot) is retyped from its first change when that
-///   is near the end or the take is short (`retypeTailChars`, `shortTakeChars`: no cursor moves at all), else a
-///   word-level diff, back to front.
+///   confirmed op. A flip while the take runs (Soniox revising a word, a changed head) never moves the cursor: a change
+///   that starts within the last `flipRetypeChars` characters is erased back to its first character and typed again,
+///   one character per op at least `flipCharMs` apart; a change further back is left for the cleaned take.
+/// - The cleaned take at the end (a complete snapshot) is retyped from its first change when that is near the end or
+///   the take is short (`retypeTailChars`, `shortTakeChars`), else a word-level diff with cursor moves, back to front.
 /// - Confirmation pins the cursor: the report must fit the shadow at the expected position and nowhere else (a web
-///   view's few words before the cursor may fit where the cursor was before a move too). A move the report shows was
-///   not made (the cursor pinned where it was) goes out once more; anything else that does not confirm freezes at
-///   `confirmLimitMs`.
+///   view's few words before the cursor may fit where the cursor was before a move too). A move the report never
+///   showed (the cursor pinned where it was) goes out once more; a move it showed must still show a tick later. A
+///   report that then pins the old place means the page put its caret back: the run freezes at once and moves are
+///   off for good (`avoidsMoves`: retype or leave). Anything else that does not confirm freezes at `confirmLimitMs`.
 /// - Drift: a report that does not confirm within `confirmLimitMs`, or a selection, means the user moved on (or the
 ///   host lost an op): everything typed so far is frozen, the rest of the queue is dropped, and the run goes on
 ///   appending at the cursor once the field's report has stopped changing, so the separator and capital are judged
@@ -30,7 +30,7 @@ import Foundation
 /// - Frozen text is never edited again. Changes the target makes to a frozen sentence are dropped, except growth
 ///   of a sentence that was still being spoken: what follows the frozen part is appended at the cursor.
 public struct RunShadow: Sendable, Equatable {
-    public enum FreezeCause: String, Sendable { case keystroke, cursor, selection, drift, field }
+    public enum FreezeCause: String, Sendable { case keystroke, cursor, selection, drift, field, caretReset }
 
     public struct Step: Sendable, Equatable {
         public var ops: [ShadowOp] = []
@@ -52,6 +52,8 @@ public struct RunShadow: Sendable, Equatable {
         public var confirmTimedOut = false
         /// The field did not show the last move (the cursor stayed where it was): `ops` sends it once more.
         public var moveResent = false
+        /// The field showed the last move, then the cursor back where it was: the page resets its caret (the step froze).
+        public var caretReset = false
         /// Snapshots dropped undiffed because a newer one arrived while the queue was busy.
         public var coalesced = 0
         /// The field shows the whole target of `version` (and nothing was left to type).
@@ -81,6 +83,10 @@ public struct RunShadow: Sendable, Equatable {
     private var lastMove: ShadowOp?
     private var movedFrom = 0
     private var moveResent = false
+    /// How long the field has shown the last move (nil: not yet).
+    private var moveShownMs: Double?
+    /// No cursor moves at all: the field puts its caret back after the keyboard moved it.
+    public private(set) var avoidsMoves: Bool
     /// The region's part of the field as the shadow expects it after the last op sent (it may end in a space Legato
     /// put after the region), and the cursor in it (UTF-16).
     private var work = ""
@@ -105,7 +111,10 @@ public struct RunShadow: Sendable, Equatable {
     /// `settlesFirst`: the run starts typing only once the field's report has held still for `stableMs`. Right after a
     /// tap or a focus the host can still report the text before the cursor as it was a moment ago (a missing trailing
     /// space would then be added again).
-    public init(runID: String, settlesFirst: Bool = false) { self.runID = runID; settling = settlesFirst }
+    /// `avoidsMoves`: the field is known to reset its caret (this keyboard session saw it): edits only retype at the end.
+    public init(runID: String, settlesFirst: Bool = false, avoidsMoves: Bool = false) {
+        self.runID = runID; settling = settlesFirst; self.avoidsMoves = avoidsMoves
+    }
 
     /// What a sentence (by segment id) already has in the field and may not be edited any more.
     struct Frozen: Equatable, Sendable {
@@ -144,9 +153,15 @@ public struct RunShadow: Sendable, Equatable {
     /// is this short, or the whole region is (a short take).
     public static let retypeTailChars = 160
     public static let shortTakeChars = 480
+    /// A flip while the take runs is retyped when it starts within this many characters of the end, else left.
+    public static let flipRetypeChars = 40
+    /// With moves off, the cleaned take is retyped from its first change up to this many characters, else left.
+    public static let noMoveRetypeChars = 2000
+    /// A move the field showed must still show this much later before the next op goes.
+    public static let moveVerifyMs = 30.0
 
-    /// Ops are queued: a new snapshot waits until they went out.
-    public var isBusy: Bool { !queue.isEmpty }
+    /// Ops are queued, or the last move is not verified yet: a new snapshot waits until they went out.
+    public var isBusy: Bool { !queue.isEmpty || lastMove != nil }
     /// What the field should report before and after the cursor once it shows the last op sent (after: only the
     /// region's own text there).
     public var expectedBefore: String { anchor + String(decoding: Array(work.utf16.prefix(workCursor)), as: UTF16.self) }
@@ -223,11 +238,22 @@ public struct RunShadow: Sendable, Equatable {
             if flush { step.waiting = true; return step }
             if !confirming { confirming = true; step.waitStarted = true }
             waitedMs += elapsedMs
-            if let move = lastMove, !moveResent, waitedMs >= Self.moveResendMs,
-               Self.pins(text: Array(anchor) + Array(work), cursor: anchor.count + Self.characters(ofUTF16: movedFrom, in: work),
-                         reportedBefore: reportedBefore, reportedAfter: reportedAfter) {
-                // The field shows the cursor where it was before the move, and nowhere else: the move was lost
-                // (or taken back by the page). It goes out once more; the field has to show it like the first time.
+            let pinsOldPlace = lastMove != nil && Self.pins(
+                text: Array(anchor) + Array(work), cursor: anchor.count + Self.characters(ofUTF16: movedFrom, in: work),
+                reportedBefore: reportedBefore, reportedAfter: reportedAfter)
+            if pinsOldPlace, moveShownMs != nil {
+                // The field showed the move, and now the cursor where it was before it: the page put its caret back.
+                // Nothing more goes out at a place that is not where the shadow thinks; no moves from now on.
+                avoidsMoves = true
+                step.driftDetail = Self.describeMismatch(expected: expectedBefore, reported: reportedBefore)
+                _ = freeze(.caretReset)
+                step.froze = .caretReset; step.caretReset = true
+                step.waiting = true; step.needsTicks = true
+                return step
+            }
+            if let move = lastMove, pinsOldPlace, !moveResent, waitedMs >= Self.moveResendMs {
+                // The field never showed the move and pins the cursor where it was: the move was lost. It goes out
+                // once more; the field has to show it like the first time.
                 moveResent = true; waitedMs = 0
                 step.ops = [move]; step.moveResent = true
                 step.waiting = true; step.needsTicks = true
@@ -246,23 +272,41 @@ public struct RunShadow: Sendable, Equatable {
             waitedMs = 0; confirming = false
         }
         sinceSendMs += elapsedMs
+        // A move the field shows must still show a tick later (a page may put its caret back after its input event).
+        var verifying = false
+        if lastMove != nil {
+            moveShownMs = moveShownMs.map { $0 + elapsedMs } ?? 0
+            if !flush, (moveShownMs ?? 0) < Self.moveVerifyMs { verifying = true } else { lastMove = nil; moveShownMs = nil }
+        }
 
-        if !queue.isEmpty {
+        if !queue.isEmpty || verifying {
             // Busy: a newer snapshot is only noted; the newest is diffed once the queue is empty.
             if snapshot.version != inFlightVersion, snapshot.version != heldVersion {
                 if heldVersion != nil { step.coalesced += 1 }
                 heldVersion = snapshot.version
             }
+            if verifying { step.needsTicks = true; return step }
             send(&step, flush: flush)
             guard flush else { return step }
             while !queue.isEmpty { send(&step, flush: true) }
         }
         heldVersion = nil
 
-        let target = prepared(snapshot, capitalization: capitalization)
+        let full = prepared(snapshot, capitalization: capitalization)
         // A target without any words never erases what is typed, unless the cleaned take dropped every word (all filler).
         let dropsAll = snapshot.complete && !snapshot.segments.isEmpty && snapshot.segments.allSatisfy { $0.final && $0.cleaned }
-        if target == region || (target.isEmpty && !dropsAll) {
+        if full.isEmpty && !dropsAll { step.applied = true; step.version = snapshot.version; return step }
+        // What the region is brought to: while the take runs, changes that start further back than `flipRetypeChars`
+        // are left as typed (the cleaned take fixes them); with moves off, so is a cleaned take too long to retype.
+        let target: String
+        if !snapshot.complete {
+            target = ShadowEditPlanner.endGoal(shadow: region, target: full, window: Self.flipRetypeChars)
+        } else if avoidsMoves, ShadowEditPlanner.retypeTail(shadow: region, target: full, limit: Self.noMoveRetypeChars) == nil {
+            target = region
+        } else {
+            target = full
+        }
+        if target == region {
             step.applied = true; step.version = snapshot.version
             return step
         }
@@ -274,7 +318,7 @@ public struct RunShadow: Sendable, Equatable {
             if region.isEmpty {
                 step.startDetail = "anchor=\(anchor.count) endsSpace=\(anchor.last?.isWhitespace == true ? 1 : 0) reported=\(reportedBefore.count) reportedEndsSpace=\(reportedBefore.last?.isWhitespace == true ? 1 : 0) following=\(following.map { $0.isWhitespace ? "space" : "char" } ?? "none") first=\(slice.first?.isWhitespace == true ? "space" : "char")"
             }
-            if region.isEmpty, let next = following, !next.isWhitespace, !Self.closingMarks.contains(next) {
+            if region.isEmpty, !avoidsMoves, let next = following, !next.isWhitespace, !Self.closingMarks.contains(next) {
                 // The run starts in front of text that follows without a space: one goes in behind it, once, and the
                 // cursor stays in front of that space, so the run keeps typing where it is.
                 queue = [.insert(slice + " "), .move(-1)]
@@ -285,12 +329,13 @@ public struct RunShadow: Sendable, Equatable {
             region += slice
             inFlightWhole = region == target; self.target = target
         } else {
-            // A flip while the take runs is typed character by character; the cleaned take at the end goes in by words,
-            // and when its changes start near the end (or the take is short) without any cursor move: everything from
-            // the first change is deleted back from the end and typed again, each op checkable at the end of the field.
+            // No cursor move where it can be helped: everything from the first change is deleted back from the end and
+            // typed again, each op checkable at the end of the field. A flip while the take runs types it one character
+            // per op; the cleaned take inserts it whole, and only a long one far from the end goes by words with moves.
             paced = !snapshot.complete; lastSentInsert = false
-            if snapshot.complete, let retype = ShadowEditPlanner.retypeTail(
-                shadow: region, target: target, limit: region.count <= Self.shortTakeChars ? region.count : Self.retypeTailChars) {
+            let limit = !snapshot.complete ? Int.max : avoidsMoves ? Self.noMoveRetypeChars
+                : region.count <= Self.shortTakeChars ? region.count : Self.retypeTailChars
+            if let retype = ShadowEditPlanner.retypeTail(shadow: region, target: target, limit: limit, characters: paced) {
                 queue = retype
             } else {
                 queue = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count, target: target, characters: paced).ops
@@ -323,7 +368,7 @@ public struct RunShadow: Sendable, Equatable {
     /// Takes a new anchor at the cursor; the region starts empty there.
     private mutating func seed(_ before: String, following next: Character?) {
         anchor = before; reseed = false; waitedMs = 0; confirming = false; following = next
-        work = ""; workCursor = 0; lastMove = nil
+        work = ""; workCursor = 0; lastMove = nil; moveShownMs = nil
     }
 
     /// Sends the next queued op: the shadow's model of the field moves on, and the field has to confirm it. A flip's
@@ -338,6 +383,7 @@ public struct RunShadow: Sendable, Equatable {
         sinceSendMs = 0
         if case .insert = op { lastSentInsert = true } else { lastSentInsert = false }
         if case .move = op { lastMove = op; movedFrom = workCursor; moveResent = false } else { lastMove = nil }
+        moveShownMs = nil
         (work, workCursor) = ShadowEditPlanner.simulate(ops: [op], shadow: work, cursor: workCursor)
         switch op {
         case .deleteBackward(let count): step.deletedChars += count
@@ -356,7 +402,7 @@ public struct RunShadow: Sendable, Equatable {
         defer {
             reseed = true; region = ""; waitedMs = 0; confirming = false; built = Built(); settling = true; lastReport = nil; stableForMs = 0
             queue = []; work = ""; workCursor = 0; inFlightVersion = nil; heldVersion = nil; paced = false; lastSentInsert = false
-            lastMove = nil
+            lastMove = nil; moveShownMs = nil
         }
         guard !region.isEmpty else { return false }
         let typed = max(0, region.count - built.prefix)
