@@ -182,8 +182,8 @@ import LegatoSoniox
         #expect(composer.holdsWarmInput)
         #expect(await keyboard.openGate())
         let socket = try #require(sockets.at(1))
-        await mic.emit()
-        try await until { await socket.audioFrames > 0 }
+        // The gate's audio route attaches asynchronously: a single frame can arrive before it and be dropped.
+        try await until { await mic.emit(); return await socket.audioFrames > 0 }
         keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
         await composer.releaseMicrophone()
     }
@@ -225,7 +225,9 @@ import LegatoSoniox
 }
 
 @MainActor private func until(_ condition: @MainActor () async -> Bool) async throws {
-    for _ in 0..<5000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) } // ~1 s timed out on loaded CI runners
+    // Bounded by real time (10 s), not iterations: on loaded CI runners each sleep can take far longer than asked.
+    let deadline = ContinuousClock.now + .seconds(10)
+    while ContinuousClock.now < deadline { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
     Issue.record("Timed out waiting for condition")
     throw CancellationError()
 }
