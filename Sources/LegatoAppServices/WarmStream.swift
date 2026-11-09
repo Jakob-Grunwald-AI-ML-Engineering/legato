@@ -33,10 +33,12 @@ import LegatoSoniox
             guard let self else { return }
             do {
                 let created = try await connect({ [weak self] in await self?.dropped(id) })
+                // Stay pending until the slot is filled: a take in between must wait for it, not find nothing.
+                let open = await created.isOpen
                 pending = nil
                 guard !closed else { await created.close(); return }
                 // A drop during the connect reached no slot yet: reconnect now.
-                guard await created.isOpen else { reconnects += 1; warm(); return }
+                guard open else { reconnects += 1; warm(); return }
                 client = created; clientID = id; liveSince = now(); failures = 0
             } catch {
                 pending = nil

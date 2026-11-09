@@ -784,6 +784,9 @@ final class KeyboardController {
     @ObservationIgnored private var liveStats = LiveDictationStats()
     @ObservationIgnored private var liveAckedVersion: Int?
     @ObservationIgnored private var liveTicker: Task<Void, Never>?
+    /// A field in this keyboard session put its caret back after a live move (a page that re-renders its textarea):
+    /// later runs edit only by retyping at the end, never by moving the cursor.
+    @ObservationIgnored private var liveFieldResetsCaret = false
     /// A live run is being typed (the word row says "Listening…" instead of the words).
     private(set) var liveRunning = false
 
@@ -797,7 +800,7 @@ final class KeyboardController {
         guard snapshot != liveSeen, snapshot.runID != ignoredLiveRunID else { return }
         liveSeen = snapshot
         if snapshot.runID != liveShadow?.runID {
-            liveShadow = RunShadow(runID: snapshot.runID, settlesFirst: true)
+            liveShadow = RunShadow(runID: snapshot.runID, settlesFirst: true, avoidsMoves: liveFieldResetsCaret)
             liveStats = LiveDictationStats(); liveAckedVersion = nil
             liveDocumentID = document.documentID
             trace?("live run start")
@@ -894,6 +897,8 @@ final class KeyboardController {
         liveShadow = shadow
         if step.waitStarted { liveStats.waits += 1 }
         if step.confirmTimedOut { liveStats.confirmTimeouts += 1 }
+        if step.moveResent { trace?("live move resent") }
+        if step.caretReset { liveFieldResetsCaret = true; trace?("live caret reset: moves off") }
         liveStats.coalesced += step.coalesced
         if let start = step.startDetail { liveStats.lastStart = start; writeLiveAck(version: nil, complete: false) }
         if let cause = step.froze {

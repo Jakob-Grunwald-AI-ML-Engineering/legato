@@ -46,6 +46,8 @@ import LegatoSoniox
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
         try await until { await sockets.last?.held == true }
+        // The keepalive goes out while connecting; the route is warm once the held connection fills its slot.
+        try await until { keyboard.diagnostics["dictationStreamLive"] as? Bool == true }
         return (composer, keyboard)
     }
 
@@ -180,8 +182,11 @@ import LegatoSoniox
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
         #expect(composer.holdsWarmInput)
+        // Tapped while the reopened keyboard's connection is still being held: the take waits for it.
         #expect(await keyboard.openGate())
+        #expect(keyboard.dictationNotice == nil)
         let socket = try #require(sockets.at(1))
+        #expect(await socket.configured, "The take starts on the reopened keyboard's held connection")
         await mic.emit()
         try await until { await socket.audioFrames > 0 }
         keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
@@ -225,7 +230,9 @@ import LegatoSoniox
 }
 
 @MainActor private func until(_ condition: @MainActor () async -> Bool) async throws {
-    for _ in 0..<5000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) } // ~1 s timed out on loaded CI runners
+    // Bounded by real time (10 s), not iterations: on loaded CI runners each sleep can take far longer than asked.
+    let deadline = ContinuousClock.now + .seconds(10)
+    while ContinuousClock.now < deadline { if await condition() { return }; try await Task.sleep(for: .milliseconds(2)) }
     Issue.record("Timed out waiting for condition")
     throw CancellationError()
 }
