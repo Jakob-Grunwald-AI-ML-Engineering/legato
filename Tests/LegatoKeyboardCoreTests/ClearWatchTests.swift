@@ -112,7 +112,8 @@ private func sentBase(_ outcome: ClearWatch.Outcome) -> Int? {
 private struct TickRig {
     var reveal = TypewriterReveal()
     var watch = ClearWatch()
-    var field = ""
+    var caret = 0
+    var field = "" { didSet { caret = field.utf16.count } }
     var cursor: AppliedCursor?
     var ms = 0.0
     var recheckAt: Date?
@@ -123,13 +124,10 @@ private struct TickRig {
         if let due = recheckAt, at(ms) >= due { recheckAt = nil }
         guard look(state) else { return }
         let plan = reveal.plan(
-            state: state, cursor: cursor, contextBefore: field, documentID: "doc-A", animated: true, elapsedMs: elapsedMs)
-        for op in plan.ops {
-            switch op {
-            case .deleteBackward(let count): field.removeLast(min(count, field.count))
-            case .insert(let text): field += text
-            }
-        }
+            state: state, cursor: cursor, contextBefore: String(decoding: field.utf16.prefix(caret), as: UTF16.self), documentID: "doc-A", animated: true, elapsedMs: elapsedMs, contextAfter: String(decoding: field.utf16.dropFirst(caret), as: UTF16.self))
+        let applied = applyProxyOps(plan.ops, to: field, cursor: caret)
+        field = applied.text
+        caret = applied.cursor
         if !plan.ops.isEmpty { watch.ownEdit(at: at(ms)) }
         cursor = plan.cursor
     }

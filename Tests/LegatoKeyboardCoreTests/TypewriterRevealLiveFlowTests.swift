@@ -5,30 +5,31 @@ import Testing
 /// of the whole text so far arriving while the next phrase is being spoken (and revealed).
 private struct FlowRig {
     var reveal = TypewriterReveal()
-    var field: String
+    var caret = 0
+    var field: String { didSet { caret = field.utf16.count } }
     var cursor: AppliedCursor?
     /// The field as the proxy reports it lags one apply behind (`documentContextBeforeInput` after an insert).
     var lagging: Bool
+    private var reportedAfter = ""
     private var reported: String
 
     init(field: String = "", lagging: Bool) {
         self.field = field
+        self.caret = field.utf16.count
         self.lagging = lagging
         self.reported = field
     }
 
     mutating func feed(_ state: HostState, elapsedMs: Double = 0) {
-        let context = lagging ? reported : field
+        let context = lagging ? reported : String(decoding: field.utf16.prefix(caret), as: UTF16.self)
         let plan = reveal.plan(
             state: state, cursor: cursor, contextBefore: context, documentID: "doc-A", animated: true,
-            elapsedMs: elapsedMs)
-        reported = field
-        for op in plan.ops {
-            switch op {
-            case .deleteBackward(let count): field.removeLast(min(count, field.count))
-            case .insert(let text): field += text
-            }
-        }
+            elapsedMs: elapsedMs, contextAfter: lagging ? reportedAfter : String(decoding: field.utf16.dropFirst(caret), as: UTF16.self))
+        reported = String(decoding: field.utf16.prefix(caret), as: UTF16.self)
+        reportedAfter = String(decoding: field.utf16.dropFirst(caret), as: UTF16.self)
+        let applied = applyProxyOps(plan.ops, to: field, cursor: caret)
+        field = applied.text
+        caret = applied.cursor
         cursor = plan.cursor
     }
 
@@ -82,6 +83,7 @@ private func live(
         rig.ticks(live(s1, " ich wollte", revision: r1), 3)
         rig.feed(live(s1, " ich wollte fragen ob", revision: r1))
         rig.ticks(live(s1, " ich wollte fragen ob", revision: r1), 3)
+        rig.drain(live(s1, " ich wollte fragen ob", revision: r1))
         let midRun = rig.field
         rig.feed(live(s1 + s2, revision: r1))
         rig.ticks(live(s1 + s2, revision: r1), 4)

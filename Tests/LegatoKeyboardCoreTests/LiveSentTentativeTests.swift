@@ -38,7 +38,7 @@ private func plan(_ state: HostState, _ cursor: AppliedCursor, context: String =
 
     @Test func theCommitThatFinalizesItTypesOnlyWhatFollowsIt() throws {
         let p = plan(live("hello world how are you "), try sentWithTentative())
-        #expect(p.ops == [.insert("you ")])
+        #expect(characterProxyOps(p.ops) == characterProxyOps([.insert("you ")]))
         #expect(p.cursor?.sentBase == 20, "the boundary moved past the sent phrase")
         #expect(p.cursor?.sentTentative == "")
     }
@@ -52,7 +52,7 @@ private func plan(_ state: HostState, _ cursor: AppliedCursor, context: String =
     ])
     func aRevisedPhraseTypesOnlyThePartAfterWhatWasSent(tentative: String, commit: String, typed: String) throws {
         let p = plan(live("hello world " + commit), try sentWithTentative(tentative))
-        #expect(p.ops == (typed.isEmpty ? [] : [.insert(typed)]))
+        #expect(characterProxyOps(p.ops) == characterProxyOps(typed.isEmpty ? [] : [.insert(typed)]))
     }
 
     @Test func itWaitsWhileTheCommittedTextCannotTellWhereTheSentPhraseEnds() throws {
@@ -65,7 +65,7 @@ private func plan(_ state: HostState, _ cursor: AppliedCursor, context: String =
     @Test func aRevisionAfterTheSentPhraseReplacesOnlyTheTextAfterIt() throws {
         let after = HostRevision(n: 1, start: 20, raw: "you ", text: "You? ")
         let p = plan(live("hello world how are you ", revision: after), try sentWithTentative())
-        #expect(p.ops == [.insert("You? ")])
+        #expect(characterProxyOps(p.ops) == characterProxyOps([.insert("You? ")]))
         #expect(p.cursor?.shownRevision == 1)
     }
 
@@ -79,24 +79,24 @@ private func plan(_ state: HostState, _ cursor: AppliedCursor, context: String =
 /// The keyboard's field through the typewriter reveal, with the host clearing it mid-run.
 private struct SendRig {
     var reveal = TypewriterReveal()
-    var field = ""
+    var caret = 0
+    var field = "" { didSet { caret = field.utf16.count } }
     var cursor: AppliedCursor?
     var lagging: Bool
+    private var reportedAfter = ""
     private var reported = ""
 
     init(lagging: Bool) { self.lagging = lagging }
 
     mutating func feed(_ state: HostState, elapsedMs: Double = 0) {
         let plan = reveal.plan(
-            state: state, cursor: cursor, contextBefore: lagging ? reported : field, documentID: "doc-A",
-            animated: true, elapsedMs: elapsedMs)
-        reported = field
-        for op in plan.ops {
-            switch op {
-            case .deleteBackward(let count): field.removeLast(min(count, field.count))
-            case .insert(let text): field += text
-            }
-        }
+            state: state, cursor: cursor, contextBefore: lagging ? reported : String(decoding: field.utf16.prefix(caret), as: UTF16.self), documentID: "doc-A",
+            animated: true, elapsedMs: elapsedMs, contextAfter: lagging ? reportedAfter : String(decoding: field.utf16.dropFirst(caret), as: UTF16.self))
+        reported = String(decoding: field.utf16.prefix(caret), as: UTF16.self)
+        reportedAfter = String(decoding: field.utf16.dropFirst(caret), as: UTF16.self)
+        let applied = applyProxyOps(plan.ops, to: field, cursor: caret)
+        field = applied.text
+        caret = applied.cursor
         cursor = plan.cursor
     }
 
@@ -113,6 +113,7 @@ private struct SendRig {
     mutating func send(_ state: HostState) throws {
         field = ""
         reported = ""
+        reportedAfter = ""
         cursor = try #require(ProxyEditPlanner.fieldCleared(
             state: state, cursor: cursor, documentID: "doc-A", contextBefore: "", hasText: false))
     }

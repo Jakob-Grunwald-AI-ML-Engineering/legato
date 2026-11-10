@@ -37,7 +37,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
             state: liveState(committed: "hello world how are you ", revision: hello),
             cursor: liveCursor(committedCount: 24), contextBefore: "Note: hello world how are you ", documentID: "doc-A")
         // The proxy only deletes backwards: the text after the first change goes out and back in.
-        #expect(plan.ops == [.deleteBackward(24), .insert("Hello world. how are you ")])
+        #expect(applyProxyOps(plan.ops, to: "Note: hello world how are you ").text == "Note: Hello world. how are you ")
         #expect(plan.cursor?.revisionHandled == 1)
         #expect(plan.cursor?.shownRevision == 1)
         #expect(plan.cursor?.revisionSkipped != true)
@@ -49,7 +49,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
             state: liveState(committed: "hello world how are you ", revision: whole),
             cursor: liveCursor(committedCount: 24, shows: hello), contextBefore: "Note: Hello world. how are you ",
             documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(12), .insert("How are you? ")])
+        #expect(applyProxyOps(plan.ops, to: "Hello world. how are you ").text == "Hello world. How are you? ")
         #expect(plan.cursor?.revisionHandled == 2)
         #expect(plan.cursor?.revisedText == "Hello world. How are you? ")
         #expect(plan.cursor?.revisedEnd == 24)
@@ -62,7 +62,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
             state: liveState(committed: "meet on friday no wait thursday ", revision: fixed),
             cursor: liveCursor(committedCount: 32, shows: first), contextBefore: "Meet on Friday. no wait thursday ",
             documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(25), .insert("Thursday. ")])
+        #expect(applyProxyOps(plan.ops, to: "Meet on Friday. no wait thursday ").text == "Meet on Thursday. ")
     }
 
     @Test func theTentativeTextStaysAfterTheRevisedText() {
@@ -70,7 +70,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
             state: liveState(committed: "hello world ", volatile: "and so", revision: hello),
             cursor: liveCursor(committedCount: 12, volatile: "and so"), contextBefore: "hello world and so",
             documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(18), .insert("Hello world. and so")])
+        #expect(applyProxyOps(plan.ops, to: "hello world and so").text == "Hello world. and so")
         #expect(plan.cursor?.volatile == "and so")
     }
 
@@ -78,7 +78,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
         let plan = ProxyEditPlanner.plan(
             state: liveState(committed: "hello world ", revision: hello),
             cursor: nil, contextBefore: "Hi", documentID: "doc-A")
-        #expect(plan.ops == [.insert(" Hello world. ")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert(" Hello world. ")]))
         #expect(plan.cursor?.committedCount == 12)
         #expect(plan.cursor?.revisionHandled == 1)
     }
@@ -89,7 +89,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
             cursor: liveCursor(committedCount: 12, shows: hello), contextBefore: "Hello world. ", documentID: "doc-A")
         // The plan types the rest first; then the revision covers typed text and applies.
         #expect(plan.cursor?.revisionHandled == 2)
-        #expect(plan.ops == [.insert("How are you? ")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("How are you? ")]))
     }
 
     @Test func aRevisionIsSkippedWhenTheUserTypedAfterTheDictation() {
@@ -125,7 +125,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
         let plan = ProxyEditPlanner.plan(
             state: liveState(committed: "hello world how ", revision: hello),
             cursor: liveCursor(committedCount: 12, shows: hello), contextBefore: "Hello world. ", documentID: "doc-A")
-        #expect(plan.ops == [.insert("how ")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("how ")]))
         #expect(plan.cursor?.committedCount == 16)
     }
 
@@ -136,7 +136,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
                 finalText: "Hello world. How are you?"),
             cursor: liveCursor(committedCount: 24, shows: hello), contextBefore: "Hello world. how are you ",
             documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(12), .insert("How are you? ")])
+        #expect(applyProxyOps(plan.ops, to: "Hello world. how are you ").text == "Hello world. How are you? ")
         #expect(plan.cursor?.finalApplied == true)
         #expect(plan.cursor?.finalReplaced == nil, "no separate swap in a live run")
     }
@@ -227,7 +227,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
         #expect(sent?.sentBase == 12)
         #expect(sent?.sentCount == 1)
         let plan = ProxyEditPlanner.plan(state: final, cursor: sent, contextBefore: "", documentID: "doc-A")
-        #expect(plan.ops == [.insert("how are you ")], "nothing of the sent part is typed again")
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("how are you ")]), "nothing of the sent part is typed again")
         #expect(plan.cursor?.finalApplied == true)
     }
 
@@ -239,7 +239,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
         let plan = ProxyEditPlanner.plan(
             state: liveState(committed: "hello world how are you ", revision: hello),
             cursor: sent, contextBefore: "", documentID: "doc-A")
-        #expect(plan.ops == [.insert("how are you ")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("how are you ")]))
     }
 
     @Test func aRevisionOfTheSentTextIsDroppedNeverTyped() {
@@ -250,7 +250,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
         let plan = ProxyEditPlanner.plan(
             state: liveState(committed: "hello world how are you ", revision: stale),
             cursor: sent, contextBefore: "", documentID: "doc-A")
-        #expect(plan.ops == [.insert("how are you ")], "only the raw text after the boundary goes in")
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("how are you ")]), "only the raw text after the boundary goes in")
         #expect(plan.cursor?.revisionHandled == 2)
         #expect(plan.cursor?.revisionSkipped != true)
     }
@@ -264,7 +264,7 @@ private let whole = HostRevision(n: 2, start: 0, raw: "hello world how are you "
             state: liveState(phase: .idle, committed: "hello world how are you ", revision: after,
                              finalText: "Hello world. How are you?"),
             cursor: sent, contextBefore: "how are you ", documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(12), .insert("How are you? ")])
+        #expect(applyProxyOps(plan.ops, to: "how are you ").text == "How are you? ")
         #expect(plan.cursor?.finalApplied == true, "the app does not copy a sent run")
     }
 }

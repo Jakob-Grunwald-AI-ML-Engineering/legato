@@ -7,7 +7,7 @@ import Testing
     @Test func firstVolatileIsInsertedAndBindsTheCurrentDocument() {
         let plan = ProxyEditPlanner.plan(
             state: hostState(volatile: "hello"), cursor: nil, contextBefore: "", documentID: "doc-A")
-        #expect(plan.ops == [.insert("hello")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("hello")]))
         #expect(plan.cursor == cursor(volatile: "hello"))
     }
 
@@ -15,7 +15,7 @@ import Testing
         let plan = ProxyEditPlanner.plan(
             state: hostState(volatile: "hello world"), cursor: cursor(volatile: "hello wo"),
             contextBefore: "hello wo", documentID: "doc-A")
-        #expect(plan.ops == [.insert("rld")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("rld")]))
         #expect(plan.cursor?.volatile == "hello world")
     }
 
@@ -23,7 +23,7 @@ import Testing
         let plan = ProxyEditPlanner.plan(
             state: hostState(volatile: "hello word"), cursor: cursor(volatile: "hello world"),
             contextBefore: "hello world", documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(2), .insert("d")])
+        #expect(applyProxyOps(plan.ops, to: "hello world").text == "hello word")
         #expect(plan.cursor?.volatile == "hello word")
     }
 
@@ -39,7 +39,7 @@ import Testing
         let plan = ProxyEditPlanner.plan(
             state: hostState(volatile: ""), cursor: cursor(volatile: "hello"),
             contextBefore: "Dear Bob, hello", documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(5)])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.deleteBackward(5)]))
         #expect(plan.cursor?.volatile == "")
     }
 
@@ -48,7 +48,7 @@ import Testing
         let plan = ProxyEditPlanner.plan(
             state: hostState(volatile: "world"), cursor: cursor(volatile: "hello wo"),
             contextBefore: "hello wo and", documentID: "doc-A")
-        #expect(plan.ops == [.insert(" world")]) // no deleteBackward at all
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert(" world")])) // no deleteBackward at all
         #expect(plan.cursor?.volatile == " world")
     }
 
@@ -58,7 +58,7 @@ import Testing
         let plan = ProxyEditPlanner.plan(
             state: hostState(committed: "hello world "), cursor: cursor(committedCount: 6),
             contextBefore: "hello ", documentID: "doc-A")
-        #expect(plan.ops == [.insert("world ")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("world ")]))
         #expect(plan.cursor?.committedCount == 12)
     }
 
@@ -66,7 +66,7 @@ import Testing
         let plan = ProxyEditPlanner.plan(
             state: hostState(committed: "hello ", volatile: "wor"), cursor: cursor(volatile: "hello"),
             contextBefore: "hello", documentID: "doc-A")
-        #expect(plan.ops == [.insert(" wor")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert(" wor")]))
         #expect(plan.cursor?.committedCount == 6)
         #expect(plan.cursor?.volatile == "wor")
     }
@@ -77,7 +77,7 @@ import Testing
             state: hostState(committed: "hello world and more ", volatile: "and"),
             cursor: cursor(committedCount: 6, volatile: "wor"),
             contextBefore: "hello wor", documentID: "doc-A")
-        #expect(plan.ops == [.insert("ld and more and")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("ld and more and")]))
         #expect(plan.cursor?.committedCount == 21)
         #expect(plan.cursor?.volatile == "and")
     }
@@ -119,7 +119,7 @@ import Testing
         let plan = ProxyEditPlanner.plan(
             state: hostState(runID: "run-1", committed: "hi "), cursor: old,
             contextBefore: "", documentID: "doc-B")
-        #expect(plan.ops == [.insert("hi ")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("hi ")]))
         #expect(plan.cursor == cursor(runID: "run-1", documentID: "doc-B", committedCount: 3))
     }
 
@@ -127,7 +127,7 @@ import Testing
         let old = cursor(runID: "run-0", volatile: "tent")
         let plan = ProxyEditPlanner.plan(
             state: hostState(runID: "run-1"), cursor: old, contextBefore: "foo tent", documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(4)])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.deleteBackward(4)]))
         #expect(plan.cursor == cursor(runID: "run-1"))
     }
 
@@ -158,25 +158,25 @@ import Testing
     func aSpaceIsAddedAtTheStartOfARunOnlyWhenTheFieldNeedsOne(context: String, inserted: String) {
         let plan = ProxyEditPlanner.plan(
             state: hostState(committed: "world "), cursor: nil, contextBefore: context, documentID: "doc-A")
-        #expect(plan.ops == [.insert(inserted)])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert(inserted)]))
         #expect(plan.cursor?.committedCount == 6) // the added space is not part of `committed`
     }
 
     @Test func punctuationIsNeverSeparatedFromTheWordBeforeIt() {
         let plan = ProxyEditPlanner.plan(
             state: hostState(committed: ". "), cursor: nil, contextBefore: "Hello", documentID: "doc-A")
-        #expect(plan.ops == [.insert(". ")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert(". ")]))
     }
 
     @Test func aVolatileAtTheStartOfARunCarriesTheSeparatorAndKeepsItWhileItGrows() {
         let first = ProxyEditPlanner.plan(
             state: hostState(volatile: "wor"), cursor: nil, contextBefore: "Hello", documentID: "doc-A")
-        #expect(first.ops == [.insert(" wor")])
+        #expect(characterProxyOps(first.ops) == characterProxyOps([.insert(" wor")]))
         #expect(first.cursor?.volatile == " wor")
         let second = ProxyEditPlanner.plan(
             state: hostState(volatile: "world"), cursor: first.cursor, contextBefore: "Hello wor",
             documentID: "doc-A")
-        #expect(second.ops == [.insert("ld")])
+        #expect(characterProxyOps(second.ops) == characterProxyOps([.insert("ld")]))
         #expect(second.cursor?.volatile == " world")
     }
 
@@ -186,7 +186,7 @@ import Testing
         // Field: "hello wor" where "wor" is tentative.
         let typing = ProxyEditPlanner.prepareForTyping(
             cursor: cursor(committedCount: 6, volatile: "wor"), contextBefore: "hello wor")
-        #expect(typing.ops == [.deleteBackward(3)])
+        #expect(characterProxyOps(typing.ops) == characterProxyOps([.deleteBackward(3)]))
         #expect(typing.cursor?.volatile == "")
         #expect(typing.cursor?.needsSeparator == true)
 
@@ -194,7 +194,7 @@ import Testing
         let next = ProxyEditPlanner.plan(
             state: hostState(committed: "hello ", volatile: "world"), cursor: typing.cursor,
             contextBefore: "hello X", documentID: "doc-A")
-        #expect(next.ops == [.insert(" world")])
+        #expect(characterProxyOps(next.ops) == characterProxyOps([.insert(" world")]))
         #expect(next.cursor?.volatile == " world")
         #expect(next.cursor?.needsSeparator == true)
 
@@ -202,7 +202,7 @@ import Testing
         let final = ProxyEditPlanner.plan(
             state: hostState(committed: "hello world "), cursor: next.cursor,
             contextBefore: "hello X world", documentID: "doc-A")
-        #expect(final.ops == [.insert(" ")])
+        #expect(characterProxyOps(final.ops) == characterProxyOps([.insert(" ")]))
         #expect(final.cursor?.committedCount == 12)
         #expect(final.cursor?.volatile == "")
         #expect(final.cursor?.needsSeparator == false)
@@ -233,7 +233,7 @@ import Testing
         let catchingUp = ProxyEditPlanner.plan(
             state: final, cursor: cursor(committedCount: 6, volatile: "wor"), contextBefore: "hello wor",
             documentID: "doc-A")
-        #expect(catchingUp.ops == [.insert("ld ")])
+        #expect(characterProxyOps(catchingUp.ops) == characterProxyOps([.insert("ld ")]))
         #expect(catchingUp.cursor?.finalApplied == true)
     }
 
@@ -249,5 +249,57 @@ import Testing
             state: hostState(phase: .idle, committed: "hello "), cursor: cursor(committedCount: 6),
             contextBefore: "hello ", documentID: "doc-B")
         #expect(plan.cursor?.finalApplied == false)
+    }
+}
+
+/// Simulates the host's real caret, including text after it, independently of planner bookkeeping.
+func applyProxyOps(_ ops: [ProxyOp], to text: String, cursor: Int? = nil) -> (text: String, cursor: Int) {
+    let shadow: [ShadowOp] = ops.map {
+        switch $0 {
+        case .move(let units): .move(units)
+        case .deleteBackward(let count): .deleteBackward(count)
+        case .insert(let text): .insert(text)
+        }
+    }
+    return ShadowEditPlanner.simulate(ops: shadow, shadow: text, cursor: cursor ?? text.utf16.count)
+}
+
+func characterProxyOps(_ ops: [ProxyOp]) -> [ProxyOp] {
+    ops.flatMap { op -> [ProxyOp] in
+        switch op {
+        case .insert(let text): text.map { .insert(String($0)) }
+        case .deleteBackward(let count): Array(repeating: .deleteBackward(1), count: count)
+        case .move: [op]
+        }
+    }
+}
+
+@Suite struct MinimalProxyCharacterEditTests {
+    @Test(arguments: [
+        ("Hello  world, keep this sentence.", "Hello world, keep this sentence.", 1, 0),
+        ("Hello world, keep this sentence.", "Hello  world, keep this sentence.", 0, 1),
+        ("The cat and dog remain.", "The bat and dig remain.", 2, 2),
+        ("Keep 👨‍👩‍👧 here and é there.", "Keep 👨‍👩‍👧 here and ê there.", 1, 1)
+    ])
+    func onlyNecessaryCharactersAreMutated(old: String, target: String, deleted: Int, inserted: Int) {
+        let ops = ProxyEditPlanner.replaceOps(from: old, to: target)
+        let final = applyProxyOps(ops, to: old)
+        #expect(final.text == target)
+        #expect(final.cursor == target.utf16.count)
+        var actualDeleted = 0
+        var actualInserted = 0
+        for op in ops {
+            switch op {
+            case .move: break
+            case .deleteBackward(let count):
+                #expect(count == 1)
+                actualDeleted += count
+            case .insert(let text):
+                #expect(text.count == 1)
+                actualInserted += text.count
+            }
+        }
+        #expect(actualDeleted == deleted)
+        #expect(actualInserted == inserted)
     }
 }

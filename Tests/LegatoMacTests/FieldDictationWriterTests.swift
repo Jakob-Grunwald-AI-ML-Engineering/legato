@@ -201,15 +201,15 @@ import LegatoCore
 }
 
 @MainActor @Suite struct FieldDictationTypewriterTests {
-    @Test func aTakeIsTypedWordByWordIntoTheField() async {
+    @Test func aTakeIsTypedCharacterByCharacterIntoTheField() async {
         let field = FakeTextTarget("Hi Anna,")
         let scene = TypeScene(.target(field))
         let writer = scene.writer()
         writer.begin()
         #expect(await writer.write("Ich komme später. Bis gleich!") == .typed)
         #expect(field.string == "Hi Anna, Ich komme später. Bis gleich!")
-        #expect(field.writes.count == 6, "The separator, then one verified write per word")
-        #expect(scene.pauses.count == 4 && scene.pauses.allSatisfy { $0 == TypewriterPlan.duration / 4 })
+        #expect(field.writes.map(\.text) == " Ich komme später. Bis gleich!".map { String($0) })
+        #expect(scene.pauses.count == "Ich komme später. Bis gleich!".count - 1)
         #expect(scene.fallbacks.isEmpty)
     }
 
@@ -230,8 +230,8 @@ import LegatoCore
         writer.begin()
         field.failWritesAfter = 2
         let outcome = await writer.write("eins zwei drei vier")
-        #expect(field.string == "eins zwei ")
-        #expect(scene.fallbacks.count == 1 && scene.fallbacks[0].text == "drei vier" && scene.fallbacks[0].copyOnly)
+        #expect(field.string == "ei")
+        #expect(scene.fallbacks.count == 1 && scene.fallbacks[0].text == "ns zwei drei vier" && scene.fallbacks[0].copyOnly)
         guard case .copied(let message) = outcome else { Issue.record("expected a copy, got \(outcome)"); return }
         #expect(message.contains("clipboard"))
     }
@@ -246,7 +246,7 @@ import LegatoCore
         })
         writer.begin()
         _ = await writer.write("eins zwei drei")
-        #expect(field.string.hasPrefix("eins ") && !field.string.contains("drei"))
+        #expect(field.string == "eX", "Typing stops after the user edits between characters")
         #expect(scene.fallbacks.count == 1 && scene.fallbacks[0].copyOnly)
     }
 
@@ -392,7 +392,7 @@ import LegatoCore
         #expect(field.writes.map(\.text) == ["Hello brave", " new world."], "One write per delta")
     }
 
-    @Test func aLongArrivalDoesNotBuildABacklog() async {
+    @Test func aLongArrivalRevealsEveryCharacterIndividually() async {
         let field = FakeTextTarget("")
         let scene = Scene(.target(field))
         let writer = streamWriter(scene)
@@ -401,7 +401,8 @@ import LegatoCore
         let take = Take(grow(long))
         #expect(await writer.writeStreaming(poll: take.poll) == .typed)
         #expect(field.string == long)
-        #expect(take.polls < 80, "The drain finishes 1000 characters in \(take.polls) frames")
+        #expect(take.polls >= long.count)
+        #expect(field.writes.allSatisfy { $0.text.count == 1 })
     }
 
     @Test func aMovedCaretStopsTheTypingAndTheRestGoesToTheClipboard() async {
