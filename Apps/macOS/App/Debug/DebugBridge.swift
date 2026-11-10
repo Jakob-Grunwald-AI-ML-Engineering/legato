@@ -19,25 +19,8 @@ import AppKit
         guard UserDefaults.standard.bool(forKey: "LegatoDebugBridge") else { return }
         #endif
         started = true
-        harness.register("state") { _ in
-            #if DEBUG
-            return MacAppController.shared.composer.debugState
-            #else
-            return ["status": MacAppController.shared.composer.status]
-            #endif
-        }
+        harness.register("state") { _ in MacAppController.shared.dictation.debugState }
         #if DEBUG
-        for name in ComposerSession.debugCommands {
-            harness.register(name) { command in
-                if name == "composer-debug-seed" { return try await MacAppController.shared.seedDebugComposer(command.args) }
-                if name == "composer-debug-start" { return try await MacAppController.shared.startDebugComposer(command.args) }
-                return try await MacAppController.shared.composer.debugControl(name, args: command.args)
-            }
-        }
-        harness.register("composer-import-keys") { command in
-            guard command.args == ["credentials.json"] else { throw Usage.invalid }
-            return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))
-        }
         // Mac dictation hotkey without speech: a finalized line (or live partial) enters where Soniox lines do and
         // is cleaned and typed into the focused field for real. The first one begins a microphone-free session
         // (the field in front is captured then); `dictation-debug-stop` ends it.
@@ -97,11 +80,21 @@ import AppKit
             return MacAppController.shared.dictation.debugState
         }
         #endif
-        harness.register("toggle") { _ in MacAppController.shared.toggle(); return ["status": "starting"] }
-        harness.register("stop") { _ in MacAppController.shared.stopComposer(); return ["status": "stopping"] }
-        harness.register("composer-insert") { _ in MacAppController.shared.insertComposer(origin: .debugBridge); return nil }
-        harness.register("composer-cancel") { _ in MacAppController.shared.cancelComposer(); return nil }
-        harness.register("session-probe") { _ in try SessionProbe.start(); return nil }
+        harness.register("magic-toggle") { _ in
+            MacAppController.shared.toggleMagic()
+            try await Task.sleep(for: .milliseconds(300))
+            return MacAppController.shared.dictation.debugState
+        }
+        harness.register("magic-undo") { _ in MacAppController.shared.instructionAction(.undo); return nil }
+        harness.register("magic-accept") { _ in MacAppController.shared.instructionAction(.accept); return nil }
+        harness.register("magic-dismiss") { _ in MacAppController.shared.instructionAction(.dismiss); return nil }
+        harness.register("magic-state") { _ in MacAppController.shared.dictation.instruction.debugState }
+        harness.register("field-fixture-state") { _ in
+            let app = MacAppController.shared
+            return ["offline": MacDictationSession.offlineFixture,
+                    "magicHotkey": app.settings.hotkey?.displayName ?? "", "dictationHotkey": app.settings.dictationHotkey?.displayName ?? "",
+                    "send": app.settings.dictationSend.rawValue, "hotkeysEnabled": app.permissions.hotkeyTapActive]
+        }
         harness.register("say") { command in
             guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }
             DebugMessages.shared.say(id: command.id, text: parsed.text); return nil

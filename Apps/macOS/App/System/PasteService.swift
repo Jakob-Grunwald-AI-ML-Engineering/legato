@@ -27,14 +27,14 @@ final class PasteService {
     /// as another shortcut); then the guards run again, and if any fails the text is only copied.
     /// With `restoreClipboard`, the previous pasteboard contents come back about 0.5 s after the
     /// paste, but only if nobody else wrote to it in between.
-    func paste(_ text: String, restoreClipboard: Bool, targetPID: pid_t?, secureField: Bool) async -> PasteOutcome {
+    func paste(_ text: String, restoreClipboard: Bool, targetPID: pid_t?, secureField: Bool, stillOwned: @MainActor () -> Bool = { true }) async -> PasteOutcome {
         let snapshot = restoreClipboard ? Snapshot(of: pasteboard) : nil
 
         let released = await waitForModifiersReleased()
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let trusted = AXIsProcessTrusted()
         let secure = secureField || IsSecureEventInputEnabled()
-        let onTarget = frontmost != nil && frontmost == targetPID
+        let onTarget = frontmost != nil && frontmost == targetPID && stillOwned()
         let route = FallbackRoute.route(
             axTrusted: trusted, frontmostIsTarget: onTarget, secureField: secure, modifiersReleased: released)
         if case .copyOnly(let reason) = route {
@@ -74,18 +74,18 @@ final class PasteService {
     /// most ~1 s for the whole text). Only when the paste guards hold (Accessibility granted, the app in front, no
     /// secure input, modifiers up) and the text has no line break or tab. Stops at the first step that finds the
     /// frontmost app changed or a real key pressed (`realKeyDowns` counts those); the rest goes to the pasteboard.
-    func type(_ text: String, targetPID: pid_t?, secureField: Bool, realKeyDowns: @MainActor () -> Int) async -> TypeOutcome {
+    func type(_ text: String, targetPID: pid_t?, secureField: Bool, realKeyDowns: @MainActor () -> Int, stillOwned: @MainActor () -> Bool = { true }) async -> TypeOutcome {
         guard !TypewriterPlan.needsPaste(text) else { return .unavailable }
         let released = await waitForModifiersReleased()
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let route = FallbackRoute.route(
-            axTrusted: AXIsProcessTrusted(), frontmostIsTarget: frontmost != nil && frontmost == targetPID,
+            axTrusted: AXIsProcessTrusted(), frontmostIsTarget: frontmost != nil && frontmost == targetPID && stillOwned(),
             secureField: secureField || IsSecureEventInputEnabled(), modifiersReleased: released)
         guard route == .pasteKeystroke, let targetPID else { return .unavailable }
         let baseline = realKeyDowns()
         let result = await Typewriter.run(text, sleep: { try? await Task.sleep(for: $0) }, clock: ContinuousClock()) { step in
             guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
-                  !IsSecureEventInputEnabled(), realKeyDowns() == baseline else { return false }
+                  !IsSecureEventInputEnabled(), stillOwned(), realKeyDowns() == baseline else { return false }
             return Self.postUnicode(step)
         }
         guard let remainder = result.remainder else { return .typed }

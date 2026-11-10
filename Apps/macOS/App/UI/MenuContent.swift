@@ -14,8 +14,8 @@ struct MenuContent: View {
                     Text(controller.notice).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Button(controller.isDictating ? "Stop composer" : "Open voice composer") { controller.toggle() }
-                .menuAction("menu.composer") { controller.toggle() }
+            Button(controller.dictation.speechMode == .instruction ? "Run Magic instruction" : "Speak a Magic instruction") { controller.toggleMagic() }
+                .menuAction("menu.magic") { controller.toggleMagic() }
                 .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
             Button(controller.dictation.isActive ? "Stop dictation" : "Dictate into the focused field") { controller.toggleDictation() }
                 .menuAction("menu.dictation") { controller.toggleDictation() }
@@ -29,7 +29,7 @@ struct MenuContent: View {
                     .controlSize(.large)
                     .menuAction("menu.meetings") { NSApp.activate(); openWindow(id: MeetingController.windowID) }
             }
-            Label("Composer \(controller.settings.hotkey?.displayName ?? "not set")", systemImage: "command")
+            Label("Magic \(controller.settings.hotkey?.displayName ?? "not set")", systemImage: "command")
                 .font(.caption).foregroundStyle(.secondary)
             Label("Dictation \(controller.settings.dictationHotkey?.displayName ?? "not set")", systemImage: "mic")
                 .font(.caption).foregroundStyle(.secondary)
@@ -45,7 +45,7 @@ struct MenuContent: View {
             }
         }.padding(20).frame(width: 300)
             // Reloads on open and whenever the composer or backfill stores a new revision.
-            .task(id: controller.composer.historyRevision + controller.dictation.pipeline.historyRevision) { await controller.refreshRecent() }
+            .task(id: controller.dictation.instruction.historyRevision + controller.dictation.pipeline.historyRevision) { await controller.refreshRecent() }
     }
 }
 

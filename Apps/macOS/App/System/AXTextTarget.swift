@@ -16,8 +16,12 @@ final class AXTextTarget: TextTarget {
 
     private let element: AXUIElement
     private let appElement: AXUIElement
+    private let pid: pid_t
 
     private init(element: AXUIElement, appElement: AXUIElement) {
+        var process: pid_t = 0
+        AXUIElementGetPid(appElement, &process)
+        self.pid = process
         self.element = element
         self.appElement = appElement
     }
@@ -62,7 +66,24 @@ final class AXTextTarget: TextTarget {
         case .notSecure: break
         }
         guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { return .none }
-        return .target(AXTextTarget(element: element, appElement: appElement))
+        let target = AXTextTarget(element: element, appElement: appElement)
+        guard let selection = try? target.selectedRange(), (try? target.text(in: selection)) != nil else { return .none }
+        return .target(target)
+    }
+
+    /// A focus/security witness for paste-only editors. This never reads or replaces their contents.
+    static func capturePasteTarget() -> AXTextTarget? {
+        guard !IsSecureEventInputEnabled(), AXIsProcessTrusted(),
+              let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
+        guard let value = try? copyAttribute(appElement, kAXFocusedUIElementAttribute),
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        let element = unsafeDowncast(value, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        guard case .notSecure = secureState(of: element) else { return nil }
+        return AXTextTarget(element: element, appElement: appElement)
     }
 
     private enum SecureState { case secure, notSecure, unknown }
@@ -92,7 +113,9 @@ final class AXTextTarget: TextTarget {
     // MARK: TextTarget
 
     func isFocused() -> Bool {
-        guard let focused = try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute),
+        guard !IsSecureEventInputEnabled(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              case .notSecure = Self.secureState(of: element),
+              let focused = try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute),
               CFGetTypeID(focused) == AXUIElementGetTypeID()
         else { return false }
         return CFEqual(focused, element)
@@ -113,7 +136,21 @@ final class AXTextTarget: TextTarget {
         return string
     }
 
+    func textLength() throws -> Int {
+        guard isFocused() else { throw AXTargetError.unexpectedValue }
+        if let number = try Self.copyAttribute(element, kAXNumberOfCharactersAttribute) as? NSNumber { return number.intValue }
+        guard let value = try Self.copyAttribute(element, kAXValueAttribute) as? String else { throw AXTargetError.unexpectedValue }
+        return value.utf16.count
+    }
+
+    func setSelectedRange(_ range: UTF16Range) throws {
+        guard isFocused() else { throw AXTargetError.unexpectedValue }
+        let error = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
+        guard error == .success else { throw AXTargetError.attribute(error) }
+    }
+
     func replace(_ range: UTF16Range, with text: String) throws {
+        guard isFocused() else { throw AXTargetError.unexpectedValue }
         var error = AXUIElementSetAttributeValue(
             element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
         guard error == .success else { throw AXTargetError.attribute(error) }

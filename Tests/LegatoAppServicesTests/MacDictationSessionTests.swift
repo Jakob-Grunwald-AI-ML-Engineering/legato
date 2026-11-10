@@ -294,4 +294,21 @@ final class FailingStreamCleaner: SentenceCleaning {
         #expect(seen.last?.text == "Hello world." && seen.last?.retracted == false, "The retry streamed on to the whole text")
         #expect(retracted == 1 && session.pipeline.nextOutboxSequenceForTesting == 2, "The partial (sequence 0) was retracted and acknowledged; the retry is sequence 1")
     }
+    @Test func magicSpeechNeverReachesTheDictationOutboxAndCancelResetsBothModes() async throws {
+        let session = make()
+        try await session.debugLine("before magic")
+        try await until { typed.lines.count == 1 }
+        #expect(await session.startMagic())
+        try await session.debugTail("make this")
+        #expect(session.instruction.strip.transcript == "make this")
+        try await session.debugLine("make this shorter")
+        #expect(session.instruction.strip.transcript == "make this shorter")
+        #expect(typed.lines == ["Before magic."])
+        #expect(session.pipeline.outbox.isEmpty)
+        await session.cancel()
+        #expect(session.speechMode == .dictation)
+        #expect(session.instruction.strip.phase == .idle)
+        #expect(session.phase == .idle)
+    }
+
 }

@@ -4,6 +4,7 @@ import SwiftUI
 import LegatoAppServices
 import LegatoComposerUI
 import LegatoMac
+import LegatoKeyboardCore
 
 /// What the pill shows besides the session itself: a short notice that outlives the run.
 @MainActor @Observable
@@ -40,7 +41,7 @@ final class DictationPillController {
     private var lastNoticeID = 0
     private static let size = NSSize(width: 460, height: 64)
     private static let failedSize = NSSize(width: 460, height: 92)
-    private var size: NSSize { session.pipeline.takePhase == .failed ? Self.failedSize : Self.size }
+    private var size: NSSize { session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle ? Self.failedSize : Self.size }
 
     /// `occupiedFrame` is the open composer, which a notice must not cover.
     init(session: MacDictationSession, occupiedFrame: @escaping () -> NSRect? = { nil }) {
@@ -59,7 +60,7 @@ final class DictationPillController {
 
     private func track() {
         withObservationTracking {
-            _ = session.phase; _ = session.noticeID; _ = session.pipeline.takePhase
+            _ = session.phase; _ = session.noticeID; _ = session.pipeline.takePhase; _ = session.instruction.strip.revision
         } onChange: { [weak self] in
             Task { @MainActor in self?.update(); self?.track() }
         }
@@ -71,9 +72,9 @@ final class DictationPillController {
             model.notice = session.notice
             scheduleHide(seconds: 5)
         }
-        let takeShown = session.pipeline.takePhase != .buffering
+        let takeShown = session.pipeline.takePhase != .buffering || session.instruction.strip.phase != .idle
         // Only a failed cleanup takes clicks (Retry, Insert as-is); every other state lets them through.
-        panel?.ignoresMouseEvents = session.pipeline.takePhase != .failed
+        panel?.ignoresMouseEvents = session.pipeline.takePhase != .failed && session.instruction.strip.phase == .idle
         if session.phase != .idle || model.notice != nil || takeShown { present() } else { hide() }
     }
 
@@ -83,7 +84,7 @@ final class DictationPillController {
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled, let self else { return }
             model.notice = nil
-            if session.phase == .idle, session.pipeline.takePhase == .buffering { hide() }
+            if session.phase == .idle, session.pipeline.takePhase == .buffering, session.instruction.strip.phase == .idle { hide() }
         }
     }
 
@@ -106,7 +107,7 @@ final class DictationPillController {
         let panel = self.panel ?? makePanel()
         self.panel = panel
         let wasShown = panel.isVisible
-        panel.ignoresMouseEvents = session.pipeline.takePhase != .failed
+        panel.ignoresMouseEvents = session.pipeline.takePhase != .failed && session.instruction.strip.phase == .idle
         position(panel)
         if !wasShown { presentation.jump(to: false) }
         panel.orderFrontRegardless()
@@ -166,7 +167,7 @@ struct DictationPillView: View {
 
     var body: some View {
         NotchIsland(style: model.style, presentation: presentation) { card }
-            .accessibilityElement(children: showsFailedActions ? .contain : .combine)
+            .accessibilityElement(children: showsFailedActions || session.instruction.strip.phase != .idle ? .contain : .combine)
     }
 
     private var card: some View {
@@ -178,7 +179,8 @@ struct DictationPillView: View {
                     .frame(width: 20)
                 text
             }
-            if showsFailedActions { failedActions }
+            if session.instruction.strip.phase != .idle { magicActions }
+            else if showsFailedActions { failedActions }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -200,6 +202,26 @@ struct DictationPillView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var magicActions: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            if session.instruction.strip.phase == .listening {
+                Button("Run") { Task { await session.endMagic() } }.accessibilityIdentifier("magic.run")
+            }
+            if session.instruction.strip.canUndo {
+                Button("Undo") { magic(.undo) }.accessibilityIdentifier("magic.undo")
+            }
+            if session.instruction.strip.phase == .result || session.instruction.strip.phase == .undone {
+                Button("Accept") { magic(.accept) }.accessibilityIdentifier("magic.accept")
+            } else if session.instruction.strip.phase == .failed {
+                if session.instruction.strip.canRetry != false { Button("Retry") { magic(.run) } }
+                Button("Dismiss") { magic(.dismiss) }.accessibilityIdentifier("magic.dismiss")
+            }
+        }.buttonStyle(.bordered).controlSize(.small)
+    }
+    private func magic(_ action: InstructionIntent.Action) {
+        session.instruction.handle(.init(action: action, instructionID: session.instruction.strip.instructionID))
+    }
     private var failedActions: some View {
         HStack(spacing: 8) {
             Spacer(minLength: 0)
@@ -218,6 +240,7 @@ struct DictationPillView: View {
     }
     private var showsPlaceholder: Bool { model.notice == nil && pipeline.takePhase == .buffering && spoken.isEmpty }
     private var symbol: String {
+        if session.instruction.strip.phase != .idle { return session.instruction.strip.phase == .failed ? "exclamationmark.triangle.fill" : "wand.and.stars" }
         if model.notice != nil || pipeline.takePhase == .failed { return "exclamationmark.triangle.fill" }
         return session.phase == .finishing || pipeline.takePhase == .cleaning ? "ellipsis" : "mic.fill"
     }
@@ -227,6 +250,15 @@ struct DictationPillView: View {
     }
     /// A state line above the text: the cleanup is running, or failed and the raw text is held.
     private var caption: String? {
+        if session.instruction.strip.phase != .idle {
+            switch session.instruction.strip.phase {
+            case .listening: return "Magic · listening"
+            case .reading: return "Magic · reading the field…"
+            case .running: return "Magic · editing…"
+            case .result, .undone, .failed: return session.instruction.strip.message ?? "Magic"
+            case .idle: break
+            }
+        }
         guard model.notice == nil else { return nil }
         switch pipeline.takePhase {
         case .failed: return "Couldn't clean up. Your text is held."
@@ -235,6 +267,7 @@ struct DictationPillView: View {
         }
     }
     private var line: String {
+        if session.instruction.strip.phase != .idle { return session.instruction.strip.transcript.isEmpty ? "Speak an instruction about the text." : session.instruction.strip.transcript }
         if let notice = model.notice { return notice }
         if pipeline.takePhase != .buffering { return spoken }
         if !spoken.isEmpty { return spoken }

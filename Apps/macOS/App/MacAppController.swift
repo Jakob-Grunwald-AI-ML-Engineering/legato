@@ -5,6 +5,7 @@ import LegatoCore
 import LegatoMac
 import LegatoVocabulary
 import LegatoAudio
+import LegatoKeyboardCore
 import Observation
 
 @MainActor @Observable final class MacAppController {
@@ -17,30 +18,23 @@ import Observation
     let vocabulary: VocabularyService
     let history: any HistoryStore
     var recent: [DictationEntry] = []
-    let composer: ComposerSession
-    let notch = NotchPanelController()
     let meetings: MeetingController
     private var meetingIsland: MeetingIslandController?
     private var callDetection: CallDetectionController?
-    /// The dictation hotkey: types straight into the focused field. It never shares speech with `composer`.
     let dictation: MacDictationSession
-    private let dictationWriter: FieldDictationWriter
+    let fieldEditor: MacFieldEditor
+    private let fallbackWriter: FieldDictationWriter
+    @ObservationIgnored private let fallbackOwner = MacFallbackOwner()
     private var dictationPill: DictationPillController?
-    private var writer: FieldWriter?
-    private var composerTargetToken: String?
-    private var targetPID: pid_t?
-    private var secureField = false
-    private var starting = false
-    private(set) var inserting = false
-    private var sessionTask: Task<Void, Never>?
-    var notice: String { composer.error ?? composer.status.capitalized }
-    var isDictating: Bool { starting || composer.isListening }
-    enum HotkeyTarget { case panel, dictation }
+    private var magicTask: Task<Void, Never>?
+    var notice: String { dictation.notice ?? (dictation.speechMode == .instruction ? "Magic" : dictation.phase.rawValue.capitalized) }
+    var isDictating: Bool { dictation.isActive }
+    enum HotkeyTarget { case magic, dictation }
     private(set) var recordingTarget: HotkeyTarget?
     var isRecordingHotkey: Bool { recordingTarget != nil }
     var recordingPreview: String?
     var onboardingRequests = 0
-    var setupAttention: Bool { !permissions.accessibility || settings.hotkey == nil }
+    var setupAttention: Bool { !permissions.accessibility || settings.dictationHotkey == nil || settings.hotkey == nil }
     #if DEBUG
     private let hotkeysEnabled = !UserDefaults.standard.bool(forKey: "LegatoDisableHotkeys")
     #else
@@ -48,87 +42,101 @@ import Observation
     #endif
     private let tap = HotkeyTap()
     private var recorder = HotkeyRecorderLogic()
-    private let panelGesture = GestureDriver()
+    private let magicGesture = GestureDriver()
     private let dictationGesture = GestureDriver()
     private var eventTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var bootstrapped = false
+    @ObservationIgnored private var focusObserver: NSObjectProtocol?
+    @ObservationIgnored private var mouseMonitor: Any?
     /// Real (untagged) key presses seen by the tap; typing into a paste-only app stops when this moves.
     let keyPresses = KeyPressCounter()
 
     private init() {
-        let root = URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
+        var root = URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
+        #if LEGATO_INTERNAL
+        if let path = UserDefaults.standard.string(forKey: "LegatoDataRoot"), path.hasPrefix("/") {
+            root = URL(fileURLWithPath: path, isDirectory: true)
+        }
+        #endif
         let engine = EngineSettings()
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(engine) })
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
-        composer = ComposerSession(history: history)
         let vocabularyURL = root.appending(path: "vocabulary.json")
         meetings = MeetingController(root: Self.meetingsRoot(in: root), vocabularyURL: vocabularyURL)
-        dictation = MacDictationSession(pipeline: DictationPipeline(vocabularyURL: vocabularyURL,
-                                                                    recentTakesURL: root.appending(path: "recent-takes.json"),
-                                                                    history: history),
-                                        microphone: AutomaticInputSource(), vocabularyURL: vocabularyURL)
-        dictationWriter = FieldDictationWriter(
-            capture: {
-                switch AXTextTarget.captureFocused() {
-                case .target(let target): .target(target)
-                case .none: .none
-                case .secure: .secure
-                }
-            },
-            fallback: { [weak paster = paster, settings = settings, keys = keyPresses] text, secure, copyOnly in
-                guard let paster else { return .copied(message: "", reason: .appChanged) }
-                let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-                if copyOnly || pid == ProcessInfo.processInfo.processIdentifier {
-                    paster.copy(text)
-                    return .copied(message: secure ? CopyReason.secureField.toast : "Copied to the clipboard. Paste with ⌘V.",
-                                   reason: secure ? .secureField : .appChanged)
-                }
-                if settings.typewriter {
-                    switch await paster.type(text, targetPID: pid, secureField: secure, realKeyDowns: { keys.count }) {
-                    case .typed: return .typed
-                    case .interrupted(let remainder): return .interrupted(remainder: remainder, message: "Typing stopped: the rest is on the clipboard. Paste with ⌘V.")
-                    case .unavailable: break
-                    }
-                }
-                let restore = UserDefaults.standard.object(forKey: "restoreClipboard") as? Bool ?? true
-                switch await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure) {
-                case .pasted: return .pasted
-                case .copied(let reason): return .copied(message: reason.toast, reason: reason)
-                }
-            },
-            typewriter: { [settings = settings] in settings.typewriter },
-            frontmostApp: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
-        dictation.onBegin = { [weak self] in self?.dictationWriter.begin() }
-        dictation.deliver = { [weak self] text in
-            guard let self else { return }
-            if case .copied(let message) = await dictationWriter.write(text), !message.isEmpty { dictation.report(message) }
+        let pipeline: DictationPipeline
+        let instruction: InstructionSession
+        #if LEGATO_INTERNAL
+        let offlineFixture = UserDefaults.standard.bool(forKey: "LegatoOfflineFixture")
+        if offlineFixture {
+            pipeline = DictationPipeline(recentTakes: RecentTakesStore(fileURL: root.appending(path: "recent-takes.json")),
+                history: history, cleaner: DebugStreamingCleaner(chunkMilliseconds: 0),
+                sendMode: { DictationSendSetting.mode() }, supportsLive: true)
+            instruction = InstructionSession(runner: MacOfflineInstructionRunner(), history: history)
+        } else {
+            pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true)
+            instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
         }
-        dictation.deliverStream = { [weak self] poll in
-            guard let self else { return false }
-            let outcome = await dictationWriter.writeStreaming(poll: poll)
-            if case .copied(let message) = outcome, !message.isEmpty { dictation.report(message) }
-            return outcome == .stalled
-        }
-        dictation.retractStream = { [weak self] in
+        #else
+        pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true)
+        instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
+        #endif
+        dictation = MacDictationSession(pipeline: pipeline, instruction: instruction, microphone: AutomaticInputSource(), vocabularyURL: vocabularyURL)
+        fieldEditor = MacFieldEditor(capture: {
+            switch AXTextTarget.captureFocused() {
+            case .target(let target): .target(target)
+            case .none: .none
+            case .secure: .secure
+            }
+        })
+        fallbackWriter = FieldDictationWriter(capture: { .none }, fallback: { [weak paster, settings, keyPresses, fallbackOwner] text, secure, copyOnly in
+            guard let paster else { return .copied(message: "", reason: .appChanged) }
+            let generation = fallbackOwner.generation, pid = fallbackOwner.pid, keys = fallbackOwner.keys
+            let witness = fallbackOwner.target
+            let owned = { @MainActor in fallbackOwner.generation == generation && fallbackOwner.allowed && keyPresses.count == keys && witness?.isFocused() == true }
+            guard !copyOnly, !secure, owned() else {
+                paster.copy(text)
+                return .copied(message: secure ? CopyReason.secureField.toast : "Dictation copied: the field or cursor changed. Paste with ⌘V.", reason: secure ? .secureField : .appChanged)
+            }
+            if settings.typewriter {
+                switch await paster.type(text, targetPID: pid, secureField: false, realKeyDowns: { keyPresses.count }, stillOwned: owned) {
+                case .typed: return .typed
+                case .interrupted(let rest): return .interrupted(remainder: rest, message: "Typing stopped. The remaining words are on the clipboard.")
+                case .unavailable: break
+                }
+            }
+            switch await paster.paste(text, restoreClipboard: settings.restoreClipboard, targetPID: pid, secureField: false, stillOwned: owned) {
+            case .pasted: return .pasted
+            case .copied(let reason): return .copied(message: reason.toast, reason: reason)
+            }
+        }, frontmostApp: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
+        instruction.field = fieldEditor
+        fieldEditor.report = { [weak dictation] in dictation?.report($0) }
+        fieldEditor.recover = { [weak paster] in paster?.copy($0) }
+        dictation.onBegin = { [weak self] in
             guard let self else { return }
-            if case .copied(let message) = dictationWriter.retractStreamed(), !message.isEmpty { dictation.report(message) }
+            fallbackOwner.generation += 1
+            fallbackOwner.pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            fallbackOwner.keys = keyPresses.count; fallbackOwner.allowed = true
+            fallbackOwner.target = AXTextTarget.capturePasteTarget()
+            fallbackWriter.begin(); fieldEditor.begin()
+        }
+        fieldEditor.fallback = { [weak self] text in
+            guard let self else { return }
+            if case .copied(let message) = await fallbackWriter.write(text) { dictation.report(message) }
         }
         dictation.onEnd = { [weak self] in
             guard let self else { return }
-            if case .copied(let message)? = await dictationWriter.finish(), !message.isEmpty { dictation.report(message) }
+            await fieldEditor.finish()
+            if case .copied(let message)? = await fallbackWriter.finish() { dictation.report(message) }
         }
-        dictation.pipeline.contextBefore = { [weak self] in self?.dictationWriter.textBeforeCursor() ?? "" }
-        composer.hostInsertionTarget = { [weak self] in self?.composerTargetToken }
-        composer.hostInsertionUnavailableReason = { [weak self] in
-            self?.secureField == true ? "The bound field is secure." : "No external text field is bound."
-        }
-        composer.hostInsertDraft = { [weak self] target in
-            guard let self else { return .init(succeeded: false, message: "Composer closed. Draft kept.") }
-            return await self.performComposerInsertion(expectedTarget: target, origin: .instruction)
-        }
-        composer.hostClearComposer = { [weak self] in await self?.clearComposer() }
+        dictation.onMagicBegin = { [weak fieldEditor] in fieldEditor?.beginInstruction() }
+        dictation.deliver = { [weak fieldEditor] in fieldEditor?.deliver($0) }
+        dictation.deliverStream = { [weak fieldEditor] poll in await fieldEditor?.stream(poll) ?? false }
+        dictation.retractStream = { [weak fieldEditor] in fieldEditor?.retractStreamed() }
+        pipeline.onLiveChange = { [weak fieldEditor] in fieldEditor?.applyLive($0) }
+        pipeline.contextBefore = { [weak fieldEditor] in fieldEditor?.contextBeforeCursor() ?? "" }
     }
     private static func meetingsRoot(in root: URL) -> URL {
         #if LEGATO_INTERNAL
@@ -140,8 +148,18 @@ import Observation
     }
     func bootstrap() {
         guard !bootstrapped else { return }; bootstrapped = true
+        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.fieldEditor.focusChanged()
+                if self.fallbackOwner.target?.isFocused() != true { self.fallbackOwner.allowed = false }
+            }
+        }
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor in self?.fieldEditor.relinquish(); self?.fallbackOwner.allowed = false }
+        }
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
-        dictationPill = DictationPillController(session: dictation, occupiedFrame: { [weak self] in self?.notch.occupiedFrame })
+        dictationPill = DictationPillController(session: dictation)
         dictation.ensureWarm()
         meetingIsland = MeetingIslandController(controller: meetings)
         meetings.bootstrap()
@@ -149,11 +167,10 @@ import Observation
             meetings: meetings,
             busy: { [weak self] in
                 guard let self else { return true }
-                return isDictating || dictation.isActive || inserting || notch.occupiedFrame != nil
+                return dictation.isActive
             },
             startMeeting: { [weak self] automatically in self?.beginMeeting(automatically: automatically) })
         Task {
-            await composer.backfillHistory(markerURL: URL.applicationSupportDirectory.appending(path: "Legato/history-backfill.v1.done"))
             await refreshRecent()
         }
         eventTask = Task { for await sample in tap.samples { handle(sample) } }
@@ -176,149 +193,68 @@ import Observation
         MeetingsPreview.runIfRequested(meetings)
         #endif
     }
-    func toggle() {
-        if isDictating { stopComposer(); return }
-        guard !starting else { return }
-        guard !refusedByMeeting() else { panelGesture.runEnded(); return }
-        guard !dictation.isActive else { dictationPill?.show(notice: "Stop dictation before opening the composer."); return }
-        starting = true
-        prepareComposerTarget()
-        sessionTask = Task {
-            await composer.start()
-            starting = false
-        }
+    func toggleMagic() {
+        if dictation.speechMode == .instruction { stopMagic() } else { startMagic() }
     }
-    private func prepareComposerTarget() {
-        targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let target: AXTextTarget?
-        secureField = false
-        switch AXTextTarget.captureFocused() {
-        case .target(let value): target = value
-        case .none: target = nil
-        case .secure: target = nil; secureField = true
-        }
-        composerTargetToken = target != nil && targetPID != ProcessInfo.processInfo.processIdentifier ? UUID().uuidString : nil
-        writer = FieldWriter(target: target, mode: .insertOnStop)
-        notch.show(controller: self, targetPID: targetPID)
+    private func startMagic() {
+        guard !refusedByMeeting() else { magicGesture.runEnded(); return }
+        guard microphoneReady() else { magicGesture.runEnded(); return }
+        magicTask = Task { if !(await dictation.startMagic()) { magicGesture.runEnded() } }
     }
-    #if DEBUG
-    func seedDebugComposer(_ args: [String]) async throws -> [String: Any] {
-        prepareComposerTarget()
-        return try await composer.debugControl("composer-debug-seed", args: args)
+    private func stopMagic() {
+        let starting = magicTask
+        Task { await starting?.value; await dictation.endMagic(); magicGesture.runEnded() }
     }
-    func startDebugComposer(_ args: [String]) async throws -> [String: Any] {
-        prepareComposerTarget()
-        return try await composer.debugControl("composer-debug-start", args: args)
+    func instructionAction(_ action: InstructionIntent.Action) {
+        dictation.instruction.handle(.init(action: action, instructionID: dictation.instruction.strip.instructionID))
     }
-    #endif
-    func stopComposer() {
-        panelGesture.runEnded()
-        if starting { cancelComposer(); return }
-        Task { await composer.stop() }
+    private func microphoneReady() -> Bool {
+        if MacDictationSession.offlineFixture { return true }
+        switch permissions.mic {
+        case .granted: return true
+        case .undetermined:
+            Task { await permissions.requestMicrophone() }
+            dictationPill?.show(notice: "Allow microphone access, then press the shortcut again.")
+        case .denied:
+            dictationPill?.show(notice: "Microphone access is off. Allow Legato in System Settings, Privacy & Security.")
+        }
+        return false
     }
-    func cancelComposer() { Task { await clearComposer() } }
-    private func clearComposer() async {
-        sessionTask?.cancel(); sessionTask = nil; starting = false
-        await composer.cancel()
-        guard composer.snapshot.lines.isEmpty, composer.status == "idle" else { return }
-        notch.dismiss(); writer = nil; composerTargetToken = nil; panelGesture.runEnded()
-    }
-    func insertComposer(origin: ComposerInsertOrigin = .macPanelButton) { Task { _ = await performComposerInsertion(origin: origin) } }
-    private func performComposerInsertion(expectedTarget: String? = nil, origin: ComposerInsertOrigin) async -> ComposerHostActionResult {
-        guard !inserting else { return .init(succeeded: false, message: "Insertion already in progress. Draft kept.") }
-        guard !composer.renderedText.isEmpty || !composer.tail.isEmpty else { return .init(succeeded: false, message: "The composer is empty.") }
-        if let expectedTarget, expectedTarget != composerTargetToken {
-            return .init(succeeded: false, message: "The target field changed. Draft kept.")
-        }
-        inserting = true
-        defer { inserting = false }
-        sessionTask?.cancel(); starting = false
-        let requestedSessionID = composer.sessionID
-        let requestedTarget = composerTargetToken, requestedWriter = writer
-        let pid = targetPID, secure = secureField, restore = settings.restoreClipboard
-        panelGesture.runEnded()
-        await composer.traceInsertion("requested", origin: origin)
-        let text: String
-        do { text = try await composer.prepareForInsertion() }
-        catch {
-            await composer.traceInsertion("undelivered", origin: origin, detail: ["reason": "prepare.failed"])
-            guard composer.sessionID == requestedSessionID else { return .init(succeeded: false, message: "Composition changed; insertion discarded.") }
-            let message = "Couldn't finish preparing the text. Draft kept. Try Insert again."
-            hud.show(toast: message); notch.show(controller: self, targetPID: pid)
-            return .init(succeeded: false, message: message)
-        }
-        guard requestedSessionID == composer.sessionID, requestedTarget == composerTargetToken else {
-            return .init(succeeded: false, message: "Composition or target changed. Draft kept.")
-        }
-        let sessionID = composer.sessionID, snapshot = composer.snapshot, tail = composer.tail
-        notch.hide()
-        let action = requestedWriter?.finish(finalText: text) ?? .paste(text)
-        let route: String
-        switch action { case .done: route = "fieldwriter"; case .paste: route = "paste"; case .copy: route = "clipboard" }
-        var delivered = false
-        var failure = "Couldn't insert into the bound text field. Draft kept."
-        switch action {
-        case .done: delivered = true
-        case .copy(let text):
-            paster.copy(text); failure = "Copied — paste with ⌘V. Draft kept."; hud.show(toast: failure)
-        case .paste(let text):
-            let result = await paster.paste(text, restoreClipboard: restore, targetPID: pid, secureField: secure)
-            switch result {
-            case .pasted: delivered = true
-            case .copied(let reason): failure = reason.toast + " Draft kept."; hud.show(toast: failure)
-            }
-        }
-        writer = nil; composerTargetToken = nil
-        // FieldWriter/paste report their own completion; neither proves the target app shows the text.
-        await composer.traceInsertion(delivered ? "acknowledged" : "undelivered", origin: origin,
-            detail: delivered ? ["ack": route] : ["reason": route + ".not.delivered"])
-        if delivered, composer.sessionID == sessionID, composer.snapshot == snapshot, composer.tail == tail {
-            // Delivery has already succeeded. Reuse the existing nonactivating panel for
-            // its flight instead of recreating the view or delaying the target insertion.
-            let presentation = notch.revealForSend()
-            await composer.insert()
-            let acknowledgement = composer.successfulInsertionID, remainingSession = composer.sessionID
-            if let presentation {
-                notch.finishSend(presentation) { [weak self] in
-                    guard let self else { return false }
-                    return composer.successfulInsertionID == acknowledgement && composer.sessionID == remainingSession
-                        && composer.renderedText.isEmpty && composer.tail.isEmpty && !isDictating
-                }
-            }
-            return .init(succeeded: true, message: "Draft inserted into the bound text field.")
-        }
-        if delivered { failure = "Inserted. Draft changed during insertion; latest edits kept."; hud.show(toast: failure) }
-        notch.show(controller: self, targetPID: pid)
-        return .init(succeeded: delivered, message: failure)
-    }
-    func beginRecording(_ target: HotkeyTarget = .panel) {
+    func beginRecording(_ target: HotkeyTarget = .magic) {
         guard tap.isActive else { permissions.requestAccessibility(); return }
-        panelGesture.reset(); dictationGesture.reset()
+        magicGesture.reset(); dictationGesture.reset()
         recorder = HotkeyRecorderLogic(); recordingTarget = target; recordingPreview = nil
     }
     func cancelRecording() { recordingTarget = nil; recordingPreview = nil }
     private func handle(_ sample: TapSample) {
-        guard let event = sample.event else { panelGesture.reset(); dictationGesture.reset(); return }
-        if event.kind == .keyDown { keyPresses.count &+= 1 }
+        guard let event = sample.event else { magicGesture.reset(); dictationGesture.reset(); return }
+        if event.kind == .keyDown {
+            keyPresses.count &+= 1
+            let shortcut = settings.hotkey?.triggerEvent(for: event) == .pressed || settings.dictationHotkey?.triggerEvent(for: event) == .pressed
+            if !shortcut, recordingTarget == nil {
+                fieldEditor.relinquish(); fallbackOwner.allowed = false
+                if dictation.instruction.strip.phase == .result || dictation.instruction.strip.phase == .undone { instructionAction(.accept) }
+            }
+        }
         if let target = recordingTarget {
             switch recorder.feed(event) {
             case .none: break
             case .preview(let text): recordingPreview = text
             case .captured(let spec):
-                let other = target == .panel ? settings.dictationHotkey : settings.hotkey
+                let other = target == .magic ? settings.dictationHotkey : settings.hotkey
                 if let other, spec.conflicts(with: other) {
-                    recordingPreview = "Already used by the \(target == .panel ? "dictation" : "composer") shortcut."
+                    recordingPreview = "Already used by the \(target == .magic ? "dictation" : "Magic") shortcut."
                     recorder = HotkeyRecorderLogic()
                     return
                 }
-                if target == .panel { settings.hotkey = spec } else { settings.dictationHotkey = spec }
+                if target == .magic { settings.hotkey = spec } else { settings.dictationHotkey = spec }
                 cancelRecording()
             case .cancelled: cancelRecording()
             }
             return
         }
         if let trigger = settings.hotkey?.triggerEvent(for: event) {
-            panelGesture.feed(trigger, at: sample.time, mode: settings.gestureMode) { [weak self] in self?.dispatch($0) }
+            magicGesture.feed(trigger, at: sample.time, mode: settings.gestureMode) { [weak self] in self?.dispatch($0) }
         }
         if let trigger = settings.dictationHotkey?.triggerEvent(for: event) {
             dictationGesture.feed(trigger, at: sample.time, mode: settings.gestureMode) { [weak self] in self?.dispatchDictation($0) }
@@ -345,17 +281,7 @@ import Observation
     private func startDictation() {
         guard !dictation.isActive else { return }
         guard !refusedByMeeting() else { dictationGesture.runEnded(); return }
-        guard !isDictating, !starting else { dictationPill?.show(notice: "Close the composer before dictating."); dictationGesture.runEnded(); return }
-        switch permissions.mic {
-        case .granted: break
-        case .undetermined:
-            Task { await permissions.requestMicrophone() }
-            dictationPill?.show(notice: "Allow microphone access, then press the dictation shortcut again.")
-            dictationGesture.runEnded(); return
-        case .denied:
-            dictationPill?.show(notice: "Microphone access is off. Allow Legato in System Settings, Privacy & Security.")
-            dictationGesture.runEnded(); return
-        }
+        guard microphoneReady() else { dictationGesture.runEnded(); return }
         Task { if await !dictation.start() { dictationGesture.runEnded() } }
     }
     /// Starts a meeting, or stops the one that records. A meeting and a dictation never share the microphone.
@@ -371,7 +297,7 @@ import Observation
     func beginMeeting(automatically: Bool) {
         guard meetings.phase == .idle else { return }
         switch permissions.mic {
-        case .granted: meetings.start(dictationActive: isDictating || starting || dictation.isActive, automatically: automatically)
+        case .granted: meetings.start(dictationActive: dictation.isActive, automatically: automatically)
         case .undetermined:
             if !automatically { Task { await permissions.requestMicrophone() } }
             meetings.flash("Allow microphone access, then start the meeting again.")
@@ -379,19 +305,19 @@ import Observation
             meetings.flash("Microphone access is off. Allow Legato in System Settings, Privacy & Security.")
         }
     }
-    /// While a meeting records, dictation and the composer say so and do not start.
+    /// While a meeting records, dictation and Magic say so and do not start.
     private func refusedByMeeting() -> Bool {
         guard let refusal = meetings.refusal else { return false }
-        meetings.flash("\(refusal). Stop it to dictate or compose.")
+        meetings.flash("\(refusal). Stop it to dictate or use Magic.")
         return true
     }
     private func stopDictation() { Task { await dictation.stop() } }
     private func cancelDictation() { Task { await dictation.cancel(); dictationGesture.runEnded() } }
     private func dispatch(_ action: HotkeyGesture.Action?) {
         switch action {
-        case .start: toggle()
-        case .stop: stopComposer()
-        case .cancel: cancelComposer()
+        case .start: startMagic()
+        case .stop: stopMagic()
+        case .cancel: magicTask?.cancel(); dictation.instruction.reset(); cancelDictation(); magicGesture.runEnded()
         case nil: break
         }
     }
@@ -427,4 +353,13 @@ import Observation
     }
     func reset() { armTask?.cancel(); armTask = nil; gesture.reset() }
     func runEnded() { gesture.runEnded() }
+}
+
+/// Only the app/field captured before speech may receive an unreadable field's final-text fallback.
+@MainActor private final class MacFallbackOwner {
+    var pid: pid_t?
+    var target: AXTextTarget?
+    var keys = 0
+    var allowed = false
+    var generation = 0
 }

@@ -21,6 +21,16 @@ if [ "$platform" = ios ]; then
   files+=(Debug/IOSMeetingFixture.swift Debug/IOSMeetingFixture.swift Debug/IOSMeetingFixture.swift)
 fi
 if [ "$platform" = mac ]; then
+  # Mac retired the dedicated composer and its probe. Keep scanning the old leak strings,
+  # but validate controls against the field Magic fixture that replaced that source.
+  controls[2]=magic-toggle
+  controls[4]=MacOfflineInstructionRunner
+  files[4]=Debug/MacOfflineInstructionRunner.swift
+  controls[5]=LegatoDataRoot
+  files[5]=MacAppController.swift
+  needles+=(MacOfflineInstructionRunner LegatoDataRoot LegatoOfflineFixture)
+  controls+=(MacOfflineInstructionRunner LegatoDataRoot LegatoOfflineFixture)
+  files+=(Debug/MacOfflineInstructionRunner.swift MacAppController.swift MacAppController.swift)
   needles+=(LEGATO_MAC_ROOT LegatoMeetingsDropSonioxAfter LegatoMeetingsNoSonioxKey LegatoMeetingsNoClaudeKey)
   controls+=(LEGATO_MAC_ROOT LegatoMeetingsDropSonioxAfter LegatoMeetingsNoSonioxKey LegatoMeetingsNoClaudeKey)
   files+=(Debug/DebugBridge.swift Debug/MeetingsFaults.swift Debug/MeetingsFaults.swift Debug/MeetingsFaults.swift)
