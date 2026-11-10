@@ -57,8 +57,13 @@ public struct TypewriterReveal: Sendable, Equatable {
         if let stoppedRun, stoppedRun == state.runID { return ProxyPlan(ops: [], cursor: cursor) }
         if let transaction = pending {
             guard transaction.runID == state.runID, transaction.documentID == documentID else {
+                let previous = cursorBeforeFieldClear(fallback: cursor)
                 pending = nil
-                return ProxyPlan(ops: [], cursor: cursor)
+                // A final publication may be the only update for this new run. Start it now;
+                // returning with no ticks would silently drop the entire insertion.
+                return plan(state: state, cursor: previous, contextBefore: contextBefore, documentID: documentID,
+                            animated: animated, elapsedMs: elapsedMs, contextAfter: contextAfter,
+                            hasSelection: hasSelection, movesByCharacters: movesByCharacters)
             }
             if state.delivery == .live, let cursor, cursor.runID == transaction.runID,
                cursor.sentCount != (transaction.cursor?.sentCount ?? 0) {

@@ -42,6 +42,20 @@ private struct Rig {
 @Suite struct TypewriterRevealTests {
     private let sentence = "Hello world, this is a typewriter test."
 
+    @Test(arguments: [false, true])
+    func aNewFinalRunDuringUnconfirmedTypingIsNotDropped(tentative: Bool) {
+        var rig = Rig()
+        let old = hostState(runID: "old", committed: tentative ? "" : "abc", volatile: tentative ? "abc" : "")
+        rig.feed(old)
+        rig.feed(old, elapsedMs: 33)
+        #expect(rig.field == "a")
+        let next = hostState(runID: "next", phase: .idle, committed: "Z")
+        rig.feed(next)
+        rig.drain(next)
+        #expect(rig.field == (tentative ? "Z" : "a Z"))
+        #expect(rig.cursor?.runID == "next" && rig.cursor?.finalApplied == true)
+    }
+
     // MARK: draining
 
     @Test func aNewRunTypesNothingUntilTheFirstTick() {
