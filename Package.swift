@@ -50,7 +50,7 @@ let package = Package(
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore", "LegatoAudioBridge"]),
         .target(name: "LegatoAppServices", dependencies: ["LegatoVoiceIdentity", "LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings", "LegatoKeyboardCore", .target(name: "LegatoMac", condition: .when(platforms: [.macOS]))]),
         .testTarget(name: "LegatoAppServicesTests", dependencies: ["LegatoAppServices", "LegatoCore", "LegatoVocabulary", "LegatoMeetings", .target(name: "LegatoMac", condition: .when(platforms: [.macOS])), "LegatoKeyboardCore"]),
-        .target(name: "LegatoMac", dependencies: ["LegatoCore"]),
+        .target(name: "LegatoMac", dependencies: ["LegatoCore", "LegatoKeyboardCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
         .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoClaudeTests", dependencies: ["LegatoClaude", "LegatoCore"]),

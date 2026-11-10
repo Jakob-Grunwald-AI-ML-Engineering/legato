@@ -28,7 +28,7 @@ private func run(_ shadow: String, cursor: Int? = nil, _ target: String) -> (pla
         let deleted = plan.ops.reduce(0) { if case .deleteBackward(let n) = $1 { $0 + n } else { $0 } }
         #expect(inserts == ["ß", "ö"] && deleted == 2, "\"ss\" becomes \"ß\", \"ö\" goes in")
         // From the end back to "w|rld": the emoji family is 8 UTF-16 units but one character, and the move counts units.
-        #expect(plan.ops.first == .deleteBackward(2) && plan.ops.contains(.move(-19)))
+        #expect(Array(plan.ops.prefix(2)) == [.deleteBackward(1), .deleteBackward(1)] && plan.ops.contains(.move(-19)))
     }
 
     @Test func aCharacterFlipTwoWordsBackLeavesTheWordsAfterItAlone() {
@@ -85,4 +85,51 @@ private func run(_ shadow: String, cursor: Int? = nil, _ target: String) -> (pla
         #expect(r2.text == "beta")
         #expect(r2.cursor == 0)
     }
+    @Test func whitespaceChangesPreserveEveryOtherCharacterEvenInCoarseMode() {
+        let old = "We  sail home. The weather is nice."
+        let new = "We sail home. The weather is nice."
+        let plan = ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: new, coarse: true, characters: true)
+        #expect(plan.ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(1)])
+        #expect(!plan.ops.contains { if case .insert = $0 { true } else { false } })
+        #expect(ShadowEditPlanner.simulate(ops: plan.ops, shadow: old, cursor: old.utf16.count).text == new)
+    }
+
+    @Test func largeChangedSpansNeverFallBackToRetypingTheirMatchingCharacters() {
+        let old = String(repeating: "ab", count: 200) + "X" + String(repeating: "cd", count: 200)
+        let new = "Z" + String(repeating: "ab", count: 200) + "Y" + String(repeating: "cd", count: 200) + "Q"
+        let plan = ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: new, characters: true)
+        #expect(plan.ops.reduce(0) { result, op in
+            if case .deleteBackward(let count) = op { result + count } else { result }
+        } == 1)
+        #expect(plan.ops.compactMap { if case .insert(let text) = $0 { text } else { nil } }.joined().count == 3)
+        #expect(ShadowEditPlanner.simulate(ops: plan.ops, shadow: old, cursor: old.utf16.count).text == new)
+    }
+
+    @Test func smallArbitraryEditsMatchAnIndependentMinimumCostOracle() {
+        var samples = [""]
+        var layer = [""]
+        for _ in 0..<4 {
+            layer = layer.flatMap { prefix in ["a", "b", " "].map { prefix + $0 } }
+            samples += layer
+        }
+        for old in samples { for new in samples {
+            let a = Array(old), b = Array(new)
+            var costs = (0...b.count).map { $0 }
+            for i in a.indices {
+                var row = [i + 1] + [Int](repeating: 0, count: b.count)
+                for j in b.indices { row[j + 1] = a[i] == b[j] ? costs[j] : min(costs[j + 1], row[j]) + 1 }
+                costs = row
+            }
+            let plan = ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: new, characters: true)
+            let cost = plan.ops.reduce(0) { total, op in
+                switch op { case .move: total; case .deleteBackward(let n): total + n; case .insert(let text): total + text.count }
+            }
+            #expect(cost == costs[b.count])
+            #expect(plan.ops.allSatisfy { op in
+                switch op { case .move: true; case .deleteBackward(let n): n == 1; case .insert(let text): text.count == 1 }
+            })
+            #expect(ShadowEditPlanner.simulate(ops: plan.ops, shadow: old, cursor: old.utf16.count).text == new)
+        } }
+    }
+
 }

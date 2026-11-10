@@ -3,28 +3,28 @@ import Testing
 @testable import LegatoMac
 
 @MainActor @Suite struct TypewriterTests {
-    @Test func stepsAreWordsWithTheirTrailingWhitespaceAndJoinBackExactly() {
+    @Test func stepsAreIndividualGraphemesAndJoinBackExactly() {
         let text = "Hallo  Welt, wie geht's?\nNeue Zeile 😀 fertig."
         let steps = TypewriterPlan.steps(text)
         #expect(steps.joined() == text)
-        #expect(steps.first == "Hallo  " && steps.count == 8)
+        #expect(steps.first == "H" && steps.count == text.count && steps.allSatisfy { $0.count == 1 })
         #expect(TypewriterPlan.steps("").isEmpty)
     }
 
-    @Test func longTextsGroupWordsIntoAtMostThirtySteps() {
+    @Test func longTextsKeepIndividualCharacterSteps() {
         let text = (1...450).map { "w\($0)" }.joined(separator: " ")
         let steps = TypewriterPlan.steps(text)
-        #expect(steps.count <= TypewriterPlan.maxSteps && steps.joined() == text)
+        #expect(steps.count == text.count && steps.joined() == text)
     }
 
-    @Test func everyTakeTakesTheSameTimeWhateverItsLength() {
-        for count in [2, 3, 5, 20, 30] {
+    @Test func longTakesKeepAVisiblePauseBetweenCharacters() {
+        for count in [2, 3, 5] {
             let total = TypewriterPlan.interval(steps: count) * (count - 1)
             #expect(total <= TypewriterPlan.duration && TypewriterPlan.duration - total < .microseconds(1))
         }
         #expect(TypewriterPlan.interval(steps: 3) == .milliseconds(150))
         let long = TypewriterPlan.steps((1...450).map { "w\($0)" }.joined(separator: " "))
-        #expect(TypewriterPlan.interval(steps: long.count) * (long.count - 1) <= TypewriterPlan.duration)
+        #expect(TypewriterPlan.interval(steps: long.count) == .milliseconds(20))
         #expect(TypewriterPlan.interval(steps: 1) == .zero && TypewriterPlan.interval(steps: 0) == .zero)
     }
 
@@ -66,13 +66,13 @@ import Testing
         var pauses: [Duration] = []
         let result = await Typewriter.run("eins zwei drei", sleep: { pauses.append($0) }) { written.append($0); return true }
         #expect(result == .init(remainder: nil, wroteAny: true))
-        #expect(written == ["eins ", "zwei ", "drei"] && pauses == [.milliseconds(150), .milliseconds(150)])
+        #expect(written == "eins zwei drei".map(String.init) && pauses.count == written.count - 1)
     }
 
     @Test func runStopsAtTheFirstFailedStepAndReturnsTheRest() async {
         var count = 0
         let result = await Typewriter.run("eins zwei drei vier", sleep: { _ in }) { _ in count += 1; return count < 3 }
-        #expect(result == .init(remainder: "drei vier", wroteAny: true))
+        #expect(result == .init(remainder: "ns zwei drei vier", wroteAny: true))
         let none = await Typewriter.run("eins zwei", sleep: { _ in }) { _ in false }
         #expect(none == .init(remainder: "eins zwei", wroteAny: false))
     }

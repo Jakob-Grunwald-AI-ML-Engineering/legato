@@ -111,6 +111,7 @@ import Observation
             case .copied(let reason): return .copied(message: reason.toast, reason: reason)
             }
         }, frontmostApp: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
+        fieldEditor.typewriter = { [settings] in settings.typewriter }
         instruction.field = fieldEditor
         fieldEditor.report = { [weak dictation] in dictation?.report($0) }
         fieldEditor.recover = { [weak paster] in paster?.copy($0) }

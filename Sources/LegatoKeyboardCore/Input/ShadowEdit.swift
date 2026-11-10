@@ -19,29 +19,15 @@ public struct ShadowPlan: Sendable, Equatable {
     }
 }
 
-/// Word-level diff of a mirrored field against a target text, as proxy ops. The field is tokenized into
-/// words, whitespace runs and single punctuation marks; an LCS over tokens picks the tokens that stay;
-/// the rest becomes hunks, applied back-to-front so earlier offsets stay valid. The cursor goes back to
-/// its logical place: shifted by edits before it, at the end of the replacement when it sat inside one.
-///
-/// `coarse` (an instruction's rewrite, where every op is one round trip to a slow host): neighbouring hunks with at most
-/// `mergeGapWords` unchanged words between them become one replace, and when more than `wholeShare` of the words
-/// change, everything from the first change to the last is one delete and one insert. A small edit stays word-level.
+/// Exact minimal insertion/deletion diff over extended grapheme clusters. Unchanged characters
+/// stay in the host, including whitespace and punctuation. Cursor moves use UTF-16 units.
 public enum ShadowEditPlanner {
-    public static let mergeGapWords = 3
-    public static let wholeShare = 0.5
-
-    /// - Parameters:
-    ///   - cursor: UTF-16 offset into `shadow` (clamped).
-    ///   - coarse: see the type's note (instruction edits).
-    ///   - characters: refine each changed word span to the characters that differ (a character-level diff inside
-    ///     it), and insert one character per op: a typewriter edit of only what changed ("whether" to "weather"
-    ///     deletes "h" and inserts "a"). Live flips only; not combined with `coarse`.
+    /// `cursor` is a UTF-16 offset. `characters` emits one deletion or insertion per grapheme;
+    /// otherwise adjacent changed characters may share an operation. `coarse` has no effect.
     public static func plan(shadow: String, cursor: Int, target: String, coarse: Bool = false, characters: Bool = false) -> ShadowPlan {
         let old = Array(shadow), new = Array(target)
         let cursorIndex = characterIndex(ofUTF16: cursor, in: old)
-        let words = diff(old, new)
-        let fine = characters ? words.flatMap { refine($0, old: old) } : words
+        let fine = diff(old, new)
 
         // Logical cursor in the new text.
         var shift = 0
@@ -53,7 +39,7 @@ public enum ShadowEditPlanner {
         }
         let newCursorIndex = newCursor ?? cursorIndex + shift
         // The cursor's place comes from the word-level hunks; merged hunks only change how the text gets there.
-        let hunks = coarse ? merged(fine, old: old) : fine
+        let hunks = fine // `coarse` is retained for source compatibility; it never retypes unchanged text.
 
         var doc = old
         var at = cursorIndex
@@ -69,7 +55,8 @@ public enum ShadowEditPlanner {
         for h in hunks.reversed() {
             move(to: h.end)
             if h.end > h.start {
-                ops.append(.deleteBackward(h.end - h.start))
+                if characters { ops += (h.start..<h.end).map { _ in .deleteBackward(1) } }
+                else { ops.append(.deleteBackward(h.end - h.start)) }
                 doc.removeSubrange(h.start..<h.end)
                 at = h.start
             }
@@ -141,105 +128,60 @@ public enum ShadowEditPlanner {
 
     struct Hunk { var start: Int; var end: Int; var text: [Character] }
 
-    enum TokenClass { case word, space, mark }
-
-    static func tokenize(_ chars: [Character]) -> [(range: Range<Int>, text: String)] {
-        func cls(_ c: Character) -> TokenClass {
-            if c.isWhitespace { return .space }
-            if c.isLetter || c.isNumber || c == "'" || c == "\u{2019}" { return .word }
-            return .mark
-        }
-        var out: [(Range<Int>, String)] = []
-        var i = 0
-        while i < chars.count {
-            let k = cls(chars[i])
-            var j = i + 1
-            if k != .mark { while j < chars.count, cls(chars[j]) == k { j += 1 } }
-            out.append((i..<j, String(chars[i..<j])))
-            i = j
-        }
-        return out
-    }
-
+    /// Hirschberg LCS: exact shortest edit script, linear auxiliary memory. Common boundaries
+    /// and disjoint alphabets avoid the quadratic work for typical streaming appends and rewrites.
     static func diff(_ old: [Character], _ new: [Character]) -> [Hunk] {
-        if old == new { return [] }
-        let a = tokenize(old), b = tokenize(new)
-        var pre = 0
-        while pre < a.count, pre < b.count, a[pre].text == b[pre].text { pre += 1 }
-        var suf = 0
-        while suf < a.count - pre, suf < b.count - pre, a[a.count - 1 - suf].text == b[b.count - 1 - suf].text { suf += 1 }
-        let n = a.count - pre - suf, m = b.count - pre - suf
-        // LCS table over the differing middle.
-        var table = [[Int32]](repeating: [Int32](repeating: 0, count: m + 1), count: n + 1)
-        if n > 0, m > 0 {
-            for i in stride(from: n - 1, through: 0, by: -1) {
-                for j in stride(from: m - 1, through: 0, by: -1) {
-                    table[i][j] = a[pre + i].text == b[pre + j].text ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+        var pairs: [(Int, Int)] = []
+        func lengths(_ ar: Range<Int>, _ br: Range<Int>, reversed: Bool) -> [Int] {
+            var row = [Int](repeating: 0, count: br.count + 1)
+            for ai in 0..<ar.count {
+                let a = old[reversed ? ar.upperBound - 1 - ai : ar.lowerBound + ai]
+                var diagonal = 0
+                for bi in 0..<br.count {
+                    let previous = row[bi + 1]
+                    let b = new[reversed ? br.upperBound - 1 - bi : br.lowerBound + bi]
+                    row[bi + 1] = a == b ? diagonal + 1 : max(row[bi], previous)
+                    diagonal = previous
                 }
             }
+            return row
         }
-        // Matched token pairs (old index, new index), including the common prefix/suffix.
-        var pairs: [(Int, Int)] = (0..<pre).map { ($0, $0) }
-        var i = 0, j = 0
-        while i < n, j < m {
-            if a[pre + i].text == b[pre + j].text { pairs.append((pre + i, pre + j)); i += 1; j += 1 }
-            else if table[i + 1][j] >= table[i][j + 1] { i += 1 } else { j += 1 }
-        }
-        for k in 0..<suf { pairs.append((a.count - suf + k, b.count - suf + k)) }
-
-        func oldStart(_ t: Int) -> Int { t < a.count ? a[t].range.lowerBound : old.count }
-        func newStart(_ t: Int) -> Int { t < b.count ? b[t].range.lowerBound : new.count }
-        var hunks: [Hunk] = []
-        var po = 0, pn = 0 // next unmatched token indices
-        for (mo, mn) in pairs + [(a.count, b.count)] {
-            if mo > po || mn > pn {
-                hunks.append(Hunk(start: oldStart(po), end: oldStart(mo), text: Array(new[newStart(pn)..<newStart(mn)])))
+        func match(_ ar: Range<Int>, _ br: Range<Int>) {
+            var lo = ar.lowerBound, ln = br.lowerBound
+            var hi = ar.upperBound, hn = br.upperBound
+            while lo < hi, ln < hn, old[lo] == new[ln] { pairs.append((lo, ln)); lo += 1; ln += 1 }
+            var suffix = 0
+            while lo < hi, ln < hn, old[hi - 1] == new[hn - 1] { hi -= 1; hn -= 1; suffix += 1 }
+            if lo < hi, ln < hn {
+                if hi - lo == 1 {
+                    if let j = (ln..<hn).first(where: { new[$0] == old[lo] }) { pairs.append((lo, j)) }
+                } else if !Set(old[lo..<hi]).isDisjoint(with: new[ln..<hn]) {
+                    let mid = lo + (hi - lo) / 2
+                    // Keep the row buffers outside recursive frames: auxiliary storage stays linear.
+                    let split: Int = {
+                        let left = lengths(lo..<mid, ln..<hn, reversed: false)
+                        let right = lengths(mid..<hi, ln..<hn, reversed: true)
+                        var best = 0, score = -1
+                        for j in 0...(hn - ln) {
+                            let candidate = left[j] + right[hn - ln - j]
+                            if candidate > score { score = candidate; best = j }
+                        }
+                        return ln + best
+                    }()
+                    match(lo..<mid, ln..<split)
+                    match(mid..<hi, split..<hn)
+                }
             }
+            for k in 0..<suffix { pairs.append((hi + k, hn + k)) }
+        }
+        match(0..<old.count, 0..<new.count)
+        var hunks: [Hunk] = []
+        var po = 0, pn = 0
+        for (mo, mn) in pairs + [(old.count, new.count)] {
+            if mo > po || mn > pn { hunks.append(Hunk(start: po, end: mo, text: Array(new[pn..<mn]))) }
             po = mo + 1; pn = mn + 1
         }
         return hunks
-    }
-
-    /// Hunks joined into fewer replaces (see `coarse`); the unchanged text between two joined hunks is retyped.
-    static func merged(_ hunks: [Hunk], old: [Character]) -> [Hunk] {
-        guard hunks.count > 1, let first = hunks.first else { return hunks }
-        func words(_ range: Range<Int>) -> Int {
-            tokenize(Array(old[range])).filter { $0.text.first.map { $0.isLetter || $0.isNumber } == true }.count
-        }
-        func join(_ a: Hunk, _ b: Hunk) -> Hunk { Hunk(start: a.start, end: b.end, text: a.text + old[a.end..<b.start] + b.text) }
-        let total = words(0..<old.count)
-        let changed = hunks.reduce(0) { $0 + words($1.start..<$1.end) }
-        // Mostly rewritten (or only inserted into): one replace from the first change to the last.
-        if total == 0 || Double(changed) > Double(total) * wholeShare { return [hunks.dropFirst().reduce(first, join)] }
-        var out = [first]
-        for h in hunks.dropFirst() {
-            if words(out[out.count - 1].end..<h.start) <= mergeGapWords { out[out.count - 1] = join(out[out.count - 1], h) } else { out.append(h) }
-        }
-        return out
-    }
-
-    /// A word-level hunk split into the character runs that differ (an LCS over its characters), positions in `old`.
-    static func refine(_ hunk: Hunk, old: [Character]) -> [Hunk] {
-        let a = Array(old[hunk.start..<hunk.end]), b = hunk.text
-        guard !a.isEmpty, !b.isEmpty, a.count * b.count <= 40_000 else { return [hunk] }
-        let n = a.count, m = b.count
-        var table = [[Int32]](repeating: [Int32](repeating: 0, count: m + 1), count: n + 1)
-        for i in stride(from: n - 1, through: 0, by: -1) {
-            for j in stride(from: m - 1, through: 0, by: -1) {
-                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
-            }
-        }
-        var out: [Hunk] = []
-        var i = 0, j = 0, pi = 0, pj = 0
-        func close(_ mi: Int, _ mj: Int) {
-            if mi > pi || mj > pj { out.append(Hunk(start: hunk.start + pi, end: hunk.start + mi, text: Array(b[pj..<mj]))) }
-        }
-        while i < n, j < m {
-            if a[i] == b[j] { close(i, j); i += 1; j += 1; pi = i; pj = j }
-            else if table[i + 1][j] >= table[i][j + 1] { i += 1 } else { j += 1 }
-        }
-        close(n, m)
-        return out
     }
 
     static func characterIndex(ofUTF16 offset: Int, in chars: [Character]) -> Int {
