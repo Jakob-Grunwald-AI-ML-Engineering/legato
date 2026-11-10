@@ -3,6 +3,7 @@ import Foundation
 import LegatoDevHarness
 import LegatoAppServices
 import AppKit
+import ApplicationServices
 
 @MainActor enum DebugBridge {
     static var root: URL {
@@ -91,7 +92,16 @@ import AppKit
         harness.register("magic-state") { _ in MacAppController.shared.dictation.instruction.debugState }
         harness.register("field-fixture-state") { _ in
             let app = MacAppController.shared
-            return ["offline": MacDictationSession.offlineFixture,
+            let capture: String
+            switch AXTextTarget.captureFocused() {
+            case .target: capture = "readable"
+            case .none: capture = "unavailable"
+            case .secure: capture = "secure-or-unverified"
+            }
+            return ["capture": capture, "offline": MacDictationSession.offlineFixture,
+                    "axTrusted": AXIsProcessTrusted(),
+                    "frontmostPID": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
+                    "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",
                     "magicHotkey": app.settings.hotkey?.displayName ?? "", "dictationHotkey": app.settings.dictationHotkey?.displayName ?? "",
                     "send": app.settings.dictationSend.rawValue, "hotkeysEnabled": app.permissions.hotkeyTapActive]
         }
