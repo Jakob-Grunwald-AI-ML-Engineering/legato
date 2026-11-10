@@ -613,7 +613,8 @@ final class KeyboardController {
         let plan = reveal.plan(
             state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID,
             animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs,
-            contextAfter: document.contextAfter, hasSelection: document.selectedText?.isEmpty == false)
+            contextAfter: document.contextAfter, hasSelection: document.selectedText?.isEmpty == false,
+            movesByCharacters: charactersField != nil && charactersField == document.documentID)
         perform(plan.ops)
         startTickerIfNeeded()
         if let updated = plan.cursor, updated != before {
