@@ -138,7 +138,13 @@ final class DictationPillController {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.becomesKeyOnlyIfNeeded = true
-        panel.contentView = DictationPillHostingView(rootView: DictationPillView(session: session, model: model, presentation: presentation))
+        let hosting = DictationPillHostingView(rootView: DictationPillView(session: session, model: model, presentation: presentation))
+        // The controller owns the panel frame. SwiftUI's default min/max negotiation feeds
+        // the GeometryReader's proposed size back into AppKit when Magic adds its actions.
+        hosting.sizingOptions = []
+        hosting.frame = NSRect(origin: .zero, size: Self.size)
+        hosting.autoresizingMask = [.width, .height]
+        panel.contentView = hosting
         return panel
     }
 
@@ -154,7 +160,7 @@ final class DictationPillController {
             frame.origin.y -= 6
         }
         if model.style != style { model.style = style }
-        panel.setFrame(frame, display: true)
+        if panel.frame != frame { panel.setFrame(frame, display: true) }
     }
 }
 
