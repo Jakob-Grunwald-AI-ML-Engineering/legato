@@ -2,7 +2,7 @@ import LegatoCore
 import Testing
 @testable import LegatoMac
 
-/// A cleaned text reaching a field the raw text streamed into: Replace swaps it in with one verified write
+/// A cleaned text reaching a field the raw text streamed into: Replace applies verified minimal edits
 /// while the field still ends with the raw text, Clipboard leaves the raw text and copies, Hold writes the
 /// cleaned text once at the end.
 @MainActor
@@ -27,12 +27,15 @@ import Testing
         #expect(field.string == "Dear Hello, world.")
     }
 
-    @Test func replaceIsOneWrite() {
+    @Test func replacePreservesUnchangedCharacters() {
         let field = FakeTextTarget()
         let writer = streamed(field)
         let before = field.writes.count
         _ = writer.finish(rawText: raw, cleanedText: cleaned, delivery: .replace)
-        #expect(field.writes.count == before + 1)
+        #expect(field.string == "Hello, world.")
+        let edits = field.writes.dropFirst(before)
+        #expect(edits.reduce(0) { $0 + $1.range.length } == 1)
+        #expect(edits.reduce(0) { $0 + $1.text.count } == 3)
     }
 
     @Test func replaceKeepsTrailingWhitespaceTheFieldGot() {

@@ -134,7 +134,7 @@ private struct TickRig {
 
     /// Whether the field may be typed into now.
     mutating func look(_ state: HostState) -> Bool {
-        switch watch.check(state: state, cursor: cursor, documentID: "doc-A", contextBefore: field, hasText: !field.isEmpty, now: at(ms)) {
+        switch watch.check(state: state, cursor: reveal.cursorBeforeFieldClear(fallback: cursor), documentID: "doc-A", contextBefore: field, hasText: !field.isEmpty, now: at(ms)) {
         case .notCleared: return true
         case .recheck(let due):
             recheckAt = due
@@ -148,7 +148,7 @@ private struct TickRig {
     /// The user presses a key: a held clear is resolved first, then the key lands in the field.
     mutating func userKey(_ text: String, _ state: HostState) {
         if case .cleared(let sent) = watch.resolveHeld(
-            state: state, cursor: cursor, documentID: "doc-A", contextBefore: field, hasText: !field.isEmpty) {
+            state: state, cursor: reveal.cursorBeforeFieldClear(fallback: cursor), documentID: "doc-A", contextBefore: field, hasText: !field.isEmpty) {
             recheckAt = nil
             if let sent { cursor = sent }
         }

@@ -128,6 +128,7 @@ private func state(
         rig.feed(listening)
         rig.drain(listening)
         rig.field += "and then I typed"
+        rig.feed(final)
         rig.drain(final)
         #expect(rig.field == raw + "and then I typed")
         #expect(rig.cursor?.finalReplaced == false)

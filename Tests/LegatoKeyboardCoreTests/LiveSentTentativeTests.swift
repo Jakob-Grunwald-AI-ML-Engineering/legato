@@ -115,7 +115,7 @@ private struct SendRig {
         reported = ""
         reportedAfter = ""
         cursor = try #require(ProxyEditPlanner.fieldCleared(
-            state: state, cursor: cursor, documentID: "doc-A", contextBefore: "", hasText: false))
+            state: state, cursor: reveal.cursorBeforeFieldClear(fallback: cursor), documentID: "doc-A", contextBefore: "", hasText: false))
     }
 }
 

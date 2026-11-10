@@ -3,8 +3,8 @@ import Testing
 @testable import LegatoMac
 
 /// Live cleanup on the Mac: a revision (a rolling pass over the run's whole raw text) replaces what the field
-/// shows for the run, followed by the raw text committed after the pass's input, with one verified write of
-/// only the part that changed. Only while the field still reads as the writer left it and the caret is right
+/// shows for the run, followed by the raw text committed after the pass's input, with verified writes of
+/// only the characters that changed. Only while the field still reads as the writer left it and the caret is right
 /// after its text; otherwise the revision, and every later one, is skipped and the writer keeps streaming.
 @MainActor
 @Suite struct FieldWriterLiveTests {
@@ -20,13 +20,15 @@ import Testing
         return writer
     }
 
-    @Test func aRevisionReplacesTheRunsTextWithOneVerifiedWrite() {
+    @Test func aRevisionPreservesTheRunsUnchangedCharacters() {
         let field = FakeTextTarget("Dear ")
         let writer = streamed(field)
         let before = field.writes.count
         writer.apply(.revise(whole))
         #expect(field.string == "Dear Hello world. How are you? ")
-        #expect(field.writes.count == before + 1)
+        let edits = field.writes.dropFirst(before)
+        #expect(edits.reduce(0) { $0 + $1.range.length } == 2)
+        #expect(edits.reduce(0) { $0 + $1.text.count } == 4)
         #expect(writer.degradeReason == nil)
     }
 
@@ -41,11 +43,13 @@ import Testing
         let field = FakeTextTarget("Dear ")
         let writer = streamed(field)
         writer.apply(.revise(hello))
+        let before = field.writes.count
         writer.apply(.revise(whole))
         #expect(field.string == "Dear Hello world. How are you? ")
-        let last = field.writes.last
-        #expect(last?.range == UTF16Range(location: 18, length: 12), "from the first changed character to the end")
-        #expect(last?.text == "How are you? ")
+        let edits = field.writes.dropFirst(before)
+        #expect(edits.reduce(0) { $0 + $1.range.length } == 1)
+        #expect(edits.reduce(0) { $0 + $1.text.count } == 2)
+        #expect(edits.filter { !$0.text.isEmpty }.map(\.text).sorted() == ["?", "H"])
     }
 
     @Test func aLaterPassCanChangeAnEarlierPhrase() {
