@@ -352,11 +352,13 @@ public struct RunShadow: Sendable, Equatable {
             if region.isEmpty, !avoidsMoves, let next = following, !next.isWhitespace, !Self.closingMarks.contains(next) {
                 // The run starts in front of text that follows without a space: one goes in behind it, once, and the
                 // cursor stays in front of that space, so the run keeps typing where it is.
-                queue = [.insert(slice + " "), .move(-1)]; spaceAfterRegion = true
+                queue = animated ? Array(slice + " ").map { .insert(String($0)) } + [.move(-1)]
+                                 : [.insert(slice + " "), .move(-1)]
+                spaceAfterRegion = true
             } else {
                 queue = [.insert(slice)]
             }
-            paced = false
+            paced = animated
             region += slice
             inFlightWhole = region == target; self.target = target
         } else {
@@ -381,9 +383,10 @@ public struct RunShadow: Sendable, Equatable {
     }
 
     /// A key of this keyboard is about to freeze the run (`freeze(.keystroke)`) while the typewriter has revealed only
-    /// part of a word: the op that types the rest of it first (with marks stuck to it, and a space when `key` starts
+    /// part of a word: a proposed insertion of its remainder (with marks stuck to it, and a space when `key` starts
     /// with a letter or digit), so the key lands after the word. Nil when nothing is cut off, ops are queued, or the
-    /// field does not confirm the last op.
+    /// field does not confirm the last op. This advances a proposed shadow only: callers must play the returned
+    /// text through a confirmed character queue and install this shadow only after that queue succeeds.
     public mutating func finishWord(beforeKey key: String, reportedBefore: String, reportedAfter: String) -> ShadowOp? {
         guard queue.isEmpty, lastMove == nil, !settling, let last = region.last, last.isLetter || last.isNumber,
               target.count > region.count, target.hasPrefix(region),

@@ -132,14 +132,29 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(shadow.frozenSegments == 2)
     }
 
-    @Test func aKeyWhileAWordIsHalfRevealedFinishesTheWordFirst() {
+    @Test func aKeyWhileAWordIsHalfRevealedFinishesTheWordFirst() throws {
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         let snap = snapshot(1, [head(0, "enough soil for the beds")])
         // The typewriter has revealed "enough so".
         while field.text != "enough so" { tick(&shadow, &field, snap, animated: true, elapsedMs: 1) }
-        let op = shadow.finishWord(beforeKey: "X", reportedBefore: field.before, reportedAfter: field.after)
+        var proposed = shadow
+        let op = proposed.finishWord(beforeKey: "X", reportedBefore: field.before, reportedAfter: field.after)
         #expect(op == .insert("il "))
-        field.apply(op.map { [$0] } ?? [])
+        let edit = ScopedEdit(instructionID: "finish-word", documentID: nil, before: "", after: "", target: "il ")
+        let plan = try ScopedEditPlanner.plan(edit, windowBefore: field.before, windowAfter: field.after, selected: nil).get()
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: field.before)
+        var finished = false, inserts: [String] = []
+        for _ in 0..<40 {
+            let action = queue.step(reportedBefore: field.before, reportedAfter: field.after, hasSelection: false, elapsedMs: 30)
+            if case .send(let operation) = action {
+                if case .insert(let text) = operation { inserts.append(text) }
+                field.apply([operation])
+            }
+            #expect(!field.text.contains("X"), "The triggering key waits until the final remainder character confirms")
+            if action == .done { finished = true; break }
+        }
+        #expect(finished && inserts == ["i", "l", " "] && field.before == "enough soil ")
+        shadow = proposed
         shadow.freeze(.keystroke)
         field.before += "XY "
         tick(&shadow, &field, snap, settle: true)
@@ -211,6 +226,20 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(field.text == "Start here. Bring the laptop. End here.", "One space, not one per step")
         tick(&shadow, &field, snapshot(3, [final(0, "Bring the laptop."), head(1, "and chargers")]))
         #expect(field.text == "Start here. Bring the laptop. and chargers End here.")
+    }
+
+    @Test func animatedInsertionBeforeFollowingTextAlsoRevealsItsSeparatorIndividually() {
+        var shadow = RunShadow(runID: "r"), field = Field(before: "Start. ", after: "End.")
+        let snap = snapshot(1, [head(0, "Bring it")])
+        var operations: [ShadowOp] = [], applied = false
+        for _ in 0..<80 {
+            let step = tick(&shadow, &field, snap, animated: true, elapsedMs: 30, drain: false)
+            operations += step.ops
+            if step.applied && !shadow.isBusy { applied = true; break }
+        }
+        #expect(applied && field.before == "Start. Bring it" && field.after == " End.")
+        #expect(operations.allSatisfy { if case .insert(let text) = $0 { return text.count == 1 }; return true })
+        #expect(operations.contains(.insert(" ")))
     }
 
     @Test func noSpaceIsAddedBeforeAWhitespaceOrClosingMarkOrAtTheEndOfTheField() {

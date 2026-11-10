@@ -735,17 +735,13 @@ final class KeyboardController {
     }
 
     /// A key, a completion or a cursor pan: the user took over, so the rest of the line being typed is dropped and
-    /// the following lines go in at the new cursor. `key`: the text a key is about to type; a word of the live run the
-    /// typewriter has only half revealed is finished first, so the key lands after it. Returns whether that typed.
-    @discardableResult
-    private func interruptDictation(_ cause: RunShadow.FreezeCause = .keystroke, key: String? = nil) -> Bool {
-        let finished = key.map(finishLiveWord(beforeKey:)) ?? false
+    /// the following lines go in at the new cursor. Partial live-word completion is scheduled before this freeze.
+    private func interruptDictation(_ cause: RunShadow.FreezeCause = .keystroke) {
         freezeLiveRun(cause)
-        guard let upTo = typist.interrupt() else { return finished }
+        guard let upTo = typist.interrupt() else { return }
         acknowledgeDictation(upTo: upTo)
         if !typist.needsTicks { stopDictationTicker() }
         trace?("dictation interrupted")
-        return finished
     }
 
     private func acknowledgeDictation(upTo: Int) {
@@ -824,7 +820,7 @@ final class KeyboardController {
     @ObservationIgnored private var liveRecoveryDismissed = false
     @ObservationIgnored private var liveTicker: Task<Void, Never>?
     /// A field in this keyboard session put its caret back after a live move (a page that re-renders its textarea):
-    /// later runs edit only by retyping at the end, never by moving the cursor.
+    /// later runs preserve the text whenever an interior edit would need a cursor move.
     @ObservationIgnored private var liveFieldResetsCaret = false
     /// A live run is being typed (the word row says "Listening…" instead of the words).
     private(set) var liveRunning = false
@@ -894,16 +890,37 @@ final class KeyboardController {
         syncRowTakeover()
     }
 
+    @ObservationIgnored private var finishingLiveWord = false
+
+    /// Finish the partial dictated word one confirmed character at a time, then replay the triggering key.
     private func finishLiveWord(beforeKey key: String) -> Bool {
-        guard !liveStepping, var shadow = liveShadow, liveSnapshot?.runID == shadow.runID, document.documentID == liveDocumentID,
-              claimLiveField(),
-              let op = shadow.finishWord(beforeKey: key, reportedBefore: document.contextBefore, reportedAfter: document.contextAfter)
-        else { return false }
-        liveShadow = shadow
-        liveStepping = true
-        defer { liveStepping = false }
-        performLive([op], expected: shadow.expectedBefore)
-        if case .insert(let text) = op { liveStats.applies += 1; liveStats.insertedChars += text.count }
+        guard !liveStepping, var shadow = liveShadow, liveSnapshot?.runID == shadow.runID,
+              document.documentID == liveDocumentID,
+              let op = shadow.finishWord(beforeKey: key, reportedBefore: document.contextBefore,
+                                         reportedAfter: document.contextAfter),
+              case .insert(let remainder) = op else { return false }
+        let expected = document.contextBefore + remainder
+        let edit = ScopedEdit(instructionID: UUID().uuidString, documentID: document.documentID,
+                              before: "", after: "", target: remainder)
+        let accepted = performVerified(edit) { [weak self] success in
+            guard let self else { return }
+            self.finishingLiveWord = false
+            if success {
+                if self.liveShadow?.runID == shadow.runID {
+                    self.liveShadow = shadow
+                    self.liveStats.applies += remainder.count
+                    self.liveStats.insertedChars += remainder.count
+                }
+                self.typing.ownEdit(contextBefore: expected)
+            } else {
+                self.fieldRestorationVerified = false
+            }
+            self.interruptDictation()
+        }
+        guard accepted else { return false }
+        finishingLiveWord = true
+        // This key waits for the remainder, and later keys join the same FIFO without aborting its completion.
+        holdInput(.type(key))
         return true
     }
 
@@ -1163,6 +1180,7 @@ final class KeyboardController {
     private func holdInput(_ input: HeldInput) {
         if heldInput.isEmpty { heldFieldID = document.documentID }
         heldInput.append(input); hasHeldInput = true
+        if finishingLiveWord { syncRowTakeover(); return }
         fieldOperationCancelled = true
         if let id = activeInstructionID { link.cancelInstruction(id) }
         syncRowTakeover()
@@ -1793,11 +1811,12 @@ final class KeyboardController {
         guard !isFieldBusy, activeInstructionID == nil, !hasHeldInput,
               claimDirectField(owner: .typing) else { holdInput(.type(text)); return false }
         versions = nil // the user moved on from the dictation
-        // A live word finished first moves the cursor: the caller's context is from before it.
-        let finished = interruptDictation(key: text)
+        // A partial live word completes through the verified queue before this key is replayed.
+        if finishLiveWord(beforeKey: text) { return true }
+        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
-        let before = finished ? typing.contextBefore : contextBefore ?? directContextBefore
+        let before = contextBefore ?? directContextBefore
         let selected = document.selectedText
         predictDirectField(before: before + text, after: document.contextAfter)
         document.insert(text)
@@ -1812,7 +1831,7 @@ final class KeyboardController {
         syncHistory()
         wordRow.keystroke(contextBefore: before + text)
         afterUserEdit()
-        return finished
+        return false
     }
 
     func deleteBackward(contextBefore: String? = nil) {
