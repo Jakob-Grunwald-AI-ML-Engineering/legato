@@ -4,6 +4,23 @@ import Testing
 struct FieldEditCoordinatorTests {
     private let start = FieldEditCoordinator.Window(documentID: "field", before: "Original", after: "", endsDocument: true)
 
+    @Test func anIdleDictationPollBetweenReadAndApplyDoesNotInvalidateTheRead() throws {
+        var owner = FieldEditCoordinator()
+        let revision = owner.observe(start)
+        let readValue = owner.begin(owner: .read, id: "read")
+        let read = try #require(readValue)
+        owner.confirm(read, window: start)
+        owner.finish(read, settled: true)
+        let idleValue = owner.begin(owner: .dictation, id: "idle-poll")
+        let idle = try #require(idleValue)
+        // An already settled run has no operation to issue, but the adapter still confirms its current position.
+        owner.confirm(idle, window: start)
+        owner.finish(idle, settled: true)
+        #expect(owner.revision == revision)
+        let apply = owner.begin(owner: .instruction, id: "apply", expectedRevision: revision)
+        #expect(apply != nil)
+    }
+
     @Test func aLateOwnEchoIsUncertainAndAnExternalChangeEndsItsCausalHistory() throws {
         var owner = FieldEditCoordinator()
         owner.observe(start)

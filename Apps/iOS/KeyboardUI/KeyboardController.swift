@@ -1493,6 +1493,7 @@ final class KeyboardController {
         fieldCoordinator.observe(fieldWindow)
         guard !link.instructionCancelled(edit.instructionID),
               let editLease = fieldCoordinator.begin(owner: .instruction, id: edit.id, expectedRevision: edit.revision) else {
+            trace?("instruction edit refused ownership expected=\(String(describing: edit.revision)) current=\(fieldCoordinator.revision) owner=\(fieldCoordinator.transaction?.owner.rawValue ?? "none") uncertain=\(fieldCoordinator.uncertain) cancelled=\(link.instructionCancelled(edit.instructionID))")
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false,
                 reason: "The field changed, is unverified, or this instruction was cancelled. Read the field again before editing."))
         }

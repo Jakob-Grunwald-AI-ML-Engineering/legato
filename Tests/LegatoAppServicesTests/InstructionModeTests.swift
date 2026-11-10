@@ -329,7 +329,8 @@ private struct UnwritableHistory: HistoryStore {
         let keyboard = InstructionLink(store: store)
         await #expect(throws: InstructionFailure.self) { _ = try await channel.read(.more, instructionID: "i") {} }
         #expect(keyboard.takeRequest() == nil, "A request nobody took is removed, so it is never served late")
-        let ack = await channel.apply(ScopedEdit(instructionID: "i", documentID: nil, before: "a", after: "", target: "b"))
+        #expect(keyboard.cancelledInstruction(id: "i"), "A timed-out read must not continue walking later")
+        let ack = await channel.apply(ScopedEdit(instructionID: "fresh-edit", documentID: nil, before: "a", after: "", target: "b"))
         #expect(ack == nil)
         #expect(keyboard.takeEdit() == nil, "An edit nobody read can never land later")
     }

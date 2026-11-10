@@ -36,6 +36,7 @@ public struct FieldEditCoordinator: Sendable {
         public fileprivate(set) var phase: Phase
         public fileprivate(set) var desired: Window?
         public fileprivate(set) var predicted: Window?
+        public fileprivate(set) var hasIssued = false
     }
     public private(set) var revision = FieldRevision(generation: UUID().uuidString, revision: 0)
     public private(set) var observed: Window?
@@ -84,6 +85,7 @@ public struct FieldEditCoordinator: Sendable {
     /// Called before the host mutation; desired and predicted text must never overwrite observed text.
     @discardableResult public mutating func issued(_ lease: Lease, desired: Window? = nil, predicted: Window? = nil) -> Bool {
         guard owns(lease) else { return false }
+        transaction?.hasIssued = true
         transaction?.phase = .issued
         if let desired { transaction?.desired = desired }
         transaction?.predicted = predicted
@@ -105,11 +107,11 @@ public struct FieldEditCoordinator: Sendable {
     public mutating func finish(_ lease: Lease, settled: Bool) {
         guard owns(lease), let current = transaction else { return }
         let verified = settled && (current.phase == .observed || current.phase == .prepared)
-        uncertain = !verified && current.phase != .prepared
+        uncertain = !verified && current.hasIssued
         if verified && current.owner == .read { uncertain = false }
         completed.append(lease.id)
         if completed.count > 128 { completed.removeFirst(completed.count - 128) }
-        if current.phase != .prepared, current.owner != .read || !verified { revision.revision &+= 1 }
+        if current.hasIssued, current.owner != .read || !verified { revision.revision &+= 1 }
         transaction = nil
     }
     private static func matches(_ predicted: Window, _ actual: Window) -> Bool {
@@ -128,7 +130,7 @@ public struct FieldEditCoordinator: Sendable {
     public mutating func preempt() {
         if let current = transaction {
             completed.append(current.lease.id)
-            if current.phase == .issued { uncertain = true }
+            if current.hasIssued { uncertain = true }
         }
         transaction = nil; revision.revision &+= 1
         // After an explicit user edit, equal text cannot safely be attributed to an earlier automated write.
