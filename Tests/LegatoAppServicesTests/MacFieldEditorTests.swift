@@ -12,13 +12,15 @@ import LegatoMac
     var focused = true
     var readable = true
     var ignoreWrites = false
+    var throwAfterWrite = false
+    var selections: [UTF16Range] = []
     var writes: [UTF16Range] = []
     init(_ value: String, _ selection: UTF16Range? = nil) {
         self.value = value; self.selection = selection ?? .init(location: value.utf16.count, length: 0)
     }
     func isFocused() -> Bool { focused }
     func selectedRange() throws -> UTF16Range { selection }
-    func setSelectedRange(_ range: UTF16Range) throws { selection = range }
+    func setSelectedRange(_ range: UTF16Range) throws { selections.append(range); selection = range }
     func textLength() throws -> Int { value.utf16.count }
     func text(in range: UTF16Range) throws -> String {
         guard readable, range.location >= 0, range.end <= value.utf16.count else { throw TextTargetReadError.unsupported }
@@ -29,12 +31,16 @@ import LegatoMac
         guard !ignoreWrites else { return }
         value = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
         selection = .init(location: range.location + text.utf16.count, length: 0)
+        if throwAfterWrite { throw TextTargetReadError.unsupported }
     }
 }
 
+@MainActor private enum SnapshotVersion { static var value = 0 }
+
 @MainActor struct MacFieldEditorTests {
     private func snapshot(_ text: String, run: String = "one", complete: Bool = false) -> LiveDictationSnapshot {
-        .init(runID: run, version: 1, segments: [.init(id: 0, text: text, final: complete)], complete: complete)
+        SnapshotVersion.value += 1
+        return .init(runID: run, version: SnapshotVersion.value, segments: [.init(id: 0, text: text, final: complete)], complete: complete)
     }
     @Test func rawPartialReplacementsAndCleanupStayInsideTheOwnedSpan() {
         let target = EditorTarget("Hello 🐈", .init(location: 8, length: 0))
@@ -202,7 +208,7 @@ import LegatoMac
         await editor.finish()
         #expect(deliveries == ["Ready."])
         editor.begin(); editor.relinquish()
-        editor.applyLive(snapshot("Keep this.", complete: true))
+        editor.applyLive(snapshot("Keep this.", run: "fresh", complete: true))
         await editor.finish()
         #expect(deliveries == ["Ready."])
         #expect(copies == ["Keep this."])
@@ -230,6 +236,77 @@ import LegatoMac
         #expect(target.value == "Before old after")
         editor.deliver("final")
         #expect(target.value == "Before final after")
+    }
+
+    @Test func browserLiveCorrectionsLeaveTheCaretAtTheTailWithoutASecondJump() {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.applyLive(snapshot("small cab is here"))
+        editor.applyLive(snapshot("small cat is here"))
+        #expect(target.value == "small cat is here")
+        #expect(target.selection == .init(location: 17, length: 0))
+        #expect(target.selections.isEmpty)
+        #expect(target.writes.last == .init(location: 8, length: 9))
+    }
+    @Test func aPartiallySuccessfulHostWriteStopsRecoveryFromWritingAgain() async throws {
+        let target = EditorTarget("draft")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.beginInstruction()
+        let read = try await editor.read(.context, instructionID: "magic", reading: {})
+        let edit = ScopedEdit(instructionID: "magic", documentID: read.documentID, before: "draft", after: "", target: "Revised")
+        target.throwAfterWrite = true
+        let ack = await editor.apply(edit)
+        #expect(ack?.applied == false)
+        #expect(ack?.stopped == true)
+        #expect(target.value == "Revised")
+        #expect(await editor.apply(edit)?.applied == false)
+        #expect(target.writes.count == 1)
+    }
+    @Test func aNewInstructionInTheSameFieldCannotApplyThePreviousResult() async throws {
+        let target = EditorTarget("draft")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.beginInstruction()
+        let old = try await editor.read(.context, instructionID: "old", reading: {})
+        editor.beginInstruction()
+        let fresh = try await editor.read(.context, instructionID: "fresh", reading: {})
+        let stale = ScopedEdit(instructionID: "old", documentID: old.documentID, before: "draft", after: "", target: "Old")
+        #expect(await editor.apply(stale)?.applied == false)
+        editor.cancel(instructionID: "old")
+        let current = ScopedEdit(instructionID: "fresh", documentID: fresh.documentID, before: "draft", after: "", target: "Fresh")
+        #expect(await editor.apply(current)?.applied == true)
+        #expect(target.value == "Fresh")
+    }
+
+    @Test func newerCleanupCanLandAfterTheTakeCompletesButOlderSnapshotsCannotRevertIt() {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin()
+        let raw = snapshot("raw words", complete: true)
+        let cleaned = snapshot("Clean words.", complete: true)
+        editor.applyLive(raw); editor.applyLive(cleaned); editor.applyLive(raw)
+        #expect(target.value == "Clean words.")
+        #expect(target.writes.count == 2)
+    }
+    @Test func rapidBrowserHypothesesCoalesceAndFinishFlushesTheLatestWords() async {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin()
+        editor.enqueueLive(snapshot("one"))
+        editor.enqueueLive(snapshot("one two"))
+        editor.enqueueLive(snapshot("One two three.", complete: true))
+        await editor.finish()
+        #expect(target.value == "One two three.")
+        #expect(target.writes.count == 1)
+    }
+
+    @Test func retractedRunCleanupCannotFollowTheRetryIntoItsText() {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.applyLive(snapshot("partial", run: "failed"))
+        #expect(editor.retractStreamed())
+        editor.deliver("Retry words.")
+        editor.applyLive(snapshot("Late failed cleanup.", run: "failed", complete: true))
+        #expect(target.value == "Retry words.")
     }
 
 }

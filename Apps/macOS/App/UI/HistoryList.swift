@@ -6,6 +6,7 @@ struct HistoryList: View {
     let entries: [DictationEntry]
     let onCopy: (DictationEntry) -> Void
     let onDelete: (DictationEntry) -> Void
+    let onCopyOriginal: (String) -> Void
 
     /// Measured row stack height; a bare ScrollView has no ideal height and collapses in the menu-bar window.
     @State private var contentHeight: CGFloat = 0
@@ -20,7 +21,7 @@ struct HistoryList: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(entries) { entry in
-                        HistoryRow(entry: entry, onCopy: onCopy, onDelete: onDelete)
+                        HistoryRow(entry: entry, onCopy: onCopy, onDelete: onDelete, onCopyOriginal: onCopyOriginal)
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
@@ -34,6 +35,7 @@ private struct HistoryRow: View {
     let entry: DictationEntry
     let onCopy: (DictationEntry) -> Void
     let onDelete: (DictationEntry) -> Void
+    let onCopyOriginal: (String) -> Void
     @State private var hovering = false
     @State private var copied = false
 
@@ -51,6 +53,7 @@ private struct HistoryRow: View {
                     Text(entry.text)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
+                    if let status = entry.instructionStatus { Text(status.label).font(.caption).foregroundStyle(.secondary) }
                     Text(copied ? "Copied" : entry.date.formatted(date: .abbreviated, time: .shortened) + (entry.cleanupFallback == true ? " · Not cleaned up" : ""))
                         .font(.caption)
                         .foregroundStyle(copied ? Color.accentColor : .secondary)
@@ -59,6 +62,12 @@ private struct HistoryRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .contextMenu {
+                Button("Copy result") { onCopy(entry) }
+                if let raw = entry.rawText {
+                    Button(entry.engineID == "instruction" ? "Copy original" : "Copy raw text") { onCopyOriginal(raw) }
+                }
+            }
             Button(role: .destructive) {
                 onDelete(entry)
             } label: {

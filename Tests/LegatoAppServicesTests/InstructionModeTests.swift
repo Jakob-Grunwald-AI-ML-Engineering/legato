@@ -74,6 +74,10 @@ import LegatoKeyboardCore
     var reads: [FieldReadRequest.Kind] = []
     var edits: [ScopedEdit] = []
     var refuse = false
+    var noAnswer = false
+    var beforeApply: (() -> Void)?
+    var onRead: (() -> Void)?
+    var cancellations: [String] = []
     /// The next edit stops partway (the field did not keep up) with the scope showing this.
     var stopWith: String?
     init(text: String, sessionLength: Int) {
@@ -82,10 +86,13 @@ import LegatoKeyboardCore
     }
     func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
         reads.append(kind)
+        onRead?()
         return reply
     }
     func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
+        beforeApply?()
         edits.append(edit)
+        if noAnswer { return nil }
         guard !refuse, text.hasSuffix(edit.before) else { return ScopedEditAck(id: edit.id, applied: false, reason: "The text changed, so nothing was edited.") }
         if let partial = stopWith {
             stopWith = nil
@@ -96,6 +103,7 @@ import LegatoKeyboardCore
         return ScopedEditAck(id: edit.id, applied: true, cursor: edit.target.utf16.count)
     }
     func publish(_ strip: InstructionStrip) { strips.append(strip) }
+    func cancel(instructionID: String) { cancellations.append(instructionID) }
 }
 
 private struct FixedRunner: InstructionRunning {
@@ -110,6 +118,14 @@ private final class MemoryHistory: HistoryStore, @unchecked Sendable {
     func append(_ entry: DictationEntry) async throws { entries.append(entry) }
     func recent(limit: Int) async throws -> [DictationEntry] { entries }
     func delete(id: UUID) async throws { entries.removeAll { $0.id == id } }
+}
+
+private struct UnwritableHistory: HistoryStore {
+    struct Failure: Error {}
+    func append(_ entry: DictationEntry) async throws { throw Failure() }
+    func upsert(_ entry: DictationEntry) async throws { throw Failure() }
+    func recent(limit: Int) async throws -> [DictationEntry] { [] }
+    func delete(id: UUID) async throws {}
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct InstructionSessionTests {
@@ -184,10 +200,72 @@ private final class MemoryHistory: HistoryStore, @unchecked Sendable {
         session.begin(); session.hear(line("make this polite")); session.end()
         try await until { session.strip.phase == .failed }
         #expect(session.strip.canUndo && session.strip.message?.hasPrefix("Stopped partway.") == true)
-        #expect(history.entries.isEmpty, "A stopped edit is not a result")
+        #expect(history.entries.count == 1 && history.entries.first?.instructionStatus == .uncertain)
+        #expect(history.entries.first?.rawText == "hey can you send the file", "A stopped edit retains the original and generated result")
         session.handle(InstructionIntent(action: .undo, instructionID: session.strip.instructionID))
         try await until { session.strip.phase == .undone }
         #expect(field.text == "Notes\nhey can you send the file")
+    }
+
+    @Test func aRecoverySaveFailurePreventsDestructiveApplication() async throws {
+        let field = FakeField(text: "Original draft", sessionLength: 14)
+        let session = InstructionSession(runner: FixedRunner(reply: "SCOPE: all\nImproved draft."), history: UnwritableHistory())
+        session.field = field
+        session.begin(); session.hear(line("rewrite it")); session.end()
+        try await until { session.strip.phase == .failed }
+        #expect(field.edits.isEmpty && field.text == "Original draft")
+        #expect(session.strip.message?.contains("could not be saved") == true)
+    }
+
+    @Test func recoveryIsDurableBeforeTheFieldReceivesAnEdit() async throws {
+        let field = FakeField(text: "Original draft", sessionLength: 14)
+        let history = MemoryHistory()
+        field.beforeApply = {
+            #expect(history.entries.count == 1)
+            #expect(history.entries.first?.instructionStatus == .saved)
+            #expect(history.entries.first?.rawText == "Original draft")
+            #expect(history.entries.first?.text == "Improved draft.")
+        }
+        let session = InstructionSession(runner: FixedRunner(reply: "SCOPE: all\nImproved draft."), history: history)
+        session.field = field
+        session.begin(); session.hear(line("rewrite it")); session.end()
+        try await until { session.strip.phase == .result }
+        #expect(history.entries.count == 1 && history.entries.first?.instructionStatus == .applied)
+    }
+
+    @Test func anUnknownApplyKeepsBothVersionsAndCannotBlindlyRetry() async throws {
+        let field = FakeField(text: "Original draft", sessionLength: 14)
+        field.noAnswer = true
+        let history = MemoryHistory()
+        let session = InstructionSession(runner: FixedRunner(reply: "SCOPE: all\nImproved draft."), history: history)
+        session.field = field
+        session.begin(); session.hear(line("rewrite it")); session.end()
+        try await until { session.strip.phase == .failed }
+        #expect(session.strip.canRetry == false && !session.strip.canUndo)
+        #expect(session.strip.message?.contains("nothing was edited") == false)
+        #expect(history.entries.first?.instructionStatus == .uncertain)
+        #expect(history.entries.first?.rawText == "Original draft")
+        #expect(history.entries.first?.text == "Improved draft.")
+        session.handle(InstructionIntent(action: .run, instructionID: session.strip.instructionID))
+        #expect(!session.isRunning && field.edits.count == 1, "A direct Run intent cannot retry an unknown host write")
+    }
+
+    @Test func replacingAnInstructionDuringItsReadDiscardsTheOldReply() async throws {
+        let field = FakeField(text: "Original draft", sessionLength: 14)
+        let session = InstructionSession(runner: FixedRunner(reply: "SCOPE: all\nImproved draft."))
+        session.field = field
+        var replacementID: String?
+        field.onRead = {
+            session.begin()
+            replacementID = session.strip.instructionID
+        }
+        session.begin(); let originalID = session.strip.instructionID
+        session.hear(line("rewrite it")); session.end()
+        try await until { replacementID != nil }
+        for _ in 0..<10 { await Task.yield() }
+        #expect(session.strip.instructionID == replacementID && session.strip.phase == .listening)
+        #expect(field.edits.isEmpty)
+        #expect(field.cancellations.contains(originalID!))
     }
 
     @Test func aFieldThatChangedRefusesTheEdit() async throws {
@@ -197,7 +275,7 @@ private final class MemoryHistory: HistoryStore, @unchecked Sendable {
         session.field = field
         session.begin(); session.hear(line("tidy up")); session.end()
         try await until { session.strip.phase == .failed }
-        #expect(session.strip.message == "The text changed, so nothing was edited.")
+        #expect(session.strip.message?.hasPrefix("The text changed, so nothing was edited.") == true)
         #expect(!session.strip.canUndo)
     }
 }
@@ -227,6 +305,22 @@ private final class MemoryHistory: HistoryStore, @unchecked Sendable {
         #expect(walked, "The strip can say it reads while the keyboard walks")
         #expect(reply.above == "Hello")
         #expect(keyboard.takeReply(id: answeredRequest.id) == nil, "A finished reply leaves the App Group once read")
+    }
+
+    @Test func cancelledIssuedEditIsUnknownAndCannotKeepRunningUnnoticed() async throws {
+        let store = LinkStore(MemoryLinkStore())
+        let channel = InstructionFieldChannel(store: store, post: { _ in }, poll: .milliseconds(1))
+        let keyboard = InstructionLink(store: store)
+        let edit = ScopedEdit(instructionID: "cancelled", documentID: "field", before: "draft", after: "", target: "result")
+        let apply = Task { @MainActor in await channel.apply(edit) }
+        for _ in 0..<500 {
+            if keyboard.takeEdit() != nil { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        apply.cancel()
+        let ack = await apply.value
+        #expect(ack?.applied == false && ack?.stopped == true)
+        #expect(keyboard.cancelledInstruction(id: edit.instructionID))
     }
 
     @Test func noAnswerFailsAndAnUnreadEditIsTakenBack() async throws {

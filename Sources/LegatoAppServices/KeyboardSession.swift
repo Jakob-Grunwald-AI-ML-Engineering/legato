@@ -88,6 +88,14 @@ import LegatoVocabulary
                   sonioxKey: { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" },
                   makeSocket: { URLSessionSonioxSocket() }, warmConnection: { await Self.warmClaudeConnection() })
     }
+    #if DEBUG || LEGATO_INTERNAL
+    /// Native keyboard acceptance with synthetic speech and an injected instruction runner. Neither provider can connect.
+    public static func offlineFixture(composer: ComposerSession, sink: any DictationRouteSink, instruction: InstructionSession) -> KeyboardSession {
+        KeyboardSession(composer: composer, sink: sink, instruction: instruction, sonioxKey: { "" },
+                        makeSocket: { OfflineKeyboardSocket() }, warmConnection: {})
+    }
+    #endif
+
     init(composer: ComposerSession, sink: any DictationRouteSink, instruction: InstructionSession? = nil, sonioxKey: @escaping @MainActor () -> String,
          makeSocket: @escaping @Sendable () -> any SonioxSocket, warmConnection: @escaping @Sendable () async -> Void,
          now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime }) {
@@ -419,3 +427,12 @@ import LegatoVocabulary
         _ = try? await MessagesStream.session.data(for: request)
     }
 }
+
+#if DEBUG || LEGATO_INTERNAL
+private actor OfflineKeyboardSocket: SonioxSocket {
+    func connect(request: URLRequest) async throws { throw CancellationError() }
+    func send(_ frame: SonioxFrame) async throws { throw CancellationError() }
+    func receive() async throws -> SonioxFrame { throw CancellationError() }
+    func close() async {}
+}
+#endif

@@ -7,10 +7,16 @@ import Foundation
     var windowBefore: String { get }
     /// `documentContextAfterInput` (empty when none).
     var windowAfter: String { get }
+    /// Stop exploration, then restore and verify the original position before reporting cancellation.
+    var isCancelled: Bool { get }
     /// `adjustTextPosition(byCharacterOffset:)`, in UTF-16 units.
     func move(by units: Int)
     /// Gives the host time to update the windows.
     func pause(milliseconds: Int) async
+}
+
+public extension FieldWindowProxy {
+    var isCancelled: Bool { false }
 }
 
 /// Reads the field upward (`readUp`) or downward (`readDown`) from the cursor, a window at a time, and returns the
@@ -67,6 +73,8 @@ import Foundation
         case stitch(offset: Int)
         /// After the walk the cursor is not back where it was.
         case cursorLost
+        /// The caller cancelled and the original cursor position was verified after restoration.
+        case cancelled
         /// The first move up did not land where the windows said: the host shows windows for a cursor that is not where
         /// a move starts from. Safari does this with a selection it does not report (`selectedText` nil after Select All):
         /// the move collapses the selection at its end.
@@ -74,14 +82,15 @@ import Foundation
 
         /// The host's windows never agreed: reading again cannot help.
         public var isLasting: Bool {
-            switch self { case .unstable, .stitch, .firstMove: true; case .changed, .cursorLost: false }
+            switch self { case .unstable, .stitch, .firstMove: true; case .changed, .cursorLost, .cancelled: false }
         }
 
         public var message: String {
             switch self {
+            case .cancelled: "Reading cancelled. The cursor is back where it started."
             case .changed: "The text changed while it was read."
             case .unstable, .stitch: "Can't read this app's text reliably. Instructions still work on text you dictate with Legato."
-            case .cursorLost: "The cursor moved while the text was read."
+            case .cursorLost: "This app did not confirm the cursor returned after reading."
             case .firstMove: "Can't read this app's text from here. If text was selected, put the cursor in the paragraph instead."
             }
         }
@@ -161,8 +170,11 @@ import Foundation
 
     /// Extends `known` (verified text that ends at the cursor; empty for a first read) upward.
     public func readUp(_ proxy: any FieldWindowProxy, known: String, limit: Limit) async -> Swift.Result<Result, Failure> {
+        guard !proxy.isCancelled else { return .failure(.cancelled) }
         // What was read before must still be what the field shows before the cursor.
-        let reported = collapsesBreaks == true ? Self.collapsed(proxy.windowBefore) : proxy.windowBefore
+        let originAfter = proxy.windowAfter
+        let originBefore = proxy.windowBefore
+        let reported = collapsesBreaks == true ? Self.collapsed(originBefore) : originBefore
         guard known.isEmpty || OwnEditEcho.isSame(expected: known, reported: reported) else { return .failure(.changed) }
         var text = known
         var added = ""
@@ -191,6 +203,7 @@ import Foundation
         // Doubled breaks: taken as they show until a move over one shows otherwise (then one unit each, for good).
         var collapse = collapsesBreaks ?? false, decided = collapsesBreaks != nil
         while true {
+            if proxy.isCancelled { failure = .cancelled; break }
             let pair: (before: String, after: String)
             let read = text
             switch await stablePair(proxy, offset: moved, result: &result, stitches: {
@@ -246,17 +259,23 @@ import Foundation
         if unitsKnown { result.movesByCharacters = byCharacters }
         // Back to the cursor in one move, then make sure it is there.
         if moved > 0 { proxy.move(by: moved) }
-        if let failure { return .failure(failure) }
-        // The host reports the cursor's return late as well: two reads that agree.
-        var back: String?
-        var previous: String?
+        // A stable but wrong pair may be a stale report. Keep waiting for the original position, not merely any
+        // repeated window; validate both sides so repeated text cannot masquerade as restoration.
+        var previous: (String, String)?
+        var restored = false
         for _ in 0...(maxRereads + 1) {
             await proxy.pause(milliseconds: settleMilliseconds)
-            let window = collapse ? Self.collapsed(proxy.windowBefore) : proxy.windowBefore
-            if window == previous { back = window; break }
-            previous = window
+            let pair = (collapse ? Self.collapsed(proxy.windowBefore) : proxy.windowBefore,
+                        collapse ? Self.collapsed(proxy.windowAfter) : proxy.windowAfter)
+            let expectedBefore = collapse ? Self.collapsed(originBefore) : originBefore
+            let expectedAfter = collapse ? Self.collapsed(originAfter) : originAfter
+            let beforeMatches = expectedBefore.isEmpty ? pair.0.isEmpty : Self.stitches(before: pair.0, onto: expectedBefore)
+            let afterMatches = expectedAfter.isEmpty ? pair.1.isEmpty : Self.stitches(after: pair.1, onto: expectedAfter)
+            if let previous, previous == pair, beforeMatches, afterMatches { restored = true; break }
+            previous = pair
         }
-        guard let back, text.isEmpty ? back.isEmpty : OwnEditEcho.isSame(expected: text, reported: back) else { return .failure(.cursorLost) }
+        guard restored else { return .failure(.cursorLost) }
+        if let failure { return .failure(failure) }
         result.text = text
         result.added = added.count
         return .success(result)
@@ -268,6 +287,7 @@ import Foundation
     /// the field's end (`.start` stands for it here: nothing more), at a structural stop below (a quote header, quoted
     /// lines, a signature: the text from that line on is not the user's), or at `room`. The cursor goes back where it was.
     public func readDown(_ proxy: any FieldWindowProxy, known: String, room: Int) async -> Swift.Result<Result, Failure> {
+        guard !proxy.isCancelled else { return .failure(.cancelled) }
         var collapse = collapsesBreaks ?? false, decided = collapsesBreaks != nil
         func shown(_ window: String) -> String { collapse ? Self.collapsed(window) : window }
         guard known.isEmpty || Self.stitches(after: shown(proxy.windowAfter), onto: known) else { return .failure(.changed) }
@@ -283,6 +303,7 @@ import Foundation
         }
         var failure: Failure?
         while true {
+            if proxy.isCancelled { failure = .cancelled; break }
             let read = text
             switch await stablePair(proxy, offset: moved, result: &result, stitches: { Self.stitches(before: shown($0.before), onto: read) }) {
             case .failure(let reason): failure = reason
@@ -330,18 +351,19 @@ import Foundation
         }
         if decided { result.collapsesBreaks = collapse }
         if moved > 0 { proxy.move(by: -moved) }
-        if let failure { return .failure(failure) }
         // Back at the cursor: two reads that agree, the window after starting with what was read, the one before as it was.
         var back: (before: String, after: String)?
         var previous: (String, String)?
         for _ in 0...(maxRereads + 1) {
             await proxy.pause(milliseconds: settleMilliseconds)
             let pair = (shown(proxy.windowBefore), shown(proxy.windowAfter))
-            if let previous, previous == pair { back = pair; break }
+            let afterMatches = known.isEmpty ? Self.stitches(after: pair.1, onto: text) : Self.stitches(after: pair.1, onto: known)
+            let beforeMatches = shown(originWindow).isEmpty ? pair.0.isEmpty : Self.stitches(before: pair.0, onto: shown(originWindow))
+            if let previous, previous == pair, afterMatches, beforeMatches { back = pair; break }
             previous = pair
         }
-        guard let back, text.isEmpty ? back.after.isEmpty : Self.stitches(after: back.after, onto: text),
-              shown(originWindow).isEmpty ? back.before.isEmpty : Self.stitches(before: back.before, onto: shown(originWindow)) else { return .failure(.cursorLost) }
+        guard back != nil else { return .failure(.cursorLost) }
+        if let failure { return .failure(failure) }
         result.text = text
         result.added = max(0, text.count - known.count)
         return .success(result)

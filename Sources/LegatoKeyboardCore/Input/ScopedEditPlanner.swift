@@ -140,8 +140,7 @@ public struct ScopedEditQueue: Sendable, Equatable {
     private var resetReports = 0
     private var resetMs = 0.0
     private var started = false
-    /// A delete was put back (`step`): the state it restores.
-    private var rollback: State?
+    private var observedMs: Double?
     /// The whole edit's budget: past it no further op is sent (the app waits `LinkChannel.editLandTimeout` for the ack).
     public static let limitMs = 20_000.0
     /// Ops that had to wait for the field to confirm them.
@@ -192,7 +191,7 @@ public struct ScopedEditQueue: Sendable, Equatable {
     }
 
     private mutating func replan(from state: State, ops: [ShadowOp]) {
-        self.ops = ops; sent = 0; confirmed = 0; waitedMs = 0
+        self.ops = ops; sent = 0; confirmed = 0; waitedMs = 0; observedMs = nil
         var text = state.before + state.after, cursor = state.before.utf16.count
         states = [state]
         for op in ops {
@@ -202,6 +201,14 @@ public struct ScopedEditQueue: Sendable, Equatable {
                                 after: String(decoding: units[cursor...], as: UTF16.self), selected: false))
         }
     }
+
+    /// The last operation's prediction, kept separate from host observations by the shared coordinator.
+    public var predictedWindow: (before: String, after: String, selected: Bool) {
+        let state = states[min(sent, states.count - 1)]
+        return (kept + (state.selected ? "" : state.before), state.after, state.selected)
+    }
+    /// A matching old window cannot prove an emitted operation was dropped rather than delayed.
+    public var hasUnconfirmedOperation: Bool { confirmed < sent }
 
     /// The field's text before the cursor once the whole edit landed.
     public var expectedBefore: String { kept + (states.last?.before ?? "") }
@@ -224,6 +231,7 @@ public struct ScopedEditQueue: Sendable, Equatable {
         }
         if confirmed < sent {
             guard shows(states[sent], reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else {
+                observedMs = nil
                 if waitedMs == 0 { waits += 1 }
                 waitedMs += elapsedMs
                 let before = states[sent - 1]
@@ -243,35 +251,16 @@ public struct ScopedEditQueue: Sendable, Equatable {
                     resetReport = nil; resetReports = 0; resetMs = 0
                 }
                 guard waitedMs >= RunShadow.confirmLimitMs else { return .wait }
-                if case .deleteBackward(let count) = ops[sent - 1], rollback == nil, !before.selected,
-                   !FieldReader.trusted(before: reportedBefore).hasSuffix(before.before.suffix(count)) {
-                    // The delete went, but the text before it is not what the plan was made for (changed outside the
-                    // keyboard). The deleted characters were shown before they went: they go back, the field is as it was.
-                    let restore = String(before.before.suffix(count))
-                    rollback = before
-                    ops = Array(ops[..<sent]) + [.insert(restore)]
-                    states = Array(states[...sent]) + [before]
-                    waitedMs = 0
-                    sent += 1
-                    return .send(.insert(restore))
-                }
                 stopped = true
-                if let back = rollback {
-                    textChanged = true
-                    return .stopped(shows(back, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) ? partial(back) : nil)
-                }
-                // The op in flight may still land, or was lost: only a field that shows the last confirmed state is known.
-                let last = states[confirmed]
-                guard shows(last, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) else { return .stopped(nil) }
-                return .stopped(partial(last))
+                // Even a report matching the old state cannot prove the emitted operation will not land later.
+                return .stopped(nil)
             }
-            confirmed = sent; waitedMs = 0; resetReport = nil; resetReports = 0; resetMs = 0
+            // An immediate echo can precede a controlled editor's asynchronous caret reset or text rollback.
+            // Require the expected position/text to survive a later host turn before another destructive operation.
+            observedMs = observedMs.map { $0 + elapsedMs } ?? 0
+            if (observedMs ?? 0) < RunShadow.moveVerifyMs { return .wait }
+            confirmed = sent; waitedMs = 0; observedMs = nil; resetReport = nil; resetReports = 0; resetMs = 0
             learnKept(from: reportedBefore, at: states[sent])
-            if let back = rollback {
-                // Put back: nothing more goes out.
-                stopped = true; textChanged = true
-                return .stopped(partial(back))
-            }
         }
         if sent < ops.count, totalMs >= Self.limitMs {
             stopped = true

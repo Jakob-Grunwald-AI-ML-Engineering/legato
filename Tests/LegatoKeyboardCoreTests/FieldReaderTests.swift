@@ -14,6 +14,8 @@ import Testing
     var staleReads = 0
     private var stale = 0
     var moves = 0
+    var cancelAfterMoves: Int?
+    var isCancelled: Bool { cancelAfterMoves.map { moves >= $0 } ?? false }
 
     init(_ text: String, cursor: Int? = nil, sizes: [Int] = [87, 65, 118, 40, 73]) {
         self.text = Array(text); self.cursor = cursor ?? text.count; self.sizes = sizes
@@ -93,6 +95,28 @@ private func paragraphs(_ count: Int) -> String {
 }
 
 @MainActor @Suite struct FieldReaderTests {
+    @Test func cancellationRestoresBothDirectionsBeforeReturning() async {
+        let text = String(repeating: "Safe original text around the insertion point. ", count: 20)
+        for upward in [true, false] {
+            let field = FakeField(text, cursor: 300, sizes: [70])
+            field.cancelAfterMoves = 1
+            let reader = FieldReader(settleMilliseconds: 0)
+            let result = upward
+                ? await reader.readUp(field, known: "", limit: .cap)
+                : await reader.readDown(field, known: "", room: 10_000)
+            guard case .failure(.cancelled) = result else { Issue.record("Expected restored cancellation, got \(result)"); continue }
+            #expect(field.cursor == 300)
+            #expect(field.moves == 2, "One exploratory move and its verified restoration")
+        }
+    }
+
+    @Test func anAlreadyCancelledReadNeverMoves() async {
+        let field = FakeField("Original text")
+        field.cancelAfterMoves = 0
+        let result = await FieldReader(settleMilliseconds: 0).readUp(field, known: "text", limit: .cap)
+        guard case .failure(.cancelled) = result else { Issue.record("Expected cancellation"); return }
+        #expect(field.moves == 0)
+    }
     @Test func learnsThatAnEmojiIsOneUnitAndReadsOverIt() async throws {
         let scope = " Hey, could you take a look at the release notes? Thanks so much! Don't forget the screenshots 😊 one more thing, the demo is at noon."
         let text = "Hi team, the release is on friday. Thanks, Jakob" + scope
@@ -476,7 +500,7 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         #expect(plan.ops == [.deleteBackward(scope.count), .insert(edit.target)] && plan.cursor == edit.target.utf16.count)
     }
 
-    @Test func textChangedOutsideTheKeyboardIsNeverDeletedAndTheFieldStaysAsItWas() throws {
+    @Test func unseenExternalChangesStopFurtherWritesWithoutBlindRollback() throws {
         // The scope as read; since then another keyboard typed "TYPED" into it, beyond the host's 20-character window.
         let scope = "the release is on friday please review the page before then"
         let field = "the release is on friday TYPED please review the page before then"
@@ -484,9 +508,10 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         var lagging = LaggingField(text: field, cursor: field.utf16.count, lag: 1)
         lagging.window = 20; lagging.tick()
         let (outcome, sent) = try run(edit, on: &lagging)
-        #expect(lagging.text == field, "What was deleted (only what the window showed) went back")
-        #expect(outcome == .stopped(.init(text: scope, cursor: scope.utf16.count)) && lastQueue?.textChanged == true)
-        #expect(sent == 2, "One verified part of the delete, then its rollback")
+        #expect(lagging.text.contains("TYPED"), "The user's unseen change must survive")
+        #expect(field.hasPrefix(lagging.text), "Only an observed suffix was removed")
+        #expect(outcome == .stopped(nil), "The final outcome is unknown, never an invented restored state")
+        #expect(sent == 1, "One observed part of the delete; no blind compensation insert")
         // Text typed at the cursor since the read: nothing goes out at all.
         let typed = scope + " ok"
         var atCursor = LaggingField(text: typed, cursor: typed.utf16.count, lag: 1)
@@ -575,19 +600,15 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         #expect(field.text == head + edit.target)
     }
 
-    @Test func aLostOpStopsTheEditAndUndoStillRestoresTheScope() throws {
+    @Test func anUnconfirmedOpStopsWithoutInventingAnUndoBaseline() throws {
         let original = head + scope
         var field = LaggingField(text: original, cursor: original.utf16.count, lag: 2)
         let half = try ScopedEditPlanner.plan(edit, windowBefore: original, windowAfter: "", selected: nil).get().ops.count / 2
         let (outcome, sent) = try run(edit, on: &field, loseAfter: half)
-        guard case .stopped(let partial?) = outcome else { Issue.record("Stopped with a known state, got \(outcome)"); return }
+        #expect(outcome == .stopped(nil), "The queue cannot tell whether the last operation was dropped or delayed")
         #expect(sent == half + 1, "Nothing goes out after the op the field did not show")
-        #expect(field.text == head + partial.text, "The partial text is what the field shows")
-        #expect(partial.text != scope && partial.text != edit.target)
-        // The app's undo of a stopped edit: from what landed back to the scope, through the same queue.
-        let stranded = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: partial.text)
-        let (back, _) = try run(ScopedEditPlanner.undo(of: stranded, cursor: partial.cursor), on: &field)
-        #expect(back == .done && field.text == original)
+        #expect(field.text != original && field.text != head + edit.target)
+        #expect(lastQueue?.hasUnconfirmedOperation == true)
     }
 
     @Test func aFieldThatShowsNeitherStateIsUnknown() throws {
@@ -601,6 +622,6 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
             if outcome != .wait { break }
         }
         #expect(outcome == .stopped(nil))
-        #expect(sends.count == 1, "What the delete took goes back, once; nothing else goes out")
+        #expect(sends.isEmpty, "An uncertain delete must never trigger a blind insert rollback")
     }
 }

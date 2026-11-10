@@ -103,6 +103,11 @@ final class LinkClient {
         DarwinObserver.post(LinkChannel.Note.instructionIntent)
     }
     /// The app's pending field read, removed as it is taken.
+    func cancelInstruction(_ id: String) {
+        instruction?.cancelInstruction(id: id)
+        DarwinObserver.post(LinkChannel.Note.instruction)
+    }
+    func instructionCancelled(_ id: String) -> Bool { instruction?.cancelledInstruction(id: id) == true }
     func takeReadRequest() -> FieldReadRequest? { instruction?.takeRequest() }
     func writeReadReply(_ reply: FieldReadReply) {
         instruction?.reply(reply)
