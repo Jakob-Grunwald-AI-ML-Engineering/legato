@@ -36,13 +36,19 @@ public enum ScopedEditPlanner {
         guard selected?.isEmpty != false,
               agrees(scope: edit.before, window: windowBefore, atEnd: true),
               agrees(scope: edit.after, window: windowAfter, atEnd: false) else { return .failure(.changed) }
-        if edit.after.isEmpty, let ops = lineRetype(edit.before, to: edit.target, limit: retypeChars) {
+        let trustedBefore = String(FieldReader.trusted(before: windowBefore))
+        let wholeScopeVisible = trustedBefore.hasSuffix(edit.before) && windowAfter.hasPrefix(edit.after)
+        if edit.after.isEmpty, let ops = lineRetype(edit.before, to: edit.target, limit: retypeChars),
+           wholeScopeVisible || deletedCharacters(in: ops) + RunShadow.reverseMatchChars < trustedBefore.count {
             // The cursor ends the scope and the first change is near it: delete back to it and type the rest. No moves,
             // so nothing a page can put back after its input events (a controlled text area moves its caret silently).
             return .success(Plan(ops: ops, cursor: edit.target.utf16.count, targetBefore: edit.target))
         }
         let shadow = edit.before + edit.after
-        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count, target: edit.target, coarse: true)
+        // A proxy window can stop at a sentence or block even when the shadow knows much more. Coalescing all
+        // replacements into one large delete can empty that window, leaving no evidence with which to confirm it.
+        // Preserve unchanged word separators and surrounding words in those fields instead.
+        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count, target: edit.target, coarse: wholeScopeVisible)
         let before = String(decoding: Array(edit.target.utf16.prefix(plan.cursor)), as: UTF16.self)
         return .success(Plan(ops: plan.ops, cursor: plan.cursor, targetBefore: before))
     }
@@ -59,6 +65,9 @@ public enum ScopedEditPlanner {
     /// An edit whose first change is at most this far back from the cursor (at the scope's end) is retyped from there;
     /// a smaller change further back goes by words, with moves.
     public static let retypeChars = 400
+    private static func deletedCharacters(in ops: [ShadowOp]) -> Int {
+        ops.reduce(0) { if case .deleteBackward(let count) = $1 { return $0 + count }; return $0 }
+    }
 
     /// A window (cut short by the host) and the scope agree where they overlap: next to the cursor. An empty window
     /// agrees only with an empty scope side: "nothing before the cursor" is not the end of any text.
@@ -312,8 +321,21 @@ public struct ScopedEditQueue: Sendable, Equatable {
 
     private func shows(_ state: State, reportedBefore: String, reportedAfter: String, hasSelection: Bool) -> Bool {
         guard state.selected == hasSelection else { return false }
-        return RunShadow.confirms(expectedBefore: kept + (state.selected ? "" : state.before), expectedAfter: state.after,
-                                  reportedBefore: reportedBefore, reportedAfter: reportedAfter)
+        let before = kept + (state.selected ? "" : state.before)
+        if RunShadow.confirms(expectedBefore: before, expectedAfter: state.after,
+                              reportedBefore: reportedBefore, reportedAfter: reportedAfter) { return true }
+        // Safari can expose no context before a sentence's first word even though earlier sentences remain.
+        // Emptying that word is confirmable only if a substantial, unique AFTER anchor pins exactly this position.
+        // A period or repeated phrase is insufficient; no prior text is inferred from the empty report.
+        guard !state.selected, reportedBefore.isEmpty,
+              state.after.hasPrefix(reportedAfter) || reportedAfter.hasPrefix(state.after) else { return false }
+        let anchor = Array(reportedAfter.count < state.after.count ? reportedAfter : state.after)
+        guard anchor.count >= RunShadow.reverseMatchChars else { return false }
+        let text = Array(before + state.after)
+        let positions = (0...(text.count - anchor.count)).filter { position in
+            text[position..<(position + anchor.count)].elementsEqual(anchor)
+        }
+        return positions == [before.count]
     }
 }
 

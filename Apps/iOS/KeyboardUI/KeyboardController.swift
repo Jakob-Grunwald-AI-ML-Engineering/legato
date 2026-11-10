@@ -790,6 +790,8 @@ final class KeyboardController {
     @ObservationIgnored private var liveDocumentID: String?
     @ObservationIgnored private var liveStats = LiveDictationStats()
     @ObservationIgnored private var liveAckedVersion: Int?
+    @ObservationIgnored private var blockedLiveRunID: String?
+    @ObservationIgnored private var blockedLiveCompleted = false
     @ObservationIgnored private var liveTicker: Task<Void, Never>?
     /// A field in this keyboard session put its caret back after a live move (a page that re-renders its textarea):
     /// later runs edit only by retyping at the end, never by moving the cursor.
@@ -806,6 +808,14 @@ final class KeyboardController {
         }
         guard snapshot != liveSeen, snapshot.runID != ignoredLiveRunID else { return }
         liveSeen = snapshot
+        if snapshot.runID == blockedLiveRunID {
+            if snapshot.complete, !blockedLiveCompleted {
+                blockedLiveCompleted = true
+                show("The field changed. Open Legato's History to recover the full take.")
+            }
+            return
+        }
+        blockedLiveRunID = nil; blockedLiveCompleted = false
         if snapshot.runID != liveShadow?.runID {
             liveShadow = RunShadow(runID: snapshot.runID, settlesFirst: true, avoidsMoves: liveFieldResetsCaret)
             liveStats = LiveDictationStats(); liveAckedVersion = nil
@@ -910,6 +920,24 @@ final class KeyboardController {
     /// op come back here and are left to the loop. Held while an instruction reads or edits the field.
     private func liveStep(elapsedMs: Double, flush: Bool = false, reveal: Bool = true) {
         guard !isFieldBusy, !hasHeldInput, !liveStepping else { return }
+        if liveShadow != nil, document.documentID != liveDocumentID {
+            let hadPendingTake = liveSnapshot?.complete != true || liveSnapshot?.version != liveAckedVersion || !liveSettled
+            // A late final/cleanup belongs to its original target. Revoke the old lease before looking at the
+            // newly focused field, and retain the full take in the app's existing dictation recovery path.
+            blockedLiveRunID = liveShadow?.runID
+            blockedLiveCompleted = liveSnapshot?.complete == true
+            freezeLiveRun(.field)
+            releaseLiveField(verified: false)
+            fieldCoordinator.observe(fieldWindow)
+            liveShadow = nil; liveSnapshot = nil; liveSettled = true
+            stopLiveTicker(); setLiveRunning(false)
+            if hadPendingTake {
+                show(blockedLiveCompleted
+                     ? "The field changed. Open Legato's History to recover the full take."
+                     : "The field changed. Finish dictation, then open History to recover the full take.")
+            }
+            return
+        }
         guard liveSnapshot != nil, claimLiveField() else { return }
         liveStepping = true
         defer {
@@ -954,10 +982,7 @@ final class KeyboardController {
     private func liveStepOnce(elapsedMs: Double, flush: Bool, reveal: Bool) -> RunShadow.Step? {
         guard !isTornDown, let snapshot = liveSnapshot, var shadow = liveShadow, snapshot.runID == shadow.runID,
               let documentID = document.documentID, !document.isSecureTextEntry else { return nil }
-        if documentID != liveDocumentID {
-            liveDocumentID = documentID
-            if shadow.freeze(.field) { liveShadow = shadow; noteLiveFreeze(.field) }
-        }
+        guard documentID == liveDocumentID else { return nil }
         let after = document.contextAfter
         let step = shadow.step(
             snapshot: snapshot, contextBefore: typing.contextBefore, reportedBefore: document.contextBefore, reportedAfter: after,

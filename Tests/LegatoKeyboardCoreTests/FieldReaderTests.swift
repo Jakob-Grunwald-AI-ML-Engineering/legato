@@ -370,10 +370,10 @@ private extension String {
         let target = "The plan for the garden is quite simple. First, we move two large pots, then we repair the gate."
         let field = "Notes: " + scope
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
-        let landed = try land(edit, field: field, cursor: field.count)
+        let landed = try land(edit, field: field, cursor: field.count, windowBefore: field)
         #expect(landed.text == "Notes: " + target && landed.cursor == landed.text.utf16.count)
         #expect(landed.plan.ops.count <= 4, "Mostly rewritten: one delete and one insert, not word by word")
-        let back = try land(ScopedEditPlanner.undo(of: edit, cursor: landed.plan.cursor), field: landed.text, cursor: landed.text.count)
+        let back = try land(ScopedEditPlanner.undo(of: edit, cursor: landed.plan.cursor), field: landed.text, cursor: landed.text.count, windowBefore: landed.text)
         #expect(back.text == field && back.plan.ops.count <= 4)
     }
 
@@ -383,7 +383,7 @@ private extension String {
         let scope = "We meet on monday at the old office. Bring the notes from last week and the slides. Lunch is on us." + tail
         let target = "We meet on Monday at the new office. Bring the notes from last week and the slides. Lunch is on us." + tail
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
-        let r = try land(edit, field: scope, cursor: scope.count)
+        let r = try land(edit, field: scope, cursor: scope.count, windowBefore: scope)
         #expect(r.text == target)
         // "monday" and "old" are three words apart: one replace of "monday at the old", nothing else retyped.
         #expect(r.plan.ops.filter { if case .insert = $0 { return true }; return false }.count == 1)
@@ -453,6 +453,58 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "Could you send the file? We need it by 9:00.")
     }
 
+    @Test func aLongRewriteKeepsEvidenceInSentenceBoundedHostWindows() throws {
+        let original = "We Are Planning A Quiet Weekend At The Harbor. On Friday I Will Collect The Charts, Check The Batteries, And Make Sure The Cabin Is Ready For Two Guests. Please Keep The Morning Free Because The Weather May Change. On Saturday We Can Leave After Breakfast And Sail Toward The Small Island. Bring Coffee, Warm Clothes, And Enough Food For Everyone. If The Wind Becomes Too Strong, We Will Stay In Port And Spend The Afternoon Repairing The Cupboard Instead. There Is No Reason To Hurry; I Would Rather Arrive Rested And Enjoy The Conversation."
+        let edit = ScopedEdit(instructionID: "i", documentID: "field", before: original, after: "", target: original.uppercased())
+        // Safari's actual native proxy reported only the current sentence. Emptying it hid all earlier text even
+        // though that text still existed, so a coarse whole-draft delete could no longer be confirmed safely.
+        func report(_ text: [Character], _ cursor: Int) -> (String, String) {
+            let start = text[..<cursor].lastIndex(of: ".").map { min(cursor, $0 + 2) } ?? 0
+            let end = text[cursor...].firstIndex(of: ".").map { $0 + 1 } ?? text.count
+            return (String(text[start..<cursor]), String(text[cursor..<end]))
+        }
+        var text = Array(original), cursor = original.count
+        // At the actual caret after the final period, UIKit still reports the final sentence.
+        func window() -> (String, String) {
+            if cursor == text.count, text.last == "." {
+                let start = text[..<max(0, cursor - 1)].lastIndex(of: ".").map { $0 + 2 } ?? 0
+                return (String(text[start..<cursor]), "")
+            }
+            return report(text, cursor)
+        }
+        let initial = window()
+        let plan = try ScopedEditPlanner.plan(edit, windowBefore: initial.0, windowAfter: initial.1, selected: nil).get()
+        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: initial.0)
+        var outcome = ScopedEditQueue.Action.wait
+        for _ in 0..<1_000 {
+            let shown = window()
+            outcome = queue.step(reportedBefore: shown.0, reportedAfter: shown.1, hasSelection: false, elapsedMs: 33)
+            if outcome == .wait { continue }
+            guard case .send(let op) = outcome else { break }
+            let next = ShadowEditPlanner.simulate(ops: [op], shadow: String(text), cursor: String(text[..<cursor]).utf16.count)
+            text = Array(next.text); cursor = next.cursor
+        }
+        #expect(outcome == .done)
+        #expect(String(text) == edit.target)
+        #expect(cursor == text.count)
+    }
+
+    @Test func anEmptyBeforeWindowRequiresASubstantialUniqueMatchingAfterAnchor() {
+        for (after, report) in [("Repeated anchor text.", "Repeated anchor text."), (".", "."),
+                                ("A unique remaining suffix.", "Different remaining suffix.")] {
+            let before = "Repeated anchor text. X"
+            let edit = ScopedEdit(instructionID: "i", documentID: "field", before: before, after: after,
+                                  target: String(before.dropLast()) + "Y" + after)
+            let plan = ScopedEditPlanner.Plan(ops: [.deleteBackward(1), .insert("Y")], cursor: before.utf16.count,
+                                              targetBefore: String(before.dropLast()) + "Y")
+            var queue = ScopedEditQueue(edit, plan: plan, windowBefore: before)
+            let first = queue.step(reportedBefore: before, reportedAfter: after, hasSelection: false, elapsedMs: 0)
+            #expect(first == .send(.deleteBackward(1)))
+            let stopped = queue.step(reportedBefore: "", reportedAfter: report, hasSelection: false, elapsedMs: 1_000)
+            #expect(stopped == .stopped(nil), "A repeated, punctuation-only, or mismatching anchor cannot authorize the insert")
+        }
+    }
+
     /// Runs the queue against the field until it finishes; `loseAfter` loses the op sent after that many confirmed ones.
     private func run(_ edit: ScopedEdit, on field: inout LaggingField, loseAfter: Int? = nil, avoidsMoves: Bool = false,
                      moves: UnsafeMutablePointer<Int>? = nil, plannedWith windows: (String, String)? = nil) throws -> (ScopedEditQueue.Action, sent: Int) {
@@ -509,9 +561,8 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         lagging.window = 20; lagging.tick()
         let (outcome, sent) = try run(edit, on: &lagging)
         #expect(lagging.text.contains("TYPED"), "The user's unseen change must survive")
-        #expect(field.hasPrefix(lagging.text), "Only an observed suffix was removed")
         #expect(outcome == .stopped(nil), "The final outcome is unknown, never an invented restored state")
-        #expect(sent == 1, "One observed part of the delete; no blind compensation insert")
+        #expect(sent > 0, "Confirmed nonoverlapping word edits may precede discovery of the unseen change")
         // Text typed at the cursor since the read: nothing goes out at all.
         let typed = scope + " ok"
         var atCursor = LaggingField(text: typed, cursor: typed.utf16.count, lag: 1)
