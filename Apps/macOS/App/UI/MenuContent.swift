@@ -34,7 +34,10 @@ struct MenuContent: View {
             Label("Dictation \(controller.settings.dictationHotkey?.displayName ?? "not set")", systemImage: "mic")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
-            HistoryList(entries: controller.recent, onCopy: { controller.copy($0) }, onDelete: { controller.delete($0) })
+            HistoryList(entries: controller.recent, onCopy: { controller.copy($0) }, onDelete: { controller.delete($0) }, onCopyOriginal: { text in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            })
             Divider()
             HStack {
                 Button("Settings…") { NSApp.activate(); openSettings() }

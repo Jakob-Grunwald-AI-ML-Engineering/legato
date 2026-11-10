@@ -135,7 +135,7 @@ import Observation
         dictation.deliver = { [weak fieldEditor] in fieldEditor?.deliver($0) }
         dictation.deliverStream = { [weak fieldEditor] poll in await fieldEditor?.stream(poll) ?? false }
         dictation.retractStream = { [weak fieldEditor] in fieldEditor?.retractStreamed() }
-        pipeline.onLiveChange = { [weak fieldEditor] in fieldEditor?.applyLive($0) }
+        pipeline.onLiveChange = { [weak fieldEditor] in fieldEditor?.enqueueLive($0) }
         pipeline.contextBefore = { [weak fieldEditor] in fieldEditor?.contextBeforeCursor() ?? "" }
     }
     private static func meetingsRoot(in root: URL) -> URL {

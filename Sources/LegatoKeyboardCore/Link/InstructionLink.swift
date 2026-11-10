@@ -152,9 +152,11 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
     /// The failure lies in how this app shows its text (its windows never agreed): reading again cannot help.
     public var lasting: Bool?
     public var documentID: String?
+    public var revision: FieldRevision?
     public init(id: String, state: State, above: String = "", below: String = "", selection: String? = nil, sessionLength: Int = 0,
                 stop: FieldStop = .unread, stopBelow: FieldStop? = nil, moreAbove: Bool = false, moreBelow: Bool = false, error: String? = nil,
-                documentID: String? = nil) {
+                documentID: String? = nil, revision: FieldRevision? = nil) {
+        self.revision = revision
         self.id = id; self.state = state; self.above = above; self.below = below; self.selection = selection
         self.sessionLength = sessionLength; self.stop = stop; self.stopBelow = stopBelow; self.moreAbove = moreAbove; self.moreBelow = moreBelow
         self.error = error; self.documentID = documentID
@@ -166,6 +168,7 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
 /// keyboard checks that the field still shows it (the windows around the cursor agree), word-diffs `target` into it
 /// (`ShadowEditPlanner`), and answers on `link.instruction.edit.ack`. Undo is the same edit the other way round.
 public struct ScopedEdit: Codable, Sendable, Equatable {
+    public var revision: FieldRevision?
     public var id: String
     public var instructionID: String
     public var documentID: String?
@@ -175,7 +178,8 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
     public var target: String
     public var at: Date
     public init(id: String = UUID().uuidString, instructionID: String, documentID: String?, before: String, after: String,
-                selected: String? = nil, target: String, at: Date = Date()) {
+                selected: String? = nil, target: String, at: Date = Date(), revision: FieldRevision? = nil) {
+        self.revision = revision
         self.id = id; self.instructionID = instructionID; self.documentID = documentID
         self.before = before; self.after = after; self.selected = selected; self.target = target; self.at = at
     }
@@ -185,6 +189,7 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
 
 /// keyboard -> app (`link.instruction.edit.ack`).
 public struct ScopedEditAck: Codable, Sendable, Equatable {
+    public var revision: FieldRevision?
     public var id: String
     public var applied: Bool
     /// Where the cursor ended, in UTF-16 units into `target` (the undo splits the target there), or into `partial`.
@@ -197,7 +202,8 @@ public struct ScopedEditAck: Codable, Sendable, Equatable {
     public var partial: String?
     /// Ops went out and the edit stopped before the end; without `partial` the field's text is unknown.
     public var stopped: Bool?
-    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil) {
+    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil, revision: FieldRevision? = nil) {
+        self.revision = revision
         self.id = id; self.applied = applied; self.cursor = cursor; self.reason = reason; self.partial = partial; self.stopped = stopped
     }
 }
@@ -227,6 +233,12 @@ public struct InstructionLink: Sendable {
         store.remove(forKey: LinkChannel.Key.read)
         return request
     }
+    /// A timeout from an older request must never consume a newer one.
+    public func takeRequest(id: String) -> FieldReadRequest? {
+        guard let request = store.read(FieldReadRequest.self, forKey: LinkChannel.Key.read), request.id == id else { return nil }
+        store.remove(forKey: LinkChannel.Key.read)
+        return request
+    }
     public func reply(_ reply: FieldReadReply) { store.write(reply, forKey: LinkChannel.Key.readAck) }
     /// The reply to `id` when one is stored; a finished reply is removed as it is taken.
     public func takeReply(id: String) -> FieldReadReply? {
@@ -241,6 +253,11 @@ public struct InstructionLink: Sendable {
         store.remove(forKey: LinkChannel.Key.instructionEdit)
         return edit
     }
+    public func takeEdit(id: String) -> ScopedEdit? {
+        guard let edit = store.read(ScopedEdit.self, forKey: LinkChannel.Key.instructionEdit), edit.id == id else { return nil }
+        store.remove(forKey: LinkChannel.Key.instructionEdit)
+        return edit
+    }
     public func acknowledge(_ ack: ScopedEditAck) { store.write(ack, forKey: LinkChannel.Key.instructionEditAck) }
     public func takeAck(id: String) -> ScopedEditAck? {
         guard let ack = store.read(ScopedEditAck.self, forKey: LinkChannel.Key.instructionEditAck), ack.id == id else { return nil }
@@ -248,10 +265,15 @@ public struct InstructionLink: Sendable {
         return ack
     }
 
+    private var cancellationPrefix: String { "link.instruction.cancel." }
+    public func cancelInstruction(id: String) { store.write(true, forKey: cancellationPrefix + id) }
+    public func cancelledInstruction(id: String) -> Bool { store.read(Bool.self, forKey: cancellationPrefix + id) == true }
+
     /// Removes every instruction value (the keyboard session ended, or the user deleted history).
     public func clearAll() {
         for key in [LinkChannel.Key.instruction, LinkChannel.Key.read, LinkChannel.Key.readAck,
                     LinkChannel.Key.instructionEdit, LinkChannel.Key.instructionEditAck] { store.remove(forKey: key) }
         for key in store.keys(withPrefix: LinkChannel.Key.instructionIntentPrefix) { store.remove(forKey: key) }
+        for key in store.keys(withPrefix: cancellationPrefix) { store.remove(forKey: key) }
     }
 }

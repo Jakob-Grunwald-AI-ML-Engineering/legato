@@ -17,10 +17,11 @@ struct HistoryView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(entry.text).lineLimit(4).foregroundStyle(.primary)
                         if let raw = entry.rawText {
-                            Text("Raw: \(raw)").lineLimit(4).font(.footnote).foregroundStyle(.secondary)
+                            Text("\(entry.engineID == "instruction" ? "Original" : "Raw"): \(raw)").lineLimit(4).font(.footnote).foregroundStyle(.secondary)
                         }
                         HStack {
                             Text(entry.date, format: .dateTime.day().month().hour().minute())
+                            if let status = entry.instructionStatus { Text(status.label) }
                             if entry.cleanupFallback == true { Text("Not cleaned up") }
                             if copiedID == entry.id { Text("Copied").foregroundStyle(.green) }
                         }
@@ -31,7 +32,7 @@ struct HistoryView: View {
                 .contextMenu {
                     Button("Copy") { controller.copy(entry.text) }
                     if let raw = entry.rawText {
-                        Button("Copy raw text") { controller.copy(raw) }
+                        Button(entry.engineID == "instruction" ? "Copy original" : "Copy raw text") { controller.copy(raw) }
                     }
                 }
             }
@@ -48,6 +49,6 @@ struct HistoryView: View {
         }
         .navigationTitle("History")
         // Reloads on appear and whenever the composer or backfill stores a new revision.
-        .task(id: controller.composer.historyRevision + controller.dictation.historyRevision) { entries = await controller.recentEntries() }
+        .task(id: controller.composer.historyRevision + controller.dictation.historyRevision + controller.keyboardSession.instruction.historyRevision) { entries = await controller.recentEntries() }
     }
 }

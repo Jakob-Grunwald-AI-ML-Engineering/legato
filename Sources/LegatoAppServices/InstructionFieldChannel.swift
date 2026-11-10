@@ -23,6 +23,12 @@ import LegatoKeyboardCore
         self.landTimeout = landTimeout; self.now = now
     }
 
+    public func cancel(instructionID: String) {
+        link.cancelInstruction(id: instructionID)
+        post(LinkChannel.Note.instructionEdit)
+        post(LinkChannel.Note.read)
+    }
+
     public func publish(_ strip: InstructionStrip) {
         link.publish(strip)
         post(LinkChannel.Note.instruction)
@@ -41,7 +47,11 @@ import LegatoKeyboardCore
         let start = now()
         var walking = false
         while true {
-            try Task.checkCancellation()
+            if Task.isCancelled {
+                cancel(instructionID: instructionID)
+                _ = link.takeRequest(id: request.id)
+                throw CancellationError()
+            }
             if let reply = link.takeReply(id: request.id) {
                 switch reply.state {
                 case .reading: if !walking { walking = true; reading() }
@@ -53,23 +63,44 @@ import LegatoKeyboardCore
             }
             if seconds(since: start) >= (walking ? readTimeout : ackTimeout) {
                 // Nobody took it: it must not be served later, when the field may be another.
-                _ = link.takeRequest()
+                _ = link.takeRequest(id: request.id)
+                cancel(instructionID: instructionID)
                 throw InstructionFailure.read(walking ? "Reading the text took too long." : "Legato's keyboard didn't answer. Is it still on screen?")
             }
-            try await Task.sleep(for: poll)
+            do { try await Task.sleep(for: poll) }
+            catch {
+                cancel(instructionID: instructionID)
+                _ = link.takeRequest(id: request.id)
+                throw error
+            }
         }
     }
 
     public func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
+        guard !Task.isCancelled, !link.cancelledInstruction(id: edit.instructionID) else {
+            return ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled.")
+        }
         link.publish(edit)
         post(LinkChannel.Note.instructionEdit)
         let start = now()
         var deadline = editTimeout, landing = false
         while true {
             if let ack = link.takeAck(id: edit.id) { return ack }
+            if Task.isCancelled || link.cancelledInstruction(id: edit.instructionID) {
+                cancel(instructionID: edit.instructionID)
+                let unread = link.takeEdit(id: edit.id) != nil
+                return ScopedEditAck(id: edit.id, applied: false,
+                                     reason: unread ? "The instruction was cancelled before editing." : "The instruction was cancelled. Check the field before continuing.",
+                                     stopped: unread ? nil : true)
+            }
             if seconds(since: start) >= deadline {
                 // Still unread: taken back, so it can never land late. Already taken: it is landing op by op; wait for it.
-                if landing || link.takeEdit() != nil { return nil }
+                if link.takeEdit(id: edit.id) != nil { return nil }
+                if landing {
+                    cancel(instructionID: edit.instructionID)
+                    return ScopedEditAck(id: edit.id, applied: false,
+                                         reason: "The edit could not be confirmed. Check the field before continuing.", stopped: true)
+                }
                 landing = true; deadline = editTimeout + landTimeout
             }
             try? await Task.sleep(for: poll)

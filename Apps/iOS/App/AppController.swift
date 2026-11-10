@@ -41,14 +41,28 @@ final class AppController {
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
+        #if LEGATO_INTERNAL
+        if UserDefaults.standard.bool(forKey: "LegatoOfflineFixture") {
+            dictation = DictationPipeline(recentTakes: RecentTakesStore(fileURL: root.appending(path: "recent-takes.json")),
+                                          history: history, cleaner: DebugStreamingCleaner(chunkMilliseconds: 0),
+                                          sendMode: { DictationSendSetting.mode(in: AppGroup.defaults) }, supportsLive: true)
+            keyboardSession = KeyboardSession.offlineFixture(composer: composer, sink: dictation,
+                                                             instruction: InstructionSession(runner: IOSOfflineInstructionRunner(), history: history))
+        } else {
+            dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
+                                          recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults,
+                                          supportsLive: true)
+            keyboardSession = KeyboardSession(composer: composer, sink: dictation,
+                                              instruction: InstructionSession(vocabularyURL: root.appending(path: "vocabulary.json"), history: history))
+        }
+        dictation.diagnostics = { event, fields in AudioDiagnostics.log(event, fields) }
+        #else
         dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
                                       recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults,
                                       supportsLive: true)
-        #if LEGATO_INTERNAL
-        dictation.diagnostics = { event, fields in AudioDiagnostics.log(event, fields) }
-        #endif
         keyboardSession = KeyboardSession(composer: composer, sink: dictation,
                                           instruction: InstructionSession(vocabularyURL: root.appending(path: "vocabulary.json"), history: history))
+        #endif
         #if LEGATO_INTERNAL
         keyboardSession.instruction.diagnostics = { event, fields in AudioDiagnostics.log(event, fields) }
         #endif

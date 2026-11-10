@@ -18,7 +18,29 @@ struct WordRowView: View {
 
     var body: some View {
         Group {
-            if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
+            if controller.hasHeldInput {
+                HStack(spacing: 8) {
+                    Text("Input held. Place the cursor, then continue.")
+                        .font(.system(size: fontSize - 4))
+                        .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity)
+                    takeButton("Continue", id: "keyboard.heldInput.continue") { controller.resumeHeldInput() }
+                }
+                .padding(.horizontal, 8)
+                .accessibilityIdentifier("keyboard.heldInput")
+            } else if let recovery = controller.liveRecoveryNotice {
+                HStack(spacing: 8) {
+                    Text(recovery)
+                        .font(.system(size: fontSize - 4))
+                        .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity)
+                    takeButton("Dismiss", id: "keyboard.liveRecovery.dismiss") { controller.dismissLiveRecovery() }
+                }
+                .padding(.horizontal, 8)
+                .accessibilityIdentifier("keyboard.liveRecovery")
+            } else if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
                 AutoFillSwitchKey(target: target)
             } else if controller.hint == nil, let presentation = controller.instructionPresentation {
                 InstructionRowView(controller: controller, presentation: presentation, fontSize: fontSize)

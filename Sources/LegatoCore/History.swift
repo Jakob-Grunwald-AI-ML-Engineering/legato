@@ -1,5 +1,19 @@
 import Foundation
 
+/// A rewrite is saved before its first host mutation, so an uncertain field never loses either version.
+public enum InstructionHistoryStatus: String, Sendable, Equatable, Codable {
+    case saved, applied, notApplied, uncertain
+
+    public var label: String {
+        switch self {
+        case .saved: "Rewrite saved · check the field"
+        case .applied: "Rewrite applied"
+        case .notApplied: "Rewrite not applied"
+        case .uncertain: "Rewrite stopped · check the field"
+        }
+    }
+}
+
 public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
     public var id: UUID
     public var date: Date
@@ -12,10 +26,12 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
     /// Cleanup failed or was rejected, so `text` is the raw text as heard. Nil on older entries and when cleanup
     /// never ran (no key).
     public var cleanupFallback: Bool?
+    /// For Magic entries, `rawText` is the original and `text` is the generated result, even if application failed.
+    public var instructionStatus: InstructionHistoryStatus?
 
     public init(
         id: UUID = UUID(), date: Date, text: String, rawText: String? = nil, localeIdentifier: String, engineID: String,
-        duration: TimeInterval, cleanupFallback: Bool? = nil
+        duration: TimeInterval, cleanupFallback: Bool? = nil, instructionStatus: InstructionHistoryStatus? = nil
     ) {
         self.id = id
         self.date = date
@@ -25,6 +41,7 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
         self.engineID = engineID
         self.duration = duration
         self.cleanupFallback = cleanupFallback
+        self.instructionStatus = instructionStatus
     }
 }
 

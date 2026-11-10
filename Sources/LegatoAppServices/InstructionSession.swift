@@ -16,6 +16,12 @@ import LegatoVocabulary
     /// Lands `edit` and waits for the keyboard's answer; nil when none came.
     func apply(_ edit: ScopedEdit) async -> ScopedEditAck?
     func publish(_ strip: InstructionStrip)
+    /// Revoke pending reads and writes before another instruction or explicit dismissal takes ownership.
+    func cancel(instructionID: String)
+}
+
+public extension InstructionField {
+    func cancel(instructionID: String) {}
 }
 
 /// Runs one instruction (`InstructionRunner` conforms); a fake in tests.
@@ -74,7 +80,7 @@ extension InstructionRunner: InstructionRunning {}
     /// Instruction mode came on: a new instruction starts (a result still on the strip counts as accepted).
     public func begin() {
         // A new instruction replaces one that is still running (its result would land under the new strip).
-        task?.cancel(); task = nil
+        cancelCurrent()
         listening = true
         landed = nil
         words = []; tail = ""
@@ -106,18 +112,18 @@ extension InstructionRunner: InstructionRunning {}
     public func handle(_ intent: InstructionIntent) {
         guard intent.instructionID == nil || intent.instructionID == strip.instructionID else { return }
         switch intent.action {
-        case .run: if !listening, strip.phase == .failed || strip.phase == .idle, !words.isEmpty { run() }
+        case .run: if !listening, strip.phase == .failed || strip.phase == .idle, strip.canRetry != false, !words.isEmpty { run() }
         case .undo: undo()
         case .accept: landed = nil; if strip.phase == .result || strip.phase == .undone { update(InstructionStrip()) }
         case .dismiss:
-            task?.cancel(); task = nil
+            cancelCurrent()
             if !listening { words = []; tail = ""; update(InstructionStrip()) } else { words = []; tail = ""; setTranscript() }
         }
     }
 
     /// The keyboard went away: everything is dropped (a running instruction too).
     public func reset() {
-        task?.cancel(); task = nil
+        cancelCurrent()
         listening = false; words = []; tail = ""; landed = nil
         if strip.phase != .idle || strip.instructionID != nil { update(InstructionStrip()) }
     }
@@ -126,7 +132,9 @@ extension InstructionRunner: InstructionRunning {}
 
     private func run() {
         guard task == nil else { return }
-        let id = strip.instructionID ?? UUID().uuidString
+        // A timed-out read already revoked the failed attempt. A fresh identity cannot revive its late reply.
+        let retrying = strip.phase == .failed
+        let id = retrying ? UUID().uuidString : strip.instructionID ?? UUID().uuidString
         generation += 1
         let generation = self.generation
         let instruction = InstructionRunner.present(words)
@@ -139,22 +147,38 @@ extension InstructionRunner: InstructionRunning {}
             do {
                 await self.beforeRun?()
                 guard let field = self.field else { throw InstructionFailure.read("Legato's keyboard isn't connected.") }
-                try Task.checkCancellation()
+                try self.checkCurrent(generation, id: id)
                 let reply = try await field.read(Self.mentionsSelection(transcript) ? .contextInPlace : .context, instructionID: id) { [weak self] in self?.setPhase(.reading, id: id) }
+                try self.checkCurrent(generation, id: id)
                 self.setPhase(.running, id: id)
                 // The edit goes to the field that was read (the keyboard refuses it in another one).
                 let documentID = reply.documentID
+                var revision = reply.revision
                 let outcome = try await self.runner.run(instruction: instruction, context: Self.context(reply)) { @MainActor [weak self] kind in
-                    try Task.checkCancellation()
-                    guard let self, let field = self.field else { throw InstructionFailure.read("Legato's keyboard isn't connected.") }
+                    guard let self else { throw CancellationError() }
+                    try self.checkCurrent(generation, id: id)
+                    guard let field = self.field else { throw InstructionFailure.read("Legato's keyboard isn't connected.") }
                     let more = try await field.read(kind == .block ? .more : .toCap, instructionID: id) { [weak self] in self?.setPhase(.reading, id: id) }
+                    try self.checkCurrent(generation, id: id)
+                    guard more.documentID == documentID else { throw InstructionFailure.unreadable("The text field changed while Magic was reading it.") }
+                    revision = more.revision
                     self.setPhase(.running, id: id)
                     return Self.context(more)
                 }
-                try Task.checkCancellation()
-                let edit = ScopedEdit(instructionID: id, documentID: documentID, before: outcome.range.before, after: outcome.range.after,
+                try self.checkCurrent(generation, id: id)
+                var edit = ScopedEdit(instructionID: id, documentID: documentID, before: outcome.range.before, after: outcome.range.after,
                                       selected: outcome.range.selected, target: outcome.target)
+                edit.revision = revision
+                // Save both versions before any destructive host operation. A failed persistence aborts the write.
+                let recoveryID = UUID()
+                let recoveryDate = Date()
+                try await self.save(id: recoveryID, date: recoveryDate, original: edit.scopeText, result: edit.target, status: .saved)
+                try self.checkCurrent(generation, id: id)
                 let ack = await field.apply(edit)
+                let status: InstructionHistoryStatus = ack?.applied == true ? .applied : (ack == nil || ack?.stopped == true ? .uncertain : .notApplied)
+                // Once an edit was issued, retain its outcome even if the user dismissed the old strip meanwhile.
+                try? await self.save(id: recoveryID, date: recoveryDate, original: edit.scopeText, result: edit.target, status: status)
+                try self.checkCurrent(generation, id: id)
                 if let ack, !ack.applied, let partial = ack.partial {
                     // Stopped partway: what landed stays, and undo puts the original back.
                     guard self.strip.instructionID == id else { return }
@@ -163,16 +187,16 @@ extension InstructionRunner: InstructionRunning {}
                     return
                 }
                 guard let ack, ack.applied else {
-                    let reason = ack?.reason ?? "The keyboard didn't answer, so nothing was edited."
+                    let reason = ack?.reason ?? "The edit could not be confirmed. Check the field before continuing."
                     // An edit that stopped partway is not run again over a field in an unknown state.
                     // The keyboard answered and refused (the text changed) or stopped partway: running the same again on the
-                    // same field cannot help. No answer at all can be retried.
-                    throw ack == nil ? InstructionFailure.read(reason) : InstructionFailure.unreadable(reason)
+                    // same field cannot help. An unknown outcome must not be run again blindly.
+                    throw InstructionFailure.unreadable(reason + " Original and result are saved in History.")
                 }
                 guard self.strip.instructionID == id else { return }
+                edit.revision = ack.revision
                 self.landed = (edit, ack.cursor ?? edit.target.utf16.count)
                 self.words = []
-                await self.save(original: edit.scopeText, result: edit.target)
                 self.update(InstructionStrip(instructionID: id, phase: .result, transcript: transcript, scope: outcome.scope.rawValue,
                                              message: Self.done(Self.changedScope(outcome.scope, original: edit.scopeText, result: edit.target),
                                                                 deleted: edit.target.isEmpty), canUndo: true))
@@ -181,7 +205,7 @@ extension InstructionRunner: InstructionRunning {}
             } catch is CancellationError {
                 self.diagnostics?("instruction.run", ["ok": false, "reason": "cancelled", "ms": Self.ms(since: started)])
             } catch {
-                guard self.strip.instructionID == id else { return }
+                guard self.generation == generation, self.strip.instructionID == id else { return }
                 let failure = error as? InstructionFailure ?? .provider(String(describing: type(of: error)))
                 Self.log.error("instruction failed: \(String(describing: failure).prefix(200), privacy: .public)")
                 self.diagnostics?("instruction.run", ["ok": false, "reason": Self.reason(failure), "ms": Self.ms(since: started)])
@@ -193,14 +217,15 @@ extension InstructionRunner: InstructionRunning {}
 
     private func undo() {
         guard let landed, task == nil, let id = strip.instructionID, let field else { return }
-        let edit = ScopedEditPlanner.undo(of: landed.edit, cursor: landed.cursor)
+        var edit = ScopedEditPlanner.undo(of: landed.edit, cursor: landed.cursor)
+        edit.revision = landed.edit.revision
         generation += 1
         let generation = self.generation
         task = Task { [weak self] in
             guard let self else { return }
             defer { if self.generation == generation { self.task = nil } }
             let ack = await field.apply(edit)
-            guard self.strip.instructionID == id else { return }
+            guard self.generation == generation, self.strip.instructionID == id else { return }
             if let ack, !ack.applied, let partial = ack.partial {
                 // The undo stopped partway: undo again goes on from what landed.
                 self.stranded(original: edit.target, partial: partial, documentID: edit.documentID, ack: ack, id: id)
@@ -220,11 +245,12 @@ extension InstructionRunner: InstructionRunning {}
     /// An edit stopped partway (the field did not keep up): the field shows `partial` where the scope was. `landed`
     /// becomes an edit from `original` to it, so undo puts `original` back; the instruction is not run again on its own.
     private func stranded(original: String, partial: String, documentID: String?, ack: ScopedEditAck, id: String) {
-        landed = (ScopedEdit(instructionID: id, documentID: documentID, before: original, after: "", target: partial),
-                  ack.cursor ?? partial.utf16.count)
+        var edit = ScopedEdit(instructionID: id, documentID: documentID, before: original, after: "", target: partial)
+        edit.revision = ack.revision
+        landed = (edit, ack.cursor ?? partial.utf16.count)
         words = []
         update(InstructionStrip(instructionID: id, phase: .failed, transcript: strip.transcript, scope: strip.scope,
-                                message: (ack.reason ?? "The edit stopped partway.") + " Undo puts the text back.", canUndo: true,
+                                message: (ack.reason ?? "The edit stopped partway.") + " Undo puts the text back. Original and result are saved in History.", canUndo: true,
                                 canRetry: false))
     }
 
@@ -320,12 +346,28 @@ extension InstructionRunner: InstructionRunning {}
         field?.publish(value)
     }
 
-    /// One history entry per instruction: the scope's text before (`rawText`) and after (`text`).
-    private func save(original: String, result: String) async {
+    private func cancelCurrent() {
+        if let id = strip.instructionID { field?.cancel(instructionID: id) }
+        generation += 1
+        task?.cancel(); task = nil
+    }
+
+    private func checkCurrent(_ value: Int, id: String) throws {
+        try Task.checkCancellation()
+        guard generation == value, strip.instructionID == id else { throw CancellationError() }
+    }
+
+    /// A stable record is written before mutation and updated in place when the host answers.
+    private func save(id: UUID, date: Date, original: String, result: String, status: InstructionHistoryStatus) async throws {
         guard let history else { return }
-        try? await history.upsert(DictationEntry(id: UUID(), date: Date(), text: result, rawText: original,
-                                                 localeIdentifier: Locale.current.identifier, engineID: "instruction", duration: 0))
-        historyRevision += 1
+        do {
+            try await history.upsert(DictationEntry(id: id, date: date, text: result, rawText: original,
+                                                   localeIdentifier: Locale.current.identifier, engineID: "instruction", duration: 0,
+                                                   instructionStatus: status))
+            historyRevision += 1
+        } catch {
+            throw InstructionFailure.unreadable("The rewrite could not be saved for recovery. Nothing was sent to the field.")
+        }
     }
 
     #if DEBUG || LEGATO_INTERNAL

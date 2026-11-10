@@ -185,7 +185,7 @@ public struct RunShadow: Sendable, Equatable {
     /// known text (`expectedBefore + expectedAfter`) at the expected cursor and at no other position in it. A short
     /// window (a web view reports a few words, often nothing after the cursor) that also fits elsewhere, say where the
     /// cursor sat before a move, confirms nothing: the queue waits for a report that tells the positions apart.
-    static func confirms(expectedBefore: String, expectedAfter: String, reportedBefore: String, reportedAfter: String) -> Bool {
+    public static func confirms(expectedBefore: String, expectedAfter: String, reportedBefore: String, reportedAfter: String) -> Bool {
         let before = Array(expectedBefore)
         return positions(in: before + Array(expectedAfter), reportedBefore: reportedBefore, reportedAfter: reportedAfter) == [before.count]
     }

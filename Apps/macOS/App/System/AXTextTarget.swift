@@ -153,7 +153,9 @@ final class AXTextTarget: TextTarget {
     func replace(_ range: UTF16Range, with text: String) throws {
         guard isFocused() else { throw AXTargetError.unexpectedValue }
         let original = try self.text(in: range)
-        try setSelectedRange(range)
+        // Streaming appends already own this caret. Avoid an unnecessary browser selection
+        // mutation, which can scroll the editor or briefly highlight its contents.
+        if try selectedRange() != range { try setSelectedRange(range) }
         guard isFocused(), try selectedRange() == range, try self.text(in: range) == original else {
             throw AXTargetError.unexpectedValue
         }
