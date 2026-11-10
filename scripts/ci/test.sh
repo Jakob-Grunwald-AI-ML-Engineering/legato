@@ -28,7 +28,25 @@ scripts/dev/tests/prune-sims-test.sh
 echo "::notice::Shell checks completed in $((SECONDS - phase_started)) s."
 phase_started=$SECONDS
 # This gate consumes binaries and test results, not IDE indexing data.
-swift test --disable-index-store
+# Keep structured issues too: a busy runner can lose individual console diagnostics.
+swift_test_help="$(swift test --help-hidden)"
+case "$swift_test_help" in
+  *--event-stream-output-path*) event_stream_flag=--event-stream-output-path ;;
+  *--experimental-event-stream-output-path*) event_stream_flag=--experimental-event-stream-output-path ;;
+  *) echo "::error::Swift test has no supported event-stream reporting option."; exit 1 ;;
+esac
+swift_test_events="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/legato-test-events.XXXXXX")"
+swift_test_status=0
+swift test --disable-index-store "$event_stream_flag" "$swift_test_events" || swift_test_status=$?
+if [ "$swift_test_status" -ne 0 ]; then
+  echo "::group::Swift Testing issues ($swift_test_events)"
+  if ! grep -E '"kind"[[:space:]]*:[[:space:]]*"issueRecorded"' "$swift_test_events"; then
+    echo 'No issueRecorded events found; last events follow.'
+    tail -n 20 "$swift_test_events"
+  fi
+  echo "::endgroup::"
+  exit "$swift_test_status"
+fi
 echo "::notice::Swift build and tests completed in $((SECONDS - phase_started)) s."
 
 # Both apps, unsigned, against the shell package. Device compilation does not start a simulator.
