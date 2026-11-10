@@ -11,6 +11,12 @@ Open-source, on-device dictation and meeting notes for iOS and macOS.
 
 Licensed under Apache-2.0.
 
+## Validation and merging
+
+Run `scripts/ci/test.sh` locally on the final candidate before enqueueing a PR. It runs the shell checks, full Swift package tests, and unsigned iOS and macOS app builds. Record the revision, toolchain and result; revalidate affected work if the candidate changes.
+
+`main` remains protected by the merge queue. The required Ubuntu `gate` check on PRs and merge groups reports this local-validation policy; it does not execute or verify the tests and builds. Wait for the queue to finish and confirm the PR is merged. Release and shipping workflows on `live` are separate.
+
 ## Build caches
 
 `scripts/e2e/ios-sim.sh` keeps its builds under `~/Library/Caches/legato` (`LEGATO_CACHE_DIR`): SwiftPM clones shared by every worktree, one fixed DerivedData per build target (`derived/{gate,mac,ios-sim,ios-device}`) reused by every worktree, and sweeps stale `legato-e2e.*` temp dirs of killed runs. `scripts/dev/prune-build-caches.sh` lists (dry run) or, with `--delete`, removes all other Legato build output.

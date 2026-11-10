@@ -71,7 +71,7 @@ Native settings evidence: [macOS Message](writing-modes-mac-message.png) and [iO
 
 ## Verification commands
 
-The affected final-tree gate passed 1,831 tests; the formatting regressions were observed failing before their fixes. Full suites are reserved for the merge queue.
+The affected final-tree gate passed 1,831 tests; the formatting regressions were observed failing before their fixes. Current merge policy requires the full `scripts/ci/test.sh` locally before enqueueing; the protected queue's Ubuntu `gate` reports the policy.
 
 ```bash
 LEGATO_STUB_DEPS=1 swift test --filter 'Legato(PostProcessing|AppServices|Core|Vocabulary|KeyboardCore|Mac)Tests'

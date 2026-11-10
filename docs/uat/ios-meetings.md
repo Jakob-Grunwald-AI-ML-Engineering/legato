@@ -20,7 +20,7 @@ The tester also expanded the meeting Live Activity in Dynamic Island while the p
 
 Internal fixtures replace both meeting providers unconditionally and isolate files and preferences. A temporary test identity can bake LegatoMeetingFixtureName and LegatoMeetingFixtureUsesMicrophone into its Info.plist so widget and automation launches remain isolated without arguments. A meetingsuat identity missing its fixture configuration fails before shared storage access. Production builds omit the fixture implementation, and the ordinary Release binary scan checks for fixture and diagnostic strings.
 
-Focused keyboard/service contracts passed, including draft preservation and competing microphone admission. Additional recovery contracts use real CAF and converted m4a files, previously recovered meetings and unavailable audio. Debug simulator builds, signed device builds, ordinary Release compilation and the Release exclusion scan passed. The protected merge queue owns the full integrated repository gate.
+Focused keyboard/service contracts passed, including draft preservation and competing microphone admission. Additional recovery contracts use real CAF and converted m4a files, previously recovered meetings and unavailable audio. Debug simulator builds, signed device builds, ordinary Release compilation and the Release exclusion scan passed. Current merge policy requires the full `scripts/ci/test.sh` locally before enqueueing; the protected queue's Ubuntu `gate` reports the policy.
 
 ## Limits
 

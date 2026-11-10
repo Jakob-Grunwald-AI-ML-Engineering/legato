@@ -13,7 +13,7 @@ Add microphone meeting recording to the iPhone companion app using the existing 
 
 ## Verification
 
-Use small contract checks for microphone handoff, competing starts, interruption/restart races and recovery. Build the iOS app and extensions, including the ordinary Release exclusion check. The protected merge queue runs the repository's full gate on the integrated revision; do not duplicate the full gate locally without a concrete reason.
+Use small contract checks for microphone handoff, competing starts, interruption/restart races and recovery. Build the iOS app and extensions, including the ordinary Release exclusion check. Run the full `scripts/ci/test.sh` locally on the final candidate before enqueueing. The protected merge queue's Ubuntu `gate` reports this policy and does not independently test the merge-group revision.
 
 Provide an internal, isolated offline fixture mode with unconditional fake providers. It must not read or mutate real meetings or provider credentials. Simulator evidence proves interface behavior; signed builds prove compilation/signing; physical recording proves device audio and background behavior. Real Soniox/Claude transcription requires separate session authorization and remains explicitly untested until authorized.
 

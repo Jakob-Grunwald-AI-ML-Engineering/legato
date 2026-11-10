@@ -10,7 +10,7 @@ if ! has_swift_targets; then
 fi
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  echo "::error::Swift targets exist; switch build-test to a macOS runner in .github/workflows/test.yml."
+  echo "::error::Swift validation requires macOS; run scripts/ci/test.sh locally on a Mac before enqueueing."
   exit 1
 fi
 
