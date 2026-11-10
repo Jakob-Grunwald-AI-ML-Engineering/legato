@@ -212,7 +212,7 @@ struct DictationPillView: View {
         HStack(spacing: 8) {
             Spacer(minLength: 0)
             if session.instruction.strip.phase == .listening {
-                Button("Run") { Task { await session.endMagic() } }.accessibilityIdentifier("magic.run")
+                Button("Run") { MacAppController.shared.toggleMagic() }.accessibilityIdentifier("magic.run")
             }
             if session.instruction.strip.canUndo {
                 Button("Undo") { magic(.undo) }.accessibilityIdentifier("magic.undo")

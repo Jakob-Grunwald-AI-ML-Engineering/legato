@@ -311,7 +311,7 @@ import Observation
         meetings.flash("\(refusal). Stop it to dictate or use Magic.")
         return true
     }
-    private func stopDictation() { Task { await dictation.stop() } }
+    private func stopDictation() { Task { await dictation.stop(); dictationGesture.runEnded() } }
     private func cancelDictation() { Task { await dictation.cancel(); dictationGesture.runEnded() } }
     private func dispatch(_ action: HotkeyGesture.Action?) {
         switch action {
