@@ -11,11 +11,11 @@ Capture promptly, retain opening speech while recognition connects, combine buil
 
 ## Proof and delivery
 
-Run focused audio conversion/recovery, microphone admission/cancellation, keyboard reappearance, opening-audio buffering, and activity-planner tests. Compile the iOS app locally and let the protected merge queue run its required full gate.
+Run focused audio conversion/recovery, microphone admission/cancellation, keyboard reappearance, opening-audio buffering, and activity-planner tests. Run the full `scripts/ci/test.sh` locally on the final candidate before enqueueing, including both app builds.
 
 A fresh UAT agent uses the installed phone app as a user, with AirPods connected, and returns observed behavior, friction, and retained evidence. The change should make microphone readiness and keyboard reuse reliable. The physical iPhone and capture-only controls are available; this session alone authorized at most three short dictation takes totaling under one minute using saved provider keys; no other external writes are authorized. Simulator/unit results do not establish acoustic quality, real speech recognition, or Bluetooth timing. Retain device snapshots of actual ports, mapped channels, PCM freshness and foreground/background capture separately.
 
-After findings are fixed, open a PR against main. Leave it open if material hardware evidence remains missing; otherwise wait through the full merge-group gate and verify MERGED. Do not promote live.
+After findings are fixed, open a PR against main. Leave it open if material hardware evidence remains missing; otherwise enqueue after successful local validation, wait for the protected queue's policy `gate` and verify MERGED. Do not promote live.
 
 ## Input preference
 

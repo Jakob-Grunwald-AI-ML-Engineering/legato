@@ -205,23 +205,28 @@ private final class MemoryHistory: HistoryStore, @unchecked Sendable {
 @MainActor @Suite(.timeLimit(.minutes(1))) struct InstructionFieldChannelTests {
     @Test func aReadIsAnsweredByItsIDFirstReadingThenDone() async throws {
         let store = LinkStore(MemoryLinkStore())
-        let channel = InstructionFieldChannel(store: store, post: { _ in }, poll: .milliseconds(5), ackTimeout: 1, readTimeout: 2, editTimeout: 0.2)
+        // This tests the reply protocol; scheduler delays must not advance its deadlines.
+        let instant = ContinuousClock.now
+        let channel = InstructionFieldChannel(store: store, post: { _ in }, poll: .milliseconds(5), ackTimeout: 1, readTimeout: 2, editTimeout: 0.2,
+                                              now: { instant })
         let keyboard = InstructionLink(store: store)
+        var request: FieldReadRequest?
         let keyboardSide = Task { @MainActor in
-            var request: FieldReadRequest?
             while request == nil { request = keyboard.takeRequest(); try? await Task.sleep(for: .milliseconds(5)) }
             keyboard.reply(FieldReadReply(id: request!.id, state: .reading))
-            try? await Task.sleep(for: .milliseconds(40))
-            keyboard.reply(FieldReadReply(id: request!.id, state: .done, above: "Hello", stop: .start))
             return request!
         }
         var walked = false
-        let reply = try await channel.read(.context, instructionID: "i") { walked = true }
-        let request = await keyboardSide.value
-        #expect(request.instructionID == "i" && request.kind == .context)
+        let reply = try await channel.read(.context, instructionID: "i") {
+            walked = true
+            // Finish only after .reading was observed, so a faster writer cannot overwrite it.
+            keyboard.reply(FieldReadReply(id: request!.id, state: .done, above: "Hello", stop: .start))
+        }
+        let answeredRequest = await keyboardSide.value
+        #expect(answeredRequest.instructionID == "i" && answeredRequest.kind == .context)
         #expect(walked, "The strip can say it reads while the keyboard walks")
         #expect(reply.above == "Hello")
-        #expect(keyboard.takeReply(id: request.id) == nil, "A finished reply leaves the App Group once read")
+        #expect(keyboard.takeReply(id: answeredRequest.id) == nil, "A finished reply leaves the App Group once read")
     }
 
     @Test func noAnswerFailsAndAnUnreadEditIsTakenBack() async throws {

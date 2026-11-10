@@ -24,6 +24,15 @@ public protocol TextTarget: AnyObject {
     func selectedRange() throws -> UTF16Range
     /// The text in `range`; may be shorter than requested near the end of the field.
     func text(in range: UTF16Range) throws -> String
+    /// The document length, without moving the selection. Unsupported targets fail closed.
+    func setSelectedRange(_ range: UTF16Range) throws
+    func textLength() throws -> Int
     /// Replaces `range` with `text`, leaving the caret after the inserted text.
     func replace(_ range: UTF16Range, with text: String) throws
+}
+
+public enum TextTargetReadError: Error { case unsupported }
+public extension TextTarget {
+    func setSelectedRange(_ range: UTF16Range) throws { throw TextTargetReadError.unsupported }
+    func textLength() throws -> Int { throw TextTargetReadError.unsupported }
 }

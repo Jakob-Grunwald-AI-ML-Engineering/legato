@@ -4,9 +4,9 @@ import SwiftUI
 /// Shows the current hotkey and records a new one: a lone modifier (Right ⌘) or a combination.
 struct HotkeyRecorderView: View {
     @Environment(MacAppController.self) private var controller
-    var target = MacAppController.HotkeyTarget.panel
+    var target = MacAppController.HotkeyTarget.magic
 
-    private var spec: HotkeySpec? { target == .panel ? controller.settings.hotkey : controller.settings.dictationHotkey }
+    private var spec: HotkeySpec? { target == .magic ? controller.settings.hotkey : controller.settings.dictationHotkey }
     private var isRecording: Bool { controller.recordingTarget == target }
 
     var body: some View {
@@ -36,7 +36,7 @@ struct HotkeyRecorderView: View {
                 .padding(.vertical, 10)
                 .frame(minWidth: 160)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityLabel("Current \(target == .panel ? "composer" : "dictation") shortcut: \(label)")
+                .accessibilityLabel("Current \(target == .magic ? "Magic" : "dictation") shortcut: \(label)")
             if isRecording {
                 Button("Cancel") { controller.cancelRecording() }.keyboardShortcut(.cancelAction)
             } else {

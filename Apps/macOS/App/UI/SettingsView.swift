@@ -22,10 +22,10 @@ struct SettingsView: View {
             switch self {
             case .voice: "Quietly reduce background voices while you dictate."
             case .overview: "Your voice, ready to write."
-            case .writing: "Make every composition sound like you."
+            case .writing: "Shape text where you write."
             case .meetings: "Record, transcribe and summarize your calls."
-            case .keys: "Connect the services that power your composer."
-            case .shortcut: "Compose or dictate from anywhere on your Mac."
+            case .keys: "Connect transcription and Magic."
+            case .shortcut: "Dictate and use Magic anywhere on your Mac."
             }
         }
     }
@@ -53,7 +53,7 @@ struct SettingsView: View {
                     Image(systemName: "waveform").font(.title2.weight(.semibold)).foregroundStyle(.tint)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Legato").font(.headline)
-                        Text("Voice composer").font(.caption).foregroundStyle(.secondary)
+                        Text("Dictation & Magic").font(.caption).foregroundStyle(.secondary)
                     }
                 }.padding(.horizontal, 16).padding(.top, 24)
                 List(Page.allCases, selection: $page) { item in
@@ -105,7 +105,7 @@ struct SettingsView: View {
                 Button("Cancel", role: .cancel) { enrollment.cancel() }
             } else {
                 Button(enrollment.hasProfile ? "Record replacement voice profile" : "Record voice profile") {
-                    enrollment.record(microphoneBusy: { controller.isDictating || controller.composer.isArmed || controller.composer.holdsWarmInput || controller.dictation.isActive || controller.meetings.isRecording })
+                    enrollment.record(microphoneBusy: { controller.dictation.isActive || controller.meetings.isRecording })
                 }.accessibilityIdentifier("settings.recordVoiceProfile")
                 if enrollment.hasProfile {
                     Button("Delete voice profile", role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
@@ -128,7 +128,7 @@ struct SettingsView: View {
                     Image(systemName: "waveform.circle.fill").font(.system(size: 38)).foregroundStyle(.tint)
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Speak. Shape. Send.").font(.title2.weight(.semibold))
-                        Text("Open the composer with your shortcut, speak your draft, then insert it where you’re writing.")
+                        Text("Dictate straight into the focused field. Turn Magic on to speak an instruction, then turn it off to edit the text in place.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -138,7 +138,7 @@ struct SettingsView: View {
                     Text("SETUP").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     readiness("Writing & transcription", detail: "Claude writes your text. Soniox transcribes your voice.", ready: claudeSaved && sonioxSaved, action: "Manage keys") { page = .keys }
                     Divider()
-                    readiness("Global shortcuts", detail: "Composer \(controller.settings.hotkey?.displayName ?? "not set"), dictation \(controller.settings.dictationHotkey?.displayName ?? "not set").", ready: controller.settings.hotkey != nil && controller.settings.dictationHotkey != nil, action: "Edit shortcuts") { page = .shortcut }
+                    readiness("Global shortcuts", detail: "Magic \(controller.settings.hotkey?.displayName ?? "not set"), dictation \(controller.settings.dictationHotkey?.displayName ?? "not set").", ready: controller.settings.hotkey != nil && controller.settings.dictationHotkey != nil, action: "Edit shortcuts") { page = .shortcut }
                 }
             }
             permissions
@@ -154,32 +154,14 @@ struct SettingsView: View {
                             Text(modelName(model)).tag(model.rawValue)
                         }
                     }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
-                    Text("One writing agent handles quick corrections, restructuring after a pause, and final cleanup.")
-                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            card {
-                VStack(alignment: .leading, spacing: 14) {
-                    Label("Send instructions", systemImage: "wand.and.stars").font(.headline)
-                    Picker("Send instructions", selection: $instructionSend) {
-                        Text("Manual").tag(InstructionSendSetting.Mode.manual.rawValue)
-                        Text("Automatically after a pause").tag(InstructionSendSetting.Mode.automatic.rawValue)
-                    }.labelsHidden().pickerStyle(.segmented)
-                    if instructionSend == InstructionSendSetting.Mode.automatic.rawValue {
-                        Stepper(value: Binding(get: { InstructionSendSetting.clampedPause(instructionPause) },
-                                               set: { instructionPause = InstructionSendSetting.clampedPause($0) }),
-                                in: InstructionSendSetting.pauseRange, step: InstructionSendSetting.pauseStep) {
-                            Text("Pause before sending: \(String(format: "%.1f", InstructionSendSetting.clampedPause(instructionPause))) s")
-                        }
-                    }
-                    Text("Speech builds one instruction until you press Send in the strip. Automatic sends it after the pause; speaking again restarts the wait.")
+                    Text("Magic uses this model when you ask it to rewrite text in the focused field.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
             card {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Personal instructions").font(.headline)
-                    Text("Add your preferred tone, spelling, or formatting. These instructions apply across writing modes.")
+                    Text("Add your preferred tone, spelling, or formatting. Magic follows them when editing your text.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     ZStack(alignment: .topLeading) {
                         if personalPrompt.isEmpty {
@@ -190,7 +172,7 @@ struct SettingsView: View {
                             .padding(4).accessibilityLabel("Personal instructions")
                     }.frame(minHeight: 190).background(.background, in: RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
-                    Label("Changes save automatically and apply to your next composition.", systemImage: "checkmark.circle")
+                    Label("Changes save automatically and apply to your next instruction.", systemImage: "checkmark.circle")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -227,6 +209,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Label("Send dictation", systemImage: "text.cursor").font(.headline)
                 Picker("Send dictation", selection: $settings.dictationSend) {
+                    Text("Live").tag(DictationSendSetting.Mode.live)
                     Text("On stop").tag(DictationSendSetting.Mode.onStop)
                     Text("After a pause").tag(DictationSendSetting.Mode.afterPause)
                     Text("Line by line").tag(DictationSendSetting.Mode.lineByLine)
@@ -238,10 +221,9 @@ struct SettingsView: View {
                         Text("Pause before sending: \(Int(DictationSendSetting.clampedPause(settings.dictationPause))) s")
                     }
                 }
-                Toggle("Typewriter insertion", isOn: $settings.typewriter)
-                Text("Types each take word by word in about a second instead of inserting it at once, also in apps that only accept a paste. Off inserts instantly and pastes with ⌘V.")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text("On stop holds the whole take and writes it once, cleaned as one text, when you stop. After a pause also writes when you stop speaking for the pause (not while you hold the key). Line by line cleans and writes each sentence as you speak.")
+                Toggle("Typewriter for paste-only editors", isOn: $settings.typewriter)
+                Toggle("Restore clipboard after a paste", isOn: $settings.restoreClipboard)
+                Text("Live puts words into your field as you speak and revises them after cleanup. On stop waits for the whole take. After a pause also sends when you stop speaking; line by line sends finished sentences.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -250,9 +232,9 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             card {
                 VStack(alignment: .leading, spacing: 16) {
-                    Label("Composer shortcut", systemImage: "command").font(.headline)
-                    HotkeyRecorderView(target: .panel)
-                    Text("Opens the voice composer: everything you say is an instruction to the writer. Record a single modifier, such as Right ⌘, or a key combination. Press Escape or Cancel to keep your current shortcut.")
+                    Label("Magic shortcut", systemImage: "command").font(.headline)
+                    HotkeyRecorderView(target: .magic)
+                    Text("Speak an instruction about selected text, what you dictated, or the surrounding paragraph. Tap to latch Magic on and off, or hold to speak an instruction. Turning Magic off runs it. The previous composer shortcut is preserved.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -260,7 +242,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Label("Dictation shortcut", systemImage: "mic").font(.headline)
                     HotkeyRecorderView(target: .dictation)
-                    Text("Types what you say straight into the focused text field. Tap to start and stop, or hold to talk. It never shares speech with the composer, and needs both API keys (without a Claude key, text is typed as heard).")
+                    Text("Types what you say straight into the focused field. Tap to start and stop, or hold to talk. While dictating, Magic temporarily routes speech into an instruction; ordinary dictation resumes when Magic turns off.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -277,9 +259,9 @@ struct SettingsView: View {
                     Button { controller.permissions.refresh() } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.plain).help("Refresh permission status").accessibilityLabel("Refresh permission status")
                 }
-                readiness("Microphone", detail: "Capture your voice while composing.", ready: controller.permissions.micGranted, action: "Allow microphone") { Task { await controller.permissions.requestMicrophone() } }
+                readiness("Microphone", detail: "Capture dictation and spoken instructions.", ready: controller.permissions.micGranted, action: "Allow microphone") { Task { await controller.permissions.requestMicrophone() } }
                 Divider()
-                readiness("Accessibility", detail: "Insert your composition into other apps.", ready: controller.permissions.accessibility, action: "Open Settings") { controller.permissions.requestAccessibility() }
+                readiness("Accessibility", detail: "Read and edit the focused field safely.", ready: controller.permissions.accessibility, action: "Open Settings") { controller.permissions.requestAccessibility() }
                 Divider()
                 readiness("Input Monitoring", detail: "Listen for your shortcut outside Legato.", ready: inputMonitoringGranted, action: "Open Settings") { controller.permissions.requestInputMonitoring() }
             }

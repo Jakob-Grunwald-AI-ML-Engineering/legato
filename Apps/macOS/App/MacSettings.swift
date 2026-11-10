@@ -11,8 +11,8 @@ import Observation
             else { defaults.removeObject(forKey: "hotkey") }
         }
     }
-    /// Types dictation straight into the focused field; the panel `hotkey` stays agent-only. Right ⌥ unless the
-    /// panel shortcut already is that key (Right ⌘ was the single pre-offshoot dictation key and is the panel's now).
+    /// The former composer binding is now Magic, preserving every custom shortcut.
+    /// Dictation stays Right Option unless that conflicts with the saved Magic key.
     var dictationHotkey: HotkeySpec? {
         didSet {
             if let dictationHotkey, let data = try? JSONEncoder().encode(dictationHotkey) { defaults.set(data, forKey: "dictationHotkey") }
@@ -25,7 +25,6 @@ import Observation
     /// the same keys live from the standard defaults.
     var dictationSend: DictationSendSetting.Mode { didSet { defaults.set(dictationSend.rawValue, forKey: DictationSendSetting.modeKey) } }
     var dictationPause: Double { didSet { defaults.set(DictationSendSetting.clampedPause(dictationPause), forKey: DictationSendSetting.pauseKey) } }
-    var insertionMode: FieldWriter.Mode { didSet { defaults.set(insertionMode.rawValue, forKey: "insertionMode") } }
     /// Types a take in word by word (Accessibility, or key events in paste-only apps); off inserts at once and pastes.
     var typewriter: Bool { didSet { defaults.set(typewriter, forKey: "typewriterInsertion") } }
     var restoreClipboard: Bool { didSet { defaults.set(restoreClipboard, forKey: "restoreClipboard") } }
@@ -35,11 +34,10 @@ import Observation
         hotkey = panel
         dictationHotkey = Self.initialDictationHotkey(defaults, panel: panel)
         gestureMode = defaults.string(forKey: "gestureMode").flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
-        // `live` is the iOS keyboard's: here the unset default stays what it was, a take written on stop.
+        // The Mac now supports the same live field route as the keyboard.
         let send = DictationSendSetting.mode(in: defaults)
-        dictationSend = send == .live ? .onStop : send
+        dictationSend = send
         dictationPause = DictationSendSetting.pause(in: defaults)
-        insertionMode = defaults.string(forKey: "insertionMode").flatMap(FieldWriter.Mode.init(rawValue:)) ?? .streamCommitted
         typewriter = defaults.object(forKey: "typewriterInsertion") as? Bool ?? true
         restoreClipboard = defaults.object(forKey: "restoreClipboard") as? Bool ?? true
     }

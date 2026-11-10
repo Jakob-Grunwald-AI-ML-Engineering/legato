@@ -6,10 +6,16 @@ Open-source, on-device dictation and meeting notes for iOS and macOS.
 - Mixed German/English in one utterance
 - Background audio keeps playing while you dictate
 - iOS: Action Button / Control Center trigger, custom keyboard without the app hop
-- macOS: menu-bar app, global hotkey, meeting notes (Soniox transcript with speakers from system audio + mic, Claude summary) in a Meetings window with client/project filing
+- macOS: menu-bar app, [direct-to-field dictation and Magic](docs/mac-field-magic.md), global shortcuts, meeting notes (Soniox transcript with speakers from system audio + mic, Claude summary) in a Meetings window with client/project filing
 - Summaries: Apple Foundation Models, local MLX, or Claude (opt-in)
 
 Licensed under Apache-2.0.
+
+## Validation and merging
+
+Run `scripts/ci/test.sh` locally on the final candidate before enqueueing a PR. It runs the shell checks, full Swift package tests, and unsigned iOS and macOS app builds. Record the revision, toolchain and result; revalidate affected work if the candidate changes.
+
+`main` remains protected by the merge queue. The required Ubuntu `gate` check on PRs and merge groups reports this local-validation policy; it does not execute or verify the tests and builds. Wait for the queue to finish and confirm the PR is merged. Release and shipping workflows on `live` are separate.
 
 ## Build caches
 

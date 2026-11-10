@@ -5,6 +5,7 @@ import LegatoAudio
 import LegatoClaude
 import LegatoCore
 import LegatoSoniox
+import LegatoKeyboardCore
 
 /// The Mac dictation hotkey's session: it types straight into the focused field, and it never shares speech with
 /// the composer (own microphone source, own Room and Soniox connection through `DictationEngine`).
@@ -27,6 +28,20 @@ import LegatoSoniox
     public var voiceIsolationStatus: String? { phase == .listening ? engine.voiceIsolationStatus : nil }
     public var isActive: Bool { phase != .idle }
     @ObservationIgnored public let pipeline: DictationPipeline
+    public let instruction: InstructionSession
+    public var speechMode: SpeechMode { modeSink.target }
+    @ObservationIgnored private let modeSink: SpeechModeSink
+    @ObservationIgnored private var finishingDictation: Task<Void, Never>?
+    @ObservationIgnored private var cutTimeout: Task<Void, Never>?
+    @ObservationIgnored private var magicOwnsTake = false
+    @ObservationIgnored public var onMagicBegin: @MainActor () -> Void = {}
+    public static var offlineFixture: Bool {
+        #if DEBUG || LEGATO_INTERNAL
+        UserDefaults.standard.bool(forKey: "LegatoOfflineFixture")
+        #else
+        false
+        #endif
+    }
     @ObservationIgnored let engine: DictationEngine
     @ObservationIgnored private let mic: any AudioSource
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
@@ -57,7 +72,7 @@ import LegatoSoniox
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "mac-dictation")
     private static let warmInterval: TimeInterval = 240
 
-    public init(pipeline: DictationPipeline, microphone: any AudioSource, vocabularyURL: URL,
+    public init(pipeline: DictationPipeline, instruction: InstructionSession? = nil, microphone: any AudioSource, vocabularyURL: URL,
                 sonioxKey: @escaping @MainActor () -> String = { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" },
                 claudeKey: @escaping @MainActor () -> Bool = { ((try? KeychainKeyStore().apiKey()) ?? nil)?.isEmpty == false },
                 makeSocket: @escaping @Sendable () -> any SonioxSocket = { URLSessionSonioxSocket() },
@@ -65,13 +80,33 @@ import LegatoSoniox
                 settleTimeout: Duration = .seconds(4)) {
         self.pipeline = pipeline; mic = microphone; self.sonioxKey = sonioxKey; self.claudeKey = claudeKey
         self.warmConnection = warmConnection; self.settleTimeout = settleTimeout
-        engine = DictationEngine(sink: pipeline, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: vocabularyURL)
+        self.instruction = instruction ?? InstructionSession(vocabularyURL: vocabularyURL)
+        let modeSink = SpeechModeSink(dictation: pipeline)
+        self.modeSink = modeSink
+        engine = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: vocabularyURL)
         pipeline.onChange = { [weak self] in self?.drain() }
+        let instruction = self.instruction
+        modeSink.onInstructionLine = { instruction.hear($0) }
+        modeSink.onInstructionTail = { instruction.hearTail($0) }
+        modeSink.onTransition = { [weak self] transition in
+            if transition.to == .instruction {
+                instruction.begin()
+                self?.finishingDictation = Task { await pipeline.finishLiveRun() }
+            } else { instruction.end() }
+        }
+        instruction.beforeRun = { [weak self] in
+            if let task = self?.finishingDictation { await task.value }
+            else { await pipeline.finishLiveRun() }
+            self?.finishingDictation = nil
+            _ = await pipeline.settle(timeout: .seconds(3))
+            await self?.drainNow()
+        }
     }
 
     /// Holds the Soniox connection and the Claude connection while the app runs and keys exist. Cheap to call
     /// often: an open route only re-warms a missing connection, and the Claude HEAD is throttled.
     public func ensureWarm() {
+        guard !Self.offlineFixture else { return }
         guard !sonioxKey().isEmpty else { return }
         guard phase == .idle || phase == .listening || engine.isOpen else { return }
         engine.open()
@@ -87,6 +122,9 @@ import LegatoSoniox
 
     /// Starts dictating. False (with a `notice`) when it cannot.
     @discardableResult public func start() async -> Bool {
+        #if DEBUG || LEGATO_INTERNAL
+        if Self.offlineFixture { try? await beginDebugIfIdle(); return phase == .listening }
+        #endif
         guard !VoiceEnrollmentController.shared.isBusy else { post("Finish or cancel voice profile setup first."); return false }
         await stopTask?.value
         guard !VoiceEnrollmentController.shared.isBusy else { post("Finish or cancel voice profile setup first."); return false }
@@ -149,6 +187,9 @@ import LegatoSoniox
             await engine.finalizeTake()
             await engine.waitForFinish(timeout: .seconds(3))
         }
+        cutTimeout?.cancel(); cutTimeout = nil
+        modeSink.flushCuts()
+        if modeSink.target == .instruction { modeSink.toggle(to: .dictation, cut: false) }
         _ = await pipeline.settle(timeout: settleTimeout)
         // The whole take (on stop, or what the pause timer has not sent yet) is cleaned and written once, here.
         // The cleanup bounds itself (a timeout per attempt, one retry); a failure leaves the raw text held for the user.
@@ -175,7 +216,8 @@ import LegatoSoniox
         await mic.stop()
         audioTask?.cancel(); audioTask = nil
         await engine.abandonTake()
-        await pipeline.reset()
+        await modeSink.reset()
+        instruction.reset()
         delivered = -1; stalled = nil
         phase = .idle
         ensureWarm()
@@ -186,9 +228,10 @@ import LegatoSoniox
         _ = await pipeline.settle(timeout: settleTimeout)
         await drainNow()
         await pipeline.reset(keepFailedTake: true)
+        instruction.reset()
         delivered = -1; stalled = nil
         engine.resetSequence()
-        engine.open()
+        if !Self.offlineFixture { engine.open() }
         onBegin()
     }
 
@@ -198,6 +241,38 @@ import LegatoSoniox
     }
     /// A notice from the delivery side (clipboard fallback, no field).
     public func report(_ text: String) { post(text) }
+
+    /// Magic reuses an active microphone; starting Magic from idle opens a take of its own.
+    public func startMagic() async -> Bool {
+        guard speechMode != .instruction else { return true }
+        magicOwnsTake = !isActive
+        if magicOwnsTake, !(await start()) { return false }
+        guard phase == .listening else { return false }
+        onMagicBegin()
+        setMagic(true)
+        return true
+    }
+    public func endMagic() async {
+        guard speechMode == .instruction else { return }
+        if magicOwnsTake { magicOwnsTake = false; await stop() }
+        else { setMagic(false) }
+    }
+    private func setMagic(_ enabled: Bool) {
+        let mode: SpeechMode = enabled ? .instruction : .dictation
+        let cut = !debugSession && engine.hasActiveTake
+        modeSink.toggle(to: mode, cut: cut)
+        guard cut else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if !(await engine.finalizeChunk()) { modeSink.flushCuts() }
+        }
+        cutTimeout?.cancel()
+        cutTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.modeSink.flushCuts()
+        }
+    }
 
     // MARK: Delivery
 
@@ -256,6 +331,7 @@ import LegatoSoniox
     }
     public func debugStop() async {
         guard debugSession else { return }
+        // A partial is not finalized speech; fixtures provide final lines explicitly.
         engine.debugTail("")
         await stop()
     }
@@ -272,7 +348,7 @@ import LegatoSoniox
         public var description: String { "Empty dictation text." }
     }
     public var debugState: [String: Any] {
-        ["phase": phase.rawValue, "tail": tail, "notice": notice ?? "", "noticeID": noticeID, "warm": engine.isLive,
+        ["phase": phase.rawValue, "speechMode": speechMode.rawValue, "instruction": instruction.debugState, "tail": tail, "notice": notice ?? "", "noticeID": noticeID, "warm": engine.isLive,
          "pending": pipeline.pending, "outbox": pipeline.outbox.count, "fallbacks": pipeline.fallbacks, "debugSession": debugSession,
          "delivered": delivered, "sessionID": pipeline.sessionID]
             .merging(pipeline.takeState) { $1 }

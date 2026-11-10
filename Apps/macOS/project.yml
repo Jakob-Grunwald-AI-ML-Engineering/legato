@@ -40,7 +40,9 @@ targets:
         product: LegatoComposerUI
       - package: LegatoKit
         product: LegatoAgent
-      # Shared composer runtime.
+      - package: LegatoKit
+        product: LegatoKeyboardCore
+      # Shared speech and instruction runtime.
       - package: LegatoKit
         product: LegatoAppServices
       # Meeting notes: the opt-in Claude summary backend with its Keychain key, and the session and store.

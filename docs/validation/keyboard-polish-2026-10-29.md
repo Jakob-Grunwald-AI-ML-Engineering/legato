@@ -41,7 +41,7 @@ The executed [XCTest fixture](keyboard-polish-2026-10-29/KeyboardPolishTests.swi
 
 ## Checks and delivery limits
 
-**570 affected tests in 60 suites passed**, along with simulator and signed real-dependency iPhone app/extension builds, shell syntax and diff checks. Expected RED assertions preceded height, cursor, stale-context, missing-context, echo-fence and subpixel-boundary fixes. Fresh review findings were fixed and rechecked. Full package and app queue checks remain CI's merge-queue gate.
+**570 affected tests in 60 suites passed**, along with simulator and signed real-dependency iPhone app/extension builds, shell syntax and diff checks. Expected RED assertions preceded height, cursor, stale-context, missing-context, echo-fence and subpixel-boundary fixes. Fresh review findings were fixed and rechecked. Current merge policy requires full package and app validation locally through `scripts/ci/test.sh` before enqueueing; the protected queue's Ubuntu `gate` reports the policy.
 
 The final phone installation failed with CoreDevice connection error 4000 and a Wi-Fi timeout. The physical phone remains on its previous temporary build; these new changes have not been validated or installed there. No microphone or speech check ran. Issue #4 remains open for its outstanding acceptance work. The signed scratch build also includes the separate DEBUG bridge; it is not a merged-main or released build.
 
