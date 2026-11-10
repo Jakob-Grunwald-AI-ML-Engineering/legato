@@ -17,6 +17,7 @@ final class AXTextTarget: TextTarget {
     private let element: AXUIElement
     private let appElement: AXUIElement
     private let pid: pid_t
+    private var textOperationSupported: Bool?
 
     private init(element: AXUIElement, appElement: AXUIElement) {
         var process: pid_t = 0
@@ -151,11 +152,74 @@ final class AXTextTarget: TextTarget {
 
     func replace(_ range: UTF16Range, with text: String) throws {
         guard isFocused() else { throw AXTargetError.unexpectedValue }
-        var error = AXUIElementSetAttributeValue(
-            element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
+        let original = try self.text(in: range)
+        try setSelectedRange(range)
+        guard isFocused(), try selectedRange() == range, try self.text(in: range) == original else {
+            throw AXTargetError.unexpectedValue
+        }
+        if supportsTextOperation() {
+            try replaceSelectedMarkerRange(range, original: original, with: text)
+        } else {
+            let error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
+            guard error == .success else { throw AXTargetError.attribute(error) }
+        }
+    }
+
+    private func supportsTextOperation() -> Bool {
+        if let textOperationSupported { return textOperationSupported }
+        var names: CFArray?
+        let result = AXUIElementCopyParameterizedAttributeNames(element, &names)
+        let supported = result == .success && (names as? [String])?.contains("AXTextOperation") == true
+        textOperationSupported = supported
+        return supported
+    }
+
+    /// WebKit advertises AXSelectedText as settable but its setSelectedText implementation is
+    /// empty. Its advertised AXTextOperation performs an exact scoped replacement instead.
+    /// Marker text and bounds must both agree with the requested AX range: never search for
+    /// matching words elsewhere, and never replace the document's AXValue.
+    private func replaceSelectedMarkerRange(_ range: UTF16Range, original: String, with text: String) throws {
+        guard let markers = try Self.copyAttribute(element, "AXSelectedTextMarkerRange"),
+              let markerText = try parameter("AXStringForTextMarkerRange", markers) as? String,
+              markerText == original,
+              let markerBounds = try parameter("AXBoundsForTextMarkerRange", markers),
+              let rangeBounds = try parameter(kAXBoundsForRangeParameterizedAttribute, Self.axValue(for: range)),
+              try Self.rect(from: markerBounds) == Self.rect(from: rangeBounds),
+              isFocused(), try selectedRange() == range, try self.text(in: range) == original else {
+            throw AXTargetError.unexpectedValue
+        }
+        // ReplacePreserveCase keeps the supplied text exactly; ordinary Replace changes its
+        // capitalization. Disable WebKit's smart spacing/quotes for the same reason.
+        let operation: NSDictionary = [
+            "AXTextOperationMarkerRanges": [markers],
+            "AXTextOperationType": "TextOperationReplacePreserveCase",
+            "AXTextOperationReplacementString": text,
+            "AXTextOperationSmartReplace": false
+        ]
+        let result = try parameter("AXTextOperation", operation) as? [String]
+        guard result == [text], isFocused(),
+              try self.text(in: .init(location: range.location, length: text.utf16.count)) == text else {
+            throw AXTargetError.unexpectedValue
+        }
+        // WebKit selects a nonempty replacement. Every TextTarget replacement promises a
+        // caret after it, so collapse only that verified replacement and confirm the result.
+        let caret = UTF16Range(location: range.location + text.utf16.count, length: 0)
+        if try selectedRange() != caret { try setSelectedRange(caret) }
+        guard try selectedRange() == caret else { throw AXTargetError.unexpectedValue }
+    }
+
+    private func parameter(_ key: String, _ value: CFTypeRef) throws -> CFTypeRef? {
+        var result: CFTypeRef?
+        let error = AXUIElementCopyParameterizedAttributeValue(element, key as CFString, value, &result)
         guard error == .success else { throw AXTargetError.attribute(error) }
-        error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
-        guard error == .success else { throw AXTargetError.attribute(error) }
+        return result
+    }
+
+    private static func rect(from value: CFTypeRef) throws -> CGRect {
+        guard CFGetTypeID(value) == AXValueGetTypeID() else { throw AXTargetError.unexpectedValue }
+        var rect = CGRect.zero
+        guard AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgRect, &rect) else { throw AXTargetError.unexpectedValue }
+        return rect
     }
 
     // MARK: Helpers
