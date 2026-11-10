@@ -62,9 +62,9 @@ public enum TypewriterPlan {
         return chunks
     }
 
-    /// Whether a text must go by paste: a synthetic Return or Tab would send a message or move the focus.
+    /// Controls must not synthesize Return/Tab, and a grapheme larger than a key event must stay intact.
     public static func needsPaste(_ text: String) -> Bool {
-        text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0 == "\u{2028}" || $0 == "\u{2029}" }
+        text.contains { $0.utf16.count > eventUnits } || text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0 == "\u{2028}" || $0 == "\u{2029}" }
     }
 }
 

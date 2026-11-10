@@ -70,8 +70,8 @@ final class PasteService {
         case unavailable
     }
 
-    /// Types one grapheme at a time. Controls use individual clipboard pastes so a line break
-    /// never synthesizes a Return that could send a message. One snapshot spans the sequence.
+    /// Types one grapheme at a time. Controls and graphemes larger than a key event use individual
+    /// clipboard pastes; Return/Tab are never synthesized. One snapshot spans the sequence.
     func type(_ text: String, targetPID: pid_t?, secureField: Bool, restoreClipboard: Bool = true,
               realKeyDowns: @MainActor () -> Int, stillOwned: @MainActor () -> Bool = { true }) async -> TypeOutcome {
         let released = await waitForModifiersReleased()

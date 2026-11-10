@@ -3,6 +3,13 @@ import Testing
 @testable import LegatoMac
 
 @MainActor @Suite struct TypewriterTests {
+    @Test func oversizedEmojiUsesOnePasteInsteadOfSplittingItsGrapheme() {
+        let emoji = String(repeating: "👨‍", count: 12) + "👦"
+        #expect(emoji.count == 1 && emoji.utf16.count > TypewriterPlan.eventUnits)
+        #expect(TypewriterPlan.steps(emoji) == [emoji])
+        #expect(TypewriterPlan.needsPaste(emoji))
+    }
+
     @Test func stepsAreIndividualGraphemesAndJoinBackExactly() {
         let text = "Hallo  Welt, wie geht's?\nNeue Zeile 😀 fertig."
         let steps = TypewriterPlan.steps(text)
