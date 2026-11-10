@@ -329,9 +329,9 @@ private actor TakeHistory: HistoryStore {
 
     // MARK: Streaming
 
-    @MainActor private func streaming(_ cleaner: StreamingCleaner, _ raw: String = "one two three") async -> (DictationPipeline, Task<Void, Never>) {
+    @MainActor private func streaming(_ cleaner: StreamingCleaner, _ raw: String = "one two three", clock: any Clock<Duration> = ContinuousClock()) async -> (DictationPipeline, Task<Void, Never>) {
         // The tests end the stream themselves; the real-clock take timeout (4 s here) fired on loaded CI runners.
-        let pipeline = DictationPipeline(cleaner: cleaner, vocabulary: { [] }, sendMode: { .onStop }, takeTimeout: { _ in .seconds(60) })
+        let pipeline = DictationPipeline(cleaner: cleaner, vocabulary: { [] }, sendMode: { .onStop }, clock: clock, takeTimeout: { _ in .seconds(60) })
         await pipeline.receive(routeLine(0, raw))
         let sending = Task { @MainActor in await pipeline.finishTake() }
         await until("the attempt started") { cleaner.calls == 1 }
@@ -356,19 +356,25 @@ private actor TakeHistory: HistoryStore {
     }
 
     @Test func growthIsAnnouncedAtMostEveryFewMilliseconds() async {
-        let cleaner = StreamingCleaner()
-        let (pipeline, sending) = await streaming(cleaner)
+        let cleaner = StreamingCleaner(), clock = VirtualClock()
+        let (pipeline, sending) = await streaming(cleaner, clock: clock)
         var announced = 0
         pipeline.onChange = { announced += 1 }
         for i in 0..<200 { cleaner.yield("w\(i) ") }
-        await until("all deltas") { pipeline.outbox.first?.text.hasSuffix("w199 ") == true }
-        let burst = announced
-        #expect(burst < 40, "200 deltas in a burst are coalesced (\(burst) announcements)")
-        try? await Task.sleep(for: .milliseconds(80))
-        #expect(announced >= 1 && announced <= burst + 1, "At most one trailing announcement carries the last growth")
+        await until("all deltas and the trailing wait") {
+            pipeline.outbox.first?.text.hasSuffix("w199 ") == true && clock.sleeperCount == 1
+        }
+        #expect(announced == 1, "The first growth is immediate; all remaining deltas share one trailing announcement")
+        #expect(clock.deadlines == [clock.now.advanced(by: .milliseconds(30))])
+        clock.advance(by: .milliseconds(29))
+        #expect(announced == 1 && clock.sleeperCount == 1, "Growth is not announced before the coalescing deadline")
+        clock.advance(by: .milliseconds(1))
+        await until("the trailing announcement") { announced == 2 }
+        #expect(clock.sleeperCount == 0, "Only one trailing announcement was scheduled")
         cleaner.finish()
         await sending.value
         #expect(pipeline.outbox[0].final)
+        #expect(announced == 3, "Completion is announced immediately without advancing the clock")
     }
 
     @Test func aFailureBeforeAnyDeltaRetriesAutomatically() async {

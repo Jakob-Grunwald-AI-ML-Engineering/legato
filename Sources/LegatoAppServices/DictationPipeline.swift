@@ -101,7 +101,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// The delivery of a take whose cleanup failed after text was streamed: `retry()` / `insertRaw()` retract it.
     @ObservationIgnored private var partialSeq: Int?
     @ObservationIgnored private var notifyTask: Task<Void, Never>?
-    @ObservationIgnored private var lastNotify = ContinuousClock.now
+    @ObservationIgnored private let streamTime: @Sendable () -> Duration
+    @ObservationIgnored private var lastNotify: Duration = .zero
     /// Growth of a streaming delivery is announced at most this often (App Group writes and Darwin notes).
     private static let streamInterval = Duration.milliseconds(30)
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "dictation-pipeline")
@@ -161,6 +162,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         self.recentTakes = recentTakes; self.history = history
         self.cleaner = cleaner; self.vocabulary = vocabulary; self.timeout = timeout
         self.sendMode = sendMode; self.pauseSeconds = pauseSeconds; self.clock = clock; self.takeTimeout = takeTimeout
+        self.streamTime = Self.elapsedTime(on: clock)
     }
 
     /// The send setting now; `lineByLine` keeps the per-line path. `live` only where `supportsLive` (else `onStop`).
@@ -669,17 +671,23 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         notifyStream(force: true)
     }
 
+    /// Keep elapsed time and sleeps on the same injected clock, including clocks with their own Instant type.
+    private static func elapsedTime<C: Clock>(on clock: C) -> @Sendable () -> Duration where C.Duration == Duration {
+        let origin = clock.now
+        return { origin.duration(to: clock.now) }
+    }
+
     private func notifyStream(force: Bool) {
-        let elapsed = lastNotify.duration(to: .now)
+        let elapsed = streamTime() - lastNotify
         if force || elapsed >= Self.streamInterval {
             notifyTask?.cancel(); notifyTask = nil
-            lastNotify = .now
+            lastNotify = streamTime()
             onChange?()
         } else if notifyTask == nil {
-            notifyTask = Task { [weak self] in
-                try? await Task.sleep(for: Self.streamInterval - elapsed)
+            notifyTask = Task { [weak self, clock = self.clock] in
+                try? await clock.sleep(for: Self.streamInterval - elapsed)
                 guard !Task.isCancelled, let self else { return }
-                self.notifyTask = nil; self.lastNotify = .now
+                self.notifyTask = nil; self.lastNotify = self.streamTime()
                 self.onChange?()
             }
         }
