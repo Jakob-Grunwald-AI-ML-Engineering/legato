@@ -81,4 +81,19 @@ import Testing
         #expect(SyntheticEvent.isLegato(SyntheticEvent.userData))
         #expect(!SyntheticEvent.isLegato(0) && !SyntheticEvent.isLegato(SyntheticEvent.userData + 1))
     }
+    @Test func asynchronousControlWritesRemainIndividualAndKeepTheirExactRemainder() async {
+        var steps: [String] = []
+        var controls: [String] = []
+        let result = await Typewriter.run("a\nb\tc", sleep: { _ in }, writeAsync: { step in
+            await Task.yield()
+            if TypewriterPlan.needsPaste(step) { controls.append(step) }
+            if step == "b" { return false }
+            steps.append(step)
+            return true
+        })
+        #expect(steps == ["a", "\n"])
+        #expect(controls == ["\n"])
+        #expect(result == .init(remainder: "b\tc", wroteAny: true))
+    }
+
 }

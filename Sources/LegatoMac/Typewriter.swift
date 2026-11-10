@@ -83,6 +83,14 @@ public enum Typewriter {
     @MainActor
     public static func run(_ text: String, sleep: (Duration) async -> Void, clock: ContinuousClock? = nil,
                            write: @MainActor (String) -> Bool) async -> Result {
+        await run(text, sleep: sleep, clock: clock, writeAsync: { write($0) })
+    }
+
+    /// Async writes let a host safely consume an individual control character through its
+    /// clipboard interface while keeping every other character on the same paced sequence.
+    @MainActor
+    public static func run(_ text: String, sleep: (Duration) async -> Void, clock: ContinuousClock? = nil,
+                           writeAsync: @MainActor (String) async -> Bool) async -> Result {
         let steps = TypewriterPlan.steps(text)
         let interval = TypewriterPlan.interval(steps: steps.count)
         let start = clock?.now
@@ -93,7 +101,7 @@ public enum Typewriter {
                 if let clock, let start { pause = max(.zero, interval * index - start.duration(to: clock.now)) }
                 if pause > .zero { await sleep(pause) }
             }
-            guard write(step) else {
+            guard !Task.isCancelled, await writeAsync(step) else {
                 return Result(remainder: steps[index...].joined(), wroteAny: wrote)
             }
             wrote = true

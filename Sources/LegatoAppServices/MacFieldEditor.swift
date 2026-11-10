@@ -356,7 +356,9 @@ import LegatoMac
             if case .move = op {} else {
                 if mutated, typewriter() { await sleep(interval) }
                 guard !Task.isCancelled, !blocked, documentID == generation, target.isFocused(),
-                      try target.selectedRange() == lastSelection else { throw Ownership.changed }
+                      try target.selectedRange() == lastSelection,
+                      try target.text(in: .init(location: range.location, length: String(document).utf16.count)) == String(document)
+                else { throw Ownership.changed }
             }
             switch op {
             case .move(let units):

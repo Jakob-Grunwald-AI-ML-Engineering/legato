@@ -62,37 +62,64 @@ final class PasteService {
     // MARK: Typing
 
     enum TypeOutcome {
-        /// Every character went in as key events; the pasteboard was not touched.
+        /// Every character went in; control characters used individual guarded pastes.
         case typed
         /// Typing stopped (the app changed, or the user pressed a key); the untyped rest is on the pasteboard.
         case interrupted(remainder: String)
-        /// Typing was not possible (a guard failed, or the text needs a paste); nothing was typed.
+        /// Typing was not possible because an initial guard failed; nothing was typed.
         case unavailable
     }
 
-    /// Types `text` into the app the dictation started in (`targetPID`) as paced synthetic Unicode key events (at
-    /// most ~1 s for the whole text). Only when the paste guards hold (Accessibility granted, the app in front, no
-    /// secure input, modifiers up) and the text has no line break or tab. Stops at the first step that finds the
-    /// frontmost app changed or a real key pressed (`realKeyDowns` counts those); the rest goes to the pasteboard.
-    func type(_ text: String, targetPID: pid_t?, secureField: Bool, realKeyDowns: @MainActor () -> Int, stillOwned: @MainActor () -> Bool = { true }) async -> TypeOutcome {
-        guard !TypewriterPlan.needsPaste(text) else { return .unavailable }
+    /// Types one grapheme at a time. Controls use individual clipboard pastes so a line break
+    /// never synthesizes a Return that could send a message. One snapshot spans the sequence.
+    func type(_ text: String, targetPID: pid_t?, secureField: Bool, restoreClipboard: Bool = true,
+              realKeyDowns: @MainActor () -> Int, stillOwned: @MainActor () -> Bool = { true }) async -> TypeOutcome {
         let released = await waitForModifiersReleased()
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let route = FallbackRoute.route(
             axTrusted: AXIsProcessTrusted(), frontmostIsTarget: frontmost != nil && frontmost == targetPID && stillOwned(),
             secureField: secureField || IsSecureEventInputEnabled(), modifiersReleased: released)
-        guard route == .pasteKeystroke, let targetPID else { return .unavailable }
+        guard !Task.isCancelled, route == .pasteKeystroke, let targetPID else { return .unavailable }
         let baseline = realKeyDowns()
-        let result = await Typewriter.run(text, sleep: { try? await Task.sleep(for: $0) }, clock: ContinuousClock()) { step in
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
-                  !IsSecureEventInputEnabled(), stillOwned(), realKeyDowns() == baseline else { return false }
-            return Self.postUnicode(step)
+        var snapshot: Snapshot?
+        var clipboardCount: Int?
+        let result = await Typewriter.run(text, sleep: { try? await Task.sleep(for: $0) }, writeAsync: { [self] step in
+            let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
+            guard !Task.isCancelled,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
+                  !IsSecureEventInputEnabled(), stillOwned(), realKeyDowns() == baseline,
+                  CGEventSource.flagsState(.hidSystemState).intersection(modifiers).isEmpty else { return false }
+            guard TypewriterPlan.needsPaste(step) else { return Self.postUnicode(step) }
+            // A clipboard changed by the user or another app belongs to them; do not overwrite it
+            // with another automated control paste midway through this sequence.
+            if let clipboardCount, pasteboard.changeCount != clipboardCount { return false }
+            if restoreClipboard, snapshot == nil { snapshot = Snapshot(of: pasteboard) }
+            pasteboard.clearContents()
+            let item = NSPasteboardItem()
+            item.setString(step, forType: .string)
+            item.setData(Data(), forType: Self.transientType)
+            guard pasteboard.writeObjects([item]) else { return false }
+            clipboardCount = pasteboard.changeCount
+            postCommandV()
+            // The target consumes the paste asynchronously. Keep this control on the clipboard
+            // until it has had the same consumption window as an ordinary guarded paste.
+            try? await Task.sleep(for: .milliseconds(500))
+            return true
+        })
+        guard let remainder = result.remainder else {
+            if let snapshot, let clipboardCount, pasteboard.changeCount == clipboardCount {
+                snapshot.restore(to: pasteboard)
+            }
+            return .typed
         }
-        guard let remainder = result.remainder else { return .typed }
-        let rest = String(remainder.drop(while: \.isWhitespace))
-        guard result.wroteAny else { return .unavailable }
-        copy(rest)
-        return .interrupted(remainder: rest)
+        guard result.wroteAny else {
+            if let snapshot, let clipboardCount, pasteboard.changeCount == clipboardCount {
+                snapshot.restore(to: pasteboard)
+            }
+            return .unavailable
+        }
+        copy(remainder)
+        return .interrupted(remainder: remainder)
     }
 
     /// One step as key events of at most 20 UTF-16 units each: key down and up, no modifiers, tagged as ours.

@@ -396,5 +396,17 @@ import LegatoMac
         #expect(target.value == "First. Second.")
     }
 
+    @Test func anExternalEditAtTheSameCaretStopsTheNextAnimationCharacter() async {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); await editor.applyLive(snapshot("cab unchanged tail"))
+        target.writes = []
+        editor.typewriter = { true }
+        editor.sleep = { _ in target.value = "X" + target.value.dropFirst() }
+        await editor.applyLive(snapshot("cat unchanged tail", complete: true))
+        #expect(target.value == "Xa unchanged tail")
+        #expect(target.writes.count == 1)
+    }
+
 }
 #endif
