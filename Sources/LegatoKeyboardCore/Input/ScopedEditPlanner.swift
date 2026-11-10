@@ -1,8 +1,7 @@
 import Foundation
 
-/// Lands an instruction's `ScopedEdit` in the field: checks that the field still shows the scope the model was shown,
-/// then diffs the target into it with the bundle 1 planner (`ShadowEditPlanner`, `coarse`: few ops, a slow host confirms
-/// each one), back to front, the cursor returning to its logical place. Pure: the keyboard feeds it the windows and carries out the ops.
+/// Checks an instruction's scope against the field, then preserves the longest unchanged character subsequence.
+/// Edits run back to front as single grapheme operations, returning the cursor to its logical place.
 public enum ScopedEditPlanner {
     public struct Plan: Sendable, Equatable {
         public var ops: [ShadowOp]
@@ -17,56 +16,31 @@ public enum ScopedEditPlanner {
         case changed
         /// The scope was a selection, and it is not selected any more.
         case selectionChanged
+        case selectionNeedsCursor
 
         public var message: String {
             switch self {
             case .changed: "The text changed, so nothing was edited."
             case .selectionChanged: "The selection changed, so nothing was edited."
+            case .selectionNeedsCursor: "This app did not confirm a cursor within the selection. Nothing was edited."
             }
         }
     }
 
     public static func plan(_ edit: ScopedEdit, windowBefore: String, windowAfter: String, selected: String?) -> Result<Plan, Refusal> {
         if let scope = edit.selected {
-            // The host replaces a selection with the inserted text; the cursor ends after it.
             guard selected == scope else { return .failure(.selectionChanged) }
-            return .success(Plan(ops: edit.target.isEmpty ? [.deleteBackward(1)] : [.insert(edit.target)],
-                                 cursor: edit.target.utf16.count, targetBefore: edit.target))
+            guard scope == edit.target else { return .failure(.selectionNeedsCursor) }
+            return .success(Plan(ops: [], cursor: edit.target.utf16.count, targetBefore: edit.target))
         }
         guard selected?.isEmpty != false,
               agrees(scope: edit.before, window: windowBefore, atEnd: true),
               agrees(scope: edit.after, window: windowAfter, atEnd: false) else { return .failure(.changed) }
-        let trustedBefore = String(FieldReader.trusted(before: windowBefore))
-        let wholeScopeVisible = trustedBefore.hasSuffix(edit.before) && windowAfter.hasPrefix(edit.after)
-        if edit.after.isEmpty, let ops = lineRetype(edit.before, to: edit.target, limit: retypeChars),
-           wholeScopeVisible || deletedCharacters(in: ops) + RunShadow.reverseMatchChars < trustedBefore.count {
-            // The cursor ends the scope and the first change is near it: delete back to it and type the rest. No moves,
-            // so nothing a page can put back after its input events (a controlled text area moves its caret silently).
-            return .success(Plan(ops: ops, cursor: edit.target.utf16.count, targetBefore: edit.target))
-        }
         let shadow = edit.before + edit.after
-        // A proxy window can stop at a sentence or block even when the shadow knows much more. Coalescing all
-        // replacements into one large delete can empty that window, leaving no evidence with which to confirm it.
-        // Preserve unchanged word separators and surrounding words in those fields instead.
-        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count, target: edit.target, coarse: wholeScopeVisible)
+        let plan = ShadowEditPlanner.plan(shadow: shadow, cursor: edit.before.utf16.count,
+                                          target: edit.target, characters: true)
         let before = String(decoding: Array(edit.target.utf16.prefix(plan.cursor)), as: UTF16.self)
         return .success(Plan(ops: plan.ops, cursor: plan.cursor, targetBefore: before))
-    }
-
-    /// `ShadowEditPlanner.retypeTail` within one line: the deleted part holds no line break. Deleting across one in a
-    /// block-based host (Safari's `contenteditable`) can leave an empty block, which takes more deletes than characters
-    /// and whose window shows nothing to confirm by.
-    static func lineRetype(_ shadow: String, to target: String, limit: Int) -> [ShadowOp]? {
-        guard let ops = ShadowEditPlanner.retypeTail(shadow: shadow, target: target, limit: limit) else { return nil }
-        let deleted = ops.reduce(0) { if case .deleteBackward(let n) = $1 { return $0 + n }; return $0 }
-        return shadow.suffix(deleted).contains(where: \.isNewline) ? nil : ops
-    }
-
-    /// An edit whose first change is at most this far back from the cursor (at the scope's end) is retyped from there;
-    /// a smaller change further back goes by words, with moves.
-    public static let retypeChars = 400
-    private static func deletedCharacters(in ops: [ShadowOp]) -> Int {
-        ops.reduce(0) { if case .deleteBackward(let count) = $1 { return $0 + count }; return $0 }
     }
 
     /// A window (cut short by the host) and the scope agree where they overlap: next to the cursor. An empty window
@@ -98,14 +72,9 @@ public enum ScopedEditPlanner {
 /// no other), so a host that reports late never gets an op at a wrong offset. Pure: the keyboard feeds it the field's
 /// report and carries out the op it hands over.
 ///
-/// A page that puts its caret back after a move (a re-rendered, controlled text area) is met like in the live run: a
-/// field known to do so (`avoidsMoves`), or a move whose old place the report keeps pinning (`RunShadow.caretResetReports`
-/// over `caretResetMs`), turns the rest of the edit into a retype at the cursor (`ShadowEditPlanner.retypeTail`: delete
-/// back to the first change, type the new text; no moves). That needs the text after the cursor to stay as it is and at
-/// most `RunShadow.cleanupRetypeChars` deleted; otherwise the edit stops, as it does when an op does not confirm within
-/// `RunShadow.confirmLimitMs` (or a selection appears or stays), or past `limitMs`: the rest is never sent. Where the
-/// field then shows a known state, `Partial` is the scope's text there (the scope itself when nothing landed), so the
-/// app can still undo; otherwise it is unknown.
+/// Every emitted operation must be confirmed before the next. A host which resets the caret refuses the remaining
+/// edit; it never falls back to deleting and retyping unchanged text. A confirmed partial state can be returned for
+/// recovery, while an operation still in flight leaves the outcome unknown.
 public struct ScopedEditQueue: Sendable, Equatable {
     public enum Action: Sendable, Equatable {
         /// Carry out this op; the next step checks that the field shows it.
@@ -150,15 +119,18 @@ public struct ScopedEditQueue: Sendable, Equatable {
     private var resetMs = 0.0
     private var started = false
     private var observedMs: Double?
-    /// The whole edit's budget: past it no further op is sent (the app waits `LinkChannel.editLandTimeout` for the ack).
+    /// Minimum total budget; long edits scale with their operation count. Each operation still has its own deadline.
     public static let limitMs = 20_000.0
+    public static func budgetMs(operationCount: Int) -> Double {
+        max(limitMs, Double(max(0, operationCount)) * 150)
+    }
     /// Ops that had to wait for the field to confirm them.
     public private(set) var waits = 0
     /// The field put its caret back after a move (seen during this edit): the keyboard should avoid moves from now on.
     public private(set) var caretReset = false
-    /// The edit lands (or landed) by retyping at the cursor, without moves.
+    /// Retained diagnostics compatibility. Minimal character edits never retype unchanged tails.
     public private(set) var retypes = false
-    /// The edit needs moves the field does not keep, and retyping cannot stand in: nothing was sent.
+    /// The edit needs cursor moves the field cannot keep.
     public private(set) var needsMoves = false
     /// The field did not show the text the plan was made for before the first op: nothing was sent.
     public private(set) var textChanged = false
@@ -182,21 +154,10 @@ public struct ScopedEditQueue: Sendable, Equatable {
         let start = State(before: edit.before, after: edit.after, selected: false)
         ops = []; states = [start]
         if avoidsMoves, plan.ops.contains(where: { if case .move = $0 { true } else { false } }) {
-            guard let retype = Self.retype(from: start, to: edit.target) else { needsMoves = true; stopped = true; return }
-            retypes = true
-            replan(from: start, ops: retype)
+            needsMoves = true; stopped = true
         } else {
             replan(from: start, ops: plan.ops)
         }
-    }
-
-    /// Ops that bring `state` to `target` by deleting back from the cursor and typing, with the text after the cursor
-    /// kept; nil when that text changes or the deletion is too long.
-    static func retype(from state: State, to target: String) -> [ShadowOp]? {
-        guard target.hasSuffix(state.after) else { return nil }
-        let newBefore = String(target.dropLast(state.after.count))
-        if newBefore == state.before { return [] }
-        return ScopedEditPlanner.lineRetype(state.before, to: newBefore, limit: RunShadow.cleanupRetypeChars)
     }
 
     private mutating func replan(from state: State, ops: [ShadowOp]) {
@@ -246,15 +207,14 @@ public struct ScopedEditQueue: Sendable, Equatable {
                 let before = states[sent - 1]
                 if case .move = ops[sent - 1], shows(before, reportedBefore: reportedBefore, reportedAfter: reportedAfter, hasSelection: hasSelection) {
                     // The report keeps the cursor where it was before the move: lagging for a moment, or a page that put
-                    // its caret back. Held steady, it is the page: the rest goes in by retyping at the cursor.
+                    // its caret back. Held steady, it is the page: stop before changing text at the wrong position.
                     let report = reportedBefore + "\u{0}" + reportedAfter
                     if report == resetReport { resetReports += 1; resetMs += elapsedMs } else { resetReport = report; resetReports = 1; resetMs = 0 }
                     if resetReports >= RunShadow.caretResetReports, resetMs >= RunShadow.caretResetMs {
                         caretReset = true; resetReport = nil; resetReports = 0; resetMs = 0
-                        guard let retype = Self.retype(from: before, to: target) else { stopped = true; return .stopped(partial(before)) }
-                        retypes = true
-                        replan(from: before, ops: retype)
-                        return next(reportedBefore: reportedBefore)
+                        stopped = true; needsMoves = true
+                        // A reset move might still arrive late. Do not claim a settled undo baseline.
+                        return .stopped(nil)
                     }
                 } else {
                     resetReport = nil; resetReports = 0; resetMs = 0
@@ -271,7 +231,7 @@ public struct ScopedEditQueue: Sendable, Equatable {
             confirmed = sent; waitedMs = 0; observedMs = nil; resetReport = nil; resetReports = 0; resetMs = 0
             learnKept(from: reportedBefore, at: states[sent])
         }
-        if sent < ops.count, totalMs >= Self.limitMs {
+        if sent < ops.count, totalMs >= Self.budgetMs(operationCount: ops.count) {
             stopped = true
             return .stopped(partial(states[confirmed]))
         }

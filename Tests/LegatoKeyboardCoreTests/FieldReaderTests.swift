@@ -324,9 +324,24 @@ private extension String {
         let r = try land(edit, field: field, cursor: field.count)
         #expect(r.text == head + "Hello, could you come tomorrow? We start at nine.")
         #expect(r.cursor == r.text.utf16.count)
-        // Changes three words or fewer apart join: one replace inside the scope, the earlier text never deleted.
-        #expect(r.plan.ops.count <= 4)
+        // Every mutation touches a single grapheme inside the scope; earlier text is never deleted.
+        #expect(r.plan.ops.allSatisfy { if case .deleteBackward(let n) = $0 { return n == 1 }; if case .insert(let text) = $0 { return text.count == 1 }; return true })
         #expect(r.plan.ops.allSatisfy { if case .deleteBackward(let n) = $0 { return n <= scope.count }; return true })
+    }
+
+    @Test func isolatedSpacesAndEmojiEditsLeaveEveryOtherCharacterUntouched() throws {
+        for (old, new, deleted, insertedCount) in [
+            ("We  sail 👨‍👩‍👧 tomorrow.", "We sail 👨‍👩‍👧 tomorrow.", 1, 0),
+            ("We sail👨‍👩‍👧 tomorrow.", "We sail 👨‍👩‍👧 tomorrow.", 0, 1),
+            ("The weather is clear.", "The whether is clear.", 1, 1)
+        ] {
+            let edit = ScopedEdit(instructionID: "i", documentID: nil, before: old, after: "", target: new)
+            let result = try land(edit, field: old, cursor: old.count, windowBefore: old)
+            #expect(result.text == new)
+            #expect(result.plan.ops.reduce(0) { if case .deleteBackward(let n) = $1 { return $0 + n }; return $0 } == deleted)
+            #expect(inserted(result.plan) == insertedCount)
+            #expect(result.plan.ops.allSatisfy { if case .insert(let text) = $0 { return text.count == 1 }; if case .deleteBackward(let n) = $0 { return n == 1 }; return true })
+        }
     }
 
     @Test func scopeAroundTheCursorKeepsTheCursorInPlace() throws {
@@ -348,7 +363,7 @@ private extension String {
                 "A window cut short by the host still agrees")
         let selection = ScopedEdit(instructionID: "i", documentID: nil, before: "", after: "", selected: "old words", target: "new words")
         #expect(ScopedEditPlanner.plan(selection, windowBefore: "", windowAfter: "", selected: "other") == .failure(.selectionChanged))
-        #expect(try ScopedEditPlanner.plan(selection, windowBefore: "", windowAfter: "", selected: "old words").get().ops == [.insert("new words")])
+        #expect(ScopedEditPlanner.plan(selection, windowBefore: "", windowAfter: "", selected: "old words") == .failure(.selectionNeedsCursor))
     }
 
     @Test func undoRestoresTheScopeFromWhereTheCursorEnded() throws {
@@ -365,31 +380,29 @@ private extension String {
         plan.ops.reduce(0) { if case .insert(let text) = $1 { return $0 + text.count }; return $0 }
     }
 
-    @Test func aRewriteIsOneReplaceAndSoIsItsUndo() throws {
+    @Test func aRewriteAndItsUndoBothUseIndividualCharacterEdits() throws {
         let scope = "So The Plan For The Garden Is Pretty Simple. First We Move Two Big Pots, Then We Fix The Gate."
         let target = "The plan for the garden is quite simple. First, we move two large pots, then we repair the gate."
         let field = "Notes: " + scope
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
         let landed = try land(edit, field: field, cursor: field.count, windowBefore: field)
         #expect(landed.text == "Notes: " + target && landed.cursor == landed.text.utf16.count)
-        #expect(landed.plan.ops.count <= 4, "Mostly rewritten: one delete and one insert, not word by word")
+        #expect(landed.plan.ops.allSatisfy { if case .deleteBackward(let n) = $0 { return n == 1 }; if case .insert(let text) = $0 { return text.count == 1 }; return true })
         let back = try land(ScopedEditPlanner.undo(of: edit, cursor: landed.plan.cursor), field: landed.text, cursor: landed.text.count, windowBefore: landed.text)
-        #expect(back.text == field && back.plan.ops.count <= 4)
+        #expect(back.text == field)
     }
 
-    @Test func nearbyChangesJoinAndASmallFixStaysWordLevel() throws {
-        // Far from the cursor (past `retypeChars`): by words.
+    @Test func nearbyChangesPreserveTheUnchangedTextBetweenThem() throws {
+        // Separate changes far from the cursor must still preserve the text between them.
         let tail = String(repeating: " Then we go through the plan together.", count: 12)
         let scope = "We meet on monday at the old office. Bring the notes from last week and the slides. Lunch is on us." + tail
         let target = "We meet on Monday at the new office. Bring the notes from last week and the slides. Lunch is on us." + tail
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
         let r = try land(edit, field: scope, cursor: scope.count, windowBefore: scope)
         #expect(r.text == target)
-        // "monday" and "old" are three words apart: one replace of "monday at the old", nothing else retyped.
-        #expect(r.plan.ops.filter { if case .insert = $0 { return true }; return false }.count == 1)
-        #expect(inserted(r.plan) == "Monday at the new".count)
-        let fine = ShadowEditPlanner.plan(shadow: scope, cursor: scope.utf16.count, target: target)
-        #expect(r.plan.ops.count < fine.ops.count)
+        // The unchanged phrase between these edits is never removed or inserted again.
+        #expect(inserted(r.plan) == 4)
+        #expect(r.plan.ops.allSatisfy { if case .deleteBackward(let n) = $0 { return n == 1 }; if case .insert(let text) = $0 { return text.count == 1 }; return true })
     }
 
     @Test func sessionSpanFollowsRunsAndEditsAndEndsWithTheUser() {
@@ -476,7 +489,7 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         let plan = try ScopedEditPlanner.plan(edit, windowBefore: initial.0, windowAfter: initial.1, selected: nil).get()
         var queue = ScopedEditQueue(edit, plan: plan, windowBefore: initial.0)
         var outcome = ScopedEditQueue.Action.wait
-        for _ in 0..<1_000 {
+        for _ in 0..<10_000 {
             let shown = window()
             outcome = queue.step(reportedBefore: shown.0, reportedAfter: shown.1, hasSelection: false, elapsedMs: 33)
             if outcome == .wait { continue }
@@ -528,8 +541,8 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         Issue.record("The queue never finished"); return (.wait, sent)
     }
 
-    @Test func aPageThatPutsItsCaretBackGetsTheRestRetypedAndUndoToo() throws {
-        // The first change is far from the end: the coarse plan moves there first; the page puts the caret back.
+    @Test func aPageThatPutsItsCaretBackStopsWithoutRetyping() throws {
+        // The first interior change needs a move; the page puts that caret back.
         let tail = String(repeating: " Then we go through the plan together.", count: 12)
         let scope = "we meet on monday at the office and bring the slides from last week" + tail
         let target = "We meet on Tuesday at the office and bring the slides from last week" + tail
@@ -537,19 +550,21 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         var field = LaggingField(text: head + scope, cursor: (head + scope).utf16.count, lag: 1)
         field.resetsCaret = true
         let (outcome, _) = try run(edit, on: &field)
-        #expect(outcome == .done && field.text == head + target)
-        #expect(lastQueue?.caretReset == true && lastQueue?.retypes == true)
-        // Known from now on: the undo retypes from the start, no moves.
+        #expect(outcome == .stopped(nil) && field.text == head + scope)
+        #expect(lastQueue?.caretReset == true && lastQueue?.retypes == false)
+        // Once the host is known to reset moves, an interior edit refuses before issuing anything.
         var moves = 0
-        let (back, _) = try run(ScopedEditPlanner.undo(of: edit, cursor: lastQueue?.finalCursor ?? 0), on: &field, avoidsMoves: true, moves: &moves)
-        #expect(back == .done && field.text == head + scope && moves == 0)
+        let (again, count) = try run(edit, on: &field, avoidsMoves: true, moves: &moves)
+        #expect(again == .stopped(.init(text: scope, cursor: scope.utf16.count)))
+        #expect(count == 0 && moves == 0 && field.text == head + scope)
     }
 
-    @Test func aChangeNearTheCursorIsRetypedWithoutMoves() throws {
+    @Test func aChangeNearTheCursorStillUsesMinimalCharacterEdits() throws {
         let scope = "we meet at nine and bring the slides"
         let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "We meet at 9:00 and bring the slides.")
         let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
-        #expect(plan.ops == [.deleteBackward(scope.count), .insert(edit.target)] && plan.cursor == edit.target.utf16.count)
+        #expect(plan.cursor == edit.target.utf16.count)
+        #expect(plan.ops.allSatisfy { if case .deleteBackward(let n) = $0 { return n == 1 }; if case .insert(let text) = $0 { return text.count == 1 }; return true })
     }
 
     @Test func unseenExternalChangesStopFurtherWritesWithoutBlindRollback() throws {
@@ -571,8 +586,8 @@ nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
         #expect(refused == .stopped(.init(text: scope, cursor: scope.utf16.count)) && none == 0 && atCursor.text == typed)
     }
 
-    @Test func aScopeLongerThanTheWindowIsDeletedInPartsThatStayPinned() throws {
-        // A session of dictation and an earlier result, longer than the host's 60-character window, retyped whole.
+    @Test func aScopeLongerThanTheWindowKeepsEveryEditPinned() throws {
+        // A session of dictation longer than the host's 60-character window, edited in place.
         let head = "Hi team, the release is on friday. Thanks, Jakob"
         let scope = " Hey, could you please check the release notes before you start? Thanks so much! And remember to update the screenshots"
         let target = " Hey there! Could you check the release notes and update the screenshots before you start? Thanks so much!"

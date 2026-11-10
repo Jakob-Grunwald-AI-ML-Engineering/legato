@@ -12,19 +12,16 @@ import Foundation
 ///   there) before the next op goes; the host reports late (Safari answers a move or a delete a moment later, with
 ///   the text before the cursor wherever it was on its way). A snapshot that arrives while the queue is busy is not
 ///   diffed: the newest one is diffed against the shadow once the queue is empty (older ones are dropped, never replayed).
-/// - Appends (the target only grows the region) go out a slice at a time through `TypewriterDrain`, a slice per
-///   confirmed op. A flip while the take runs (Soniox revising a word, a changed head) never moves the cursor: a change
-///   that starts within the last `flipRetypeChars` characters is erased back to its first character and typed again,
-///   one character per op at least `flipCharMs` apart; a change further back is left for the cleaned take.
-/// - The cleaned take at the end (a complete snapshot) is retyped from its first change (deleted back from the end,
-///   the rest inserted whole) up to `cleanupRetypeChars`; only a longer one goes by words with cursor moves, back to
-///   front. If that one freezes, the cursor goes back to the end of the run when the report pins where it is.
+/// - Appends reveal one grapheme per animated tick. Recognition flips and completed cleanup use the same minimal
+///   grapheme diff; unchanged text remains in place, and every insertion and deletion is a single character op.
+///   Interior edits verify cursor moves before changing text; a host known to reset its caret leaves those edits
+///   unapplied rather than retyping an unchanged tail.
 /// - Confirmation pins the cursor: the report must fit the shadow at the expected position and nowhere else (a web
 ///   view's few words before the cursor may fit where the cursor was before a move too). A move the report never
 ///   showed (the cursor pinned where it was) goes out once more; a move it showed must still show a tick later. A
 ///   report that then keeps pinning the old place, unchanged, over `caretResetReports` reports and `caretResetMs`
 ///   means the page put its caret back (a lagging report shows the move again first): the run freezes and moves are
-///   off for good (`avoidsMoves`: retype or leave). Anything else that does not confirm freezes at `confirmLimitMs`.
+///   off for good (`avoidsMoves`: leave interior edits unapplied). Anything else that does not confirm freezes at `confirmLimitMs`.
 /// - Drift: a report that does not confirm within `confirmLimitMs`, or a selection, means the user moved on (or the
 ///   host lost an op): everything typed so far is frozen, the rest of the queue is dropped, and the run goes on
 ///   appending at the cursor once the field's report has stopped changing, so the separator and capital are judged
@@ -123,7 +120,7 @@ public struct RunShadow: Sendable, Equatable {
     /// `settlesFirst`: the run starts typing only once the field's report has held still for `stableMs`. Right after a
     /// tap or a focus the host can still report the text before the cursor as it was a moment ago (a missing trailing
     /// space would then be added again).
-    /// `avoidsMoves`: the field is known to reset its caret (this keyboard session saw it): edits only retype at the end.
+    /// `avoidsMoves`: the field is known to reset its caret; only edits requiring no cursor moves are allowed.
     public init(runID: String, settlesFirst: Bool = false, avoidsMoves: Bool = false) {
         self.runID = runID; settling = settlesFirst; self.avoidsMoves = avoidsMoves
     }
@@ -161,12 +158,8 @@ public struct RunShadow: Sendable, Equatable {
     public static let flipCharMs = 30.0
     /// How long a move may go unseen before it is sent once more (only when the report pins the cursor where it was).
     public static let moveResendMs = 400.0
-    /// The cleaned take lands without cursor moves (delete back to the first change, type the rest) when that tail
-    /// is this short, or the whole region is (a short take).
-    /// A flip while the take runs is retyped when it starts within this many characters of the end, else left.
+    /// Retained compatibility limits for callers of the legacy tail planner. Live edits no longer retype tails.
     public static let flipRetypeChars = 40
-    /// The cleaned take is retyped from its first change up to this many characters; beyond it goes by words with
-    /// moves (or, with moves off, is left as typed).
     public static let cleanupRetypeChars = 2000
     /// A caret reset needs the same report pinning the old place this many times, over at least this long.
     public static let caretResetReports = 3
@@ -342,16 +335,8 @@ public struct RunShadow: Sendable, Equatable {
         // A target without any words never erases what is typed, unless the cleaned take dropped every word (all filler).
         let dropsAll = snapshot.complete && !snapshot.segments.isEmpty && snapshot.segments.allSatisfy { $0.final && $0.cleaned }
         if full.isEmpty && !dropsAll { step.applied = true; step.version = snapshot.version; return step }
-        // What the region is brought to: while the take runs, changes that start further back than `flipRetypeChars`
-        // are left as typed (the cleaned take fixes them); with moves off, so is a cleaned take too long to retype.
-        let target: String
-        if !snapshot.complete {
-            target = ShadowEditPlanner.endGoal(shadow: region, target: full, window: Self.flipRetypeChars)
-        } else if avoidsMoves, ShadowEditPlanner.retypeTail(shadow: region, target: full, limit: Self.cleanupRetypeChars) == nil {
-            target = region
-        } else {
-            target = full
-        }
+        // Every revision preserves unchanged graphemes, including live recognition flips.
+        let target = full
         if target == region {
             step.applied = true; step.version = snapshot.version
             return step
@@ -359,7 +344,7 @@ public struct RunShadow: Sendable, Equatable {
         inFlightVersion = snapshot.version
         if target.hasPrefix(region) {
             let revealed = region.count, total = target.count
-            let next = animated ? TypewriterDrain.step(revealed: revealed, target: total, dtMs: elapsedMs) : total
+            let next = animated ? min(total, revealed + 1) : total
             let slice = String(target.dropFirst(revealed).prefix(next - revealed))
             if region.isEmpty {
                 step.startDetail = "anchor=\(anchor.count) endsSpace=\(anchor.last?.isWhitespace == true ? 1 : 0) reported=\(reportedBefore.count) reportedEndsSpace=\(reportedBefore.last?.isWhitespace == true ? 1 : 0) following=\(following.map { $0.isWhitespace ? "space" : "char" } ?? "none") first=\(slice.first?.isWhitespace == true ? "space" : "char")"
@@ -375,17 +360,18 @@ public struct RunShadow: Sendable, Equatable {
             region += slice
             inFlightWhole = region == target; self.target = target
         } else {
-            // No cursor move where it can be helped: everything from the first change is deleted back from the end and
-            // typed again, each op checkable at the end of the field. A flip while the take runs types it one character
-            // per op; the cleaned take inserts it whole, and only a long one far from the end goes by words with moves.
-            paced = !snapshot.complete; lastSentInsert = false
-            let limit = snapshot.complete ? Self.cleanupRetypeChars : Int.max
-            if let retype = ShadowEditPlanner.retypeTail(shadow: region, target: target, limit: limit, characters: paced) {
-                queue = retype
-            } else {
-                queue = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count, target: target, characters: paced).ops
-                cleanupMoving = true
+            let planned = ShadowEditPlanner.plan(shadow: region, cursor: region.utf16.count,
+                                                 target: target, characters: true).ops
+            // A host which resets the caret cannot safely perform interior edits. Keep the original
+            // instead of retyping unchanged text or issuing deletes at an unverified position.
+            if avoidsMoves, planned.contains(where: { if case .move = $0 { true } else { false } }) {
+                _ = freeze(.caretReset)
+                step.froze = .caretReset; step.caretReset = true
+                return step
             }
+            paced = animated; lastSentInsert = false
+            queue = planned
+            cleanupMoving = planned.contains { if case .move = $0 { true } else { false } }
             step.rewrote = true
             region = target; inFlightWhole = true; self.target = target
         }
@@ -417,11 +403,10 @@ public struct RunShadow: Sendable, Equatable {
         work = ""; workCursor = 0; lastMove = nil; moveShownMs = nil; spaceAfterRegion = false; cleanupMoving = false
     }
 
-    /// Sends the next queued op: the shadow's model of the field moves on, and the field has to confirm it. A flip's
-    /// insert right after an insert waits for `flipCharMs` (the typewriter pace), unless flushing.
+    /// Sends one confirmed character operation at typewriter pace, unless flushing.
     private mutating func send(_ step: inout Step, flush: Bool = false) {
-        guard let next = queue.first else { return }
-        if paced, !flush, lastSentInsert, case .insert = next, sinceSendMs < Self.flipCharMs {
+        guard !queue.isEmpty else { return }
+        if paced, !flush, sinceSendMs < Self.flipCharMs {
             step.needsTicks = true
             return
         }

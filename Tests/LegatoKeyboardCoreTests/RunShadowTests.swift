@@ -72,24 +72,21 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(field.text == "the quick brown fox jumps" && steps > 1)
     }
 
-    @Test func aWordFlipNearTheEndIsRetypedFromItsFirstChangeWithoutMoves() {
+    @Test func aWordFlipEditsOnlyItsChangedCharacters() {
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         tick(&shadow, &field, snapshot(1, [final(0, "I think their going home."), head(1, "then we eat")]))
         let step = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home."), head(1, "then we eat")]))
         #expect(field.text == "I think they're going home. then we eat")
-        // Everything from the first change ("i" of "their") is erased back from the end and typed again.
-        let kept = "I think the".count
-        #expect(step.rewrote && step.deletedChars == "I think their going home. then we eat".count - kept
-                && step.insertedChars == field.text.count - kept)
-        #expect(!step.ops.contains { if case .move = $0 { true } else { false } } && field.after.isEmpty)
+        #expect(step.rewrote && step.deletedChars == 1 && step.insertedChars == 3)
+        #expect(step.ops.contains { if case .move = $0 { true } else { false } } && field.after.isEmpty)
     }
 
-    @Test func aFlipFurtherBackThanTheRetypeWindowIsLeftForTheCleanedTake() {
+    @Test func aFlipFurtherBackAlsoEditsOnlyItsChangedCharacters() {
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         tick(&shadow, &field, snapshot(1, [final(0, "I think their going home after the long walk."), head(1, "then we")]))
         let step = tick(&shadow, &field, snapshot(2, [final(0, "I think they're going home after the long walk."), head(1, "then we eat")]))
-        #expect(field.text == "I think their going home after the long walk. then we eat", "The head still grows")
-        #expect(!step.ops.contains { if case .move = $0 { true } else { false } } && step.deletedChars == 0)
+        #expect(field.text == "I think they're going home after the long walk. then we eat", "Earlier flips also preserve unchanged characters")
+        #expect(step.deletedChars == 1)
         tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home after the long walk.", cleaned: true),
                                            final(1, "Then we eat.", cleaned: true)], complete: true))
         #expect(field.text == "I think they're going home after the long walk. Then we eat.")
@@ -115,13 +112,12 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         #expect(field.before == "Dear Sam, Thanks for the file.")
     }
 
-    @Test func emojiAndUTF16FlipsAreRetypedByCharacter() {
+    @Test func emojiAndUTF16FlipsPreserveUnchangedGraphemes() {
         var shadow = RunShadow(runID: "r"), field = Field(before: "")
         tick(&shadow, &field, snapshot(1, [final(0, "😀 Hallo wrld 👨‍👩‍👧 tschüss"), head(1, "bis bald")]))
         let step = tick(&shadow, &field, snapshot(2, [final(0, "😀 Hallo world 👨‍👩‍👧 tschüss"), head(1, "bis bald")]))
         #expect(field.text == "😀 Hallo world 👨‍👩‍👧 tschüss bis bald")
-        let kept = "😀 Hallo w".count
-        #expect(step.deletedChars == "😀 Hallo wrld 👨‍👩‍👧 tschüss bis bald".count - kept && step.insertedChars == field.text.count - kept)
+        #expect(step.deletedChars == 0 && step.insertedChars == 1)
     }
 
     @Test func frozenSentencesAreNotEditedAgainAndTheHeadKeepsAppendingAtTheCursor() {
@@ -262,7 +258,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         var sent = 1
         while shadow.isBusy, sent < 40 {
             let next = tick(&shadow, &field, snap, elapsedMs: RunShadow.flipCharMs, drain: false)
-            #expect(next.ops.count == 1)
+            #expect(next.ops.count <= 1, "Cursor moves may need a second confirmation tick")
             sent += 1
         }
         #expect(sent >= 4 && field.text == "I think they're going home. then we eat and sleep" && field.after.isEmpty)
@@ -272,6 +268,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         let next = tick(&shadow, &field, flip, drain: false)
         #expect(next.ops.count == 1 && shadow.isBusy)
         let sentOne = field
+        _ = tick(&shadow, &field, flip, elapsedMs: 400, reported: before.before, reportedAfter: before.after, drain: false)
         let stuck = tick(&shadow, &field, flip, elapsedMs: 900, reported: before.before, reportedAfter: before.after, drain: false)
         #expect(stuck.froze == .drift && stuck.confirmTimedOut && !shadow.isBusy && field.text == sentOne.text)
     }
@@ -447,7 +444,7 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
         let snap = snapshot(2, [final(0, "I think they're going home."), head(1, "then")])
         // 10 ms ticks: an insert that follows an insert goes out only `flipCharMs` after it.
         var ops: [ShadowOp] = [], now = 0.0, lastInsert: Double?, previousWasInsert = false
-        var step = tick(&shadow, &field, snap, drain: false)
+        var step = tick(&shadow, &field, snap, animated: true, elapsedMs: 30, drain: false)
         while true {
             for op in step.ops {
                 if case .insert(let text) = op {
@@ -459,16 +456,14 @@ private func tick(_ shadow: inout RunShadow, _ field: inout Field, _ snap: LiveD
             }
             guard shadow.isBusy, now < 2000 else { break }
             now += 10
-            step = tick(&shadow, &field, snap, elapsedMs: 10, drain: false)
+            step = tick(&shadow, &field, snap, animated: true, elapsedMs: 10, drain: false)
         }
         #expect(field.text == "I think they're going home. then" && field.after.isEmpty)
-        let kept = "I think the".count
-        #expect(ops.first == .deleteBackward("I think their going home. then".count - kept))
-        #expect(ops.filter { if case .insert = $0 { true } else { false } }.count == field.text.count - kept)
-        #expect(!ops.contains { if case .move = $0 { true } else { false } }, "The cursor never leaves the end")
-        // The complete take inserts its retyped tail whole.
+        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } }.count == 1)
+        #expect(ops.filter { if case .insert = $0 { true } else { false } }.count == 3)
         let done = tick(&shadow, &field, snapshot(3, [final(0, "I think they're going home.", cleaned: true), final(1, "Then.", cleaned: true)], complete: true))
-        #expect(field.text == "I think they're going home. Then." && done.ops.contains(.insert("Then.")))
+        #expect(field.text == "I think they're going home. Then.")
+        #expect(done.ops.allSatisfy { if case .insert(let text) = $0 { return text.count == 1 }; if case .deleteBackward(let n) = $0 { return n == 1 }; return true })
     }
 }
 
@@ -783,15 +778,16 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
         #expect(steps.allSatisfy { $0.froze == nil } && !shadow.avoidsMoves)
     }
 
-    @Test func aCleanedTakeOfSomeHundredWordsIsRetypedWithoutMovesInLargeInserts() {
+    @Test func aLongCleanedTakeOnlyDeletesOneSpaceAndInsertsOneComma() {
         let middle = (1...20).map { "Sentence number \($0) talks about step \($0)." }.joined(separator: " ")
         let raw = "Lina we ship it today. " + middle + " Or do we wait for Lina ?"
         let cleaned = "Lina, we ship it today. " + middle + " Or do we wait for Lina?"
-        var shadow = RunShadow(runID: "r"), field = WebField(window: 40, restoresCaret: true)
+        var shadow = RunShadow(runID: "r"), field = WebField(window: 40)
         drive(&shadow, &field, snapshot(1, [final(0, raw)]))
         let ops = drive(&shadow, &field, snapshot(2, [final(0, cleaned, cleaned: true)], complete: true)).flatMap(\.ops)
         #expect(field.full == cleaned && field.cursor == field.text.count)
-        #expect(ops == [.deleteBackward(raw.count - 4), .insert(String(cleaned.dropFirst(4)))])
+        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(1)])
+        #expect(ops.filter { if case .insert = $0 { true } else { false } } == [.insert(",")])
     }
 
     @Test func aPageThatPutsItsCaretBackAfterAMoveFreezesTheRunAndTurnsMovesOff() {
@@ -802,14 +798,14 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
         #expect(steps.last?.froze == .caretReset && steps.last?.caretReset == true && shadow.avoidsMoves)
         #expect([Self.raw, Self.raw.replacingOccurrences(of: " ?", with: "?")].contains(field.full), "Nothing landed at the old place")
         #expect(field.cursor == field.text.count, "The cursor is put back at the end of the run")
-        // The next run in that field (moves off for the session) leaves a take too long to retype as typed.
+        // The next run knows this field resets moves and leaves its interior edits unapplied.
         var next = RunShadow(runID: "s", avoidsMoves: true), fresh = WebField(restoresCaret: true)
         drive(&next, &fresh, snapshot(1, [final(0, Self.raw)]))
         let left = drive(&next, &fresh, snapshot(2, [final(0, Self.cleaned, cleaned: true)], complete: true))
         #expect(fresh.full == Self.raw && fresh.cursor == fresh.text.count && left.flatMap(\.ops).isEmpty)
     }
 
-    @Test func theCleanedShortTakeIsRetypedFromItsFirstChangeWithoutMoves() {
+    @Test func aShortCleanupOnAResettingHostStopsWithoutRetypingTheTail() {
         // A split word, a filler and a stray space before "?": the cleanup changes an early word and the end.
         let raw = "I guess we coul d, uh, run the checks on the second branch. What would you say ?"
         let cleaned = "I guess we could run the checks on the second branch. What would you say?"
@@ -819,8 +815,8 @@ private func drive(_ shadow: inout RunShadow, _ field: inout WebField, _ snap: L
         let steps = drive(&shadow, &field, snapshot(2, [final(0, "I guess we could run the checks on the second branch.", cleaned: true),
                                                        final(1, "What would you say?", cleaned: true)], complete: true))
         let ops = steps.flatMap(\.ops)
-        #expect(field.full == cleaned && field.cursor == field.text.count)
-        #expect(ops == [.deleteBackward(raw.count - "I guess we coul".count), .insert(String(cleaned.dropFirst("I guess we coul".count)))])
-        #expect(steps.reduce(0) { $0 + $1.deletedChars } == raw.count - "I guess we coul".count)
+        #expect([raw, raw.replacingOccurrences(of: " ?", with: "?")].contains(field.full))
+        #expect(!ops.contains { if case .insert = $0 { true } else { false } })
+        #expect(steps.contains { $0.froze != nil }, "An unconfirmable host stops rather than retyping unchanged text")
     }
 }
