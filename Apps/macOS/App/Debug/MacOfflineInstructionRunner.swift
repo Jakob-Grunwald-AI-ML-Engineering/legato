@@ -13,8 +13,20 @@ struct MacOfflineInstructionRunner: InstructionRunning {
         let result: String
         if lower.contains("uppercase") || lower.contains("upper case") || lower.contains("capital letters") { result = text.uppercased() }
         else if lower.contains("lowercase") || lower.contains("lower case") { result = text.lowercased() }
+        else if lower.contains("remove extra spaces") {
+            var normalized = text
+            while normalized.contains("  ") { normalized = normalized.replacingOccurrences(of: "  ", with: " ") }
+            result = normalized
+        }
+        else if lower.hasPrefix("replace \""), instruction.components(separatedBy: "\"").count == 5 {
+            let parts = instruction.components(separatedBy: "\"")
+            guard !parts[1].isEmpty, parts[2].trimmingCharacters(in: .whitespaces).lowercased() == "with" else {
+                throw InstructionFailure.unreadable("Use replace \"old\" with \"new\".")
+            }
+            result = text.replacingOccurrences(of: parts[1], with: parts[3])
+        }
         else if lower.contains("delete") { result = "" }
-        else { throw InstructionFailure.unreadable("Offline fixture supports uppercase, lowercase and delete instructions.") }
+        else { throw InstructionFailure.unreadable("Offline fixture supports uppercase, lowercase, delete, remove extra spaces, and replace \"old\" with \"new\" instructions.") }
         return try InstructionRunner.outcome(reply: "SCOPE: \(scope.rawValue)\n" + result, context: context, instruction: instruction)
     }
 }

@@ -133,19 +133,31 @@ public struct DictationTypist: Sendable, Equatable {
             current.waitedMs = 0
             if current.retract {
                 // The field ends with exactly what was typed for this line: take it back.
-                step.deletes += current.revealed
-                active = nil
-                typedThrough = max(typedThrough, current.seq); step.acknowledged = typedThrough
+                let count = animated ? min(1, current.revealed) : current.revealed
+                step.deletes += count
+                current.revealed -= count
+                current.expected = String(current.expected.dropLast(count))
+                if current.revealed > 0 || (animated && count > 0) {
+                    active = current
+                } else {
+                    active = nil
+                    typedThrough = max(typedThrough, current.seq); step.acknowledged = typedThrough
+                }
                 return step
             }
             let total = current.text.count
-            let next = animated ? TypewriterDrain.step(revealed: current.revealed, target: total, dtMs: elapsedMs) : total
+            let next = animated ? min(total, current.revealed + (elapsedMs > 0 ? 1 : 0)) : total
             if next > current.revealed {
                 let slice = String(current.text[current.revealed..<next])
                 step.inserts.append(slice)
                 current.expected += slice
                 contextBefore += slice
                 current.revealed = next
+            }
+            if animated, !step.inserts.isEmpty {
+                // The next step verifies the final character's host echo before acknowledging the line.
+                active = current
+                break
             }
             if current.revealed >= total && !current.final {
                 active = current // fully typed so far; more text, the end or a retraction comes with a later publication

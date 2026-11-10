@@ -165,7 +165,7 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
 
 /// app -> keyboard (`link.instruction.edit`): replace the scope with `target`. The scope is exactly the text the model
 /// was shown: `before` ends at the cursor, `after` starts there; with `selected` set the selection is the scope. The
-/// keyboard checks that the field still shows it (the windows around the cursor agree), word-diffs `target` into it
+/// keyboard checks that the field still shows it (the windows around the cursor agree), character-diffs `target` into it
 /// (`ShadowEditPlanner`), and answers on `link.instruction.edit.ack`. Undo is the same edit the other way round.
 public struct ScopedEdit: Codable, Sendable, Equatable {
     public var revision: FieldRevision?

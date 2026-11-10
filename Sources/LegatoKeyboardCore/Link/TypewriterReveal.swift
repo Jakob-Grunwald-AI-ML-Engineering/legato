@@ -1,31 +1,9 @@
 import Foundation
 
-/// Lets the host's text appear in the field like typing instead of in chunks: it plans against a prefix of
-/// the host's text (`ProxyEditPlanner` does the rest) and grows that prefix with `TypewriterDrain` on
-/// every tick. The keyboard calls `plan` for each host update and for each tick while `needsTicks`.
-///
-/// - The reveal counts characters of `committed + volatile`. Text the host revises behind the revealed
-///   part, or shortens below it, is not animated: the reveal jumps to the full text and the planner's
-///   diff applies the revision at once. A revision of the part not yet revealed just moves the target.
-/// - A run's final state is reported (`AppliedCursor.finalApplied`) only once all of it is in the field.
-/// - A new run starts at nothing; the same run met again (a restarted keyboard) continues from what the
-///   cursor says is typed.
-/// - Right after an insert the field can still report the old context, and the planner would take the
-///   tentative text it can't find at the end of it for the user's and type it again. So while the context
-///   doesn't end with the cursor's tentative text, ticks wait (`settleLimitMs` at most, then it is
-///   planned against as before: the user did move on). Host updates don't use up that wait.
-/// - Nothing is drained without a field to type into (no field, another field, not the keyboard's run).
-/// - Cleanup delivery (`HostState.delivery`): `.hold` is not revealed (nothing is typed while listening and
-///   the final text goes in as one edit, which the reveal would otherwise insert again on every tick).
-///   With `.replace` the streamed text is revealed like any other; the swap for the final text waits until
-///   all of it is in the field and the field's context shows it (`settleLimitMs` at most), and is then one
-///   edit. With `.clipboard` the streamed text is the result.
-///   With `.live` a revision (`HostState.revision`) is applied by the planner only to text the reveal has
-///   typed (the planner sees the state cut to the revealed part, so a revision waits until the text it covers
-///   is revealed), and, like the swap, only once the field's context shows the run text typed on earlier
-///   ticks (`settleLimitMs` at most): a revision that finds the field changed is skipped for good. After a sent
-///   boundary the reveal goes on from the boundary; tentative text sent with the message holds it until the
-///   committed text shows where that text ends (`ProxyEditPlanner.awaitsSentTentative`, on the whole state).
+/// Reveals host text one character at a time. Revisions and final cleanup preserve surviving characters
+/// through the same verified edit queue as magic. A host update received during an edit waits until its
+/// operations confirm; only then is its applied cursor acknowledged. A failed transaction stops that run
+/// without issuing further mutations. Context and document identity protect user edits and field changes.
 public struct TypewriterReveal: Sendable, Equatable {
     /// How long a tick waits for the field's context to show the tentative text before giving up.
     public static let settleLimitMs = 250.0
@@ -33,6 +11,16 @@ public struct TypewriterReveal: Sendable, Equatable {
     /// More ticks are needed: text is left to reveal, or a tick is waiting for the context.
     public private(set) var needsTicks = false
 
+    private struct Pending: Sendable, Equatable {
+        var queue: ScopedEditQueue
+        var cursor: AppliedCursor?
+        var runID: String?
+        var documentID: String
+        var appendOnly: Bool
+    }
+    private var pending: Pending?
+    private var stoppedRun: String?
+    private var movesByCharacters = false
     private var runID: String?
     private var text = ""
     private var revealed = 0
@@ -42,18 +30,50 @@ public struct TypewriterReveal: Sendable, Equatable {
 
     public init() {}
 
+    /// A host Send is evidence that even an unacknowledged appended character left with the message.
+    /// This cursor is only for clear detection; it never confirms a partially applied rewrite.
+    public func cursorBeforeFieldClear(fallback: AppliedCursor?) -> AppliedCursor? {
+        guard let pending, pending.appendOnly,
+              pending.queue.predictedWindow.before == pending.queue.expectedBefore else { return fallback }
+        var sent = pending.cursor
+        sent?.finalApplied = false
+        return sent
+    }
+
     /// The edits that bring the field closer to `state`. `elapsedMs` is the time since the last tick (0 for
     /// a host update: it follows the new text but reveals nothing more); `animated` false (Reduce Motion,
     /// or a flush) reveals everything now.
     public mutating func plan(
         state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?, animated: Bool,
-        elapsedMs: Double = 0
+        elapsedMs: Double = 0, contextAfter: String = "", hasSelection: Bool = false, movesByCharacters: Bool = false
     ) -> ProxyPlan {
+        self.movesByCharacters = movesByCharacters
         needsTicks = false
+        if hasSelection {
+            pending = nil; stoppedRun = state.runID
+            var failed = cursor; failed?.finalApplied = false
+            return ProxyPlan(ops: [], cursor: failed)
+        }
+        if let stoppedRun, stoppedRun == state.runID { return ProxyPlan(ops: [], cursor: cursor) }
+        if let transaction = pending {
+            guard transaction.runID == state.runID, transaction.documentID == documentID else {
+                pending = nil
+                return ProxyPlan(ops: [], cursor: cursor)
+            }
+            if state.delivery == .live, let cursor, cursor.runID == transaction.runID,
+               cursor.sentCount != (transaction.cursor?.sentCount ?? 0) {
+                // The host sent the currently shown text; no queued mutation of that text may follow it.
+                pending = nil
+            } else {
+                return advance(state: state, cursor: cursor, contextBefore: contextBefore, contextAfter: contextAfter, elapsedMs: elapsedMs)
+            }
+        }
         guard let documentID, state.target == .keyboard, let runID = state.runID, state.delivery != .hold,
               cursor == nil || cursor?.runID != runID || cursor?.documentID == documentID
         else {
-            return ProxyEditPlanner.plan(state: state, cursor: cursor, contextBefore: contextBefore, documentID: documentID)
+            let plan = ProxyEditPlanner.plan(state: state, cursor: cursor, contextBefore: contextBefore, documentID: documentID)
+            return play(plan, state: state, cursor: cursor, contextBefore: contextBefore, contextAfter: contextAfter,
+                        documentID: documentID, elapsedMs: elapsedMs)
         }
 
         let target = state.committed + state.volatile
@@ -110,7 +130,7 @@ public struct TypewriterReveal: Sendable, Equatable {
         if !animated {
             revealed = total
         } else if elapsedMs > 0 {
-            revealed = TypewriterDrain.step(revealed: revealed, target: total, dtMs: elapsedMs)
+            revealed = min(total, revealed + 1)
         }
 
         // The swap is a step of its own, after the streamed text has settled in the field.
@@ -123,7 +143,66 @@ public struct TypewriterReveal: Sendable, Equatable {
             plan.cursor?.finalApplied = false
             needsTicks = true
         }
-        return plan
+        return play(plan, state: state, cursor: cursor, contextBefore: contextBefore, contextAfter: contextAfter,
+                    documentID: documentID, elapsedMs: elapsedMs)
+    }
+
+    /// Use the same confirmed edit queue as magic, including for held takes and final cleanup.
+    private mutating func play(_ plan: ProxyPlan, state: HostState, cursor: AppliedCursor?, contextBefore: String,
+                               contextAfter: String, documentID: String?, elapsedMs: Double) -> ProxyPlan {
+        guard !plan.ops.isEmpty, let documentID else { return plan }
+        let ops: [ShadowOp] = plan.ops.flatMap { op -> [ShadowOp] in
+            switch op {
+            case .move(let units): return [.move(units)]
+            case .deleteBackward(let count): return Array(repeating: .deleteBackward(1), count: count)
+            case .insert(let text): return text.map { .insert(String($0)) }
+            }
+        }
+        let result = ShadowEditPlanner.simulate(ops: ops, shadow: contextBefore + contextAfter, cursor: contextBefore.utf16.count)
+        let edit = ScopedEdit(instructionID: "host", documentID: documentID, before: contextBefore, after: contextAfter, target: result.text)
+        let scoped = ScopedEditPlanner.Plan(ops: ops, cursor: result.cursor,
+            targetBefore: String(decoding: result.text.utf16.prefix(result.cursor), as: UTF16.self))
+        pending = Pending(queue: ScopedEditQueue(edit, plan: scoped, windowBefore: contextBefore, movesByCharacters: movesByCharacters), cursor: plan.cursor,
+                          runID: state.runID, documentID: documentID,
+                          appendOnly: ops.allSatisfy { if case .insert = $0 { true } else { false } })
+        return advance(state: state, cursor: cursor, contextBefore: contextBefore, contextAfter: contextAfter, elapsedMs: elapsedMs)
+    }
+
+    private mutating func advance(state: HostState, cursor: AppliedCursor?, contextBefore: String, contextAfter: String, elapsedMs: Double) -> ProxyPlan {
+        guard var transaction = pending else { return ProxyPlan(ops: [], cursor: cursor) }
+        var waitingCursor = cursor
+        waitingCursor?.finalApplied = false
+        let action = transaction.queue.step(reportedBefore: contextBefore, reportedAfter: contextAfter,
+                                           hasSelection: false, elapsedMs: elapsedMs)
+        switch action {
+        case .send(let op):
+            pending = transaction; needsTicks = true
+            let proxy: ProxyOp = switch op {
+            case .move(let units): .move(units)
+            case .deleteBackward(let count): .deleteBackward(count)
+            case .insert(let text): .insert(text)
+            }
+            return ProxyPlan(ops: [proxy], cursor: waitingCursor)
+        case .wait:
+            pending = transaction; needsTicks = true
+            return ProxyPlan(ops: [], cursor: waitingCursor)
+        case .done:
+            pending = nil
+            // Reconcile a newer host snapshot on the next tick after acknowledging this transaction.
+            needsTicks = true
+            return ProxyPlan(ops: [], cursor: transaction.cursor)
+        case .stopped:
+            stoppedRun = transaction.runID; pending = nil
+            var failed = cursor
+            failed?.finalApplied = false
+            if transaction.cursor?.finalReplaced != nil { failed?.finalReplaced = false }
+            let handled = max(transaction.cursor?.revisionHandled ?? 0, state.delivery == .live ? state.revision?.n ?? 0 : 0)
+            if handled > (failed?.revisionHandled ?? 0) {
+                failed?.revisionHandled = handled
+                failed?.revisionSkipped = true
+            }
+            return ProxyPlan(ops: [], cursor: failed)
+        }
     }
 
     /// `.live`: a revision not yet handled replaces the run text typed on earlier ticks, which the planner looks

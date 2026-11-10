@@ -1,6 +1,8 @@
 import Foundation
 
 public enum ProxyOp: Sendable, Equatable {
+    /// Move in UTF-16 units; the executor verifies the host position before the next edit.
+    case move(Int)
     /// Delete this many characters before the insertion point (one `deleteBackward()` each).
     case deleteBackward(Int)
     case insert(String)
@@ -22,19 +24,19 @@ public struct ProxyPlan: Sendable, Equatable {
 /// (`documentContextBeforeInput`) shows is there.
 ///
 /// - Committed text is only ever appended: the part of `committed` past `cursor.committedCount`.
-/// - The volatile tail is revised by a common-prefix diff against what is in the field, and is deleted
+/// - The volatile tail is revised by a character diff against what is in the field, and is deleted
 ///   only while the context still ends with it; otherwise it is left alone (it has become the user's).
 /// - Edits go only to the document the run is bound to; a run binds to the document it first types into.
 ///   With no document (`documentID` nil: no field is bound) nothing is planned and the cursor stays.
 /// - A separating space goes in front of the first text of a run (and after the user typed into the
 ///   run) when the field's text before it doesn't end in whitespace.
 /// - Cleanup (`HostState.delivery`, `finalText`): with `.replace` the streamed text is swapped for the
-///   final text in one edit once it has all landed, only while the field still ends with it (never
+///   final text using minimal character edits once it has all landed, only while the field still ends with it (never
 ///   retried; without the swap the final state is not confirmed, so the app uses the clipboard). With
 ///   `.clipboard` the streamed text stays. With `.hold` nothing is typed while listening; the final text
 ///   is inserted once, at the end.
 /// - Live cleanup (`.live`): the newest `HostState.revision` replaces what the field shows for the run
-///   (`runText`) with its text followed by the raw text committed after it, in one common-prefix edit, when
+///   (`runText`) with its text followed by the raw text committed after it, in minimal character edits, when
 ///   the field still ends with exactly that run text (`applyLiveRevision`). One that would replace text not
 ///   typed yet waits. When the field no longer ends with it (the user edited) the revision is skipped, and
 ///   so is every later one. The final state is confirmed only when the newest revision landed and none was
@@ -78,10 +80,7 @@ public enum ProxyEditPlanner {
             ? " " : ""
         let target = separator + body
 
-        let shared = commonPrefixCount(inField, target)
-        if inField.count > shared { ops.append(.deleteBackward(inField.count - shared)) }
-        let missing = String(target.dropFirst(shared))
-        if !missing.isEmpty { ops.append(.insert(missing)) }
+        ops += replaceOps(from: inField, to: target)
 
         current.committedCount += delta.count
         // With nothing newly committed the separator belongs to the tentative text; otherwise it is committed.
@@ -104,7 +103,7 @@ public enum ProxyEditPlanner {
         return ProxyPlan(ops: ops, cursor: current)
     }
 
-    /// `.live`: streams like `.replace` and applies the new revisions; the edit is one common-prefix diff
+    /// `.live`: streams like `.replace` and applies the new revisions; the edit is one character diff
     /// from the field as it is to the field as it should be.
     private static func planLive(state: HostState, cursor: AppliedCursor, ops: [ProxyOp], context: String) -> ProxyPlan {
         var ops = ops
@@ -255,14 +254,15 @@ public enum ProxyEditPlanner {
         String(text.reversed().prefix(while: \.isWhitespace).reversed())
     }
 
-    /// The edit that turns `old`, the end of the field, into `new`: a shared beginning stays.
+    /// Preserve all surviving characters, including text between separate changes.
     static func replaceOps(from old: String, to new: String) -> [ProxyOp] {
-        let shared = commonPrefixCount(old, new)
-        var ops: [ProxyOp] = []
-        if old.count > shared { ops.append(.deleteBackward(old.count - shared)) }
-        let missing = String(new.dropFirst(shared))
-        if !missing.isEmpty { ops.append(.insert(missing)) }
-        return ops
+        ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: new, characters: true).ops.map {
+            switch $0 {
+            case .move(let offset): .move(offset)
+            case .deleteBackward(let count): .deleteBackward(count)
+            case .insert(let text): .insert(text)
+            }
+        }
     }
 
     /// The user is about to type into the field mid-run: remove the tentative text (if it is still the end
