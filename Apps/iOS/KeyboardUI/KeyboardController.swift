@@ -45,6 +45,8 @@ final class KeyboardController {
     private(set) var appearance: UIUserInterfaceStyle = .unspecified
     /// A line above the keys: the Full Access explainer, or the "tap again to open" fallback.
     private(set) var hint: String?
+    /// Recovery guidance survives Safari's accessory-field keyboard disappearance/appearance and transient hints.
+    private(set) var liveRecoveryNotice: String?
     /// Up to three suggestions, best first; the word row shows them as "2 | 1 | 3" (``SuggestionSlots``).
     /// `SuggestionController` fills them.
     var suggestions: [String] = []
@@ -176,7 +178,12 @@ final class KeyboardController {
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        hint ?? instructionPresentation?.text ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
+        liveRecoveryNotice ?? hint ?? instructionPresentation?.text ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
+    }
+    func dismissLiveRecovery() {
+        liveRecoveryDismissed = true
+        liveRecoveryNotice = nil
+        syncRowTakeover()
     }
 
     /// The held take's phase while one is held (`cleaning`, `failed`), else nil.
@@ -352,6 +359,21 @@ final class KeyboardController {
 
     func disappeared() {
         isVisible = false
+        if let snapshot = liveSnapshot,
+           !snapshot.complete || snapshot.version != liveAckedVersion || !liveSettled {
+            // Safari's Next/Previous accessory can cycle keyboard visibility before the new field reports its ID.
+            // Remember only this controller's known interrupted take; an arbitrary old publication is still ignored.
+            blockedLiveRunID = snapshot.runID
+            blockedLiveCompleted = snapshot.complete
+            liveRecoveryDismissed = false
+            freezeLiveRun(.field)
+            liveShadow = nil; liveSnapshot = nil; liveSettled = true
+            setLiveRunning(false)
+            liveRecoveryNotice = snapshot.complete
+                ? "Recover full take in History."
+                : "Finish dictation; recover in History."
+            syncRowTakeover()
+        }
         fieldOperationCancelled = true
         if let id = activeInstructionID { link.cancelInstruction(id) }
         fieldCoordinator.preempt()
@@ -792,6 +814,7 @@ final class KeyboardController {
     @ObservationIgnored private var liveAckedVersion: Int?
     @ObservationIgnored private var blockedLiveRunID: String?
     @ObservationIgnored private var blockedLiveCompleted = false
+    @ObservationIgnored private var liveRecoveryDismissed = false
     @ObservationIgnored private var liveTicker: Task<Void, Never>?
     /// A field in this keyboard session put its caret back after a live move (a page that re-renders its textarea):
     /// later runs edit only by retyping at the end, never by moving the cursor.
@@ -806,17 +829,23 @@ final class KeyboardController {
             if liveSeen != nil { liveSeen = nil; liveSnapshot = nil; setLiveRunning(false) }
             return
         }
-        guard snapshot != liveSeen, snapshot.runID != ignoredLiveRunID else { return }
-        liveSeen = snapshot
+        guard snapshot != liveSeen else { return }
         if snapshot.runID == blockedLiveRunID {
+            liveSeen = snapshot
             if snapshot.complete, !blockedLiveCompleted {
                 blockedLiveCompleted = true
-                show("The field changed. Open Legato's History to recover the full take.")
+                if !liveRecoveryDismissed {
+                    liveRecoveryNotice = "Recover full take in History."
+                    syncRowTakeover()
+                }
             }
             return
         }
+        guard snapshot.runID != ignoredLiveRunID else { return }
+        liveSeen = snapshot
         blockedLiveRunID = nil; blockedLiveCompleted = false
         if snapshot.runID != liveShadow?.runID {
+            dismissLiveRecovery()
             liveShadow = RunShadow(runID: snapshot.runID, settlesFirst: true, avoidsMoves: liveFieldResetsCaret)
             liveStats = LiveDictationStats(); liveAckedVersion = nil
             liveDocumentID = document.documentID
@@ -932,9 +961,11 @@ final class KeyboardController {
             liveShadow = nil; liveSnapshot = nil; liveSettled = true
             stopLiveTicker(); setLiveRunning(false)
             if hadPendingTake {
-                show(blockedLiveCompleted
-                     ? "The field changed. Open Legato's History to recover the full take."
-                     : "The field changed. Finish dictation, then open History to recover the full take.")
+                liveRecoveryDismissed = false
+                liveRecoveryNotice = blockedLiveCompleted
+                    ? "Recover full take in History."
+                    : "Finish dictation; recover in History."
+                syncRowTakeover()
             }
             return
         }
@@ -1277,6 +1308,7 @@ final class KeyboardController {
     func engageMagic(_ value: MagicToggle) {
         guard value.isOn else { return releaseMagic() }
         guard fullAccess else { return show("Turn on Allow Full Access for Legato in Settings > General > Keyboard to give instructions.") }
+        dismissLiveRecovery()
         setMagicToggle(value)
         guard !isCapturing, pendingRemoteStartID == nil else { return }
         reloadHost()
@@ -1867,6 +1899,7 @@ final class KeyboardController {
     /// The user types into a run's text: the tentative text comes out first so the key lands after the
     /// committed text; `applyHost` puts it back after the key.
     private func beforeUserEdit() {
+        dismissLiveRecovery()
         settleInstructionRow()
         // Committed text still to be revealed goes in first, so the key does not land in the middle of it.
         if reveal.needsTicks { applyHost(flush: true) }
