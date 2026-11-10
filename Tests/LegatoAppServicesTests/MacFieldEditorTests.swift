@@ -13,6 +13,8 @@ import LegatoMac
     var readable = true
     var ignoreWrites = false
     var throwAfterWrite = false
+    var normalizeTrailingNBSP = false
+    var corruptPrefixAfterWrite = false
     var selections: [UTF16Range] = []
     var writes: [UTF16Range] = []
     init(_ value: String, _ selection: UTF16Range? = nil) {
@@ -30,6 +32,13 @@ import LegatoMac
         writes.append(range)
         guard !ignoreWrites else { return }
         value = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+        if normalizeTrailingNBSP, range.length == 0, range.location > 0, !text.isEmpty,
+           (value as NSString).substring(with: NSRange(location: range.location - 1, length: 1)) == "\u{00A0}" {
+            value = (value as NSString).replacingCharacters(in: NSRange(location: range.location - 1, length: 1), with: " ")
+        }
+        if corruptPrefixAfterWrite, !value.isEmpty {
+            value = (value as NSString).replacingCharacters(in: NSRange(location: 0, length: 1), with: "X")
+        }
         selection = .init(location: range.location + text.utf16.count, length: 0)
         if throwAfterWrite { throw TextTargetReadError.unsupported }
     }
@@ -54,6 +63,41 @@ import LegatoMac
         #expect(target.value == "Hello 🐈 Small cat.")
         #expect(target.selection.location == target.value.utf16.count)
         #expect(target.writes.allSatisfy { $0.location >= 8 })
+    }
+    @Test func richFieldTrailingSpaceNormalizationDoesNotDetachTheNextPartial() {
+        for prefix in ["Draft:", "Sailing ⛵️:"] {
+            let target = EditorTarget(prefix + "\u{00A0}")
+            target.normalizeTrailingNBSP = true
+            let editor = MacFieldEditor(capture: { .target(target) })
+            var reports: [String] = []
+            editor.report = { reports.append($0) }
+            editor.begin()
+            editor.applyLive(snapshot("hello there"))
+            editor.applyLive(snapshot("hello there friend"))
+            editor.applyLive(snapshot("Hello there friend.", complete: true))
+            #expect(target.value == prefix + " Hello there friend.")
+            #expect(target.selection == .init(location: target.value.utf16.count, length: 0))
+            #expect(target.writes.count == 3)
+            #expect(reports.isEmpty)
+        }
+    }
+    @Test func aLiteralNBSPCanRemainUnchangedAndOtherPrefixChangesStillStopEditing() {
+        let target = EditorTarget("Draft:\u{00A0}")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin()
+        editor.applyLive(snapshot("hello"))
+        editor.applyLive(snapshot("hello there", complete: true))
+        #expect(target.value == "Draft:\u{00A0}hello there")
+        #expect(target.writes.count == 2)
+
+        let corrupted = EditorTarget("Draft:\u{00A0}")
+        corrupted.normalizeTrailingNBSP = true; corrupted.corruptPrefixAfterWrite = true
+        let guarded = MacFieldEditor(capture: { .target(corrupted) })
+        guarded.begin()
+        guarded.applyLive(snapshot("hello"))
+        guarded.applyLive(snapshot("hello there", complete: true))
+        #expect(corrupted.value == "Xraft: hello")
+        #expect(corrupted.writes.count == 1)
     }
     @Test func movingTheCursorBeforeFirstWordsNeverRedirectsTheRun() {
         let target = EditorTarget("Keep this")

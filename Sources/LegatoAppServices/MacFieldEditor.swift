@@ -360,7 +360,12 @@ import LegatoMac
                                                   after: suffix, selection: restoresSelection ? text : nil,
                                                   startsDocument: lower == 0,
                                                   endsDocument: suffix.utf16.count == length - range.end)
-        guard coordinator.issued(lease, desired: desired, predicted: desired) else { throw Ownership.changed }
+        // WebKit represents a trailing contenteditable space as NBSP. Appending text can
+        // turn only that boundary character back into a regular space, outside our range.
+        // Its two legal outcomes cannot be predicted as one exact window. Preserve the
+        // desired document, then settle only from the narrowly verified actual report.
+        let boundarySpace = range.length == 0 && prefix.hasSuffix("\u{00A0}") && text.first.map { !$0.isWhitespace } == true
+        guard coordinator.issued(lease, desired: desired, predicted: boundarySpace ? nil : desired) else { throw Ownership.changed }
         do {
             try target.replace(range, with: text)
             let caret = UTF16Range(location: range.location + text.utf16.count, length: 0)
@@ -368,8 +373,10 @@ import LegatoMac
                   try target.text(in: .init(location: range.location, length: text.utf16.count)) == text else { throw Ownership.changed }
             // Verify the untouched sides and document size as well as the replacement: an AX
             // call reporting success is not proof it kept the rest of a browser editor intact.
+            let actualPrefix = try target.text(in: .init(location: lower, length: prefix.utf16.count))
+            let normalizedBoundary = boundarySpace && actualPrefix == String(prefix.dropLast()) + " "
             guard try target.textLength() == length - range.length + text.utf16.count,
-                  try target.text(in: .init(location: lower, length: prefix.utf16.count)) == prefix,
+                  actualPrefix == prefix || normalizedBoundary,
                   try target.text(in: .init(location: caret.location, length: suffix.utf16.count)) == suffix else { throw Ownership.changed }
             if let finalSelection, finalSelection != caret {
                 try target.setSelectedRange(finalSelection)
