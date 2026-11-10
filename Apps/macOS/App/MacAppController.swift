@@ -100,7 +100,7 @@ import Observation
                 return .copied(message: secure ? CopyReason.secureField.toast : "Dictation copied: the field or cursor changed. Paste with ⌘V.", reason: secure ? .secureField : .appChanged)
             }
             if settings.typewriter {
-                switch await paster.type(text, targetPID: pid, secureField: false, realKeyDowns: { keyPresses.count }, stillOwned: owned) {
+                switch await paster.type(text, targetPID: pid, secureField: false, restoreClipboard: settings.restoreClipboard, realKeyDowns: { keyPresses.count }, stillOwned: owned) {
                 case .typed: return .typed
                 case .interrupted(let rest): return .interrupted(remainder: rest, message: "Typing stopped. The remaining words are on the clipboard.")
                 case .unavailable: break
@@ -111,6 +111,7 @@ import Observation
             case .copied(let reason): return .copied(message: reason.toast, reason: reason)
             }
         }, frontmostApp: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
+        fieldEditor.typewriter = { [settings] in settings.typewriter }
         instruction.field = fieldEditor
         fieldEditor.report = { [weak dictation] in dictation?.report($0) }
         fieldEditor.recover = { [weak paster] in paster?.copy($0) }

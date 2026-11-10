@@ -101,7 +101,11 @@ import LegatoKeyboardCore
                     return ScopedEditAck(id: edit.id, applied: false,
                                          reason: "The edit could not be confirmed. Check the field before continuing.", stopped: true)
                 }
-                landing = true; deadline = editTimeout + landTimeout
+                // Character playback can take longer than a whole-span replacement. Each changed character
+                // needs at most a mutation and two moves; the keyboard still enforces its per-op timeout.
+                let operationBound = 3 * (edit.scopeText.count + edit.target.count) + 2
+                let playbackSeconds = ScopedEditQueue.budgetMs(operationCount: operationBound) / 1000 + 5
+                landing = true; deadline = editTimeout + max(landTimeout, playbackSeconds)
             }
             try? await Task.sleep(for: poll)
         }

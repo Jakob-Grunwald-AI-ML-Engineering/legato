@@ -18,7 +18,7 @@ private func finalState(
             state: finalState(committed: "um hello world ", finalText: "Hello, world.", delivery: .replace),
             cursor: cursor(committedCount: 15), contextBefore: "Dear Bob, um hello world ", documentID: "doc-A")
         // The trailing space the engine left stays after the cleaned text.
-        #expect(plan.ops == [.deleteBackward(15), .insert("Hello, world. ")])
+        #expect(applyProxyOps(plan.ops, to: "Dear Bob, um hello world ").text == "Dear Bob, Hello, world. ")
         #expect(plan.cursor?.finalApplied == true)
         #expect(plan.cursor?.finalReplaced == true)
     }
@@ -27,7 +27,7 @@ private func finalState(
         let plan = ProxyEditPlanner.plan(
             state: finalState(committed: "hello world", finalText: "hello, world.", delivery: .replace),
             cursor: cursor(committedCount: 11), contextBefore: "hello world", documentID: "doc-A")
-        #expect(plan.ops == [.deleteBackward(6), .insert(", world.")])
+        #expect(applyProxyOps(plan.ops, to: "hello world").text == "hello, world.")
         #expect(plan.cursor?.finalApplied == true)
     }
 
@@ -35,7 +35,7 @@ private func finalState(
         let plan = ProxyEditPlanner.plan(
             state: finalState(committed: "um hello world ", finalText: "Hello, world.", delivery: .replace),
             cursor: cursor(committedCount: 9), contextBefore: "um hello ", documentID: "doc-A")
-        #expect(plan.ops == [.insert("world "), .deleteBackward(15), .insert("Hello, world. ")])
+        #expect(applyProxyOps(plan.ops, to: "um hello ").text == "Hello, world. ")
         #expect(plan.cursor?.finalApplied == true)
         #expect(plan.cursor?.committedCount == 15)
     }
@@ -113,7 +113,7 @@ private func finalState(
         let plan = ProxyEditPlanner.plan(
             state: holding(phase: .idle, committed: "um hello world ", finalText: "Hello, world."),
             cursor: cursor(), contextBefore: "Dear Bob,", documentID: "doc-A")
-        #expect(plan.ops == [.insert(" Hello, world.")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert(" Hello, world.")]))
         #expect(plan.cursor?.finalApplied == true)
         #expect(plan.cursor?.committedCount == 15)
     }
@@ -122,7 +122,7 @@ private func finalState(
         let plan = ProxyEditPlanner.plan(
             state: holding(phase: .idle, committed: "hello world "), cursor: cursor(), contextBefore: "",
             documentID: "doc-A")
-        #expect(plan.ops == [.insert("hello world")])
+        #expect(characterProxyOps(plan.ops) == characterProxyOps([.insert("hello world")]))
         #expect(plan.cursor?.finalApplied == true)
     }
 

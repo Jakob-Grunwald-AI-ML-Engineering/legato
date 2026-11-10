@@ -51,20 +51,20 @@ import LegatoMac
         SnapshotVersion.value += 1
         return .init(runID: run, version: SnapshotVersion.value, segments: [.init(id: 0, text: text, final: complete)], complete: complete)
     }
-    @Test func rawPartialReplacementsAndCleanupStayInsideTheOwnedSpan() {
+    @Test func rawPartialReplacementsAndCleanupStayInsideTheOwnedSpan() async {
         let target = EditorTarget("Hello 🐈", .init(location: 8, length: 0))
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.begin()
-        editor.applyLive(snapshot("small cab"))
+        await editor.applyLive(snapshot("small cab"))
         #expect(target.value == "Hello 🐈 small cab")
-        editor.applyLive(snapshot("small cat"))
+        await editor.applyLive(snapshot("small cat"))
         #expect(target.value == "Hello 🐈 small cat")
-        editor.applyLive(snapshot("Small cat.", complete: true))
+        await editor.applyLive(snapshot("Small cat.", complete: true))
         #expect(target.value == "Hello 🐈 Small cat.")
         #expect(target.selection.location == target.value.utf16.count)
         #expect(target.writes.allSatisfy { $0.location >= 8 })
     }
-    @Test func richFieldTrailingSpaceNormalizationDoesNotDetachTheNextPartial() {
+    @Test func richFieldTrailingSpaceNormalizationDoesNotDetachTheNextPartial() async {
         for prefix in ["Draft:", "Sailing ⛵️:"] {
             let target = EditorTarget(prefix + "\u{00A0}")
             target.normalizeTrailingNBSP = true
@@ -72,65 +72,65 @@ import LegatoMac
             var reports: [String] = []
             editor.report = { reports.append($0) }
             editor.begin()
-            editor.applyLive(snapshot("hello there"))
-            editor.applyLive(snapshot("hello there friend"))
-            editor.applyLive(snapshot("Hello there friend.", complete: true))
+            await editor.applyLive(snapshot("hello there"))
+            await editor.applyLive(snapshot("hello there friend"))
+            await editor.applyLive(snapshot("Hello there friend.", complete: true))
             #expect(target.value == prefix + " Hello there friend.")
             #expect(target.selection == .init(location: target.value.utf16.count, length: 0))
-            #expect(target.writes.count == 3)
+            #expect(target.writes.allSatisfy { $0.length <= 1 })
             #expect(reports.isEmpty)
         }
     }
-    @Test func aLiteralNBSPCanRemainUnchangedAndOtherPrefixChangesStillStopEditing() {
+    @Test func aLiteralNBSPCanRemainUnchangedAndOtherPrefixChangesStillStopEditing() async {
         let target = EditorTarget("Draft:\u{00A0}")
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.begin()
-        editor.applyLive(snapshot("hello"))
-        editor.applyLive(snapshot("hello there", complete: true))
+        await editor.applyLive(snapshot("hello"))
+        await editor.applyLive(snapshot("hello there", complete: true))
         #expect(target.value == "Draft:\u{00A0}hello there")
-        #expect(target.writes.count == 2)
+        #expect(target.writes.allSatisfy { $0.length <= 1 })
 
         let corrupted = EditorTarget("Draft:\u{00A0}")
         corrupted.normalizeTrailingNBSP = true; corrupted.corruptPrefixAfterWrite = true
         let guarded = MacFieldEditor(capture: { .target(corrupted) })
         guarded.begin()
-        guarded.applyLive(snapshot("hello"))
-        guarded.applyLive(snapshot("hello there", complete: true))
-        #expect(corrupted.value == "Xraft: hello")
+        await guarded.applyLive(snapshot("hello"))
+        await guarded.applyLive(snapshot("hello there", complete: true))
+        #expect(corrupted.value == "Xraft: h")
         #expect(corrupted.writes.count == 1)
     }
-    @Test func movingTheCursorBeforeFirstWordsNeverRedirectsTheRun() {
+    @Test func movingTheCursorBeforeFirstWordsNeverRedirectsTheRun() async {
         let target = EditorTarget("Keep this")
         let editor = MacFieldEditor(capture: { .target(target) })
         var copied = ""
         editor.recover = { copied = $0 }
         editor.begin()
         target.selection = .init(location: 0, length: 0)
-        editor.applyLive(snapshot("new words", complete: true))
+        await editor.applyLive(snapshot("new words", complete: true))
         #expect(target.value == "Keep this")
         #expect(target.writes.isEmpty)
         #expect(copied == "new words")
     }
-    @Test func focusLossNeverRebindsToAnotherFieldAndFinalTextIsRecovered() {
+    @Test func focusLossNeverRebindsToAnotherFieldAndFinalTextIsRecovered() async {
         let target = EditorTarget("")
         let other = EditorTarget("Untouched")
         var current = target
         let editor = MacFieldEditor(capture: { .target(current) })
         var copied = ""
         editor.recover = { copied = $0 }
-        editor.begin(); editor.applyLive(snapshot("hello"))
+        editor.begin(); await editor.applyLive(snapshot("hello"))
         target.focused = false; current = other
-        editor.applyLive(snapshot("Hello world.", complete: true))
+        await editor.applyLive(snapshot("Hello world.", complete: true))
         #expect(target.value == "hello")
         #expect(other.value == "Untouched")
         #expect(copied == "Hello world.")
     }
-    @Test func userTypingFreezesLaterCleanup() {
+    @Test func userTypingFreezesLaterCleanup() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
-        editor.begin(); editor.applyLive(snapshot("hello"))
+        editor.begin(); await editor.applyLive(snapshot("hello"))
         target.value = "hello user"; target.selection = .init(location: 10, length: 0)
-        editor.applyLive(snapshot("Hello.", complete: true))
+        await editor.applyLive(snapshot("Hello.", complete: true))
         #expect(target.value == "hello user")
     }
     @Test func selectedInstructionAndUndoTouchExactlyTheirVerifiedScope() async throws {
@@ -146,7 +146,7 @@ import LegatoMac
         let undo = ScopedEditPlanner.undo(of: edit, cursor: try #require(ack?.cursor))
         #expect(await editor.apply(undo)?.applied == true)
         #expect(target.value == "Before 🐈 after")
-        #expect(target.writes == [.init(location: 7, length: 2), .init(location: 7, length: 3)])
+        #expect(target.writes.allSatisfy { $0.location >= 7 && $0.location <= 9 && $0.length <= 2 })
     }
     @Test func anEditOrAppSwitchWhileTheModelWorksRefusesTheResult() async throws {
         let target = EditorTarget("Prefix. Draft")
@@ -178,7 +178,7 @@ import LegatoMac
         await #expect(throws: (any Error).self) { try await secure.read(.context, instructionID: "x", reading: {}) }
         let target = EditorTarget("private"); target.readable = false
         let editor = MacFieldEditor(capture: { .target(target) })
-        editor.begin(); editor.applyLive(snapshot("new", complete: true))
+        editor.begin(); await editor.applyLive(snapshot("new", complete: true))
         #expect(target.writes.isEmpty)
         #expect(target.value == "private")
     }
@@ -228,10 +228,10 @@ import LegatoMac
         let old = EditorTarget(""), fresh = EditorTarget("Leave this alone", .init(location: 0, length: 5))
         var focused = old
         let editor = MacFieldEditor(capture: { .target(focused) })
-        editor.begin(); editor.applyLive(snapshot("raw dictation"))
+        editor.begin(); await editor.applyLive(snapshot("raw dictation"))
         editor.relinquish(); old.focused = false; focused = fresh
         editor.beginInstruction()
-        editor.applyLive(snapshot("Cleaned dictation.", complete: true))
+        await editor.applyLive(snapshot("Cleaned dictation.", complete: true))
         #expect(old.value == "raw dictation")
         #expect(fresh.value == "Leave this alone")
         #expect(fresh.writes.isEmpty)
@@ -244,15 +244,15 @@ import LegatoMac
         editor.fallback = { deliveries.append($0) }
         editor.recover = { copies.append($0) }
         editor.begin()
-        editor.applyLive(snapshot("raw"))
+        await editor.applyLive(snapshot("raw"))
         #expect(deliveries.isEmpty)
-        editor.applyLive(snapshot("Ready.", complete: true))
+        await editor.applyLive(snapshot("Ready.", complete: true))
         await editor.finish()
-        editor.applyLive(snapshot("Late cleanup.", complete: true))
+        await editor.applyLive(snapshot("Late cleanup.", complete: true))
         await editor.finish()
         #expect(deliveries == ["Ready."])
         editor.begin(); editor.relinquish()
-        editor.applyLive(snapshot("Keep this.", run: "fresh", complete: true))
+        await editor.applyLive(snapshot("Keep this.", run: "fresh", complete: true))
         await editor.finish()
         #expect(deliveries == ["Ready."])
         #expect(copies == ["Keep this."])
@@ -262,7 +262,7 @@ import LegatoMac
         var deliveries: [String] = [], copies: [String] = []
         editor.fallback = { deliveries.append($0) }
         editor.recover = { copies.append($0) }
-        editor.begin(); editor.applyLive(snapshot("words", complete: true))
+        editor.begin(); await editor.applyLive(snapshot("words", complete: true))
         await editor.finish()
         #expect(deliveries.isEmpty)
         #expect(copies == ["words"])
@@ -279,18 +279,19 @@ import LegatoMac
         }
         #expect(target.value == "Before old after")
         editor.deliver("final")
+        await editor.finish()
         #expect(target.value == "Before final after")
     }
 
-    @Test func browserLiveCorrectionsLeaveTheCaretAtTheTailWithoutASecondJump() {
+    @Test func browserLiveCorrectionsPreserveTheUnchangedTailAndRestoreTheCaret() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
-        editor.begin(); editor.applyLive(snapshot("small cab is here"))
-        editor.applyLive(snapshot("small cat is here"))
+        editor.begin(); await editor.applyLive(snapshot("small cab is here"))
+        await editor.applyLive(snapshot("small cat is here"))
         #expect(target.value == "small cat is here")
         #expect(target.selection == .init(location: 17, length: 0))
-        #expect(target.selections.isEmpty)
-        #expect(target.writes.last == .init(location: 8, length: 9))
+        #expect(target.selections.last == .init(location: 17, length: 0))
+        #expect(Array(target.writes.suffix(2)) == [.init(location: 8, length: 1), .init(location: 8, length: 0)])
     }
     @Test func aPartiallySuccessfulHostWriteStopsRecoveryFromWritingAgain() async throws {
         let target = EditorTarget("draft")
@@ -302,7 +303,7 @@ import LegatoMac
         let ack = await editor.apply(edit)
         #expect(ack?.applied == false)
         #expect(ack?.stopped == true)
-        #expect(target.value == "Revised")
+        #expect(target.value == "draf")
         #expect(await editor.apply(edit)?.applied == false)
         #expect(target.writes.count == 1)
     }
@@ -321,15 +322,15 @@ import LegatoMac
         #expect(target.value == "Fresh")
     }
 
-    @Test func newerCleanupCanLandAfterTheTakeCompletesButOlderSnapshotsCannotRevertIt() {
+    @Test func newerCleanupCanLandAfterTheTakeCompletesButOlderSnapshotsCannotRevertIt() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.begin()
         let raw = snapshot("raw words", complete: true)
         let cleaned = snapshot("Clean words.", complete: true)
-        editor.applyLive(raw); editor.applyLive(cleaned); editor.applyLive(raw)
+        await editor.applyLive(raw); await editor.applyLive(cleaned); await editor.applyLive(raw)
         #expect(target.value == "Clean words.")
-        #expect(target.writes.count == 2)
+        #expect(target.writes.allSatisfy { $0.length <= 1 })
     }
     @Test func rapidBrowserHypothesesCoalesceAndFinishFlushesTheLatestWords() async {
         let target = EditorTarget("")
@@ -340,17 +341,71 @@ import LegatoMac
         editor.enqueueLive(snapshot("One two three.", complete: true))
         await editor.finish()
         #expect(target.value == "One two three.")
-        #expect(target.writes.count == 1)
+        #expect(target.writes.count == "One two three.".count)
     }
 
-    @Test func retractedRunCleanupCannotFollowTheRetryIntoItsText() {
+    @Test func retractedRunCleanupCannotFollowTheRetryIntoItsText() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
-        editor.begin(); editor.applyLive(snapshot("partial", run: "failed"))
+        editor.begin(); await editor.applyLive(snapshot("partial", run: "failed"))
         #expect(editor.retractStreamed())
         editor.deliver("Retry words.")
-        editor.applyLive(snapshot("Late failed cleanup.", run: "failed", complete: true))
+        await editor.finish()
+        await editor.applyLive(snapshot("Late failed cleanup.", run: "failed", complete: true))
         #expect(target.value == "Retry words.")
+    }
+
+    @Test func typewriterCorrectionsPauseBetweenIndividualCharactersAndKeepTheTail() async {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); await editor.applyLive(snapshot("abc unchanged tail"))
+        target.writes = []
+        var pauses: [Duration] = []
+        var frames: [String] = []
+        editor.typewriter = { true }
+        editor.sleep = { duration in pauses.append(duration); frames.append(target.value) }
+        await editor.applyLive(snapshot("aXYc unchanged tail", complete: true))
+        #expect(target.value == "aXYc unchanged tail")
+        #expect(target.writes.count == 3)
+        #expect(target.writes.allSatisfy { $0.length <= 1 })
+        #expect(pauses.count == 2 && pauses.allSatisfy { $0 >= .milliseconds(20) })
+        #expect(frames.allSatisfy { $0.hasSuffix("c unchanged tail") })
+    }
+
+    @Test func realTypingDuringAnAnimationStopsAtTheLastConfirmedCharacter() async {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        var copied = ""
+        editor.recover = { copied = $0 }
+        editor.typewriter = { true }
+        editor.sleep = { _ in editor.relinquish() }
+        editor.begin()
+        await editor.applyLive(snapshot("hello", complete: true))
+        #expect(target.value == "h")
+        #expect(target.writes.count == 1)
+        #expect(copied == "hello")
+    }
+
+    @Test func queuedSeparateTakesAreNeverCoalescedAway() async {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin()
+        editor.deliver("First.")
+        editor.deliver("Second.")
+        await editor.finish()
+        #expect(target.value == "First. Second.")
+    }
+
+    @Test func anExternalEditAtTheSameCaretStopsTheNextAnimationCharacter() async {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); await editor.applyLive(snapshot("cab unchanged tail"))
+        target.writes = []
+        editor.typewriter = { true }
+        editor.sleep = { _ in target.value = "X" + target.value.dropFirst() }
+        await editor.applyLive(snapshot("cat unchanged tail", complete: true))
+        #expect(target.value == "Xa unchanged tail")
+        #expect(target.writes.count == 1)
     }
 
 }

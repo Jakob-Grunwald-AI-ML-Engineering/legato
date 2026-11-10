@@ -182,6 +182,15 @@ final class FailingStreamCleaner: SentenceCleaning {
         await session.cancel()
     }
 
+    @Test func aFreshSessionClearsThePreviousFieldFailureNotice() async throws {
+        let session = make()
+        session.report("The previous field could not be read.")
+        let previousNotice = session.noticeID
+        try await session.debugLine("a fresh sentence")
+        #expect(session.notice == nil && session.noticeID == previousNotice + 1)
+        await session.debugStop()
+    }
+
     @Test func aMissingSonioxKeyStaysIdleAndSaysWhy() async throws {
         let session = make(key: "")
         let before = session.noticeID

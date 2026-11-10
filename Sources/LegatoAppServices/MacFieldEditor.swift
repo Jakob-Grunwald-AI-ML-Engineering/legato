@@ -9,6 +9,8 @@ import LegatoMac
 /// a lost target is never rebound while words or a model result are in flight.
 @MainActor public final class MacFieldEditor: InstructionField {
     private let capture: @MainActor () -> FocusedField
+    public var typewriter: @MainActor () -> Bool = { false }
+    public var sleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
     public var report: @MainActor (String) -> Void = { _ in }
     public var recover: @MainActor (String) -> Void = { _ in }
     /// Only an initially unreadable, nonsecure field may receive a guarded final-text fallback.
@@ -17,7 +19,8 @@ import LegatoMac
     private var fallbackRuns: Set<String> = []
     private var fallbackTask: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
-    private var pendingLive: LiveDictationSnapshot?
+    private var instructionWaitingForLive = false
+    private var pendingLive: [LiveDictationSnapshot] = []
     private var seenRunIDs: Set<String> = []
     private var retiredRunIDs: Set<String> = []
     private var target: (any TextTarget)?
@@ -41,7 +44,7 @@ import LegatoMac
     public init(capture: @escaping @MainActor () -> FocusedField) { self.capture = capture }
 
     public func begin() {
-        liveTask?.cancel(); liveTask = nil; pendingLive = nil
+        liveTask?.cancel(); liveTask = nil; pendingLive = []; instructionWaitingForLive = false
         fallbackTask?.cancel(); fallbackTask = nil
         fallbackAllowed = false; fallbackRuns = []
         retiredRunIDs.formUnion(seenRunIDs); seenRunIDs = []; runVersions = [:]
@@ -72,7 +75,7 @@ import LegatoMac
     public func focusChanged() { if target?.isFocused() == false { relinquish() } }
 
     public func beginInstruction() {
-        flushLive()
+        if liveTask != nil { instructionWaitingForLive = true; return }
         let cursorChanged = target.flatMap { try? $0.selectedRange() } != expected
         if target?.isFocused() != true || blocked || cursorChanged {
             // An old pipeline cleanup may finish after Magic binds a different field/selection.
@@ -95,28 +98,33 @@ import LegatoMac
     public func enqueueLive(_ snapshot: LiveDictationSnapshot?) {
         guard let snapshot, !retiredRunIDs.contains(snapshot.runID) else { return }
         seenRunIDs.insert(snapshot.runID)
-        if let pending = pendingLive, pending.runID == snapshot.runID, pending.version >= snapshot.version { return }
-        pendingLive = snapshot
+        if let pending = pendingLive.last, pending.runID == snapshot.runID {
+            guard pending.version < snapshot.version else { return }
+            pendingLive[pendingLive.count - 1] = snapshot
+        } else { pendingLive.append(snapshot) }
         guard liveTask == nil else { return }
         liveTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(80))
                 guard !Task.isCancelled, let self else { return }
-                guard let next = self.pendingLive else { self.liveTask = nil; return }
-                self.pendingLive = nil
-                self.applyLive(next)
-                if self.pendingLive == nil { self.liveTask = nil; return }
+                guard !self.pendingLive.isEmpty else { self.liveTask = nil; return }
+                let next = self.pendingLive.removeFirst()
+                await self.applyLive(next)
+                guard !Task.isCancelled else { return }
+                if self.pendingLive.isEmpty { self.liveTask = nil; return }
             }
         }
     }
-    private func flushLive() {
-        liveTask?.cancel(); liveTask = nil
-        let next = pendingLive; pendingLive = nil
-        applyLive(next)
+    private func flushLive() async {
+        await liveTask?.value
+        liveTask = nil
+        let remaining = pendingLive; pendingLive = []
+        for next in remaining { await applyLive(next) }
     }
 
-    public func applyLive(_ snapshot: LiveDictationSnapshot?) {
+    public func applyLive(_ snapshot: LiveDictationSnapshot?) async {
         guard let snapshot else { return }
+        let generation = documentID
         seenRunIDs.insert(snapshot.runID)
         guard !retiredRunIDs.contains(snapshot.runID),
               snapshot.version > (runVersions[snapshot.runID] ?? -1) else { return }
@@ -159,22 +167,17 @@ import LegatoMac
             // Empty nonfinal snapshots must not erase the user's initial selection.
             if written.isEmpty && text.isEmpty { return }
             let old = written.isEmpty ? original : written
-            // Preserve the stable prefix. Replace the changing tail in one operation so
-            // browser hosts do not select a middle word then jump the caret to the end.
-            let a = Array(old), b = Array(text)
-            var prefix = 0
-            while prefix < min(a.count, b.count), a[prefix] == b[prefix] { prefix += 1 }
-            let lead = String(a.prefix(prefix)).utf16.count
-            let removed = String(a[prefix...]).utf16.count
-            let replacement = String(b[prefix...])
-            try replaceOwned(target, range: .init(location: start + lead, length: removed), text: replacement,
-                             owner: .dictation, id: UUID().uuidString)
-            // replaceOwned verified the tail and its natural final caret together.
+            try await replaceOwned(target, range: .init(location: start, length: old.utf16.count), text: text,
+                             owner: .dictation, id: UUID().uuidString, progress: { [self] current in
+                                 written = current; original = ""
+                                 if let selection = try? target.selectedRange() { expected = selection }
+                             })
             let end = UTF16Range(location: start + text.utf16.count, length: 0)
             written = text; expected = end; original = ""
             if instructionCursor != nil, readSelection == nil { instructionCursor = end }
             sessionSpan = (.init(location: start, length: text.utf16.count), text)
         } catch {
+            guard generation == documentID else { return }
             blocked = true
             if snapshot.complete { recover(body) }
             report("The field or cursor changed. Dictation stopped editing it; finished text will be copied.")
@@ -182,6 +185,8 @@ import LegatoMac
     }
 
     public func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
+        await flushLive()
+        if instructionWaitingForLive { instructionWaitingForLive = false; beginInstruction() }
         guard !blocked, let target, target.isFocused(), let bound = instructionCursor,
               let selection = try? target.selectedRange(), selection == bound else {
             throw InstructionFailure.unreadable("The field or cursor changed. Nothing was edited.")
@@ -257,7 +262,7 @@ import LegatoMac
                 range = .init(location: selection.location - edit.before.utf16.count, length: edit.scopeText.utf16.count)
             }
             guard try target.text(in: range) == edit.scopeText else { return refused("The text changed. Nothing was edited.") }
-            try replaceOwned(target, range: range, text: edit.target, owner: .instruction, id: edit.id,
+            try await replaceOwned(target, range: range, text: edit.target, owner: .instruction, id: edit.id,
                              revision: edit.revision ?? readRevision)
             let caret = UTF16Range(location: range.location + edit.target.utf16.count, length: 0)
             readSelection = nil; readText = nil; instructionCursor = caret; expected = caret
@@ -274,17 +279,19 @@ import LegatoMac
     /// Retry/Insert-as-is retract only the last stream's verified text, including restoring
     /// the original selection. A refused retract freezes retries so they cannot duplicate it.
     @discardableResult public func retractStreamed() -> Bool {
+        liveTask?.cancel(); liveTask = nil; pendingLive = []
         guard runID != nil, !written.isEmpty else { return true }
         guard !blocked, let target, target.isFocused() else { blocked = true; report("The field changed. Partial text was left in place; the retry will be copied."); return false }
         do {
             let range = UTF16Range(location: start, length: written.utf16.count)
             guard try target.selectedRange() == expected, try target.text(in: range) == written else { throw Ownership.changed }
-            try replaceOwned(target, range: range, text: replacedOriginal, owner: .dictation, id: UUID().uuidString,
+            try replaceOwnedImmediate(target, range: range, text: replacedOriginal, owner: .dictation, id: UUID().uuidString,
                              finalSelection: .init(location: start, length: replacedOriginal.utf16.count))
             let restored = UTF16Range(location: start, length: replacedOriginal.utf16.count)
             guard try target.text(in: restored) == replacedOriginal else { throw Ownership.changed }
             guard try target.selectedRange() == restored else { throw Ownership.changed }
             if let runID { retiredRunIDs.insert(runID) }
+            documentID = UUID().uuidString
             expected = restored; runID = nil; written = ""; original = ""; sessionSpan = nil
             return true
         } catch {
@@ -294,7 +301,7 @@ import LegatoMac
         }
     }
 
-    public func finish() async { flushLive(); await fallbackTask?.value }
+    public func finish() async { await flushLive(); await fallbackTask?.value }
 
     public func contextBeforeCursor() -> String {
         guard !blocked, let target, target.isFocused(), let cursor = try? target.selectedRange() else { return "" }
@@ -302,7 +309,7 @@ import LegatoMac
         return (try? target.text(in: .init(location: cursor.location - length, length: length))) ?? ""
     }
     public func deliver(_ text: String) {
-        applyLive(.init(runID: UUID().uuidString, version: 1, segments: [.init(id: 0, text: text, final: true)], complete: true))
+        enqueueLive(.init(runID: UUID().uuidString, version: 1, segments: [.init(id: 0, text: text, final: true)], complete: true))
     }
     public func stream(_ poll: @MainActor () -> DictationStreamState?) async -> Bool {
         let id = UUID().uuidString
@@ -310,7 +317,7 @@ import LegatoMac
         while let state = poll() {
             version += 1
             if state.retracted { _ = retractStreamed(); return false }
-            applyLive(.init(runID: id, version: version, segments: [.init(id: 0, text: state.text, final: state.isFinal)], complete: state.isFinal))
+            await applyLive(.init(runID: id, version: version, segments: [.init(id: 0, text: state.text, final: state.isFinal)], complete: state.isFinal))
             if state.isFinal { return false }
             if state.stalled { return true }
             try? await Task.sleep(for: .milliseconds(30))
@@ -331,9 +338,115 @@ import LegatoMac
                      startsDocument: lower == 0, endsDocument: upper == length)
     }
 
+    /// Preserve every matching grapheme across all edit sources. The surrounding coordinator
+    /// transaction still verifies both untouched sides and the final caret after each mutation.
+    private func replaceOwned(_ target: any TextTarget, range: UTF16Range, text: String,
+                              owner: FieldEditCoordinator.Owner, id: String, revision: FieldRevision? = nil,
+                              finalSelection: UTF16Range? = nil, progress: ((String) -> Void)? = nil) async throws {
+        let old = try target.text(in: range)
+        let plan = ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: text, characters: true)
+        var document = Array(old), at = document.count
+        var first = true
+        let generation = documentID
+        var lastSelection = try target.selectedRange()
+        let mutations = plan.ops.filter { if case .move = $0 { false } else { true } }.count
+        let interval = TypewriterPlan.interval(steps: mutations)
+        var mutated = false
+        for op in plan.ops {
+            if case .move = op {} else {
+                if mutated, typewriter() { await sleep(interval) }
+                guard !Task.isCancelled, !blocked, documentID == generation, target.isFocused(),
+                      try target.selectedRange() == lastSelection,
+                      try target.text(in: .init(location: range.location, length: String(document).utf16.count)) == String(document)
+                else { throw Ownership.changed }
+            }
+            switch op {
+            case .move(let units):
+                let local = ShadowEditPlanner.simulate(ops: [.move(units)], shadow: String(document),
+                                                      cursor: String(document.prefix(at)).utf16.count)
+                // Convert the verified UTF-16 destination back to a grapheme boundary.
+                at = 0
+                var offset = 0
+                while at < document.count, offset < local.cursor { offset += String(document[at]).utf16.count; at += 1 }
+            case .deleteBackward(let count):
+                let lower = at - count
+                let location = range.location + String(document.prefix(lower)).utf16.count
+                let removed = String(document[lower..<at]).utf16.count
+                try replaceAtomOwned(target, range: .init(location: location, length: removed), text: "",
+                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
+                first = false; document.removeSubrange(lower..<at); at = lower
+                mutated = true; lastSelection = try target.selectedRange(); progress?(String(document))
+            case .insert(let insertion):
+                let location = range.location + String(document.prefix(at)).utf16.count
+                try replaceAtomOwned(target, range: .init(location: location, length: 0), text: insertion,
+                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
+                first = false; document.insert(contentsOf: insertion, at: at); at += insertion.count
+                mutated = true; lastSelection = try target.selectedRange(); progress?(String(document))
+            }
+        }
+        let selection = finalSelection ?? UTF16Range(location: range.location + text.utf16.count, length: 0)
+        if try target.selectedRange() != selection {
+            guard target.isFocused() else { throw Ownership.changed }
+            guard let lease = coordinator.begin(owner: owner, id: UUID().uuidString) else { throw Ownership.changed }
+            guard coordinator.issued(lease) else { throw Ownership.changed }
+            do {
+                try target.setSelectedRange(selection)
+                guard target.isFocused(), try target.selectedRange() == selection,
+                      coordinator.confirm(lease, window: try window(target)) else { throw Ownership.changed }
+                coordinator.finish(lease, settled: true)
+            } catch { coordinator.finish(lease, settled: false); throw error }
+        }
+        guard try target.text(in: .init(location: range.location, length: text.utf16.count)) == text else { throw Ownership.changed }
+    }
+
+    private func replaceOwnedImmediate(_ target: any TextTarget, range: UTF16Range, text: String,
+                              owner: FieldEditCoordinator.Owner, id: String, revision: FieldRevision? = nil,
+                              finalSelection: UTF16Range? = nil) throws {
+        let old = try target.text(in: range)
+        let plan = ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: text, characters: true)
+        var document = Array(old), at = document.count
+        var first = true
+        for op in plan.ops {
+            switch op {
+            case .move(let units):
+                let local = ShadowEditPlanner.simulate(ops: [.move(units)], shadow: String(document),
+                                                      cursor: String(document.prefix(at)).utf16.count)
+                // Convert the verified UTF-16 destination back to a grapheme boundary.
+                at = 0
+                var offset = 0
+                while at < document.count, offset < local.cursor { offset += String(document[at]).utf16.count; at += 1 }
+            case .deleteBackward(let count):
+                let lower = at - count
+                let location = range.location + String(document.prefix(lower)).utf16.count
+                let removed = String(document[lower..<at]).utf16.count
+                try replaceAtomOwned(target, range: .init(location: location, length: removed), text: "",
+                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
+                first = false; document.removeSubrange(lower..<at); at = lower
+            case .insert(let insertion):
+                let location = range.location + String(document.prefix(at)).utf16.count
+                try replaceAtomOwned(target, range: .init(location: location, length: 0), text: insertion,
+                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
+                first = false; document.insert(contentsOf: insertion, at: at); at += insertion.count
+            }
+        }
+        let selection = finalSelection ?? UTF16Range(location: range.location + text.utf16.count, length: 0)
+        if try target.selectedRange() != selection {
+            guard target.isFocused() else { throw Ownership.changed }
+            guard let lease = coordinator.begin(owner: owner, id: UUID().uuidString) else { throw Ownership.changed }
+            guard coordinator.issued(lease) else { throw Ownership.changed }
+            do {
+                try target.setSelectedRange(selection)
+                guard target.isFocused(), try target.selectedRange() == selection,
+                      coordinator.confirm(lease, window: try window(target)) else { throw Ownership.changed }
+                coordinator.finish(lease, settled: true)
+            } catch { coordinator.finish(lease, settled: false); throw error }
+        }
+        guard try target.text(in: .init(location: range.location, length: text.utf16.count)) == text else { throw Ownership.changed }
+    }
+
     /// Every AX mutation must acquire the shared owner before issuing. A throwing host can have
     /// already written; only exact read-back settles it, and uncertainty prohibits another write.
-    private func replaceOwned(_ target: any TextTarget, range: UTF16Range, text: String,
+    private func replaceAtomOwned(_ target: any TextTarget, range: UTF16Range, text: String,
                               owner: FieldEditCoordinator.Owner, id: String, revision: FieldRevision? = nil,
                               finalSelection: UTF16Range? = nil) throws {
         coordinator.observe(try window(target))

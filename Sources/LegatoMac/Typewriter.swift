@@ -13,30 +13,11 @@ public enum TypewriterPlan {
     /// A take that arrives whole (line-by-line dictation, composer inserts) is typed out over this long; a
     /// streaming take is paced by `drainStep` instead.
     public static let duration = Duration.milliseconds(300)
-    /// Most steps one take is cut into (about 10 ms apart); longer texts group several words per step.
-    public static let maxSteps = 30
     /// Most UTF-16 units one synthetic key event carries.
     public static let eventUnits = 20
 
-    /// Word-sized steps: each word with the whitespace that follows it, in order, joined back to the exact text.
-    /// Long texts group several words per step so there are at most `maxSteps`.
-    public static func steps(_ text: String) -> [String] {
-        var words: [String] = []
-        var current = ""
-        var inSpace = false
-        for character in text {
-            if character.isWhitespace {
-                inSpace = true
-            } else if inSpace {
-                words.append(current); current = ""; inSpace = false
-            }
-            current.append(character)
-        }
-        if !current.isEmpty { words.append(current) }
-        guard words.count > maxSteps else { return words }
-        let group = (words.count + maxSteps - 1) / maxSteps
-        return stride(from: 0, to: words.count, by: group).map { words[$0..<min($0 + group, words.count)].joined() }
-    }
+    /// Each visible step is exactly one extended grapheme cluster, even for long text.
+    public static func steps(_ text: String) -> [String] { text.map(String.init) }
 
     /// Time constant of the streaming drain (the same as the keyboard's `TypewriterDrain`): each frame types the
     /// share of the pending text that empties it over about this long, so the typing never lags far behind.
@@ -52,7 +33,7 @@ public enum TypewriterPlan {
     /// The pause between steps, so the first step lands at once and the last one `duration` later.
     public static func interval(steps: Int) -> Duration {
         guard steps > 1 else { return .zero }
-        return duration / (steps - 1)
+        return max(.milliseconds(20), duration / (steps - 1))
     }
 
     /// Pieces of at most `eventUnits` UTF-16 units, cut on grapheme boundaries (a grapheme longer than the
@@ -81,9 +62,9 @@ public enum TypewriterPlan {
         return chunks
     }
 
-    /// Whether a text must go by paste: a synthetic Return or Tab would send a message or move the focus.
+    /// Controls must not synthesize Return/Tab, and a grapheme larger than a key event must stay intact.
     public static func needsPaste(_ text: String) -> Bool {
-        text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0 == "\u{2028}" || $0 == "\u{2029}" }
+        text.contains { $0.utf16.count > eventUnits } || text.unicodeScalars.contains { $0.properties.generalCategory == .control || $0 == "\u{2028}" || $0 == "\u{2029}" }
     }
 }
 
@@ -102,6 +83,14 @@ public enum Typewriter {
     @MainActor
     public static func run(_ text: String, sleep: (Duration) async -> Void, clock: ContinuousClock? = nil,
                            write: @MainActor (String) -> Bool) async -> Result {
+        await run(text, sleep: sleep, clock: clock, writeAsync: { write($0) })
+    }
+
+    /// Async writes let a host safely consume an individual control character through its
+    /// clipboard interface while keeping every other character on the same paced sequence.
+    @MainActor
+    public static func run(_ text: String, sleep: (Duration) async -> Void, clock: ContinuousClock? = nil,
+                           writeAsync: @MainActor (String) async -> Bool) async -> Result {
         let steps = TypewriterPlan.steps(text)
         let interval = TypewriterPlan.interval(steps: steps.count)
         let start = clock?.now
@@ -112,7 +101,7 @@ public enum Typewriter {
                 if let clock, let start { pause = max(.zero, interval * index - start.duration(to: clock.now)) }
                 if pause > .zero { await sleep(pause) }
             }
-            guard write(step) else {
+            guard !Task.isCancelled, await writeAsync(step) else {
                 return Result(remainder: steps[index...].joined(), wroteAny: wrote)
             }
             wrote = true

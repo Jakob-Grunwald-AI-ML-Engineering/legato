@@ -4,23 +4,20 @@ import Testing
 /// The keyboard's loop in miniature (as in `TypewriterRevealTests`): a field that applies the plans.
 private struct Rig {
     var reveal = TypewriterReveal()
-    var field = ""
+    var caret = 0
+    var field = "" { didSet { caret = field.utf16.count } }
     var cursor: AppliedCursor?
     var inserts: [String] = []
 
     @discardableResult
     mutating func feed(_ state: HostState, elapsedMs: Double = 0, context: String? = nil) -> ProxyPlan {
         let plan = reveal.plan(
-            state: state, cursor: cursor, contextBefore: context ?? field, documentID: "doc-A", animated: true,
-            elapsedMs: elapsedMs)
-        for op in plan.ops {
-            switch op {
-            case .deleteBackward(let count): field.removeLast(min(count, field.count))
-            case .insert(let text):
-                field += text
-                inserts.append(text)
-            }
-        }
+            state: state, cursor: cursor, contextBefore: context ?? String(decoding: field.utf16.prefix(caret), as: UTF16.self), documentID: "doc-A", animated: true,
+            elapsedMs: elapsedMs, contextAfter: String(decoding: field.utf16.dropFirst(caret), as: UTF16.self))
+        inserts += plan.ops.compactMap { if case .insert(let text) = $0 { text } else { nil } }
+        let applied = applyProxyOps(plan.ops, to: field, cursor: caret)
+        field = applied.text
+        caret = applied.cursor
         cursor = plan.cursor
         return plan
     }
@@ -63,12 +60,14 @@ private func state(
         rig.feed(state(phase: .listening, committed: raw, delivery: .hold))
         let final = state(phase: .idle, committed: raw, delivery: .hold, finalText: cleaned)
         rig.feed(final)
+        #expect(rig.cursor?.finalApplied != true)
+        rig.drain(final)
         #expect(rig.field == cleaned)
         #expect(rig.cursor?.finalApplied == true)
         #expect(!rig.reveal.needsTicks)
         for _ in 0..<10 { rig.feed(final, elapsedMs: 33) }
         #expect(rig.field == cleaned)
-        #expect(rig.inserts == [cleaned])
+        #expect(rig.inserts == cleaned.map { String($0) })
     }
 
     // MARK: replace
@@ -110,15 +109,14 @@ private func state(
     @Test func theSwapWaitsForAContextThatStillLacksTheStreamedText() {
         var rig = Rig()
         let final = state(phase: .idle, committed: raw, delivery: .replace, finalText: cleaned)
-        rig.feed(final)
-        // Everything revealed, but the field reports the old context for a few ticks.
-        while rig.reveal.needsTicks, rig.field != raw { rig.feed(final, elapsedMs: 33, context: "") }
-        // One tick with a stale context: the swap does not happen on a guess.
+        let listening = state(phase: .listening, committed: raw, delivery: .replace)
+        rig.feed(listening)
+        rig.drain(listening)
         let held = rig.feed(final, elapsedMs: 33, context: "")
         #expect(held.ops.isEmpty)
         #expect(rig.reveal.needsTicks)
         #expect(rig.field == raw)
-        rig.feed(final, elapsedMs: 33)
+        rig.drain(final)
         #expect(rig.field == cleaned + " ")
         #expect(rig.cursor?.finalReplaced == true)
     }
@@ -126,9 +124,11 @@ private func state(
     @Test func aFieldTheUserMovedOnFromIsLeftAloneAndNotConfirmed() {
         var rig = Rig()
         let final = state(phase: .idle, committed: raw, delivery: .replace, finalText: cleaned)
-        rig.feed(final)
-        while rig.reveal.needsTicks, rig.field != raw { rig.feed(final, elapsedMs: 33) }
+        let listening = state(phase: .listening, committed: raw, delivery: .replace)
+        rig.feed(listening)
+        rig.drain(listening)
         rig.field += "and then I typed"
+        rig.feed(final)
         rig.drain(final)
         #expect(rig.field == raw + "and then I typed")
         #expect(rig.cursor?.finalReplaced == false)

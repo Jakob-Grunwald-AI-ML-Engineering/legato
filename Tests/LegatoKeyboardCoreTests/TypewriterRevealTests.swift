@@ -4,24 +4,24 @@ import Testing
 /// The keyboard's loop in miniature: a field that applies the plans, fed host states and ticks.
 private struct Rig {
     var reveal = TypewriterReveal()
-    var field = ""
+    var caret = 0
+    var field = "" { didSet { caret = field.utf16.count } }
     var cursor: AppliedCursor?
     var documentID: String? = "doc-A"
     var animated = true
     var finalSeenWhileIncomplete = false
+    var history: [[ProxyOp]] = []
 
     /// One planning pass, as `applyHost` makes it. `context` overrides what the field reports (a stale read).
     @discardableResult
     mutating func feed(_ state: HostState, elapsedMs: Double = 0, context: String? = nil) -> ProxyPlan {
         let plan = reveal.plan(
-            state: state, cursor: cursor, contextBefore: context ?? field, documentID: documentID,
-            animated: animated, elapsedMs: elapsedMs)
-        for op in plan.ops {
-            switch op {
-            case .deleteBackward(let count): field.removeLast(min(count, field.count))
-            case .insert(let text): field += text
-            }
-        }
+            state: state, cursor: cursor, contextBefore: context ?? String(decoding: field.utf16.prefix(caret), as: UTF16.self), documentID: documentID,
+            animated: animated, elapsedMs: elapsedMs, contextAfter: String(decoding: field.utf16.dropFirst(caret), as: UTF16.self))
+        history.append(plan.ops)
+        let applied = applyProxyOps(plan.ops, to: field, cursor: caret)
+        field = applied.text
+        caret = applied.cursor
         if plan.cursor?.finalApplied == true, field != state.committed + state.volatile { finalSeenWhileIncomplete = true }
         cursor = plan.cursor
         return plan
@@ -41,6 +41,20 @@ private struct Rig {
 
 @Suite struct TypewriterRevealTests {
     private let sentence = "Hello world, this is a typewriter test."
+
+    @Test(arguments: [false, true])
+    func aNewFinalRunDuringUnconfirmedTypingIsNotDropped(tentative: Bool) {
+        var rig = Rig()
+        let old = hostState(runID: "old", committed: tentative ? "" : "abc", volatile: tentative ? "abc" : "")
+        rig.feed(old)
+        rig.feed(old, elapsedMs: 33)
+        #expect(rig.field == "a")
+        let next = hostState(runID: "next", phase: .idle, committed: "Z")
+        rig.feed(next)
+        rig.drain(next)
+        #expect(rig.field == (tentative ? "Z" : "a Z"))
+        #expect(rig.cursor?.runID == "next" && rig.cursor?.finalApplied == true)
+    }
 
     // MARK: draining
 
@@ -73,7 +87,7 @@ private struct Rig {
         let state = hostState(phase: .idle, committed: sentence)
         rig.feed(state)
         rig.feed(state, elapsedMs: 33)
-        #expect(rig.cursor?.finalApplied == false)
+        #expect(rig.cursor?.finalApplied != true)
         rig.drain(state)
         #expect(rig.cursor?.finalApplied == true)
         #expect(!rig.finalSeenWhileIncomplete)
@@ -145,16 +159,17 @@ private struct Rig {
 
     // MARK: revisions
 
-    @Test func aRevisionOfWhatIsTypedAlreadyAppliesAtOnce() {
+    @Test func aRevisionOfWhatIsTypedAlreadyAnimatesOnlyTheChanges() {
         var rig = Rig()
         let first = hostState(volatile: "Hello wor")
         rig.feed(first)
         rig.drain(first)
         #expect(rig.field == "Hello wor")
         let plan = rig.feed(hostState(volatile: "Hello were now"))
-        #expect(plan.ops == [.deleteBackward(2), .insert("ere now")])
+        #expect(plan.ops.count <= 1)
+        #expect(rig.reveal.needsTicks)
+        rig.drain(hostState(volatile: "Hello were now"))
         #expect(rig.field == "Hello were now")
-        #expect(!rig.reveal.needsTicks)
     }
 
     @Test func aRevisionOfTheUnrevealedTailKeepsAnimating() {
@@ -171,12 +186,14 @@ private struct Rig {
         #expect(rig.field == "Hello wonderful day")
     }
 
-    @Test func aRevisionThatShortensTheTextBelowWhatIsTypedSnaps() {
+    @Test func aRevisionThatShortensTheTextBelowWhatIsTypedAnimates() {
         var rig = Rig()
         let first = hostState(volatile: "Hello wor")
         rig.feed(first)
         rig.drain(first)
         rig.feed(hostState(volatile: "Hello"))
+        #expect(rig.reveal.needsTicks)
+        rig.drain(hostState(volatile: "Hello"))
         #expect(rig.field == "Hello")
         #expect(!rig.reveal.needsTicks)
     }
@@ -186,6 +203,7 @@ private struct Rig {
         rig.feed(hostState(volatile: "Hello wonderful world"))
         for _ in 0..<3 { rig.feed(hostState(volatile: "Hello wonderful world"), elapsedMs: 33) }
         rig.feed(hostState(volatile: "Hallo wonderful world"), elapsedMs: 33) // rewrites typed text
+        rig.drain(hostState(volatile: "Hallo wonderful world"))
         #expect(rig.field == "Hallo wonderful world")
         let final = hostState(phase: .idle, committed: "Hallo wonderful world!")
         rig.feed(final, elapsedMs: 33)
@@ -201,6 +219,7 @@ private struct Rig {
         rig.animated = false
         let state = hostState(phase: .idle, committed: sentence)
         rig.feed(state)
+        rig.drain(state)
         #expect(rig.field == sentence)
         #expect(rig.cursor?.finalApplied == true)
         #expect(!rig.reveal.needsTicks)
@@ -214,6 +233,7 @@ private struct Rig {
         #expect(rig.field.count < sentence.count)
         rig.animated = false
         rig.feed(state)
+        rig.drain(state)
         #expect(rig.field == sentence)
         #expect(rig.cursor?.finalApplied == true)
     }
@@ -225,7 +245,7 @@ private struct Rig {
         rig.field = "Dear Bob, old"
         rig.cursor = cursor(runID: "run-0", volatile: "old")
         rig.feed(hostState(runID: "run-1", volatile: "new text"))
-        #expect(rig.field == "Dear Bob, ")
+        #expect(rig.reveal.needsTicks)
         rig.drain(hostState(runID: "run-1", volatile: "new text"))
         #expect(rig.field == "Dear Bob, new text")
     }
@@ -289,7 +309,7 @@ private struct Rig {
         #expect(rig.field == sentence)
     }
 
-    @Test func aContextThatNeverCatchesUpIsGivenUpOnAsToday() {
+    @Test func aContextThatNeverCatchesUpStopsWithoutMutating() {
         // The user moved the cursor: after a short wait the tentative text is treated as theirs.
         var rig = Rig()
         let state = hostState(volatile: sentence)
@@ -302,21 +322,20 @@ private struct Rig {
             inserted = !plan.ops.isEmpty
             waited += 1
         }
-        #expect(inserted)
-        #expect(waited <= 10)
+        #expect(!inserted, "Unverified context never authorizes a mutation")
     }
 
     @Test func withoutAnimationAStaleContextStillWaits() {
         var rig = Rig()
         rig.animated = false
         let state = hostState(volatile: "Hello")
-        rig.feed(state)
-        rig.field = "Hel" // an earlier partial, as a flush meets it
+        rig.field = "Hel" // a restarted keyboard resumes an earlier partial
         rig.cursor = cursor(volatile: "Hel")
         let plan = rig.feed(state, context: "")
         #expect(plan.ops.isEmpty)
         #expect(rig.reveal.needsTicks)
         rig.feed(state)
+        rig.drain(state)
         #expect(rig.field == "Hello")
     }
 
@@ -327,5 +346,54 @@ private struct Rig {
         rig.feed(state, elapsedMs: 33)
         for _ in 0..<50 { #expect(rig.feed(state, context: "").ops.isEmpty) } // no time passes
         #expect(rig.reveal.needsTicks)
+    }
+}
+
+@Suite struct TypewriterCharacterPacingTests {
+    @Test func deletingASpacePreservesTheSentenceAndConfirmsAfterTheLastMove() {
+        var rig = Rig()
+        let old = "Hello  world, keep this sentence."
+        rig.field = old
+        rig.cursor = cursor(volatile: old)
+        let target = hostState(phase: .idle, committed: "Hello world, keep this sentence.")
+        rig.feed(target)
+        var deleted = 0
+        var inserted = 0
+        var reachedTargetBeforeAcknowledgment = false
+        for _ in 0..<200 where rig.reveal.needsTicks {
+            let plan = rig.feed(target, elapsedMs: 33)
+            #expect(plan.ops.count <= 1)
+            for op in plan.ops {
+                switch op {
+                case .move: break
+                case .deleteBackward(let count):
+                    #expect(count == 1)
+                    deleted += count
+                case .insert(let text): inserted += text.count
+                }
+            }
+            if rig.field == target.committed, rig.cursor?.finalApplied != true {
+                reachedTargetBeforeAcknowledgment = true
+            }
+        }
+        #expect(rig.field == target.committed)
+        #expect(deleted == 1 && inserted == 0)
+        #expect(reachedTargetBeforeAcknowledgment)
+        #expect(rig.cursor?.finalApplied == true)
+    }
+
+    @Test func insertingUnicodeEmitsOneWholeGraphemePerMutation() {
+        var rig = Rig()
+        let target = hostState(phase: .idle, committed: "A 👨‍👩‍👧 é 🇩🇪!")
+        rig.feed(target)
+        rig.drain(target)
+        for ops in rig.history {
+            #expect(ops.count <= 1)
+            for op in ops {
+                if case .insert(let text) = op { #expect(text.count == 1) }
+            }
+        }
+        #expect(rig.field == target.committed)
+        #expect(rig.cursor?.finalApplied == true)
     }
 }

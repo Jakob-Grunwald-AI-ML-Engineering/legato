@@ -185,7 +185,7 @@ public final class FieldDictationWriter {
             }
             if !stopped {
                 let total = live.text.count
-                let next = typewriter() ? TypewriterPlan.drainStep(revealed: revealed, target: total, dtMs: Self.streamTickMs) : total
+                let next = typewriter() ? min(total, revealed + 1) : total
                 if next > revealed {
                     let slice = String(live.text.dropFirst(revealed).prefix(next - revealed))
                     if !run.committed.isEmpty, (try? target.selectedRange()) != expected {
@@ -289,7 +289,7 @@ public final class FieldDictationWriter {
         switch capture() {
         case .target(let target):
             lastWasSecure = false
-            current = Current(target: target, writer: FieldWriter(target: target, mode: .streamCommitted))
+            current = Current(target: target, writer: FieldWriter(target: target, mode: .streamCommitted, characterEdits: typewriter()))
         case .secure: lastWasSecure = true
         case .none: lastWasSecure = false
         }
@@ -346,7 +346,7 @@ public final class FieldDictationWriter {
         guard wroteAny else {
             // The user edited the field between lines: start over at the cursor once.
             if retry, reason == .drift, case .target(let target) = capture() {
-                current = Current(target: target, writer: FieldWriter(target: target, mode: .streamCommitted))
+                current = Current(target: target, writer: FieldWriter(target: target, mode: .streamCommitted, characterEdits: typewriter()))
                 return await type(text, retry: false)
             }
             return nil

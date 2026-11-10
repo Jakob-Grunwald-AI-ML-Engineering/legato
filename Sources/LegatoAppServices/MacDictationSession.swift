@@ -231,6 +231,7 @@ import LegatoKeyboardCore
         instruction.reset()
         delivered = -1; stalled = nil
         engine.resetSequence()
+        if notice != nil { notice = nil; noticeID += 1 }
         if !Self.offlineFixture { engine.open() }
         onBegin()
     }

@@ -74,13 +74,13 @@ private func final(committed: String, finalText: String?, delivery: HostDelivery
 
     @Test func swappingBackReplacesTheShownVersionWithThePreviousOne() throws {
         let ops = try #require(versions().swapOps(to: 0, contextBefore: "Dear Bob, Hello, world. "))
-        #expect(ops == [.deleteBackward(14), .insert("um hello world ")])
+        #expect(applyProxyOps(ops, to: "Dear Bob, Hello, world. ").text == "Dear Bob, um hello world ")
     }
 
     @Test func aSharedBeginningStays() throws {
         let v = DictationVersions(
             runID: "run-1", documentID: "doc-A", texts: ["See you Friday.", "See you Thursday."], current: 0, trailing: "")
-        #expect(v.swapOps(to: 1, contextBefore: "See you Friday.") == [.deleteBackward(7), .insert("Thursday.")])
+        #expect(applyProxyOps(try #require(v.swapOps(to: 1, contextBefore: "See you Friday.")), to: "See you Friday.").text == "See you Thursday.")
     }
 
     @Test func noSwapWhenTheFieldNoLongerEndsWithTheShownVersion() {

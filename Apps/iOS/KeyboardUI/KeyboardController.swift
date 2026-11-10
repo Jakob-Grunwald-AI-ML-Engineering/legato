@@ -479,7 +479,7 @@ final class KeyboardController {
     @discardableResult
     private func checkForClear() -> ClearCheck {
         let outcome = clearWatch.check(
-            state: host, cursor: cursor, documentID: document.documentID, contextBefore: document.contextBefore,
+            state: host, cursor: reveal.cursorBeforeFieldClear(fallback: cursor), documentID: document.documentID, contextBefore: document.contextBefore,
             hasText: document.hasText, now: Date())
         switch outcome {
         case .notCleared:
@@ -517,7 +517,7 @@ final class KeyboardController {
     private func resolveHeldClear() {
         guard clearWatch.holds else { return }
         let outcome = clearWatch.resolveHeld(
-            state: host, cursor: cursor, documentID: document.documentID, contextBefore: document.contextBefore,
+            state: host, cursor: reveal.cursorBeforeFieldClear(fallback: cursor), documentID: document.documentID, contextBefore: document.contextBefore,
             hasText: document.hasText)
         switch outcome {
         case .cleared(let sent): _ = takeClear(sent)
@@ -612,7 +612,9 @@ final class KeyboardController {
         let before = cursor
         let plan = reveal.plan(
             state: host, cursor: cursor, contextBefore: document.contextBefore, documentID: document.documentID,
-            animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs)
+            animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs,
+            contextAfter: document.contextAfter, hasSelection: document.selectedText?.isEmpty == false,
+            movesByCharacters: charactersField != nil && charactersField == document.documentID)
         perform(plan.ops)
         startTickerIfNeeded()
         if let updated = plan.cursor, updated != before {
@@ -690,14 +692,18 @@ final class KeyboardController {
     /// the history; whoever swaps a version records that itself.
     private func perform(_ ops: [ProxyOp]) {
         guard !ops.isEmpty, let lease = directFieldLease, fieldCoordinator.owns(lease) else { return }
-        var expected = typing.contextBefore
-        for op in ops {
+        let before = document.contextBefore, after = document.contextAfter
+        let shadowOps: [ShadowOp] = ops.map { op in
             switch op {
-            case .deleteBackward(let count): expected = String(expected.dropLast(count))
-            case .insert(let text): expected += text
+            case .move(let units): .move(units)
+            case .deleteBackward(let count): .deleteBackward(count)
+            case .insert(let text): .insert(text)
             }
         }
-        predictDirectField(before: expected, after: document.contextAfter)
+        let predicted = ShadowEditPlanner.simulate(ops: shadowOps, shadow: before + after, cursor: before.utf16.count)
+        let units = Array(predicted.text.utf16)
+        predictDirectField(before: String(decoding: units[..<predicted.cursor], as: UTF16.self),
+                           after: String(decoding: units[predicted.cursor...], as: UTF16.self))
         if !ops.isEmpty {
             clearWatch.ownEdit(at: Date())
             history.cursorMoved()
@@ -705,6 +711,7 @@ final class KeyboardController {
         }
         for op in ops {
             switch op {
+            case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
             case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
             case .insert(let text): document.insert(text)
             }
@@ -728,17 +735,13 @@ final class KeyboardController {
     }
 
     /// A key, a completion or a cursor pan: the user took over, so the rest of the line being typed is dropped and
-    /// the following lines go in at the new cursor. `key`: the text a key is about to type; a word of the live run the
-    /// typewriter has only half revealed is finished first, so the key lands after it. Returns whether that typed.
-    @discardableResult
-    private func interruptDictation(_ cause: RunShadow.FreezeCause = .keystroke, key: String? = nil) -> Bool {
-        let finished = key.map(finishLiveWord(beforeKey:)) ?? false
+    /// the following lines go in at the new cursor. Partial live-word completion is scheduled before this freeze.
+    private func interruptDictation(_ cause: RunShadow.FreezeCause = .keystroke) {
         freezeLiveRun(cause)
-        guard let upTo = typist.interrupt() else { return finished }
+        guard let upTo = typist.interrupt() else { return }
         acknowledgeDictation(upTo: upTo)
         if !typist.needsTicks { stopDictationTicker() }
         trace?("dictation interrupted")
-        return finished
     }
 
     private func acknowledgeDictation(upTo: Int) {
@@ -817,7 +820,7 @@ final class KeyboardController {
     @ObservationIgnored private var liveRecoveryDismissed = false
     @ObservationIgnored private var liveTicker: Task<Void, Never>?
     /// A field in this keyboard session put its caret back after a live move (a page that re-renders its textarea):
-    /// later runs edit only by retyping at the end, never by moving the cursor.
+    /// later runs preserve the text whenever an interior edit would need a cursor move.
     @ObservationIgnored private var liveFieldResetsCaret = false
     /// A live run is being typed (the word row says "Listening…" instead of the words).
     private(set) var liveRunning = false
@@ -887,16 +890,37 @@ final class KeyboardController {
         syncRowTakeover()
     }
 
+    @ObservationIgnored private var finishingLiveWord = false
+
+    /// Finish the partial dictated word one confirmed character at a time, then replay the triggering key.
     private func finishLiveWord(beforeKey key: String) -> Bool {
-        guard !liveStepping, var shadow = liveShadow, liveSnapshot?.runID == shadow.runID, document.documentID == liveDocumentID,
-              claimLiveField(),
-              let op = shadow.finishWord(beforeKey: key, reportedBefore: document.contextBefore, reportedAfter: document.contextAfter)
-        else { return false }
-        liveShadow = shadow
-        liveStepping = true
-        defer { liveStepping = false }
-        performLive([op], expected: shadow.expectedBefore)
-        if case .insert(let text) = op { liveStats.applies += 1; liveStats.insertedChars += text.count }
+        guard !liveStepping, var shadow = liveShadow, liveSnapshot?.runID == shadow.runID,
+              document.documentID == liveDocumentID,
+              let op = shadow.finishWord(beforeKey: key, reportedBefore: document.contextBefore,
+                                         reportedAfter: document.contextAfter),
+              case .insert(let remainder) = op else { return false }
+        let expected = document.contextBefore + remainder
+        let edit = ScopedEdit(instructionID: UUID().uuidString, documentID: document.documentID,
+                              before: "", after: "", target: remainder)
+        let accepted = performVerified(edit) { [weak self] success in
+            guard let self else { return }
+            self.finishingLiveWord = false
+            if success {
+                if self.liveShadow?.runID == shadow.runID {
+                    self.liveShadow = shadow
+                    self.liveStats.applies += remainder.count
+                    self.liveStats.insertedChars += remainder.count
+                }
+                self.typing.ownEdit(contextBefore: expected)
+            } else {
+                self.fieldRestorationVerified = false
+            }
+            self.interruptDictation()
+        }
+        guard accepted else { return false }
+        finishingLiveWord = true
+        // This key waits for the remainder, and later keys join the same FIFO without aborting its completion.
+        holdInput(.type(key))
         return true
     }
 
@@ -1156,6 +1180,7 @@ final class KeyboardController {
     private func holdInput(_ input: HeldInput) {
         if heldInput.isEmpty { heldFieldID = document.documentID }
         heldInput.append(input); hasHeldInput = true
+        if finishingLiveWord { syncRowTakeover(); return }
         fieldOperationCancelled = true
         if let id = activeInstructionID { link.cancelInstruction(id) }
         syncRowTakeover()
@@ -1543,7 +1568,8 @@ final class KeyboardController {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false,
                 reason: "This app did not confirm the cursor position. Nothing was edited."))
         }
-        let windowBefore = shown(document.contextBefore)
+        var windowBefore = shown(document.contextBefore)
+        var edit = edit
         guard document.documentID == documentID else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
         }
@@ -1556,6 +1582,41 @@ final class KeyboardController {
         }
         var editSettled = false
         defer { fieldCoordinator.finish(editLease, settled: editSettled) }
+        if let selection = edit.selected, selection != edit.target {
+            // A zero-offset move can collapse the selection without editing text. Hosts differ about which end;
+            // only stable reports that uniquely pin one end authorize character edits afterwards.
+            guard document.selectedText == selection else {
+                return link.writeInstructionEditAck(.init(id: edit.id, applied: false, reason: "The selection changed, so nothing was edited."))
+            }
+            let afterSelection = shown(document.contextAfter)
+            _ = fieldCoordinator.issued(editLease)
+            isNudging = true
+            document.adjustTextPosition(byCharacterOffset: 0)
+            var collapsed: Bool?
+            var observed: Bool?
+            for _ in 0..<12 {
+                try? await Task.sleep(for: Self.tickInterval)
+                guard !shouldCancelFieldOperation, !Task.isCancelled, document.documentID == documentID else { break }
+                guard document.selectedText?.isEmpty != false else { continue }
+                let before = shown(document.contextBefore), after = shown(document.contextAfter)
+                let atEnd = RunShadow.confirms(expectedBefore: windowBefore + selection, expectedAfter: afterSelection,
+                                              reportedBefore: before, reportedAfter: after)
+                let atStart = RunShadow.confirms(expectedBefore: windowBefore, expectedAfter: selection + afterSelection,
+                                                reportedBefore: before, reportedAfter: after)
+                let end: Bool? = atEnd != atStart ? atEnd : nil
+                if let end, observed == end { collapsed = end; break }
+                observed = end
+            }
+            isNudging = false
+            guard let atEnd = collapsed else {
+                return link.writeInstructionEditAck(.init(id: edit.id, applied: false,
+                    reason: "This app did not confirm a cursor within the selection. Nothing was edited."))
+            }
+            edit.before = atEnd ? selection : ""
+            edit.after = atEnd ? "" : selection
+            edit.selected = nil
+            windowBefore = shown(document.contextBefore)
+        }
         let plan: ScopedEditPlanner.Plan
         switch ScopedEditPlanner.plan(edit, windowBefore: windowBefore, windowAfter: shown(document.contextAfter), selected: document.selectedText) {
         case .failure(let refusal):
@@ -1592,7 +1653,7 @@ final class KeyboardController {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false,
                 reason: "The instruction was cancelled before editing."))
         }
-        // A field that puts its caret back after a move gets the edit by retyping at the cursor.
+        // A field which resets the caret refuses interior edits instead of rewriting unchanged text.
         var queue = ScopedEditQueue(edit, plan: plan, windowBefore: windowBefore, avoidsMoves: liveFieldResetsCaret, keptBefore: keptBefore,
                                     movesByCharacters: charactersField != nil && charactersField == documentID)
         fieldRestorationVerified = false
@@ -1750,11 +1811,12 @@ final class KeyboardController {
         guard !isFieldBusy, activeInstructionID == nil, !hasHeldInput,
               claimDirectField(owner: .typing) else { holdInput(.type(text)); return false }
         versions = nil // the user moved on from the dictation
-        // A live word finished first moves the cursor: the caller's context is from before it.
-        let finished = interruptDictation(key: text)
+        // A partial live word completes through the verified queue before this key is replayed.
+        if finishLiveWord(beforeKey: text) { return true }
+        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
-        let before = finished ? typing.contextBefore : contextBefore ?? directContextBefore
+        let before = contextBefore ?? directContextBefore
         let selected = document.selectedText
         predictDirectField(before: before + text, after: document.contextAfter)
         document.insert(text)
@@ -1769,7 +1831,7 @@ final class KeyboardController {
         syncHistory()
         wordRow.keystroke(contextBefore: before + text)
         afterUserEdit()
-        return finished
+        return false
     }
 
     func deleteBackward(contextBefore: String? = nil) {
@@ -1812,33 +1874,102 @@ final class KeyboardController {
         let after = document.contextAfter
         let moved = before + String(after.prefix(edit.forward))
         let expected = String(moved.dropLast(edit.deleteCount)) + edit.insert
-        predictDirectField(before: expected, after: String(after.dropFirst(edit.forward)))
-        versions = nil
-        if asTyping {
-            // A completion goes on in the live typing buffer (the word typed so far becomes the completed word), so
-            // the pair learned is previous -> completed word, not previous -> prefix.
-            wordRow.completed(deleting: edit.deleteCount, with: edit.insert)
-        } else {
-            wordRow.interruptTyping()
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+        let old = String(moved.suffix(edit.deleteCount))
+        let oldAfter = String(after.prefix(edit.forward))
+        guard old.count == edit.deleteCount, oldAfter.count <= old.count else {
+            show("The word changed, so nothing was edited."); return
         }
-        clearWatch.ownEdit(at: Date(), leavesFieldEmpty: expected.isEmpty && String(after.dropFirst(edit.forward)).isEmpty)
-        // The proxy moves by UTF-16 units; the edit counts characters.
-        if edit.forward != 0 { document.adjustTextPosition(byCharacterOffset: edit.utf16Forward(contextAfter: after)) }
-        for _ in 0..<edit.deleteCount { document.deleteBackward() }
-        if !edit.insert.isEmpty { document.insert(edit.insert) }
-        if record { history.record(removed: removed, inserted: edit.insert, at: Date(), contextBefore: expected) }
-        syncHistory()
-        typing.ownEdit(contextBefore: expected)
-        // A completion, undo or redo goes on with what fits the new cursor position; a swap empties the row.
-        if asTyping || !record { wordRow.keystroke(contextBefore: expected) }
-        afterUserEdit()
+        let scoped = ScopedEdit(instructionID: UUID().uuidString, documentID: document.documentID,
+                                before: String(old.dropLast(oldAfter.count)), after: oldAfter, target: edit.insert)
+        versions = nil
+        wordRow.interruptTyping()
+        let accepted = performVerified(scoped) { [weak self] success in
+            guard let self else { return }
+            guard success else {
+                if !record { self.history.clear(); self.syncHistory() }
+                return
+            }
+            if asTyping { self.wordRow.completed(deleting: edit.deleteCount, with: edit.insert) }
+            self.wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            if record { self.history.record(removed: removed, inserted: edit.insert, at: Date(), contextBefore: expected) }
+            self.syncHistory()
+            self.typing.ownEdit(contextBefore: expected)
+            if asTyping || !record { self.wordRow.keystroke(contextBefore: expected) }
+            self.afterUserEdit()
+        }
+        if !accepted { show("The text changed, so nothing was edited.") }
     }
 
     /// The user's choice from the word row, for the app to learn from (Full Access only).
     func recordChoice(_ record: ChoiceRecord) {
         guard hasFullAccess() else { return }
         link.writeChoice(record)
+    }
+
+    /// Word choices, history and version swaps use the same confirmed character queue as magic.
+    /// Completion callbacks run only after the final character and caret position are confirmed.
+    private func performVerified(_ edit: ScopedEdit, completed: @escaping (Bool) -> Void) -> Bool {
+        guard let lease = directFieldLease, fieldCoordinator.owns(lease),
+              let plan = try? ScopedEditPlanner.plan(edit, windowBefore: shown(document.contextBefore),
+                windowAfter: shown(document.contextAfter), selected: document.selectedText).get() else { return false }
+        var endPlan = plan
+        let end = edit.target.utf16.count
+        if endPlan.cursor != end { endPlan.ops.append(.move(end - endPlan.cursor)) }
+        endPlan.cursor = end; endPlan.targetBefore = edit.target
+        var queue = ScopedEditQueue(edit, plan: endPlan, windowBefore: shown(document.contextBefore),
+                                    avoidsMoves: liveFieldResetsCaret,
+                                    movesByCharacters: charactersField != nil && charactersField == document.documentID)
+        isEditingField = true; fieldOperationCancelled = false; fieldRestorationVerified = false
+        let fieldID = document.documentID
+        Task { [weak self] in
+            guard let self else { return }
+            var success = false, settled = false
+            defer {
+                self.isEditingField = false
+                self.fieldRestorationVerified = settled
+                self.fieldCoordinator.finish(lease, settled: settled)
+                self.directFieldLease = nil
+                completed(success)
+                self.completeFieldOperation()
+            }
+            let clock = ContinuousClock()
+            var last = clock.now, elapsed = 0.0
+            while self.isVisible, !self.isTornDown, !Task.isCancelled, !self.fieldOperationCancelled,
+                  self.document.documentID == fieldID, self.fieldCoordinator.owns(lease) {
+                let action = queue.step(reportedBefore: self.shown(self.document.contextBefore),
+                                        reportedAfter: self.shown(self.document.contextAfter),
+                                        hasSelection: self.document.selectedText?.isEmpty == false, elapsedMs: elapsed)
+                switch action {
+                case .send(let op):
+                    let predicted = queue.predictedWindow
+                    guard self.fieldCoordinator.issued(lease, predicted: .init(documentID: fieldID,
+                        before: predicted.before, after: predicted.after)) else { return }
+                    self.clearWatch.ownEdit(at: Date())
+                    switch op {
+                    case .move(let offset): self.document.adjustTextPosition(byCharacterOffset: offset)
+                    case .deleteBackward(let count): for _ in 0..<count { self.document.deleteBackward() }
+                    case .insert(let text): self.document.insert(text)
+                    }
+                case .wait: break
+                case .done:
+                    settled = self.fieldCoordinator.confirm(lease, window: self.fieldWindow)
+                    success = settled
+                    return
+                case .stopped(let partial):
+                    if partial != nil, !queue.hasUnconfirmedOperation {
+                        settled = self.fieldCoordinator.confirm(lease, window: self.fieldWindow)
+                    }
+                    if queue.caretReset { self.liveFieldResetsCaret = true }
+                    self.typing.hostEdited()
+                    self.show("The field could not confirm this edit. Check the text before continuing.")
+                    return
+                }
+                try? await Task.sleep(for: Self.tickInterval)
+                let now = clock.now
+                elapsed = Self.milliseconds(now - last); last = now
+            }
+        }
+        return true
     }
 
     // MARK: Undo and redo
@@ -2071,20 +2202,26 @@ final class KeyboardController {
         }
         let before = typing.contextBefore
         let expected = String(before.dropLast(current.shown.count)) + current.texts[index] + current.trailing
-        wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-        perform(ops)
-        // `perform` forgot the tracked context (it is for the host's text); this swap is the keyboard's own, so a
-        // quick second undo reads the context the swap left rather than the field's lagging report.
-        typing.ownEdit(contextBefore: expected)
-        current.show(index)
-        versions = current // undoing the typing that followed the dictation makes Refine possible again
-        keptVersions = current
-        if record, from != index {
-            history.recordVersion(from: from, to: index, at: Date())
-            syncHistory()
+        let edit = ScopedEdit(instructionID: UUID().uuidString, documentID: document.documentID,
+                              before: current.shown, after: "", target: current.texts[index] + current.trailing)
+        _ = ops // swapOps validates the current version's ownership before the minimal queue is created.
+        return performVerified(edit) { [weak self] success in
+            guard let self else { return }
+            guard success else {
+                if !record { self.history.clear(); self.syncHistory() }
+                return
+            }
+            self.wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            self.typing.ownEdit(contextBefore: expected)
+            current.show(index)
+            self.versions = current
+            self.keptVersions = current
+            if record, from != index {
+                self.history.recordVersion(from: from, to: index, at: Date())
+                self.syncHistory()
+            }
+            self.trace?("version index=\(index) of=\(current.texts.count)")
         }
-        trace?("version index=\(index) of=\(current.texts.count)")
-        return true
     }
 
     /// Asks the app for a stronger rewrite (its message style) of the raw dictation and shows it as a new

@@ -17,7 +17,7 @@ private struct Field {
         var acked: [Int] = []
         for _ in 0..<steps where typist.needsTicks {
             let step = typist.step(contextBefore: text, elapsedMs: ms, capitalization: capitalization)
-            text += step.inserts.joined()
+            text = String(text.dropLast(step.deletes)) + step.inserts.joined()
             if let up = step.acknowledged { acked.append(up) }
         }
         return acked
@@ -166,19 +166,20 @@ private struct Field {
     #expect(acked.first == 0, "The interrupted line is dropped once the echo fails to arrive")
 }
 
-@Test func aShortAndALongLineAreDrainedWithoutABacklog() {
+@Test func aShortAndALongLineUseOneCharacterPerAnimatedStep() {
     for text in ["Short line.", String(repeating: "A much longer take with many words in it. ", count: 20)] {
         var typist = DictationTypist()
         var field = Field()
         typist.accept(publication(line(0, text)), acknowledged: nil)
         var ticks = 0
-        while typist.needsTicks, ticks < 200 {
-            field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined()
+        while typist.needsTicks, ticks < text.count + 10 {
+            let step = typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none)
+            #expect(step.inserts.joined().count <= 1)
+            field.text += step.inserts.joined()
             ticks += 1
         }
         #expect(field.text == text.trimmingCharacters(in: .whitespaces))
-        // The drain empties what is pending over about 250 ms; even 840 characters take a bounded number of frames.
-        #expect(ticks <= (text.count < 20 ? 12 : 60), "\(text.count) characters in \(ticks) ticks")
+        #expect(ticks >= text.trimmingCharacters(in: .whitespaces).count)
     }
 }
 
@@ -211,25 +212,26 @@ private struct Field {
     #expect(field.text == "Hello there, how are you?", "A line is never typed twice")
 }
 
-@Test func aFastStreamNeverBuildsABacklog() {
+@Test func aFastStreamPreservesEveryCharacterWhileTheTypewriterCatchesUp() {
     var typist = DictationTypist()
     var field = Field()
     var text = ""
     var lag: [Int] = []
-    // 40 characters arrive every frame (far faster than speech); the typing may only trail by a bounded amount.
+    // A fast publication still reveals at most one character per animated step.
     for frame in 0..<60 {
         text += String(repeating: "x", count: 40)
         typist.accept(publication(line(0, text, final: false)), acknowledged: nil)
-        field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined()
+        let step = typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none)
+        #expect(step.inserts.joined().count <= 1)
+        field.text += step.inserts.joined()
         if frame > 10 { lag.append(text.count - field.text.count) }
     }
-    // Steady state of the drain: pending ~ arrival rate x window, about 40 x 250/33 = 300 characters.
-    #expect(lag.allSatisfy { $0 < 400 }, "lag stayed bounded: \(lag.max() ?? 0)")
-    #expect(lag.last! < 400)
+    #expect(lag.last == text.count - field.text.count)
     typist.accept(publication(line(0, text, final: true)), acknowledged: nil)
     var ticks = 0
-    while typist.needsTicks, ticks < 200 { field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined(); ticks += 1 }
-    #expect(field.text.count == text.count && ticks < 60)
+    while typist.needsTicks, ticks < text.count + 10 { field.text += typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none).inserts.joined(); ticks += 1 }
+    #expect(field.text == text)
+    #expect(ticks >= text.count - 60)
 }
 
 @Test func reduceMotionTypesWhateverArrivedAtOnce() {
@@ -261,9 +263,20 @@ private struct Field {
     #expect(field.text == "Dear Anna, this is the partial text")
     typist.accept(publication(line(0, "this is the partial text", final: true, retracted: true), line(1, "the whole take.")), acknowledged: nil)
     let erase = typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none)
-    #expect(erase.deletes == "this is the partial text".count && erase.inserts.isEmpty && erase.acknowledged == 0)
+    #expect(erase.deletes == 1 && erase.inserts.isEmpty && erase.acknowledged == nil)
     field.text = String(field.text.dropLast(erase.deletes))
+    var deleted = erase.deletes
+    var acknowledged = false
+    while !acknowledged, typist.needsTicks {
+        let step = typist.step(contextBefore: field.text, elapsedMs: 33, capitalization: .none)
+        #expect(step.deletes <= 1 && step.inserts.isEmpty)
+        field.text = String(field.text.dropLast(step.deletes))
+        deleted += step.deletes
+        acknowledged = step.acknowledged == 0
+    }
+    #expect(deleted == "this is the partial text".count)
     #expect(field.text == "Dear Anna, ")
+    #expect(acknowledged)
     _ = field.run(&typist)
     #expect(field.text == "Dear Anna, the whole take.")
 }
@@ -298,4 +311,16 @@ private struct Field {
     let old = Data(#"{"sessionID":"s","lines":[{"lineID":"s-0","seq":0,"raw":"a","text":"A.","status":"cleaned"}]}"#.utf8)
     let line = try #require(try JSONDecoder().decode(DictationPublication.self, from: old).lines.first)
     #expect(line.final && !line.retracted, "A line without the flags is whole and not retracted")
+}
+
+@Test func anAnimatedFinalCharacterIsAcknowledgedOnlyAfterItsEcho() {
+    var typist = DictationTypist()
+    typist.accept(publication(line(0, "👨‍👩‍👧")), acknowledged: nil)
+    let sent = typist.step(contextBefore: "", elapsedMs: 33, capitalization: .none)
+    #expect(sent.inserts == ["👨‍👩‍👧"])
+    #expect(sent.acknowledged == nil)
+    let stale = typist.step(contextBefore: "", elapsedMs: 33, capitalization: .none)
+    #expect(stale.inserts.isEmpty && stale.acknowledged == nil)
+    let confirmed = typist.step(contextBefore: "👨‍👩‍👧", elapsedMs: 33, capitalization: .none)
+    #expect(confirmed.inserts.isEmpty && confirmed.acknowledged == 0)
 }

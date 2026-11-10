@@ -76,6 +76,7 @@ public final class FieldWriter {
     public private(set) var degradeReason: DegradeReason?
 
     private let target: (any TextTarget)?
+    private let characterEdits: Bool
     /// Everything the engine committed, as received.
     private var rawCommitted = ""
     /// Live cleanup's newest revision (the collected text shows it).
@@ -108,8 +109,9 @@ public final class FieldWriter {
     private let startSelection: UTF16Range?
 
     /// Create the writer when the run starts: `.insertOnStop` remembers the selection then.
-    public init(target: (any TextTarget)?, mode: Mode = .streamCommitted) {
+    public init(target: (any TextTarget)?, mode: Mode = .streamCommitted, characterEdits: Bool = false) {
         self.target = target
+        self.characterEdits = characterEdits
         self.mode = mode
         startSelection = mode == .insertOnStop ? try? target?.selectedRange() : nil
     }
@@ -159,7 +161,7 @@ public final class FieldWriter {
         } else {
             return .leftInPlace
         }
-        do { try target.replace(range, with: restore) } catch { return .leftInPlace }
+        do { try target.replaceMinimally(range, with: restore, characters: characterEdits) } catch { return .leftInPlace }
         guard let after = try? target.text(in: range), after != shown else { return .leftInPlace }
         written = ""
         tentative = ""
@@ -180,7 +182,7 @@ public final class FieldWriter {
               let selection = try? target.selectedRange(), selection == UTF16Range(location: span.end, length: 0)
         else { return .leftInPlace }
         let removal = UTF16Range(location: span.end - text.utf16.count, length: text.utf16.count)
-        do { try target.replace(removal, with: "") } catch { return .leftInPlace }
+        do { try target.replaceMinimally(removal, with: "", characters: characterEdits) } catch { return .leftInPlace }
         let rest = String(written.dropLast(text.count))
         guard let readback = try? target.text(in: UTF16Range(location: start, length: rest.utf16.count)), readback == rest,
               (try? target.selectedRange()) == UTF16Range(location: removal.location, length: 0)
@@ -255,7 +257,7 @@ public final class FieldWriter {
             location: start + shared.utf16.count, length: shown.utf16.count - shared.utf16.count)
         let replacement = String(desired.dropFirst(shared.count)) + tentative
         do {
-            try target.replace(span, with: replacement)
+            try target.replaceMinimally(span, with: replacement, characters: characterEdits)
         } catch {
             return degrade(.writeFailed)
         }
@@ -319,7 +321,7 @@ public final class FieldWriter {
         if text == body { return .swapped }
         let replacement = text + written.dropFirst(body.count)
         do {
-            try target.replace(span, with: replacement)
+            try target.replaceMinimally(span, with: replacement, characters: characterEdits)
         } catch {
             degrade(.writeFailed)
             return .leftInPlace
@@ -383,7 +385,13 @@ public final class FieldWriter {
         }
 
         do {
-            try target.replace(range, with: insertion)
+            try target.replaceMinimally(range, with: insertion, characters: characterEdits)
+        } catch let failure as MinimalTextEditError {
+            if spanStart == nil {
+                if let probe { uncertainWrite = (try? target.text(in: probe.window)) != probe.before }
+                else { uncertainWrite = true }
+            }
+            return degrade(failure == .notApplied ? .notApplied : .writeFailed)
         } catch {
             return degrade(.writeFailed)
         }
