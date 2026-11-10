@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import LegatoAgent
 import LegatoCore
@@ -259,3 +260,4 @@ import LegatoMac
     public func publish(_ strip: InstructionStrip) {}
     private enum Ownership: Error { case changed }
 }
+#endif
