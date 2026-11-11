@@ -2,7 +2,7 @@ import Testing
 @testable import LegatoKeyboardCore
 
 /// A field whose windows are small and ragged, like the hosts' (`documentContextBeforeInput` cut at varying sizes).
-@MainActor private final class FakeField: FieldWindowProxy {
+@MainActor private final class WindowField: FieldWindowProxy {
     var text: [Character]
     /// Cursor, in characters.
     var cursor: Int
@@ -98,7 +98,7 @@ private func paragraphs(_ count: Int) -> String {
     @Test func cancellationRestoresBothDirectionsBeforeReturning() async {
         let text = String(repeating: "Safe original text around the insertion point. ", count: 20)
         for upward in [true, false] {
-            let field = FakeField(text, cursor: 300, sizes: [70])
+            let field = WindowField(text, cursor: 300, sizes: [70])
             field.cancelAfterMoves = 1
             let reader = FieldReader(settleMilliseconds: 0)
             let result = upward
@@ -111,7 +111,7 @@ private func paragraphs(_ count: Int) -> String {
     }
 
     @Test func anAlreadyCancelledReadNeverMoves() async {
-        let field = FakeField("Original text")
+        let field = WindowField("Original text")
         field.cancelAfterMoves = 0
         let result = await FieldReader(settleMilliseconds: 0).readUp(field, known: "text", limit: .cap)
         guard case .failure(.cancelled) = result else { Issue.record("Expected cancellation"); return }
@@ -129,7 +129,7 @@ private func paragraphs(_ count: Int) -> String {
         let read = try await FieldReader(settleMilliseconds: 0).readUp(near, known: "", limit: .cap).get()
         #expect(read.text == text && read.movesByCharacters == true && near.cursor == text.count)
         // UIKit's fields move by UTF-16 units: the same text reads the same, as two units.
-        let uikit = FakeField(text, sizes: [80])
+        let uikit = WindowField(text, sizes: [80])
         let plain = try await FieldReader(settleMilliseconds: 0).readUp(uikit, known: "", limit: .cap).get()
         #expect(plain.text == text && plain.movesByCharacters == false)
     }
@@ -148,7 +148,7 @@ private func paragraphs(_ count: Int) -> String {
         }
         // A text area's blank line is two real line breaks: read as it shows.
         let blank = "Dear Anna,\n\nthe plan is ready and the boat is fixed.\n\nBest, Jakob"
-        let plain = FakeField(blank, sizes: [30])
+        let plain = WindowField(blank, sizes: [30])
         let read = try await FieldReader(settleMilliseconds: 0).readUp(plain, known: "", limit: .cap).get()
         #expect(read.text == blank && read.collapsesBreaks == false)
     }
@@ -176,7 +176,7 @@ private func paragraphs(_ count: Int) -> String {
     }
 
     @Test func readsAShortFieldToItsStartAndReturnsTheCursor() async throws {
-        let field = FakeField("Hello Anna, the meeting moved to Thursday. Can you make it?")
+        let field = WindowField("Hello Anna, the meeting moved to Thursday. Can you make it?")
         let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.text == "Hello Anna, the meeting moved to Thursday. Can you make it?")
         #expect(result.stop == .start)
@@ -186,7 +186,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func stitchesRaggedWindowsWithEmojiAndAccents() async throws {
         let text = paragraphs(20)
-        let field = FakeField(text, sizes: [87, 13, 118, 40, 547, 9])
+        let field = WindowField(text, sizes: [87, 13, 118, 40, 547, 9])
         field.staleReads = 1
         let result = try await FieldReader(cap: 10_000, settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.text == text)
@@ -197,7 +197,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func aWindowThatDoesNotTileFailsLoudlyAndTheCursorReturns() async throws {
         let text = paragraphs(6)
-        let field = FakeField(text)
+        let field = WindowField(text)
         // The second window position above the cursor reports a character short.
         let first = text.count - field.sizes[(text.count / 7) % field.sizes.count]
         field.brokenAt = [first]
@@ -207,14 +207,14 @@ private func paragraphs(_ count: Int) -> String {
         #expect(failure.isLasting)
         #expect(field.cursor == text.count, "The cursor goes back even when the read fails")
         // Windows at the cursor that a move does not start from (Safari's hidden selection): the first move fails.
-        let hidden = FakeField(text)
+        let hidden = WindowField(text)
         hidden.brokenAt = [text.count]
         let lost = await FieldReader(settleMilliseconds: 0).readUp(hidden, known: "", limit: .cap)
         #expect(lost == .failure(.firstMove))
     }
 
     @Test func capEndsAtALineStartAndSaysMoreRemains() async throws {
-        let field = FakeField(paragraphs(60))
+        let field = WindowField(paragraphs(60))
         let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.stop == .cap)
         #expect(result.moreRemains)
@@ -225,7 +225,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func readMoreExtendsByOneBlockFromWhatWasRead() async throws {
         let text = paragraphs(40)
-        let field = FakeField(text)
+        let field = WindowField(text)
         let reader = FieldReader(settleMilliseconds: 0)
         let first = try await reader.readUp(field, known: "", limit: .block).get()
         #expect(first.stop == .block && first.moreRemains)
@@ -240,14 +240,14 @@ private func paragraphs(_ count: Int) -> String {
     }
 
     @Test func knownTextThatNoLongerMatchesTheFieldIsRefused() async {
-        let field = FakeField("Something else entirely is before the cursor now.")
+        let field = WindowField("Something else entirely is before the cursor now.")
         let result = await FieldReader(settleMilliseconds: 0).readUp(field, known: "the text read earlier", limit: .block)
         #expect(result == .failure(.changed))
     }
 
     @Test func stopsAtTheNearestQuoteHeaderOrSignature() async throws {
         let mail = "Hi Max,\nthanks for the notes.\n\nOn Mon, 3 Nov 2026 at 10:12, Anna <anna@example.com> wrote:\n> Here are the notes.\n> Best, Anna\nI agree with all of it."
-        let field = FakeField(mail)
+        let field = WindowField(mail)
         let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.text == "I agree with all of it.")
         #expect(result.stop == .quote)
@@ -256,7 +256,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func readsDownFromTheCursorToTheFieldsEndAndReturns() async throws {
         let text = paragraphs(8)
-        let field = FakeField(text, cursor: 0)
+        let field = WindowField(text, cursor: 0)
         field.staleReads = 1
         let known = String(text.prefix(65))
         let result = try await FieldReader(settleMilliseconds: 0).readDown(field, known: known, room: 10_000).get()
@@ -264,21 +264,21 @@ private func paragraphs(_ count: Int) -> String {
         #expect(result.stop == .start && !result.moreRemains, "The field's end")
         #expect(field.cursor == 0)
         let mid = text.count / 2
-        let middle = FakeField(text, cursor: mid)
+        let middle = WindowField(text, cursor: mid)
         let rest = try await FieldReader(settleMilliseconds: 0).readDown(middle, known: "", room: 10_000).get()
         #expect(rest.text == String(text.dropFirst(mid)) && middle.cursor == mid)
     }
 
     @Test func readingDownStopsAtTheRoomOrAQuoteBelow() async throws {
         let text = paragraphs(30)
-        let capped = try await FieldReader(settleMilliseconds: 0).readDown(FakeField(text, cursor: 0), known: "", room: 1000).get()
+        let capped = try await FieldReader(settleMilliseconds: 0).readDown(WindowField(text, cursor: 0), known: "", room: 1000).get()
         #expect(capped.stop == .cap && capped.moreRemains)
         #expect(capped.text.count <= 1000 && text.hasPrefix(capped.text) && text.dropFirst(capped.text.count).hasPrefix("\n"),
                 "A capped read down ends at a line end")
         let mail = "Sounds good, see you then.\nJo\n\nOn Mon, 3 Nov 2026 at 10:12, Anna <anna@example.com> wrote:\n> Shall we meet at nine?\n"
-        let quoted = try await FieldReader(settleMilliseconds: 0).readDown(FakeField(mail, cursor: 0), known: "", room: 3000).get()
+        let quoted = try await FieldReader(settleMilliseconds: 0).readDown(WindowField(mail, cursor: 0), known: "", room: 3000).get()
         #expect(quoted.text == "Sounds good, see you then.\nJo\n\n" && quoted.stop == .quote && quoted.moreRemains)
-        let changed = await FieldReader(settleMilliseconds: 0).readDown(FakeField(mail, cursor: 0), known: "Something else", room: 3000)
+        let changed = await FieldReader(settleMilliseconds: 0).readDown(WindowField(mail, cursor: 0), known: "Something else", room: 3000)
         #expect(changed == .failure(.changed))
     }
 
