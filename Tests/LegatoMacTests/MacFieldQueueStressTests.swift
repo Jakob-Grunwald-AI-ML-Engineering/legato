@@ -328,6 +328,11 @@ private struct SeededRandom {
                                                  before: before, target: word.uppercased(), caretAfter: true))
         }
         await queue.whenIdle()
+        // Without the user's interference: Magic's edit is taken back and put back through the queue.
+        if !interferes, case .applied? = magicResult {
+            if !(await queue.undo()) { return "seed \(seed): Magic's edit could not be undone: \(field.string)" }
+            if !(await queue.redo()) { return "seed \(seed): Magic's edit could not be redone: \(field.string)" }
+        }
         if field.keysInFlight > 0 { return "seed \(seed): idle with \(field.keysInFlight) keys in flight: \(queue.debugState)" }
         let final = field.string.replacingOccurrences(of: "\u{00A0}", with: " ")
         stats.digits += typedDigits; stats.drops += drops.count
@@ -430,7 +435,81 @@ private struct SeededRandom {
         for keys in [false, true] {
             let rates = await typingRates(keys: keys)
             print("TYPING RATE keys=\(keys): calm \(Int(rates.calm)) chars/s, backlog \(Int(rates.backlog)) chars/s")
+            // Speech is about 15 characters a second: typing is well ahead of it, and at least 30 to 40 when behind.
+            #expect(rates.calm >= 25, "calm \(rates.calm)")
+            #expect(rates.backlog >= 40, "backlog \(rates.backlog)")
         }
+    }
+
+    /// Undo and redo take Legato's own changes back and forth through the queue, in an Accessibility field and in a
+    /// keystroke field: a finished take, then a Magic edit; a take still growing is not undoable.
+    @Test(arguments: [false, true]) func undoAndRedoGoThroughTheQueue(keys: Bool) async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(21))
+        var clock = ContinuousClock.now
+        field.keys = keys
+        field.clock = { clock }
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { true }
+        queue.sleep = { clock += $0 }
+        queue.now = { clock }
+        var changes = 0
+        queue.onHistoryChange = { changes += 1 }
+        #expect(!queue.canUndo && !queue.canRedo)
+
+        queue.live(runID: "a", version: 1, text: "sail north")
+        await queue.whenIdle()
+        // Still growing: nothing to undo yet.
+        #expect(!queue.canUndo)
+        queue.live(runID: "a", version: 2, text: "Sail north.", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        #expect(field.string == "Log: Sail north." && queue.canUndo && !queue.canRedo && changes > 0)
+
+        // Magic upper-cases a word; it is a change of its own.
+        let hit = (field.string as NSString).range(of: "north")
+        let magic = await queue.edit(.init(range: .init(location: hit.location, length: hit.length), scope: "north", before: "Sail ",
+                                           after: ".", target: "NORTH", caretAfter: true))
+        #expect(magic == .applied(.init(location: hit.location, length: 5)))
+        field.settle(all: true)
+        #expect(field.string == "Log: Sail NORTH.")
+
+        #expect(await queue.undo())
+        field.settle(all: true)
+        #expect(field.string == "Log: Sail north." && queue.canUndo && queue.canRedo, "\(field.string) \(queue.canUndo) \(queue.canRedo)")
+        #expect(await queue.undo())
+        field.settle(all: true)
+        #expect(field.string == "Log: " && !queue.canUndo && queue.canRedo)
+        #expect(await queue.undo() == false)
+        if keys { #expect(field.writes == 0) }
+
+        #expect(await queue.redo())
+        field.settle(all: true)
+        #expect(field.string == "Log: Sail north." && queue.canUndo && queue.canRedo, "\(field.string) \(queue.canUndo) \(queue.canRedo)")
+        #expect(await queue.redo())
+        field.settle(all: true)
+        #expect(field.string == "Log: Sail NORTH." && !queue.canRedo)
+        #expect(await queue.redo() == false)
+
+        // New dictation after an undo ends the redo.
+        #expect(await queue.undo())
+        queue.live(runID: "b", version: 1, text: "calm", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        #expect(!queue.canRedo && field.string.contains("calm"))
+    }
+
+    /// An edit that is exactly the inverse of the last one (Magic's own Undo) counts as taking it back.
+    @Test func anInverseEditIsAnUndoNotANewChange() async {
+        let field = FakeAXField("one two three", rng: SeededRandom(22))
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.sleep = { _ in }
+        _ = await queue.edit(.init(range: .init(location: 4, length: 3), scope: "two", before: "one ", after: " three", target: "TWO"))
+        #expect(queue.canUndo && !queue.canRedo)
+        _ = await queue.edit(.init(range: .init(location: 4, length: 3), scope: "TWO", before: "one ", after: " three", target: "two"))
+        #expect(!queue.canUndo && queue.canRedo && field.string == "one two three")
+        #expect(await queue.redo())
+        #expect(field.string == "one TWO three")
     }
 
     @Test func aRevisionAwayFromTheCaretIsAJumpUnitThatReturnsTheCaret() async {

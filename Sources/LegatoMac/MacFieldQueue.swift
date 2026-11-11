@@ -182,6 +182,8 @@ public final class MacFieldQueue {
         /// Run text after the last region that still needs a region of its own.
         var remainder: [Character] = []
         var retracted = false
+        /// The run's last words were delivered (it can be undone as a whole).
+        var complete = false
         /// Typed at the fast end of the pace (a panel take's one insert at its end).
         var fast = false
         /// Words past the last region wait for a region of their own (whitespace alone waits for more words).
@@ -271,11 +273,17 @@ public final class MacFieldQueue {
 
     /// A live run's newest text (a snapshot, a growing take, a typed line). Older versions of a run are ignored.
     /// `fast`: typed at the fast end of the pace (still one grapheme per op), for a finished take inserted at once.
-    public func live(runID: String, version: Int, text: String, fast: Bool = false) {
+    /// `complete`: this is the run's last text (it can then be undone as a change of its own, `undo()`).
+    public func live(runID: String, version: Int, text: String, fast: Bool = false, complete: Bool = false) {
         let index = runs.firstIndex { $0.id == runID } ?? {
-            runs.append(Run(id: runID)); return runs.count - 1
+            runs.append(Run(id: runID))
+            // New dictation is a new change: whatever was undone can no longer be redone.
+            if !redoing { undone = [] }
+            ledger.append(.run(runID))
+            return runs.count - 1
         }()
         guard !runs[index].retracted, version > runs[index].version else { return }
+        if complete, !runs[index].complete { runs[index].complete = true; historyChanged() }
         // A new run closes the open region of earlier runs: its words start where the user's caret is.
         if runs[index].regions.isEmpty, runs[index].version < 0 {
             for other in runs.indices where other != index { close(&runs[other], cause: "newRun") }
@@ -286,6 +294,7 @@ public final class MacFieldQueue {
         if fast { runs[index].fast = true }
         retarget(&runs[index], to: Array(text))
         note(.live, id: nil, run: runID, text: text, detail: "v\(version)")
+        historyChanged()
         schedule()
     }
 
@@ -300,17 +309,122 @@ public final class MacFieldQueue {
             region.desired = offset == 0 ? Array(region.original) : []
         }
         note(.live, id: nil, run: runID, text: "", detail: "retract")
+        historyChanged()
         schedule()
     }
 
     /// Lands an edit and returns once it was applied or dropped.
     public func edit(_ edit: Edit) async -> EditResult {
+        let result = await land(edit)
+        if case .applied(let range) = result { record(edit, landed: range) }
+        return result
+    }
+
+    private func land(_ edit: Edit) async -> EditResult {
         guard target != nil else { return .dropped(.cannotPlace) }
         note(.edit, id: edit.id, text: edit.target, detail: "scope=\(edit.scope)")
         return await withCheckedContinuation { done in
             edits.append(PendingEdit(edit: edit, since: now(), done: done))
             schedule()
         }
+    }
+
+    // MARK: History
+
+    /// Legato's own changes to the field, oldest first: dictated runs and edits (Magic). `undo()` takes the last one back
+    /// through the queue like any other change; `redo()` puts the last one taken back.
+    private struct Change { var edit: Edit; var range: UTF16Range }
+    private enum Entry { case run(String), edit(Change) }
+    private enum Undone { case run(String), edit(Change) }
+    private var ledger: [Entry] = []
+    private var undone: [Undone] = []
+    private var redoing = false
+    /// Called when `canUndo` or `canRedo` may have changed.
+    public var onHistoryChange: (@MainActor () -> Void)?
+
+    public var canUndo: Bool { ledger.contains { undoable($0) } }
+    public var canRedo: Bool { !undone.isEmpty }
+
+    private func undoable(_ entry: Entry) -> Bool {
+        switch entry {
+        case .edit: return true
+        case .run(let id):
+            guard let run = runs.first(where: { $0.id == id }), run.complete, !run.retracted else { return false }
+            return run.regions.contains { !$0.current.isEmpty }
+        }
+    }
+
+    private func historyChanged() { onHistoryChange?() }
+
+    /// An edit that landed is a change of its own, unless it is exactly the inverse of the last one (an undo made
+    /// elsewhere, Magic's own): that one is taken back instead.
+    private func record(_ edit: Edit, landed: UTF16Range) {
+        if case .edit(let last)? = ledger.last, last.edit.target == edit.scope, last.edit.scope == edit.target, !redoing {
+            ledger.removeLast()
+            undone.append(.edit(last))
+        } else {
+            if !redoing { undone = [] }
+            ledger.append(.edit(Change(edit: edit, range: landed)))
+        }
+        historyChanged()
+    }
+
+    /// Takes Legato's last change back: a finished dictated run goes out again (as `retract`), an edit is reversed. False
+    /// when there was nothing to undo or the text no longer allows it.
+    @discardableResult public func undo() async -> Bool {
+        guard let index = ledger.lastIndex(where: { undoable($0) }) else { return false }
+        return await takeBack(at: index)
+    }
+
+    private func takeBack(at index: Int) async -> Bool {
+        switch ledger[index] {
+        case .run(let id):
+            guard let run = runs.first(where: { $0.id == id }) else { return false }
+            let text = String(run.target)
+            ledger.remove(at: index)
+            // Regions an edit took over (Magic rewrote words of the take) are no longer followed: they come out as edits
+            // of their last known text, found again at their place or uniquely elsewhere.
+            let stale = run.regions.filter { $0.lost && !$0.current.isEmpty }
+            let followed = run.regions.contains { !$0.lost }
+            retract(runID: id)
+            var taken = followed
+            for (offset, region) in stale.enumerated().reversed() {
+                let original = region === run.regions.first ? String(region.original) : ""
+                let result = await land(Edit(range: .init(location: region.start, length: region.end - region.start), scope: String(region.current),
+                                             before: region.before, after: region.after, target: original, caretAfter: offset == 0))
+                if case .applied = result { taken = true }
+            }
+            guard taken else { historyChanged(); return false }
+            undone.append(.run(text))
+        case .edit(let change):
+            ledger.remove(at: index)
+            let reverse = Edit(range: change.range, scope: change.edit.target, before: change.edit.before, after: change.edit.after,
+                               target: change.edit.scope, caretAfter: true)
+            guard case .applied = await land(reverse) else { historyChanged(); return false }
+            undone.append(.edit(change))
+        }
+        historyChanged()
+        await whenIdle()
+        return true
+    }
+
+    /// Puts back what `undo()` took out last. False when there was nothing to redo or it can no longer be placed.
+    @discardableResult public func redo() async -> Bool {
+        guard let last = undone.popLast() else { return false }
+        redoing = true
+        defer { redoing = false }
+        switch last {
+        case .run(let text):
+            live(runID: UUID().uuidString, version: 1, text: text, complete: true)
+        case .edit(let change):
+            let again = Edit(range: change.range, scope: change.edit.scope, before: change.edit.before, after: change.edit.after,
+                             target: change.edit.target, caretAfter: true)
+            guard case .applied(let range) = await land(again) else { historyChanged(); return false }
+            ledger.append(.edit(Change(edit: change.edit, range: range)))
+        }
+        historyChanged()
+        await whenIdle()
+        return true
     }
 
     /// Runs `body` (the panel's typed insert) once everything before it landed; nothing else goes out meanwhile.
@@ -349,6 +463,8 @@ public final class MacFieldQueue {
     public func reset(_ reason: Reason = .cancelled) {
         dropAll(reason)
         runs = []
+        ledger = []; undone = []
+        historyChanged()
         note(.reset, reason: reason.rawValue)
     }
 

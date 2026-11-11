@@ -40,6 +40,22 @@ public enum PanelDictationPolicy {
     }
 }
 
+/// What the notch panel (the pill) shows while a take runs. A take that types straight into its field never shows its
+/// words in the pill: the field does. The pill then holds only the listening state and quick controls (Magic, Undo,
+/// Redo). A panel-mode take keeps showing every word, growing, until they were typed.
+public enum DictationPillContent: Sendable, Equatable {
+    /// The take's growing text.
+    case growingText
+    /// A compact listening state with Magic, Undo and Redo.
+    case listeningControls
+
+    public static func forTake(panelActive: Bool) -> DictationPillContent { panelActive ? .growingText : .listeningControls }
+
+    public static func forPolicy(_ mode: PanelDictationSetting.Mode, field: DictationFieldKind) -> DictationPillContent {
+        forTake(panelActive: PanelDictationPolicy.usesPanel(mode, field: field))
+    }
+}
+
 /// The words a panel-mode session shows and types once at the end: finished pieces in speaking order, then the one
 /// piece still growing (a live run, or a take whose cleanup streams). A later revision of a finished piece (a late
 /// cleanup of the same run) replaces it in place instead of adding it again.

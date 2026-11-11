@@ -17,6 +17,19 @@ import Testing
         #expect(!PanelDictationPolicy.usesPanel(.whenNeeded, field: .secure))
     }
 
+    @Test func theLivePillShowsNoWordsAndThePanelModePillShowsThemAll() {
+        // Typing straight into the field (the default for a field that can be edited live): listening and controls only.
+        #expect(DictationPillContent.forPolicy(.whenNeeded, field: .liveEditable) == .listeningControls)
+        #expect(DictationPillContent.forPolicy(.whenNeeded, field: .secure) == .listeningControls)
+        #expect(DictationPillContent.forPolicy(.always, field: .secure) == .listeningControls)
+        // Panel mode (always, or a field that cannot be edited live): the growing text.
+        #expect(DictationPillContent.forPolicy(.always, field: .liveEditable) == .growingText)
+        #expect(DictationPillContent.forPolicy(.whenNeeded, field: .unreadable) == .growingText)
+        #expect(DictationPillContent.forPolicy(.whenNeeded, field: .readOnly) == .growingText)
+        #expect(DictationPillContent.forTake(panelActive: true) == .growingText)
+        #expect(DictationPillContent.forTake(panelActive: false) == .listeningControls)
+    }
+
     @Test func theStoredSettingFallsBackToTheDefault() throws {
         let defaults = try #require(UserDefaults(suiteName: "panel-dictation-\(UUID().uuidString)"))
         #expect(PanelDictationSetting.mode(in: defaults) == .whenNeeded)

@@ -52,9 +52,25 @@ import Testing
     }
 
     @Test func thePaceSpreadsAChangeOverTheBudgetWithinItsBounds() {
+        // Small changes at the calm pace (25 to 35 ms), never slower.
         #expect(KeystrokePlanner.paceMs(ops: 4) == KeystrokePlanner.calmMs)
-        #expect(KeystrokePlanner.paceMs(ops: 40) == KeystrokePlanner.budgetMs / 40)
+        #expect((25.0...35.0).contains(KeystrokePlanner.calmMs))
+        // A middling change spreads over the budget, between the floor and the calm pace.
+        let middling = KeystrokePlanner.paceMs(ops: KeystrokePlanner.behindOps - 1)
+        #expect(middling >= KeystrokePlanner.floorMs && middling <= KeystrokePlanner.calmMs)
+    }
+
+    @Test func fallingBehindSpeechGoesStraightToTheFloor() {
+        // Speech is about 15 characters a second (67 ms each): a backlog of behindOps goes at the floor, which is at
+        // least 30 characters a second, and a field written by Accessibility goes at its own, lower floor.
+        #expect(KeystrokePlanner.paceMs(ops: KeystrokePlanner.behindOps) == KeystrokePlanner.floorMs)
         #expect(KeystrokePlanner.paceMs(ops: 1_000) == KeystrokePlanner.floorMs)
+        #expect(1_000 / KeystrokePlanner.floorMs >= 30)
+        #expect(KeystrokePlanner.paceMs(ops: 1_000, floor: KeystrokePlanner.writeFloorMs) == KeystrokePlanner.writeFloorMs)
+        #expect(KeystrokePlanner.writeFloorMs <= KeystrokePlanner.floorMs)
+        // The pace never gets slower as the backlog grows.
+        let paces = (1...60).map { KeystrokePlanner.paceMs(ops: $0) }
+        #expect(zip(paces, paces.dropFirst()).allSatisfy { $0 >= $1 })
     }
 
     @Test func syntheticSequencesArePairedAndNeverReturnOrTab() {
