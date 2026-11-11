@@ -157,6 +157,9 @@ final class AXTextTarget: TextTarget {
     /// Whether Accessibility writes land exactly in this field. Chromium's web content reports success for an
     /// AXSelectedText write and changes nothing.
     var editsInPlace: Bool { !Self.isChromium(pid: pid) }
+    /// Chromium fields are edited with synthetic keys, each read back (`MacFieldQueue`).
+    var typesKeys: Bool { Self.isChromium(pid: pid) }
+    var inputMark: Int { RealInput.shared.count }
 
     private enum SecureState { case secure, notSecure, unknown }
 
@@ -222,8 +225,7 @@ final class AXTextTarget: TextTarget {
     }
 
     func replace(_ range: UTF16Range, with text: String) throws {
-        guard isFocused() else { throw AXTargetError.unexpectedValue }
-        if !editsInPlace { return try replaceByPaste(range, with: text) }
+        guard isFocused(), editsInPlace else { throw AXTargetError.unexpectedValue }
         let original = try self.text(in: range)
         // Streaming appends already own this caret. Avoid an unnecessary browser selection
         // mutation, which can scroll the editor or briefly highlight its contents.
@@ -239,70 +241,48 @@ final class AXTextTarget: TextTarget {
         }
     }
 
-    /// For a field that takes pastes, not Accessibility writes: before anything is written, the app is still in front
-    /// with no modifier held, and exactly `range` is selected with its text unchanged.
-    func prepareReplace(_ range: UTF16Range) throws {
-        guard !editsInPlace else { return }
-        guard isFocused(), Self.pasteAllowed(pid: pid) else { throw AXTargetError.unexpectedValue }
-        if try selectedRange() != range {
-            let original = try text(in: range)
-            try setSelectedRange(range)
-            guard Self.waitFor({ (try? self.selectedRange()) == range }), try text(in: range) == original else {
-                throw AXTargetError.unexpectedValue
-            }
+    // MARK: Keystrokes
+
+    /// Modifiers that turn a key into a shortcut (fn turns the arrows into Home/End and Backspace into forward delete).
+    private static let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn]
+
+    /// One key into this field, only while every guard holds: no secure input, this app in front with this element
+    /// focused, no real key or click since `mark`, no modifier held, and the selection still `selection`. The input
+    /// mark is checked again right before the key goes out.
+    func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws {
+        guard isFocused() else { throw FieldKeyRefusal.notFocused }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        guard CGEventSource.flagsState(.hidSystemState).intersection(Self.modifiers).isEmpty else { throw FieldKeyRefusal.modifiersHeld }
+        guard (try? selectedRange()) == selection else { throw FieldKeyRefusal.selectionMoved }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        let sent: Bool
+        switch key {
+        case .left: sent = SyntheticKeys.tap(kVK_LeftArrow)
+        case .right: sent = SyntheticKeys.tap(kVK_RightArrow)
+        case .backspace: sent = SyntheticKeys.tap(kVK_Delete)
+        case .text(let character):
+            let text = String(character)
+            sent = SyntheticEvent.typeable(text) ? SyntheticKeys.type(text) : paste(text, at: selection)
         }
+        guard sent else { throw FieldKeyRefusal.unavailable }
     }
 
-    /// A synthesized paste or Delete lands in the app that started the edit, never in a secure field, never while the
-    /// user holds a modifier (the key would arrive as a shortcut).
-    private static func pasteAllowed(pid: pid_t) -> Bool {
-        let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
-        return NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && !IsSecureEventInputEnabled()
-            && CGEventSource.flagsState(.hidSystemState).intersection(modifiers).isEmpty
-    }
-
-    /// Chromium's web content ignores Accessibility text writes but moves its selection. One replacement (a Magic
-    /// edit or its undo) selects exactly `range`, pastes the text (or deletes the selection) as the user would, and
-    /// waits for the field to show it. The clipboard comes back once the paste has landed.
-    private func replaceByPaste(_ range: UTF16Range, with text: String) throws {
-        try prepareReplace(range)
-        guard Self.pasteAllowed(pid: pid), try selectedRange() == range else { throw AXTargetError.unexpectedValue }
-        if range.length == 0, text.isEmpty { return }
+    /// A line break, tab or oversized grapheme: never a Return or Tab key. It is pasted (⌘V, paired), the field is
+    /// watched until it shows the text, and the clipboard comes back unless someone else wrote to it meanwhile.
+    private func paste(_ text: String, at selection: UTF16Range) -> Bool {
         let pasteboard = NSPasteboard.general
-        var restore: (snapshot: PasteService.Snapshot, count: Int)?
-        if text.isEmpty {
-            let source = CGEventSource(stateID: .hidSystemState)
-            for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Delete), keyDown: down) else { continue }
-                event.flags = []
-                event.setIntegerValueField(.eventSourceUserData, value: SyntheticEvent.userData)
-                event.post(tap: .cghidEventTap)
-            }
-        } else {
-            let snapshot = PasteService.Snapshot(of: pasteboard)
-            pasteboard.clearContents()
-            let item = NSPasteboardItem()
-            item.setString(text, forType: .string)
-            item.setData(Data(), forType: PasteService.transientType)
-            guard pasteboard.writeObjects([item]) else { throw AXTargetError.unexpectedValue }
-            restore = (snapshot, pasteboard.changeCount)
-            PasteService.postCommandV()
-        }
-        let caret = UTF16Range(location: range.location + text.utf16.count, length: 0)
-        let landed = Self.waitFor {
-            (try? self.selectedRange()) == caret && (try? self.text(in: .init(location: range.location, length: text.utf16.count))) == text
-        }
-        if let restore, pasteboard.changeCount == restore.count { restore.snapshot.restore(to: pasteboard) }
-        guard landed else { throw AXTargetError.unexpectedValue }
-    }
-
-    /// Polls `condition` while the other app applies an asynchronous change: at most about a second.
-    private static func waitFor(_ condition: () -> Bool) -> Bool {
-        for _ in 0..<50 {
-            if condition() { return true }
-            usleep(20_000)
-        }
-        return condition()
+        let snapshot = PasteService.Snapshot(of: pasteboard)
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: PasteService.transientType)
+        guard pasteboard.writeObjects([item]) else { snapshot.restore(to: pasteboard); return false }
+        let ours = pasteboard.changeCount
+        guard SyntheticKeys.commandV() else { snapshot.restore(to: pasteboard); return false }
+        let range = UTF16Range(location: selection.location, length: text.utf16.count)
+        for _ in 0..<50 where (try? self.text(in: range)) != text { usleep(20_000) }
+        if pasteboard.changeCount == ours { snapshot.restore(to: pasteboard) }
+        return true
     }
 
     private func supportsTextOperation() -> Bool {

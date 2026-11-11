@@ -125,18 +125,7 @@ final class PasteService {
 
     /// One step as key events of at most 20 UTF-16 units each: key down and up, no modifiers, tagged as ours.
     static func postUnicode(_ text: String) -> Bool {
-        let source = CGEventSource(stateID: .hidSystemState)
-        for chunk in TypewriterPlan.eventChunks(text) {
-            let units = Array(chunk.utf16)
-            for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { return false }
-                event.flags = []
-                event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-                event.setIntegerValueField(.eventSourceUserData, value: SyntheticEvent.userData)
-                event.post(tap: .cghidEventTap)
-            }
-        }
-        return true
+        TypewriterPlan.eventChunks(text).allSatisfy { SyntheticKeys.type($0) }
     }
 
     // MARK: Keystroke
@@ -148,19 +137,8 @@ final class PasteService {
         return await ModifierWait.untilReleased(held: { !CGEventSource.flagsState(.hidSystemState).intersection(mask).isEmpty })
     }
 
-    /// ⌘V as a real keyboard would send it: Command down, V down and up, Command up. Posting only V with the Command
-    /// flag left the HID state's Command flag set, so the user's next keys arrived as shortcuts.
-    static func postCommandV() {
-        let source = CGEventSource(stateID: .hidSystemState)
-        let keys: [(CGKeyCode, Bool, CGEventFlags)] = [(0x37, true, .maskCommand), (9, true, .maskCommand),
-                                                        (9, false, .maskCommand), (0x37, false, [])]
-        for (key, down, flags) in keys {
-            guard let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down) else { continue }
-            event.flags = flags
-            event.setIntegerValueField(.eventSourceUserData, value: SyntheticEvent.userData)
-            event.post(tap: .cghidEventTap)
-        }
-    }
+    /// ⌘V, paired (`SyntheticKeys.commandV`).
+    static func postCommandV() { SyntheticKeys.commandV() }
 
     // MARK: Snapshot
 

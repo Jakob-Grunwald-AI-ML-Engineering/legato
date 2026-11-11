@@ -59,7 +59,7 @@ public struct PanelTake: Sendable, Equatable {
         pieces.map(\.text).reduce("") { joined, next in
             guard !next.isEmpty else { return joined }
             guard let last = joined.last else { return next }
-            return joined + FieldDictationWriter.separator(before: next, after: last, first: false) + next
+            return joined + Self.space(before: next, after: last, first: false) + next
         }
     }
     public var isEmpty: Bool { text.isEmpty }
@@ -93,7 +93,7 @@ public struct PanelTake: Sendable, Equatable {
         guard let first = body.first else { return "" }
         defer { lastTaken = body.last }
         guard let lastTaken, first != "\n" else { return body }
-        return FieldDictationWriter.separator(before: body, after: lastTaken, first: false) + body
+        return Self.space(before: body, after: lastTaken, first: false) + body
     }
     private var lastTaken: Character?
     /// Nothing was handed over yet: the first text needs the field's own preceding character for its space.
@@ -101,7 +101,16 @@ public struct PanelTake: Sendable, Equatable {
 
     /// The space (or nothing) between a field's `previous` character and `text`.
     public static func separator(before text: String, after previous: Character?) -> String {
-        FieldDictationWriter.separator(before: text, after: previous, first: true)
+        space(before: text, after: previous, first: true)
+    }
+
+    /// A space unless `text` starts with whitespace or closing punctuation, or `previous` is whitespace or opening
+    /// punctuation. No previous character: none in an empty field (`first`), one after earlier unknown text.
+    static func space(before text: String, after previous: Character?, first: Bool) -> String {
+        guard let next = text.first, !next.isWhitespace, !".,;:!?)]}%".contains(next) else { return "" }
+        guard let previous else { return first ? "" : " " }
+        if previous.isWhitespace || "([{\"'“‘„«¿¡".contains(previous) { return "" }
+        return " "
     }
 
     private mutating func update(id: String, text: String, finished: Bool) {

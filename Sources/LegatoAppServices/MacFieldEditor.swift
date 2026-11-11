@@ -77,7 +77,7 @@ import LegatoMac
         switch capture() {
         case .target(let value):
             target = value
-            field = value.editsInPlace ? .liveEditable : .readOnly
+            field = value.editsInPlace || value.typesKeys ? .liveEditable : .readOnly
         case .secure: field = .secure; report("Secure field: dictation will be copied. Magic cannot edit it.")
         case .none: field = .unreadable
         }

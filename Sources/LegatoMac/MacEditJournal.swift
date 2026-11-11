@@ -21,6 +21,8 @@ public enum MacEditJournal {
         /// A region was found again elsewhere, or started and closed.
         case relocated, regionStarted, regionClosed
         case applied, dropped, waiting, reset
+        /// Keystroke fields: a region's keys were planned; a key was refused by its guards (nothing sent).
+        case planned, refused
     }
 
     public struct Entry: Codable, Sendable, Equatable {

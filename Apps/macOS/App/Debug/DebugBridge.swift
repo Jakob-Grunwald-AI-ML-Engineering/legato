@@ -96,7 +96,7 @@ import ApplicationServices
             await AXTextTarget.prepareFocused()
             let capture: String
             switch AXTextTarget.captureFocused() {
-            case .target(let target): capture = target.editsInPlace ? "readable" : "readable-no-writes"
+            case .target(let target): capture = target.editsInPlace ? "readable" : target.typesKeys ? "readable-keys" : "readable-no-writes"
             case .none: capture = "unavailable"
             case .secure: capture = "secure-or-unverified"
             }
