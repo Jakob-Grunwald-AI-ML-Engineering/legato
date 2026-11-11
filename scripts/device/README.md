@@ -31,6 +31,10 @@ Bundle/group overrides route the CLI; they do not rewrite signing, entitlements,
 
 `bash scripts/device/ctl.sh device-logs [--since 10m]` (`<num>m|h|d`) runs `log collect --device-udid "$LEGATO_DEVICE" --last <dur>` and filters the archive with `log show --archive … --info --debug --predicate 'subsystem == "de.gruenwald.legato"'` (app, keyboard and widget share the subsystem). The text lands in `$STATE/pulled/device-logs.txt`; the command prints its path, the line count and the latest `composer.view blank` / `composer.poll stale|start|stop` lines (#225). Needs the phone unlocked and paired, and sudo: `log collect` reads an attached device only as root, so the command prompts once (`sudo -v`) before collecting; run it from your own terminal. Device target only. Messages carry counts and flags, never draft text. `LEGATO_DEVICE_LOGS_TIMEOUT` caps collect and filter (300 s).
 
+## Keyboard edit journal
+
+Internal and debug keyboards write every field-queue event with full text to the App Group (`Library/Caches/edit-journal.jsonl`, rotated at about 2 MB into `edit-journal.1.jsonl`). Pull it with `xcrun devicectl device copy from --device "$LEGATO_DEVICE" --domain-type appGroupDataContainer --domain-identifier group.de.gruenwald.legato --source Library/Caches/edit-journal.jsonl --destination /tmp/edit-journal.jsonl` (or `bash scripts/device/ctl.sh pull --group Library/Caches/edit-journal.jsonl`), then replay it in a test with `JournalReplay` (`Tests/LegatoKeyboardCoreTests/EditJournalTests.swift`). It holds what was typed: share it only with Jakob's consent.
+
 ## Physical-device screenshots
 
 `bash scripts/device/native-control.sh screenshot /tmp/phone.png` captures the entire physical display, including the foreground host, actual system/custom keyboard and safe areas. `bash scripts/device/native-control.sh record /tmp/phone.mp4 10` records a bounded screen video. Both use `LEGATO_DEVICE` and never launch, install or activate an app or simulator. Coordinate the visible state with anyone using the phone before capture; avoid key/settings screens.
@@ -156,5 +160,20 @@ Diagnostics (internal builds): `live2.*` lines in `Library/Caches/audio-diag.jso
 Other controls use actual session actions: `composer-tap <lineID> <wordID> <offset_ms>`, `composer-pick <lineID> <wordID> <text>`, `composer-mode message|email|prompt|note`, `composer-undo`, `composer-cancel`, and `composer-insert-host`. Tap offsets use exactly `audioOrigin + offset_ms/1000`, sharing the injected token clock without sleeps. Query state for targets, tap, then inject correction speech at a matching offset. `composer-insert-host` immediately accepts the host document and cancels remaining work; it does **not** prove keyboard text-proxy delivery. On Mac, `composer-insert` uses the existing focused-field/paste delivery path. For actual phone keyboard Insert proof, launch the existing native field harness (`-LegatoKeyboardHarness YES -LegatoHarnessSystemField YES`) and tap the real keyboard button; `harness-status` is only the separate in-process keyboard harness.
 
 Foreground is the default phone setup. For another app's keyboard, `composer-debug-start message microphone-lease` explicitly holds the existing real microphone lease for host liveness, without forwarding or recording audio. `microphoneLeaseActive` reports it. That path still requires microphone permission; do not describe it as audio-free background execution. Without a lease, iOS can suspend a background host. Normal mic starts still use Soniox and require its key. Controls and key import are unavailable in Release builds.
+
+Magic offline in a Debug Simulator build (no Claude key): launch with the fixture, then type the instruction through the bridge; it reads and edits the field through the keyboard's queue like a spoken one. For the real keyboard in Safari, leave out `-LegatoKeyboardHarness YES` and focus the page's field first.
+
+```bash
+ctl="bash scripts/device/ctl.sh --target sim"
+$ctl build && $ctl install && $ctl launch -LegatoOfflineFixture YES -LegatoKeyboardHarness YES
+id=$($ctl send harness-visible); $ctl wait "$id"            # the in-app keyboard over a text view
+id=$($ctl send keyboard-tap); $ctl wait "$id"
+id=$($ctl send dictation-debug-line "the meeting is at three pm"); $ctl wait "$id"
+id=$($ctl send dictation-debug-stop); $ctl wait "$id"
+id=$($ctl send instruction-debug 'replace "Three" with "four"'); $ctl wait "$id"   # the offline cleanup capitalises words; or: uppercase the dictated text
+id=$($ctl send instruction-state); $ctl wait "$id"           # phase result, message, canUndo
+```
+
+Without an App Group (unsigned Simulator builds) the edit journal is in the process's own `Library/Caches/edit-journal.jsonl`.
 
 For credential-free native UAT, launch an internal build with `-LegatoOfflineFixture YES`. The deterministic instruction fixture supports uppercase, lowercase, delete, remove extra spaces, and `replace "old" with "new"`; it uses the normal field editing and undo paths without a model request. Keep this evidence distinct from real-provider and physical-device validation.

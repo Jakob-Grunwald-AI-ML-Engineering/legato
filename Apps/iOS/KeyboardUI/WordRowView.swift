@@ -18,24 +18,17 @@ struct WordRowView: View {
 
     var body: some View {
         Group {
-            if controller.hasHeldInput {
+            if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
-                    Text("Input held. Place the cursor, then continue.")
-                        .font(.system(size: fontSize - 4))
-                        .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity)
-                    takeButton("Continue", id: "keyboard.heldInput.continue") { controller.resumeHeldInput() }
-                }
-                .padding(.horizontal, 8)
-                .accessibilityIdentifier("keyboard.heldInput")
-            } else if let recovery = controller.liveRecoveryNotice {
-                HStack(spacing: 8) {
+                    // Plain text (nothing to tap but Dismiss); it fits in two lines, shrinking rather than cutting off.
                     Text(recovery)
                         .font(.system(size: fontSize - 4))
                         .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                         .lineLimit(2)
+                        .minimumScaleFactor(0.7)
+                        .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
+                        .accessibilityAddTraits(.isStaticText)
                     takeButton("Dismiss", id: "keyboard.liveRecovery.dismiss") { controller.dismissLiveRecovery() }
                 }
                 .padding(.horizontal, 8)

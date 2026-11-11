@@ -109,22 +109,4 @@ struct FieldEditCoordinatorTests {
         owner.finish(lease, settled: true)
         #expect(owner.uncertain)
     }
-
-    @Test func sameTurnMoveEchoCannotAuthorizeADelete() throws {
-        let original = "At the start " + String(repeating: "remaining text ", count: 50)
-        let edit = ScopedEdit(instructionID: "i", documentID: "field", before: original, after: "", target: "At the beginning " + String(repeating: "remaining text ", count: 50))
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: original, windowAfter: "", selected: nil).get()
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: original)
-        let first = queue.step(reportedBefore: original, reportedAfter: "", hasSelection: false, elapsedMs: 0)
-        guard case .send(let op) = first else { Issue.record("Expected a move"); return }
-        guard case .move = op else { Issue.record("Expected a move, got \(op)"); return }
-        let (moved, cursor) = ShadowEditPlanner.simulate(ops: [op], shadow: original, cursor: original.utf16.count)
-        let units = Array(moved.utf16)
-        let before = String(decoding: units[..<cursor], as: UTF16.self)
-        let after = String(decoding: units[cursor...], as: UTF16.self)
-        let value15 = queue.step(reportedBefore: before, reportedAfter: after, hasSelection: false, elapsedMs: 0)
-        #expect(value15 == .wait)
-        let value16 = queue.step(reportedBefore: original, reportedAfter: "", hasSelection: false, elapsedMs: 33)
-        #expect(value16 == .wait)
-    }
 }

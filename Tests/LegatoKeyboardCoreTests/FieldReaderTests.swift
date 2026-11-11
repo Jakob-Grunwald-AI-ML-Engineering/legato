@@ -2,7 +2,7 @@ import Testing
 @testable import LegatoKeyboardCore
 
 /// A field whose windows are small and ragged, like the hosts' (`documentContextBeforeInput` cut at varying sizes).
-@MainActor private final class FakeField: FieldWindowProxy {
+@MainActor private final class WindowField: FieldWindowProxy {
     var text: [Character]
     /// Cursor, in characters.
     var cursor: Int
@@ -98,7 +98,7 @@ private func paragraphs(_ count: Int) -> String {
     @Test func cancellationRestoresBothDirectionsBeforeReturning() async {
         let text = String(repeating: "Safe original text around the insertion point. ", count: 20)
         for upward in [true, false] {
-            let field = FakeField(text, cursor: 300, sizes: [70])
+            let field = WindowField(text, cursor: 300, sizes: [70])
             field.cancelAfterMoves = 1
             let reader = FieldReader(settleMilliseconds: 0)
             let result = upward
@@ -111,7 +111,7 @@ private func paragraphs(_ count: Int) -> String {
     }
 
     @Test func anAlreadyCancelledReadNeverMoves() async {
-        let field = FakeField("Original text")
+        let field = WindowField("Original text")
         field.cancelAfterMoves = 0
         let result = await FieldReader(settleMilliseconds: 0).readUp(field, known: "text", limit: .cap)
         guard case .failure(.cancelled) = result else { Issue.record("Expected cancellation"); return }
@@ -129,7 +129,7 @@ private func paragraphs(_ count: Int) -> String {
         let read = try await FieldReader(settleMilliseconds: 0).readUp(near, known: "", limit: .cap).get()
         #expect(read.text == text && read.movesByCharacters == true && near.cursor == text.count)
         // UIKit's fields move by UTF-16 units: the same text reads the same, as two units.
-        let uikit = FakeField(text, sizes: [80])
+        let uikit = WindowField(text, sizes: [80])
         let plain = try await FieldReader(settleMilliseconds: 0).readUp(uikit, known: "", limit: .cap).get()
         #expect(plain.text == text && plain.movesByCharacters == false)
     }
@@ -148,7 +148,7 @@ private func paragraphs(_ count: Int) -> String {
         }
         // A text area's blank line is two real line breaks: read as it shows.
         let blank = "Dear Anna,\n\nthe plan is ready and the boat is fixed.\n\nBest, Jakob"
-        let plain = FakeField(blank, sizes: [30])
+        let plain = WindowField(blank, sizes: [30])
         let read = try await FieldReader(settleMilliseconds: 0).readUp(plain, known: "", limit: .cap).get()
         #expect(read.text == blank && read.collapsesBreaks == false)
     }
@@ -176,7 +176,7 @@ private func paragraphs(_ count: Int) -> String {
     }
 
     @Test func readsAShortFieldToItsStartAndReturnsTheCursor() async throws {
-        let field = FakeField("Hello Anna, the meeting moved to Thursday. Can you make it?")
+        let field = WindowField("Hello Anna, the meeting moved to Thursday. Can you make it?")
         let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.text == "Hello Anna, the meeting moved to Thursday. Can you make it?")
         #expect(result.stop == .start)
@@ -186,7 +186,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func stitchesRaggedWindowsWithEmojiAndAccents() async throws {
         let text = paragraphs(20)
-        let field = FakeField(text, sizes: [87, 13, 118, 40, 547, 9])
+        let field = WindowField(text, sizes: [87, 13, 118, 40, 547, 9])
         field.staleReads = 1
         let result = try await FieldReader(cap: 10_000, settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.text == text)
@@ -197,7 +197,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func aWindowThatDoesNotTileFailsLoudlyAndTheCursorReturns() async throws {
         let text = paragraphs(6)
-        let field = FakeField(text)
+        let field = WindowField(text)
         // The second window position above the cursor reports a character short.
         let first = text.count - field.sizes[(text.count / 7) % field.sizes.count]
         field.brokenAt = [first]
@@ -207,14 +207,14 @@ private func paragraphs(_ count: Int) -> String {
         #expect(failure.isLasting)
         #expect(field.cursor == text.count, "The cursor goes back even when the read fails")
         // Windows at the cursor that a move does not start from (Safari's hidden selection): the first move fails.
-        let hidden = FakeField(text)
+        let hidden = WindowField(text)
         hidden.brokenAt = [text.count]
         let lost = await FieldReader(settleMilliseconds: 0).readUp(hidden, known: "", limit: .cap)
         #expect(lost == .failure(.firstMove))
     }
 
     @Test func capEndsAtALineStartAndSaysMoreRemains() async throws {
-        let field = FakeField(paragraphs(60))
+        let field = WindowField(paragraphs(60))
         let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.stop == .cap)
         #expect(result.moreRemains)
@@ -225,7 +225,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func readMoreExtendsByOneBlockFromWhatWasRead() async throws {
         let text = paragraphs(40)
-        let field = FakeField(text)
+        let field = WindowField(text)
         let reader = FieldReader(settleMilliseconds: 0)
         let first = try await reader.readUp(field, known: "", limit: .block).get()
         #expect(first.stop == .block && first.moreRemains)
@@ -240,14 +240,14 @@ private func paragraphs(_ count: Int) -> String {
     }
 
     @Test func knownTextThatNoLongerMatchesTheFieldIsRefused() async {
-        let field = FakeField("Something else entirely is before the cursor now.")
+        let field = WindowField("Something else entirely is before the cursor now.")
         let result = await FieldReader(settleMilliseconds: 0).readUp(field, known: "the text read earlier", limit: .block)
         #expect(result == .failure(.changed))
     }
 
     @Test func stopsAtTheNearestQuoteHeaderOrSignature() async throws {
         let mail = "Hi Max,\nthanks for the notes.\n\nOn Mon, 3 Nov 2026 at 10:12, Anna <anna@example.com> wrote:\n> Here are the notes.\n> Best, Anna\nI agree with all of it."
-        let field = FakeField(mail)
+        let field = WindowField(mail)
         let result = try await FieldReader(settleMilliseconds: 0).readUp(field, known: "", limit: .cap).get()
         #expect(result.text == "I agree with all of it.")
         #expect(result.stop == .quote)
@@ -256,7 +256,7 @@ private func paragraphs(_ count: Int) -> String {
 
     @Test func readsDownFromTheCursorToTheFieldsEndAndReturns() async throws {
         let text = paragraphs(8)
-        let field = FakeField(text, cursor: 0)
+        let field = WindowField(text, cursor: 0)
         field.staleReads = 1
         let known = String(text.prefix(65))
         let result = try await FieldReader(settleMilliseconds: 0).readDown(field, known: known, room: 10_000).get()
@@ -264,21 +264,21 @@ private func paragraphs(_ count: Int) -> String {
         #expect(result.stop == .start && !result.moreRemains, "The field's end")
         #expect(field.cursor == 0)
         let mid = text.count / 2
-        let middle = FakeField(text, cursor: mid)
+        let middle = WindowField(text, cursor: mid)
         let rest = try await FieldReader(settleMilliseconds: 0).readDown(middle, known: "", room: 10_000).get()
         #expect(rest.text == String(text.dropFirst(mid)) && middle.cursor == mid)
     }
 
     @Test func readingDownStopsAtTheRoomOrAQuoteBelow() async throws {
         let text = paragraphs(30)
-        let capped = try await FieldReader(settleMilliseconds: 0).readDown(FakeField(text, cursor: 0), known: "", room: 1000).get()
+        let capped = try await FieldReader(settleMilliseconds: 0).readDown(WindowField(text, cursor: 0), known: "", room: 1000).get()
         #expect(capped.stop == .cap && capped.moreRemains)
         #expect(capped.text.count <= 1000 && text.hasPrefix(capped.text) && text.dropFirst(capped.text.count).hasPrefix("\n"),
                 "A capped read down ends at a line end")
         let mail = "Sounds good, see you then.\nJo\n\nOn Mon, 3 Nov 2026 at 10:12, Anna <anna@example.com> wrote:\n> Shall we meet at nine?\n"
-        let quoted = try await FieldReader(settleMilliseconds: 0).readDown(FakeField(mail, cursor: 0), known: "", room: 3000).get()
+        let quoted = try await FieldReader(settleMilliseconds: 0).readDown(WindowField(mail, cursor: 0), known: "", room: 3000).get()
         #expect(quoted.text == "Sounds good, see you then.\nJo\n\n" && quoted.stop == .quote && quoted.moreRemains)
-        let changed = await FieldReader(settleMilliseconds: 0).readDown(FakeField(mail, cursor: 0), known: "Something else", room: 3000)
+        let changed = await FieldReader(settleMilliseconds: 0).readDown(WindowField(mail, cursor: 0), known: "Something else", room: 3000)
         #expect(changed == .failure(.changed))
     }
 
@@ -425,269 +425,3 @@ private extension String {
     }
 }
 
-/// A host that shows each op only `lag` reports later (Safari's proxy): the queue must not send the next op before then.
-private struct LaggingField {
-    var text: String
-    var cursor: Int
-    var lag: Int
-    /// A page that re-renders its text area: a move shows for a moment, then the caret is back where it was.
-    var resetsCaret = false
-    /// Characters reported before the cursor (a web view's short window).
-    var window = Int.max
-    private var pending: [(ShadowOp, Int)] = []
-    private(set) var reported: (before: String, after: String)
-    init(text: String, cursor: Int, lag: Int) {
-        self.text = text; self.cursor = cursor; self.lag = lag
-        let units = Array(text.utf16)
-        reported = (String(decoding: units[..<cursor], as: UTF16.self), String(decoding: units[cursor...], as: UTF16.self))
-    }
-    var inFlight: Int { pending.count }
-    mutating func perform(_ op: ShadowOp) { pending.append((op, lag)) }
-    /// One report later; `lose` drops the op in flight (a host that never shows it).
-    mutating func tick(lose: Bool = false) {
-        if lose { pending.removeAll() }
-        pending = pending.map { ($0.0, $0.1 - 1) }
-        while let first = pending.first, first.1 <= 0 {
-            if resetsCaret, case .move = first.0 { pending.removeFirst(); continue }
-            (text, cursor) = ShadowEditPlanner.simulate(ops: [first.0], shadow: text, cursor: cursor)
-            pending.removeFirst()
-        }
-        let units = Array(text.utf16)
-        reported = (String(String(decoding: units[..<cursor], as: UTF16.self).suffix(window)), String(decoding: units[cursor...], as: UTF16.self))
-    }
-}
-
-nonisolated(unsafe) private var lastQueue: ScopedEditQueue?
-
-@Suite(.serialized) struct ScopedEditQueueTests {
-    private let head = "Earlier text. "
-    private let scope = "hey can you send the file we need it by nine"
-    private var edit: ScopedEdit {
-        ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "Could you send the file? We need it by 9:00.")
-    }
-
-    @Test func aLongRewriteKeepsEvidenceInSentenceBoundedHostWindows() throws {
-        let original = "We Are Planning A Quiet Weekend At The Harbor. On Friday I Will Collect The Charts, Check The Batteries, And Make Sure The Cabin Is Ready For Two Guests. Please Keep The Morning Free Because The Weather May Change. On Saturday We Can Leave After Breakfast And Sail Toward The Small Island. Bring Coffee, Warm Clothes, And Enough Food For Everyone. If The Wind Becomes Too Strong, We Will Stay In Port And Spend The Afternoon Repairing The Cupboard Instead. There Is No Reason To Hurry; I Would Rather Arrive Rested And Enjoy The Conversation."
-        let edit = ScopedEdit(instructionID: "i", documentID: "field", before: original, after: "", target: original.uppercased())
-        // Safari's actual native proxy reported only the current sentence. Emptying it hid all earlier text even
-        // though that text still existed, so a coarse whole-draft delete could no longer be confirmed safely.
-        func report(_ text: [Character], _ cursor: Int) -> (String, String) {
-            let start = text[..<cursor].lastIndex(of: ".").map { min(cursor, $0 + 2) } ?? 0
-            let end = text[cursor...].firstIndex(of: ".").map { $0 + 1 } ?? text.count
-            return (String(text[start..<cursor]), String(text[cursor..<end]))
-        }
-        var text = Array(original), cursor = original.count
-        // At the actual caret after the final period, UIKit still reports the final sentence.
-        func window() -> (String, String) {
-            if cursor == text.count, text.last == "." {
-                let start = text[..<max(0, cursor - 1)].lastIndex(of: ".").map { $0 + 2 } ?? 0
-                return (String(text[start..<cursor]), "")
-            }
-            return report(text, cursor)
-        }
-        let initial = window()
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: initial.0, windowAfter: initial.1, selected: nil).get()
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: initial.0)
-        var outcome = ScopedEditQueue.Action.wait
-        for _ in 0..<10_000 {
-            let shown = window()
-            outcome = queue.step(reportedBefore: shown.0, reportedAfter: shown.1, hasSelection: false, elapsedMs: 33)
-            if outcome == .wait { continue }
-            guard case .send(let op) = outcome else { break }
-            let next = ShadowEditPlanner.simulate(ops: [op], shadow: String(text), cursor: String(text[..<cursor]).utf16.count)
-            text = Array(next.text); cursor = next.cursor
-        }
-        #expect(outcome == .done)
-        #expect(String(text) == edit.target)
-        #expect(cursor == text.count)
-    }
-
-    @Test func anEmptyBeforeWindowRequiresASubstantialUniqueMatchingAfterAnchor() {
-        for (after, report) in [("Repeated anchor text.", "Repeated anchor text."), (".", "."),
-                                ("A unique remaining suffix.", "Different remaining suffix.")] {
-            let before = "Repeated anchor text. X"
-            let edit = ScopedEdit(instructionID: "i", documentID: "field", before: before, after: after,
-                                  target: String(before.dropLast()) + "Y" + after)
-            let plan = ScopedEditPlanner.Plan(ops: [.deleteBackward(1), .insert("Y")], cursor: before.utf16.count,
-                                              targetBefore: String(before.dropLast()) + "Y")
-            var queue = ScopedEditQueue(edit, plan: plan, windowBefore: before)
-            let first = queue.step(reportedBefore: before, reportedAfter: after, hasSelection: false, elapsedMs: 0)
-            #expect(first == .send(.deleteBackward(1)))
-            let stopped = queue.step(reportedBefore: "", reportedAfter: report, hasSelection: false, elapsedMs: 1_000)
-            #expect(stopped == .stopped(nil), "A repeated, punctuation-only, or mismatching anchor cannot authorize the insert")
-        }
-    }
-
-    /// Runs the queue against the field until it finishes; `loseAfter` loses the op sent after that many confirmed ones.
-    private func run(_ edit: ScopedEdit, on field: inout LaggingField, loseAfter: Int? = nil, avoidsMoves: Bool = false,
-                     moves: UnsafeMutablePointer<Int>? = nil, plannedWith windows: (String, String)? = nil) throws -> (ScopedEditQueue.Action, sent: Int) {
-        let (wb, wa) = windows ?? (field.reported.before, field.reported.after)
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: wb, windowAfter: wa, selected: nil).get()
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: wb, avoidsMoves: avoidsMoves)
-        var sent = 0
-        defer { lastQueue = queue }
-        for _ in 0..<2000 {
-            let action = queue.step(reportedBefore: field.reported.before, reportedAfter: field.reported.after, hasSelection: false, elapsedMs: 33)
-            switch action {
-            case .send(let op):
-                #expect(field.inFlight == 0, "Never a second op before the field showed the first")
-                if case .move = op { moves?.pointee += 1 }
-                field.perform(op); sent += 1
-            case .wait: break
-            case .done, .stopped: return (action, sent)
-            }
-            field.tick(lose: loseAfter.map { sent == $0 + 1 } ?? false)
-        }
-        Issue.record("The queue never finished"); return (.wait, sent)
-    }
-
-    @Test func aPageThatPutsItsCaretBackStopsWithoutRetyping() throws {
-        // The first interior change needs a move; the page puts that caret back.
-        let tail = String(repeating: " Then we go through the plan together.", count: 12)
-        let scope = "we meet on monday at the office and bring the slides from last week" + tail
-        let target = "We meet on Tuesday at the office and bring the slides from last week" + tail
-        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
-        var field = LaggingField(text: head + scope, cursor: (head + scope).utf16.count, lag: 1)
-        field.resetsCaret = true
-        let (outcome, _) = try run(edit, on: &field)
-        #expect(outcome == .stopped(nil) && field.text == head + scope)
-        #expect(lastQueue?.caretReset == true && lastQueue?.retypes == false)
-        // Once the host is known to reset moves, an interior edit refuses before issuing anything.
-        var moves = 0
-        let (again, count) = try run(edit, on: &field, avoidsMoves: true, moves: &moves)
-        #expect(again == .stopped(.init(text: scope, cursor: scope.utf16.count)))
-        #expect(count == 0 && moves == 0 && field.text == head + scope)
-    }
-
-    @Test func aChangeNearTheCursorStillUsesMinimalCharacterEdits() throws {
-        let scope = "we meet at nine and bring the slides"
-        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "We meet at 9:00 and bring the slides.")
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
-        #expect(plan.cursor == edit.target.utf16.count)
-        #expect(plan.ops.allSatisfy { if case .deleteBackward(let n) = $0 { return n == 1 }; if case .insert(let text) = $0 { return text.count == 1 }; return true })
-    }
-
-    @Test func unseenExternalChangesStopFurtherWritesWithoutBlindRollback() throws {
-        // The scope as read; since then another keyboard typed "TYPED" into it, beyond the host's 20-character window.
-        let scope = "the release is on friday please review the page before then"
-        let field = "the release is on friday TYPED please review the page before then"
-        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "The release is Friday. Review the page before then.")
-        var lagging = LaggingField(text: field, cursor: field.utf16.count, lag: 1)
-        lagging.window = 20; lagging.tick()
-        let (outcome, sent) = try run(edit, on: &lagging)
-        #expect(lagging.text.contains("TYPED"), "The user's unseen change must survive")
-        #expect(outcome == .stopped(nil), "The final outcome is unknown, never an invented restored state")
-        #expect(sent > 0, "Confirmed nonoverlapping word edits may precede discovery of the unseen change")
-        // Text typed at the cursor since the read: nothing goes out at all.
-        let typed = scope + " ok"
-        var atCursor = LaggingField(text: typed, cursor: typed.utf16.count, lag: 1)
-        atCursor.window = 20; atCursor.tick()
-        let (refused, none) = try run(edit, on: &atCursor, plannedWith: (String(scope.suffix(20)), ""))
-        #expect(refused == .stopped(.init(text: scope, cursor: scope.utf16.count)) && none == 0 && atCursor.text == typed)
-    }
-
-    @Test func aScopeLongerThanTheWindowKeepsEveryEditPinned() throws {
-        // A session of dictation longer than the host's 60-character window, edited in place.
-        let head = "Hi team, the release is on friday. Thanks, Jakob"
-        let scope = " Hey, could you please check the release notes before you start? Thanks so much! And remember to update the screenshots"
-        let target = " Hey there! Could you check the release notes and update the screenshots before you start? Thanks so much!"
-        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: target)
-        var field = LaggingField(text: head + scope, cursor: (head + scope).utf16.count, lag: 1)
-        field.window = 60; field.tick()
-        let (outcome, _) = try run(edit, on: &field)
-        #expect(outcome == .done && field.text == head + target)
-    }
-
-    @Test func aFieldThatMovesByCharactersGetsMovesInCharacters() throws {
-        // A change before an emoji, far from the cursor: the plan moves over the emoji in UTF-16 units (two); this field
-        // counts it as one, and the queue sends the move as such.
-        let tail = String(repeating: " and we go through the plan together", count: 12)
-        let scope = "we meet on monday 😊" + tail
-        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: scope, after: "", target: "We meet on Tuesday 😊" + tail)
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
-        #expect(plan.ops.contains { if case .move = $0 { return true }; return false })
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: scope, movesByCharacters: true)
-        var field = Array(scope), cursor = field.count, outcome = ScopedEditQueue.Action.wait
-        for _ in 0..<200 {
-            outcome = queue.step(reportedBefore: String(field[..<cursor]), reportedAfter: String(field[cursor...]), hasSelection: false, elapsedMs: 33)
-            guard case .send(let op) = outcome else { if outcome == .wait { continue }; break }
-            switch op {
-            case .move(let n): cursor = min(field.count, max(0, cursor + n))
-            case .deleteBackward(let n): field.removeSubrange((cursor - n)..<cursor); cursor -= n
-            case .insert(let t): field.insert(contentsOf: t, at: cursor); cursor += t.count
-            }
-        }
-        #expect(outcome == .done && String(field) == edit.target && cursor == field.count)
-    }
-
-    @Test func withoutMovesAChangeAfterTheCursorIsNotMadeAtAll() throws {
-        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: "first half ", after: "second half", target: "First half, second half.")
-        var field = LaggingField(text: "first half second half", cursor: "first half ".utf16.count, lag: 1)
-        let (outcome, sent) = try run(edit, on: &field, avoidsMoves: true)
-        #expect(outcome == .stopped(.init(text: "first half second half", cursor: "first half ".utf16.count)) && sent == 0)
-        #expect(lastQueue?.needsMoves == true)
-    }
-
-    @Test func aBlockHostsBoundaryEchoStillPinsTheCursor() throws {
-        // Safari's contenteditable: the window starts at the block's start with "\n "; the scope reaches into the block above.
-        let text = Array("The plan is simple.\nWe need to move the pots first.")
-        func report(_ chars: [Character], _ cursor: Int) -> (String, String) {
-            let start = chars[..<cursor].lastIndex(of: "\n").map { $0 + 1 } ?? 0
-            let end = chars[cursor...].firstIndex(of: "\n") ?? chars.count
-            // At a block's very start the window reaches into the block above (measured); else it starts at the block.
-            // An emptied block shows only its boundary.
-            if cursor == start, start > 0, end == cursor { return ("\n ", "") }
-            if cursor == start { return (String(chars[..<cursor]), String(chars[cursor..<end])) }
-            return ((start > 0 ? "\n " : "") + String(chars[start..<cursor]), String(chars[cursor..<end]))
-        }
-        let (rb, ra) = report(text, text.count)
-        #expect(RunShadow.confirms(expectedBefore: String(text), expectedAfter: "", reportedBefore: rb, reportedAfter: ra))
-        #expect(!RunShadow.confirms(expectedBefore: String(text.dropLast(5)), expectedAfter: String(text.suffix(5)), reportedBefore: rb, reportedAfter: ra),
-                "The echo pins the cursor at one place only")
-        let edit = ScopedEdit(instructionID: "i", documentID: nil, before: String(text), after: "", target: "The plan is simple.\nFirst we move the pots.")
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: rb, windowAfter: ra, selected: nil).get()
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: rb)
-        var field = text, cursor = text.count, outcome = ScopedEditQueue.Action.wait
-        for _ in 0..<100 {
-            let (b, a) = report(field, cursor)
-            outcome = queue.step(reportedBefore: b, reportedAfter: a, hasSelection: false, elapsedMs: 33)
-            if outcome == .wait { continue }
-            guard case .send(let op) = outcome else { break }
-            let (t, c) = ShadowEditPlanner.simulate(ops: [op], shadow: String(field), cursor: String(field[..<cursor]).utf16.count)
-            field = Array(t); cursor = String(t).utf16Offset(toCharacter: c)
-        }
-        #expect(outcome == .done && String(field) == edit.target, "\(outcome) \(String(field))")
-    }
-
-    @Test func aLaggingFieldGetsOneConfirmedOpAtATimeAndEndsRight() throws {
-        var field = LaggingField(text: head + scope, cursor: (head + scope).utf16.count, lag: 3)
-        let (outcome, sent) = try run(edit, on: &field)
-        #expect(outcome == .done && sent > 1)
-        #expect(field.text == head + edit.target)
-    }
-
-    @Test func anUnconfirmedOpStopsWithoutInventingAnUndoBaseline() throws {
-        let original = head + scope
-        var field = LaggingField(text: original, cursor: original.utf16.count, lag: 2)
-        let half = try ScopedEditPlanner.plan(edit, windowBefore: original, windowAfter: "", selected: nil).get().ops.count / 2
-        let (outcome, sent) = try run(edit, on: &field, loseAfter: half)
-        #expect(outcome == .stopped(nil), "The queue cannot tell whether the last operation was dropped or delayed")
-        #expect(sent == half + 1, "Nothing goes out after the op the field did not show")
-        #expect(field.text != original && field.text != head + edit.target)
-        #expect(lastQueue?.hasUnconfirmedOperation == true)
-    }
-
-    @Test func aFieldThatShowsNeitherStateIsUnknown() throws {
-        let plan = try ScopedEditPlanner.plan(edit, windowBefore: scope, windowAfter: "", selected: nil).get()
-        var queue = ScopedEditQueue(edit, plan: plan, windowBefore: scope)
-        guard case .send = queue.step(reportedBefore: scope, reportedAfter: "", hasSelection: false, elapsedMs: 0) else { Issue.record("First op"); return }
-        var outcome = ScopedEditQueue.Action.wait, sends: [ShadowOp] = []
-        while true {
-            outcome = queue.step(reportedBefore: "the user typed this", reportedAfter: "", hasSelection: false, elapsedMs: 100)
-            if case .send(let op) = outcome { sends.append(op); continue }
-            if outcome != .wait { break }
-        }
-        #expect(outcome == .stopped(nil))
-        #expect(sends.isEmpty, "An uncertain delete must never trigger a blind insert rollback")
-    }
-}

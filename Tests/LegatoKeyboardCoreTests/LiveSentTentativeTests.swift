@@ -97,7 +97,8 @@ private struct SendRig {
         let applied = applyProxyOps(plan.ops, to: field, cursor: caret)
         field = applied.text
         caret = applied.cursor
-        cursor = plan.cursor
+        // The field queue lands the proposed edit at once here (this field confirms synchronously).
+        cursor = reveal.pendingEdit.flatMap { reveal.landed($0.id) } ?? plan.cursor
     }
 
     mutating func drain(_ state: HostState) {
