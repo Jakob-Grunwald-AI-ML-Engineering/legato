@@ -51,5 +51,5 @@ import AppKit
 }
 
 /// The pre-macOS 14 activation call, without its deprecation warning at the call site.
-private protocol LegacyActivation { func activate(ignoringOtherApps flag: Bool) }
+@MainActor private protocol LegacyActivation { func activate(ignoringOtherApps flag: Bool) }
 extension NSApplication: LegacyActivation {}
