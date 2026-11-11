@@ -26,6 +26,23 @@ import Testing
         #expect(run("colour", "color").map(\.key) == [.backspace])
     }
 
+    @Test func aReplacementNeverLeavesItsLineEmpty() {
+        // A rich editor puts a placeholder into a line that becomes empty: the first old letter stays until the new
+        // text is typed before it.
+        for (old, new) in [("Sailing To Noon", "SAILING TO NOON"), ("ab\nhi", "ab\nHO"), ("x", "y")] {
+            let steps = KeystrokePlanner.steps(from: Array(old), to: Array(new))
+            var text = Array(old)
+            for step in steps {
+                text = step.after
+                let lines = String(text).split(separator: "\n", omittingEmptySubsequences: false)
+                #expect(lines.allSatisfy { !$0.isEmpty }, "\(old) → \(new) passed through \(String(text).debugDescription)")
+            }
+            #expect(String(text) == new)
+        }
+        // Inside a line nothing changes: "colour" → "color" is still one Backspace.
+        #expect(KeystrokePlanner.steps(from: Array("a colour b"), to: Array("a color b")).count == 1)
+    }
+
     @Test func nearbyChangesMergeAndTheCheaperModeWins() {
         let spans = KeystrokePlanner.spans(from: Array("a-b-c-d"), to: Array("x-y-z-w"))
         #expect(spans.count == 1)

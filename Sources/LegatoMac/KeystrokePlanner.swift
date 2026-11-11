@@ -92,21 +92,30 @@ public enum KeystrokePlanner {
 
     /// The edit keys that turn `old` into `new`: spans back to front (so earlier offsets hold), in each the hunks back to
     /// front, each hunk's Backspaces from its end, then its new graphemes typed in order.
-    public static func steps(from old: [Character], to new: [Character], paceMs: Double = calmMs) -> [Step] {
+    ///
+    /// A replacement that would empty its line first keeps the line's first old grapheme, types the new text before
+    /// it, and deletes it last: a rich editor puts a placeholder line break into a line that becomes empty, and drops
+    /// it again, so the line is never left empty. `lineStart` / `lineEnd`: the text starts / ends a line of the field.
+    public static func steps(from old: [Character], to new: [Character], paceMs: Double = calmMs,
+                             lineStart: Bool = true, lineEnd: Bool = true) -> [Step] {
         var steps: [Step] = []
         var text = old
+        func add(_ caret: Int, _ key: Step.Key) {
+            let step = Step(caret: caret, key: key, before: text)
+            text = step.after; steps.append(step)
+        }
         for span in spans(from: old, to: new, paceMs: paceMs).reversed() {
             let hunks = span.block ? [Hunk(start: span.start, end: span.end, text: span.text)] : span.hunks
             for hunk in hunks.reversed() {
+                let emptiesLine = hunk.end > hunk.start && !hunk.text.isEmpty
+                    && (hunk.start == 0 ? lineStart : text[hunk.start - 1].isNewline)
+                    && (hunk.end == text.count ? lineEnd : text[hunk.end].isNewline)
+                let kept = emptiesLine ? 1 : 0
                 var caret = hunk.end
-                while caret > hunk.start {
-                    let step = Step(caret: caret, key: .backspace, before: text)
-                    text = step.after; caret -= 1; steps.append(step)
-                }
-                for character in hunk.text {
-                    let step = Step(caret: caret, key: .type(character), before: text)
-                    text = step.after; caret += 1; steps.append(step)
-                }
+                while caret > hunk.start + kept { add(caret, .backspace); caret -= 1 }
+                caret = hunk.start
+                for character in hunk.text { add(caret, .type(character)); caret += 1 }
+                if emptiesLine { add(caret + 1, .backspace) }
             }
         }
         return steps

@@ -659,7 +659,7 @@ public final class MacFieldQueue {
 
     /// The region's planned keys, kept while the region's text follows them (a key that read back late moves the unit
     /// on); planned again when the desired text changed or the field shows anything else.
-    private func keyUnit(for region: Region) -> KeyUnit? {
+    private func keyUnit(for region: Region, doc: Document) -> KeyUnit? {
         if let unit = region.keys, unit.desired == region.desired {
             for index in unit.index..<min(unit.steps.count, unit.index + 4) where unit.steps[index].before == region.current {
                 unit.index = index
@@ -667,7 +667,9 @@ public final class MacFieldQueue {
             }
         }
         let typedMs = pacedNow ? KeystrokePlanner.calmMs : KeystrokePlanner.keyMs
-        let steps = KeystrokePlanner.steps(from: region.current, to: region.desired, paceMs: typedMs)
+        let lineStart = doc.context(before: region.start, 1).last?.isNewline ?? true
+        let lineEnd = doc.context(after: region.end, 1).first?.isNewline ?? true
+        let steps = KeystrokePlanner.steps(from: region.current, to: region.desired, paceMs: typedMs, lineStart: lineStart, lineEnd: lineEnd)
         guard !steps.isEmpty else { region.keys = nil; return nil }
         let typed = steps.reduce(0) { if case .type = $1.key { $0 + 1 } else { $0 } }
         let fixed = Double(steps.count - typed) * KeystrokePlanner.keyMs
@@ -681,7 +683,7 @@ public final class MacFieldQueue {
     /// One key toward the region's desired text: an arrow while the caret is not where the next edit goes, else the
     /// edit (Backspace or one grapheme). It is confirmed by reading the region's text, the length and the selection.
     private func performKey(_ region: Region, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int) async -> Bool {
-        guard let unit = keyUnit(for: region) else { return true }
+        guard let unit = keyUnit(for: region, doc: doc) else { return true }
         let step = unit.steps[unit.index]
         let caret = region.start + String(step.before[..<step.caret]).utf16.count
         guard selection == UTF16Range(location: caret, length: 0) else {
