@@ -223,9 +223,11 @@ struct QueueRig {
                 events.append((clockMs, event))
                 if case .sent(_, let lane) = event { lastLane = lane }
                 if event == .insertedBehind { behind = true }
-                // A tap the late report had not shown yet races with the queue's own moves: once the queue sees the
-                // change, where it puts the user's caret is the user's caret.
-                if outsidePending, case .resync(let kind) = event, kind == .cursorMoved || kind == .reseeded {
+                // An outside action (a tap, a selection, another keyboard typing) races with the queue's own moves and is
+                // revealed by late reports, sometimes in several steps. Where the user meant their caret then cannot be
+                // known by any keyboard (another keyboard typed at a caret a unit had moved): at each resync within the
+                // race window the queue's choice becomes the expectation. Outside that window nothing is excused.
+                if racing, case .resync(let kind) = event, kind == .cursorMoved || kind == .reseeded || kind == .outsideInsert {
                     outsidePending = false; syncUserCaret = true
                 }
             }

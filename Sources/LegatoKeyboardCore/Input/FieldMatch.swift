@@ -25,6 +25,16 @@ public enum FieldMatch {
         let exact = fits(in: text, reportedBefore: Array(reportedBefore), reportedAfter: Array(reportedAfter))
         let trusted = Array(FieldReader.trusted(before: reportedBefore))
         guard exact.isEmpty, trusted.count < reportedBefore.count, reportedBefore.first?.isNewline == true else { return exact }
+        // The echo is the line break and one space: spaces after it are the block's own (a space typed at its start).
+        let echo = reportedBefore.drop(while: \.isNewline)
+        let ownSpaces = Array(echo.first == " " ? echo.dropFirst() : echo)
+        if ownSpaces.count > trusted.count {
+            let start = { (p: Int) in p - ownSpaces.count }
+            let spaced = fits(in: text, reportedBefore: ownSpaces, reportedAfter: Array(reportedAfter)).filter { p in
+                start(p) > 0 && text[start(p) - 1].isNewline
+            }
+            if !spaced.isEmpty { return spaced }
+        }
         if trusted.isEmpty {
             // Only the boundary: the cursor is at a block's start, a line break before it. With nothing reported after
             // it, the block is empty (a line break or the end follows); otherwise the report after it must fit there.

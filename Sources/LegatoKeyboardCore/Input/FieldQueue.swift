@@ -91,6 +91,8 @@ public struct FieldQueue: Sendable {
         case ambiguous
         /// The user waited for the op in flight long enough: it counts as landed.
         case assumed
+        /// Text appeared at the caret that the keyboard did not type (another keyboard): it is the user's, at the caret.
+        case outsideInsert
     }
     public enum CloseCause: String, Sendable, Codable { case keystroke, cursor, resync, selection, newRun, edit }
 
@@ -151,6 +153,8 @@ public struct FieldQueue: Sendable {
     /// An op whose result the report cannot tell from the state before it (a delete with nothing known before the
     /// cursor, a collapsing move) is taken as landed only after the host's longest measured transit.
     public static let transitMs = 150.0
+    /// A paced insert longer than this goes in this many steps rather than one per grapheme.
+    static let pacedSteps = 8
     /// An edit that cannot be placed yet waits this long for the report to catch up.
     public static let placeGraceMs = 400.0
     /// An edit whose text went out of sight (a resync) waits this long for it to show again.
@@ -236,7 +240,8 @@ public struct FieldQueue: Sendable {
         case moveInSpan(Int, offset: Int)
         case moveToUser
         case moveToSpanEnd(Int)
-        case delete(owner: Int?)
+        /// Deletes this many characters before the caret in one op (the same delete at one place: order cannot matter).
+        case delete(Int, owner: Int?)
         case insert(String, owner: Int?)
         /// Inserted at the caret, behind the user's cursor (which stays in front of it).
         case insertBehind(String)
@@ -317,7 +322,7 @@ public struct FieldQueue: Sendable {
     /// The queue's state in one line, for traces and the edit journal.
     public var debugState: String {
         var parts = ["user=\(userLane.count)", "edits=\(editLane.count)", "unit=\(unit.map { "\($0.ops.count)" } ?? "-")",
-                     "flight=\(inFlight != nil)", "sel=\(selection)"]
+                     "flight=\(inFlight != nil)", "sel=\(selection)", "lost=\(userLost.map { "\(String($0.before).debugDescription)|\(String($0.after).debugDescription) homed=\($0.homed)" } ?? "-")"]
         for run in runs {
             for region in run.regions {
                 let span = spans[region.spanID]
@@ -391,6 +396,8 @@ public struct FieldQueue: Sendable {
     public mutating func step(report: Report, elapsedMs: Double) -> Action {
         stepElapsedMs = elapsedMs
         sinceSendMs += elapsedMs
+        // Only the user selects: a selection the model does not have says the user acted at the caret.
+        if report.selected != nil, selection == 0 { userActed = true }
         lagging = lagging.filter { $0.ageMs + elapsedMs < Self.confirmLimitMs }.map { ($0.state, $0.ageMs + elapsedMs) }
         if report == lastReport { reportStableMs += elapsedMs } else { lastReport = report; reportStableMs = 0 }
         if !seeded {
@@ -412,6 +419,7 @@ public struct FieldQueue: Sendable {
                !lagging.contains(where: { pins(report, in: $0.state) }) {
                 if flight.anywhere { relocate(report) }
                 events.append(.confirmed(waitedMs: flight.waitedMs))
+                userActed = false
                 merge(report)
                 inFlight = nil
                 lagging = []
@@ -422,7 +430,8 @@ public struct FieldQueue: Sendable {
             } else {
                 flight.waitedMs += elapsedMs
                 if report != flight.lastReport { flight.lastReport = report }
-                let pinsPre = pins(report, in: flight.pre)
+                // A report that fits the state before the op (even among other places) may be that state, late.
+                let pinsPre = fits(report, in: flight.pre)
                 if !flight.nudged, !flight.isMove, flight.waitedMs >= Self.nudgeAfterMs, selection == 0, report.selected == nil {
                     // An edit the proxy has not reported yet (it can stay on its last report): a zero-offset move makes
                     // it report the field afresh. It moves nothing, so it cannot land out of order.
@@ -467,6 +476,17 @@ public struct FieldQueue: Sendable {
         if sinceSendMs < Self.sendGapMs {
             if inFlight == nil { for ri in runs.indices { ack(ri) } }
             return .wait
+        }
+        if var lost = userLost {
+            if lost.homed {
+                // The caret went back the way it came: the user's cursor is found there, or the caret is taken for it.
+                findLostUser()
+            } else {
+                // Nothing starts at a cursor the queue does not know: the caret goes back the way it came, once.
+                lost.homed = true; userLost = lost
+                abortUnit()
+                return send(.move(lost.units), lane: .edit, anywhere: true) { _ in }
+            }
         }
         if paused {
             abortUnit()
@@ -540,6 +560,7 @@ public struct FieldQueue: Sendable {
                 inFlight?.input = input
                 return action
             }
+            userLost = nil
             guard target != cursor else { userCursor = cursor; return nil }
             let action = send(.move(units(to: target)), lane: .user, moveTo: target)
             userCursor = cursor
@@ -660,9 +681,15 @@ public struct FieldQueue: Sendable {
         if leaveTailAppend, let last = hunks.last, last.start == current.count, last.end == current.count { hunks.removeLast() }
         for hunk in hunks.reversed() {
             ops.append(.moveInSpan(spanID, offset: hunk.end))
-            ops += Array(repeating: .delete(owner: spanID), count: hunk.end - hunk.start)
+            if hunk.end > hunk.start { ops.append(.delete(hunk.end - hunk.start, owner: spanID)) }
             if !hunk.text.isEmpty {
-                if paced { ops += hunk.text.map { .insert(String($0), owner: spanID) } }
+                if paced {
+                    // One grapheme per tick; a long change in at most `pacedSteps` steps (each op waits for the field).
+                    let size = max(1, (hunk.text.count + Self.pacedSteps - 1) / Self.pacedSteps)
+                    ops += stride(from: 0, to: hunk.text.count, by: size).map {
+                        .insert(String(hunk.text[$0..<min(hunk.text.count, $0 + size)]), owner: spanID)
+                    }
+                }
                 else { ops.append(.insert(String(hunk.text), owner: spanID)) }
             }
         }
@@ -700,10 +727,10 @@ public struct FieldQueue: Sendable {
                     runs[ri].regions.append(Region(spanID: id, tStart: tStart, tEnd: nil, anchor: anchor))
                     events.append(.regionStarted(runID: runID, anchorChars: anchor.count))
                 }
-            case .delete(let owner):
-                guard cursor > 0 else { unit = nil; requeue(current.owner); return .wait }
+            case .delete(let count, let owner):
+                guard cursor >= count, count > 0 else { unit = nil; requeue(current.owner); return .wait }
                 current.ops.removeFirst(); unit = current
-                return send(.deleteBackward(1), lane: lane(of: current.owner)) { q in q.removeRange(q.cursor - 1, q.cursor, owner: owner) }
+                return send(.deleteBackward(count), lane: lane(of: current.owner)) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
             case .insert(let chars, let owner):
                 if current.paced, sinceSendMs < Self.charMs { return .wait }
                 current.ops.removeFirst(); unit = current
@@ -1077,6 +1104,13 @@ public struct FieldQueue: Sendable {
         return p + chars.count <= text.count && text[p..<(p + chars.count)].elementsEqual(chars)
     }
 
+    /// The report fits the state at its cursor, perhaps elsewhere too.
+    private func fits(_ report: Report, in state: ModelState) -> Bool {
+        let selected = report.selected ?? ""
+        return selected.count == state.selection
+            && FieldMatch.positions(in: state.text, reportedBefore: report.before, reportedAfter: selected + report.after).contains(state.cursor)
+    }
+
     private func pins(_ report: Report, in state: ModelState) -> Bool {
         let selected = report.selected ?? ""
         return FieldMatch.positions(in: state.text, reportedBefore: report.before, reportedAfter: selected + report.after) == [state.cursor]
@@ -1115,7 +1149,9 @@ public struct FieldQueue: Sendable {
         let selected = report.selected ?? ""
         let found = FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: selected + report.after)
         if found.contains(cursor), selected.count == selection {
-            if found.count > 1 { events.append(.resync(.ambiguous)) }
+            // The model fits; with an op on its way that never confirmed (its report fit the state before it too), the
+            // op counts as landed now, long after the host's transit.
+            if found.count > 1 { events.append(.resync(.ambiguous)) } else if flight != nil { events.append(.resync(.assumed)) }
             return
         }
         if let flight, pins(report, in: flight.pre) {
@@ -1128,7 +1164,16 @@ public struct FieldQueue: Sendable {
             }
             return
         }
-        if found.count == 1, fitsSelection(found[0], selected) {
+        // A late report of the state before the op, which fits there among other places: the op counts as landed.
+        if let flight, fits(report, in: flight.pre) {
+            events.append(.resync(.ambiguous))
+            return
+        }
+        // Moving the user's cursor takes a report that fits wholly inside known text: at the model's end any text
+        // after the cursor fits, which says nothing about where the cursor is.
+        let after = selected.count + report.after.count
+        let inside = found.filter { after <= text.count - $0 }
+        if found.count == 1, inside == found, fitsSelection(found[0], selected) {
             abortUnit()
             cursor = found[0]; userCursor = cursor; selection = selected.count
             closeOpenRegions(selected.isEmpty ? .cursor : .selection)
@@ -1138,6 +1183,12 @@ public struct FieldQueue: Sendable {
         }
         if found.count > 1 {
             events.append(.resync(.ambiguous))
+            return
+        }
+        if absorbOutsideInsert(report) {
+            abortUnit()
+            closeOpenRegions(.keystroke)
+            events.append(.resync(.outsideInsert))
             return
         }
         // The text around the cursor changed: the report is the new model; spans are found again by their text.
@@ -1153,29 +1204,97 @@ public struct FieldQueue: Sendable {
         }
         let oldText = text, oldCursor = cursor, oldUser = userCursor
         seed(report)
-        carryUserCursor(from: oldText, cursor: oldCursor, user: oldUser)
+        // The user's own op on its way (a pan, a key): the caret is where the user put it.
+        if flight?.lane == .user { userLost = nil }
+        // Already searching (the homing move's landing is unknown to the model): the search alone decides. A carry that
+        // fails after the user acted at the caret (a selection appeared) leaves the caret as the user's.
+        else if userLost == nil, !carryUserCursor(from: oldText, cursor: oldCursor, user: oldUser), !userActed {
+            // The text between the caret and the user's cursor changed in a way the model did not know: the user's
+            // cursor is found again by the text around it, else the caret goes back the distance it came and looks there.
+            let before = Array(oldText[max(0, oldUser - Self.relocateChars)..<oldUser])
+            let after = Array(oldText[oldUser..<min(oldText.count, oldUser + Self.relocateChars)])
+            let units = oldUser > oldCursor ? String(oldText[oldCursor..<oldUser]).utf16.count : -String(oldText[oldUser..<oldCursor]).utf16.count
+            userLost = LostUser(before: before, after: after,
+                                units: config.movesByCharacters ? oldUser - oldCursor : units, homed: false)
+        }
+        if userLost != nil { findLostUser() }
+        userActed = false
         events.append(.resync(.reseeded))
         unparkSpans()
     }
 
     /// A resync while a unit had the caret away from the user: the user's cursor keeps its distance from the caret when
     /// the text between them agrees with the new model as far as the model shows it (the rest comes from the old model).
-    private mutating func carryUserCursor(from old: [Character], cursor oldCursor: Int, user oldUser: Int) {
+    @discardableResult
+    private mutating func carryUserCursor(from old: [Character], cursor oldCursor: Int, user oldUser: Int) -> Bool {
         let d = oldUser - oldCursor
-        guard d != 0 else { return }
+        guard d != 0 else { return true }
         if d > 0 {
             let segment = old[oldCursor..<oldUser]
             let known = min(d, text.count - cursor)
-            guard known == d || known >= Self.contextChars, text[cursor..<(cursor + known)].elementsEqual(segment.prefix(known)) else { return }
+            guard known == d || known >= Self.contextChars, text[cursor..<(cursor + known)].elementsEqual(segment.prefix(known)) else { return false }
             if known < d { text += segment.suffix(d - known) }
             userCursor = cursor + d
         } else {
             let segment = old[oldUser..<oldCursor]
             let known = min(-d, cursor)
-            guard known == -d || known >= Self.contextChars, text[(cursor - known)..<cursor].elementsEqual(segment.suffix(known)) else { return }
+            guard known == -d || known >= Self.contextChars, text[(cursor - known)..<cursor].elementsEqual(segment.suffix(known)) else { return false }
             if known < -d { prepend(Array(segment.prefix(-d - known))) }
             userCursor = cursor + d
         }
+        return true
+    }
+
+    /// The user's cursor after a resync while a unit had the caret away, when the text in between changed unseen.
+    struct LostUser: Sendable, Equatable {
+        var before: [Character]
+        var after: [Character]
+        /// From the caret to the user's cursor, in the field's units, as the model last knew it.
+        var units: Int
+        var homed: Bool
+    }
+    private(set) var userLost: LostUser?
+    private var userActed = false
+
+    /// Finds the lost user's cursor by the text around it: one place in the model where the text before it ends (as far
+    /// as the model reaches) and the text after it begins, with at least `relocateChars` of it agreeing.
+    private mutating func findLostUser() {
+        guard let lost = userLost else { return }
+        var hits: [Int] = []
+        for p in 0...text.count {
+            let b = min(lost.before.count, p), a = min(lost.after.count, text.count - p)
+            guard b + a >= min(Self.relocateChars, lost.before.count + lost.after.count),
+                  text[(p - b)..<p].elementsEqual(lost.before.suffix(b)), text[p..<(p + a)].elementsEqual(lost.after.prefix(a)) else { continue }
+            hits.append(p)
+            if hits.count > 1 { break }
+        }
+        if lost.homed {
+            // The caret went back the distance it came: that physical place is the user's (the remembered text around
+            // it may be stale, it is what the model got wrong).
+            userCursor = cursor; userLost = nil
+        } else if hits.count == 1, let p = hits.first {
+            userCursor = p; userLost = nil
+        }
+    }
+
+    /// The report is the model with a few characters more right at the caret (another keyboard typed there): they go
+    /// into the model as the user's own input, and the user's cursor is after them.
+    private mutating func absorbOutsideInsert(_ report: Report) -> Bool {
+        guard selection == 0, report.selected == nil else { return false }
+        let before = Array(FieldReader.trusted(before: report.before)), after = Array(report.after)
+        let n = min(after.count, text.count - cursor)
+        guard n == after.count || cursor + n == text.count, text[cursor..<(cursor + n)].elementsEqual(after[..<n]) else { return false }
+        for k in 1...max(1, min(Self.contextChars * 2, before.count - Self.extendOverlapChars)) where before.count - k >= Self.extendOverlapChars {
+            let rest = before.dropLast(k)
+            let m = min(rest.count, cursor)
+            // As strong as finding text again: the text before it agrees for `relocateChars` (or back to the model's start).
+            guard m >= min(Self.relocateChars, cursor), m >= Self.extendOverlapChars,
+                  text[(cursor - m)..<cursor].elementsEqual(rest.suffix(m)) else { continue }
+            insertAtCursor(Array(before.suffix(k)), owner: nil)
+            userCursor = cursor
+            return true
+        }
+        return false
     }
 
     /// Parked spans come back where their text is found again, once and uniquely.

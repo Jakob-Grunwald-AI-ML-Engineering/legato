@@ -9,6 +9,23 @@ import Testing
 @Suite struct FieldQueueStressTests {
     private static var environment: [String: String] { ProcessInfo.processInfo.environment }
 
+    /// Seeds that once failed, kept as regressions (each named fix is in `FieldQueue`):
+    /// - 230: a late report of the state before the op fit there among other places; the resync then "found" the cursor
+    ///   at the model's end, where any text after it fits. Wrong final text.
+    /// - 265, 398, 615, 2251, 2989: a resync while a unit had the caret away, with text between caret and user cursor
+    ///   changed unseen: the jumped caret was taken for the user's cursor (keys and dictation landed mid-text). The
+    ///   queue now finds the user's cursor again by the text around it, or moves the caret back the distance it came.
+    /// - 856, 1138: text another keyboard typed right at the caret: now taken into the model as the user's typing, and
+    ///   only with as much agreeing text as any other relocation (a looser match deleted the user's text).
+    /// - 1035: a lagging field and a long flip: deletes of one change now go in one op.
+    /// - 2729: an op whose report fit the states before and after it was taken as landed without saying so.
+    /// - 4568: a space typed at a block's start hid behind Safari's "\n " echo; the key was judged lost and sent twice.
+    @Test(arguments: [UInt64(230), 265, 398, 615, 856, 1035, 1138, 2251, 2729, 2989, 4568])
+    func pinnedSeedsKeepTheInvariants(seed: UInt64) {
+        var session = StressSession(seed: seed)
+        if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
+    }
+
     @Test func seededSessionsKeepTheInvariants() {
         let runs = Self.environment["LEGATO_STRESS_RUNS"].flatMap(Int.init) ?? 48
         let first = Self.environment["LEGATO_STRESS_SEED"].flatMap(UInt64.init) ?? 1
@@ -128,9 +145,9 @@ struct StressSession {
         if rig.field.staleTriggers > 0 { return "\(rig.field.staleTriggers) edits went right behind a move (stale reports)" }
         // One op in flight: a confirmation or a resync between any two ops.
         var open = false
-        for (_, event) in rig.events {
+        for (ms, event) in rig.events {
             switch event {
-            case .sent: if open { return "two ops in flight" }; open = true
+            case .sent: if open { return "two ops in flight at \(Int(ms)) ms" }; open = true
             case .confirmed, .resync: open = false
             default: break
             }
