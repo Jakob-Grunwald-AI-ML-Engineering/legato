@@ -369,7 +369,15 @@ public final class MacFieldQueue {
             count = Self.readCap
         }
         guard let text = try? target.text(in: UTF16Range(location: base, length: count)) else { return nil }
-        return (Document(base: base, text: text as NSString, length: length), selection)
+        return (Document(base: base, text: Self.folded(text, keyed: Self.keyed(target)) as NSString, length: length), selection)
+    }
+
+    private static func keyed(_ target: any TextTarget) -> Bool { !target.editsInPlace && target.typesKeys }
+
+    /// Keystroke fields: a rich editor shows a typed space as a no-break space (Chromium does at the end of a line, and
+    /// turns it back once more text follows). The queue reads both as a space, so its own spaces are recognised.
+    static func folded(_ text: String, keyed: Bool) -> String {
+        keyed && text.contains("\u{00A0}") ? text.replacingOccurrences(of: "\u{00A0}", with: " ") : text
     }
 
     /// One op at most. False when the field cannot take one now (unfocused, unreadable, an edit not yet placeable).
@@ -392,6 +400,8 @@ public final class MacFieldQueue {
         if keyed, let late = lateKey {
             // Never a second key while the last one may still land.
             if selection != late.selection, now() - late.at < Self.keyLateLimit { return false }
+            // A key that showed late was no failure.
+            if selection == late.selection { moveFailures = 0 }
             lateKey = nil
         }
         if let region = nextRegion() {
@@ -696,11 +706,24 @@ public final class MacFieldQueue {
         let delta = inserted.utf16.count - range.length
         let expected = UTF16Range(location: range.location + inserted.utf16.count, length: 0)
         let window = UTF16Range(location: region.start, length: String(after).utf16.count)
+        var transformed = false
         let landed = await poll {
-            (try? target.selectedRange()) == expected && (try? target.textLength()) == doc.length + delta
-                && (try? target.text(in: window)) == String(after)
+            guard (try? target.selectedRange()) == expected, (try? target.textLength()) == doc.length + delta,
+                  let shown = try? target.text(in: window) else { return false }
+            if Self.folded(shown, keyed: true) == String(after) { return true }
+            // The caret and length are the key's, the text is not: the host changed what the key typed.
+            transformed = true
+            return true
         }
-        guard landed else {
+        if landed, transformed, target.inputMark == mark {
+            // Typing again would only repeat the host's change: the region's work stops (its text is recovered).
+            note(.mismatch, id: region.id, run: region.runID, reason: "transformed")
+            region.lost = true
+            drop(region, .failed)
+            expectedSelections = [expected]
+            return true
+        }
+        guard landed, !transformed else {
             expectedSelections.append(expected)
             if target.inputMark != mark {
                 // The user typed or clicked meanwhile: not the key's failure. The next read takes their input and

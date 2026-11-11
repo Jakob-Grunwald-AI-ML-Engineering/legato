@@ -24,6 +24,8 @@ import LegatoKeyboardCore
     var dropChance = 0.0
     var lateChance = 0.0
     var blipChance = 0.0
+    /// Like a Chromium rich editor: a space typed at the end shows as a no-break space until more text follows.
+    var nbsp = false
     var mark = 0
     var keysSent = 0, keysDropped = 0, keysLate = 0, refusals = 0
     private var inFlight: [(due: ContinuousClock.Instant, key: FieldKey)] = []
@@ -72,7 +74,13 @@ import LegatoKeyboardCore
             selection = .init(location: previous, length: caret - previous)
             replaceSelection(with: "")
         case .text(let character):
-            replaceSelection(with: String(character))
+            let atEnd = selection.end == string.utf16.count
+            if nbsp, character != " ", selection.length == 0, selection.location > 0,
+               (string as NSString).substring(with: NSRange(location: selection.location - 1, length: 1)) == "\u{00A0}" {
+                let ns = string as NSString
+                value = Array(ns.replacingCharacters(in: NSRange(location: selection.location - 1, length: 1), with: " "))
+            }
+            replaceSelection(with: nbsp && character == " " && atEnd ? "\u{00A0}" : String(character))
         }
     }
     private func replaceSelection(with text: String) {
@@ -159,6 +167,7 @@ private struct SeededRandom {
             field.dropChance = rng.chance(0.5) ? 0.03 : 0
             field.lateChance = rng.chance(0.5) ? 0.04 : 0
             field.blipChance = 0.02
+            field.nbsp = rng.chance(0.5)
         }
         let queue = MacFieldQueue(target: field)
         queue.paced = { true }
@@ -209,7 +218,7 @@ private struct SeededRandom {
         }
         await queue.whenIdle()
         if field.keysInFlight > 0 { return "seed \(seed): idle with \(field.keysInFlight) keys in flight: \(queue.debugState)" }
-        let final = field.string
+        let final = field.string.replacingOccurrences(of: "\u{00A0}", with: " ")
         stats.digits += typedDigits; stats.drops += drops.count
         stats.keys += field.keysSent; stats.dropped += field.keysDropped; stats.late += field.keysLate; stats.refusals += field.refusals
         if keys, field.writes > 0 { return "seed \(seed): \(field.writes) Accessibility writes to a keystroke field" }
@@ -218,7 +227,7 @@ private struct SeededRandom {
         if digits != typedDigits { return "seed \(seed): \(typedDigits) digits typed, \(digits) left: \(final)" }
         // The fake never loses focus: a park-and-drop means the queue could not make progress.
         if drops.contains(where: { $0.reason == .focusLost || $0.reason == .failed }) {
-            return "seed \(seed): stalled: \(drops) state=\(queue.debugState) final=\(final)\n\(trail.joined(separator: "\n"))"
+            return "seed \(seed): stalled (keys \(field.keysSent) dropped \(field.keysDropped) late \(field.keysLate) nbsp \(field.nbsp)): \(drops) state=\(queue.debugState) final=\(final)\n\(trail.joined(separator: "\n"))"
         }
         if queue.hasWork { return "seed \(seed): still busy: \(queue.debugState)\n\(trail.joined(separator: "\n"))" }
         if !interferes, field.lagChance == 0 || keys {
