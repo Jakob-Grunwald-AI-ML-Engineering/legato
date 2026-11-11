@@ -34,7 +34,8 @@ struct FakeField {
     private var stuck: FieldQueue.Report?
     private var lastMoveSentMs = -1_000.0
     private var seq = 0
-    private var rng = SeededGenerator(seed: 7)
+    /// The host's delays (settable: a timing report averages over several).
+    var rng = SeededGenerator(seed: 7)
 
     /// Who wrote each character, and who deleted what: the stress test's provenance checks.
     enum Origin: String { case initial, outside, user, live, edit }

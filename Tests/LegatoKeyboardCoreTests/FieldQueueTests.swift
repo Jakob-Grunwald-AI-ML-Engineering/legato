@@ -215,6 +215,34 @@ import Testing
         #expect(zip(rig.sent, rig.sent.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.gap(after: $0.op, before: $1.op) - 0.001 })
     }
 
+    /// A rich editor puts a placeholder into a line that becomes empty (or drops its list item): a replacement of a whole
+    /// line keeps one old grapheme until the new text stands.
+    @Test(arguments: [false, true])
+    func aWholeLineReplacementNeverLeavesTheLineEmpty(safari: Bool) {
+        var field = FakeField("milk\neggs\nbread", caret: 9)
+        field.hostDelays = safari
+        field.blockEcho = true
+        var rig = QueueRig(field, config: .init(animated: true))
+        rig.run(ms: 100)
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "milk\neggs", after: "\nbread",
+                                          target: "milk\nbutter\nbread", cursorAtEnd: false, paced: true))
+        var emptied = false
+        for _ in 0..<200 {
+            rig.tick()
+            if rig.field.string.contains("\n\n") { emptied = true }
+        }
+        #expect(rig.field.string == "milk\nbutter\nbread")
+        #expect(!emptied)
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "milk\nbutter", after: "\nbread", target: "milk\nbutter\nBREAD",
+                                          cursorAtEnd: false, paced: true))
+        for _ in 0..<200 {
+            rig.tick()
+            if rig.field.string.hasSuffix("\n") { emptied = true }
+        }
+        #expect(rig.field.string == "milk\nbutter\nBREAD")
+        #expect(!emptied)
+    }
+
     @Test func aLostOpIsSeenAndTheUsersKeyGoesOnceMore() {
         var rig = QueueRig(FakeField("abc"))
         rig.queue.enqueue(.insert("d"))
@@ -351,7 +379,8 @@ import Testing
         print("speed: uppercase Magic of \(sentence.count) chars took \(Int(took)) ms, \(Int(took / Double(sentence.count))) ms a character")
         #expect(rig.field.string == sentence.uppercased())
         let ops = rig.sent[from...].map(\.op)
-        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(sentence.count)])
+        // The field's only line never goes empty: its last old grapheme goes once the new text stands before it.
+        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(sentence.count - 1), .deleteBackward(1)])
         #expect(inserts(rig, from: from).count == sentence.count)
         #expect(rig.field.reorders == 0)
         #expect(took < 3_000)

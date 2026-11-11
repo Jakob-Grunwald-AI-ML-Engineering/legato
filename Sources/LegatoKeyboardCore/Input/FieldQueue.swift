@@ -147,25 +147,28 @@ public struct FieldQueue: Sendable {
 
     /// How long an op may go unconfirmed before the queue resyncs.
     public static let confirmLimitMs = 600.0
-    /// How long user input waits behind the op in flight.
-    public static let userBoundMs = 150.0
+    /// How long user input waits behind the op in flight: by then the host has applied it (`transitMs`).
+    public static let userBoundMs = transitMs
     /// A new region starts only once the report held still this long.
     public static let stableMs = 150.0
     /// The closest two typed graphemes (or two deletes) follow each other: the field's confirmation floor.
     public static let charMs = SpanPlanner.floorMs
-    /// Measured on Safari (no field puts its caret back after a move): the proxy reports a move at once, before the
-    /// host applied it (25–50 ms later), so a move is confirmed only by a report at least `moveSettleMs` after it. An
-    /// edit the proxy has not reported after `nudgeAfterMs` gets a zero-offset move (its report can stay stale until a
-    /// move).
-    public static let moveSettleMs = 60.0
+    /// Safari as measured (no field puts its caret back after a move): the proxy reports a move at once, but the host
+    /// applies it 25–50 ms later, and an edit no sooner than 5 ms after it is sent. A move is confirmed only by a report
+    /// at least `moveSettleMs` after it, so the edit that follows cannot land before it. An edit the proxy has not
+    /// reported after `nudgeAfterMs` gets a zero-offset move (its report can stay stale until a move).
+    public static let moveSettleMs = 45.0
     public static let nudgeAfterMs = 250.0
-    /// An op whose result the report cannot tell from the state before it (a delete with nothing known before the
-    /// cursor, a collapsing move) is taken as landed only after the host's longest measured transit.
-    public static let transitMs = 150.0
-    /// The proxy shows an insert or delete at once too, before the host applied it (up to about 110 ms later; in UAT a
-    /// move sent 70 ms after an insert landed before it, and the insert was lost). An op of another kind follows an
-    /// edit only this long after it; edits of one kind follow each other at the pace (they land in order).
-    public static let editSettleMs = 115.0
+    /// The host applies an insert or delete up to about 110 ms after it was sent (in UAT a move sent 70 ms after an
+    /// insert landed before it, and the insert was lost). An op that never confirmed, or one whose result the report
+    /// cannot tell from the state before it (a delete with nothing known before the cursor, a collapsing move), is
+    /// taken as landed only after this transit.
+    public static let transitMs = 115.0
+    /// An edit of another kind follows an edit only this long after it (it lands no sooner than 5 ms after it is sent);
+    /// edits of one kind follow each other at the pace (they land in order).
+    public static let editSettleMs = 110.0
+    /// A move follows an edit only this long after it (a move lands no sooner than 25 ms after it is sent).
+    public static let editMoveSettleMs = 90.0
     /// Confirmed states kept to recognise a late report of one of them (lag), and how long.
     static let historyCount = 24
     static let historyMs = 3_000.0
@@ -297,6 +300,8 @@ public struct FieldQueue: Sendable {
         var abandoned = false
         /// The text the region last held as the run wanted it: a user edit with no newer revision drops nothing.
         var landed: [Character] = []
+        /// A revision the region could not take was reported: it drops once, not once per version.
+        var dropped = false
     }
     struct LiveRun: Sendable, Equatable {
         var runID: String
@@ -308,8 +313,14 @@ public struct FieldQueue: Sendable {
         var ackedVersion: Int?
         /// The highest segment id seen so far: a cleaned segment up to it is a rewrite of known words, not new speech.
         var lastSegmentID = -1
+        /// Every segment is cleaned: no later cleanup is coming.
+        var cleaned = false
     }
     private(set) var runs: [LiveRun] = []
+    /// Finished runs kept for a cleanup still to come (the newest run aside).
+    static let keptRuns = 4
+    /// Runs no longer kept: a late version of one is ignored (it is in History), never typed at the caret.
+    private var retiredRunIDs: [String] = []
 
     /// A read of the field for an instruction (`markRead`): the model then, and every change since, so the edit that
     /// comes back finds its scope through them and tells the keyboard's own changes from the user's.
@@ -365,7 +376,9 @@ public struct FieldQueue: Sendable {
                 case .insert, .insertBehind: kind = .insert
                 case .setUserCursorToCursor, .startRegion: continue
                 }
-                if let previous, previous != kind { fixedMs += previous == .move ? FieldQueue.moveSettleMs : FieldQueue.editSettleMs }
+                if let previous, previous != kind {
+                    fixedMs += previous == .move ? FieldQueue.moveSettleMs : kind == .move ? FieldQueue.editMoveSettleMs : FieldQueue.editSettleMs
+                }
                 if kind == .insert { inserts += 1 }
                 previous = kind
             }
@@ -442,7 +455,7 @@ public struct FieldQueue: Sendable {
     }
     public var hasOpInFlight: Bool { inFlight != nil }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
-    public var isHome: Bool { inFlight == nil && cursor == userCursor && sinceSendMs >= Self.editSettleMs }
+    public var isHome: Bool { inFlight == nil && cursor == userCursor && sinceSendMs >= Self.transitMs }
     public var isInUnit: Bool { unit != nil }
     public var modelText: String { String(text) }
     /// The text before the user's cursor once pending at-cursor edits landed: what typed lines and host text plan against.
@@ -506,6 +519,7 @@ public struct FieldQueue: Sendable {
             runs[index].pending = snapshot
             return
         }
+        guard !retiredRunIDs.contains(snapshot.runID) else { return }
         closeOpenRegions(.newRun)
         var run = LiveRun(runID: snapshot.runID)
         run.pending = snapshot
@@ -518,6 +532,7 @@ public struct FieldQueue: Sendable {
         if case .region(let r)? = unit?.owner, r == runID { unit = nil }
         dropRun(at: index, reason: .reset)
         runs.remove(at: index)
+        retiredRunIDs.append(runID)
     }
 
     /// The field is read now for an instruction (the queue home): an edit carrying `id` as its `readID` is placed
@@ -682,6 +697,7 @@ public struct FieldQueue: Sendable {
         switch (last, op) {
         case (.insert, .insert), (.deleteBackward, .deleteBackward): return charMs
         case (.move, _): return 0 // a move counts only after its settle (`moveSettleMs`) anyway
+        case (_, .move): return editMoveSettleMs
         default: return editSettleMs
         }
     }
@@ -935,14 +951,31 @@ public struct FieldQueue: Sendable {
             : SpanPlanner.spans(from: current, to: target, leaveTailAppend: leaveTailAppend, paceMs: paced ? SpanPlanner.calmMs : 0,
                                 moveSettleMs: Self.moveSettleMs, editSettleMs: Self.editSettleMs)
                 .map { $0.block ? [SpanPlanner.Hunk(start: $0.start, end: $0.end, text: $0.text)] : $0.hunks }
+        let base = spans[spanID]!.start
         for hunks in groups.reversed() {
             for hunk in hunks.reversed() {
+                if emptiesLine(base + hunk.start, base + hunk.end), !hunk.text.isEmpty {
+                    // Never an empty line mid-replacement: a rich editor puts a placeholder line break into a line that
+                    // becomes empty (and may drop the line's list or block). The line's last old grapheme stays until the
+                    // new text stands before it.
+                    ops.append(.moveInSpan(spanID, offset: hunk.end - 1))
+                    if hunk.end - 1 > hunk.start { ops.append(.delete(hunk.end - 1 - hunk.start, owner: spanID)) }
+                    ops += typed(hunk.text)
+                    ops.append(.moveInSpan(spanID, offset: hunk.start + hunk.text.count + 1))
+                    ops.append(.delete(1, owner: spanID))
+                    continue
+                }
                 ops.append(.moveInSpan(spanID, offset: hunk.end))
                 if hunk.end > hunk.start { ops.append(.delete(hunk.end - hunk.start, owner: spanID)) }
                 ops += typed(hunk.text)
             }
         }
         return ops
+    }
+
+    /// Deleting the model's `a..<b` leaves its line empty: a line break (or the known text's edge) on both sides.
+    private func emptiesLine(_ a: Int, _ b: Int) -> Bool {
+        b > a && (a == 0 || text[a - 1].isNewline) && (b == text.count || text[b].isNewline)
     }
 
     /// Typed graphemes still to come besides the unit's: the open region's append, and the queued edits' estimates.
@@ -1109,9 +1142,12 @@ public struct FieldQueue: Sendable {
                 let current = chars(of: span)
                 if region.abandoned || span.edited || (span.userChanged && span.cells == nil) {
                     runs[ri].regions[gi].abandoned = true
-                    // Only a revision the region had not shown yet is lost (once each); the user's own change is no drop.
+                    // Only a revision the region had not shown yet is lost; the user's own change is no drop. The region
+                    // drops once, not once per version.
                     guard desired != region.landed else { continue }
                     runs[ri].regions[gi].landed = desired
+                    guard !region.dropped else { continue }
+                    runs[ri].regions[gi].dropped = true
                     events.append(.dropped(Drop(id: "\(runs[ri].runID)#\(gi)", runID: runs[ri].runID, kind: nil,
                                                 reason: span.userChanged ? .userEdited : .changed,
                                                 text: String(desired), partial: String(current))))
@@ -1121,7 +1157,8 @@ public struct FieldQueue: Sendable {
                     // The user edited the region: their words stay, the run's changes elsewhere in it still land.
                     if desired != region.landed, merged.dropped > 0 || merged.text == current {
                         runs[ri].regions[gi].landed = desired
-                        if merged.dropped > 0 {
+                        if merged.dropped > 0, !region.dropped {
+                            runs[ri].regions[gi].dropped = true
                             events.append(.dropped(Drop(id: "\(runs[ri].runID)#\(gi)", runID: runs[ri].runID, kind: nil, reason: .userEdited,
                                                         text: String(desired), partial: String(current))))
                         }
@@ -1173,8 +1210,14 @@ public struct FieldQueue: Sendable {
             ack(ri)
         }
         let newest = runs.last?.runID
-        let settled = runs.filter { $0.runID != newest && !runNeedsWork($0) && $0.ackedVersion == $0.version && $0.complete }.map(\.runID)
+        // A finished run stays while its cleanup may still come (it lands in the run's own text, never at the caret),
+        // up to the last few runs. A retired run's later versions are ignored.
+        let finished = runs.filter { $0.runID != newest && !runNeedsWork($0) && $0.ackedVersion == $0.version && $0.complete }
+        let keptFrom = runs.count - Self.keptRuns
+        let settled = finished.filter { run in run.cleaned || (runs.firstIndex { $0.runID == run.runID } ?? 0) < keptFrom }.map(\.runID)
         runs.removeAll { settled.contains($0.runID) }
+        retiredRunIDs += settled
+        if retiredRunIDs.count > 32 { retiredRunIDs.removeFirst(retiredRunIDs.count - 32) }
         return nil
     }
 
@@ -1195,6 +1238,7 @@ public struct FieldQueue: Sendable {
         runs[ri].version = snapshot.version
         let wasComplete = runs[ri].complete
         runs[ri].complete = snapshot.complete
+        runs[ri].cleaned = snapshot.complete && !snapshot.segments.isEmpty && snapshot.segments.allSatisfy { $0.final && $0.cleaned }
         let lastSegmentID = runs[ri].lastSegmentID
         runs[ri].lastSegmentID = max(lastSegmentID, snapshot.segments.map(\.id).max() ?? -1)
         let target = Array(Self.target(of: snapshot))
@@ -1294,7 +1338,8 @@ public struct FieldQueue: Sendable {
             let desired = desiredText(region, in: run)
             guard let span = spans[region.spanID] else { continue }
             let current = String(chars(of: span))
-            if desired != current {
+            // A region that dropped already is not reported again.
+            if desired != current, !region.dropped {
                 events.append(.dropped(Drop(id: "\(run.runID)#\(gi)", runID: run.runID, kind: nil, reason: span.parked ? .unplaceable : reason,
                                             text: desired, partial: span.parked ? nil : current)))
             }
@@ -1549,6 +1594,9 @@ public struct FieldQueue: Sendable {
             cursor = found[0]; userCursor = cursor; selection = selected.count
             closeOpenRegions(selected.isEmpty ? .cursor : .selection)
             quietAfterMove = true
+            // As after a tap: the ops on their way may still land where the user moved the caret (a window too short
+            // to tell a tap shows only now).
+            if selected.isEmpty, !recentSends.isEmpty { tapRace = (recentSends, 0) }
             events.append(.resync(.cursorMoved))
             merge(report)
             return
@@ -1836,6 +1884,9 @@ public struct FieldQueue: Sendable {
     private mutating func absorbOutsideInsert(_ report: Report) -> Bool {
         guard selection == 0, report.selected == nil else { return false }
         let before = Array(FieldReader.trusted(before: report.before)), after = Array(report.after)
+        // Text the model knows after the caret shows after it: a report with nothing after it is the field's end (a tap
+        // there, where an op on its way may have landed), not typing at the caret.
+        guard !after.isEmpty || cursor == text.count else { return false }
         let n = min(after.count, text.count - cursor)
         guard n == after.count || cursor + n == text.count, text[cursor..<(cursor + n)].elementsEqual(after[..<n]) else { return false }
         for k in 1...max(1, min(Self.contextChars * 2, before.count - Self.extendOverlapChars)) where before.count - k >= Self.extendOverlapChars {

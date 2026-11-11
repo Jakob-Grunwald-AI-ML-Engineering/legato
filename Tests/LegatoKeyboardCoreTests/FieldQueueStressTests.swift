@@ -42,7 +42,13 @@ import Testing
     /// - 944: raw words out of sight after a resync still start at the cursor (not the cleanup's doing).
     /// - 165, 1571: a merge into a region the user edited deleted and retyped the user's letter (a whole-word span; a
     ///   diff that took the user's "a" for the keyboard's). The queue now knows who wrote each character.
-    @Test(arguments: [UInt64(165), 944, 1571])
+    /// Faster settles (iOS parity with the Mac):
+    /// - 2930, 4414: a tap seen only through a short window while the live insert was on its way; the insert landed at
+    ///   the tap and was taken for another keyboard's typing, so the model kept it twice (a stall). A resync that finds
+    ///   the user's caret elsewhere now expects the ops on their way to land there, as after a tap.
+    /// - 4167: a tap at the field's end with the live insert landing there read as another keyboard's typing at the
+    ///   caret (the report's empty window after the caret fit anything); the model kept the text after it twice.
+    @Test(arguments: [UInt64(165), 944, 1571, 2930, 4167, 4414])
     func pinnedLateCleanupSeedsKeepTheInvariants(seed: UInt64) {
         var session = StressSession(seed: seed)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
@@ -50,7 +56,8 @@ import Testing
 
     @Test func seededSessionsKeepTheInvariants() {
         let runs = Self.environment["LEGATO_STRESS_RUNS"].flatMap(Int.init) ?? 48
-        let first = Self.environment["LEGATO_STRESS_SEED"].flatMap(UInt64.init) ?? 1
+        // `LEGATO_STRESS_FIRST` starts a long run elsewhere (parallel shards).
+        let first = (Self.environment["LEGATO_STRESS_SEED"] ?? Self.environment["LEGATO_STRESS_FIRST"]).flatMap(UInt64.init) ?? 1
         var failures = 0
         for i in 0..<(Self.environment["LEGATO_STRESS_SEED"] == nil ? runs : 1) {
             let seed = first &+ UInt64(i)
