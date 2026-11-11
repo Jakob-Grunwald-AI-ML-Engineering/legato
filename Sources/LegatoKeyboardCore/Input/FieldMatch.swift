@@ -26,10 +26,11 @@ public enum FieldMatch {
         let exact = fits(in: text, reportedBefore: Array(reportedBefore), reportedAfter: Array(reportedAfter))
         let trusted = Array(FieldReader.trusted(before: reportedBefore))
         guard trusted.count < reportedBefore.count, reportedBefore.first?.isNewline == true else { return exact }
-        // Exact fits whose report after the cursor runs past the known text's end say little: the echo reading counts
-        // as well (an emptied block, "\n " then a space, also fits a model that knows nothing past it).
+        // Exact fits whose report after the cursor runs past the known text's end, or before it reaches back past the
+        // known text's start, say little: the echo reading counts as well (an emptied block, "\n " then a space, also
+        // fits a model that knows nothing past it; a line repeated further down is where the block echo points).
         if !exact.isEmpty {
-            guard exact.allSatisfy({ $0 + reportedAfter.count > text.count }) else { return exact }
+            guard exact.allSatisfy({ $0 + reportedAfter.count > text.count || $0 < reportedBefore.count }) else { return exact }
             let echoed = echoPositions(in: text, reportedBefore: reportedBefore, reportedAfter: reportedAfter)
                 .filter { $0 + reportedAfter.count <= text.count }
             return Array(Set(exact + echoed)).sorted()

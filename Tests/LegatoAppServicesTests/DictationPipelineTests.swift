@@ -324,6 +324,24 @@ extension DictationPipelineTests {
         #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["THE DRAFT IS DONE AND REVIEWED NOW. WE COULD SEND IT TODAY", ""])
     }
 
+    /// UAT F3: a list dictated in one run, the user typing "\n- " between the items. The keyboard reports where each
+    /// piece starts; cleanup takes each item alone (it never joins them into one sentence), and no whole pass runs.
+    @Test func piecesTheUserSplitTheRunIntoAreCleanedApart() async throws {
+        let cleaner = FnCleaner { $0.text.uppercased() }
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        await pipeline.receive(routeLine(0, "buy some milk"))
+        await pipeline.receive(routeLine(1, "call the plumber tomorrow"))
+        let runID = try #require(pipeline.liveRun?.runID)
+        await pipeline.livePieces(runID: runID, startingAt: [1])
+        // The third item's words are typed on their own line while still being spoken.
+        await pipeline.livePieces(runID: runID, startingAt: [1, 2])
+        await pipeline.receive(routeLine(2, "water the plants"))
+        await pipeline.finishTake()
+        let texts = cleaner.inputs.withLock { $0.map(\.text) }
+        #expect(texts.sorted() == ["buy some milk", "call the plumber tomorrow", "water the plants"])
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["BUY SOME MILK", "CALL THE PLUMBER TOMORROW", "WATER THE PLANTS"])
+    }
+
     @Test func anInstructionEndsAndSealsTheRun() async throws {
         let pipeline = live()
         var published: [LiveDictationSnapshot?] = []

@@ -5,8 +5,10 @@ import Testing
 /// Seeded random sessions against a misbehaving field: late reports, short windows, Safari's block echo, emoji that
 /// move as one unit; dictation that grows, flips and gets cleaned up (in some sessions late, after the user deleted,
 /// moved and tapped: the cleanup must start no region at the user's cursor); the user's keys, deletes, cursor moves, taps,
-/// selections and outside typing; Magic edits. CI runs a few dozen seeds; `LEGATO_STRESS_RUNS=5000` runs a long
-/// local pass, and `LEGATO_STRESS_SEED=<n>` replays one seed.
+/// selections and outside typing; Magic edits; a switch to another field of the page with work for the old one pending
+/// (the queue is not told). Each seed also runs a `ListSession`. CI runs a few dozen seeds; `LEGATO_STRESS_RUNS=5000`
+/// runs a long local pass, and `LEGATO_STRESS_SEED=<n>` replays one seed (`LEGATO_STRESS_NO_SWITCH=1`,
+/// `LEGATO_STRESS_NO_LIST=1` leave those parts out).
 @Suite struct FieldQueueStressTests {
     private static var environment: [String: String] { ProcessInfo.processInfo.environment }
 
@@ -34,7 +36,7 @@ import Testing
     ///   replaced the selection, so the field holds text no report showed. Key placement is not asserted after that.
     @Test(arguments: [UInt64(69), 190, 230, 241, 265, 398, 548, 615, 856, 1035, 1121, 1138, 1376, 1392, 1555, 1615, 1886, 2251, 2729, 2989, 3569, 4568])
     func pinnedSeedsKeepTheInvariants(seed: UInt64) {
-        var session = StressSession(seed: seed, lateCleanups: false)
+        var session = StressSession(seed: seed, lateCleanups: false, fieldSwitches: false)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
     }
 
@@ -50,8 +52,26 @@ import Testing
     ///   caret (the report's empty window after the caret fit anything); the model kept the text after it twice.
     @Test(arguments: [UInt64(165), 944, 1571, 2930, 4167, 4414])
     func pinnedLateCleanupSeedsKeepTheInvariants(seed: UInt64) {
-        var session = StressSession(seed: seed)
+        var session = StressSession(seed: seed, fieldSwitches: false)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
+    }
+
+    /// Field switches and list sessions (UAT F1–F3), seeds that once failed:
+    /// - 206, 444: a switch while a jump unit had the caret away; the reseed's way back (the old field's distance) moved
+    ///   the user's caret in the new field. It now goes back only when the report shares text with the old model there,
+    ///   and a way back cut short by the field's edge leaves the user where the caret was.
+    /// - 3794: a tiny report of the new field fit the old model elsewhere; a jump went out on it. Nothing of the
+    ///   keyboard's own starts while the report does not show the model at the caret.
+    /// - 4687: the user's key waited while a jump into the old field was in flight; the jump was assumed landed and the way
+    ///   back threw the caret to the new field's start. A jump still shown at its start then fails.
+    /// - 1638: a unit's way back to the user went out on an unshown model (the new field's report fit it elsewhere).
+    /// - 3227: the new field held the old text's end; four agreeing characters sent the caret back the old distance.
+    /// - 3066, 1250: a list line repeated further down, under Safari's block echo, pinned the first line.
+    @Test(arguments: [UInt64(206), 444, 1250, 1638, 3066, 3227, 3794, 4687])
+    func pinnedFieldSwitchAndListSeedsKeepTheInvariants(seed: UInt64) {
+        var session = StressSession(seed: seed)
+        var list = ListSession(seed: seed)
+        if let failure = session.run() ?? list.run().map({ "list session: \($0)" }) { Issue.record("seed \(seed): \(failure)") }
     }
 
     @Test func seededSessionsKeepTheInvariants() {
@@ -63,13 +83,124 @@ import Testing
             let seed = first &+ UInt64(i)
             // Names each seed before it runs, so a crash says which one to replay.
             if Self.environment["LEGATO_STRESS_PROGRESS"] == "1" { print("stress seed \(seed)") }
-            var session = StressSession(seed: seed)
-            if let failure = session.run() {
+            var session = StressSession(seed: seed, fieldSwitches: Self.environment["LEGATO_STRESS_NO_SWITCH"] == nil)
+            var list = ListSession(seed: seed)
+            let lists = Self.environment["LEGATO_STRESS_NO_LIST"] == nil
+            if let failure = session.run() ?? (lists ? list.run().map({ "list session: \($0)" }) : nil) {
                 Issue.record("seed \(seed) (replay: LEGATO_STRESS_SEED=\(seed)): \(failure)")
                 failures += 1
                 if failures >= 5 { break }
             }
         }
+    }
+}
+
+/// A Markdown list dictated in one run (UAT F1, F3): the user types "- " and "\n- " between the items, the run's
+/// segments go on after a stop (the run is complete, then new speech comes), and the cleanups join the items into one
+/// sentence (", ", "; ", ". ", " and "), early, mid-list or at the end. Every item starts at the caret and keeps its own
+/// words; no joiner lands at an item's start.
+struct ListSession {
+    private var rng: SeededGenerator
+    init(seed: UInt64) { rng = SeededGenerator(seed: seed ^ 0x115715) }
+
+    private mutating func chance(_ p: Double) -> Bool { Double.random(in: 0..<1, using: &rng) < p }
+    private mutating func pick<T>(_ items: [T]) -> T { items[Int.random(in: 0..<items.count, using: &rng)] }
+
+    private static func capitalized(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
+
+    /// The run's snapshot with its first `count` items cleaned into one sentence (one unit over their segments), the
+    /// later ones raw.
+    private static func cleanup(_ items: [String], count: Int, joiner: String, run: String, version: Int) -> LiveDictationSnapshot {
+        let text = pieces(Array(items[..<count]), joiner: joiner).joined(separator: joiner) + "."
+        return LiveDictationSnapshot(runID: run, version: version, segments: items.enumerated().map { i, item in
+            guard i < count else { return LiveSegment(id: i, text: item, final: true) }
+            return LiveSegment(id: i, text: i == 0 ? text : "", cleaned: true, final: true, unit: count > 1 ? 0 : nil, raw: count > 1 ? item : nil)
+        }, complete: true)
+    }
+
+    private static func pieces(_ items: [String], joiner: String) -> [String] {
+        items.enumerated().map { i, item in i == 0 || joiner == ". " ? capitalized(item) : item }
+    }
+
+    mutating func run() -> String? {
+        let words = ["alpha", "beta", "gamma", "delta", "river", "stone", "light", "table", "green", "quiet", "north", "maple"]
+        let initial = pick(["", "Notes:\n", "Shopping\n"])
+        var field = FakeField(initial)
+        field.hostDelays = chance(0.7)
+        field.lagTicks = chance(0.3) ? Int.random(in: 1...3, using: &rng) : 0
+        field.window = Int.random(in: 20...80, using: &rng)
+        field.blockEcho = chance(0.3)
+        var rig = QueueRig(field, config: .init(animated: chance(0.6)))
+        let items = (0..<Int.random(in: 2...4, using: &rng)).map { _ in
+            (0..<Int.random(in: 1...4, using: &rng)).map { _ in pick(words) }.joined(separator: " ")
+        }
+        let joiner = pick([", ", "; ", ". ", " and "])
+        // The take is stopped after each item and its run goes on (the bridge reuses it): F1.
+        let stops = chance(0.5)
+        let run = "list"
+        var version = 0
+        var finals: [LiveSegment] = []
+        // How many items the last cleanup covered, and one still to come.
+        var cleanedCount = 0
+        var pendingCleanup = false
+
+        // At a person's pace (the UAT typed a key about every 0.7 s); fast typing races are the main session's.
+        func typeKeys(_ keys: String, _ rig: inout QueueRig, _ rng: inout SeededGenerator) {
+            for key in keys { rig.queue.enqueue(.insert(String(key))); rig.run(ms: Double.random(in: 120...300, using: &rng)) }
+        }
+        func publishCleanup(_ rig: inout QueueRig) {
+            version += 1; cleanedCount = finals.count; pendingCleanup = false
+            rig.queue.enqueue(Self.cleanup(Array(items[..<finals.count]), count: finals.count, joiner: joiner, run: run, version: version))
+        }
+
+        for (i, item) in items.enumerated() {
+            // The item before is typed whole (a key cut short would end its region mid-item), and its cleanup is maybe
+            // still on its way while the user types the next line's start.
+            rig.drain()
+            let prefix = i == 0 ? "- " : "\n- "
+            if pendingCleanup {
+                let split = Int.random(in: 0...prefix.count, using: &rng)
+                typeKeys(String(prefix.prefix(split)), &rig, &rng)
+                publishCleanup(&rig)
+                typeKeys(String(prefix.dropFirst(split)), &rig, &rng)
+            } else {
+                typeKeys(prefix, &rig, &rng)
+            }
+            if !stops || i == 0 {
+                // Words arrive as the speaking head (a stopped take's later speech comes as finals only).
+                var head = ""
+                for word in item.split(separator: " ") {
+                    head += (head.isEmpty ? "" : " ") + word
+                    version += 1
+                    let before = cleanedCount > 0 ? Self.cleanup(Array(items[..<finals.count]), count: cleanedCount, joiner: joiner, run: run, version: 0).segments : finals
+                    rig.queue.enqueue(LiveDictationSnapshot(runID: run, version: version, segments: before + [.init(id: i, text: head, final: false)]))
+                    rig.run(ms: Double.random(in: 60...400, using: &rng))
+                }
+            }
+            finals.append(.init(id: i, text: item, final: true))
+            version += 1
+            let segments = cleanedCount > 0 ? Self.cleanup(Array(items[..<finals.count]), count: cleanedCount, joiner: joiner, run: run, version: 0).segments : finals
+            rig.queue.enqueue(LiveDictationSnapshot(runID: run, version: version, segments: segments, complete: stops || cleanedCount > 0))
+            // A cleanup of the items so far (the late whole pass after a stop): now, or while the next line starts.
+            if stops, chance(0.6) { if chance(0.5) { publishCleanup(&rig) } else { pendingCleanup = true } }
+        }
+        if chance(0.5) { rig.drain() }
+        publishCleanup(&rig)
+        guard rig.drain(limitMs: 60_000) else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
+        if rig.field.reorders > 0 || rig.field.staleTriggers > 0 { return "host timing traps: \(rig.field.reorders) reorders, \(rig.field.staleTriggers) stale" }
+        let pieces = Self.pieces(items, joiner: joiner)
+        let expected = initial + "- " + pieces.joined(separator: "\n- ") + "."
+        // Each line holds its own words; the last ends the run. A stopped take's cleanup may have put its period at the
+        // end of an earlier line already: a later cleanup that keeps it there leaves it.
+        let lines = String(rig.field.string.dropFirst(initial.count)).components(separatedBy: "\n")
+        let fits = rig.field.string.hasPrefix(initial) && lines.count == pieces.count && zip(lines, pieces).enumerated().allSatisfy { i, pair in
+            pair.0 == "- " + pair.1 + (i == pieces.count - 1 ? "." : "") || (stops && i < pieces.count - 1 && pair.0 == "- " + pair.1 + ".")
+        }
+        if !fits {
+            return "final text \(rig.field.string.debugDescription), expected \(expected.debugDescription) (joiner \(joiner.debugDescription), stops \(stops))"
+        }
+        if !rig.drops.isEmpty { return "dropped \(rig.drops.map(\.reason.rawValue)) with nothing conflicting" }
+        return nil
     }
 }
 
@@ -94,11 +225,54 @@ struct StressSession {
     /// Late cleanups draw from their own generator (they replace the take's cleanup in some sessions).
     private var late: SeededGenerator
     private let lateCleanups: Bool
+    /// Field switches draw from their own generator too (UAT F2).
+    private var switches: SeededGenerator
+    private let fieldSwitches: Bool
+    /// Fields the user left (Safari gives every field of a page one identity: the queue is not told).
+    private var retired: [FakeField] = []
 
-    /// `lateCleanups`: off for the pinned seeds, which replay their sessions as they were when they failed.
-    init(seed: UInt64, lateCleanups: Bool = true) {
-        self.seed = seed; self.lateCleanups = lateCleanups
+    /// `lateCleanups`, `fieldSwitches`: off for the pinned seeds, which replay their sessions as they were when they failed.
+    init(seed: UInt64, lateCleanups: Bool = true, fieldSwitches: Bool = true) {
+        self.seed = seed; self.lateCleanups = lateCleanups; self.fieldSwitches = fieldSwitches
         rng = SeededGenerator(seed: seed); extra = SeededGenerator(seed: seed ^ 0x57A1E); late = SeededGenerator(seed: seed ^ 0x1A7E)
+        switches = SeededGenerator(seed: seed ^ 0xF1E1D)
+    }
+
+    /// The user moves to another field of the page with the queue's work for this one pending: an empty field, one that
+    /// holds a copy of this field's text (its report pins a place in the queue's model, as in the UAT), or other text.
+    private mutating func switchField(_ rig: inout QueueRig) {
+        let old = rig.field
+        let kind = Int.random(in: 0..<3, using: &switches)
+        var text: [Character] = []
+        var caret = 0
+        // Text the user wrote in both fields (the UAT: the same list line), never the run's own words: a copy of those
+        // around the caret is the take itself as far as any keyboard can tell.
+        var pieces: [Range<Int>] = []
+        var i = 0
+        while i < old.text.count {
+            guard old.origin[i] != .live else { i += 1; continue }
+            let start = i
+            while i < old.text.count, old.origin[i] != .live { i += 1 }
+            if i - start >= 4 { pieces.append(start..<i) }
+        }
+        if kind == 1, !pieces.isEmpty {
+            let piece = pieces[Int.random(in: 0..<pieces.count, using: &switches)]
+            let start = Bool.random(using: &switches) ? piece.lowerBound : Int.random(in: piece.lowerBound..<(piece.upperBound - 2), using: &switches)
+            let end = Int.random(in: (start + 1)...piece.upperBound, using: &switches)
+            text = Array(old.text[start..<end])
+            caret = Bool.random(using: &switches) ? text.count : Int.random(in: 0...text.count, using: &switches)
+        } else if kind == 2 {
+            text = Array("Dear Anna, the boat is ready.")
+            caret = Int.random(in: 0...text.count, using: &switches)
+        }
+        var field = FakeField(String(text), caret: caret)
+        field.lagTicks = old.lagTicks; field.window = old.window; field.blockEcho = old.blockEcho
+        field.movesByCharacters = old.movesByCharacters; field.hostDelays = old.hostDelays
+        field.staleReportsAfterTap = old.staleReportsAfterTap; field.nowMs = rig.clockMs
+        if rig.trace { print("        SWITCH to", String(text).debugDescription, "caret", caret) }
+        retired.append(old)
+        rig.field = field
+        rig.fieldSwitched()
     }
 
     private mutating func chance(_ p: Double) -> Bool { Double.random(in: 0..<1, using: &rng) < p }
@@ -132,7 +306,11 @@ struct StressSession {
         var complete = false
         var keys: [String] = []
         let ticks = Int.random(in: 150...320, using: &rng)
+        // A field switch with the run's work for the old field pending (its words, flips, cleanup) in some sessions.
+        let switchAt = fieldSwitches && Double.random(in: 0..<1, using: &switches) < 0.25
+            ? Int.random(in: (ticks / 4)...(ticks - 10), using: &switches) : nil
         for tick in 0..<ticks {
+            if tick == switchAt { switchField(&rig) }
             // Dictation: words arrive, Soniox flips an earlier one now and then, the take ends and is cleaned up.
             var changed = false
             if !complete, chance(0.25) { dictated.append(pick(words)); changed = true }
@@ -181,6 +359,8 @@ struct StressSession {
         if rig.field.selection > 0 { rig.field.tap(at: rig.field.caret); rig.outsidePending = true }
         // One grapheme an op, each waiting for the (perhaps lagging) field: the time it may take grows with the text.
         let target = dictated.joined(separator: " ")
+        // Late enough that the cleanup is pending for the old field (the UAT's F2).
+        if fieldSwitches, switchAt == nil, Double.random(in: 0..<1, using: &switches) < 0.1 { switchField(&rig) }
         let drained = rig.drain(limitMs: 30_000 + 150 * Double(rig.field.text.count + target.count))
         // A cleanup rewrites words already typed: it starts no new region at the user's cursor.
         if let lateFrom, drained, rig.events[lateFrom...].contains(where: { if case .regionStarted = $0.event { true } else { false } }) {
@@ -226,11 +406,21 @@ struct StressSession {
             default: break
             }
         }
-        // The live run only ever deletes what it typed.
+        // The live run only ever deletes what it typed (in the field it typed it into).
         // (A selection or text another keyboard typed is invisible until a late report shows it: an op already on its
         // way can race with it. Once the queue has seen it, nothing is excused.)
-        if let bad = rig.field.deletions.first(where: { $0.by == .live && $0.origin != .live && !$0.racing }) {
-            return "the live run deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue)"
+        let fields = retired + [rig.field]
+        for field in fields {
+            if let bad = field.deletions.first(where: { $0.by == .live && $0.origin != .live && !$0.racing }) {
+                return "the live run deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue)"
+            }
+        }
+        // After a field switch, the run's text goes into the new field only at the user's caret (new words) or next to
+        // what it typed there: never its old field's work (a cleanup's jump, a joiner) away from both.
+        for field in fields.dropFirst() {
+            if field.liveInserts.contains(where: { !$0.atUserCaret && !$0.touchesOwn && !$0.racing }) {
+                return "the live run typed into another field away from the caret (text \(field.string.debugDescription))"
+            }
         }
         // Every key went out exactly once, at the user's caret.
         let userInserts = rig.events.compactMap { e -> String? in
@@ -238,10 +428,12 @@ struct StressSession {
         }
         if userInserts.count != keys.count { return "keys sent \(userInserts.count) of \(keys.count)" }
         for (sent, key) in zip(userInserts, keys) where !sent.hasSuffix(key) { return "key \(key.debugDescription) went out as \(sent.debugDescription)" }
-        if let miss = rig.field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }), !rig.field.clobberedSelection {
-            return "a key landed at \(miss.caret), the user's caret was at \(miss.userCaret)"
+        for field in fields {
+            if let miss = field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }), !field.clobberedSelection {
+                return "a key landed at \(miss.caret), the user's caret was at \(miss.userCaret)"
+            }
         }
-        guard clean else { return nil }
+        guard clean, retired.isEmpty else { return nil }
         // Nothing conflicted: the field holds exactly the text around the run.
         let chars = Array(initial)
         let before = String(chars[..<caret]), after = String(chars[caret...])

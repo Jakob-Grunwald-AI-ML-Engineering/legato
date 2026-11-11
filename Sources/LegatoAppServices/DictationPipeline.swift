@@ -328,7 +328,9 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     private func receiveLive(_ raw: String, sequence: Int, forced: Bool) async {
         var run = currentLiveRun()
         let unit = run.addFinal(key: sequence, text: raw, closes: !forced)
+        let pieces = run.drainSplitUnits()
         publishLive(run)
+        for piece in pieces { await submitLive(piece.text, key: piece.key, run: run) }
         // A cut-short segment waits for the rest of its sentence, a pause fragment for the rest of its unit; the unit
         // is cleaned once, whole.
         guard let unit else { return }
@@ -337,15 +339,29 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if run.complete { await cleanWholeLate(run) }
     }
 
+    /// The keyboard started new pieces of the live run at these segments (the user typed or moved the caret between
+    /// them and the words before, as in a list): no cleanup unit spans them, so each piece is cleaned on its own, and
+    /// the whole-take pass is left out.
+    public func livePieces(runID: String, startingAt segments: [Int]) async {
+        guard mode == .live, var run = liveRun, run.runID == runID, run.runID != sealedLiveRunID else { return }
+        var changed = false
+        for segment in segments { changed = run.split(before: segment) || changed }
+        guard changed else { return }
+        let pieces = run.drainSplitUnits()
+        liveRun = run
+        diagnostics?("live2.pieces", ["run": String(runID.prefix(8)), "pieces": run.pieceStarts.count + 1, "closed": pieces.count])
+        for piece in pieces { await submitLive(piece.text, key: piece.key, run: run) }
+    }
+
     /// The whole-take pass for a finished take that a late segment joined (the stop could not wait for it).
     private func cleanWholeLate(_ run: LiveDictationRun) async {
         let whole = run.wholeRaw, runID = run.runID
-        guard run.unitCount > 1, whole.words <= Self.wholeTakeWords else { return }
+        guard run.unitCount > 1, !run.isSplit, whole.words <= Self.wholeTakeWords else { return }
         let input = await wholeInput(whole.text)
         Task { [weak self] in
             guard let self, let text = await self.cleanWhole(input, late: true) else { return }
             // A newer straggler runs its own pass; this one is stale then. An instruction's run is not edited again.
-            guard var run = self.liveRun, run.runID == runID, run.runID != self.sealedLiveRunID, run.wholeRaw.finals == whole.finals else { return }
+            guard var run = self.liveRun, run.runID == runID, run.runID != self.sealedLiveRunID, !run.isSplit, run.wholeRaw.finals == whole.finals else { return }
             if run.setWhole(SentenceStart.capitalized(text, after: self.liveAnchor), finals: whole.finals) { self.publishLive(run) }
         }
     }
@@ -413,7 +429,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         // A short take of several units is also cleaned whole, in parallel with the units still in cleanup.
         var wholeTask: Task<String?, Never>?
         var wholeFinals = 0
-        if let run = liveRun, !run.complete, run.unitCount > 1 {
+        if let run = liveRun, !run.complete, run.unitCount > 1, !run.isSplit {
             let whole = run.wholeRaw
             if whole.words <= Self.wholeTakeWords {
                 wholeFinals = whole.finals
@@ -431,7 +447,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         }
         let wholeText = await wholeTask?.value
         guard var run = liveRun, !run.complete else { return }
-        if let wholeText {
+        if let wholeText, !run.isSplit {
             let before = liveAnchor
             run.setWhole(SentenceStart.capitalized(wholeText, after: before), finals: wholeFinals)
         }

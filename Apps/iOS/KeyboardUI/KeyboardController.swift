@@ -1025,7 +1025,9 @@ final class KeyboardController {
 
     private func writeLiveAck(version: Int?, complete: Bool) {
         guard let runID = liveSnapshot?.runID else { return }
-        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats))
+        // Where the user split the run (a line typed between its words): the app cleans the pieces apart.
+        let pieces = queue.pieceStarts(of: runID)
+        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats, pieces: pieces.isEmpty ? nil : pieces))
     }
 
     private static func milliseconds(_ duration: Duration) -> Double {

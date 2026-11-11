@@ -96,6 +96,84 @@ import Testing
         #expect(rig.field.string == "Note: Buy milk and bread.")
     }
 
+    /// Segments of one run as the app publishes them: `cleanedAs` puts the run's cleanup in the first segment (one
+    /// unit over all of them, the others empty with their raw words).
+    static func segments(_ items: [String], final: Bool = true, cleanedAs: String? = nil) -> [LiveSegment] {
+        items.enumerated().map { i, item in
+            guard let cleanedAs else { return LiveSegment(id: i, text: item, final: final || i < items.count - 1) }
+            return LiveSegment(id: i, text: i == 0 ? cleanedAs : "", cleaned: true, final: true, unit: 0, raw: item)
+        }
+    }
+
+    /// UAT F1: the take was stopped (complete) and its run goes on with new speech (the bridge reuses the run). The user
+    /// pressed Enter and typed "- " meanwhile: the new words start at their caret, and the cleanup that joins both into
+    /// one sentence lands in each piece's own words, the joiner nowhere.
+    @Test(arguments: [false, true])
+    func newSpeechAfterAStopStartsAtTheCaretNotAtTheTakesEnd(safari: Bool) {
+        var field = FakeField("")
+        field.hostDelays = safari
+        var rig = QueueRig(field, config: .init(animated: true))
+        type("- ", &rig)
+        rig.drain()
+        dictate("the meeting is at three", run: "m", &rig)
+        rig.drain()
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "m", version: 21, segments: [
+            .init(id: 0, text: "the meeting is at three", cleaned: true, final: true),
+        ], complete: true))
+        type("\n- ", &rig)
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "m", version: 22, segments: [
+            .init(id: 0, text: "the meeting is at three", cleaned: true, final: true),
+            .init(id: 1, text: "bring the laptop", final: true),
+        ], complete: true))
+        rig.drain()
+        #expect(rig.field.string == "- the meeting is at three\n- bring the laptop")
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "m", version: 23, segments: Self.segments(
+            ["the meeting is at three", "bring the laptop"], cleanedAs: "The meeting is at three, bring the laptop."), complete: true))
+        rig.drain()
+        #expect(rig.field.string == "- The meeting is at three\n- bring the laptop.")
+        #expect(rig.drops.isEmpty)
+    }
+
+    /// F1, with the raw version of the new speech coalesced away: the cleanup is the first the keyboard sees of it. The
+    /// unit that joins known words with unseen ones shows its raw words, so the new ones still start at the caret.
+    @Test func aCleanupJoiningUnseenSpeechStillStartsTheNewWordsAtTheCaret() {
+        var rig = QueueRig(FakeField(""), config: .init(animated: true))
+        type("- ", &rig)
+        dictate("the meeting is at three", run: "m", &rig)
+        rig.drain()
+        type("\n- ", &rig)
+        rig.drain()
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "m", version: 23, segments: Self.segments(
+            ["the meeting is at three", "bring the laptop"], cleanedAs: "The meeting is at three, bring the laptop."), complete: true))
+        rig.drain()
+        #expect(rig.field.string == "- the meeting is at three\n- bring the laptop")
+    }
+
+    /// UAT F3: three items dictated in one run, the user typing "\n- " between them; the cleanup joins them into one
+    /// sentence. Each line takes its own words; no joiner lands at a line's start.
+    @Test(arguments: [(", ", false), (", ", true), ("; ", true), (". ", false), (". ", true)])
+    func aCleanupThatJoinsTheRunsPiecesLeavesTheJoinersOut(joiner: String, safari: Bool) {
+        let items = ["buy some milk", "call the plumber tomorrow", "water the plants"]
+        var field = FakeField("")
+        field.hostDelays = safari
+        var rig = QueueRig(field, config: .init(animated: true))
+        for (i, item) in items.enumerated() {
+            type(i == 0 ? "- " : "\n- ", &rig)
+            rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: i + 1, segments: Self.segments(Array(items[...i]))))
+            rig.drain()
+        }
+        #expect(rig.field.string == "- buy some milk\n- call the plumber tomorrow\n- water the plants")
+        // The app hears where the pieces start, so it can clean each on its own.
+        #expect(rig.queue.pieceStarts(of: "list") == [1, 2])
+        let capital = joiner == ". "
+        let pieces = items.enumerated().map { i, item in i == 0 || capital ? item.prefix(1).uppercased() + item.dropFirst() : item }
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: 9, segments: Self.segments(
+            items, cleanedAs: pieces.joined(separator: joiner) + "."), complete: true))
+        rig.drain()
+        #expect(rig.field.string == "- " + pieces.joined(separator: "\n- ") + ".")
+        #expect(rig.drops.isEmpty)
+    }
+
     /// The user taps into the middle of a take's text and types a word there; the take's next words go where the
     /// user is, not back to the take's end.
     @Test(arguments: [false, true])

@@ -45,6 +45,10 @@ struct FakeField {
     var userCaret: Int
     /// For every user insert as it lands: the field's caret and the user's caret.
     var userInserts: [(caret: Int, userCaret: Int, racing: Bool)] = []
+    /// For every insert of the live run as it lands: whether it went at the user's caret, or near the run's own text in
+    /// this field (within four characters), or where the run just deleted its own.
+    var liveInserts: [(atUserCaret: Bool, touchesOwn: Bool, racing: Bool)] = []
+    private var liveDeletedAt: Int?
     /// A keyboard op on its way replaced a selection the user made meanwhile: the field now holds text no report showed
     /// the keyboard before (what was selected is gone), so where the user's caret is cannot be known from then on.
     var clobberedSelection = false
@@ -188,6 +192,12 @@ struct FakeField {
             }
         case .insert(let string):
             if send.writer == .user { userInserts.append((caret, userCaret, send.racing)) }
+            if send.writer == .live, selection == 0 {
+                // Near the run's own text (a user's letter glued onto its word stays inside the region it edited).
+                let near = origin[max(0, caret - 4)..<min(text.count, caret + 4)]
+                let own = near.contains(.live) || liveDeletedAt == caret
+                liveInserts.append((caret == userCaret, own, send.racing))
+            }
             if selection > 0 {
                 if send.racing, send.writer != .outside { clobberedSelection = true }
                 remove(caret..<(caret + selection), send); selection = 0
@@ -205,6 +215,7 @@ struct FakeField {
 
     private mutating func remove(_ range: Range<Int>, _ send: Send) {
         for i in range { deletions.append((text[i], origin[i], send.writer, send.racing)) }
+        if send.writer == .live { liveDeletedAt = range.lowerBound }
         text.removeSubrange(range); origin.removeSubrange(range)
         if userCaret >= range.upperBound { userCaret -= range.count } else if userCaret > range.lowerBound { userCaret = range.lowerBound }
     }
@@ -242,6 +253,12 @@ struct QueueRig {
     /// The user acted outside the keyboard (tap, selection, another keyboard) and the queue has not resynced since.
     var outsidePending = false { didSet { if outsidePending { outsideAtMs = clockMs } } }
     private var outsideAtMs = -1_000_000.0
+
+    /// The user moved to another field (the queue is not told): ops on their way race with it, but the user's caret is
+    /// known, where they tapped, so the queue's choice does not become the expectation.
+    mutating func fieldSwitched() { outsideAtMs = clockMs; switchedAtMs = clockMs }
+    private var switchedAtMs = -1_000_000.0
+    private var switching: Bool { clockMs - switchedAtMs < FieldQueue.confirmLimitMs + 200 }
     /// An op sent now races with an outside action: the queue has not resynced since, or it was a moment ago (an
     /// op already on its way, a report still late).
     private var racing: Bool { outsidePending || clockMs - outsideAtMs < FieldQueue.confirmLimitMs + 200 }
@@ -276,7 +293,7 @@ struct QueueRig {
                 // revealed by late reports, sometimes in several steps. Where the user meant their caret then cannot be
                 // known by any keyboard (another keyboard typed at a caret a unit had moved): at each resync within the
                 // race window the queue's choice becomes the expectation. Outside that window nothing is excused.
-                if racing, case .resync(let kind) = event, kind == .cursorMoved || kind == .reseeded || kind == .outsideInsert {
+                if racing, !switching, case .resync(let kind) = event, kind == .cursorMoved || kind == .reseeded || kind == .outsideInsert {
                     outsidePending = false; syncUserCaret = true
                 }
             }

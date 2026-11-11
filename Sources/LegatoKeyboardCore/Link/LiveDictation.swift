@@ -65,8 +65,11 @@ public struct LiveDictationAck: Codable, Equatable, Sendable {
     /// The applied version was the complete take.
     public var complete: Bool
     public var stats: LiveDictationStats
-    public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats) {
-        self.runID = runID; self.version = version; self.complete = complete; self.stats = stats
+    /// Segment ids where a new piece of the run starts in the field: the user typed or moved the caret between it and
+    /// the words before (a list item per line). Cleanup takes the pieces apart (`LiveDictationRun.split`).
+    public var pieces: [Int]?
+    public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats, pieces: [Int]? = nil) {
+        self.runID = runID; self.version = version; self.complete = complete; self.stats = stats; self.pieces = pieces
     }
 }
 
@@ -117,6 +120,13 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// Cut-short parts of the sentence being spoken, with the keys of their segments.
     private var open: [String] = []
     private var openKeys: [Int] = []
+    /// Finals (by index, which is the segment id) where the keyboard started a new piece (`split`).
+    public private(set) var pieceStarts: Set<Int> = []
+    /// Units a split closed, still to be cleaned (`drainSplitUnits`).
+    private var splitClosed: [SplitUnit] = []
+    private struct SplitUnit: Sendable, Equatable { var key: Int; var text: String }
+    /// The user split the run into pieces: no whole-take pass joins them again.
+    public var isSplit: Bool { !pieceStarts.isEmpty }
 
     public init(runID: String = UUID().uuidString) { self.runID = runID }
 
@@ -168,6 +178,8 @@ public struct LiveDictationRun: Sendable, Equatable {
             return nil
         }
         let sentence = (open + [text]).joined(separator: " ")
+        // A new piece starts here: the open unit ends before it.
+        if pieceStarts.contains(finals.count) { closeOpenUnit(before: finals.count) }
         for k in openKeys + [key] { keys[k] = finals.count }
         finals.append(.init(id: finals.count, text: sentence, final: true))
         open = []; openKeys = []
@@ -187,6 +199,32 @@ public struct LiveDictationRun: Sendable, Equatable {
         openUnit = false
         guard let key = keys.filter({ $0.value == range.upperBound - 1 }).map(\.key).max() else { return nil }
         return (key, rawText(units.count - 1))
+    }
+
+    /// The keyboard started a new piece of the run at segment `index` (the user typed or moved between it and the words
+    /// before): a unit never spans the split, so each piece is cleaned on its own. The open unit closes before it (now,
+    /// or when that segment becomes final); the closed part is cleaned (`drainSplitUnits`). True when it was new.
+    @discardableResult
+    public mutating func split(before index: Int) -> Bool {
+        guard index > 0, !pieceStarts.contains(index) else { return false }
+        pieceStarts.insert(index)
+        if index < finals.count { closeOpenUnit(before: index) }
+        return true
+    }
+
+    /// Units closed by a split since the last call: (key of its last segment, raw text) to clean.
+    public mutating func drainSplitUnits() -> [(key: Int, text: String)] {
+        defer { splitClosed = [] }
+        return splitClosed.map { ($0.key, $0.text) }
+    }
+
+    private mutating func closeOpenUnit(before index: Int) {
+        guard openUnit, let range = units.last, range.lowerBound < index, index <= range.upperBound else { return }
+        units[units.count - 1] = range.lowerBound..<index
+        if index < range.upperBound { units.append(index..<range.upperBound) } else { openUnit = false }
+        guard let key = keys.filter({ $0.value == index - 1 }).map(\.key).max() else { return }
+        let closed = units.count - (index < range.upperBound ? 2 : 1)
+        splitClosed.append(SplitUnit(key: key, text: rawText(closed)))
     }
 
     /// Whether a unit's raw text is a whole unit: a sentence end with enough words, a line break, or the word cap.

@@ -118,7 +118,12 @@ final class KeyboardLinkHost: TranscriptSink {
                 }
                 if let dictation {
                     if let ack = dictationChannel.acknowledged() { dictation.acknowledge(sessionID: ack.sessionID, upTo: ack.upTo) }
-                    self.logLiveAck(liveChannel.acknowledged(), diagnostics: dictation.diagnostics)
+                    let liveAck = liveChannel.acknowledged()
+                    // The user split the live run into pieces (a list typed line by line): each is cleaned on its own.
+                    if let liveAck, liveAck != self.liveAckSeen, let pieces = liveAck.pieces {
+                        await dictation.livePieces(runID: liveAck.runID, startingAt: pieces)
+                    }
+                    self.logLiveAck(liveAck, diagnostics: dictation.diagnostics)
                     publishDictation()
                 }
                 for intent in channel.drainIntents() {
