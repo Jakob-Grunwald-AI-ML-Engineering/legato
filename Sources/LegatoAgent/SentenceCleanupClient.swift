@@ -325,7 +325,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         let request: JSONValue = .object([
             "model": .string(model.rawValue), "max_tokens": .number(Double(DictationTakeLimits.maxTokens(characters: input.text.count))),
             "stream": .bool(true), "thinking": Self.thinking(model),
-            "system": .array([.object(["type": .string("text"), "text": .string(takePrompt), "cache_control": .object(["type": .string("ephemeral")])])]),
+            "system": .array([.object(["type": .string("text"), "text": .string(takePrompt), "cache_control": dictationCache])]),
             "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try encoder.encode(source), as: UTF8.self))])])])
         return try encoder.encode(request)
     }
@@ -342,6 +342,8 @@ public struct SentenceCleanupClient: SentenceCleaning {
     private static func toolChoice(_ model: ModelChoice) -> JSONValue {
         model == .haiku ? .object(["type": .string("tool"), "name": .string("submit_sentence")]) : .object(["type": .string("auto")])
     }
+    /// Dictation comes in bursts often more than 5 minutes apart: the 1-hour TTL lets a burst read the previous one's entry.
+    static let dictationCache: JSONValue = .object(["type": .string("ephemeral"), "ttl": .string("1h")])
     /// The prompt cache needs 512 tokens on Haiku 5.5 (prompt-caching docs); the prompt and tool are above it.
     private static let dictationPrompt: String = PromptLayers.dictationCleanup()
     private static func request(_ input: SentenceCleanupInput, model: ModelChoice) throws -> Data {
@@ -367,7 +369,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
             "model": .string(model.rawValue), "max_tokens": .number(1024), "stream": .bool(true),
             "thinking": Self.thinking(model),
             "system": input.dictation == nil ? .string(instruction)
-                : .array([.object(["type": .string("text"), "text": .string(dictationPrompt), "cache_control": .object(["type": .string("ephemeral")])])]),
+                : .array([.object(["type": .string("text"), "text": .string(dictationPrompt), "cache_control": dictationCache])]),
             "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try encoder.encode(source), as: UTF8.self))])]),
             "tools": try .encoding([tool]), "tool_choice": Self.toolChoice(model)])
         return try encoder.encode(request)

@@ -160,7 +160,7 @@ private final class CapturingMessages: MessagesStreaming {
     #expect(a.text == "\n", "A spoken line break survives trimming")
     let requests = fixture.requests.withLock { $0 }.map { try! JSONDecoder().decode(JSONValue.self, from: $0) }
     let system = try #require(requests[0]["system"]).decode([JSONValue].self)
-    #expect(system.count == 1 && system[0]["cache_control"]?["type"] == .string("ephemeral"))
+    #expect(system.count == 1 && system[0]["cache_control"] == SentenceCleanupClient.dictationCache, "1-hour cache on the dictation prompt")
     let promptValue = try #require(system[0]["text"])
     let prompt = try promptValue.decode(String.self)
     #expect(prompt.contains("Never rephrase") && prompt.contains("Never answer a question"))
