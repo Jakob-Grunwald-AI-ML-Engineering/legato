@@ -82,7 +82,7 @@ import Observation
         pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true)
         instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
         #endif
-        dictation = MacDictationSession(pipeline: pipeline, instruction: instruction, microphone: AutomaticInputSource(), vocabularyURL: vocabularyURL)
+        dictation = MacDictationSession(pipeline: pipeline, instruction: instruction, microphone: AutomaticInputSource(preference: { MicrophonePreference.dictation() }), vocabularyURL: vocabularyURL)
         fieldEditor = MacFieldEditor(capture: { () -> FocusedField in
             #if DEBUG
             // Acceptance of the unreadable-field path in an app whose fields are readable.

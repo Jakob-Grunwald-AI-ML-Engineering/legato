@@ -10,9 +10,13 @@ public struct AudioInputCandidate: Sendable, Codable, Equatable {
     public let available: Bool
     public let channels: Int?
     public let sampleRate: Double?
-    public init(id: String, name: String, kind: Kind, available: Bool = true, channels: Int? = nil, sampleRate: Double? = nil) {
+    /// Stable across launches and reconnects (Core Audio's device UID on the Mac; `id` there is the session-local
+    /// device number). Nil where `id` is already stable (iOS port UIDs).
+    public let uid: String?
+    public init(id: String, name: String, kind: Kind, available: Bool = true, channels: Int? = nil, sampleRate: Double? = nil,
+                uid: String? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.available = available
-        self.channels = channels; self.sampleRate = sampleRate
+        self.channels = channels; self.sampleRate = sampleRate; self.uid = uid
     }
     public var isUsable: Bool {
         available && !id.isEmpty && kind != .aggregate && kind != .virtual && kind != .other
@@ -57,6 +61,8 @@ struct AutomaticInputHardware: Sendable {
     let make: @Sendable (AudioInputCandidate) -> any AudioSource
     let isCurrent: @Sendable (AudioInputCandidate) async -> Bool
     var fallbackFromCombined: (@Sendable (String) async throws -> Void)? = nil
+    /// The `id` of the system's default input, for `MicrophonePreference.systemDefault`.
+    var defaultInputID: @Sendable () -> String? = { nil }
 }
 
 /// Distinguishes a rejected category downgrade from a recoverable engine-start failure.
@@ -81,8 +87,8 @@ public enum AutomaticInputError: Error, Sendable, LocalizedError {
     }
 }
 
-/// Uses the system's combined input when admitted in dual-route mode; otherwise prefers built-in.
-/// Silence is healthy PCM.
+/// Uses the system's combined input when admitted in dual-route mode; otherwise prefers built-in, or the input
+/// `preference` names (see `MicrophonePreference`). Silence is healthy PCM.
 /// Missing/invalid buffers and native source failure trigger bounded same-stream recovery.
 public actor AutomaticInputSource: ResumableAudioSource {
     public nonisolated let resumptions: AsyncStream<Void>
@@ -91,6 +97,8 @@ public actor AutomaticInputSource: ResumableAudioSource {
     public nonisolated var diagnostics: AutomaticInputDiagnostics { diagnosticState.withLock { $0 } }
     public static func availableInputs() async -> [AudioInputCandidate] { await AutomaticInputHardware.live.candidates() }
     private let hardware: AutomaticInputHardware
+    /// Read at every connect (start and recovery), so a changed setting applies to the next capture.
+    private let preference: @Sendable () -> MicrophonePreference
     private let timeout: Duration
     private let clock: @Sendable () -> Double
     private let preflight: Duration
@@ -115,15 +123,17 @@ public actor AutomaticInputSource: ResumableAudioSource {
     private var recoveryBudgetUsed = 0
     private var healthySince: Double?
 
-    public init() {
+    public init(preference: @escaping @Sendable () -> MicrophonePreference = { .automatic }) {
+        self.preference = preference
         hardware = .live; timeout = .seconds(2); preflight = .zero; healthInterval = .seconds(1); clock = { ProcessInfo.processInfo.systemUptime }
         (resumptions, resumeSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
     /// `healthInterval` defaults to half the no-PCM timeout. Tests pass a large timeout (an upper bound that
     /// only a silent input reaches) with a short interval, so scheduling stalls cannot fake a dead microphone.
     init(hardware: AutomaticInputHardware, timeout: Duration = .milliseconds(100), preflight: Duration = .zero,
-         healthInterval: Duration? = nil, clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
-        self.hardware = hardware; self.timeout = timeout; self.preflight = preflight; self.clock = clock
+         healthInterval: Duration? = nil, clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime },
+         preference: @escaping @Sendable () -> MicrophonePreference = { .automatic }) {
+        self.hardware = hardware; self.preference = preference; self.timeout = timeout; self.preflight = preflight; self.clock = clock
         self.healthInterval = healthInterval ?? timeout / 2
         (resumptions, resumeSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
@@ -196,7 +206,9 @@ public actor AutomaticInputSource: ResumableAudioSource {
         defer { if token == generation { connecting = false } }
         let candidates = await hardware.candidates()
         diagnosticState.withLock { $0.candidates = candidates }
-        for candidate in AudioInputCandidate.ordered(only ?? candidates) where !failed.contains(candidate.id) {
+        let order = only?.filter(\.isSelectable)
+            ?? AudioInputCandidate.ordered(candidates, preference: preference(), defaultID: hardware.defaultInputID())
+        for candidate in order where !failed.contains(candidate.id) {
             try check(token)
             let fresh = hardware.make(candidate)
             source = fresh; selected = candidate; routeGeneration += 1
@@ -302,7 +314,8 @@ public actor AutomaticInputSource: ResumableAudioSource {
         guard token == generation, !connecting, let format else { return }
         let routeChanged = if let selected { await !hardware.isCurrent(selected) } else { true }
         guard token == generation, !connecting else { return }
-        if !fault && !stale && !routeChanged && clippingWindows >= 2 && !qualityTrialUsed {
+        // A microphone the user chose stays, clipping or not.
+        if !fault && !stale && !routeChanged && clippingWindows >= 2 && !qualityTrialUsed && preference() == .automatic {
             await compareClippingAlternative(token: token, format: format)
             return
         }

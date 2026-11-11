@@ -65,6 +65,23 @@ final class BufferConverter: Sendable {
 }
 
 extension BufferConverter {
+    /// Deinterleaved Float32 at `sampleRate` with `channels` channels. Above two channels AVAudioFormat needs a channel
+    /// layout (the plain initializer returns nil), so those get a discrete one: a MacBook Pro's built-in microphone is
+    /// a three-channel array.
+    static func deinterleavedFloat(sampleRate: Double, channels: AVAudioChannelCount) -> AVAudioFormat? {
+        guard channels > 2 else {
+            return AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: channels, interleaved: false)
+        }
+        guard let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)) else { return nil }
+        return AVAudioFormat(standardFormatWithSampleRate: sampleRate, channelLayout: layout)
+    }
+
+    /// A converter for a hardware input. Arrays of more than two channels (beamforming capsules, multichannel
+    /// interfaces) keep their first channel rather than an average of spaced microphones.
+    static func forInput(_ input: AVAudioFormat, to spec: AudioFormatSpec) -> BufferConverter? {
+        BufferConverter(from: input, to: spec, firstChannelOnly: input.channelCount > 2)
+    }
+
     fileprivate static func fold(_ input: AVAudioPCMBuffer, to fold: MonoFold) -> AVAudioPCMBuffer? {
         let channels = Int(input.format.channelCount)
         let frames = Int(input.frameLength)

@@ -21,7 +21,7 @@ struct SettingsView: View {
         }
         var subtitle: String {
             switch self {
-            case .voice: "Quietly reduce background voices while you dictate."
+            case .voice: "Choose the microphone and quietly reduce background voices."
             case .overview: "Your voice, ready to write."
             case .writing: "Shape text where you write."
             case .meetings: "Record, transcribe and summarize your calls."
@@ -72,7 +72,7 @@ struct SettingsView: View {
                         Text(currentPage.subtitle).foregroundStyle(.secondary)
                     }
                     switch currentPage {
-                    case .voice: voice
+                    case .voice: VStack(alignment: .leading, spacing: 20) { DictationMicrophoneCard(); voice }
                     case .overview: overview
                     case .writing: writing
                     case .meetings: SettingsMeetingsPage()
