@@ -222,6 +222,8 @@ public final class MacFieldQueue {
         if runs[index].regions.isEmpty, runs[index].version < 0 {
             for other in runs.indices where other != index { close(&runs[other], cause: "newRun") }
         }
+        // A key or click the queue has not read yet already closed the open region: new words wait for the user's caret.
+        if userActedFlag { for other in runs.indices { close(&runs[other], cause: "input") } }
         runs[index].version = version
         retarget(&runs[index], to: Array(text))
         note(.live, id: nil, run: runID, text: text, detail: "v\(version)")
