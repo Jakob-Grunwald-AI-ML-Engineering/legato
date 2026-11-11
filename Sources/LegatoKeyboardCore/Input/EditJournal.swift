@@ -19,6 +19,8 @@ public enum EditJournal {
         case edit
         /// A live dictation snapshot.
         case live
+        /// The field was read for an instruction (`FieldQueue.markRead`; `id`: the instruction).
+        case read
         /// The field's report, when it changed, and the step's outcome.
         case step
         case sent, confirmed, resync, nudged, applied, dropped, liveApplied, regionStarted, regionClosed

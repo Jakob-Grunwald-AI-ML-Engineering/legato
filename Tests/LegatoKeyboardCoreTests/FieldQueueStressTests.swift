@@ -3,7 +3,8 @@ import Testing
 @testable import LegatoKeyboardCore
 
 /// Seeded random sessions against a misbehaving field: late reports, short windows, Safari's block echo, emoji that
-/// move as one unit; dictation that grows, flips and gets cleaned up; the user's keys, deletes, cursor moves, taps,
+/// move as one unit; dictation that grows, flips and gets cleaned up (in some sessions late, after the user deleted,
+/// moved and tapped: the cleanup must start no region at the user's cursor); the user's keys, deletes, cursor moves, taps,
 /// selections and outside typing; Magic edits. CI runs a few dozen seeds; `LEGATO_STRESS_RUNS=5000` runs a long
 /// local pass, and `LEGATO_STRESS_SEED=<n>` replays one seed.
 @Suite struct FieldQueueStressTests {
@@ -33,6 +34,16 @@ import Testing
     ///   replaced the selection, so the field holds text no report showed. Key placement is not asserted after that.
     @Test(arguments: [UInt64(69), 190, 230, 241, 265, 398, 548, 615, 856, 1035, 1121, 1138, 1376, 1392, 1555, 1615, 1886, 2251, 2729, 2989, 3569, 4568])
     func pinnedSeedsKeepTheInvariants(seed: UInt64) {
+        var session = StressSession(seed: seed, lateCleanups: false)
+        if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
+    }
+
+    /// Late cleanups and regions the user edited:
+    /// - 944: raw words out of sight after a resync still start at the cursor (not the cleanup's doing).
+    /// - 165, 1571: a merge into a region the user edited deleted and retyped the user's letter (a whole-word span; a
+    ///   diff that took the user's "a" for the keyboard's). The queue now knows who wrote each character.
+    @Test(arguments: [UInt64(165), 944, 1571])
+    func pinnedLateCleanupSeedsKeepTheInvariants(seed: UInt64) {
         var session = StressSession(seed: seed)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
     }
@@ -73,8 +84,15 @@ struct StressSession {
     private var rng: SeededGenerator
     /// Choices added later draw from here, so earlier seeds replay the same sessions.
     private var extra: SeededGenerator
+    /// Late cleanups draw from their own generator (they replace the take's cleanup in some sessions).
+    private var late: SeededGenerator
+    private let lateCleanups: Bool
 
-    init(seed: UInt64) { self.seed = seed; rng = SeededGenerator(seed: seed); extra = SeededGenerator(seed: seed ^ 0x57A1E) }
+    /// `lateCleanups`: off for the pinned seeds, which replay their sessions as they were when they failed.
+    init(seed: UInt64, lateCleanups: Bool = true) {
+        self.seed = seed; self.lateCleanups = lateCleanups
+        rng = SeededGenerator(seed: seed); extra = SeededGenerator(seed: seed ^ 0x57A1E); late = SeededGenerator(seed: seed ^ 0x1A7E)
+    }
 
     private mutating func chance(_ p: Double) -> Bool { Double.random(in: 0..<1, using: &rng) < p }
     private mutating func pick<T>(_ items: [T]) -> T { items[Int.random(in: 0..<items.count, using: &rng)] }
@@ -99,6 +117,8 @@ struct StressSession {
         if field.hostDelays, Bool.random(using: &extra) { field.staleReportsAfterTap = Int.random(in: 1...4, using: &extra) }
         let clean = chance(0.35)
         var rig = QueueRig(field, config: .init(animated: chance(0.5)))
+        // The cleanup comes late: after the take is typed and the user edited and moved (real Claude cleanup, ~20 s).
+        let lateCleanup = lateCleanups && Double.random(in: 0..<1, using: &late) < 0.4
 
         var dictated: [String] = []
         var version = 0
@@ -115,7 +135,7 @@ struct StressSession {
                 changed = true
             }
             if !complete, tick > ticks * 2 / 3, !dictated.isEmpty { complete = true; changed = true }
-            if complete, tick == ticks - 20, !dictated.isEmpty {
+            if complete, tick == ticks - 20, !dictated.isEmpty, !lateCleanup {
                 dictated[0] = dictated[0].prefix(1).uppercased() + dictated[0].dropFirst()
                 dictated[dictated.count - 1] += "."
                 changed = true
@@ -127,11 +147,38 @@ struct StressSession {
             if !clean { userActs(&rig, &keys) }
             rig.tick()
         }
+        var lateFrom: Int?
+        if lateCleanup, !dictated.isEmpty {
+            // Every raw word is in; the user deletes, moves and taps; then the cleaned take arrives.
+            rig.drain(limitMs: 30_000 + 150 * Double(rig.field.text.count))
+            if !clean {
+                for _ in 0..<Int.random(in: 10...40, using: &late) {
+                    let roll = Double.random(in: 0..<1, using: &late)
+                    if roll < 0.08 { rig.queue.enqueue(.deleteBackward) }
+                    else if roll < 0.13 { rig.queue.enqueue(.move(Int.random(in: -8...8, using: &late))) }
+                    else if roll < 0.16 { rig.field.tap(at: Int.random(in: 0...rig.field.text.count, using: &late)); rig.outsidePending = true }
+                    rig.tick()
+                }
+                rig.drain(limitMs: 30_000 + 150 * Double(rig.field.text.count))
+            }
+            dictated[0] = dictated[0].prefix(1).uppercased() + dictated[0].dropFirst()
+            dictated[dictated.count - 1] += "."
+            version += 1
+            // (Raw words still untyped, out of sight after a resync, start at the cursor as they should.)
+            if !rig.queue.hasUntypedRest { lateFrom = rig.events.count }
+            rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: version, segments: [
+                .init(id: 0, text: dictated.joined(separator: " "), cleaned: true, final: true),
+            ], complete: true))
+        }
         // A selection holds dictation and edits (typing would replace it): the user taps it away at the end.
         if rig.field.selection > 0 { rig.field.tap(at: rig.field.caret); rig.outsidePending = true }
         // One grapheme an op, each waiting for the (perhaps lagging) field: the time it may take grows with the text.
         let target = dictated.joined(separator: " ")
         let drained = rig.drain(limitMs: 30_000 + 150 * Double(rig.field.text.count + target.count))
+        // A cleanup rewrites words already typed: it starts no new region at the user's cursor.
+        if let lateFrom, drained, rig.events[lateFrom...].contains(where: { if case .regionStarted = $0.event { true } else { false } }) {
+            return "the late cleanup started a region at the user's cursor (text \(rig.field.string.debugDescription))"
+        }
         return check(rig, drained: drained, clean: clean, initial: initial, caret: caret, target: target, keys: keys)
     }
 

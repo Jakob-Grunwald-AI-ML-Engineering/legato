@@ -87,6 +87,9 @@ final class KeyboardController {
     @ObservationIgnored private var queue = FieldQueue()
     @ObservationIgnored private var queueDocumentID: String?
     @ObservationIgnored private var pumping = false
+    /// When the queue last stepped: each step is given the time since, so a field that held still while the ticker
+    /// slept counts as still (a run that comes after a tap starts at once, not after the quiet wait).
+    @ObservationIgnored private var lastStepAt: ContinuousClock.Instant?
     /// Completions of the user's edits (word row, undo, versions) and of instruction edits, by edit id.
     @ObservationIgnored private var editCompletions: [String: (FieldQueue.Event?) -> Void] = [:]
     /// The host-state edit already handed to the queue.
@@ -727,16 +730,26 @@ final class KeyboardController {
         journal.write(entry)
     }
 
+    private func markRead(_ id: String) {
+        syncQueueField()
+        queue.markRead(id)
+        var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .read, field: queueDocumentID)
+        entry.id = id
+        journal.write(entry)
+    }
+
     private static var uptimeMs: Double { ProcessInfo.processInfo.systemUptime * 1000 }
 
     /// Steps the queue against the field's report and carries out the op it hands over. Not reentrant (the field's
     /// change notes during an op come back here); paused while a walk reads the field.
-    private func pump(elapsedMs: Double = 0) {
+    private func pump() {
         guard !isTornDown, isVisible, !isFieldBusy, !pumping, document.documentID != nil, !document.isSecureTextEntry else { return }
         pumping = true
         defer { pumping = false }
         syncQueueField()
-        var elapsed = elapsedMs
+        let now = ContinuousClock.now
+        var elapsed = lastStepAt.map { Self.milliseconds(now - $0) } ?? 0
+        lastStepAt = now
         for _ in 0..<8 {
             let report = currentReport
             let action = queue.step(report: report, elapsedMs: elapsed)
@@ -840,7 +853,7 @@ final class KeyboardController {
         if reveal.needsTicks { applyHost(elapsedMs: elapsedMs) }
         if typist.needsTicks { dictationStep(elapsedMs: elapsedMs) }
         cancelRevokedInstructionEdits()
-        pump(elapsedMs: elapsedMs)
+        pump()
         if queue.isIdle, !reveal.needsTicks, !typist.needsTicks { stopTicker() }
     }
 
@@ -1014,10 +1027,22 @@ final class KeyboardController {
         pump()
         while !queue.isHome, !isTornDown, isVisible, clock.now - start < limit {
             try? await Task.sleep(for: Self.tickInterval)
-            pump(elapsedMs: Self.milliseconds(Self.tickInterval))
+            pump()
         }
         if !queue.isHome { trace?("queue pause timed out") }
         return queue.isHome
+    }
+
+    /// Before a read for an instruction: the keyboard's own writes on their way (a cleanup landing) go in first, so the
+    /// read shows them (bounded; the edit is placed through anything later, `FieldQueue.markRead`).
+    private func landOwnWork(limit: Duration = .seconds(3)) async {
+        let clock = ContinuousClock(), start = clock.now
+        pump()
+        while queue.hasOwnWork, !isTornDown, isVisible, clock.now - start < limit {
+            try? await Task.sleep(for: Self.tickInterval)
+            pump()
+        }
+        if queue.hasOwnWork { trace?("own work before read timed out") }
     }
 
     private func resumeQueue() {
@@ -1226,9 +1251,11 @@ final class KeyboardController {
         guard Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge, let documentID = document.documentID, !document.isSecureTextEntry else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
         }
-        // The queue lands the op in flight and brings the caret home; the read has the cursor to itself until it ends.
-        // That can take longer than the app waits for a first answer: it hears that the read is under way.
-        if !queue.isHome { link.writeReadReply(FieldReadReply(id: request.id, state: .reading)) }
+        // The keyboard's own writes on their way land first; then the queue lands the op in flight and brings the caret
+        // home, and the read has the cursor to itself until it ends. That can take longer than the app waits for a first
+        // answer: it hears that the read is under way.
+        if !queue.isHome || queue.hasOwnWork { link.writeReadReply(FieldReadReply(id: request.id, state: .reading)) }
+        if request.kind == .context || request.kind == .contextInPlace { await landOwnWork() }
         defer { resumeQueue() }
         guard await pauseQueue() else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "The field is busy. Try again in a moment."))
@@ -1243,6 +1270,8 @@ final class KeyboardController {
         guard !link.instructionCancelled(request.instructionID) else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "This instruction was cancelled."))
         }
+        // The edit that comes back finds its scope through the changes made from now on (`FieldQueue.markRead`).
+        if request.kind == .context || request.kind == .contextInPlace { markRead(request.instructionID) }
         let before = shown(document.contextBefore), after = shown(document.contextAfter)
         let selection = document.selectedText.flatMap { $0.isEmpty ? nil : $0 }
         #if DEBUG
@@ -1348,7 +1377,7 @@ final class KeyboardController {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled before editing."))
         }
         let queued = FieldQueue.Edit(id: edit.id, kind: .magic, before: edit.before, after: edit.after, selected: edit.selected,
-                                     target: edit.target, cursorAtEnd: edit.selected != nil, paced: true)
+                                     target: edit.target, cursorAtEnd: edit.selected != nil, paced: true, readID: edit.instructionID)
         let started = Date()
         let outcome: FieldQueue.Event? = await withCheckedContinuation { continuation in
             magicEditIDs[edit.id] = edit.instructionID
@@ -1358,6 +1387,7 @@ final class KeyboardController {
             // app's own wait; a later answer is ignored.
         }
         magicEditIDs[edit.id] = nil
+        queue.forgetRead(edit.instructionID)
         let ms = Int(Date().timeIntervalSince(started) * 1000)
         typing.hostEdited()
         versions = nil

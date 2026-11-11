@@ -72,6 +72,12 @@ public enum SpanPlanner {
         }
     }
 
+    /// The minimal grapheme diff with words that change by half or more replaced whole (`FieldMerge`'s changes).
+    static func wordHunks(from old: [Character], to new: [Character]) -> [Hunk] {
+        let hunks = ShadowEditPlanner.diff(old, new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
+        return hunks.isEmpty ? [] : snapToWords(hunks, old: old, new: new)
+    }
+
     /// The time hunks take: a move between them (an edit's settle, then the move's), one op per deletion, a settle
     /// where a delete is followed by typing, and one op per typed grapheme (or one op for all at pace 0).
     static func cost(of hunks: [Hunk], paceMs: Double, moveSettleMs: Double, editSettleMs: Double) -> Double {

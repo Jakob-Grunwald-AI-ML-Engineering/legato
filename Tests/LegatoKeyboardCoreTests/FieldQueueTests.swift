@@ -378,4 +378,124 @@ import Testing
         #expect(rig.field.reorders == 0)
         #expect(took < 15_000)
     }
+
+    // MARK: Late cleanups and Magic against the run's own edits (UAT, Safari, real Claude cleanup)
+
+    private static let line = "please remember to send the quarterly report to the whole team before Friday afternoon"
+
+    /// Types the line, deleting as the UAT did while it typed: the "e" of "whole", all of "Friday", the end of "afternoon".
+    private static func typedWithDeletes() -> QueueRig {
+        var rig = QueueRig(FakeField(""), config: .init(animated: true))
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 1, segments: [.init(id: 0, text: line, final: true)]))
+        func type(until suffix: String, thenDelete count: Int, rig: inout QueueRig) {
+            while !rig.field.string.hasSuffix(suffix), rig.clockMs < 30_000 { rig.tick() }
+            for _ in 0..<count { rig.queue.enqueue(.deleteBackward) }
+        }
+        type(until: "whole", thenDelete: 1, rig: &rig)
+        type(until: "Friday", thenDelete: 6, rig: &rig)
+        type(until: "afternoon", thenDelete: 2, rig: &rig)
+        rig.drain()
+        return rig
+    }
+
+    @Test func aLateCleanupAfterUserEditsLandsInTheRunsRegionsNotAtTheCursor() {
+        var rig = Self.typedWithDeletes()
+        #expect(rig.field.string == "please remember to send the quarterly report to the whol team before afterno")
+        // The user taps right after "please"; the cleanup arrives much later.
+        rig.field.tap(at: 6)
+        rig.run(ms: 1_000)
+        let from = rig.events.count
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [
+            .init(id: 0, text: "Please remember to send the quarterly report to the whole team before Friday afternoon.", cleaned: true, final: true),
+        ], complete: true))
+        let drained = rig.drain(); #expect(drained)
+        // The "." goes at the end of the run's last region; the capital of an untouched word lands; the user's own
+        // deletes stay (no "e", no "Friday"), and nothing starts at the user's cursor.
+        #expect(rig.field.string == "Please remember to send the quarterly report to the whol team before afterno.")
+        #expect(!rig.events[from...].contains { if case .regionStarted = $0.event { true } else { false } })
+        #expect(rig.queue.userCursor == 6 && rig.field.caret == 6)
+        #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: true) })
+    }
+
+    @Test func aCleanupHunkOnAWordTheUserChangedIsDroppedAloneTheOthersLand() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "alpha beta gamma delta"))
+        rig.drain()
+        // The user deletes the "a" of "delta" (at the region's end), then moves before "gamma".
+        rig.queue.enqueue(.deleteBackward)
+        rig.queue.enqueue(.move(-10))
+        rig.drain()
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [
+            .init(id: 0, text: "Alpha beta, gamma Delta.", cleaned: true, final: true),
+        ], complete: true))
+        rig.drain()
+        // "delta" → "Delta" touches the user's word and is dropped; the capital, the comma and the "." land.
+        #expect(rig.field.string == "Alpha beta, gamma delt.")
+        #expect(rig.drops.map(\.reason) == [.userEdited])
+    }
+
+    @Test func newRawWordsAfterATapStillStartAtTheUsersCursor() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "first words"))
+        rig.drain()
+        rig.queue.enqueue(.deleteBackward)
+        rig.drain()
+        rig.field.tap(at: 0)
+        rig.run(ms: 500)
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [
+            .init(id: 0, text: "first words", final: true), .init(id: 1, text: "more", final: false),
+        ]))
+        rig.drain()
+        #expect(rig.field.string == "more first word")
+    }
+
+    /// Magic read the field while the run's cleanup was still on its way; the cleanup landed before the result came.
+    @Test func magicReadBeforeACleanupLandsOverIt() {
+        var rig = QueueRig(FakeField(""), config: .init(animated: true))
+        rig.queue.enqueue(snap(1, "please send the report"))
+        rig.drain()
+        rig.queue.markRead("i1")
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [
+            .init(id: 0, text: "Please send the report.", cleaned: true, final: true),
+        ], complete: true))
+        rig.drain()
+        #expect(rig.field.string == "Please send the report.")
+        rig.queue.enqueue(FieldQueue.Edit(id: "m", kind: .magic, before: "please send the report", target: "Bitte sende den Bericht.",
+                                          cursorAtEnd: false, paced: true, readID: "i1"))
+        rig.drain()
+        #expect(rig.field.string == "Bitte sende den Bericht.")
+        #expect(rig.applied == ["m"])
+        #expect(rig.drops.isEmpty)
+    }
+
+    @Test func magicKeepsTheCleanupsChangesItDoesNotTouch() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "please send the report to anna"))
+        rig.drain()
+        rig.queue.markRead("i1")
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [
+            .init(id: 0, text: "Please send the report to Anna.", cleaned: true, final: true),
+        ], complete: true))
+        rig.drain()
+        rig.queue.enqueue(FieldQueue.Edit(id: "m", kind: .magic, before: "please send the report to anna", target: "please send the summary to anna",
+                                          cursorAtEnd: false, readID: "i1"))
+        rig.drain()
+        #expect(rig.field.string == "Please send the summary to Anna.")
+        #expect(rig.applied == ["m"])
+    }
+
+    @Test func magicIsCancelledOnlyByTheUsersChangeToItsScope() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "please send the report"))
+        rig.drain()
+        rig.queue.markRead("i1")
+        rig.queue.enqueue(.move(-3))
+        rig.queue.enqueue(.insert("x"))
+        rig.drain()
+        rig.queue.enqueue(FieldQueue.Edit(id: "m", kind: .magic, before: "please send the report", target: "PLEASE SEND THE REPORT",
+                                          cursorAtEnd: false, readID: "i1"))
+        rig.drain()
+        #expect(rig.field.string == "please send the repxort")
+        #expect(rig.drops.map(\.reason) == [.userEdited])
+    }
 }

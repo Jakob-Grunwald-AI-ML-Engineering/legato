@@ -23,6 +23,7 @@ enum JournalReplay {
             case .input: if let input = entry.input { queue.enqueue(input) }
             case .edit: if let edit = entry.edit { queue.enqueue(edit, user: entry.user ?? false) }
             case .live: if let snapshot = entry.snapshot { queue.enqueue(snapshot) }
+            case .read: if let id = entry.id { queue.markRead(id) }
             case .step:
                 guard let report = entry.report else { continue }
                 let action = queue.step(report: report, elapsedMs: lastStep.map { entry.t - $0 } ?? 0)
@@ -49,6 +50,7 @@ enum JournalReplay {
             case .input: if let input = entry.input { rig.queue.enqueue(input) }
             case .edit: if let edit = entry.edit { rig.queue.enqueue(edit, user: entry.user ?? false) }
             case .live: if let snapshot = entry.snapshot { rig.queue.enqueue(snapshot) }
+            case .read: if let id = entry.id { rig.queue.markRead(id) }
             default: break
             }
         }
