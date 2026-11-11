@@ -91,8 +91,6 @@ public struct FieldQueue: Sendable {
         case ambiguous
         /// The user waited for the op in flight long enough: it counts as landed.
         case assumed
-        /// A confirmed move did not hold (the page put its caret back).
-        case caretReset
     }
     public enum CloseCause: String, Sendable, Codable { case keystroke, cursor, resync, selection, newRun, edit }
 
@@ -119,20 +117,16 @@ public struct FieldQueue: Sendable {
         case regionClosed(runID: String, cause: CloseCause)
         /// The op just sent inserts behind the user's cursor: the user's cursor stays in front of it.
         case insertedBehind
+        /// A zero-offset move went out to make the proxy report afresh (the op in flight stays in flight).
+        case nudged
     }
-
-    /// Caret-reset handling per field (no session latch). `verifyMoves`: a confirmed move must still show
-    /// `moveVerifyMs` later before anything else goes; a move the page undoes ends the unit and resyncs.
-    public enum CaretStrategy: String, Sendable, Codable { case movesHold, verifyMoves }
 
     public struct Config: Sendable, Equatable {
         public var animated: Bool
         public var movesByCharacters: Bool
-        public var caret: CaretStrategy
         public var capitalization: AutoCapitalizationType
-        public init(animated: Bool = true, movesByCharacters: Bool = false, caret: CaretStrategy = .movesHold,
-                    capitalization: AutoCapitalizationType = .none) {
-            self.animated = animated; self.movesByCharacters = movesByCharacters; self.caret = caret; self.capitalization = capitalization
+        public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none) {
+            self.animated = animated; self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
         }
     }
 
@@ -146,7 +140,17 @@ public struct FieldQueue: Sendable {
     public static let stableMs = 150.0
     /// The typewriter pace of paced inserts.
     public static let charMs = 30.0
-    public static let moveVerifyMs = 60.0
+    /// Measured on Safari (no field puts its caret back after a move): the proxy reports a move at once, before the
+    /// host applied it (25–50 ms later), and the host can apply ops sent close together out of order. So a move is
+    /// confirmed only by a report at least `moveSettleMs` after it, and no op follows the last one sooner than
+    /// `sendGapMs`. An edit the proxy has not reported after `nudgeAfterMs` gets a zero-offset move (its report can
+    /// stay stale until a move).
+    public static let moveSettleMs = 80.0
+    public static let sendGapMs = 50.0
+    public static let nudgeAfterMs = 250.0
+    /// An op whose result the report cannot tell from the state before it (a delete with nothing known before the
+    /// cursor, a collapsing move) is taken as landed only after the host's longest measured transit.
+    public static let transitMs = 150.0
     /// An edit that cannot be placed yet waits this long for the report to catch up.
     public static let placeGraceMs = 400.0
     /// An edit whose text went out of sight (a resync) waits this long for it to show again.
@@ -257,7 +261,9 @@ public struct FieldQueue: Sendable {
         var input: Input?
         var retried = false
         var isMove: Bool
-        var shownMs: Double?
+        /// A report counts only this long after the last send (a move's settle gap).
+        var settleMs: Double
+        var nudged = false
         var lastReport: Report?
     }
     private var inFlight: InFlight?
@@ -393,25 +399,35 @@ public struct FieldQueue: Sendable {
         }
 
         if var flight = inFlight {
-            if matches(report, anywhere: flight.anywhere) {
+            // The proxy shows a move at once, before the host applied it: only a report after the settle gap counts.
+            let settled = sinceSendMs >= flight.settleMs
+            // A report that fits the state before the op as well proves nothing (the op may still be on its way), and
+            // neither does one that shows a state the host lags behind.
+            if settled, matches(report, anywhere: flight.anywhere), flight.anywhere || !pins(report, in: flight.pre),
+               !lagging.contains(where: { pins(report, in: $0.state) }) {
                 if flight.anywhere { relocate(report) }
-                if config.caret == .verifyMoves, flight.isMove {
-                    flight.shownMs = (flight.shownMs ?? -elapsedMs) + elapsedMs
-                    if flight.shownMs! < Self.moveVerifyMs { inFlight = flight; return .wait }
-                }
                 events.append(.confirmed(waitedMs: flight.waitedMs))
                 merge(report)
                 inFlight = nil
                 lagging = []
+            } else if !settled {
+                flight.waitedMs += elapsedMs
+                inFlight = flight
+                return .wait
             } else {
                 flight.waitedMs += elapsedMs
                 if report != flight.lastReport { flight.lastReport = report }
                 let pinsPre = pins(report, in: flight.pre)
-                if flight.shownMs != nil, pinsPre {
-                    // The move showed, then the old place again: the page put its caret back.
-                    restore(flight.pre); inFlight = nil; abortUnit()
-                    events.append(.resync(.caretReset))
-                } else if !userLane.isEmpty, flight.waitedMs >= Self.userBoundMs, pinsPre {
+                if !flight.nudged, !flight.isMove, flight.waitedMs >= Self.nudgeAfterMs, selection == 0, report.selected == nil {
+                    // An edit the proxy has not reported yet (it can stay on its last report): a zero-offset move makes
+                    // it report the field afresh. It moves nothing, so it cannot land out of order.
+                    flight.nudged = true; flight.settleMs = Self.moveSettleMs
+                    inFlight = flight
+                    sinceSendMs = 0
+                    events.append(.nudged)
+                    return .send(.move(0))
+                }
+                if !userLane.isEmpty, flight.waitedMs >= Self.userBoundMs, pinsPre {
                     // The host lags: the op counts as landed so the user's input can go.
                     inFlight = nil
                     lagging.append((flight.pre, 0))
@@ -442,6 +458,11 @@ public struct FieldQueue: Sendable {
     // MARK: Choosing the next op
 
     private mutating func next() -> Action {
+        // Ops sent close together can land out of order: the next waits for the gap.
+        if sinceSendMs < Self.sendGapMs {
+            if inFlight == nil { for ri in runs.indices { ack(ri) } }
+            return .wait
+        }
         // User input first; a running unit gives the caret back first.
         if !userLane.isEmpty {
             abortUnit()
@@ -937,7 +958,7 @@ public struct FieldQueue: Sendable {
         if let moveTo { cursor = moveTo } else { apply(&self) }
         var isMove = false
         if case .move = op { isMove = true }
-        inFlight = InFlight(op: op, lane: lane, anywhere: anywhere, pre: pre, isMove: isMove)
+        inFlight = InFlight(op: op, lane: lane, anywhere: anywhere, pre: pre, isMove: isMove, settleMs: anywhere ? Self.transitMs : isMove ? Self.moveSettleMs : 0)
         sinceSendMs = 0
         events.append(.sent(op, lane))
         return .send(op)

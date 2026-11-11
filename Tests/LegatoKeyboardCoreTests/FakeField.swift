@@ -2,8 +2,12 @@ import Foundation
 @testable import LegatoKeyboardCore
 
 /// A text field that misbehaves like real hosts: late reports, a short window around the cursor, Safari's block echo
-/// (`"\n "` where a window starts at a block), emoji that move as one unit, and optionally a page that puts its caret
-/// back after a move.
+/// (`"\n "` where a window starts at a block), and emoji that move as one unit. With `hostDelays` it also behaves like
+/// Safari as measured (2026-11 caret spike):
+/// - the proxy reports a move at once (optimistically), while the host applies it 25–50 ms later;
+/// - the host applies an edit 5–110 ms after it was sent, so ops sent close together can land out of order;
+/// - an edit sent right after a move leaves the proxy on its post-move report until the next move.
+/// `reorders` and `staleTriggers` count when the keyboard set off the last two: the queue must never.
 struct FakeField {
     var text: [Character]
     var caret: Int
@@ -16,21 +20,40 @@ struct FakeField {
     var blockEcho = false
     /// A move of one unit crosses a whole emoji (Safari); otherwise moves count UTF-16 units.
     var movesByCharacters = false
-    /// The page puts the caret back where it was a tick after a move.
-    var caretResets = false
+    /// Safari's timing (see above); without it every op applies at once.
+    var hostDelays = false
+    var nowMs = 0.0
+    private(set) var reorders = 0
+    private(set) var staleTriggers = 0
     private var history: [FieldQueue.Report] = []
-    private var pendingReset: Int?
+    private var stuck: FieldQueue.Report?
+    private var lastMoveSentMs = -1_000.0
+    private var seq = 0
+    private var rng = SeededGenerator(seed: 7)
 
     /// Who wrote each character, and who deleted what: the stress test's provenance checks.
     enum Origin: String { case initial, outside, user, live, edit }
     var origin: [Origin]
-    /// Who the next op is from.
-    var writer = Origin.outside
     var deletions: [(char: Character, origin: Origin, by: Origin, racing: Bool)] = []
-    /// The next op races with an outside action the queue has not seen yet.
-    var racing = false
     /// Where the user's caret is: taps and the user's moves put it there; edits before it shift it.
     var userCaret: Int
+    /// For every user insert as it lands: the field's caret and the user's caret.
+    var userInserts: [(caret: Int, userCaret: Int, racing: Bool)] = []
+
+    /// How one op is to be carried out and accounted for.
+    struct Send {
+        var op: ShadowOp
+        var writer = Origin.outside
+        /// The op races with an outside action the queue has not seen yet.
+        var racing = false
+        /// The insert lands behind the user's caret (which stays in front of it).
+        var behind = false
+        /// The first characters of a user insert are the run's (a key that finished a dictated word).
+        var runPrefix = 0
+        /// After it lands, the user's caret is this far from the caret (the queue resynced after an outside action).
+        var userOffset: Int?
+    }
+    private var pending: [(seq: Int, at: Double, send: Send)] = []
 
     init(_ text: String = "", caret: Int? = nil) {
         self.text = Array(text)
@@ -40,9 +63,9 @@ struct FakeField {
     }
 
     var string: String { String(text) }
+    var settled: Bool { pending.isEmpty }
 
-    /// The report as the field shows it now.
-    var current: FieldQueue.Report {
+    private static func report(text: [Character], caret: Int, selection: Int, window: Int, blockEcho: Bool) -> FieldQueue.Report {
         var start = max(0, caret - window)
         var prefix = ""
         if blockEcho, let breakIndex = text[start..<caret].lastIndex(where: \.isNewline) {
@@ -56,18 +79,53 @@ struct FakeField {
         return .init(before: before, after: after, selected: selected)
     }
 
-    /// One host turn: returns the (possibly late) report.
-    mutating func tick() -> FieldQueue.Report {
-        if let back = pendingReset { caret = back; pendingReset = nil }
-        history.append(current)
-        if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1) }
-        return history.first!
+    /// The report as the proxy shows it now: the field, with moves not applied yet already in it.
+    var current: FieldQueue.Report {
+        var shown = self
+        shown.hostDelays = false
+        for item in pending.sorted(by: { $0.seq < $1.seq }) { if case .move = item.send.op { shown.carryOut(item.send) } }
+        return Self.report(text: shown.text, caret: shown.caret, selection: shown.selection, window: window, blockEcho: blockEcho)
     }
 
-    mutating func apply(_ op: ShadowOp) {
-        switch op {
+    /// One host turn at `nowMs`: ops due land, and the (possibly late, possibly stale) report comes back.
+    mutating func tick() -> FieldQueue.Report {
+        let due = pending.filter { $0.at <= nowMs }.sorted { $0.at < $1.at }
+        for item in due {
+            pending.removeAll { $0.seq == item.seq }
+            // An op sent earlier is still on its way: this one lands before it.
+            if pending.contains(where: { $0.seq < item.seq }) {
+                reorders += 1
+                if ProcessInfo.processInfo.environment["LEGATO_STRESS_TRACE"] == "1" { print("        REORDER", item.send.op, "before", pending.filter { $0.seq < item.seq }.map { ($0.send.op, $0.at) }, "now", nowMs) }
+            }
+            carryOut(item.send)
+        }
+        history.append(current)
+        if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1) }
+        return stuck ?? history.first!
+    }
+
+    /// The keyboard sends an op.
+    mutating func send(_ send: Send) {
+        guard hostDelays else { carryOut(send); return }
+        seq += 1
+        var delay: Double
+        if case .move = send.op {
+            stuck = nil
+            lastMoveSentMs = nowMs
+            delay = Double.random(in: 25...50, using: &rng)
+        } else {
+            if nowMs - lastMoveSentMs < 30 { stuck = current; staleTriggers += 1 }
+            delay = Double.random(in: 5...110, using: &rng)
+        }
+        pending.append((seq, nowMs + delay, send))
+    }
+
+    /// Applies an op right away (the in-process harness, or tests that drive the field by hand).
+    mutating func apply(_ op: ShadowOp) { carryOut(Send(op: op)) }
+
+    private mutating func carryOut(_ send: Send) {
+        switch send.op {
         case .move(let units):
-            let from = caret
             if selection > 0 { if units >= 0 { caret += selection }; selection = 0 }
             var remaining = abs(units)
             while remaining > 0 {
@@ -81,39 +139,46 @@ struct FakeField {
                     caret -= 1
                 }
             }
-            if caretResets, units != 0 { pendingReset = from }
-            if writer == .user { userCaret = caret }
+            if send.writer == .user { userCaret = caret }
         case .deleteBackward(let count):
             for _ in 0..<count {
-                if selection > 0 { remove(caret..<(caret + selection)); selection = 0; continue }
+                if selection > 0 { remove(caret..<(caret + selection), send); selection = 0; continue }
                 guard caret > 0 else { break }
-                remove((caret - 1)..<caret); caret -= 1
+                remove((caret - 1)..<caret, send); caret -= 1
             }
         case .insert(let string):
-            if selection > 0 { remove(caret..<(caret + selection)); selection = 0 }
+            if send.writer == .user { userInserts.append((caret, userCaret, send.racing)) }
+            if selection > 0 { remove(caret..<(caret + selection), send); selection = 0 }
             let chars = Array(string)
             text.insert(contentsOf: chars, at: caret)
-            origin.insert(contentsOf: Array(repeating: writer, count: chars.count), at: caret)
-            if userCaret >= caret { userCaret += chars.count }
+            var origins = Array(repeating: send.writer, count: chars.count)
+            for i in 0..<min(send.runPrefix, origins.count) { origins[i] = .live }
+            origin.insert(contentsOf: origins, at: caret)
+            if userCaret > caret || (userCaret == caret && !send.behind) { userCaret += chars.count }
             caret += chars.count
         }
+        if let offset = send.userOffset { userCaret = caret + offset }
     }
 
-    private mutating func remove(_ range: Range<Int>) {
-        for i in range { deletions.append((text[i], origin[i], writer, racing)) }
+    private mutating func remove(_ range: Range<Int>, _ send: Send) {
+        for i in range { deletions.append((text[i], origin[i], send.writer, send.racing)) }
         text.removeSubrange(range); origin.removeSubrange(range)
         if userCaret >= range.upperBound { userCaret -= range.count } else if userCaret > range.lowerBound { userCaret = range.lowerBound }
     }
 
-    /// The user taps somewhere (outside the keyboard).
-    mutating func tap(at index: Int) { caret = max(0, min(text.count, index)); selection = 0; userCaret = caret }
-    mutating func select(_ range: Range<Int>) { caret = range.lowerBound; selection = range.count; userCaret = caret }
-    /// Another keyboard (a hardware keyboard) types: invisible to the queue except through reports.
-    mutating func typeOutside(_ string: String) {
-        let previous = writer; writer = .outside
-        apply(.insert(string))
-        writer = previous
+    /// The user's caret is this far from the caret once what is on its way has landed.
+    mutating func setUserOffset(_ offset: Int) {
+        if let last = pending.indices.max(by: { pending[$0].at < pending[$1].at }) { pending[last].send.userOffset = offset }
+        else { userCaret = caret + offset }
     }
+
+    /// The user taps somewhere (outside the keyboard).
+    mutating func tap(at index: Int) { outsideNow(); caret = max(0, min(text.count, index)); selection = 0; userCaret = caret }
+    mutating func select(_ range: Range<Int>) { outsideNow(); caret = range.lowerBound; selection = range.count; userCaret = caret }
+    /// Another keyboard (a hardware keyboard) types: invisible to the queue except through reports.
+    mutating func typeOutside(_ string: String) { outsideNow(); carryOut(Send(op: .insert(string), writer: .outside)) }
+    /// Ops already on their way when the user acts outside the keyboard race with it (as on a real host).
+    private mutating func outsideNow() { for i in pending.indices { pending[i].send.racing = true } }
 }
 
 /// The keyboard's loop in miniature: steps the queue against a `FakeField` every `tickMs`.
@@ -125,10 +190,12 @@ struct QueueRig {
     var sent: [(ms: Double, op: ShadowOp)] = []
     var events: [(ms: Double, event: FieldQueue.Event)] = []
     var lastLane: FieldQueue.Lane?
-    /// For every user insert: the field's caret and where the user's caret was when it went out.
-    var userInsertCarets: [(ms: Double, caret: Int, userCaret: Int, racing: Bool)] = []
     /// The user acted outside the keyboard (tap, selection, another keyboard) and the queue has not resynced since.
-    var outsidePending = false
+    var outsidePending = false { didSet { if outsidePending { outsideAtMs = clockMs } } }
+    private var outsideAtMs = -1_000_000.0
+    /// An op sent now races with an outside action: the queue has not resynced since, or it was a moment ago (an
+    /// op already on its way, a report still late).
+    private var racing: Bool { outsidePending || clockMs - outsideAtMs < FieldQueue.confirmLimitMs + 200 }
 
     /// Prints every step (`LEGATO_STRESS_TRACE=1`).
     var trace = ProcessInfo.processInfo.environment["LEGATO_STRESS_TRACE"] == "1"
@@ -144,6 +211,7 @@ struct QueueRig {
     /// keyboard's loop does for a synchronous host).
     mutating func tick() {
         clockMs += tickMs
+        field.nowMs = clockMs
         var elapsed = tickMs
         for _ in 0..<64 {
             let report = field.tick()
@@ -169,28 +237,17 @@ struct QueueRig {
                       "model", queue.modelText.debugDescription, "cursor", queue.cursor, "user", queue.userCursor, queue.debugState)
             }
             guard case .send(let op) = action else {
-                if syncUserCaret { field.userCaret = field.caret + queue.userCursor - queue.cursor }
+                if syncUserCaret { field.setUserOffset(queue.userCursor - queue.cursor) }
                 break
             }
             sent.append((clockMs, op))
-            if syncUserCaret, case .insert = op, lastLane == .user { field.userCaret = field.caret }
-            field.writer = lastLane.map { lane in lane == .user ? .user : lane == .live ? .live : .edit } ?? .edit
-            if case .insert = op, lastLane == .user { userInsertCarets.append((clockMs, field.caret, field.userCaret, outsidePending)) }
-            // The run starting in front of text puts a space behind the user's caret (which stays before it).
-            let keep = field.userCaret
-            if trace, lastLane == .live, case .deleteBackward = op, field.caret > 0, field.origin[field.caret - 1] != .live {
-                print("        BAD DELETE of", String(field.text[field.caret - 1]).debugDescription, "by live")
-            }
-            let before = field.caret
-            field.racing = outsidePending
-            field.apply(op)
+            let writer: FakeField.Origin = lastLane.map { lane in lane == .user ? .user : lane == .live ? .live : .edit } ?? .edit
+            var send = FakeField.Send(op: op, writer: writer, racing: racing, behind: behind)
             // A key that finished a dictated word carries the word's rest: that part is the run's (keys are one character).
-            if lastLane == .user, case .insert(let s) = op, s.count > 1 {
-                for i in before..<(before + s.count - 1) where i < field.origin.count { field.origin[i] = .live }
-            }
-            if behind { field.userCaret = keep }
-            if syncUserCaret { field.userCaret = field.caret + queue.userCursor - queue.cursor }
-            if field.lagTicks > 0 { break }
+            if writer == .user, case .insert(let s) = op, s.count > 1 { send.runPrefix = s.count - 1 }
+            if syncUserCaret { send.userOffset = queue.userCursor - queue.cursor }
+            field.send(send)
+            if field.lagTicks > 0 || field.hostDelays { break }
         }
     }
 
@@ -202,7 +259,7 @@ struct QueueRig {
         let end = clockMs + limitMs
         while clockMs < end {
             tick()
-            if queue.isIdle, !queue.hasOpInFlight { tick(); if queue.isIdle { return true } }
+            if queue.isIdle, !queue.hasOpInFlight, field.settled { tick(); if queue.isIdle { return true } }
         }
         return false
     }

@@ -196,7 +196,7 @@ public struct ScopedEditAck: Codable, Sendable, Equatable {
     public var cursor: Int?
     /// Why nothing (or not all) was edited (no field text).
     public var reason: String?
-    /// Not applied, but stopped partway (the field did not keep up, `ScopedEditQueue`): the scope's text as the field
+    /// Not applied, but stopped partway (the field did not keep up, `FieldQueue`): the scope's text as the field
     /// shows it now, so an undo can still put the original back. Nil with `applied` false: the field is as it was, or
     /// its text is unknown (`reason` says which).
     public var partial: String?

@@ -1,9 +1,9 @@
 import Foundation
 
-/// Reveals host text one character at a time. Revisions and final cleanup preserve surviving characters
-/// through the same verified edit queue as magic. A host update received during an edit waits until its
-/// operations confirm; only then is its applied cursor acknowledged. A failed transaction stops that run
-/// without issuing further mutations. Context and document identity protect user edits and field changes.
+/// Reveals host text one character at a time. Pure producer for the field queue (`FieldQueue`): each plan proposes at
+/// most one edit (`pendingEdit`, the change of the text before the cursor as minimal character edits), and nothing more
+/// until the queue reports it `landed` (then the applied cursor is acknowledged) or `dropped` (that run stops, without
+/// further mutations). Context and document identity protect user edits and field changes.
 public struct TypewriterReveal: Sendable, Equatable {
     /// How long a tick waits for the field's context to show the tentative text before giving up.
     public static let settleLimitMs = 250.0
@@ -12,7 +12,7 @@ public struct TypewriterReveal: Sendable, Equatable {
     public private(set) var needsTicks = false
 
     private struct Pending: Sendable, Equatable {
-        var queue: ScopedEditQueue
+        var edit: FieldQueue.Edit
         var cursor: AppliedCursor?
         var runID: String?
         var documentID: String
@@ -20,7 +20,6 @@ public struct TypewriterReveal: Sendable, Equatable {
     }
     private var pending: Pending?
     private var stoppedRun: String?
-    private var movesByCharacters = false
     private var runID: String?
     private var text = ""
     private var revealed = 0
@@ -30,14 +29,41 @@ public struct TypewriterReveal: Sendable, Equatable {
 
     public init() {}
 
+    /// The edit waiting in the field queue (enqueue it once; its id names it in `landed` and `dropped`).
+    public var pendingEdit: FieldQueue.Edit? { pending?.edit }
+
     /// A host Send is evidence that even an unacknowledged appended character left with the message.
     /// This cursor is only for clear detection; it never confirms a partially applied rewrite.
     public func cursorBeforeFieldClear(fallback: AppliedCursor?) -> AppliedCursor? {
-        guard let pending, pending.appendOnly,
-              pending.queue.predictedWindow.before == pending.queue.expectedBefore else { return fallback }
+        guard let pending, pending.appendOnly else { return fallback }
         var sent = pending.cursor
         sent?.finalApplied = false
         return sent
+    }
+
+    /// The queue landed the pending edit: its cursor is the run's applied cursor now.
+    public mutating func landed(_ id: String) -> AppliedCursor? {
+        guard let transaction = pending, transaction.edit.id == id else { return nil }
+        pending = nil
+        // Reconcile a newer host snapshot on the next tick.
+        needsTicks = true
+        return transaction.cursor
+    }
+
+    /// The queue dropped the pending edit (its text changed under it): the run stops; the returned cursor says what
+    /// was not applied.
+    public mutating func dropped(_ id: String, state: HostState, cursor: AppliedCursor?) -> AppliedCursor? {
+        guard let transaction = pending, transaction.edit.id == id else { return nil }
+        stoppedRun = transaction.runID; pending = nil
+        var failed = cursor
+        failed?.finalApplied = false
+        if transaction.cursor?.finalReplaced != nil { failed?.finalReplaced = false }
+        let handled = max(transaction.cursor?.revisionHandled ?? 0, state.delivery == .live ? state.revision?.n ?? 0 : 0)
+        if handled > (failed?.revisionHandled ?? 0) {
+            failed?.revisionHandled = handled
+            failed?.revisionSkipped = true
+        }
+        return failed
     }
 
     /// The edits that bring the field closer to `state`. `elapsedMs` is the time since the last tick (0 for
@@ -45,9 +71,8 @@ public struct TypewriterReveal: Sendable, Equatable {
     /// or a flush) reveals everything now.
     public mutating func plan(
         state: HostState, cursor: AppliedCursor?, contextBefore: String, documentID: String?, animated: Bool,
-        elapsedMs: Double = 0, contextAfter: String = "", hasSelection: Bool = false, movesByCharacters: Bool = false
+        elapsedMs: Double = 0, contextAfter: String = "", hasSelection: Bool = false
     ) -> ProxyPlan {
-        self.movesByCharacters = movesByCharacters
         needsTicks = false
         if hasSelection {
             pending = nil; stoppedRun = state.runID
@@ -62,15 +87,18 @@ public struct TypewriterReveal: Sendable, Equatable {
                 // A final publication may be the only update for this new run. Start it now;
                 // returning with no ticks would silently drop the entire insertion.
                 return plan(state: state, cursor: previous, contextBefore: contextBefore, documentID: documentID,
-                            animated: animated, elapsedMs: elapsedMs, contextAfter: contextAfter,
-                            hasSelection: hasSelection, movesByCharacters: movesByCharacters)
+                            animated: animated, elapsedMs: elapsedMs, contextAfter: contextAfter, hasSelection: hasSelection)
             }
             if state.delivery == .live, let cursor, cursor.runID == transaction.runID,
                cursor.sentCount != (transaction.cursor?.sentCount ?? 0) {
                 // The host sent the currently shown text; no queued mutation of that text may follow it.
                 pending = nil
             } else {
-                return advance(state: state, cursor: cursor, contextBefore: contextBefore, contextAfter: contextAfter, elapsedMs: elapsedMs)
+                // The queue is landing the last edit: nothing more until it says how that went.
+                needsTicks = true
+                var waiting = cursor
+                waiting?.finalApplied = false
+                return ProxyPlan(ops: [], cursor: waiting)
             }
         }
         guard let documentID, state.target == .keyboard, let runID = state.runID, state.delivery != .hold,
@@ -152,62 +180,29 @@ public struct TypewriterReveal: Sendable, Equatable {
                     documentID: documentID, elapsedMs: elapsedMs)
     }
 
-    /// Use the same confirmed edit queue as magic, including for held takes and final cleanup.
+    /// The plan's ops as one edit of the text before the cursor, for the field queue. The returned plan carries the ops
+    /// (for a caller that applies them itself) and the cursor as it stands until the edit lands.
     private mutating func play(_ plan: ProxyPlan, state: HostState, cursor: AppliedCursor?, contextBefore: String,
                                contextAfter: String, documentID: String?, elapsedMs: Double) -> ProxyPlan {
         guard !plan.ops.isEmpty, let documentID else { return plan }
-        let ops: [ShadowOp] = plan.ops.flatMap { op -> [ShadowOp] in
+        let ops: [ShadowOp] = plan.ops.map { op in
             switch op {
-            case .move(let units): return [.move(units)]
-            case .deleteBackward(let count): return Array(repeating: .deleteBackward(1), count: count)
-            case .insert(let text): return text.map { .insert(String($0)) }
-            }
-        }
-        let result = ShadowEditPlanner.simulate(ops: ops, shadow: contextBefore + contextAfter, cursor: contextBefore.utf16.count)
-        let edit = ScopedEdit(instructionID: "host", documentID: documentID, before: contextBefore, after: contextAfter, target: result.text)
-        let scoped = ScopedEditPlanner.Plan(ops: ops, cursor: result.cursor,
-            targetBefore: String(decoding: result.text.utf16.prefix(result.cursor), as: UTF16.self))
-        pending = Pending(queue: ScopedEditQueue(edit, plan: scoped, windowBefore: contextBefore, movesByCharacters: movesByCharacters), cursor: plan.cursor,
-                          runID: state.runID, documentID: documentID,
-                          appendOnly: ops.allSatisfy { if case .insert = $0 { true } else { false } })
-        return advance(state: state, cursor: cursor, contextBefore: contextBefore, contextAfter: contextAfter, elapsedMs: elapsedMs)
-    }
-
-    private mutating func advance(state: HostState, cursor: AppliedCursor?, contextBefore: String, contextAfter: String, elapsedMs: Double) -> ProxyPlan {
-        guard var transaction = pending else { return ProxyPlan(ops: [], cursor: cursor) }
-        var waitingCursor = cursor
-        waitingCursor?.finalApplied = false
-        let action = transaction.queue.step(reportedBefore: contextBefore, reportedAfter: contextAfter,
-                                           hasSelection: false, elapsedMs: elapsedMs)
-        switch action {
-        case .send(let op):
-            pending = transaction; needsTicks = true
-            let proxy: ProxyOp = switch op {
             case .move(let units): .move(units)
             case .deleteBackward(let count): .deleteBackward(count)
             case .insert(let text): .insert(text)
             }
-            return ProxyPlan(ops: [proxy], cursor: waitingCursor)
-        case .wait:
-            pending = transaction; needsTicks = true
-            return ProxyPlan(ops: [], cursor: waitingCursor)
-        case .done:
-            pending = nil
-            // Reconcile a newer host snapshot on the next tick after acknowledging this transaction.
-            needsTicks = true
-            return ProxyPlan(ops: [], cursor: transaction.cursor)
-        case .stopped:
-            stoppedRun = transaction.runID; pending = nil
-            var failed = cursor
-            failed?.finalApplied = false
-            if transaction.cursor?.finalReplaced != nil { failed?.finalReplaced = false }
-            let handled = max(transaction.cursor?.revisionHandled ?? 0, state.delivery == .live ? state.revision?.n ?? 0 : 0)
-            if handled > (failed?.revisionHandled ?? 0) {
-                failed?.revisionHandled = handled
-                failed?.revisionSkipped = true
-            }
-            return ProxyPlan(ops: [], cursor: failed)
         }
+        let result = ShadowEditPlanner.simulate(ops: ops, shadow: contextBefore, cursor: contextBefore.utf16.count)
+        let old = Array(contextBefore), new = Array(result.text)
+        var common = 0
+        while common < min(old.count, new.count), old[common] == new[common] { common += 1 }
+        let edit = FieldQueue.Edit(kind: .host, before: String(old[common...]), target: String(new[common...]), cursorAtEnd: true)
+        pending = Pending(edit: edit, cursor: plan.cursor, runID: state.runID, documentID: documentID,
+                          appendOnly: ops.allSatisfy { if case .insert = $0 { true } else { false } })
+        needsTicks = true
+        var waiting = cursor
+        waiting?.finalApplied = false
+        return ProxyPlan(ops: plan.ops, cursor: waiting)
     }
 
     /// `.live`: a revision not yet handled replaces the run text typed on earlier ticks, which the planner looks

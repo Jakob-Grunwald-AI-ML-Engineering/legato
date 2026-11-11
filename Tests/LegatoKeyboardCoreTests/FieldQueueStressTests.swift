@@ -61,6 +61,8 @@ struct StressSession {
         field.window = Int.random(in: 20...80, using: &rng)
         field.blockEcho = blockEcho
         field.movesByCharacters = emoji && chance(0.7)
+        // Safari's measured timing (optimistic moves, edits landing 5–110 ms later, stale reports after a 0-gap edit).
+        field.hostDelays = chance(0.7)
         let clean = chance(0.35)
         var rig = QueueRig(field, config: .init(animated: chance(0.5)))
 
@@ -121,6 +123,9 @@ struct StressSession {
 
     private func check(_ rig: QueueRig, drained: Bool, clean: Bool, initial: String, caret: Int, target: String, keys: [String]) -> String? {
         guard drained else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
+        // The host's timing traps: ops landing out of order, a report stuck after an edit right behind a move.
+        if rig.field.reorders > 0 { return "\(rig.field.reorders) ops landed out of order (sent too close together)" }
+        if rig.field.staleTriggers > 0 { return "\(rig.field.staleTriggers) edits went right behind a move (stale reports)" }
         // One op in flight: a confirmation or a resync between any two ops.
         var open = false
         for (_, event) in rig.events {
@@ -142,7 +147,7 @@ struct StressSession {
         }
         if userInserts.count != keys.count { return "keys sent \(userInserts.count) of \(keys.count)" }
         for (sent, key) in zip(userInserts, keys) where !sent.hasSuffix(key) { return "key \(key.debugDescription) went out as \(sent.debugDescription)" }
-        if let miss = rig.userInsertCarets.first(where: { $0.caret != $0.userCaret && !$0.racing }) {
+        if let miss = rig.field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }) {
             return "a key landed at \(miss.caret), the user's caret was at \(miss.userCaret)"
         }
         guard clean else { return nil }

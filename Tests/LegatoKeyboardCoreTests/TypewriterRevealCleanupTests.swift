@@ -18,7 +18,8 @@ private struct Rig {
         let applied = applyProxyOps(plan.ops, to: field, cursor: caret)
         field = applied.text
         caret = applied.cursor
-        cursor = plan.cursor
+        // The field queue lands the proposed edit at once here (this field confirms synchronously).
+        cursor = reveal.pendingEdit.flatMap { reveal.landed($0.id) } ?? plan.cursor
         return plan
     }
 
@@ -60,14 +61,14 @@ private func state(
         rig.feed(state(phase: .listening, committed: raw, delivery: .hold))
         let final = state(phase: .idle, committed: raw, delivery: .hold, finalText: cleaned)
         rig.feed(final)
-        #expect(rig.cursor?.finalApplied != true)
         rig.drain(final)
         #expect(rig.field == cleaned)
         #expect(rig.cursor?.finalApplied == true)
         #expect(!rig.reveal.needsTicks)
         for _ in 0..<10 { rig.feed(final, elapsedMs: 33) }
         #expect(rig.field == cleaned)
-        #expect(rig.inserts == cleaned.map { String($0) })
+        // One edit for the field queue, which lands it (its pace is the queue's).
+        #expect(rig.inserts.joined() == cleaned)
     }
 
     // MARK: replace

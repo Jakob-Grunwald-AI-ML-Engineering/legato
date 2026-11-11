@@ -129,7 +129,8 @@ private struct TickRig {
         field = applied.text
         caret = applied.cursor
         if !plan.ops.isEmpty { watch.ownEdit(at: at(ms)) }
-        cursor = plan.cursor
+        // The field queue lands the proposed edit at once here (this field confirms synchronously).
+        cursor = reveal.pendingEdit.flatMap { reveal.landed($0.id) } ?? plan.cursor
     }
 
     /// Whether the field may be typed into now.

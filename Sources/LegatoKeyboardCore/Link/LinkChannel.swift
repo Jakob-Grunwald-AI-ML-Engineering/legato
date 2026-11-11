@@ -105,6 +105,6 @@ public enum LinkChannel {
     /// How long the app waits for the keyboard to take an instruction's edit.
     public static let editTimeout: TimeInterval = 4
     /// How long the app waits for the ack of an edit the keyboard took: its ops land one confirmed op at a time
-    /// (`ScopedEditQueue.limitMs`, after the live run settles).
+    /// (`FieldQueue.budgetMs`, queued behind the user's input).
     public static let editLandTimeout: TimeInterval = 30
 }
