@@ -37,6 +37,22 @@ enum SyntheticKeys {
         post([Stroke(key: CGKeyCode(key), down: true), Stroke(key: CGKeyCode(key), down: false)])
     }
 
+    /// `count` presses of one key, no modifiers, posted as one sequence.
+    @discardableResult
+    static func taps(_ key: Int, count: Int) -> Bool {
+        guard count > 0 else { return false }
+        let code = CGKeyCode(key)
+        return post(Array(repeating: [Stroke(key: code, down: true), Stroke(key: code, down: false)], count: count).flatMap { $0 })
+    }
+
+    /// `key` with one modifier, as a real keyboard sends it: the modifier down, the key down and up, the modifier up.
+    @discardableResult
+    static func chord(_ modifier: Int, flag: CGEventFlags, _ key: Int) -> Bool {
+        let modifier = CGKeyCode(modifier), key = CGKeyCode(key)
+        return post([Stroke(key: modifier, down: true, flags: flag), Stroke(key: key, down: true, flags: flag),
+                     Stroke(key: key, down: false, flags: flag), Stroke(key: modifier, down: false)])
+    }
+
     /// `text` (at most one key event's worth, no control characters) as one Unicode key down and up, no modifiers.
     @discardableResult
     static func type(_ text: String) -> Bool {

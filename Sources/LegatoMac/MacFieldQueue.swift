@@ -12,10 +12,16 @@ import LegatoKeyboardCore
 /// - Typewriter: one grapheme per op at the typewriter pace; `paced` false (Reduce Motion) or `flush()` sends each
 ///   change whole.
 /// - Keystrokes: a field that reads but ignores Accessibility writes (`TextTarget.typesKeys`, Chromium web content)
-///   is edited with synthetic keys, one key in flight, each confirmed by reading the text and selection back:
-///   Left/Right arrows to move, Backspace to delete, one grapheme per Unicode key to type. `KeystrokePlanner` chooses
-///   the keys (whole-word and merged spans, minimal or block per span, about `KeystrokePlanner.budgetMs` per change,
-///   paced by the backlog). A key whose guard fails is not sent; the next step reads the field again and replans.
+///   is edited with synthetic keys, one key in flight, each confirmed by reading the field back: Backspace to delete,
+///   one grapheme per Unicode key to type. An edit key counts by the field's value (the expected text at its place);
+///   a caret that lags behind a landed key is waited for, never answered with the key again. `KeystrokePlanner`
+///   chooses the keys (whole-word and merged spans, minimal or block per span, about `KeystrokePlanner.budgetMs` per
+///   change, paced by the backlog). A key whose guard fails is not sent; the next step reads again and replans.
+/// - Jumps: the caret goes straight to a change and back. Each jump is one verified step: an Accessibility caret set
+///   where the field honours it (proven once by one arrow), else Option word hops, Command line or document hops
+///   where they provably aim at the target, and runs of plain arrows for the rest. A jump that lands elsewhere is
+///   corrected from where the field reports the caret, within `jumpRounds`; then arrows only. What works is
+///   remembered per field (`CaretJumps`).
 /// - Never freezes on the user: their typing and clicks are seen on the next read. Regions (the text a run or edit
 ///   owns) are found again at their place or uniquely elsewhere, and pending work is replanned there. A key or click
 ///   closes the open dictation region; later words start a new region at the user's caret, and revisions of closed
@@ -83,6 +89,20 @@ public final class MacFieldQueue {
     public static let keyQuiet = Duration.milliseconds(600)
     /// The pause at a transition between moves and edits.
     public static let keySettle = Duration.milliseconds(Int(KeystrokePlanner.settleMs))
+    /// How long an edit key whose text already shows may wait for the caret before it counts as landed with a lagging
+    /// caret (Chromium reports the caret of a key typed on an empty line or at a block start late).
+    public static let caretWait = Duration.milliseconds(150)
+    /// How long an Accessibility caret set may take to read back; one that does not is never tried again in the field.
+    public static let caretSetConfirm = Duration.milliseconds(60)
+    /// A caret set that did not read back may still take until this long after it.
+    public static let caretSetLateLimit = Duration.milliseconds(300)
+    /// A run of plain arrows is at most this long; farther moves hop first.
+    public static let arrowRun = 8
+    /// Jumps (caret sets and hops) toward one target before only arrows go.
+    public static let jumpRounds = 4
+    /// A move that lands off its prediction counts once the caret held still this long (a run of arrows shows its keys
+    /// one by one; a lagging caret report catches up).
+    public static let moveStable = Duration.milliseconds(40)
 
     // MARK: Configuration
 
@@ -122,6 +142,8 @@ public final class MacFieldQueue {
         /// What the region replaced when it started (a run's initial selection), for a retract.
         var original: String = ""
         var before = "", after = ""
+        /// `after` runs to the end of the field.
+        var afterAtEnd = false
         var failures = 0
         /// An op that did not read back yet: if the field shows this next, the op landed late.
         var landing: [Character]?
@@ -154,6 +176,8 @@ public final class MacFieldQueue {
         /// Run text after the last region that still needs a region of its own.
         var remainder: [Character] = []
         var retracted = false
+        /// Typed at the fast end of the pace (a panel take's one insert at its end).
+        var fast = false
         /// Words past the last region wait for a region of their own (whitespace alone waits for more words).
         var needsRegion: Bool {
             !retracted && remainder.contains { !$0.isWhitespace || $0.isNewline }
@@ -187,8 +211,24 @@ public final class MacFieldQueue {
     private var moveFailures = 0
     /// A modifier is held: the queue waits without counting toward `parkLimit` (a held push-to-talk key).
     private var holding = false
-    /// Keystroke fields: a key that did not read back in time, and the selection it would leave.
-    private var lateKey: (at: ContinuousClock.Instant, selection: UTF16Range)?
+    /// Keystroke fields: a key that did not read back in time (or whose caret lags), the selection it would leave, and
+    /// how long it may still show.
+    private var lateKey: (at: ContinuousClock.Instant, selection: UTF16Range, limit: Duration, edit: Bool)?
+    /// Keystroke fields: the caret the field still reported after an edit key's text showed, and where that key put
+    /// the real caret; while it reads so, one arrow makes the field report its caret afresh before anything else.
+    private var staleCaret: (reported: UTF16Range, believed: UTF16Range?)?
+    /// The late edit key's text showed (its caret may still be the one from before it).
+    private var lateKeyLanded = false
+    /// Keystroke fields: a caret set the field reported but never proved (`CaretJumps.Direct.tentative`) put the caret
+    /// here; the next edit there first proves it with one arrow.
+    private var probeAt: Int?
+    /// Keystroke fields: the target of the current move, and the jumps spent on it.
+    private var jumpGoal: UTF16Range?
+    private var jumpsSpent = 0
+    /// Hops that missed toward the current target are not repeated for it (a wrapped line's Command+Left stays put).
+    private var missedHops: Set<CaretHop> = []
+    /// What each keystroke field showed about moving its caret, by `TextTarget.fieldKey` (bounded).
+    private static var memory: [AnyHashable: CaretJumps] = [:]
     /// Keystroke fields: the last input mark seen, and when the user's real input last showed.
     private var lastMark: Int?
     private var inputAt: ContinuousClock.Instant?
@@ -205,6 +245,17 @@ public final class MacFieldQueue {
         else { return nil }
         return (UTF16Range(location: region.start, length: region.end - region.start), String(region.current))
     }
+    /// What this field showed so far about moving its caret (remembered across bindings of the same field).
+    public var caretJumps: CaretJumps {
+        get { target?.fieldKey.flatMap { Self.memory[$0] } ?? localJumps }
+        set {
+            guard let key = target?.fieldKey else { localJumps = newValue; return }
+            if Self.memory[key] == nil, Self.memory.count >= 64, let any = Self.memory.keys.first { Self.memory[any] = nil }
+            Self.memory[key] = newValue
+        }
+    }
+    /// A field with no `fieldKey`: what it showed is kept for this binding only.
+    private var localJumps = CaretJumps()
     public var debugState: String {
         let regions = runs.flatMap(\.regions).map { "\($0.runID ?? $0.id)@\($0.start)[\(String($0.current))→\(String($0.desired))]\($0.open ? "o" : "")\($0.lost ? "x" : "")" }
         return "rev=\(revision) owed=\(caretOwed) caret=\(userCaret.map { "\($0.location)+\($0.length)" } ?? "-") edits=\(edits.count)+\(editRegions.count) regions=\(regions)"
@@ -213,7 +264,8 @@ public final class MacFieldQueue {
     // MARK: Enqueue
 
     /// A live run's newest text (a snapshot, a growing take, a typed line). Older versions of a run are ignored.
-    public func live(runID: String, version: Int, text: String) {
+    /// `fast`: typed at the fast end of the pace (still one grapheme per op), for a finished take inserted at once.
+    public func live(runID: String, version: Int, text: String, fast: Bool = false) {
         let index = runs.firstIndex { $0.id == runID } ?? {
             runs.append(Run(id: runID)); return runs.count - 1
         }()
@@ -225,6 +277,7 @@ public final class MacFieldQueue {
         // A key or click the queue has not read yet already closed the open region: new words wait for the user's caret.
         if userActedFlag { for other in runs.indices { close(&runs[other], cause: "input") } }
         runs[index].version = version
+        if fast { runs[index].fast = true }
         retarget(&runs[index], to: Array(text))
         note(.live, id: nil, run: runID, text: text, detail: "v\(version)")
         schedule()
@@ -389,23 +442,34 @@ public final class MacFieldQueue {
         // Real input after this mark refuses a key planned from this read.
         let mark = target.inputMark
         guard target.isFocused(), let (doc, selection) = read(target).map({ ($0.0, $0.1) }) else { return false }
-        noteUser(selection: selection, doc: doc)
+        let keyed = !target.editsInPlace && target.typesKeys
+        // A caret that moved with no real input while a key of ours may still land is that key's, not the user's.
+        noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark))
         locateAll(doc)
         placeEdits(doc)
         finishEdits()
-        let keyed = !target.editsInPlace && target.typesKeys
         if keyed {
-            if mark != lastMark { if lastMark != nil { inputAt = now() }; lastMark = mark }
+            if mark != lastMark {
+                if lastMark != nil { inputAt = now() }
+                lastMark = mark
+                // Real input moves the real caret: a pending proof or refresh would prove nothing now.
+                probeAt = nil; staleCaret = nil
+            }
             // The user is typing or clicking: keys wait until they rest (without counting toward `parkLimit`).
             if let input = inputAt, now() - input < Self.keyQuiet { holding = true; return false }
         }
         if keyed, let late = lateKey {
             // Never a second key while the last one may still land.
-            if selection != late.selection, now() - late.at < Self.keyLateLimit { return false }
+            if selection != late.selection, now() - late.at < late.limit { return false }
             // A key that showed late was no failure.
             if selection == late.selection { moveFailures = 0 }
+            // An edit key whose caret never showed: the caret read may be the one from before it. One arrow makes the
+            // field report afresh before anything is planned from it.
+            else if late.edit, lateKeyLanded { staleCaret = (selection, late.selection) }
             lateKey = nil
         }
+        if let stale = staleCaret, stale.reported != selection { staleCaret = nil }
+        if let probe = probeAt, selection != UTF16Range(location: probe, length: 0) { probeAt = nil }
         if let region = nextRegion() {
             if keyed { return await performKey(region, doc: doc, selection: selection, target: target, mark: mark) }
             return await perform(region, doc: doc, target: target)
@@ -416,10 +480,11 @@ public final class MacFieldQueue {
         return false
     }
 
-    private func noteUser(selection: UTF16Range, doc: Document) {
-        let moved = !expectedSelections.isEmpty && !expectedSelections.contains(selection)
+    private func noteUser(selection: UTF16Range, doc: Document, ownKey: Bool = false) {
+        let moved = !ownKey && !expectedSelections.isEmpty && !expectedSelections.contains(selection)
         if userActedFlag || moved {
             userActedFlag = false
+            probeAt = nil; staleCaret = nil
             userCaret = selection
             caretOwed = false
             revision += 1
@@ -451,10 +516,13 @@ public final class MacFieldQueue {
             region.landing = nil
             let landingLength = String(landing).utf16.count
             // The landed text, with what followed the region still right after it (a prefix of the old text is not it).
+            let tail = region.start + landingLength
             if doc.string(region.start, landingLength) == String(landing), landing != region.current,
-               doc.context(after: region.start + landingLength, Self.contextChars) == region.after {
+               Self.tailMatches(old: region.after, oldAtEnd: region.afterAtEnd,
+                                new: doc.context(after: tail, Self.contextChars), newAtEnd: tail + doc.context(after: tail, Self.contextChars).utf16.count == doc.length) {
                 let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
                 apply(region, landed: landing)
+                if lateKey?.edit == true { lateKeyLanded = true }
                 if follows || (region.caretAfter && region.current == region.desired) { userCaret = UTF16Range(location: region.end, length: 0) }
                 refreshContext(region, doc)
                 return
@@ -507,6 +575,16 @@ public final class MacFieldQueue {
     private func refreshContext(_ region: Region, _ doc: Document) {
         region.before = doc.context(before: region.start, Self.contextChars)
         region.after = doc.context(after: region.end, Self.contextChars)
+        region.afterAtEnd = region.end + region.after.utf16.count == doc.length
+    }
+
+    /// Whether the text after an edit is still what followed it before. A rich editor shows an empty last line as a
+    /// placeholder line break: it goes when the line gets text and comes when the line empties, so at the end of the
+    /// field one trailing line break more or less is the same text.
+    static func tailMatches(old: String, oldAtEnd: Bool, new: String, newAtEnd: Bool) -> Bool {
+        if new == old { return true }
+        guard oldAtEnd, newAtEnd else { return false }
+        return (old.hasSuffix("\n") && new == String(old.dropLast())) || new == old + "\n"
     }
 
     private func placeEdits(_ doc: Document) {
@@ -652,12 +730,16 @@ public final class MacFieldQueue {
              selection: wanted)
         if pacedNow, !insertion.isEmpty {
             let remaining = ShadowEditPlanner.changes(from: region.current, to: region.desired).reduce(0) { $0 + $1.text.count }
-            await sleep(TypewriterPlan.interval(steps: remaining + 2))
+            await sleep(isFast(region) ? .milliseconds(Int(KeystrokePlanner.floorMs)) : TypewriterPlan.interval(steps: remaining + 2))
         }
         return true
     }
 
     // MARK: Keystrokes
+
+    private func isFast(_ region: Region) -> Bool {
+        region.runID.flatMap { id in runs.first { $0.id == id }?.fast } ?? false
+    }
 
     /// The region's planned keys, kept while the region's text follows them (a key that read back late moves the unit
     /// on); planned again when the desired text changed or the field shows anything else.
@@ -668,28 +750,44 @@ public final class MacFieldQueue {
                 return unit
             }
         }
-        let typedMs = pacedNow ? KeystrokePlanner.calmMs : KeystrokePlanner.keyMs
+        let fast = isFast(region)
+        let typedMs = fast ? KeystrokePlanner.floorMs : pacedNow ? KeystrokePlanner.calmMs : KeystrokePlanner.keyMs
         let lineStart = doc.context(before: region.start, 1).last?.isNewline ?? true
         let lineEnd = doc.context(after: region.end, 1).first?.isNewline ?? true
-        let steps = KeystrokePlanner.steps(from: region.current, to: region.desired, paceMs: typedMs, lineStart: lineStart, lineEnd: lineEnd)
+        let steps = KeystrokePlanner.steps(from: region.current, to: region.desired, paceMs: typedMs, jumpMs: caretJumps.jumpMs,
+                                           lineStart: lineStart, lineEnd: lineEnd)
         guard !steps.isEmpty else { region.keys = nil; return nil }
         let typed = steps.reduce(0) { if case .type = $1.key { $0 + 1 } else { $0 } }
         let fixed = Double(steps.count - typed) * KeystrokePlanner.keyMs
-        let unit = KeyUnit(desired: region.desired, steps: steps, paceMs: KeystrokePlanner.paceMs(ops: typed, fixedMs: fixed))
+        let unit = KeyUnit(desired: region.desired, steps: steps,
+                           paceMs: fast ? KeystrokePlanner.floorMs : KeystrokePlanner.paceMs(ops: typed, fixedMs: fixed))
         region.keys = unit
         note(.planned, id: region.id, run: region.runID, location: region.start, text: String(region.desired),
              detail: "keys=\(steps.count) typed=\(typed) pace=\(Int(unit.paceMs))")
         return unit
     }
 
-    /// One key toward the region's desired text: an arrow while the caret is not where the next edit goes, else the
-    /// edit (Backspace or one grapheme). It is confirmed by reading the region's text, the length and the selection.
+    /// One key toward the region's desired text: a caret move while the caret is not where the next edit goes, else the
+    /// edit (Backspace or one grapheme). It counts by the field's value: the region's new text at its place, what
+    /// followed it still after it, and the field's length. A caret that lags behind a landed key is waited for.
     private func performKey(_ region: Region, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int) async -> Bool {
         guard let unit = keyUnit(for: region, doc: doc) else { return true }
         let step = unit.steps[unit.index]
         let caret = region.start + String(step.before[..<step.caret]).utf16.count
+        // The field still reports the caret an earlier key left before it showed moving: one arrow makes it report
+        // afresh before anything is typed, or planned, from a caret that may not be the real one.
+        if let stale = staleCaret, stale.reported == selection {
+            staleCaret = nil
+            if await settle(before: .move) { return true }
+            return await refresh(stale.believed, doc: doc, selection: selection, target: target, mark: mark, region: region)
+        }
         guard selection == UTF16Range(location: caret, length: 0) else {
-            return await move(toward: caret, doc: doc, selection: selection, target: target, mark: mark, region: region)
+            return await move(toward: UTF16Range(location: caret, length: 0), doc: doc, selection: selection, target: target, mark: mark, region: region)
+        }
+        // A caret set the field reported but never proved: one arrow shows whether the real caret followed it.
+        if probeAt == caret, caretJumps.direct == .tentative {
+            if await settle(before: .move) { return true }
+            return await probe(doc: doc, selection: selection, target: target, mark: mark, region: region)
         }
         if await settle(before: .edit) { return true }
         let after = step.after
@@ -704,22 +802,36 @@ public final class MacFieldQueue {
         let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
         note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: inserted,
              read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40), detail: "key")
-        guard send(key, target: target, mark: mark, selection: selection) else { return false }
+        guard sendKey(key, target: target, mark: mark, selection: selection) == nil else { return false }
         let sentAt = now()
         lastKey = (.edit, sentAt)
+        probeAt = nil
         let delta = inserted.utf16.count - range.length
         let expected = UTF16Range(location: range.location + inserted.utf16.count, length: 0)
         let window = UTF16Range(location: region.start, length: String(after).utf16.count)
-        var transformed = false
-        let landed = await poll {
-            guard (try? target.selectedRange()) == expected, (try? target.textLength()) == doc.length + delta,
-                  let shown = try? target.text(in: window) else { return false }
-            if Self.folded(shown, keyed: true) == String(after) { return true }
+        let oldTail = doc.context(after: region.end, Self.contextChars)
+        let oldAtEnd = region.end + oldTail.utf16.count == doc.length
+        let lengthNow = doc.length + delta
+        var valueAt: ContinuousClock.Instant?
+        var caretSeen = false, transformed = false
+        var lastSelection = selection
+        _ = await poll(Self.keyConfirm) {
+            guard let length = try? target.textLength(), let shown = try? target.text(in: window) else { return false }
+            let current = try? target.selectedRange()
+            if let current { lastSelection = current }
+            let textShows = Self.folded(shown, keyed: true) == String(after)
+            if textShows, Self.tailHolds(target, at: window.end, length: length, old: oldTail, oldAtEnd: oldAtEnd, lengthNow: lengthNow) {
+                if current == expected { caretSeen = true; return true }
+                // The key's text is there: it landed. The caret may follow late; it gets a short wait here.
+                let since = valueAt ?? now()
+                valueAt = since
+                return now() - since >= Self.caretWait
+            }
             // The caret and length are the key's, the text is not: the host changed what the key typed.
-            transformed = true
-            return true
+            if !textShows, current == expected, length == lengthNow { transformed = true; return true }
+            return false
         }
-        if landed, transformed, target.inputMark == mark {
+        if transformed, target.inputMark == mark {
             // Typing again would only repeat the host's change: the region's work stops (its text is recovered).
             note(.mismatch, id: region.id, run: region.runID, reason: "transformed")
             region.lost = true
@@ -727,7 +839,7 @@ public final class MacFieldQueue {
             expectedSelections = [expected]
             return true
         }
-        guard landed, !transformed else {
+        guard valueAt != nil || caretSeen, !transformed else {
             expectedSelections.append(expected)
             if target.inputMark != mark {
                 // The user typed or clicked meanwhile: not the key's failure. The next read takes their input and
@@ -737,18 +849,28 @@ public final class MacFieldQueue {
                 note(.mismatch, id: region.id, run: region.runID, reason: "user", detail: "failures=\(region.failures)")
                 return true
             }
-            // The key may still land: its caret is ours too, and the next read takes its text as landed late.
-            lateKey = (sentAt, expected)
+            // The value does not show the key (yet): it may still land, and it is never sent again before it shows or
+            // its window passes. Its caret is ours too, and the next read takes its text as landed late.
+            lateKey = (sentAt, expected, Self.keyLateLimit, true)
+            lateKeyLanded = false
             return await failed(region, after: after, reason: "key")
         }
         apply(region, landed: after, at: range, delta: delta, inserted: inserted.utf16.count)
         unit.index += 1
         revision += 1
         if follows || (region.current == region.desired && region.caretAfter) { userCaret = UTF16Range(location: region.end, length: 0) }
-        expectedSelections = [expected]
         caretOwed = userCaret != expected
+        if caretSeen {
+            expectedSelections = [expected]
+        } else {
+            // The value shows the key, the caret does not yet: nothing goes out until it does or the window passes.
+            expectedSelections = [expected, lastSelection]
+            lateKey = (sentAt, expected, Self.keyLateLimit, true)
+            lateKeyLanded = true
+            staleCaret = (lastSelection, expected)
+        }
         note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start,
-             text: String(region.current), selection: expected)
+             text: String(region.current), selection: expected, detail: caretSeen ? nil : "caretLag \(lastSelection.location)+\(lastSelection.length)")
         if case .type = step.key, pacedNow {
             // The faster of the change's own pace and the backlog's, counted from when the key went out.
             let pace = min(unit.paceMs, KeystrokePlanner.paceMs(ops: unit.typedLeft + typedBacklog(besides: region)))
@@ -758,46 +880,231 @@ public final class MacFieldQueue {
         return true
     }
 
-    /// One arrow toward `goal`: Left or Right without modifiers (with a selection, the arrow collapses it).
-    private func move(toward goal: Int, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int,
+    /// Whether the text after an edit key's window is what followed the region before, and the field's length fits
+    /// (`tailMatches`: one trailing placeholder line break more or less at the end of the field).
+    private static func tailHolds(_ target: any TextTarget, at location: Int, length: Int, old: String, oldAtEnd: Bool,
+                                  lengthNow: Int) -> Bool {
+        let available = max(0, min(length - location, old.utf16.count + 1))
+        guard let read = try? target.text(in: UTF16Range(location: location, length: available)) else { return false }
+        let tail = folded(read, keyed: true)
+        if length == lengthNow, tail.hasPrefix(old) { return true }
+        guard oldAtEnd, location + tail.utf16.count == length, abs(length - lengthNow) == 1 else { return false }
+        return tailMatches(old: old, oldAtEnd: true, new: tail, newAtEnd: true)
+    }
+
+    // MARK: Jumps
+
+    /// One verified step toward `goal`: an Accessibility caret set where the field honours it, a hop toward a far
+    /// target, or a run of plain arrows. Whatever lands is read back; the next step goes on from where the field
+    /// reports the caret. Jumps per target are bounded (`jumpRounds`); after that only arrows go.
+    private func move(toward goal: UTF16Range, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int,
                       region: Region?) async -> Bool {
         if await settle(before: .move) { return true }
-        let key: FieldKey
-        let exact: UTF16Range
-        if selection.length > 0 {
-            key = goal <= selection.location ? .left : .right
-            exact = UTF16Range(location: key == .left ? selection.location : selection.end, length: 0)
-        } else if goal < selection.location {
-            key = .left
-            let size = doc.context(before: selection.location, 32).last.map { String($0).utf16.count } ?? 1
-            exact = UTF16Range(location: selection.location - size, length: 0)
-        } else {
-            key = .right
-            let size = doc.context(after: selection.location, 32).first.map { String($0).utf16.count } ?? 1
-            exact = UTF16Range(location: selection.location + size, length: 0)
+        // An unproven caret set is proved before the caret moves on: a second set would hide whether the first took.
+        if let probe = probeAt, selection == UTF16Range(location: probe, length: 0), caretJumps.direct == .tentative {
+            return await self.probe(doc: doc, selection: selection, target: target, mark: mark, region: region)
         }
-        note(.sent, id: region?.id, run: region?.runID, location: selection.location, selection: exact,
-             detail: key == .left ? "left" : "right")
-        guard send(key, target: target, mark: mark, selection: selection) else { return false }
+        if jumpGoal != goal { jumpGoal = goal; jumpsSpent = 0; missedHops = [] }
+        let distance = graphemes(doc, from: selection.location, to: goal.location)
+        let memory = caretJumps
+        let canJump = jumpsSpent < Self.jumpRounds
+        // A set that does not read back is refused for the field: it cannot loop.
+        if memory.direct != .refused, distance > 1 || selection.length > 0 || goal.length > 0 || memory.direct == .trusted {
+            return await caretSet(goal, doc: doc, selection: selection, target: target, mark: mark, region: region)
+        }
+        if goal.length > 0 {
+            // Arrows cannot rebuild a selection: the caret goes to its end.
+            return await move(toward: UTF16Range(location: goal.end, length: 0), doc: doc, selection: selection, target: target, mark: mark, region: region)
+        }
+        if canJump, selection.length == 0, distance > Self.arrowRun,
+           let (hop, predicted) = Self.hop(from: selection.location, to: goal.location, in: doc,
+                                             allowed: { memory.allows($0) && !self.missedHops.contains($0) }) {
+            return await hopMove(hop, predicted: predicted, doc: doc, selection: selection, target: target, mark: mark, region: region)
+        }
+        return await arrows(toward: goal.location, count: min(max(distance, 1), Self.arrowRun), doc: doc, selection: selection,
+                            target: target, mark: mark, region: region, purpose: "move")
+    }
+
+    /// Graphemes between two offsets of the read text.
+    private func graphemes(_ doc: Document, from a: Int, to b: Int) -> Int {
+        doc.string(min(a, b), abs(a - b))?.count ?? abs(a - b)
+    }
+
+    /// The caret (or a selection) through Accessibility. A set that reads back is used again; one that does not is
+    /// never tried again in this field (it may still take within `caretSetLateLimit`; nothing goes out before).
+    private func caretSet(_ goal: UTF16Range, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int,
+                          region: Region?) async -> Bool {
+        note(.sent, id: region?.id, run: region?.runID, location: selection.location, selection: goal, detail: "caret")
+        do {
+            try target.setCaret(goal, mark: mark, selection: selection)
+            opsSent += 1
+        } catch {
+            let refusal = error as? FieldKeyRefusal ?? .unavailable
+            note(.refused, reason: "\(refusal)", detail: "caret")
+            if refusal == .unavailable { caretJumps.direct = .refused; return true }
+            refused(refusal, target: target, mark: mark)
+            return false
+        }
         let sentAt = now()
         lastKey = (.move, sentAt)
+        let took = await poll(Self.caretSetConfirm) {
+            (try? target.selectedRange()) == goal && (try? target.textLength()) == doc.length
+        }
+        if took {
+            guard target.inputMark == mark else { userActedFlag = true; return true }
+            if caretJumps.direct == .untested { caretJumps.direct = .tentative }
+            probeAt = caretJumps.direct == .tentative && goal.length == 0 ? goal.location : nil
+            moveFailures = 0
+            expectedSelections = [goal]
+            // An unproven set still owes its proof, even where it put the caret back.
+            caretOwed = userCaret != goal || probeAt != nil
+            return true
+        }
+        caretJumps.direct = .refused
+        note(.mismatch, id: region?.id, run: region?.runID, reason: "caret", detail: "direct refused")
+        expectedSelections.append(goal)
+        if target.inputMark != mark { userActedFlag = true; return true }
+        lateKey = (sentAt, goal, Self.caretSetLateLimit, false)
+        return true
+    }
+
+    /// One arrow from where the field's stale caret read says the caret is not: the way whose landing (from where the
+    /// last key put the real caret) differs from that read. Only that landing counts (a stale read catching up is not
+    /// the arrow); until it shows, nothing else goes out.
+    ///
+    /// With no belief (a caret set that may only have been reported), any landing counts: only a key moves the caret.
+    private func refresh(_ believed: UTF16Range?, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int,
+                         region: Region?) async -> Bool {
+        guard let believed else {
+            let right = !doc.context(after: selection.location, 1).isEmpty
+            var refusal: FieldKeyRefusal?
+            let seen = await sendMove(right ? .right : .left, exact: UTF16Range(location: selection.location + (right ? 1 : -1), length: 0),
+                                      left: !right, doc: doc, selection: selection, target: target, mark: mark, region: region,
+                                      detail: "refresh", anyWay: true, refusal: &refusal)
+            if seen == nil, refusal == nil, target.inputMark == mark { staleCaret = (selection, nil) }
+            return refusal == nil
+        }
+        let at = believed.location
+        let next = doc.context(after: at, 32).first.map { String($0).utf16.count }
+        let previous = doc.context(before: at, 32).last.map { String($0).utf16.count }
+        let right = next.map { at + $0 != selection.location } ?? false || previous == nil
+        let exact = UTF16Range(location: right ? at + (next ?? 0) : at - (previous ?? 0), length: 0)
+        guard exact != selection, next != nil || previous != nil else { return await refresh(nil, doc: doc, selection: selection, target: target, mark: mark, region: region) }
+        var refusal: FieldKeyRefusal?
+        _ = await sendMove(right ? .right : .left, exact: exact, left: !right, doc: doc, selection: selection, target: target,
+                           mark: mark, region: region, detail: "refresh", exactOnly: true, refusal: &refusal)
+        return refusal == nil
+    }
+
+    /// One arrow away from a tentative caret set, read back exactly: the real caret followed the set (it is trusted
+    /// from now on in this field) or it did not (never used again). The next step goes on from where it is.
+    private func probe(doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int, region: Region?) async -> Bool {
+        probeAt = nil
+        let right = !doc.context(after: selection.location, 1).isEmpty
+        let size = (right ? doc.context(after: selection.location, 32).first : doc.context(before: selection.location, 32).last)
+            .map { String($0).utf16.count } ?? 1
+        let exact = UTF16Range(location: selection.location + (right ? size : -size), length: 0)
+        var refusal: FieldKeyRefusal?
+        // Any landing counts: where the real caret was is the point.
+        let seen = await sendMove(right ? .right : .left, exact: exact, left: !right, doc: doc, selection: selection,
+                                  target: target, mark: mark, region: region, detail: "probe", anyWay: true, refusal: &refusal)
+        guard let seen else {
+            if refusal != nil { probeAt = selection.location; return false }
+            // Where the real caret is stays unknown: the caret read may be the set's alone. One arrow finds out first.
+            if target.inputMark == mark { caretJumps.direct = .refused; staleCaret = (selection, nil) }
+            return true
+        }
+        // The user's key or click during the probe may have moved the caret: it proves nothing either way.
+        guard target.inputMark == mark else { userActedFlag = true; return true }
+        caretJumps.direct = seen == exact ? .trusted : .refused
+        note(.verified, id: region?.id, run: region?.runID, selection: seen, detail: "probe \(caretJumps.direct.rawValue)")
+        return true
+    }
+
+    /// One hop toward a far target. Its landing is predicted; where it really lands counts toward whether the field
+    /// keeps using that hop (`CaretJumps`).
+    private func hopMove(_ hop: CaretHop, predicted: Int, doc: Document, selection: UTF16Range, target: any TextTarget,
+                         mark: Int, region: Region?) async -> Bool {
+        let exact = UTF16Range(location: predicted, length: 0)
+        let left = [CaretHop.wordLeft, .lineStart, .documentStart].contains(hop)
+        var refusal: FieldKeyRefusal?
+        let seen = await sendMove(.hop(hop), exact: exact, left: left, doc: doc, selection: selection, target: target,
+                                  mark: mark, region: region, detail: "hop \(hop.rawValue)", refusal: &refusal)
+        if refusal == .unavailable { caretJumps.unsupported.insert(hop); return true }
+        if refusal != nil { return false }
+        // A hop that lands off its prediction is a correction round (`jumpRounds` per target). Input meanwhile voids it.
+        guard target.inputMark == mark else { userActedFlag = true; return true }
+        if let seen {
+            if seen == exact { caretJumps.hits[hop, default: 0] += 1 } else { caretJumps.misses[hop, default: 0] += 1; jumpsSpent += 1; missedHops.insert(hop) }
+        } else if target.inputMark == mark {
+            caretJumps.misses[hop, default: 0] += 1; jumpsSpent += 1; missedHops.insert(hop)
+        }
+        return true
+    }
+
+    /// `count` plain arrows toward `goal` (one when a selection collapses).
+    private func arrows(toward goal: Int, count: Int, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int,
+                        region: Region?, purpose: String) async -> Bool {
+        let left: Bool
+        let exact: UTF16Range
+        var count = count
+        if selection.length > 0 {
+            left = goal <= selection.location
+            exact = UTF16Range(location: left ? selection.location : selection.end, length: 0)
+            count = 1
+        } else {
+            left = goal < selection.location
+            let span = left ? Array(doc.context(before: selection.location, 32 * count).reversed())
+                            : Array(doc.context(after: selection.location, 32 * count))
+            count = max(1, min(count, span.count))
+            let units = span.prefix(count).reduce(0) { $0 + String($1).utf16.count }
+            exact = UTF16Range(location: selection.location + (left ? -max(units, 1) : max(units, 1)), length: 0)
+        }
+        let key: FieldKey = count == 1 ? (left ? .left : .right) : .arrows(left: left, count: count)
+        var refusal: FieldKeyRefusal?
+        _ = await sendMove(key, exact: exact, left: left, doc: doc, selection: selection, target: target, mark: mark,
+                           region: region, detail: (left ? "left" : "right") + (count == 1 ? "" : "×\(count)") + (purpose == "move" ? "" : " \(purpose)"),
+                           refusal: &refusal)
+        return refusal == nil
+    }
+
+    /// Sends one move and reads back where it landed: exactly the predicted caret, or a collapsed caret the right way
+    /// that held still (the host's word and grapheme boundaries may differ from ours). Returns the landing, or nil
+    /// when it was refused or did not read back (then it may still land: nothing goes out before it shows or its
+    /// window passes).
+    private func sendMove(_ key: FieldKey, exact: UTF16Range, left: Bool, doc: Document, selection: UTF16Range,
+                          target: any TextTarget, mark: Int, region: Region?, detail: String, anyWay: Bool = false,
+                          exactOnly: Bool = false, refusal: inout FieldKeyRefusal?) async -> UTF16Range? {
+        note(.sent, id: region?.id, run: region?.runID, location: selection.location, selection: exact, detail: detail)
+        if let refused = sendKey(key, target: target, mark: mark, selection: selection) {
+            refusal = refused
+            return nil
+        }
+        let sentAt = now()
+        lastKey = (.move, sentAt)
+        probeAt = nil
         var seen: UTF16Range?
-        let moved = await poll {
-            guard let now = try? target.selectedRange(), now != selection, (try? target.textLength()) == doc.length else { return false }
-            // The host's grapheme boundary may differ from ours: a collapsed caret one step the right way counts.
-            let ok = now == exact || (now.length == 0 && selection.length == 0
-                                      && (key == .left ? now.location < selection.location : now.location > selection.location))
-            if ok { seen = now }
-            return ok
+        var held: (range: UTF16Range, since: ContinuousClock.Instant)?
+        let moved = await poll(Self.keyConfirm) {
+            guard let current = try? target.selectedRange(), current != selection, (try? target.textLength()) == doc.length
+            else { held = nil; return false }
+            if current == exact { seen = current; return true }
+            if exactOnly { return false }
+            let rightWay = current.length == 0 && (anyWay || selection.length == 0
+                && (left ? current.location < selection.location : current.location > selection.location))
+            guard rightWay else { held = nil; return false }
+            if held?.range != current { held = (current, now()) }
+            if let held, now() - held.since >= Self.moveStable { seen = current; return true }
+            return false
         }
         guard moved, let seen else {
             expectedSelections.append(exact)
             if target.inputMark != mark {
                 // The user typed or clicked meanwhile: the next read takes their caret.
                 userActedFlag = true
-                return true
+                return nil
             }
-            lateKey = (sentAt, exact)
+            lateKey = (sentAt, exact, Self.keyLateLimit, false)
             moveFailures += 1
             note(.mismatch, id: region?.id, run: region?.runID, reason: "move", detail: "failures=\(moveFailures)")
             if moveFailures >= Self.retryLimit {
@@ -805,25 +1112,80 @@ public final class MacFieldQueue {
                 if let region { region.lost = true; drop(region, .failed) } else { caretOwed = false }
             }
             await sleep(Self.waitTick)
-            return true
+            return nil
         }
         moveFailures = 0
         expectedSelections = [seen]
         caretOwed = userCaret != seen
-        return true
+        // The user's key or click meanwhile: the next read takes their caret and text.
+        if target.inputMark != mark { userActedFlag = true }
+        if seen != exact { note(.verified, id: region?.id, run: region?.runID, selection: seen, detail: "landed off \(exact.location)") }
+        return seen
     }
 
-    /// Nothing else to do: the caret goes back to where the user expects it. Plain arrows cannot rebuild a selection,
-    /// so a selected range gets the caret at its end.
+    /// A hop toward `goal` from `caret` and where it should land, or nil when none helps: Command+Up/Down to the
+    /// field's start or end, Command+Left/Right to the start or end of the caret's own line (each when the goal is
+    /// there or a short arrow run from there, on the near side), Option+Left/Right while the next word boundary is not
+    /// past the goal. A hop that lands elsewhere is corrected from where it landed.
+    private static func hop(from caret: Int, to goal: Int, in doc: Document, allowed: (CaretHop) -> Bool) -> (CaretHop, Int)? {
+        let before = Array(doc.context(before: caret, 2_000).reversed())
+        let after = Array(doc.context(after: caret, 2_000))
+        func units(_ characters: ArraySlice<Character>) -> Int { characters.reduce(0) { $0 + String($1).utf16.count } }
+        func word(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "'" || c == "\u{2019}" || c == "_" }
+        if goal < caret {
+            let near = arrowRun
+            if goal <= near, doc.string(0, goal)?.contains(where: \.isNewline) == false, allowed(.documentStart) { return (.documentStart, 0) }
+            let toLine = before.firstIndex(where: \.isNewline) ?? before.count
+            let lineStart = caret - units(before[..<toLine])
+            if goal >= lineStart, goal - lineStart <= near, toLine < before.count || lineStart == 0, allowed(.lineStart) {
+                return (.lineStart, lineStart)
+            }
+            var i = 0
+            while i < before.count, !word(before[i]) { i += 1 }
+            while i < before.count, word(before[i]) { i += 1 }
+            let start = caret - units(before[..<i])
+            if start >= goal, start < caret, allowed(.wordLeft) { return (.wordLeft, start) }
+        } else if goal > caret {
+            let contentEnd = doc.length - (doc.text.hasSuffix("\n\n") || doc.text as String == "\n" ? 1 : 0)
+            let near = arrowRun
+            if goal <= contentEnd, contentEnd - goal <= near, doc.base + doc.text.length == doc.length,
+               doc.string(goal, contentEnd - goal)?.contains(where: \.isNewline) == false, allowed(.documentEnd) {
+                return (.documentEnd, contentEnd)
+            }
+            let toLine = after.firstIndex(where: \.isNewline) ?? after.count
+            let lineEnd = caret + units(after[..<toLine])
+            if goal <= lineEnd, lineEnd - goal <= near, toLine < after.count, allowed(.lineEnd) { return (.lineEnd, lineEnd) }
+            var i = 0
+            while i < after.count, !word(after[i]) { i += 1 }
+            while i < after.count, word(after[i]) { i += 1 }
+            let end = caret + units(after[..<i])
+            if end <= goal, end > caret, allowed(.wordRight) { return (.wordRight, end) }
+        }
+        return nil
+    }
+
+    /// Nothing else to do: the caret goes back to where the user expects it. Without a trusted caret set, arrows
+    /// cannot rebuild a selection, so a selected range gets the caret at its end.
     private func restoreCaret(doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int) async -> Bool {
         guard let wanted = userCaret, wanted.end <= doc.length else { caretOwed = false; return false }
         let goal = UTF16Range(location: wanted.end, length: 0)
+        if let stale = staleCaret, stale.reported == selection {
+            staleCaret = nil
+            if await settle(before: .move) { return true }
+            return await refresh(stale.believed, doc: doc, selection: selection, target: target, mark: mark, region: nil)
+        }
+        // A caret set the field reported but never proved is proved before the caret counts as back.
+        if probeAt == selection.location, selection.length == 0, caretJumps.direct == .tentative {
+            if await settle(before: .move) { return true }
+            return await probe(doc: doc, selection: selection, target: target, mark: mark, region: nil)
+        }
         if selection == wanted || selection == goal {
             caretOwed = false
             userCaret = selection
             return true
         }
-        return await move(toward: goal.location, doc: doc, selection: selection, target: target, mark: mark, region: nil)
+        let full = caretJumps.direct == .trusted ? wanted : goal
+        return await move(toward: full, doc: doc, selection: selection, target: target, mark: mark, region: nil)
     }
 
     /// At a transition between moves and edits the last key gets `keySettle` to land before the next is planned.
@@ -837,28 +1199,34 @@ public final class MacFieldQueue {
     }
 
     /// Sends one key through the target's guards. A refusal sends nothing: the next step reads again and replans.
-    private func send(_ key: FieldKey, target: any TextTarget, mark: Int, selection: UTF16Range) -> Bool {
+    private func sendKey(_ key: FieldKey, target: any TextTarget, mark: Int, selection: UTF16Range) -> FieldKeyRefusal? {
         do {
             try target.press(key, mark: mark, selection: selection)
             opsSent += 1
-            return true
+            return nil
         } catch {
             let refusal = error as? FieldKeyRefusal ?? .unavailable
             note(.refused, reason: "\(refusal)")
-            switch refusal {
-            case .modifiersHeld: holding = true
-            case .userInput, .selectionMoved: userActedFlag = true
-            case .notFocused, .unavailable: break
-            }
-            return false
+            refused(refusal, target: target, mark: mark)
+            return refusal
         }
     }
 
-    /// Reads back until `check` holds, up to `keyConfirm`.
-    private func poll(_ check: () -> Bool) async -> Bool {
+    private func refused(_ refusal: FieldKeyRefusal, target: any TextTarget, mark: Int) {
+        switch refusal {
+        case .modifiersHeld: holding = true
+        case .userInput: userActedFlag = true
+        // A selection that moved with no real input while a key of ours may still land is that key's, not the user's.
+        case .selectionMoved: if target.inputMark != mark || lateKey == nil { userActedFlag = true }
+        case .notFocused, .unavailable: break
+        }
+    }
+
+    /// Reads back until `check` holds, up to `limit`.
+    private func poll(_ limit: Duration, _ check: () -> Bool) async -> Bool {
         let start = now()
         while !check() {
-            if now() - start >= Self.keyConfirm { return false }
+            if now() - start >= limit { return false }
             await sleep(Self.keyPoll)
         }
         return true
@@ -996,4 +1364,30 @@ public final class MacFieldQueue {
         entry.selection = selection.map { "\($0.location)+\($0.length)" }; entry.reason = reason; entry.detail = detail ?? (kind == .verified ? debugState : nil)
         journal(entry)
     }
+}
+
+/// What a keystroke field showed about moving its caret, remembered per field (`TextTarget.fieldKey`) across bindings.
+public struct CaretJumps: Sendable, Equatable {
+    public enum Direct: String, Sendable, Equatable {
+        /// Never tried.
+        case untested
+        /// An Accessibility caret set read back, but no arrow proved yet that the real caret followed it.
+        case tentative
+        /// The field takes caret sets: jumps go straight there.
+        case trusted
+        /// A set did not read back, or the real caret did not follow it: hops and arrows only.
+        case refused
+    }
+    public var direct: Direct = .untested
+    /// Hops that landed where predicted and that did not; a hop the field refused, or that keeps missing, is not used.
+    public var hits: [CaretHop: Int] = [:]
+    public var misses: [CaretHop: Int] = [:]
+    public var unsupported: Set<CaretHop> = []
+    public init() {}
+    public func allows(_ hop: CaretHop) -> Bool {
+        let missed = misses[hop, default: 0]
+        return !unsupported.contains(hop) && (missed < 3 || hits[hop, default: 0] >= 2 * missed)
+    }
+    /// What a jump costs the planner here: one caret set where it is trusted, else a few hops and arrows.
+    public var jumpMs: Double { direct == .trusted ? KeystrokePlanner.keyMs : KeystrokePlanner.jumpMs }
 }

@@ -243,6 +243,17 @@ import LegatoMac
         let first = panel.take.isFirstHandOver
         var text = panel.take.takeFinished()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // A field the queue edits (Accessibility, or verified keys): the finished text goes in once through the queue,
+        // one insert at the user's caret, typed at the fast end of the pace. Input meanwhile only moves where it goes.
+        if let target, !panelCopiesOnly, target.editsInPlace || target.typesKeys {
+            panel.inserting = true
+            defer { panel.inserting = false }
+            let id = UUID().uuidString
+            seenRunIDs.insert(id)
+            queue.live(runID: id, version: 1, text: text, fast: true)
+            await queue.whenIdle()
+            return
+        }
         // A readable field tells which space the first words need after its own text.
         if first, let target, target.isFocused(), let caret = try? target.selectedRange(), caret.location > 0,
            let previous = (try? target.text(in: .init(location: caret.location - 1, length: 1)))?.last {

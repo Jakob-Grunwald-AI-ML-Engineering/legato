@@ -64,6 +64,7 @@ import LegatoMac
     func replace(_ range: UTF16Range, with text: String) throws {}
     func press(_ key: FieldKey, mark: Int, selection planned: UTF16Range) throws {
         guard planned == selection else { throw FieldKeyRefusal.selectionMoved }
+        if case .hop = key { throw FieldKeyRefusal.unavailable }
         keys.append(key)
         let ns = value as NSString
         switch key {
@@ -75,6 +76,10 @@ import LegatoMac
         case .text(let character):
             value = ns.replacingCharacters(in: NSRange(location: selection.location, length: 0), with: String(character))
             selection = .init(location: selection.location + String(character).utf16.count, length: 0)
+
+        case .arrows(let left, let count):
+            selection = .init(location: left ? max(0, selection.location - count) : min(ns.length, selection.end + count), length: 0)
+        case .hop: break
         }
     }
 }
@@ -325,18 +330,54 @@ import LegatoMac
         #expect(inserts.isEmpty)
         #expect(copies == ["words"])
     }
-    @Test func panelModeAlwaysLeavesAReadableFieldUntouchedUntilTheEnd() async {
+    @Test func panelModeAlwaysLeavesAReadableFieldUntouchedUntilTheEndThenInsertsThroughTheQueue() async {
         let target = EditorTarget("Hi")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.sleep = { _ in }
         var inserts: [String] = []
         editor.insert = { inserts.append($0); return .typed }
         editor.panelMode = { .always }
         editor.begin()
+        #expect(editor.panel.active)
         await editor.applyLive(snapshot("there"))
+        #expect(editor.panel.take.text == "there")
         await editor.applyLive(snapshot("there.", complete: true))
         #expect(target.writes.isEmpty)
         await editor.finish()
-        #expect(inserts == [" there."]) // after the field's own "Hi"
+        // One insert at the caret, after the field's own "Hi", typed one grapheme per write by the field's queue.
+        #expect(target.value == "Hi there.")
+        #expect(target.writes.count == " there.".count)
+        #expect(inserts.isEmpty)
+    }
+    @Test func switchingThePanelModeTakesEffectAtTheNextTake() async {
+        var mode = PanelDictationSetting.Mode.whenNeeded
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.sleep = { _ in }
+        editor.panelMode = { mode }
+        editor.begin()
+        #expect(!editor.panel.active)
+        await editor.applyLive(snapshot("live", run: "a"))
+        #expect(target.value == "live")
+        await editor.finish()
+        mode = .always
+        editor.begin()
+        #expect(editor.panel.active)
+        await editor.applyLive(snapshot("held", run: "b"))
+        #expect(target.value == "live")
+        await editor.applyLive(snapshot("held back.", run: "b", complete: true))
+        await editor.finish()
+        #expect(target.value == "live held back.")
+        // A keystroke field in the panel mode gets the same one insert, with verified keys.
+        let keys = KeyTarget("Hi")
+        let keyed = MacFieldEditor(capture: { .target(keys) })
+        keyed.sleep = { _ in }
+        keyed.panelMode = { .always }
+        keyed.begin()
+        await keyed.applyLive(snapshot("there.", run: "c", complete: true))
+        #expect(keys.keys.isEmpty)
+        await keyed.finish()
+        #expect(keys.value == "Hi there.")
     }
     @Test func anElementThatReadsButTakesNoWritesOrKeysUsesThePanelAndOnlyCopies() async throws {
         let target = EditorTarget("Some text")

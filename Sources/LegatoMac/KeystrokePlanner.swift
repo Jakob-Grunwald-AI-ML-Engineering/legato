@@ -7,8 +7,9 @@ import LegatoKeyboardCore
 /// - Spans: the minimal grapheme diff; a word whose graphemes change by at least half is replaced whole ("Thursday" →
 ///   "Friday"; "colour" → "color" stays one deleted letter); changes a few unchanged graphemes apart, or in one word,
 ///   merge into one span.
-/// - Mode: a span goes in as minimal edits (the differing characters only, with arrow moves between them) or as one
-///   block delete and its new text typed, whichever costs less; a tie keeps the minimal edits.
+/// - Mode: a span goes in as minimal edits (the differing characters only, with caret moves between them) or as one
+///   block delete and its new text typed, whichever costs less; a tie keeps the minimal edits. A caret move costs one
+///   key per grapheme up to the price of a jump (`jumpMs`): the queue jumps straight to a far change.
 /// - Pace: one grapheme per key. The gap between typed graphemes spreads the work over about `budgetMs`, no slower than
 ///   `calmMs` and no faster than `floorMs`.
 public enum KeystrokePlanner {
@@ -66,6 +67,14 @@ public enum KeystrokePlanner {
     public static let keyMs = 15.0
     /// The pause at a transition between moves and edits (the host may apply either late).
     public static let settleMs = 30.0
+    /// About what a verified jump costs at any distance: an Accessibility caret set, or a few hops and a short run of
+    /// arrows (the default, until the field showed which works).
+    public static let jumpMs = 3 * keyMs
+
+    /// The time a caret move of `distance` graphemes takes: arrows, or one jump when that is cheaper.
+    public static func moveMs(_ distance: Int, jumpMs: Double = jumpMs) -> Double {
+        distance <= 0 ? 0 : min(Double(distance) * keyMs, jumpMs)
+    }
 
     /// The gap between typed graphemes for `ops` of them still to go, after `fixedMs` of keys and settles the work
     /// needs anyway: spread over the budget, between the floor and the calm pace.
@@ -77,15 +86,15 @@ public enum KeystrokePlanner {
     // MARK: Spans
 
     /// The spans that turn `old` into `new`, front to back.
-    public static func spans(from old: [Character], to new: [Character], paceMs: Double = calmMs) -> [Span] {
+    public static func spans(from old: [Character], to new: [Character], paceMs: Double = calmMs, jumpMs: Double = jumpMs) -> [Span] {
         var hunks = ShadowEditPlanner.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
         guard !hunks.isEmpty else { return [] }
         hunks = snapToWords(hunks, old: old, new: new)
         return merge(hunks, old: old).map { group in
             let start = group.first!.start, end = group.last!.end
             let text = Array(new[map(start, hunks: hunks, side: .start)..<map(end, hunks: hunks, side: .end)])
-            let minimal = cost(of: group, paceMs: paceMs)
-            let block = cost(of: [Hunk(start: start, end: end, text: text)], paceMs: paceMs)
+            let minimal = cost(of: group, paceMs: paceMs, jumpMs: jumpMs)
+            let block = cost(of: [Hunk(start: start, end: end, text: text)], paceMs: paceMs, jumpMs: jumpMs)
             return Span(start: start, end: end, text: text, block: group.count > 1 && block < minimal, hunks: group)
         }
     }
@@ -96,7 +105,7 @@ public enum KeystrokePlanner {
     /// A replacement that would empty its line first keeps the line's first old grapheme, types the new text before
     /// it, and deletes it last: a rich editor puts a placeholder line break into a line that becomes empty, and drops
     /// it again, so the line is never left empty. `lineStart` / `lineEnd`: the text starts / ends a line of the field.
-    public static func steps(from old: [Character], to new: [Character], paceMs: Double = calmMs,
+    public static func steps(from old: [Character], to new: [Character], paceMs: Double = calmMs, jumpMs: Double = jumpMs,
                              lineStart: Bool = true, lineEnd: Bool = true) -> [Step] {
         var steps: [Step] = []
         var text = old
@@ -104,7 +113,7 @@ public enum KeystrokePlanner {
             let step = Step(caret: caret, key: key, before: text)
             text = step.after; steps.append(step)
         }
-        for span in spans(from: old, to: new, paceMs: paceMs).reversed() {
+        for span in spans(from: old, to: new, paceMs: paceMs, jumpMs: jumpMs).reversed() {
             let hunks = span.block ? [Hunk(start: span.start, end: span.end, text: span.text)] : span.hunks
             for hunk in hunks.reversed() {
                 let emptiesLine = hunk.end > hunk.start && !hunk.text.isEmpty
@@ -121,16 +130,16 @@ public enum KeystrokePlanner {
         return steps
     }
 
-    /// The time hunks take, back to front: arrows from one hunk's typed end to the next hunk's end, a settle at each
-    /// move/edit transition, one key per deleted grapheme, one paced key per typed grapheme.
-    static func cost(of hunks: [Hunk], paceMs: Double) -> Double {
+    /// The time hunks take, back to front: a caret move from one hunk's typed end to the next hunk's end (`moveMs`), a
+    /// settle at each move/edit transition, one key per deleted grapheme, one paced key per typed grapheme.
+    static func cost(of hunks: [Hunk], paceMs: Double, jumpMs: Double = jumpMs) -> Double {
         let typed = max(paceMs, floorMs)
         var ms = 0.0
         var previous: Hunk?
         for hunk in hunks.reversed() {
             if let previous {
                 let arrows = previous.start + previous.text.count - hunk.end
-                ms += Double(max(0, arrows)) * keyMs + 2 * settleMs
+                ms += moveMs(arrows, jumpMs: jumpMs) + 2 * settleMs
             }
             ms += Double(hunk.end - hunk.start) * keyMs
             ms += Double(hunk.text.count) * typed

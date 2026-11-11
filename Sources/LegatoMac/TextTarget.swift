@@ -27,10 +27,24 @@ public enum FocusedField {
 
 /// One synthetic key the queue sends to a field that takes keystrokes: an arrow without modifiers, Backspace, or one
 /// grapheme as a Unicode key event (a control character such as a line break goes as a guarded paste: Return and Tab
-/// are never synthesized).
+/// are never synthesized). Caret moves can also go as a short run of arrows, or as one hop with its modifier pressed
+/// and released around it.
 public enum FieldKey: Sendable, Equatable {
     case left, right, backspace
     case text(Character)
+    /// `count` plain arrows in one posted sequence.
+    case arrows(left: Bool, count: Int)
+    case hop(CaretHop)
+}
+
+/// A caret move of one modified arrow key.
+public enum CaretHop: String, Sendable, Equatable, CaseIterable {
+    /// Option+Left / Option+Right: to the start of the word before, the end of the word after.
+    case wordLeft, wordRight
+    /// Command+Left / Command+Right: to the start / end of the line (a wrapped line's visual start or end).
+    case lineStart, lineEnd
+    /// Command+Up / Command+Down: to the start / end of the field.
+    case documentStart, documentEnd
 }
 
 /// Why a key was not sent. Nothing reached the field.
@@ -73,6 +87,12 @@ public protocol TextTarget: AnyObject {
     /// since `mark`, no modifier held, and the selection is `selection`. Throws `FieldKeyRefusal` and sends nothing
     /// otherwise. Returning does not mean the key landed: the caller reads the field back.
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws
+    /// Sets the selection through Accessibility under the same guards as `press` (focus, no real input since `mark`,
+    /// the selection still `selection`). Returning does not mean it took: the caller reads it back.
+    func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws
+    /// Identifies the field across bindings (the same element bound again), so what the queue learned about it is
+    /// remembered; nil when unknown.
+    var fieldKey: AnyHashable? { get }
 }
 
 public enum TextTargetReadError: Error { case unsupported }
@@ -81,6 +101,8 @@ public extension TextTarget {
     var typesKeys: Bool { false }
     var inputMark: Int { 0 }
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
+    func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
+    var fieldKey: AnyHashable? { nil }
     func setSelectedRange(_ range: UTF16Range) throws { throw TextTargetReadError.unsupported }
     func textLength() throws -> Int { throw TextTargetReadError.unsupported }
 }

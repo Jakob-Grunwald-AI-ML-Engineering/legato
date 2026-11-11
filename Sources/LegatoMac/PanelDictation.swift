@@ -1,12 +1,13 @@
 import Foundation
 
 /// Where a take's words show while it runs: in the field itself (live editing), or in the notch panel, typed into
-/// the app once when the take ends. Stored in the Mac app's standard defaults; there is no UI for it yet.
+/// the app once when the take ends. Stored in the Mac app's standard defaults (Settings → Shortcut → Send dictation).
 public enum PanelDictationSetting {
     public enum Mode: String, CaseIterable, Sendable {
         /// The panel only where the field cannot be edited live: unreadable, or readable without any way to write.
         case whenNeeded
-        /// The panel for every field that is not secure.
+        /// The panel for every field that is not secure: nothing touches the field until the take is final, then it goes
+        /// in once (through the field's queue where the field is readable).
         case always
     }
     public static let key = "dictation.panel"

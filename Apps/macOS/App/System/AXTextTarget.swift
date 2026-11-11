@@ -266,11 +266,41 @@ final class AXTextTarget: TextTarget {
         case .left: sent = SyntheticKeys.tap(kVK_LeftArrow)
         case .right: sent = SyntheticKeys.tap(kVK_RightArrow)
         case .backspace: sent = SyntheticKeys.tap(kVK_Delete)
+        case .arrows(let left, let count): sent = SyntheticKeys.taps(left ? kVK_LeftArrow : kVK_RightArrow, count: count)
+        case .hop(let hop):
+            // The left-hand modifiers: Right Option and Right Command are Legato's own shortcuts.
+            switch hop {
+            case .wordLeft: sent = SyntheticKeys.chord(kVK_Option, flag: .maskAlternate, kVK_LeftArrow)
+            case .wordRight: sent = SyntheticKeys.chord(kVK_Option, flag: .maskAlternate, kVK_RightArrow)
+            case .lineStart: sent = SyntheticKeys.chord(kVK_Command, flag: .maskCommand, kVK_LeftArrow)
+            case .lineEnd: sent = SyntheticKeys.chord(kVK_Command, flag: .maskCommand, kVK_RightArrow)
+            case .documentStart: sent = SyntheticKeys.chord(kVK_Command, flag: .maskCommand, kVK_UpArrow)
+            case .documentEnd: sent = SyntheticKeys.chord(kVK_Command, flag: .maskCommand, kVK_DownArrow)
+            }
         case .text(let character):
             let text = String(character)
             sent = SyntheticEvent.typeable(text) ? SyntheticKeys.type(text) : paste(text, at: selection)
         }
         guard sent else { throw FieldKeyRefusal.unavailable }
+    }
+
+    /// The caret through Accessibility, under the key guards (no modifier check: nothing is typed). Chromium may or
+    /// may not honour it; the queue reads it back and remembers per field which way works.
+    func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws {
+        guard isFocused() else { throw FieldKeyRefusal.notFocused }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        guard (try? selectedRange()) == selection else { throw FieldKeyRefusal.selectionMoved }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        let error = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
+        guard error == .success else { throw FieldKeyRefusal.unavailable }
+    }
+
+    /// The bound element: the same field bound again is equal (`CFEqual`), so the queue's per-field memory follows it.
+    var fieldKey: AnyHashable? { AnyHashable(ElementKey(element: element)) }
+    private struct ElementKey: Hashable {
+        let element: AXUIElement
+        static func == (a: Self, b: Self) -> Bool { CFEqual(a.element, b.element) }
+        func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
     }
 
     /// A line break, tab or oversized grapheme: never a Return or Tab key. It is pasted (⌘V, paired), the field is
