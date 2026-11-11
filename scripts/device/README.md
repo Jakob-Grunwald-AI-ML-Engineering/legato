@@ -31,6 +31,10 @@ Bundle/group overrides route the CLI; they do not rewrite signing, entitlements,
 
 `bash scripts/device/ctl.sh device-logs [--since 10m]` (`<num>m|h|d`) runs `log collect --device-udid "$LEGATO_DEVICE" --last <dur>` and filters the archive with `log show --archive … --info --debug --predicate 'subsystem == "de.gruenwald.legato"'` (app, keyboard and widget share the subsystem). The text lands in `$STATE/pulled/device-logs.txt`; the command prints its path, the line count and the latest `composer.view blank` / `composer.poll stale|start|stop` lines (#225). Needs the phone unlocked and paired, and sudo: `log collect` reads an attached device only as root, so the command prompts once (`sudo -v`) before collecting; run it from your own terminal. Device target only. Messages carry counts and flags, never draft text. `LEGATO_DEVICE_LOGS_TIMEOUT` caps collect and filter (300 s).
 
+## Keyboard edit journal
+
+Internal and debug keyboards write every field-queue event with full text to the App Group (`Library/Caches/edit-journal.jsonl`, rotated at about 2 MB into `edit-journal.1.jsonl`). Pull it with `xcrun devicectl device copy from --device "$LEGATO_DEVICE" --domain-type appGroupDataContainer --domain-identifier group.de.gruenwald.legato --source Library/Caches/edit-journal.jsonl --destination /tmp/edit-journal.jsonl` (or `bash scripts/device/ctl.sh pull --group Library/Caches/edit-journal.jsonl`), then replay it in a test with `JournalReplay` (`Tests/LegatoKeyboardCoreTests/EditJournalTests.swift`). It holds what was typed: share it only with Jakob's consent.
+
 ## Physical-device screenshots
 
 `bash scripts/device/native-control.sh screenshot /tmp/phone.png` captures the entire physical display, including the foreground host, actual system/custom keyboard and safe areas. `bash scripts/device/native-control.sh record /tmp/phone.mp4 10` records a bounded screen video. Both use `LEGATO_DEVICE` and never launch, install or activate an app or simulator. Coordinate the visible state with anyone using the phone before capture; avoid key/settings screens.

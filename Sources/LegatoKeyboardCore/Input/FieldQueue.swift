@@ -167,6 +167,9 @@ public struct FieldQueue: Sendable {
     // MARK: State
 
     public var config: Config
+    /// Something else needs the cursor for a moment (a walk that reads the field): the op in flight is confirmed and
+    /// the caret goes back to the user's cursor, nothing else goes out.
+    public var paused = false
     public private(set) var text: [Character] = []
     public private(set) var cursor = 0
     public private(set) var userCursor = 0
@@ -284,6 +287,8 @@ public struct FieldQueue: Sendable {
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
     public var hasOpInFlight: Bool { inFlight != nil }
+    /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
+    public var isHome: Bool { inFlight == nil && cursor == userCursor && sinceSendMs >= Self.sendGapMs }
     public var isInUnit: Bool { unit != nil }
     public var modelText: String { String(text) }
     /// The text before the user's cursor once pending at-cursor edits landed: what typed lines and host text plan against.
@@ -461,6 +466,11 @@ public struct FieldQueue: Sendable {
         // Ops sent close together can land out of order: the next waits for the gap.
         if sinceSendMs < Self.sendGapMs {
             if inFlight == nil { for ri in runs.indices { ack(ri) } }
+            return .wait
+        }
+        if paused {
+            abortUnit()
+            if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
             return .wait
         }
         // User input first; a running unit gives the caret back first.

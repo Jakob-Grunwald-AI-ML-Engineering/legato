@@ -182,6 +182,39 @@ import Testing
         #expect(rig.field.string.hasSuffix("the end") || rig.drops.count == 1)
     }
 
+    @Test func aRunInFrontOfTextGetsASpaceBehindItAndTheCaretStaysInFront() {
+        var rig = QueueRig(FakeField("Hello world", caret: 6))
+        rig.queue.enqueue(snap(1, "big"))
+        rig.drain()
+        #expect(rig.field.string == "Hello big world")
+        rig.queue.enqueue(snap(2, "big wide"))
+        rig.drain()
+        #expect(rig.field.string == "Hello big wide world")
+    }
+
+    @Test func aRunAfterASentenceEndStartsWithACapitalAndASpace() {
+        var rig = QueueRig(FakeField("Done."), config: .init(animated: false, capitalization: .sentences))
+        rig.queue.enqueue(snap(1, "next one"))
+        rig.drain()
+        #expect(rig.field.string == "Done. Next one")
+    }
+
+    @Test func safarisTimingNeverReordersOrStallsReports() {
+        var field = FakeField("I think the plan is fine. ")
+        field.hostDelays = true
+        var rig = QueueRig(field, config: .init(animated: true))
+        rig.queue.enqueue(snap(1, "and then we go"))
+        rig.run(ms: 400)
+        rig.queue.enqueue(snap(2, "and than we go home"))
+        rig.queue.enqueue(.insert("!"))
+        rig.drain()
+        #expect(rig.field.reorders == 0)
+        #expect(rig.field.staleTriggers == 0)
+        #expect(rig.field.string.contains("!"))
+        // Every op went out at least the send gap after the one before.
+        #expect(zip(rig.sent, rig.sent.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.sendGapMs - 0.001 })
+    }
+
     @Test func aLostOpIsSeenAndTheUsersKeyGoesOnceMore() {
         var rig = QueueRig(FakeField("abc"))
         rig.queue.enqueue(.insert("d"))
