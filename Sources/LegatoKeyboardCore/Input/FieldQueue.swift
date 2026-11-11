@@ -117,6 +117,8 @@ public struct FieldQueue: Sendable {
         case liveApplied(runID: String, version: Int, complete: Bool)
         case regionStarted(runID: String, anchorChars: Int)
         case regionClosed(runID: String, cause: CloseCause)
+        /// The op just sent inserts behind the user's cursor: the user's cursor stays in front of it.
+        case insertedBehind
     }
 
     /// Caret-reset handling per field (no session latch). `verifyMoves`: a confirmed move must still show
@@ -147,6 +149,14 @@ public struct FieldQueue: Sendable {
     public static let moveVerifyMs = 60.0
     /// An edit that cannot be placed yet waits this long for the report to catch up.
     public static let placeGraceMs = 400.0
+    /// An edit whose text went out of sight (a resync) waits this long for it to show again.
+    public static let parkLimitMs = 3_000.0
+    /// Text found again away from the cursor (after a resync, or a scope that moved) must be at least this long.
+    public static let relocateChars = 16
+    /// Context on each side that must match too when parked text is found again.
+    static let contextChars = 8
+    /// A report reaching back past a short model must agree with at least this much of it.
+    static let extendOverlapChars = 4
     /// A budget for the app's wait on an edit of `operationCount` ops.
     public static func budgetMs(operationCount: Int) -> Double { max(20_000, Double(max(0, operationCount)) * 150) }
 
@@ -167,8 +177,13 @@ public struct FieldQueue: Sendable {
         /// Another edit (Magic) rewrote part of it: a dictation region there is left as it is.
         var edited = false
         var parked = false
+        /// An edit's anchor: text inserted right at it goes after it.
+        var anchor = false
         /// The text the span was last known to hold, to find it again after a reseed.
         var lastText: [Character] = []
+        /// The text around it then (up to `contextChars` each side): it must stand there too.
+        var lastBefore: [Character] = []
+        var lastAfter: [Character] = []
     }
     private var spans: [Int: Span] = [:]
     private var nextSpanID = 0
@@ -176,6 +191,8 @@ public struct FieldQueue: Sendable {
     private struct EditState: Sendable, Equatable {
         var edit: Edit
         var spanID: Int?
+        /// Where the user's cursor was when the edit came: a zero-width span that moves with every change.
+        var anchorID: Int?
         var unplacedMs = 0.0
         var attempts = 0
     }
@@ -208,11 +225,14 @@ public struct FieldQueue: Sendable {
     private(set) var runs: [LiveRun] = []
 
     private enum QOp: Sendable, Equatable {
-        case moveTo(Int)
+        /// To this offset into a span (resolved when sent: the model may have grown in front of it meanwhile).
+        case moveInSpan(Int, offset: Int)
         case moveToUser
         case moveToSpanEnd(Int)
         case delete(owner: Int?)
         case insert(String, owner: Int?)
+        /// Inserted at the caret, behind the user's cursor (which stays in front of it).
+        case insertBehind(String)
         case setUserCursorToCursor
         case startRegion(run: String, tStart: Int, anchor: String)
     }
@@ -275,13 +295,29 @@ public struct FieldQueue: Sendable {
     /// The open dictation region (for the instruction scope `session`): its run, anchor and text.
     public var openRegion: (runID: String, anchor: String, text: String)? {
         guard let run = runs.last, let region = run.regions.last, region.tEnd == nil, let span = spans[region.spanID] else { return nil }
-        return (run.runID, region.anchor, String(text[span.start..<span.end]))
+        return (run.runID, region.anchor, String(chars(of: span)))
     }
     public var pendingEditIDs: [String] {
         userLane.compactMap { if case .edit(let s) = $0 { s.edit.id } else { nil } } + editLane.map(\.edit.id)
     }
 
     public mutating func drainEvents() -> [Event] { defer { events = [] }; return events }
+
+    /// The queue's state in one line, for traces and the edit journal.
+    public var debugState: String {
+        var parts = ["user=\(userLane.count)", "edits=\(editLane.count)", "unit=\(unit.map { "\($0.ops.count)" } ?? "-")",
+                     "flight=\(inFlight != nil)", "sel=\(selection)"]
+        for run in runs {
+            for region in run.regions {
+                let span = spans[region.spanID]
+                parts.append("[\(region.tStart)..\(region.tEnd.map(String.init) ?? "open") parked=\(span?.parked ?? true) "
+                             + "changed=\(span?.userChanged ?? false) abandoned=\(region.abandoned) "
+                             + "has=\(String(span.map { chars(of: $0) } ?? []).debugDescription) wants=\(desiredText(region, in: run).debugDescription)]")
+            }
+            if let rest = untypedRest(of: run) { parts.append("rest@\(rest)") }
+        }
+        return parts.joined(separator: " ")
+    }
 
     // MARK: Enqueue
 
@@ -291,7 +327,8 @@ public struct FieldQueue: Sendable {
 
     /// `user`: an edit the user asked for (word row, undo, version swap): it goes in the user lane.
     public mutating func enqueue(_ edit: Edit, user: Bool = false) {
-        let state = EditState(edit: edit)
+        var state = EditState(edit: edit)
+        if seeded, !edit.atCursor, edit.selected == nil { state.anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true)) }
         if user { userLane.append(.edit(state)) } else { editLane.append(state) }
     }
 
@@ -320,8 +357,8 @@ public struct FieldQueue: Sendable {
     public mutating func cancelEdit(_ id: String) {
         if case .edit(let s, _)? = unit?.owner, s.edit.id == id { unit = nil; finishSpan(s.spanID) }
         var spanIDs: [Int?] = []
-        userLane.removeAll { if case .edit(let s) = $0, s.edit.id == id { spanIDs.append(s.spanID); return true }; return false }
-        editLane.removeAll { if $0.edit.id == id { spanIDs.append($0.spanID); return true }; return false }
+        userLane.removeAll { if case .edit(let s) = $0, s.edit.id == id { spanIDs += [s.spanID, s.anchorID]; return true }; return false }
+        editLane.removeAll { if $0.edit.id == id { spanIDs += [$0.spanID, $0.anchorID]; return true }; return false }
         for spanID in spanIDs { finishSpan(spanID) }
     }
 
@@ -345,7 +382,15 @@ public struct FieldQueue: Sendable {
         sinceSendMs += elapsedMs
         lagging = lagging.filter { $0.ageMs + elapsedMs < Self.confirmLimitMs }.map { ($0.state, $0.ageMs + elapsedMs) }
         if report == lastReport { reportStableMs += elapsedMs } else { lastReport = report; reportStableMs = 0 }
-        if !seeded { seed(report) }
+        if !seeded {
+            seed(report)
+            // Edits that came before the first report are anchored where the cursor turns out to be.
+            for i in userLane.indices { if case .edit(var s) = userLane[i], s.anchorID == nil, !s.edit.atCursor, s.edit.selected == nil {
+                s.anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true)); userLane[i] = .edit(s) } }
+            for i in editLane.indices where editLane[i].anchorID == nil && !editLane[i].edit.atCursor && editLane[i].edit.selected == nil {
+                editLane[i].anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true))
+            }
+        }
 
         if var flight = inFlight {
             if matches(report, anywhere: flight.anywhere) {
@@ -388,6 +433,8 @@ public struct FieldQueue: Sendable {
             // A report that still shows a state the host lags behind is no change of the user's.
             if lagging.contains(where: { pins(report, in: $0.state) }) { return .wait }
             resync(report, pre: nil)
+        } else if reportStableMs == 0 {
+            merge(report)
         }
         return next()
     }
@@ -397,10 +444,8 @@ public struct FieldQueue: Sendable {
     private mutating func next() -> Action {
         // User input first; a running unit gives the caret back first.
         if !userLane.isEmpty {
-            if unit != nil {
-                abortUnit()
-                if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
-            }
+            abortUnit()
+            if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
             if let action = nextUser() { return action }
         }
         if unit != nil { return nextInUnit() }
@@ -478,7 +523,7 @@ public struct FieldQueue: Sendable {
         guard cursor == userCursor, selection == 0, let (ri, gi) = openRegionIndex(), let span = spans[runs[ri].regions[gi].spanID],
               !span.parked, span.end == userCursor else { return nil }
         let desired = Array(desiredText(runs[ri].regions[gi], in: runs[ri]))
-        let current = Array(text[span.start..<span.end])
+        let current = chars(of: span)
         guard desired.count > current.count, desired.starts(with: current), let last = current.last,
               last.isLetter || last.isNumber, let first = desired[current.count...].first, first.isLetter || first.isNumber else { return nil }
         let rest = String(desired[current.count...].prefix { !$0.isWhitespace })
@@ -530,9 +575,9 @@ public struct FieldQueue: Sendable {
             if state.edit.atCursor {
                 state.spanID = addSpan(Span(start: userCursor, end: userCursor))
             } else {
-                let placement = place(state.edit)
+                let placement = place(state.edit, anchor: state.anchorID)
                 switch placement {
-                case .placed(let id): state.spanID = id
+                case .placed(let id): state.spanID = id; finishSpan(state.anchorID); state.anchorID = nil
                 case .ambiguous, .absent:
                     // The report may still catch up with a cursor move; past the grace the text is not there.
                     state.unplacedMs += stepElapsedMs
@@ -544,8 +589,13 @@ public struct FieldQueue: Sendable {
         }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return .done }
         if span.userChanged { drop(state, .userEdited); return .done }
-        if span.parked { return .wait }
-        let current = Array(text[span.start..<span.end])
+        if span.parked {
+            // Out of sight after a resync: an edit waits a while for its text to show again, then drops.
+            state.unplacedMs += stepElapsedMs
+            if lane == .edit, state.unplacedMs < Self.parkLimitMs { return .wait }
+            drop(state, .unplaceable); return .done
+        }
+        let current = chars(of: span)
         let target = Array(state.edit.target)
         if current == target {
             if state.edit.cursorAtEnd, userCursor != span.end {
@@ -570,11 +620,15 @@ public struct FieldQueue: Sendable {
     }
 
     /// Back to front: move to each change, delete its old characters, insert its new ones.
-    private func plan(spanID: Int, from current: [Character], to target: [Character], paced: Bool) -> [QOp] {
-        guard let span = spans[spanID] else { return [] }
+    private func plan(spanID: Int, from current: [Character], to target: [Character], paced: Bool, leaveTailAppend: Bool = false) -> [QOp] {
+        guard spans[spanID] != nil else { return [] }
         var ops: [QOp] = []
-        for hunk in ShadowEditPlanner.diff(current, target).reversed() {
-            ops.append(.moveTo(span.start + hunk.end))
+        var hunks = ShadowEditPlanner.diff(current, target)
+        // Growth at the end of the open region at the cursor is typed by the append path (the typewriter drain), not
+        // one grapheme per op inside a unit.
+        if leaveTailAppend, let last = hunks.last, last.start == current.count, last.end == current.count { hunks.removeLast() }
+        for hunk in hunks.reversed() {
+            ops.append(.moveInSpan(spanID, offset: hunk.end))
             ops += Array(repeating: .delete(owner: spanID), count: hunk.end - hunk.start)
             if !hunk.text.isEmpty {
                 if paced { ops += hunk.text.map { .insert(String($0), owner: spanID) } }
@@ -594,9 +648,10 @@ public struct FieldQueue: Sendable {
             }
             let op = current.ops[0]
             switch op {
-            case .moveTo(let index):
+            case .moveInSpan(let id, let offset):
                 current.ops.removeFirst(); unit = current
-                let target = min(max(0, index), text.count)
+                guard let span = spans[id], !span.parked else { unit = nil; requeue(current.owner); return .wait }
+                let target = min(max(0, span.start + offset), text.count)
                 if target != cursor { return send(.move(units(to: target)), lane: lane(of: current.owner), moveTo: target) }
             case .moveToUser:
                 current.ops.removeFirst(); unit = current
@@ -622,6 +677,11 @@ public struct FieldQueue: Sendable {
                 if current.paced, sinceSendMs < Self.charMs { return .wait }
                 current.ops.removeFirst(); unit = current
                 return send(.insert(chars), lane: lane(of: current.owner)) { q in q.insertAtCursor(Array(chars), owner: owner) }
+            case .insertBehind(let chars):
+                current.ops.removeFirst(); unit = current
+                let action = send(.insert(chars), lane: lane(of: current.owner)) { q in q.insertAtCursor(Array(chars), owner: nil, behindUser: true) }
+                events.append(.insertedBehind)
+                return action
             }
         }
         return next()
@@ -637,7 +697,7 @@ public struct FieldQueue: Sendable {
     private mutating func finishUnit(_ owner: UnitOwner) {
         guard case .edit(var state, let lane) = owner else { return }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return }
-        if Array(text[span.start..<span.end]) == Array(state.edit.target), cursor == userCursor,
+        if chars(of: span) == Array(state.edit.target), cursor == userCursor,
            !state.edit.cursorAtEnd || userCursor == span.end {
             applied(state)
         } else {
@@ -663,14 +723,14 @@ public struct FieldQueue: Sendable {
         guard let id = state.spanID, let span = spans[id] else { return }
         let offset = min(max(0, userCursor - span.start), span.end - span.start)
         let cursorUnits = String(text[span.start..<(span.start + offset)]).utf16.count
-        spans[id] = nil
+        spans[id] = nil; finishSpan(state.anchorID)
         events.append(.applied(id: state.edit.id, cursor: cursorUnits))
     }
 
     private mutating func drop(_ state: EditState, _ reason: DropReason) {
         var partial: String?
-        if let id = state.spanID, let span = spans[id], !span.parked, inFlight == nil { partial = String(text[span.start..<span.end]) }
-        finishSpan(state.spanID)
+        if let id = state.spanID, let span = spans[id], !span.parked, inFlight == nil { partial = String(chars(of: span)) }
+        finishSpan(state.spanID); finishSpan(state.anchorID)
         events.append(.dropped(Drop(id: state.edit.id, runID: nil, kind: state.edit.kind, reason: reason,
                                     text: state.edit.target, partial: partial)))
     }
@@ -683,7 +743,7 @@ public struct FieldQueue: Sendable {
         if run.pending != nil { return true }
         for region in run.regions where !region.abandoned {
             guard let span = spans[region.spanID], !span.parked, !span.userChanged, !span.edited else { continue }
-            if Array(text[span.start..<span.end]) != Array(desiredText(region, in: run)) { return true }
+            if chars(of: span) != Array(desiredText(region, in: run)) { return true }
         }
         return untypedRest(of: run) != nil
     }
@@ -707,7 +767,7 @@ public struct FieldQueue: Sendable {
                 let region = runs[ri].regions[gi]
                 guard let span = spans[region.spanID], !span.parked else { continue }
                 let desired = Array(desiredText(region, in: runs[ri]))
-                let current = Array(text[span.start..<span.end])
+                let current = chars(of: span)
                 if region.abandoned || span.userChanged || span.edited {
                     runs[ri].regions[gi].abandoned = true
                     // Only a revision the region had not shown yet is lost (once each); the user's own change is no drop.
@@ -735,7 +795,8 @@ public struct FieldQueue: Sendable {
                     }
                 }
                 let paced = config.animated
-                unit = Unit(ops: plan(spanID: region.spanID, from: current, to: desired, paced: paced) + [.moveToUser],
+                unit = Unit(ops: plan(spanID: region.spanID, from: current, to: desired, paced: paced,
+                                     leaveTailAppend: region.tEnd == nil && span.end == userCursor) + [.moveToUser],
                             owner: .region(run: runs[ri].runID), paced: paced)
                 return nextInUnit()
             }
@@ -745,7 +806,7 @@ public struct FieldQueue: Sendable {
                 var ops: [QOp] = []
                 if userCursor < text.count, !text[userCursor].isWhitespace, !Self.closingMarks.contains(text[userCursor]) {
                     // The run starts in front of text without a space: one goes in behind it, and the caret stays before it.
-                    ops = [.insert(" ", owner: nil), .moveTo(userCursor), .setUserCursorToCursor]
+                    ops = [.insertBehind(" "), .moveToUser]
                 }
                 ops.append(.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor))
                 unit = Unit(ops: ops, owner: .space, paced: false)
@@ -855,7 +916,7 @@ public struct FieldQueue: Sendable {
         for (gi, region) in run.regions.enumerated() where !region.abandoned {
             let desired = desiredText(region, in: run)
             guard let span = spans[region.spanID] else { continue }
-            let current = String(text[span.start..<span.end])
+            let current = String(chars(of: span))
             if desired != current {
                 events.append(.dropped(Drop(id: "\(run.runID)#\(gi)", runID: run.runID, kind: nil, reason: span.parked ? .unplaceable : reason,
                                             text: desired, partial: span.parked ? nil : current)))
@@ -891,18 +952,18 @@ public struct FieldQueue: Sendable {
 
     // MARK: Model
 
-    private mutating func insertAtCursor(_ chars: [Character], owner: Int?) {
+    private mutating func insertAtCursor(_ chars: [Character], owner: Int?, behindUser: Bool = false) {
         guard !chars.isEmpty else { return }
         let i = cursor, n = chars.count
         text.insert(contentsOf: chars, at: i)
         for (id, var span) in spans {
             if id != owner, span.start < i, i < span.end { if owner == nil { span.userChanged = true } else { span.edited = true } }
-            if span.start > i || (span.start == i && id != owner) { span.start += n }
+            if span.start > i || (span.start == i && id != owner && !span.anchor) { span.start += n }
             if span.end > i || (span.end == i && id == owner) { span.end += n }
             span.end = max(span.end, span.start)
             spans[id] = span
         }
-        if userCursor >= i { userCursor += n }
+        if userCursor > i || (userCursor == i && !behindUser) { userCursor += n }
         cursor = i + n
     }
 
@@ -928,6 +989,12 @@ public struct FieldQueue: Sendable {
         for (id, var span) in spans { span.start += n; span.end += n; spans[id] = span }
     }
 
+    /// A span's text in the model (empty for a parked span, whose bounds mean nothing until it is found again).
+    private func chars(of span: Span) -> [Character] {
+        guard !span.parked, span.start >= 0, span.start <= span.end, span.end <= text.count else { return [] }
+        return Array(text[span.start..<span.end])
+    }
+
     private mutating func addSpan(_ span: Span) -> Int {
         nextSpanID += 1
         spans[nextSpanID] = span
@@ -948,15 +1015,30 @@ public struct FieldQueue: Sendable {
         let selected = report.selected ?? ""
         let found = FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: selected + report.after)
         if anywhere { return found.count == 1 && selected.count == selection && fitsSelection(found[0], selected) }
-        return found == [cursor] && selected.count == selection && fitsSelection(cursor, selected)
+        return (found == [cursor] || pinsExtended(report)) && selected.count == selection && fitsSelection(cursor, selected)
     }
 
     /// Idle: the report fits the model at the cursor (perhaps elsewhere too).
     private func consistent(_ report: Report) -> Bool {
         let selected = report.selected ?? ""
         return selected.count == selection
-            && FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: selected + report.after).contains(cursor)
+            && (FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: selected + report.after).contains(cursor)
+                || pinsExtended(report))
             && fitsSelection(cursor, selected)
+    }
+
+    /// The model knows only a little before the cursor (fewer than `FieldMatch.reverseMatchChars`), and the report
+    /// reaches back past it while agreeing with all of it: the model grown by the report's extra text pins the cursor.
+    private func pinsExtended(_ report: Report) -> Bool {
+        let before = Array(FieldReader.trusted(before: report.before))
+        guard cursor >= Self.extendOverlapChars, cursor < FieldMatch.reverseMatchChars, before.count > cursor,
+              before.suffix(cursor).elementsEqual(text[..<cursor]) else { return false }
+        // A late report of the state before the op in flight is lag, not more text.
+        if let flight = inFlight, pins(report, in: flight.pre) { return false }
+        if lagging.contains(where: { pins(report, in: $0.state) }) { return false }
+        let extra = before.count - cursor
+        let grown = Array(before.prefix(extra)) + text
+        return FieldMatch.positions(in: grown, reportedBefore: report.before, reportedAfter: (report.selected ?? "") + report.after) == [cursor + extra]
     }
 
     private func fitsSelection(_ p: Int, _ selected: String) -> Bool {
@@ -1030,19 +1112,52 @@ public struct FieldQueue: Sendable {
         // The text around the cursor changed: the report is the new model; spans are found again by their text.
         abortUnit()
         closeOpenRegions(.resync)
-        for (id, var span) in spans { span.lastText = Array(text[span.start..<span.end]); span.parked = true; spans[id] = span }
+        for (id, var span) in spans where !span.parked {
+            span.lastText = chars(of: span)
+            if !span.lastText.isEmpty {
+                span.lastBefore = Array(text[max(0, span.start - Self.contextChars)..<span.start])
+                span.lastAfter = Array(text[span.end..<min(text.count, span.end + Self.contextChars)])
+            }
+            span.parked = true; spans[id] = span
+        }
+        let oldText = text, oldCursor = cursor, oldUser = userCursor
         seed(report)
+        carryUserCursor(from: oldText, cursor: oldCursor, user: oldUser)
         events.append(.resync(.reseeded))
         unparkSpans()
+    }
+
+    /// A resync while a unit had the caret away from the user: the user's cursor keeps its distance from the caret when
+    /// the text between them agrees with the new model as far as the model shows it (the rest comes from the old model).
+    private mutating func carryUserCursor(from old: [Character], cursor oldCursor: Int, user oldUser: Int) {
+        let d = oldUser - oldCursor
+        guard d != 0 else { return }
+        if d > 0 {
+            let segment = old[oldCursor..<oldUser]
+            let known = min(d, text.count - cursor)
+            guard known == d || known >= Self.contextChars, text[cursor..<(cursor + known)].elementsEqual(segment.prefix(known)) else { return }
+            if known < d { text += segment.suffix(d - known) }
+            userCursor = cursor + d
+        } else {
+            let segment = old[oldUser..<oldCursor]
+            let known = min(-d, cursor)
+            guard known == -d || known >= Self.contextChars, text[(cursor - known)..<cursor].elementsEqual(segment.suffix(known)) else { return }
+            if known < -d { prepend(Array(segment.prefix(-d - known))) }
+            userCursor = cursor + d
+        }
     }
 
     /// Parked spans come back where their text is found again, once and uniquely.
     private mutating func unparkSpans() {
         for (id, var span) in spans where span.parked {
             let needle = span.lastText
-            guard !needle.isEmpty, needle.count <= text.count else { continue }
+            // A short text may well stand elsewhere too (the user's own words): only a long one is found again.
+            guard needle.count >= Self.relocateChars, needle.count <= text.count else { continue }
             var hits: [Int] = []
-            for p in 0...(text.count - needle.count) where text[p..<(p + needle.count)].elementsEqual(needle) {
+            for p in 0...(text.count - needle.count) where text[p..<(p + needle.count)].elementsEqual(needle)
+                && p >= span.lastBefore.count && text[(p - span.lastBefore.count)..<p].elementsEqual(span.lastBefore)
+                && p + needle.count + span.lastAfter.count <= text.count
+                && text[(p + needle.count)..<(p + needle.count + span.lastAfter.count)].elementsEqual(span.lastAfter) {
                 hits.append(p)
                 if hits.count > 1 { break }
             }
@@ -1056,22 +1171,26 @@ public struct FieldQueue: Sendable {
 
     /// Where an edit's scope is in the model: at the user's cursor (the model may grow by the scope's text beyond what
     /// it knows), else at its one occurrence in the model.
-    private mutating func place(_ edit: Edit) -> Placement {
+    private mutating func place(_ edit: Edit, anchor: Int? = nil) -> Placement {
         let before = Array(edit.before), after = Array(edit.after)
         func fitsWithGrowth(_ p: Int) -> (front: Int, back: Int)? {
+            guard p >= 0, p <= text.count else { return nil }
             let k = min(p, before.count)
             guard text[(p - k)..<p].elementsEqual(before[(before.count - k)...]), k == before.count || p - k == 0 else { return nil }
             let m = min(text.count - p, after.count)
             guard text[p..<(p + m)].elementsEqual(after[..<m]), m == after.count || p + m == text.count else { return nil }
             return (before.count - k, after.count - m)
         }
-        if let growth = fitsWithGrowth(userCursor), selection == 0 {
-            prepend(Array(before.prefix(growth.front)))
+        // Where the cursor is, or where it was when the edit came (tracked through every change since).
+        for candidate in [userCursor, anchor.flatMap { spans[$0] }.flatMap { $0.parked ? nil : $0.start }].compactMap({ $0 }) {
+            guard let growth = fitsWithGrowth(candidate), selection == 0 || candidate != cursor else { continue }
+            var p = candidate
+            if growth.front > 0 { prepend(Array(before.prefix(growth.front))); p += growth.front }
             if growth.back > 0 { text += after.suffix(growth.back) }
-            return .placed(addSpan(Span(start: userCursor - before.count, end: userCursor + after.count)))
+            return .placed(addSpan(Span(start: p - before.count, end: p + after.count)))
         }
         let scope = before + after
-        guard !scope.isEmpty, scope.count <= text.count else { return .absent }
+        guard scope.count >= Self.relocateChars, scope.count <= text.count else { return .absent }
         var hits: [Int] = []
         for p in before.count...(text.count - after.count)
             where text[(p - before.count)..<p].elementsEqual(before) && text[p..<(p + after.count)].elementsEqual(after) {

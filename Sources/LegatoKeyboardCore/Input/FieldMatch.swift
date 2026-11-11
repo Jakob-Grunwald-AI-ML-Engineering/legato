@@ -26,10 +26,14 @@ public enum FieldMatch {
         let trusted = Array(FieldReader.trusted(before: reportedBefore))
         guard exact.isEmpty, trusted.count < reportedBefore.count, reportedBefore.first?.isNewline == true else { return exact }
         if trusted.isEmpty {
-            // Only the boundary: the cursor is in an empty block, a line break before it and one (or the end) after it.
-            guard reportedAfter.isEmpty else { return [] }
+            // Only the boundary: the cursor is at a block's start, a line break before it. With nothing reported after
+            // it, the block is empty (a line break or the end follows); otherwise the report after it must fit there.
+            let after = Array(reportedAfter)
             return (1...max(1, text.count)).filter { p in
-                p <= text.count && text[p - 1].isNewline && (p == text.count || text[p].isNewline)
+                guard p <= text.count, text[p - 1].isNewline else { return false }
+                if after.isEmpty { return p == text.count || text[p].isNewline }
+                let n = min(after.count, text.count - p)
+                return n > 0 && text[p..<(p + n)].elementsEqual(after[..<n])
             }
         }
         return fits(in: text, reportedBefore: trusted, reportedAfter: Array(reportedAfter)).filter { p in

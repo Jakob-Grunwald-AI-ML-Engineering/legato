@@ -21,9 +21,22 @@ struct FakeField {
     private var history: [FieldQueue.Report] = []
     private var pendingReset: Int?
 
+    /// Who wrote each character, and who deleted what: the stress test's provenance checks.
+    enum Origin: String { case initial, outside, user, live, edit }
+    var origin: [Origin]
+    /// Who the next op is from.
+    var writer = Origin.outside
+    var deletions: [(char: Character, origin: Origin, by: Origin, racing: Bool)] = []
+    /// The next op races with an outside action the queue has not seen yet.
+    var racing = false
+    /// Where the user's caret is: taps and the user's moves put it there; edits before it shift it.
+    var userCaret: Int
+
     init(_ text: String = "", caret: Int? = nil) {
         self.text = Array(text)
         self.caret = caret ?? self.text.count
+        origin = Array(repeating: .initial, count: self.text.count)
+        userCaret = self.caret
     }
 
     var string: String { String(text) }
@@ -69,24 +82,38 @@ struct FakeField {
                 }
             }
             if caretResets, units != 0 { pendingReset = from }
+            if writer == .user { userCaret = caret }
         case .deleteBackward(let count):
             for _ in 0..<count {
-                if selection > 0 { text.removeSubrange(caret..<(caret + selection)); selection = 0; continue }
+                if selection > 0 { remove(caret..<(caret + selection)); selection = 0; continue }
                 guard caret > 0 else { break }
-                text.remove(at: caret - 1); caret -= 1
+                remove((caret - 1)..<caret); caret -= 1
             }
         case .insert(let string):
-            if selection > 0 { text.removeSubrange(caret..<(caret + selection)); selection = 0 }
-            text.insert(contentsOf: Array(string), at: caret)
-            caret += string.count
+            if selection > 0 { remove(caret..<(caret + selection)); selection = 0 }
+            let chars = Array(string)
+            text.insert(contentsOf: chars, at: caret)
+            origin.insert(contentsOf: Array(repeating: writer, count: chars.count), at: caret)
+            if userCaret >= caret { userCaret += chars.count }
+            caret += chars.count
         }
     }
 
+    private mutating func remove(_ range: Range<Int>) {
+        for i in range { deletions.append((text[i], origin[i], writer, racing)) }
+        text.removeSubrange(range); origin.removeSubrange(range)
+        if userCaret >= range.upperBound { userCaret -= range.count } else if userCaret > range.lowerBound { userCaret = range.lowerBound }
+    }
+
     /// The user taps somewhere (outside the keyboard).
-    mutating func tap(at index: Int) { caret = max(0, min(text.count, index)); selection = 0 }
-    mutating func select(_ range: Range<Int>) { caret = range.lowerBound; selection = range.count }
+    mutating func tap(at index: Int) { caret = max(0, min(text.count, index)); selection = 0; userCaret = caret }
+    mutating func select(_ range: Range<Int>) { caret = range.lowerBound; selection = range.count; userCaret = caret }
     /// Another keyboard (a hardware keyboard) types: invisible to the queue except through reports.
-    mutating func typeOutside(_ string: String) { apply(.insert(string)) }
+    mutating func typeOutside(_ string: String) {
+        let previous = writer; writer = .outside
+        apply(.insert(string))
+        writer = previous
+    }
 }
 
 /// The keyboard's loop in miniature: steps the queue against a `FakeField` every `tickMs`.
@@ -97,7 +124,14 @@ struct QueueRig {
     var clockMs = 0.0
     var sent: [(ms: Double, op: ShadowOp)] = []
     var events: [(ms: Double, event: FieldQueue.Event)] = []
-    var maxInFlight = 0
+    var lastLane: FieldQueue.Lane?
+    /// For every user insert: the field's caret and where the user's caret was when it went out.
+    var userInsertCarets: [(ms: Double, caret: Int, userCaret: Int, racing: Bool)] = []
+    /// The user acted outside the keyboard (tap, selection, another keyboard) and the queue has not resynced since.
+    var outsidePending = false
+
+    /// Prints every step (`LEGATO_STRESS_TRACE=1`).
+    var trace = ProcessInfo.processInfo.environment["LEGATO_STRESS_TRACE"] == "1"
 
     init(_ field: FakeField, config: FieldQueue.Config = .init(animated: false)) {
         self.field = field
@@ -115,10 +149,47 @@ struct QueueRig {
             let report = field.tick()
             let action = queue.step(report: report, elapsedMs: elapsed)
             elapsed = 0
-            for event in queue.drainEvents() { events.append((clockMs, event)) }
-            guard case .send(let op) = action else { break }
+            var syncUserCaret = false
+            var behind = false
+            for event in queue.drainEvents() {
+                events.append((clockMs, event))
+                if case .sent(_, let lane) = event { lastLane = lane }
+                if event == .insertedBehind { behind = true }
+                // A tap the late report had not shown yet races with the queue's own moves: once the queue sees the
+                // change, where it puts the user's caret is the user's caret.
+                if outsidePending, case .resync(let kind) = event, kind == .cursorMoved || kind == .reseeded {
+                    outsidePending = false; syncUserCaret = true
+                }
+            }
+            if trace {
+                print(String(format: "%7.0f", clockMs), "report", report.before.suffix(24).debugDescription, "|", report.after.prefix(12).debugDescription,
+                      report.selected.map { "sel=\($0.debugDescription)" } ?? "", "->", action,
+                      events.suffix(4).map { "\($0.event)" }.joined(separator: " "))
+                print("        field", field.string.debugDescription, "caret", field.caret, "user", field.userCaret,
+                      "model", queue.modelText.debugDescription, "cursor", queue.cursor, "user", queue.userCursor, queue.debugState)
+            }
+            guard case .send(let op) = action else {
+                if syncUserCaret { field.userCaret = field.caret + queue.userCursor - queue.cursor }
+                break
+            }
             sent.append((clockMs, op))
+            if syncUserCaret, case .insert = op, lastLane == .user { field.userCaret = field.caret }
+            field.writer = lastLane.map { lane in lane == .user ? .user : lane == .live ? .live : .edit } ?? .edit
+            if case .insert = op, lastLane == .user { userInsertCarets.append((clockMs, field.caret, field.userCaret, outsidePending)) }
+            // The run starting in front of text puts a space behind the user's caret (which stays before it).
+            let keep = field.userCaret
+            if trace, lastLane == .live, case .deleteBackward = op, field.caret > 0, field.origin[field.caret - 1] != .live {
+                print("        BAD DELETE of", String(field.text[field.caret - 1]).debugDescription, "by live")
+            }
+            let before = field.caret
+            field.racing = outsidePending
             field.apply(op)
+            // A key that finished a dictated word carries the word's rest: that part is the run's (keys are one character).
+            if lastLane == .user, case .insert(let s) = op, s.count > 1 {
+                for i in before..<(before + s.count - 1) where i < field.origin.count { field.origin[i] = .live }
+            }
+            if behind { field.userCaret = keep }
+            if syncUserCaret { field.userCaret = field.caret + queue.userCursor - queue.cursor }
             if field.lagTicks > 0 { break }
         }
     }
