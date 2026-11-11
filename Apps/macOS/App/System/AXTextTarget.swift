@@ -72,20 +72,100 @@ final class AXTextTarget: TextTarget {
         return .target(target)
     }
 
-    /// A focus/security witness for paste-only editors. This never reads or replaces their contents.
-    static func capturePasteTarget() -> AXTextTarget? {
-        guard !IsSecureEventInputEnabled(), AXIsProcessTrusted(),
-              let app = NSWorkspace.shared.frontmostApplication,
-              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
+    /// What a typed insert at the end of a take can rely on in the field it started in.
+    enum PasteWitness {
+        /// The focused element: the insert goes ahead only while it still has focus.
+        case element(AXTextTarget)
+        /// No element could be read (nothing focused that Accessibility exposes): the app and the key guards decide.
+        case unreadable
+        /// A secure field, or one that could not be ruled out: copy only.
+        case secure
+    }
+
+    /// A focus/security witness for typed inserts. This never reads or replaces the field's contents.
+    static func capturePasteWitness() -> PasteWitness {
+        if IsSecureEventInputEnabled() { return .secure }
+        guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return .unreadable }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
-        guard let value = try? copyAttribute(appElement, kAXFocusedUIElementAttribute),
-              CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        let value: CFTypeRef?
+        do { value = try copyAttribute(appElement, kAXFocusedUIElementAttribute) }
+        catch AXTargetError.attribute(let error) where isAbsent(error) { return .unreadable }
+        catch { return .secure }
+        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return .unreadable }
         let element = unsafeDowncast(value, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
-        guard case .notSecure = secureState(of: element) else { return nil }
-        return AXTextTarget(element: element, appElement: appElement)
+        guard case .notSecure = secureState(of: element) else { return .secure }
+        return .element(AXTextTarget(element: element, appElement: appElement))
     }
+
+    // MARK: Chromium
+
+    private static var warmup = AccessibilityWarmup()
+    private static var chromium: [pid_t: Bool] = [:]
+
+    /// Whether `pid` runs on Chromium (cached per process): its web text can be read, not replaced, through
+    /// Accessibility.
+    static func isChromium(pid: pid_t) -> Bool {
+        if let known = chromium[pid] { return known }
+        guard let app = NSRunningApplication(processIdentifier: pid), let bundle = app.bundleURL else { return false }
+        let frameworks = bundle.appending(path: "Contents/Frameworks", directoryHint: .isDirectory)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: frameworks.path)) ?? []
+        let result = ChromiumHost.matches(executableName: app.executableURL?.lastPathComponent, frameworks: names) {
+            FileManager.default.fileExists(atPath: frameworks.appending(path: $0).path)
+        }
+        chromium[pid] = result
+        return result
+    }
+
+    /// Asks a Chromium app that exposes no focused element to build its Accessibility tree (`AccessibilityWarmup`
+    /// paces the requests). Chrome, Edge, their web apps and Electron turn on their native Accessibility API when a
+    /// client reads the application's role (Chromium does this for Voice Control-style assistive apps); the tree is
+    /// there about 0.1 s later. Older Electron apps also honour `AXManualAccessibility`. `AXEnhancedUserInterface`
+    /// is never set: it has window-manager side effects, and Chrome debounces it by seconds.
+    static func requestTree(pid: pid_t) {
+        guard pid != ProcessInfo.processInfo.processIdentifier, AXIsProcessTrusted(), isChromium(pid: pid) else { return }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, messagingTimeout)
+        var focused: CFTypeRef?
+        guard isAbsent(AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused)),
+              warmup.shouldRequest(pid: pid, now: .now) else { return }
+        _ = try? copyAttribute(app, kAXRoleAttribute)
+        _ = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
+    /// A process ended: forget what was learned about its pid.
+    static func forget(pid: pid_t) {
+        warmup.forget(pid: pid)
+        chromium[pid] = nil
+    }
+
+    /// Before a capture: request the frontmost app's tree if it is Chromium, and while that tree is still being
+    /// built (`AccessibilityWarmup.budget` after the request) wait for the focused field to become readable.
+    static func prepareFocused() async {
+        guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication else { return }
+        let pid = app.processIdentifier
+        requestTree(pid: pid)
+        _ = await AccessibilityWarmup.retry(until: warmup.retryDeadline(pid: pid, now: .now)) { () -> Bool? in
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return true }
+            if case .none = captureFocused() { return nil }
+            return true
+        }
+    }
+
+    /// Whether Accessibility writes land exactly in this field. Chromium's web content reports success for an
+    /// AXSelectedText write and changes nothing.
+    var editsInPlace: Bool { !Self.isChromium(pid: pid) }
+    /// Chromium fields are edited with synthetic keys, each read back (`MacFieldQueue`). Only an editable element
+    /// takes keys: the page itself (AXWebArea) reads as text too, and a letter typed there can be a site's shortcut.
+    var typesKeys: Bool { Self.isChromium(pid: pid) && editable }
+    private lazy var editable: Bool = {
+        var settable: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue { return true }
+        return (try? Self.copyAttribute(element, "AXEditableAncestor")) != nil
+    }()
+    var inputMark: Int { RealInput.shared.count }
 
     private enum SecureState { case secure, notSecure, unknown }
 
@@ -151,7 +231,7 @@ final class AXTextTarget: TextTarget {
     }
 
     func replace(_ range: UTF16Range, with text: String) throws {
-        guard isFocused() else { throw AXTargetError.unexpectedValue }
+        guard isFocused(), editsInPlace else { throw AXTargetError.unexpectedValue }
         let original = try self.text(in: range)
         // Streaming appends already own this caret. Avoid an unnecessary browser selection
         // mutation, which can scroll the editor or briefly highlight its contents.
@@ -165,6 +245,50 @@ final class AXTextTarget: TextTarget {
             let error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
             guard error == .success else { throw AXTargetError.attribute(error) }
         }
+    }
+
+    // MARK: Keystrokes
+
+    /// Modifiers that turn a key into a shortcut (fn turns the arrows into Home/End and Backspace into forward delete).
+    private static let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn]
+
+    /// One key into this field, only while every guard holds: no secure input, this app in front with this element
+    /// focused, no real key or click since `mark`, no modifier held, and the selection still `selection`. The input
+    /// mark is checked again right before the key goes out.
+    func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws {
+        guard isFocused() else { throw FieldKeyRefusal.notFocused }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        guard CGEventSource.flagsState(.hidSystemState).intersection(Self.modifiers).isEmpty else { throw FieldKeyRefusal.modifiersHeld }
+        guard (try? selectedRange()) == selection else { throw FieldKeyRefusal.selectionMoved }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        let sent: Bool
+        switch key {
+        case .left: sent = SyntheticKeys.tap(kVK_LeftArrow)
+        case .right: sent = SyntheticKeys.tap(kVK_RightArrow)
+        case .backspace: sent = SyntheticKeys.tap(kVK_Delete)
+        case .text(let character):
+            let text = String(character)
+            sent = SyntheticEvent.typeable(text) ? SyntheticKeys.type(text) : paste(text, at: selection)
+        }
+        guard sent else { throw FieldKeyRefusal.unavailable }
+    }
+
+    /// A line break, tab or oversized grapheme: never a Return or Tab key. It is pasted (⌘V, paired), the field is
+    /// watched until it shows the text, and the clipboard comes back unless someone else wrote to it meanwhile.
+    private func paste(_ text: String, at selection: UTF16Range) -> Bool {
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteService.Snapshot(of: pasteboard)
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: PasteService.transientType)
+        guard pasteboard.writeObjects([item]) else { snapshot.restore(to: pasteboard); return false }
+        let ours = pasteboard.changeCount
+        guard SyntheticKeys.commandV() else { snapshot.restore(to: pasteboard); return false }
+        let range = UTF16Range(location: selection.location, length: text.utf16.count)
+        for _ in 0..<50 where (try? self.text(in: range)) != text { usleep(20_000) }
+        if pasteboard.changeCount == ours { snapshot.restore(to: pasteboard) }
+        return true
     }
 
     private func supportsTextOperation() -> Bool {

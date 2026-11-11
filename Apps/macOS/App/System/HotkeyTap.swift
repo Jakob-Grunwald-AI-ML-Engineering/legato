@@ -75,6 +75,9 @@ private func hotkeyTapCallback(
         if let port = context.port { CGEvent.tapEnable(tap: port, enable: true) }
         context.continuation.yield(TapSample(event: nil, time: ProcessInfo.processInfo.systemUptime))
         return Unmanaged.passUnretained(event)
+    case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+        if !SyntheticEvent.isLegato(event.getIntegerValueField(.eventSourceUserData)) { RealInput.shared.bump() }
+        return Unmanaged.passUnretained(event)
     case .flagsChanged: kind = .flagsChanged
     case .keyDown: kind = .keyDown
     case .keyUp: kind = .keyUp
@@ -85,12 +88,14 @@ private func hotkeyTapCallback(
         kind: kind, keyCode: UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode)),
         flagsRaw: event.flags.rawValue, userData: event.getIntegerValueField(.eventSourceUserData)
     ) else { return Unmanaged.passUnretained(event) }
+    // A real key: a synthetic key planned before it is refused (`RealInput`).
+    if kind == .keyDown { RealInput.shared.bump() }
     let sample = TapSample(event: keyEvent, time: ProcessInfo.processInfo.systemUptime)
     context.continuation.yield(sample)
     return Unmanaged.passUnretained(event)
 }
 
-/// A listen-only `CGEventTap` for `flagsChanged`, `keyDown` and `keyUp`, on its own thread so a busy
+/// A listen-only `CGEventTap` for `flagsChanged`, `keyDown` and `keyUp` (and clicks, counted in `RealInput`), on its own thread so a busy
 /// main thread (Accessibility calls can block for their timeout) never gets the tap disabled.
 /// Samples arrive in order on `samples`.
 @MainActor
@@ -111,7 +116,9 @@ final class HotkeyTap {
     func start() -> Bool {
         guard port == nil else { return true }
         let context = TapContext(continuation: continuation)
-        let mask: CGEventMask = [CGEventType.flagsChanged, .keyDown, .keyUp].reduce(0) { $0 | (1 << $1.rawValue) }
+        // Clicks only count as real input (`RealInput`); they are not samples.
+        let mask: CGEventMask = [CGEventType.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+            .reduce(0) { $0 | (1 << $1.rawValue) }
         guard let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
