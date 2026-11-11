@@ -126,6 +126,19 @@ public enum ShadowEditPlanner {
 
     // MARK: Diff
 
+    /// One change of the minimal diff: the characters `start..<end` of the old text become `text`.
+    public struct Change: Sendable, Equatable {
+        public var start: Int
+        public var end: Int
+        public var text: [Character]
+        public init(start: Int, end: Int, text: [Character]) { self.start = start; self.end = end; self.text = text }
+    }
+
+    /// The minimal grapheme diff from `old` to `new`, in order: only the differing characters.
+    public static func changes(from old: [Character], to new: [Character]) -> [Change] {
+        diff(old, new).map { Change(start: $0.start, end: $0.end, text: $0.text) }
+    }
+
     struct Hunk { var start: Int; var end: Int; var text: [Character] }
 
     /// Hirschberg LCS: exact shortest edit script, linear auxiliary memory. Common boundaries

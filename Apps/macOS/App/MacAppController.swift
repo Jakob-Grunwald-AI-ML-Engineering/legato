@@ -23,7 +23,6 @@ import Observation
     private var callDetection: CallDetectionController?
     let dictation: MacDictationSession
     let fieldEditor: MacFieldEditor
-    private let fallbackWriter: FieldDictationWriter
     @ObservationIgnored private let fallbackOwner = MacFallbackOwner()
     private var dictationPill: DictationPillController?
     private var magicTask: Task<Void, Never>?
@@ -48,6 +47,7 @@ import Observation
     private var pollTask: Task<Void, Never>?
     private var bootstrapped = false
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
+    @ObservationIgnored private var terminateObserver: NSObjectProtocol?
     @ObservationIgnored private var mouseMonitor: Any?
     /// Real (untagged) key presses seen by the tap; typing into a paste-only app stops when this moves.
     let keyPresses = KeyPressCounter()
@@ -83,35 +83,51 @@ import Observation
         instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
         #endif
         dictation = MacDictationSession(pipeline: pipeline, instruction: instruction, microphone: AutomaticInputSource(), vocabularyURL: vocabularyURL)
-        fieldEditor = MacFieldEditor(capture: {
+        fieldEditor = MacFieldEditor(capture: { () -> FocusedField in
+            #if DEBUG
+            // Acceptance of the unreadable-field path in an app whose fields are readable.
+            if UserDefaults.standard.bool(forKey: "LegatoDebugUnreadableField") { return .none }
+            #endif
             switch AXTextTarget.captureFocused() {
-            case .target(let target): .target(target)
-            case .none: .none
-            case .secure: .secure
+            case .target(let target): return .target(target)
+            case .none: return .none
+            case .secure: return .secure
             }
         })
-        fallbackWriter = FieldDictationWriter(capture: { .none }, fallback: { [weak paster, settings, keyPresses, fallbackOwner] text, secure, copyOnly in
-            guard let paster else { return .copied(message: "", reason: .appChanged) }
+        fieldEditor.panelMode = { PanelDictationSetting.mode() }
+        fieldEditor.insert = { [weak paster, settings, keyPresses, fallbackOwner] text in
+            guard let paster else { return .copied(message: "") }
             let generation = fallbackOwner.generation, pid = fallbackOwner.pid, keys = fallbackOwner.keys
-            let witness = fallbackOwner.target
-            let owned = { @MainActor in fallbackOwner.generation == generation && fallbackOwner.allowed && keyPresses.count == keys && witness?.isFocused() == true }
-            guard !copyOnly, !secure, owned() else {
-                paster.copy(text)
-                return .copied(message: secure ? CopyReason.secureField.toast : "Dictation copied: the field or cursor changed. Paste with ⌘V.", reason: secure ? .secureField : .appChanged)
-            }
-            if settings.typewriter {
-                switch await paster.type(text, targetPID: pid, secureField: false, restoreClipboard: settings.restoreClipboard, realKeyDowns: { keyPresses.count }, stillOwned: owned) {
-                case .typed: return .typed
-                case .interrupted(let rest): return .interrupted(remainder: rest, message: "Typing stopped. The remaining words are on the clipboard.")
-                case .unavailable: break
+            let witness = fallbackOwner.witness
+            // Same session, no click or real key since it started, the field (when readable) still focused.
+            let owned = { @MainActor () -> Bool in
+                guard fallbackOwner.generation == generation, fallbackOwner.allowed, keyPresses.count == keys else { return false }
+                switch witness {
+                case .element(let target): return target.isFocused()
+                case .unreadable: return true
+                case .secure, nil: return false
                 }
             }
-            switch await paster.paste(text, restoreClipboard: settings.restoreClipboard, targetPID: pid, secureField: false, stillOwned: owned) {
-            case .pasted: return .pasted
-            case .copied(let reason): return .copied(message: reason.toast, reason: reason)
+            guard owned() else {
+                paster.copy(text)
+                return .copied(message: "Dictation copied: the field or app changed. Paste with ⌘V.")
             }
-        }, frontmostApp: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
-        fieldEditor.typewriter = { [settings] in settings.typewriter }
+            switch await paster.type(text, targetPID: pid, secureField: false, restoreClipboard: settings.restoreClipboard,
+                                     paced: settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                                     realKeyDowns: { keyPresses.count }, stillOwned: owned) {
+            case .typed: return .typed
+            case .interrupted: return .interrupted(message: "Typing stopped. The rest is on the clipboard; paste with ⌘V.")
+            case .unavailable(let reason):
+                paster.copy(text)
+                return .copied(message: reason == .appChanged ? "Dictation copied: the field or app changed. Paste with ⌘V." : reason.toast)
+            }
+        }
+        // Every change is typed a grapheme at a time; Reduce Motion (or the Typewriter setting off) sends it whole.
+        fieldEditor.typewriter = { [settings] in settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+        #if DEBUG || LEGATO_INTERNAL
+        let journalFile = EditJournalFile()
+        fieldEditor.journal = { journalFile.write($0) }
+        #endif
         instruction.field = fieldEditor
         fieldEditor.report = { [weak dictation] in dictation?.report($0) }
         fieldEditor.recover = { [weak paster] in paster?.copy($0) }
@@ -120,18 +136,11 @@ import Observation
             fallbackOwner.generation += 1
             fallbackOwner.pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
             fallbackOwner.keys = keyPresses.count; fallbackOwner.allowed = true
-            fallbackOwner.target = AXTextTarget.capturePasteTarget()
-            fallbackWriter.begin(); fieldEditor.begin()
+            fallbackOwner.witness = AXTextTarget.capturePasteWitness()
+            fieldEditor.begin()
         }
-        fieldEditor.fallback = { [weak self] text in
-            guard let self else { return }
-            if case .copied(let message) = await fallbackWriter.write(text) { dictation.report(message) }
-        }
-        dictation.onEnd = { [weak self] in
-            guard let self else { return }
-            await fieldEditor.finish()
-            if case .copied(let message)? = await fallbackWriter.finish() { dictation.report(message) }
-        }
+        dictation.onPrepare = { await AXTextTarget.prepareFocused() }
+        dictation.onEnd = { [weak fieldEditor] in await fieldEditor?.finish() }
         dictation.onMagicBegin = { [weak fieldEditor] in fieldEditor?.beginInstruction() }
         dictation.deliver = { [weak fieldEditor] in fieldEditor?.deliver($0) }
         dictation.deliverStream = { [weak fieldEditor] poll in await fieldEditor?.stream(poll) ?? false }
@@ -149,18 +158,26 @@ import Observation
     }
     func bootstrap() {
         guard !bootstrapped else { return }; bootstrapped = true
-        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
             Task { @MainActor in
                 guard let self else { return }
+                // A Chromium app builds its tree in about a second: ask for it now, before a dictation needs it.
+                if let pid { AXTextTarget.requestTree(pid: pid) }
                 self.fieldEditor.focusChanged()
-                if self.fallbackOwner.target?.isFocused() != true { self.fallbackOwner.allowed = false }
+                if case .element(let target) = self.fallbackOwner.witness, target.isFocused() {} else { self.fallbackOwner.allowed = false }
             }
         }
+        terminateObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { note in
+            guard let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier else { return }
+            Task { @MainActor in AXTextTarget.forget(pid: pid) }
+        }
+        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier { AXTextTarget.requestTree(pid: pid) }
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in self?.fieldEditor.relinquish(); self?.fallbackOwner.allowed = false }
         }
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
-        dictationPill = DictationPillController(session: dictation)
+        dictationPill = DictationPillController(session: dictation, panel: fieldEditor.panel)
         dictation.ensureWarm()
         meetingIsland = MeetingIslandController(controller: meetings)
         meetings.bootstrap()
@@ -230,8 +247,9 @@ import Observation
     private func handle(_ sample: TapSample) {
         guard let event = sample.event else { magicGesture.reset(); dictationGesture.reset(); return }
         if event.kind == .keyDown {
-            keyPresses.count &+= 1
             let shortcut = settings.hotkey?.triggerEvent(for: event) == .pressed || settings.dictationHotkey?.triggerEvent(for: event) == .pressed
+            // Legato's own shortcuts are not the user's typing: a key-based shortcut must not void a typed insert.
+            if !shortcut { keyPresses.count &+= 1 }
             if !shortcut, recordingTarget == nil {
                 fieldEditor.relinquish(); fallbackOwner.allowed = false
                 if dictation.instruction.strip.phase == .result || dictation.instruction.strip.phase == .undone { instructionAction(.accept) }
@@ -356,10 +374,10 @@ import Observation
     func runEnded() { gesture.runEnded() }
 }
 
-/// Only the app/field captured before speech may receive an unreadable field's final-text fallback.
+/// Only the app/field captured before speech may receive a panel-mode take's typed insert.
 @MainActor private final class MacFallbackOwner {
     var pid: pid_t?
-    var target: AXTextTarget?
+    var witness: AXTextTarget.PasteWitness?
     var keys = 0
     var allowed = false
     var generation = 0

@@ -30,10 +30,18 @@ public protocol TextTarget: AnyObject {
     func textLength() throws -> Int
     /// Replaces `range` with `text`, leaving the caret after the inserted text.
     func replace(_ range: UTF16Range, with text: String) throws
+    /// Whether `replace` lands exactly, so the field can be edited live. False where the host reads but does not
+    /// apply text writes (Chromium web content): dictation then types the finished take instead.
+    var editsInPlace: Bool { get }
+    /// Checks, before anything is written, that `replace(range, …)` can be issued now; it may move the selection.
+    /// A throw here means the text was not touched.
+    func prepareReplace(_ range: UTF16Range) throws
 }
 
 public enum TextTargetReadError: Error { case unsupported }
 public extension TextTarget {
+    var editsInPlace: Bool { true }
+    func prepareReplace(_ range: UTF16Range) throws {}
     func setSelectedRange(_ range: UTF16Range) throws { throw TextTargetReadError.unsupported }
     func textLength() throws -> Int { throw TextTargetReadError.unsupported }
 }

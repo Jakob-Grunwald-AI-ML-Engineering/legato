@@ -2,6 +2,7 @@
 import Foundation
 import LegatoDevHarness
 import LegatoAppServices
+import LegatoMac
 import AppKit
 import ApplicationServices
 
@@ -92,18 +93,22 @@ import ApplicationServices
         harness.register("magic-state") { _ in MacAppController.shared.dictation.instruction.debugState }
         harness.register("field-fixture-state") { _ in
             let app = MacAppController.shared
+            await AXTextTarget.prepareFocused()
             let capture: String
             switch AXTextTarget.captureFocused() {
-            case .target: capture = "readable"
+            case .target(let target): capture = target.editsInPlace ? "readable" : "readable-no-writes"
             case .none: capture = "unavailable"
             case .secure: capture = "secure-or-unverified"
             }
+            let panel = app.fieldEditor.panel
             return ["capture": capture, "offline": MacDictationSession.offlineFixture,
                     "axTrusted": AXIsProcessTrusted(),
                     "frontmostPID": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
                     "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",
                     "magicHotkey": app.settings.hotkey?.displayName ?? "", "dictationHotkey": app.settings.dictationHotkey?.displayName ?? "",
-                    "send": app.settings.dictationSend.rawValue, "hotkeysEnabled": app.permissions.hotkeyTapActive]
+                    "send": app.settings.dictationSend.rawValue, "hotkeysEnabled": app.permissions.hotkeyTapActive,
+                    "panelMode": PanelDictationSetting.mode().rawValue, "panelActive": panel.active,
+                    "panelText": panel.take.text, "panelInserting": panel.inserting]
         }
         harness.register("say") { command in
             guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }

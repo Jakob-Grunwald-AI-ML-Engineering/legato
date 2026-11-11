@@ -27,11 +27,13 @@ private final class DictationPillHostingView<Content: View>: NSHostingView<Conte
 }
 
 /// A small island growing out of the notch (a top-centre card without one) while dictation runs: the listening
-/// state and the live line, or a readable notice (missing key, no field, microphone).
+/// state and the live line, or a readable notice (missing key, no field, microphone). A panel-mode take shows all
+/// its words here, growing with them, until they were typed into the app.
 @MainActor
 final class DictationPillController {
     let model = DictationPillModel()
     private let session: MacDictationSession
+    private let takePanel: DictationPanel
     private var panel: NSPanel?
     private var hideTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
@@ -41,11 +43,29 @@ final class DictationPillController {
     private var lastNoticeID = 0
     private static let size = NSSize(width: 460, height: 64)
     private static let failedSize = NSSize(width: 460, height: 92)
-    private var size: NSSize { session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle ? Self.failedSize : Self.size }
+    private var size: NSSize {
+        let base = session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle ? Self.failedSize : Self.size
+        guard DictationPillView.showsPanel(session: session, panel: takePanel) else { return base }
+        return NSSize(width: base.width, height: max(base.height, panelHeight(base: base)))
+    }
+
+    /// Room for every word of the panel take at the card's text width, up to half the screen (then the newest words
+    /// show and the oldest scroll out at the top).
+    private func panelHeight(base: NSSize) -> CGFloat {
+        let text = DictationPillView.panelText(session: session, panel: takePanel)
+        let width = base.width - 32 - 30 // card padding, then the symbol and its spacing
+        let bounds = (text as NSString).boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude),
+                                                     options: [.usesLineFragmentOrigin, .usesFontLeading],
+                                                     attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        let oneLine = ceil(NSFont.systemFont(ofSize: 14).boundingRectForFont.height)
+        let limit = ((NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.height ?? 800) / 2
+        return min(limit, base.height + max(0, ceil(bounds.height) - oneLine))
+    }
 
     /// `occupiedFrame` is the open composer, which a notice must not cover.
-    init(session: MacDictationSession, occupiedFrame: @escaping () -> NSRect? = { nil }) {
+    init(session: MacDictationSession, panel: DictationPanel = DictationPanel(), occupiedFrame: @escaping () -> NSRect? = { nil }) {
         self.session = session
+        self.takePanel = panel
         self.occupiedFrame = occupiedFrame
         lastNoticeID = session.noticeID
         track()
@@ -61,6 +81,7 @@ final class DictationPillController {
     private func track() {
         withObservationTracking {
             _ = session.phase; _ = session.noticeID; _ = session.pipeline.takePhase; _ = session.instruction.strip.revision
+            _ = DictationPillView.panelText(session: session, panel: takePanel); _ = takePanel.inserting; _ = takePanel.active
         } onChange: { [weak self] in
             Task { @MainActor in self?.update(); self?.track() }
         }
@@ -73,6 +94,7 @@ final class DictationPillController {
             scheduleHide(seconds: 5)
         }
         let takeShown = session.pipeline.takePhase != .buffering || session.instruction.strip.phase != .idle
+            || DictationPillView.showsPanel(session: session, panel: takePanel)
         // Only a failed cleanup takes clicks (Retry, Insert as-is); every other state lets them through.
         panel?.ignoresMouseEvents = session.pipeline.takePhase != .failed && session.instruction.strip.phase == .idle
         if session.phase != .idle || model.notice != nil || takeShown { present() } else { hide() }
@@ -84,7 +106,8 @@ final class DictationPillController {
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled, let self else { return }
             model.notice = nil
-            if session.phase == .idle, session.pipeline.takePhase == .buffering, session.instruction.strip.phase == .idle { hide() }
+            if session.phase == .idle, session.pipeline.takePhase == .buffering, session.instruction.strip.phase == .idle,
+               !DictationPillView.showsPanel(session: session, panel: takePanel) { hide() }
         }
     }
 
@@ -138,7 +161,7 @@ final class DictationPillController {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.becomesKeyOnlyIfNeeded = true
-        let hosting = DictationPillHostingView(rootView: DictationPillView(session: session, model: model, presentation: presentation))
+        let hosting = DictationPillHostingView(rootView: DictationPillView(session: session, panel: takePanel, model: model, presentation: presentation))
         // The controller owns the panel frame. SwiftUI's default min/max negotiation feeds
         // the GeometryReader's proposed size back into AppKit when Magic adds its actions.
         hosting.sizingOptions = []
@@ -166,6 +189,7 @@ final class DictationPillController {
 
 struct DictationPillView: View {
     let session: MacDictationSession
+    let panel: DictationPanel
     let model: DictationPillModel
     let presentation: IslandPresentation
     private var pipeline: DictationPipeline { session.pipeline }
@@ -202,8 +226,9 @@ struct DictationPillView: View {
             Text(line)
                 .font(NotchIslandTokens.body)
                 .foregroundStyle(showsPlaceholder ? .secondary : .primary)
-                .lineLimit(caption == nil ? 2 : 1)
+                .lineLimit(inPanel ? nil : caption == nil ? 2 : 1)
                 .truncationMode(.head)
+                .fixedSize(horizontal: false, vertical: inPanel)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -239,19 +264,42 @@ struct DictationPillView: View {
         .buttonStyle(.bordered).controlSize(.small)
     }
 
-    private var showsFailedActions: Bool { model.notice == nil && pipeline.takePhase == .failed }
+    private var showsFailedActions: Bool { (model.notice == nil || inPanel) && pipeline.takePhase == .failed }
     /// What was said so far: the take's text, then the live words.
     private var spoken: String {
-        [pipeline.takeDisplay, session.tail].filter { !$0.isEmpty }.joined(separator: " ")
+        if inPanel { return Self.panelText(session: session, panel: panel) }
+        return [pipeline.takeDisplay, session.tail].filter { !$0.isEmpty }.joined(separator: " ")
     }
-    private var showsPlaceholder: Bool { model.notice == nil && pipeline.takePhase == .buffering && spoken.isEmpty }
+    private var showsPlaceholder: Bool { (model.notice == nil || inPanel) && pipeline.takePhase == .buffering && spoken.isEmpty }
+    private var inPanel: Bool { Self.showsPanel(session: session, panel: panel) }
+
+    /// A panel-mode take is on show: from the dictation start until its words were typed (or are held after a failed
+    /// cleanup). Magic's strip takes precedence while it runs.
+    static func showsPanel(session: MacDictationSession, panel: DictationPanel) -> Bool {
+        guard panel.active, session.instruction.strip.phase == .idle else { return false }
+        return session.phase != .idle || panel.inserting || !panel.take.isEmpty || session.pipeline.takePhase != .buffering
+    }
+
+    /// Every word of a panel-mode take: what reached the panel (live runs, cleaned takes, lines), then raw words still
+    /// on their way there (a take before its cleaned words stream in, buffered lines, the live line).
+    static func panelText(session: MacDictationSession, panel: DictationPanel) -> String {
+        let pipeline = session.pipeline
+        var parts = [panel.take.text]
+        if pipeline.mode != .live {
+            if !panel.take.isGrowing { parts.append(pipeline.failedText ?? pipeline.cleaningText ?? "") }
+            parts += pipeline.takeLines
+            parts.append(session.tail)
+        }
+        return parts.filter { !$0.isEmpty }.joined(separator: " ")
+    }
     private var symbol: String {
         if session.instruction.strip.phase != .idle { return session.instruction.strip.phase == .failed ? "exclamationmark.triangle.fill" : "wand.and.stars" }
-        if model.notice != nil || pipeline.takePhase == .failed { return "exclamationmark.triangle.fill" }
+        if (model.notice != nil && !inPanel) || pipeline.takePhase == .failed { return "exclamationmark.triangle.fill" }
+        if inPanel, panel.inserting { return "keyboard" }
         return session.phase == .finishing || pipeline.takePhase == .cleaning ? "ellipsis" : "mic.fill"
     }
     private var tint: Color {
-        if model.notice != nil || pipeline.takePhase == .failed { return .orange }
+        if (model.notice != nil && !inPanel) || pipeline.takePhase == .failed { return .orange }
         return session.phase == .listening && pipeline.takePhase == .buffering ? .red : .secondary
     }
     /// A state line above the text: the cleanup is running, or failed and the raw text is held.
@@ -265,7 +313,10 @@ struct DictationPillView: View {
             case .idle: break
             }
         }
+        // In the panel the words stay; a notice takes the caption line instead.
+        if inPanel, let notice = model.notice { return notice }
         guard model.notice == nil else { return nil }
+        if inPanel, panel.inserting { return "Typing into the app…" }
         switch pipeline.takePhase {
         case .failed: return "Couldn't clean up. Your text is held."
         case .cleaning: return "Cleaning…"
@@ -274,7 +325,7 @@ struct DictationPillView: View {
     }
     private var line: String {
         if session.instruction.strip.phase != .idle { return session.instruction.strip.transcript.isEmpty ? "Speak an instruction about the text." : session.instruction.strip.transcript }
-        if let notice = model.notice { return notice }
+        if let notice = model.notice, !inPanel { return notice }
         if pipeline.takePhase != .buffering { return spoken }
         if !spoken.isEmpty { return spoken }
         switch session.phase {

@@ -1,42 +1,60 @@
 #if os(macOS)
 import Foundation
+import Observation
 import LegatoAgent
 import LegatoCore
 import LegatoKeyboardCore
 import LegatoMac
 
-/// AX-backed hosts supply a TextTarget. All mutations own an exact readable span and caret;
-/// a lost target is never rebound while words or a model result are in flight.
+/// A panel-mode dictation: the notch panel shows the take's words while it runs and is cleaned, and the finished
+/// text is typed into the app once at the end (`MacFieldEditor.insert`).
+@MainActor @Observable public final class DictationPanel {
+    /// This session dictates through the panel (from its start until the next one begins).
+    public fileprivate(set) var active = false
+    public fileprivate(set) var take = PanelTake()
+    /// The finished text is being typed into the app.
+    public fileprivate(set) var inserting = false
+    public init() {}
+}
+
+/// The Mac's dictation and Magic side of the focused field. It binds the field when a session starts and hands every
+/// change to the field's one queue (`MacFieldQueue`): live words and their revisions, cleanup, typed lines, Magic and
+/// its undo, and the panel's final typed insert. It writes nothing itself; Magic's reads come from here.
 @MainActor public final class MacFieldEditor: InstructionField {
+    /// How a panel-mode take reached the app.
+    public enum InsertOutcome: Sendable, Equatable {
+        case typed
+        /// Typing stopped part-way; the rest is on the clipboard.
+        case interrupted(message: String)
+        /// A guard failed before typing; all of it is on the clipboard.
+        case copied(message: String)
+    }
     private let capture: @MainActor () -> FocusedField
-    public var typewriter: @MainActor () -> Bool = { false }
+    /// Typewriter pacing of the queue (false with Reduce Motion).
+    public var typewriter: @MainActor () -> Bool = { true }
     public var sleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
     public var report: @MainActor (String) -> Void = { _ in }
     public var recover: @MainActor (String) -> Void = { _ in }
-    /// Only an initially unreadable, nonsecure field may receive a guarded final-text fallback.
-    public var fallback: (@MainActor (String) async -> Void)?
-    private var fallbackAllowed = false
-    private var fallbackRuns: Set<String> = []
-    private var fallbackTask: Task<Void, Never>?
-    private var liveTask: Task<Void, Never>?
-    private var instructionWaitingForLive = false
-    private var pendingLive: [LiveDictationSnapshot] = []
-    private var seenRunIDs: Set<String> = []
-    private var retiredRunIDs: Set<String> = []
+    /// Which fields dictate through the panel (`PanelDictationPolicy`).
+    public var panelMode: @MainActor () -> PanelDictationSetting.Mode = { PanelDictationSetting.defaultMode }
+    /// Types a panel-mode take into the app the session started in, under the host's guards (synthetic keys).
+    public var insert: (@MainActor (String) async -> InsertOutcome)?
+    /// Where the queue's journal goes (debug and internal builds).
+    public var journal: (@MainActor (MacEditJournal.Entry) -> Void)?
+    public let panel = DictationPanel()
+    /// The field's queue; a new one per bound field.
+    public private(set) var queue = MacFieldQueue(target: nil)
+    /// The session's last words were delivered: finished panel text is typed as soon as it is final.
+    private var sessionEnded = false
+    /// Real input since the start: the panel's text is copied, never typed.
+    private var panelOwned = true
     private var target: (any TextTarget)?
     private var documentID = UUID().uuidString
-    private var coordinator = FieldEditCoordinator()
-    private var readRevision: FieldRevision?
     private var activeInstructionID: String?
-    private var runVersions: [String: Int] = [:]
-    private var runID: String?
-    private var start = 0
-    private var written = ""
-    private var expected = UTF16Range(location: 0, length: 0)
-    private var original = ""
-    private var replacedOriginal = ""
-    private var blocked = false
-    private var sessionSpan: (range: UTF16Range, text: String)?
+    private var streamedRunID: String?
+    /// Runs this editor saw; a rebind retires them, so a late cleanup never follows into another field or session.
+    private var seenRunIDs: Set<String> = []
+    private var retiredRunIDs: Set<String> = []
     private var readSelection: UTF16Range?
     private var instructionCursor: UTF16Range?
     private var readText: String?
@@ -44,155 +62,213 @@ import LegatoMac
     public init(capture: @escaping @MainActor () -> FocusedField) { self.capture = capture }
 
     public func begin() {
-        liveTask?.cancel(); liveTask = nil; pendingLive = []; instructionWaitingForLive = false
-        fallbackTask?.cancel(); fallbackTask = nil
-        fallbackAllowed = false; fallbackRuns = []
-        retiredRunIDs.formUnion(seenRunIDs); seenRunIDs = []; runVersions = [:]
-        coordinator = FieldEditCoordinator(); readRevision = nil; activeInstructionID = nil
-        target = nil; runID = nil; written = ""; blocked = false; sessionSpan = nil
-        readSelection = nil; readText = nil; instructionCursor = nil
+        panel.active = false; panel.take = PanelTake(); sessionEnded = false; panelOwned = true
+        bind()
+    }
+
+    /// Binds the focused field to a fresh queue. The panel session (its words and whether it runs) is left to the caller.
+    private func bind() {
+        queue.reset(.cancelled)
+        retiredRunIDs.formUnion(seenRunIDs); seenRunIDs = []
+        target = nil; streamedRunID = nil; activeInstructionID = nil
+        readSelection = nil; readText = nil; readRange = nil; instructionCursor = nil
         documentID = UUID().uuidString
+        let field: DictationFieldKind
         switch capture() {
         case .target(let value):
             target = value
-            if let selection = try? value.selectedRange() { expected = selection } else { blocked = true }
-        case .secure: blocked = true; report("Secure field: dictation will be copied. Magic cannot edit it.")
-        case .none: blocked = true; fallbackAllowed = true; report("Live editing is unavailable here. Dictation sends when finished; Magic needs readable text.")
+            field = value.editsInPlace ? .liveEditable : .readOnly
+        case .secure: field = .secure; report("Secure field: dictation will be copied. Magic cannot edit it.")
+        case .none: field = .unreadable
         }
+        queue = MacFieldQueue(target: target, documentID: documentID)
+        queue.paced = { [weak self] in self?.typewriter() ?? true }
+        queue.sleep = { [weak self] in await self?.sleep($0) }
+        queue.journal = journal
+        queue.onDrop = { [weak self] drop in self?.dropped(drop) }
+        journal?(.init(kind: .field, field: documentID))
+        if PanelDictationPolicy.usesPanel(panelMode(), field: field) { panel.active = true }
     }
 
-    /// A Magic start binds the field now, even when no dictation preceded it. Keep the verified
-    /// dictated span only while the same field still owns focus.
-    /// Real user input relinquishes every in-flight dictation/model edit, even if its caret
-    /// later returns to the same offset. A new explicit Magic/dictation start binds afresh.
-    public func relinquish() { blocked = true; fallbackAllowed = false; coordinator.preempt() }
+    /// Work the queue could not place: the take or result is in History; the text goes to the clipboard too.
+    private func dropped(_ drop: MacFieldQueue.Drop) {
+        guard !drop.text.isEmpty, drop.reason != .cancelled else { return }
+        recover(drop.text)
+        report(drop.runID == nil
+               ? "Magic's result couldn't be placed: the text changed. It's in History."
+               : "Some dictated words couldn't be placed where the text changed. They're in History and on the clipboard.")
+    }
+
+    /// The user typed or clicked: the queue takes their caret and text from the next read and replans around them.
+    public func relinquish() { panelOwned = false; queue.userActed() }
     public func cancel(instructionID: String) {
         guard activeInstructionID == instructionID else { return }
-        coordinator.preempt(); activeInstructionID = nil
-        documentID = UUID().uuidString; readRevision = nil
-        readSelection = nil; readText = nil; readRange = nil; instructionCursor = nil
+        activeInstructionID = nil
+        readSelection = nil; readText = nil; readRange = nil
     }
-    public func focusChanged() { if target?.isFocused() == false { relinquish() } }
+    /// Another app came forward: the queue waits for the field (and drops its work if it does not come back).
+    public func focusChanged() { if target?.isFocused() == false { panelOwned = false } }
 
     public func beginInstruction() {
-        if liveTask != nil { instructionWaitingForLive = true; return }
-        let cursorChanged = target.flatMap { try? $0.selectedRange() } != expected
-        if target?.isFocused() != true || blocked || cursorChanged {
-            // An old pipeline cleanup may finish after Magic binds a different field/selection.
-            // Its run remains barred even though the new instruction has explicit fresh ownership.
-            let retired = retiredRunIDs.union(seenRunIDs)
-            begin()
-            retiredRunIDs = retired
+        // A Magic start binds the field in front now when it is not the bound one. A panel session keeps its words.
+        if target?.isFocused() != true {
+            if panel.active { bind() } else { begin() }
         }
-        // An explicit new Magic start owns a fresh result namespace, including in the same field.
-        retiredRunIDs.formUnion(seenRunIDs)
+        // An explicit new Magic start owns a fresh result namespace, in the same field too.
         documentID = UUID().uuidString
-        coordinator.preempt(); readRevision = nil; activeInstructionID = nil
+        activeInstructionID = nil
         instructionCursor = try? target?.selectedRange()
-        if let instructionCursor { expected = instructionCursor }
-        readSelection = nil; readText = nil
+        readSelection = nil; readText = nil; readRange = nil
     }
 
-    /// Browser accessibility updates are expensive and partials can arrive faster than they can
-    /// paint. Coalesce pending hypotheses; every final and cleanup still reaches the same owner.
+    // MARK: Dictation
+
+    /// Every live snapshot goes to the queue (or the panel); the queue coalesces to the newest per run.
     public func enqueueLive(_ snapshot: LiveDictationSnapshot?) {
-        guard let snapshot, !retiredRunIDs.contains(snapshot.runID) else { return }
-        seenRunIDs.insert(snapshot.runID)
-        if let pending = pendingLive.last, pending.runID == snapshot.runID {
-            guard pending.version < snapshot.version else { return }
-            pendingLive[pendingLive.count - 1] = snapshot
-        } else { pendingLive.append(snapshot) }
-        guard liveTask == nil else { return }
-        liveTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(80))
-                guard !Task.isCancelled, let self else { return }
-                guard !self.pendingLive.isEmpty else { self.liveTask = nil; return }
-                let next = self.pendingLive.removeFirst()
-                await self.applyLive(next)
-                guard !Task.isCancelled else { return }
-                if self.pendingLive.isEmpty { self.liveTask = nil; return }
-            }
-        }
-    }
-    private func flushLive() async {
-        await liveTask?.value
-        liveTask = nil
-        let remaining = pendingLive; pendingLive = []
-        for next in remaining { await applyLive(next) }
-    }
-
-    public func applyLive(_ snapshot: LiveDictationSnapshot?) async {
         guard let snapshot else { return }
-        let generation = documentID
-        seenRunIDs.insert(snapshot.runID)
-        guard !retiredRunIDs.contains(snapshot.runID),
-              snapshot.version > (runVersions[snapshot.runID] ?? -1) else { return }
-        runVersions[snapshot.runID] = snapshot.version
-        let body = snapshot.segments.map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
-        guard !blocked, let target, target.isFocused() else {
-            blocked = true
-            if snapshot.complete, !body.isEmpty {
-                if fallbackAllowed, let fallback {
-                    guard fallbackRuns.insert(snapshot.runID).inserted else { return }
-                    let previous = fallbackTask
-                    let id = documentID
-                    fallbackTask = Task { [weak self] in
-                        await previous?.value
-                        guard !Task.isCancelled, let self, self.documentID == id else { return }
-                        if self.fallbackAllowed { await fallback(body) }
-                        else { self.recover(body); self.report("Dictation copied: the target changed. Paste with ⌘V.") }
-                    }
-                } else { recover(body); report("Dictation copied. The field is unavailable or changed; paste with ⌘V.") }
-            }
+        if panel.active { showInPanel(snapshot); return }
+        guard !retiredRunIDs.contains(snapshot.runID) else { return }
+        seenRunIDs.insert(snapshot.runID); streamedRunID = snapshot.runID
+        guard target != nil else {
+            if snapshot.complete { copyUnwritable(Self.body(of: snapshot)) }
             return
         }
-        do {
-            if runID != snapshot.runID {
-                if let runID { retiredRunIDs.insert(runID) }
-                runID = snapshot.runID
-                guard try target.selectedRange() == expected else { throw Ownership.changed }
-                start = expected.location
-                original = try target.text(in: expected); replacedOriginal = original; written = ""
-            }
-            guard try target.selectedRange() == expected,
-                  try target.text(in: .init(location: start, length: written.isEmpty ? original.utf16.count : written.utf16.count)) == (written.isEmpty ? original : written)
-            else { throw Ownership.changed }
-            var text = body
-            if !text.isEmpty, start > 0,
-               let preceding = try target.text(in: .init(location: start - 1, length: 1)).last,
-               !preceding.isWhitespace, !"([{\"'“‘„«¿¡".contains(preceding),
-               text.first.map({ !$0.isWhitespace && !".,;:!?)]}%".contains($0) }) == true { text = " " + text }
-            guard text != written else { return }
-            // Empty nonfinal snapshots must not erase the user's initial selection.
-            if written.isEmpty && text.isEmpty { return }
-            let old = written.isEmpty ? original : written
-            try await replaceOwned(target, range: .init(location: start, length: old.utf16.count), text: text,
-                             owner: .dictation, id: UUID().uuidString, progress: { [self] current in
-                                 written = current; original = ""
-                                 if let selection = try? target.selectedRange() { expected = selection }
-                             })
-            let end = UTF16Range(location: start + text.utf16.count, length: 0)
-            written = text; expected = end; original = ""
-            if instructionCursor != nil, readSelection == nil { instructionCursor = end }
-            sessionSpan = (.init(location: start, length: text.utf16.count), text)
-        } catch {
-            guard generation == documentID else { return }
-            blocked = true
-            if snapshot.complete { recover(body) }
-            report("The field or cursor changed. Dictation stopped editing it; finished text will be copied.")
+        queue.live(runID: snapshot.runID, version: snapshot.version, text: Self.body(of: snapshot))
+    }
+    public func applyLive(_ snapshot: LiveDictationSnapshot?) async {
+        enqueueLive(snapshot)
+        await queue.whenIdle()
+    }
+
+    /// A secure field (or no field at all outside panel mode): finished text only reaches the clipboard.
+    private func copyUnwritable(_ text: String) {
+        guard !text.isEmpty else { return }
+        recover(text); report("Dictation copied. The field is unavailable or changed; paste with ⌘V.")
+    }
+
+    private static func body(of snapshot: LiveDictationSnapshot) -> String {
+        snapshot.segments.map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    public func deliver(_ text: String) {
+        enqueueLive(.init(runID: UUID().uuidString, version: 1, segments: [.init(id: 0, text: text, final: true)], complete: true))
+    }
+
+    /// A take whose cleanup streams: each state of it goes to the queue as the run's newest text.
+    public func stream(_ poll: @MainActor () -> DictationStreamState?) async -> Bool {
+        if panel.active { return await streamInPanel(poll) }
+        let id = UUID().uuidString
+        streamedRunID = id
+        seenRunIDs.insert(id)
+        var version = 0
+        while let state = poll() {
+            version += 1
+            if state.retracted { _ = retractStreamed(); return false }
+            if target == nil { if state.isFinal { copyUnwritable(state.text) }; if state.isFinal || state.stalled { return state.stalled } }
+            else { queue.live(runID: id, version: version, text: state.text) }
+            if state.isFinal { return false }
+            if state.stalled { return true }
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        return false
+    }
+
+    /// Retry / Insert as-is take the last take back out (the queue restores what it replaced).
+    @discardableResult public func retractStreamed() -> Bool {
+        if panel.active { panel.take.dropGrowing(); return true }
+        guard let id = streamedRunID else { return true }
+        streamedRunID = nil
+        queue.retract(runID: id)
+        return true
+    }
+
+    /// The session's last words were delivered: the queue finishes its work (paced). A panel session types its
+    /// finished text now; a take still held (failed cleanup) follows once the user chose Retry or Insert as-is.
+    public func finish() async {
+        await queue.whenIdle()
+        guard panel.active else { return }
+        sessionEnded = true
+        scheduleInsert()
+        await insertTask?.value
+    }
+
+    public func contextBeforeCursor() -> String {
+        guard let target, target.isFocused(), let cursor = try? target.selectedRange() else { return "" }
+        let length = min(cursor.location, 600)
+        return (try? target.text(in: .init(location: cursor.location - length, length: length))) ?? ""
+    }
+    public func publish(_ strip: InstructionStrip) {}
+
+    // MARK: Panel
+
+    private var insertTask: Task<Void, Never>?
+    private var panelVersions: [String: Int] = [:]
+
+    private func showInPanel(_ snapshot: LiveDictationSnapshot) {
+        guard snapshot.version > (panelVersions[snapshot.runID] ?? -1) else { return }
+        panelVersions[snapshot.runID] = snapshot.version
+        panel.take.live(id: snapshot.runID, text: Self.body(of: snapshot), complete: snapshot.complete)
+        if sessionEnded { scheduleInsert() }
+    }
+
+    /// Follows a take whose cleanup streams: the cleaned words replace the raw ones in the panel as they come.
+    private func streamInPanel(_ poll: @MainActor () -> DictationStreamState?) async -> Bool {
+        let id = UUID().uuidString
+        while let state = poll() {
+            panel.take.stream(id: id, text: state.text, final: state.isFinal || state.retracted, retracted: state.retracted)
+            if state.isFinal || state.retracted { break }
+            if state.stalled { return true }
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        if sessionEnded { scheduleInsert() }
+        return false
+    }
+
+    /// Types what is finished, in order, after any insert still running. A growing piece (a stalled take waiting for
+    /// Retry or Insert as-is) holds back what follows it.
+    private func scheduleInsert() {
+        let previous = insertTask
+        insertTask = Task { [weak self] in
+            await previous?.value
+            await self?.insertFinished()
         }
     }
 
+    private func insertFinished() async {
+        guard panel.active else { return }
+        let first = panel.take.isFirstHandOver
+        var text = panel.take.takeFinished()
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // A readable field tells which space the first words need after its own text.
+        if first, let target, target.isFocused(), let caret = try? target.selectedRange(), caret.location > 0,
+           let previous = (try? target.text(in: .init(location: caret.location - 1, length: 1)))?.last {
+            text = PanelTake.separator(before: text, after: previous) + text
+        }
+        guard panelOwned, let insert else {
+            recover(text.trimmingCharacters(in: .whitespaces))
+            report("Dictation copied: the field or app changed. Paste with ⌘V.")
+            return
+        }
+        panel.inserting = true
+        defer { panel.inserting = false }
+        // The panel's one op: a typed insert, in the field's queue like every other change.
+        switch await queue.exclusive(label: "panel", text: text, { await insert(text) }) {
+        case .typed: break
+        case .interrupted(let message), .copied(let message): report(message)
+        }
+    }
+
+    // MARK: Magic
+
     public func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
-        await flushLive()
-        if instructionWaitingForLive { instructionWaitingForLive = false; beginInstruction() }
-        guard !blocked, let target, target.isFocused(), let bound = instructionCursor,
-              let selection = try? target.selectedRange(), selection == bound else {
-            throw InstructionFailure.unreadable("The field or cursor changed. Nothing was edited.")
+        guard let target else { throw InstructionFailure.unreadable("Magic can't read this field. Nothing was edited.") }
+        // Dictation still on its way lands first, all at once, so Magic reads the finished text.
+        await queue.flush()
+        guard target.isFocused(), let selection = try? target.selectedRange() else {
+            throw InstructionFailure.unreadable("The field changed. Nothing was edited.")
         }
         let length = try target.textLength()
-        guard selection.location >= 0, selection.end <= length else { throw Ownership.changed }
+        guard selection.location >= 0, selection.end <= length else { throw InstructionFailure.unreadable("The field changed. Nothing was edited.") }
         let cap = FieldReader.defaultCap
         guard selection.length <= cap else { throw InstructionFailure.unreadable("The selection is too long. Select a smaller passage.") }
         let room = cap - selection.length
@@ -202,8 +278,9 @@ import LegatoMac
         let upper = min(length, selection.end + room - beforeLength)
         let range = UTF16Range(location: lower, length: upper - lower)
         let snapshot = try target.text(in: range)
-        if let readText, readText != snapshot { throw InstructionFailure.unreadable("The text changed while Magic was reading it.") }
-        guard snapshot.utf16.count == range.length, try target.selectedRange() == selection else { throw Ownership.changed }
+        guard snapshot.utf16.count == range.length, try target.selectedRange() == selection else {
+            throw InstructionFailure.unreadable("The text changed while Magic was reading it.")
+        }
         // Derive all model context from one observed snapshot; separate AX reads could mix revisions.
         let captured = snapshot as NSString
         var above = captured.substring(with: NSRange(location: 0, length: selection.location - lower))
@@ -218,290 +295,58 @@ import LegatoMac
             below = String(below[..<stop.index]); belowStop = stop.kind
         }
         activeInstructionID = instructionID
-        coordinator.observe(try window(target))
-        guard let lease = coordinator.begin(owner: .read, id: UUID().uuidString) else { throw Ownership.changed }
-        do {
-            guard coordinator.confirm(lease, window: try window(target)) else { throw Ownership.changed }
-            coordinator.finish(lease, settled: true)
-        } catch {
-            coordinator.finish(lease, settled: false)
-            throw error
-        }
-        readRevision = coordinator.revision
-        readSelection = selection; readText = snapshot; readRange = range
+        readSelection = selection; readText = snapshot; readRange = range; instructionCursor = selection
         var sessionLength = 0
-        if let span = sessionSpan, span.range.end == selection.location,
-           (try? target.text(in: span.range)) == span.text { sessionLength = min(span.text.count, above.count) }
+        if let span = queue.lastRegionAtCaret, span.range.end == selection.location, selection.length == 0 {
+            sessionLength = min(span.text.count, above.count)
+        }
         return FieldReadReply(id: instructionID, state: .done, above: above, below: below, selection: selected,
                               sessionLength: sessionLength, stop: aboveStop,
                               stopBelow: belowStop, moreAbove: aboveStop == .cap,
-                              moreBelow: belowStop == .cap, documentID: documentID, revision: readRevision)
+                              moreBelow: belowStop == .cap, documentID: documentID, revision: nil)
     }
 
+    /// Magic's result (or its undo) goes to the queue as one edit of the text it read; the user's typing or clicks
+    /// meanwhile rebase it, and only a scope the user changed is refused.
     public func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
         func refused(_ reason: String) -> ScopedEditAck { .init(id: edit.id, applied: false, reason: reason) }
-        guard edit.documentID == documentID, !blocked, let target, target.isFocused() else {
-            return refused("The focused field changed. Nothing was edited.")
+        guard edit.documentID == documentID, let target else { return refused("The focused field changed. Nothing was edited.") }
+        guard let anchor = readSelection ?? instructionCursor else { return refused("The field changed. Nothing was edited.") }
+        let range: UTF16Range
+        if let selected = edit.selected {
+            guard anchor.length == selected.utf16.count else { return refused("The selection changed.") }
+            range = anchor
+        } else {
+            guard anchor.location >= edit.before.utf16.count else { return refused("The cursor moved.") }
+            range = .init(location: anchor.location - edit.before.utf16.count, length: edit.scopeText.utf16.count)
         }
-        do {
-            let selection = try target.selectedRange()
-            if let readSelection {
-                guard selection == readSelection else { return refused("The cursor moved. Nothing was edited.") }
-                guard let readRange, try target.text(in: readRange) == readText else {
-                    return refused("The text changed. Nothing was edited.")
-                }
-            } else {
-                guard selection == instructionCursor else { return refused("The cursor moved. Nothing was edited.") }
+        // Context from the text Magic read (or the field as it is, for an undo): it places the edit uniquely.
+        let source: (text: NSString, base: Int)? = readText.flatMap { text in readRange.map { (text as NSString, $0.location) } }
+        func context(_ location: Int, _ length: Int) -> String {
+            if let source, location - source.base >= 0, location - source.base + length <= source.text.length {
+                return source.text.substring(with: NSRange(location: location - source.base, length: length))
             }
-            let range: UTF16Range
-            if let selected = edit.selected {
-                guard selection.length == selected.utf16.count else { return refused("The selection changed.") }
-                range = selection
-            } else {
-                guard selection.length == 0, selection.location >= edit.before.utf16.count else { return refused("The cursor moved.") }
-                range = .init(location: selection.location - edit.before.utf16.count, length: edit.scopeText.utf16.count)
-            }
-            guard try target.text(in: range) == edit.scopeText else { return refused("The text changed. Nothing was edited.") }
-            try await replaceOwned(target, range: range, text: edit.target, owner: .instruction, id: edit.id,
-                             revision: edit.revision ?? readRevision)
-            let caret = UTF16Range(location: range.location + edit.target.utf16.count, length: 0)
-            readSelection = nil; readText = nil; instructionCursor = caret; expected = caret
-            sessionSpan = nil; runID = nil; readRevision = coordinator.revision
-            return .init(id: edit.id, applied: true, cursor: edit.target.utf16.count, revision: coordinator.revision)
-        } catch {
-            if coordinator.uncertain {
-                blocked = true
-                return .init(id: edit.id, applied: false, reason: "The app did not confirm the edit. The original and suggestion are saved; check the field before retrying.", stopped: true)
-            }
-            return refused("The field could not be verified. Nothing further was edited.")
+            return (try? target.text(in: .init(location: max(0, location), length: max(0, length)))) ?? ""
+        }
+        let beforeLength = min(MacFieldQueue.contextChars, range.location)
+        let before = context(range.location - beforeLength, beforeLength)
+        let after = context(range.end, MacFieldQueue.contextChars)
+        readSelection = nil; readText = nil; readRange = nil
+        let result = await queue.edit(.init(id: edit.id, range: range, scope: edit.scopeText, before: before, after: after,
+                                            target: edit.target, caretAfter: true))
+        switch result {
+        case .applied(let landed):
+            instructionCursor = UTF16Range(location: landed.end, length: 0)
+            return .init(id: edit.id, applied: true, cursor: edit.target.utf16.count, revision: nil)
+        case .dropped(.userChanged):
+            return refused("The text changed. Nothing more was edited.")
+        case .dropped(.failed):
+            return .init(id: edit.id, applied: false,
+                         reason: "The app did not confirm the edit. The original and suggestion are saved; check the field before retrying.",
+                         stopped: true)
+        case .dropped:
+            return refused("The field changed. Nothing was edited.")
         }
     }
-    /// Retry/Insert-as-is retract only the last stream's verified text, including restoring
-    /// the original selection. A refused retract freezes retries so they cannot duplicate it.
-    @discardableResult public func retractStreamed() -> Bool {
-        liveTask?.cancel(); liveTask = nil; pendingLive = []
-        guard runID != nil, !written.isEmpty else { return true }
-        guard !blocked, let target, target.isFocused() else { blocked = true; report("The field changed. Partial text was left in place; the retry will be copied."); return false }
-        do {
-            let range = UTF16Range(location: start, length: written.utf16.count)
-            guard try target.selectedRange() == expected, try target.text(in: range) == written else { throw Ownership.changed }
-            try replaceOwnedImmediate(target, range: range, text: replacedOriginal, owner: .dictation, id: UUID().uuidString,
-                             finalSelection: .init(location: start, length: replacedOriginal.utf16.count))
-            let restored = UTF16Range(location: start, length: replacedOriginal.utf16.count)
-            guard try target.text(in: restored) == replacedOriginal else { throw Ownership.changed }
-            guard try target.selectedRange() == restored else { throw Ownership.changed }
-            if let runID { retiredRunIDs.insert(runID) }
-            documentID = UUID().uuidString
-            expected = restored; runID = nil; written = ""; original = ""; sessionSpan = nil
-            return true
-        } catch {
-            blocked = true
-            report("The field changed. Partial text was left in place; the retry will be copied.")
-            return false
-        }
-    }
-
-    public func finish() async { await flushLive(); await fallbackTask?.value }
-
-    public func contextBeforeCursor() -> String {
-        guard !blocked, let target, target.isFocused(), let cursor = try? target.selectedRange() else { return "" }
-        let length = min(cursor.location, 600)
-        return (try? target.text(in: .init(location: cursor.location - length, length: length))) ?? ""
-    }
-    public func deliver(_ text: String) {
-        enqueueLive(.init(runID: UUID().uuidString, version: 1, segments: [.init(id: 0, text: text, final: true)], complete: true))
-    }
-    public func stream(_ poll: @MainActor () -> DictationStreamState?) async -> Bool {
-        let id = UUID().uuidString
-        var version = 0
-        while let state = poll() {
-            version += 1
-            if state.retracted { _ = retractStreamed(); return false }
-            await applyLive(.init(runID: id, version: version, segments: [.init(id: 0, text: state.text, final: state.isFinal)], complete: state.isFinal))
-            if state.isFinal { return false }
-            if state.stalled { return true }
-            try? await Task.sleep(for: .milliseconds(30))
-        }
-        return false
-    }
-    public func publish(_ strip: InstructionStrip) {}
-    /// Observe a bounded UTF-16 window without moving the selection or inventing unread text.
-    private func window(_ target: any TextTarget) throws -> FieldEditCoordinator.Window {
-        let selection = try target.selectedRange(), length = try target.textLength()
-        guard selection.location >= 0, selection.end <= length else { throw Ownership.changed }
-        let lower = max(0, selection.location - FieldReader.defaultCap)
-        let upper = min(length, selection.end + FieldReader.defaultCap)
-        return .init(documentID: documentID,
-                     before: try target.text(in: .init(location: lower, length: selection.location - lower)),
-                     after: try target.text(in: .init(location: selection.end, length: upper - selection.end)),
-                     selection: selection.length == 0 ? nil : try target.text(in: selection),
-                     startsDocument: lower == 0, endsDocument: upper == length)
-    }
-
-    /// Preserve every matching grapheme across all edit sources. The surrounding coordinator
-    /// transaction still verifies both untouched sides and the final caret after each mutation.
-    private func replaceOwned(_ target: any TextTarget, range: UTF16Range, text: String,
-                              owner: FieldEditCoordinator.Owner, id: String, revision: FieldRevision? = nil,
-                              finalSelection: UTF16Range? = nil, progress: ((String) -> Void)? = nil) async throws {
-        let old = try target.text(in: range)
-        let plan = ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: text, characters: true)
-        var document = Array(old), at = document.count
-        var first = true
-        let generation = documentID
-        var lastSelection = try target.selectedRange()
-        let mutations = plan.ops.filter { if case .move = $0 { false } else { true } }.count
-        let interval = TypewriterPlan.interval(steps: mutations)
-        var mutated = false
-        for op in plan.ops {
-            if case .move = op {} else {
-                if mutated, typewriter() { await sleep(interval) }
-                guard !Task.isCancelled, !blocked, documentID == generation, target.isFocused(),
-                      try target.selectedRange() == lastSelection,
-                      try target.text(in: .init(location: range.location, length: String(document).utf16.count)) == String(document)
-                else { throw Ownership.changed }
-            }
-            switch op {
-            case .move(let units):
-                let local = ShadowEditPlanner.simulate(ops: [.move(units)], shadow: String(document),
-                                                      cursor: String(document.prefix(at)).utf16.count)
-                // Convert the verified UTF-16 destination back to a grapheme boundary.
-                at = 0
-                var offset = 0
-                while at < document.count, offset < local.cursor { offset += String(document[at]).utf16.count; at += 1 }
-            case .deleteBackward(let count):
-                let lower = at - count
-                let location = range.location + String(document.prefix(lower)).utf16.count
-                let removed = String(document[lower..<at]).utf16.count
-                try replaceAtomOwned(target, range: .init(location: location, length: removed), text: "",
-                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
-                first = false; document.removeSubrange(lower..<at); at = lower
-                mutated = true; lastSelection = try target.selectedRange(); progress?(String(document))
-            case .insert(let insertion):
-                let location = range.location + String(document.prefix(at)).utf16.count
-                try replaceAtomOwned(target, range: .init(location: location, length: 0), text: insertion,
-                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
-                first = false; document.insert(contentsOf: insertion, at: at); at += insertion.count
-                mutated = true; lastSelection = try target.selectedRange(); progress?(String(document))
-            }
-        }
-        let selection = finalSelection ?? UTF16Range(location: range.location + text.utf16.count, length: 0)
-        if try target.selectedRange() != selection {
-            guard target.isFocused() else { throw Ownership.changed }
-            guard let lease = coordinator.begin(owner: owner, id: UUID().uuidString) else { throw Ownership.changed }
-            guard coordinator.issued(lease) else { throw Ownership.changed }
-            do {
-                try target.setSelectedRange(selection)
-                guard target.isFocused(), try target.selectedRange() == selection,
-                      coordinator.confirm(lease, window: try window(target)) else { throw Ownership.changed }
-                coordinator.finish(lease, settled: true)
-            } catch { coordinator.finish(lease, settled: false); throw error }
-        }
-        guard try target.text(in: .init(location: range.location, length: text.utf16.count)) == text else { throw Ownership.changed }
-    }
-
-    private func replaceOwnedImmediate(_ target: any TextTarget, range: UTF16Range, text: String,
-                              owner: FieldEditCoordinator.Owner, id: String, revision: FieldRevision? = nil,
-                              finalSelection: UTF16Range? = nil) throws {
-        let old = try target.text(in: range)
-        let plan = ShadowEditPlanner.plan(shadow: old, cursor: old.utf16.count, target: text, characters: true)
-        var document = Array(old), at = document.count
-        var first = true
-        for op in plan.ops {
-            switch op {
-            case .move(let units):
-                let local = ShadowEditPlanner.simulate(ops: [.move(units)], shadow: String(document),
-                                                      cursor: String(document.prefix(at)).utf16.count)
-                // Convert the verified UTF-16 destination back to a grapheme boundary.
-                at = 0
-                var offset = 0
-                while at < document.count, offset < local.cursor { offset += String(document[at]).utf16.count; at += 1 }
-            case .deleteBackward(let count):
-                let lower = at - count
-                let location = range.location + String(document.prefix(lower)).utf16.count
-                let removed = String(document[lower..<at]).utf16.count
-                try replaceAtomOwned(target, range: .init(location: location, length: removed), text: "",
-                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
-                first = false; document.removeSubrange(lower..<at); at = lower
-            case .insert(let insertion):
-                let location = range.location + String(document.prefix(at)).utf16.count
-                try replaceAtomOwned(target, range: .init(location: location, length: 0), text: insertion,
-                                     owner: owner, id: id + "-" + UUID().uuidString, revision: first ? revision : nil)
-                first = false; document.insert(contentsOf: insertion, at: at); at += insertion.count
-            }
-        }
-        let selection = finalSelection ?? UTF16Range(location: range.location + text.utf16.count, length: 0)
-        if try target.selectedRange() != selection {
-            guard target.isFocused() else { throw Ownership.changed }
-            guard let lease = coordinator.begin(owner: owner, id: UUID().uuidString) else { throw Ownership.changed }
-            guard coordinator.issued(lease) else { throw Ownership.changed }
-            do {
-                try target.setSelectedRange(selection)
-                guard target.isFocused(), try target.selectedRange() == selection,
-                      coordinator.confirm(lease, window: try window(target)) else { throw Ownership.changed }
-                coordinator.finish(lease, settled: true)
-            } catch { coordinator.finish(lease, settled: false); throw error }
-        }
-        guard try target.text(in: .init(location: range.location, length: text.utf16.count)) == text else { throw Ownership.changed }
-    }
-
-    /// Every AX mutation must acquire the shared owner before issuing. A throwing host can have
-    /// already written; only exact read-back settles it, and uncertainty prohibits another write.
-    private func replaceAtomOwned(_ target: any TextTarget, range: UTF16Range, text: String,
-                              owner: FieldEditCoordinator.Owner, id: String, revision: FieldRevision? = nil,
-                              finalSelection: UTF16Range? = nil) throws {
-        coordinator.observe(try window(target))
-        guard let lease = coordinator.begin(owner: owner, id: id, expectedRevision: revision) else { throw Ownership.changed }
-        let length: Int, prefix: String, suffix: String, lower: Int
-        do {
-            length = try target.textLength()
-            guard range.location >= 0, range.end <= length else { throw Ownership.changed }
-            if let finalSelection {
-                // Retraction restores the original selected passage; no arbitrary cursor relocation
-                // may be smuggled into this replacement transaction.
-                guard finalSelection == UTF16Range(location: range.location, length: text.utf16.count) else { throw Ownership.changed }
-            }
-            lower = max(0, range.location - FieldReader.defaultCap)
-            prefix = try target.text(in: .init(location: lower, length: range.location - lower))
-            suffix = try target.text(in: .init(location: range.end, length: min(FieldReader.defaultCap, length - range.end)))
-        } catch {
-            coordinator.finish(lease, settled: true)
-            throw error
-        }
-        let restoresSelection = (finalSelection?.length ?? 0) > 0
-        let desired = FieldEditCoordinator.Window(documentID: documentID,
-                                                  before: restoresSelection ? prefix : prefix + text,
-                                                  after: suffix, selection: restoresSelection ? text : nil,
-                                                  startsDocument: lower == 0,
-                                                  endsDocument: suffix.utf16.count == length - range.end)
-        // WebKit represents a trailing contenteditable space as NBSP. Appending text can
-        // turn only that boundary character back into a regular space, outside our range.
-        // Its two legal outcomes cannot be predicted as one exact window. Preserve the
-        // desired document, then settle only from the narrowly verified actual report.
-        let boundarySpace = range.length == 0 && prefix.hasSuffix("\u{00A0}") && text.first.map { !$0.isWhitespace } == true
-        guard coordinator.issued(lease, desired: desired, predicted: boundarySpace ? nil : desired) else { throw Ownership.changed }
-        do {
-            try target.replace(range, with: text)
-            let caret = UTF16Range(location: range.location + text.utf16.count, length: 0)
-            guard target.isFocused(), try target.selectedRange() == caret,
-                  try target.text(in: .init(location: range.location, length: text.utf16.count)) == text else { throw Ownership.changed }
-            // Verify the untouched sides and document size as well as the replacement: an AX
-            // call reporting success is not proof it kept the rest of a browser editor intact.
-            let actualPrefix = try target.text(in: .init(location: lower, length: prefix.utf16.count))
-            let normalizedBoundary = boundarySpace && actualPrefix == String(prefix.dropLast()) + " "
-            guard try target.textLength() == length - range.length + text.utf16.count,
-                  actualPrefix == prefix || normalizedBoundary,
-                  try target.text(in: .init(location: caret.location, length: suffix.utf16.count)) == suffix else { throw Ownership.changed }
-            if let finalSelection, finalSelection != caret {
-                try target.setSelectedRange(finalSelection)
-                guard target.isFocused(), try target.selectedRange() == finalSelection else { throw Ownership.changed }
-            }
-            guard coordinator.confirm(lease, window: try window(target)) else { throw Ownership.changed }
-            coordinator.finish(lease, settled: true)
-        } catch {
-            coordinator.finish(lease, settled: false)
-            throw error
-        }
-    }
-    private enum Ownership: Error { case changed }
 }
 #endif
