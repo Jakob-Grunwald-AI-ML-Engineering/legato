@@ -545,7 +545,8 @@ import LegatoMac
         #expect(target.value == "aXYc unchanged tail")
         #expect(target.writes.count == 3)
         #expect(target.writes.allSatisfy { $0.length <= 1 })
-        #expect(pauses.count == 2 && pauses.allSatisfy { $0 >= .milliseconds(20) })
+        // One pause, between the two typed characters; none after the last one.
+        #expect(pauses.count == 1 && pauses.allSatisfy { $0 >= .milliseconds(20) })
         #expect(frames.allSatisfy { $0.hasSuffix("c unchanged tail") })
     }
 
