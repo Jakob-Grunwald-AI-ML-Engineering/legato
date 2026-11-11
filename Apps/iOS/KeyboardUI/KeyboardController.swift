@@ -796,10 +796,11 @@ final class KeyboardController {
                 trace?("queue dropped reason=\(drop.reason.rawValue) kind=\(drop.kind?.rawValue ?? "live")")
                 if let completion = editCompletions.removeValue(forKey: drop.id) { completion(event) }
                 else if drop.id == enqueuedHostEditID { enqueuedHostEditID = nil; hostEditLanded(drop.id, applied: false) }
-                else if drop.runID != nil, drop.reason != .reset {
-                    // Dictated words the field could not take (the user changed the text there): the take is in History.
+                else if drop.runID != nil, drop.reason == .unplaceable {
+                    // Dictated words the field could not take: the take is in History. Text the user edited or deleted
+                    // themselves (or an instruction rewrote) is no drop worth telling.
                     liveRecoveryDismissed = false
-                    liveRecoveryNotice = "Some dictated words couldn't be placed. Recover the take in History."
+                    liveRecoveryNotice = "Some dictated words didn't fit. The take is in Legato's History."
                     syncRowTakeover()
                 }
             case .liveApplied(let runID, let version, let complete):
@@ -935,7 +936,7 @@ final class KeyboardController {
             if snapshot.complete, !blockedLiveCompleted {
                 blockedLiveCompleted = true
                 if !liveRecoveryDismissed {
-                    liveRecoveryNotice = "Recover full take in History."
+                    liveRecoveryNotice = "The full take is in Legato's History."
                     syncRowTakeover()
                 }
             }
@@ -972,7 +973,7 @@ final class KeyboardController {
         setLiveRunning(false)
         guard pending else { return }
         liveRecoveryDismissed = false
-        liveRecoveryNotice = snapshot.complete ? "Recover full take in History." : "Finish dictation; recover in History."
+        liveRecoveryNotice = snapshot.complete ? "The full take is in Legato's History." : "Finish dictating; the take will be in Legato's History."
         syncRowTakeover()
     }
 

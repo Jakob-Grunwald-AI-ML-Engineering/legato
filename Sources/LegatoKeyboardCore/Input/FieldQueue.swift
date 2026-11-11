@@ -93,6 +93,11 @@ public struct FieldQueue: Sendable {
         case assumed
         /// Text appeared at the caret that the keyboard did not type (another keyboard): it is the user's, at the caret.
         case outsideInsert
+        /// A report showed an older confirmed state: lag until a fresh report (after a nudge) keeps showing it.
+        case stale
+        /// A fresh report kept showing an older state: the host lost what followed. The model goes back to it and the
+        /// lost edits are made again (the user's lost keys go once more).
+        case reverted
     }
     public enum CloseCause: String, Sendable, Codable { case keystroke, cursor, resync, selection, newRun, edit }
 
@@ -153,6 +158,12 @@ public struct FieldQueue: Sendable {
     /// An op whose result the report cannot tell from the state before it (a delete with nothing known before the
     /// cursor, a collapsing move) is taken as landed only after the host's longest measured transit.
     public static let transitMs = 150.0
+    /// The proxy shows an insert or delete at once too, before the host applied it (measured in UAT: a move sent 70 ms
+    /// after an insert landed before it, and the insert was lost). An edit counts only after this long.
+    public static let editSettleMs = 150.0
+    /// Confirmed states kept to recognise a late report of one of them (lag), and how long.
+    static let historyCount = 24
+    static let historyMs = 3_000.0
     /// A paced insert longer than this goes in this many steps rather than one per grapheme.
     static let pacedSteps = 8
     /// An edit that cannot be placed yet waits this long for the report to catch up.
@@ -272,6 +283,9 @@ public struct FieldQueue: Sendable {
         /// A report counts only this long after the last send (a move's settle gap).
         var settleMs: Double
         var nudged = false
+        /// The nudge after a report of an older state: it is given the whole confirm window (late reports still show
+        /// the old state for a while) before the older state is believed.
+        var staleCheck = false
         var lastReport: Report?
     }
     private var inFlight: InFlight?
@@ -282,6 +296,22 @@ public struct FieldQueue: Sendable {
     private var stepElapsedMs = 0.0
     /// States before ops that counted as landed without a confirmation: reports showing them are lag.
     private var lagging: [(state: ModelState, ageMs: Double)] = []
+    /// The states before recently confirmed ops, oldest first, with the user's input each op carried.
+    private var confirmedHistory: [(state: ModelState, input: Input?, ageMs: Double)] = []
+    /// A report showed an older state: a nudge is due, or out and not answered yet.
+    private var staleNudgeDue = false
+    private var staleNudgeSent = false
+    /// The last history entry is the state before an op that never confirmed (kept as a candidate older state).
+    private var unconfirmedInHistory = false
+    /// The user moved the caret (a tap): only the user's own input goes until the report held still this long and fits.
+    private var quietAfterMove = false
+    /// The op that was on its way when the user tapped: it may land where they tapped.
+    private var tapRace: (op: ShadowOp, lane: Lane, pre: ModelState, ageMs: Double)?
+    /// Characters of the keyboard's own that landed where the user tapped: they come out before anything else.
+    private var strayChars = 0
+    private var strayLane = Lane.live
+    private var lastSendConfirmed = true
+    static let quietMs = 250.0
 
     public init(config: Config = Config()) { self.config = config }
 
@@ -399,6 +429,8 @@ public struct FieldQueue: Sendable {
         // Only the user selects: a selection the model does not have says the user acted at the caret.
         if report.selected != nil, selection == 0 { userActed = true }
         lagging = lagging.filter { $0.ageMs + elapsedMs < Self.confirmLimitMs }.map { ($0.state, $0.ageMs + elapsedMs) }
+        if let race = tapRace { tapRace = race.ageMs + elapsedMs < Self.confirmLimitMs * 2 ? (race.op, race.lane, race.pre, race.ageMs + elapsedMs) : nil }
+        confirmedHistory = confirmedHistory.filter { $0.ageMs + elapsedMs < Self.historyMs }.map { ($0.state, $0.input, $0.ageMs + elapsedMs) }
         if report == lastReport { reportStableMs += elapsedMs } else { lastReport = report; reportStableMs = 0 }
         if !seeded {
             seed(report)
@@ -410,6 +442,11 @@ public struct FieldQueue: Sendable {
             }
         }
 
+        if let flight = inFlight, let tap = tappedElsewhere(report, flight: flight) {
+            // A place no op was going to, settled or not: the user tapped. Later reports of the state before it are lag.
+            inFlight = nil
+            userTapped(at: tap, flight: flight)
+        }
         if var flight = inFlight {
             // The proxy shows a move at once, before the host applied it: only a report after the settle gap counts.
             let settled = sinceSendMs >= flight.settleMs
@@ -419,6 +456,11 @@ public struct FieldQueue: Sendable {
                !lagging.contains(where: { pins(report, in: $0.state) }) {
                 if flight.anywhere { relocate(report) }
                 events.append(.confirmed(waitedMs: flight.waitedMs))
+                lastSendConfirmed = true
+                confirmedHistory.append((flight.pre, flight.input, 0))
+                unconfirmedInHistory = false
+                if confirmedHistory.count > Self.historyCount { confirmedHistory.removeFirst() }
+                staleNudgeSent = false
                 userActed = false
                 merge(report)
                 inFlight = nil
@@ -432,26 +474,36 @@ public struct FieldQueue: Sendable {
                 if report != flight.lastReport { flight.lastReport = report }
                 // A report that fits the state before the op (even among other places) may be that state, late.
                 let pinsPre = fits(report, in: flight.pre)
+                if landedElsewhere(report, flight: flight) {
+                    // The user tapped while their key was on its way: it landed where they tapped.
+                    inFlight = nil
+                    events.append(.resync(.cursorMoved))
+                    return next()
+                }
                 if !flight.nudged, !flight.isMove, flight.waitedMs >= Self.nudgeAfterMs, selection == 0, report.selected == nil {
                     // An edit the proxy has not reported yet (it can stay on its last report): a zero-offset move makes
                     // it report the field afresh. It moves nothing, so it cannot land out of order.
-                    flight.nudged = true; flight.settleMs = Self.moveSettleMs
+                    flight.nudged = true; flight.settleMs = Self.moveSettleMs; flight.staleCheck = true
+                    // The fresh report this brings is the stale check: an older state it keeps showing is believed.
+                    staleNudgeSent = true
                     inFlight = flight
                     sinceSendMs = 0
                     events.append(.nudged)
                     return .send(.move(0))
                 }
                 if !userLane.isEmpty, flight.waitedMs >= Self.userBoundMs, pinsPre {
-                    // The host lags: the op counts as landed so the user's input can go.
+                    // The host lags: the op counts as landed so the user's input can go. Its state before stays a candidate
+                    // older state: if the host lost it, a later report shows that state (and the op is made again).
                     inFlight = nil
                     lagging.append((flight.pre, 0))
+                    confirmedHistory.append((flight.pre, flight.input, 0)); unconfirmedInHistory = true
                     events.append(.resync(.assumed))
                 } else if flight.waitedMs < Self.confirmLimitMs, lagging.contains(where: { pins(report, in: $0.state) }) {
                     inFlight = flight
                     return .wait
                 } else if flight.waitedMs >= Self.confirmLimitMs
-                            || (!pinsPre && flight.waitedMs >= Self.userBoundMs && reportStableMs >= Self.userBoundMs / 2)
-                            || (!userLane.isEmpty && flight.waitedMs >= 2 * Self.userBoundMs) {
+                            || (!flight.staleCheck && !pinsPre && flight.waitedMs >= Self.userBoundMs && reportStableMs >= Self.userBoundMs / 2)
+                            || (!flight.staleCheck && !userLane.isEmpty && flight.waitedMs >= 2 * Self.userBoundMs) {
                     inFlight = nil
                     resync(report, pre: flight)
                 } else {
@@ -473,9 +525,19 @@ public struct FieldQueue: Sendable {
 
     private mutating func next() -> Action {
         // Ops sent close together can land out of order: the next waits for the gap.
-        if sinceSendMs < Self.sendGapMs {
+        // An op that never confirmed may still be on its way: nothing follows it before the host's transit.
+        if sinceSendMs < (lastSendConfirmed ? Self.sendGapMs : Self.transitMs) {
             if inFlight == nil { for ri in runs.indices { ack(ri) } }
             return .wait
+        }
+        if staleNudgeDue {
+            // A late report showed an older state: a zero-offset move makes the proxy report the field afresh.
+            staleNudgeDue = false; staleNudgeSent = true
+            abortUnit()
+            // Zero offset: the model is in doubt, so the caret goes nowhere on its strength.
+            let action = send(.move(0), lane: .edit)
+            inFlight?.staleCheck = true
+            return action
         }
         if var lost = userLost {
             if lost.homed {
@@ -494,10 +556,26 @@ public struct FieldQueue: Sendable {
             return .wait
         }
         // User input first; a running unit gives the caret back first.
+        if strayChars > 0, selection == 0 {
+            // The keyboard's own text that landed where the user tapped comes out first (the caret is right after it).
+            let count = strayChars
+            strayChars = 0
+            abortUnit()
+            return send(.deleteBackward(count), lane: strayLane) { q in
+                q.removeRange(q.cursor - count, q.cursor, owner: -1)
+                q.userCursor = q.cursor
+            }
+        }
         if !userLane.isEmpty {
             abortUnit()
             if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
             if let action = nextUser() { return action }
+        }
+        if quietAfterMove {
+            // Ops sent before the tap may still be landing where the user tapped: nothing of the keyboard's own
+            // goes until the field holds still and shows what the model expects.
+            guard inFlight == nil, reportStableMs >= Self.quietMs, let report = lastReport, consistent(report) else { return .wait }
+            quietAfterMove = false
         }
         if unit != nil { return nextInUnit() }
         if selection > 0 { return .idle }
@@ -995,8 +1073,9 @@ public struct FieldQueue: Sendable {
         if let moveTo { cursor = moveTo } else { apply(&self) }
         var isMove = false
         if case .move = op { isMove = true }
-        inFlight = InFlight(op: op, lane: lane, anywhere: anywhere, pre: pre, isMove: isMove, settleMs: anywhere ? Self.transitMs : isMove ? Self.moveSettleMs : 0)
+        inFlight = InFlight(op: op, lane: lane, anywhere: anywhere, pre: pre, isMove: isMove, settleMs: anywhere ? Self.transitMs : isMove ? Self.moveSettleMs : Self.editSettleMs)
         sinceSendMs = 0
+        lastSendConfirmed = false
         events.append(.sent(op, lane))
         return .send(op)
     }
@@ -1154,19 +1233,24 @@ public struct FieldQueue: Sendable {
             if found.count > 1 { events.append(.resync(.ambiguous)) } else if flight != nil { events.append(.resync(.assumed)) }
             return
         }
-        if let flight, pins(report, in: flight.pre) {
-            restore(flight.pre)
-            abortUnit()
-            events.append(.resync(.opLost))
-            // A user's key or delete the host lost goes once more.
-            if let input = flight.input, !flight.retried {
-                if case .move = input {} else { userLane.insert(.input(input, retried: true), at: 0) }
-            }
+        // A late report of the state before the op, which fits there among other places: the op counts as landed.
+        if let flight, !pins(report, in: flight.pre), fits(report, in: flight.pre) {
+            events.append(.resync(.ambiguous))
             return
         }
-        // A late report of the state before the op, which fits there among other places: the op counts as landed.
-        if let flight, fits(report, in: flight.pre) {
-            events.append(.resync(.ambiguous))
+        // A report of an older state than one confirmed since (the op in flight's, or an earlier one): lag, never truth,
+        // until a fresh report after a nudge keeps showing it. Then the host lost what followed: back to that state.
+        let fitsHereElsewhere = found.count == 1 && (found.first.map { selected.count + report.after.count <= text.count - $0 } ?? false)
+        if let older = olderState(report, flight: flight),
+           !fitsHereElsewhere || (older.index == nil && older.at == older.state.cursor) {
+            if !staleNudgeSent {
+                // The op in flight stays a candidate: if the host lost it, its state before it is the older state.
+                if let flight { confirmedHistory.append((flight.pre, flight.input, 0)); unconfirmedInHistory = true }
+                staleNudgeDue = true
+                events.append(.resync(.stale))
+                return
+            }
+            revert(to: older, flight: flight, report: report)
             return
         }
         // Moving the user's cursor takes a report that fits wholly inside known text: at the model's end any text
@@ -1175,14 +1259,23 @@ public struct FieldQueue: Sendable {
         let inside = found.filter { after <= text.count - $0 }
         if found.count == 1, inside == found, fitsSelection(found[0], selected) {
             abortUnit()
+            // Reports of the state before the user moved, still on their way, are lag from now on.
+            lagging.append((ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans), 0))
+            if let flight { lagging.append((flight.pre, 0)) }
             cursor = found[0]; userCursor = cursor; selection = selected.count
             closeOpenRegions(selected.isEmpty ? .cursor : .selection)
+            quietAfterMove = true
             events.append(.resync(.cursorMoved))
             merge(report)
             return
         }
-        if found.count > 1 {
+        // Ambiguous: the model is kept, unless the report holds still that way (never a freeze): then it starts over.
+        if found.count > 1, flight != nil || reportStableMs < Self.confirmLimitMs {
             events.append(.resync(.ambiguous))
+            return
+        }
+        if tapRaceLanded(report) {
+            events.append(.resync(.cursorMoved))
             return
         }
         if absorbOutsideInsert(report) {
@@ -1277,6 +1370,141 @@ public struct FieldQueue: Sendable {
         }
     }
 
+    /// The report fits the known text (or a recently confirmed state of it, shown late) at one place inside it that is
+    /// neither where the op in flight left the caret nor where it was before: no op went there, so the user tapped.
+    /// Returns that place in the current text.
+    private func tappedElsewhere(_ report: Report, flight: InFlight) -> Int? {
+        guard report.selected == nil, selection == 0, !fits(report, in: flight.pre),
+              !lagging.contains(where: { fits(report, in: $0.state) }),
+              report.before.count + report.after.count >= Self.relocateChars || report.before.isEmpty || report.after.isEmpty else { return nil }
+        // Older states only when the report fits the current text nowhere (old text shown at the tap); repetitive text
+        // that fits here several times says nothing.
+        let fitsNow = !FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: report.after).isEmpty
+        let states = [ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)]
+            + (fitsNow ? [] : [flight.pre] + confirmedHistory.reversed().map(\.state))
+        for state in states {
+            let found = FieldMatch.positions(in: state.text, reportedBefore: report.before, reportedAfter: report.after)
+            // Wholly inside that text (a report reaching back past an early, short state's start says nothing).
+            // An empty side is an edge of the text for a tap (an empty window after the caret fits anywhere otherwise).
+            let candidates = found.filter { p in
+                (!report.after.isEmpty || p == state.text.count) && (!report.before.isEmpty || p == 0)
+            }
+            guard candidates.count == 1, let p = candidates.first, report.after.count <= state.text.count - p,
+                  FieldReader.trusted(before: report.before).count <= p else { continue }
+            // The place in the current text: through the changes since that state.
+            var shift = 0
+            for h in ShadowEditPlanner.diff(state.text, text) {
+                if h.end <= p { shift += h.text.count - (h.end - h.start) } else if h.start < p { shift += h.start + h.text.count - p; break } else { break }
+            }
+            let here = min(text.count, max(0, p + shift))
+            // At that state's own caret it is that state, late: lag, not a tap.
+            guard p != state.cursor, here != cursor, here != flight.pre.cursor else { return nil }
+            return here
+        }
+        return nil
+    }
+
+    /// The user tapped at `at` (current text) while an op was on its way: everything stops there; reports of the
+    /// states before it are lag from now on.
+    private mutating func userTapped(at: Int, flight: InFlight) {
+        abortUnit()
+        lagging.append((ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans), 0))
+        lagging.append((flight.pre, 0))
+        cursor = at; userCursor = at; selection = 0
+        closeOpenRegions(.cursor)
+        quietAfterMove = true
+        tapRace = (flight.op, flight.lane, flight.pre, 0)
+        events.append(.resync(.cursorMoved))
+    }
+
+    /// The insert that was on its way at the tap shows right before the tapped caret: it landed there, not where it was
+    /// sent for. The model takes it there (and back out where it was meant to go). The user's own key stays; the
+    /// keyboard's own text comes out again (`strayChars`), and its region makes that change again where it belongs.
+    private mutating func tapRaceLanded(_ report: Report) -> Bool {
+        guard let race = tapRace, case .insert(let key) = race.op, report.selected == nil, report.before.hasSuffix(key) else { return false }
+        let before = String(report.before.dropLast(key.count))
+        let found = FieldMatch.positions(in: race.pre.text, reportedBefore: before, reportedAfter: report.after)
+        guard found.count == 1, let p = found.first, p != race.pre.cursor, report.after.count <= race.pre.text.count - p else { return false }
+        restore(race.pre)
+        cursor = p; userCursor = p; selection = 0
+        insertAtCursor(Array(key), owner: -1)
+        if race.lane == .user { userCursor = cursor } else { userCursor = p; strayChars = key.count; strayLane = race.lane }
+        tapRace = nil
+        lagging = []
+        return true
+    }
+
+    /// The user's insert in flight shows in the report right before a caret at another place of the text it was sent
+    /// into (a tap moved the caret meanwhile): the model takes it there, and the user's cursor is after it.
+    private mutating func landedElsewhere(_ report: Report, flight: InFlight) -> Bool {
+        guard flight.lane == .user, case .insert(let key) = flight.op, report.selected == nil, flight.pre.selection == 0,
+              report.before.hasSuffix(key) else { return false }
+        let before = String(report.before.dropLast(key.count))
+        let found = FieldMatch.positions(in: flight.pre.text, reportedBefore: before, reportedAfter: report.after)
+        guard found.count == 1, let p = found.first, p != flight.pre.cursor, report.after.count <= flight.pre.text.count - p,
+              before.count >= Self.relocateChars || before.count == p else { return false }
+        restore(flight.pre)
+        abortUnit()
+        cursor = p; userCursor = p
+        closeOpenRegions(.cursor)
+        insertAtCursor(Array(key), owner: nil)
+        userCursor = cursor
+        return true
+    }
+
+    /// The most recent confirmed state (or the op in flight's state before it) the report pins at one place.
+    private func olderState(_ report: Report, flight: InFlight?) -> (index: Int?, state: ModelState, at: Int)? {
+        let selected = report.selected ?? ""
+        let after = selected.count + report.after.count
+        var candidates: [(Int?, ModelState)] = flight.map { [(nil, $0.pre)] } ?? []
+        for i in confirmedHistory.indices.reversed() { candidates.append((i, confirmedHistory[i].state)) }
+        for (index, state) in candidates where state.text != text || state.cursor != cursor {
+            let found = FieldMatch.positions(in: state.text, reportedBefore: report.before, reportedAfter: selected + report.after)
+            // That state at its own caret, late (a tap shown with old text is `tappedElsewhere`'s).
+            guard found.count == 1, let p = found.first, p == state.cursor, after <= state.text.count - p, selected.count == state.selection,
+                  FieldReader.trusted(before: report.before).count <= p else { continue }
+            return (index, state, p)
+        }
+        return nil
+    }
+
+    /// The host has an older state than the model: the model goes back to it. The live run's regions and placed edits
+    /// are planned again from there (their lost characters are made again); the user's keys that were lost go once more.
+    /// A report at another place in that text is the user's tap.
+    private mutating func revert(to older: (index: Int?, state: ModelState, at: Int), flight: InFlight?, report: Report) {
+        // Only an input that never confirmed goes again: a confirmed one reached the host (it may have been undone
+        // there, which is not the keyboard's to repeat).
+        var lostInputs: [Input] = []
+        if let index = older.index {
+            if index == confirmedHistory.count - 1, unconfirmedInHistory, let input = confirmedHistory[index].input { lostInputs.append(input) }
+            confirmedHistory.removeSubrange(index...)
+        }
+        if older.index == nil, let input = flight?.input, flight?.retried == false { lostInputs.append(input) }
+        unconfirmedInHistory = false
+        abortUnit()
+        restore(older.state)
+        if older.at != older.state.cursor {
+            cursor = older.at; userCursor = older.at
+            closeOpenRegions(.cursor)
+        }
+        // Regions begun and edits placed since that state have no span in it: they are planned afresh.
+        for ri in runs.indices { runs[ri].regions.removeAll { spans[$0.spanID] == nil } }
+        for i in editLane.indices where editLane[i].spanID.map({ spans[$0] == nil }) ?? false { editLane[i].spanID = nil }
+        for i in userLane.indices { if case .edit(var e) = userLane[i], e.spanID.map({ spans[$0] == nil }) ?? false { e.spanID = nil; userLane[i] = .edit(e) } }
+        for input in lostInputs.reversed() {
+            switch input {
+            case .move: continue
+            // A key whose text stands right before the caret the report shows landed there (a tap moved the caret
+            // while it was on its way): it does not go again.
+            case .insert(let key) where report.before.hasSuffix(key): continue
+            default: userLane.insert(.input(input, retried: true), at: 0)
+            }
+        }
+        staleNudgeSent = false; staleNudgeDue = false
+        lagging = []
+        events.append(.resync(.reverted))
+    }
+
     /// The report is the model with a few characters more right at the caret (another keyboard typed there): they go
     /// into the model as the user's own input, and the user's cursor is after them.
     private mutating func absorbOutsideInsert(_ report: Report) -> Bool {
@@ -1326,9 +1554,12 @@ public struct FieldQueue: Sendable {
         func fitsWithGrowth(_ p: Int) -> (front: Int, back: Int)? {
             guard p >= 0, p <= text.count else { return nil }
             let k = min(p, before.count)
-            guard text[(p - k)..<p].elementsEqual(before[(before.count - k)...]), k == before.count || p - k == 0 else { return nil }
+            // Growing the model by the scope's text takes some of it agreeing with what the model knows there.
+            guard text[(p - k)..<p].elementsEqual(before[(before.count - k)...]),
+                  k == before.count || (p - k == 0 && k >= min(before.count, Self.extendOverlapChars)) else { return nil }
             let m = min(text.count - p, after.count)
-            guard text[p..<(p + m)].elementsEqual(after[..<m]), m == after.count || p + m == text.count else { return nil }
+            guard text[p..<(p + m)].elementsEqual(after[..<m]),
+                  m == after.count || (p + m == text.count && m >= min(after.count, Self.extendOverlapChars)) else { return nil }
             return (before.count - k, after.count - m)
         }
         // Where the cursor is, or where it was when the edit came (tracked through every change since).

@@ -227,3 +227,52 @@ import Testing
         #expect(rig.field.string == "abcd")
     }
 }
+
+@Suite struct FieldQueueSafariTimingTests {
+    /// UAT (Simulator Safari): cleanup capitalises a dictated line while the user taps the start and types. The proxy
+    /// echoes every edit at once, and a report after the tap shows the text from before the last confirmed edits.
+    /// Nothing may be lost ("QThe eeting" lost the "M"), and the key lands where the user tapped.
+    @Test(arguments: [UInt64(1), 2, 3, 4, 5, 6, 7, 8])
+    func aTapDuringCleanupLosesNoCharacterAndTheKeyLandsAtTheTap(seed: UInt64) {
+        let raw = "the meeting is at three pm tomorrow and we need slides"
+        let cleaned = "The Meeting Is At Three Pm Tomorrow And We Need Slides"
+        var field = FakeField("")
+        field.hostDelays = true
+        field.staleReportsAfterTap = 3
+        field.lagTicks = Int(seed % 3)
+        var rig = QueueRig(field, config: .init(animated: true))
+        rig.queue.enqueue(snap(1, raw))
+        rig.drain()
+        #expect(rig.field.string == raw)
+        rig.queue.enqueue(snap(2, cleaned, complete: true))
+        rig.run(ms: 300 + Double(seed) * 120)
+        rig.field.tap(at: 0)
+        rig.run(ms: 100)
+        rig.queue.enqueue(.insert("Q"))
+        rig.drain()
+        #expect(rig.field.reorders == 0)
+        #expect(rig.field.string.hasPrefix("Q"))
+        // Every word is there whole (cleaned, or raw where the user's tap closed the region first).
+        let words = rig.field.string.dropFirst().split(separator: " ").map { $0.lowercased() }
+        #expect(words == raw.split(separator: " ").map { String($0) })
+    }
+
+    /// UAT: two keys within 0.1 s, a tap, a key, then backspace, against Safari's timing: every key lands once, in order.
+    @Test func aRapidBurstOfKeysAndATapLandsEveryKeyOnce() {
+        var field = FakeField("alpha bravo charlie delta echo")
+        field.hostDelays = true
+        field.staleReportsAfterTap = 2
+        var rig = QueueRig(field, config: .init(animated: true))
+        rig.run(ms: 100)
+        rig.queue.enqueue(.insert("x")); rig.tick(); rig.queue.enqueue(.insert("y"))
+        rig.run(ms: 400)
+        rig.field.tap(at: 6)
+        rig.run(ms: 66)
+        rig.queue.enqueue(.insert("z"))
+        rig.run(ms: 66)
+        rig.queue.enqueue(.deleteBackward)
+        rig.drain()
+        #expect(rig.field.reorders == 0)
+        #expect(rig.field.string == "alpha bravo charlie delta echoxy")
+    }
+}

@@ -161,4 +161,19 @@ Other controls use actual session actions: `composer-tap <lineID> <wordID> <offs
 
 Foreground is the default phone setup. For another app's keyboard, `composer-debug-start message microphone-lease` explicitly holds the existing real microphone lease for host liveness, without forwarding or recording audio. `microphoneLeaseActive` reports it. That path still requires microphone permission; do not describe it as audio-free background execution. Without a lease, iOS can suspend a background host. Normal mic starts still use Soniox and require its key. Controls and key import are unavailable in Release builds.
 
+Magic offline in a Debug Simulator build (no Claude key): launch with the fixture, then type the instruction through the bridge; it reads and edits the field through the keyboard's queue like a spoken one. For the real keyboard in Safari, leave out `-LegatoKeyboardHarness YES` and focus the page's field first.
+
+```bash
+ctl="bash scripts/device/ctl.sh --target sim"
+$ctl build && $ctl install && $ctl launch -LegatoOfflineFixture YES -LegatoKeyboardHarness YES
+id=$($ctl send harness-visible); $ctl wait "$id"            # the in-app keyboard over a text view
+id=$($ctl send keyboard-tap); $ctl wait "$id"
+id=$($ctl send dictation-debug-line "the meeting is at three pm"); $ctl wait "$id"
+id=$($ctl send dictation-debug-stop); $ctl wait "$id"
+id=$($ctl send instruction-debug 'replace "Three" with "four"'); $ctl wait "$id"   # the offline cleanup capitalises words; or: uppercase the dictated text
+id=$($ctl send instruction-state); $ctl wait "$id"           # phase result, message, canUndo
+```
+
+Without an App Group (unsigned Simulator builds) the edit journal is in the process's own `Library/Caches/edit-journal.jsonl`.
+
 For credential-free native UAT, launch an internal build with `-LegatoOfflineFixture YES`. The deterministic instruction fixture supports uppercase, lowercase, delete, remove extra spaces, and `replace "old" with "new"`; it uses the normal field editing and undo paths without a model request. Keep this evidence distinct from real-provider and physical-device validation.

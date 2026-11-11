@@ -29,7 +29,9 @@ final class EditJournalFile {
     #if DEBUG || LEGATO_INTERNAL
     private func openIfNeeded() -> FileHandle? {
         if let handle { return handle }
-        guard !failed, let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LinkChannel.appGroupID) else {
+        // Without an App Group (an unsigned Simulator build) the process's own Caches hold it.
+        guard !failed, let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LinkChannel.appGroupID)
+                ?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.deletingLastPathComponent() else {
             failed = true; return nil
         }
         let directory = root.appendingPathComponent("Library/Caches", isDirectory: true)

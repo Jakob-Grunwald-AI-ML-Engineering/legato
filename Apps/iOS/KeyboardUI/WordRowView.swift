@@ -20,11 +20,15 @@ struct WordRowView: View {
         Group {
             if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
+                    // Plain text (nothing to tap but Dismiss); it fits in two lines, shrinking rather than cutting off.
                     Text(recovery)
                         .font(.system(size: fontSize - 4))
                         .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                         .lineLimit(2)
+                        .minimumScaleFactor(0.7)
+                        .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
+                        .accessibilityAddTraits(.isStaticText)
                     takeButton("Dismiss", id: "keyboard.liveRecovery.dismiss") { controller.dismissLiveRecovery() }
                 }
                 .padding(.horizontal, 8)

@@ -22,6 +22,11 @@ struct FakeField {
     var movesByCharacters = false
     /// Safari's timing (see above); without it every op applies at once.
     var hostDelays = false
+    /// After a tap, this many reports show the field's text as it was a few host turns ago (before the edits the keyboard
+    /// confirmed last) with the caret where the user tapped: a stale report that reverts confirmed edits (UAT, Safari).
+    var staleReportsAfterTap = 0
+    private var truthLog: [[Character]] = []
+    private var staleShow: (text: [Character], caret: Int, left: Int)?
     var nowMs = 0.0
     private(set) var reorders = 0
     private(set) var staleTriggers = 0
@@ -81,11 +86,14 @@ struct FakeField {
 
     /// The report as the proxy shows it now: the field, with moves not applied yet already in it.
     var current: FieldQueue.Report {
-        var shown = self
-        shown.hostDelays = false
-        for item in pending.sorted(by: { $0.seq < $1.seq }) { if case .move = item.send.op { shown.carryOut(item.send) } }
+        let shown = proxy ?? (text, caret, selection)
         return Self.report(text: shown.text, caret: shown.caret, selection: shown.selection, window: window, blockEcho: blockEcho)
     }
+
+    /// The proxy's own view: every op the keyboard sends shows in it at once (optimistically, measured in UAT for edits
+    /// too); each time the host applies an op or the user acts, the host's truth replaces it, without the ops still on
+    /// their way (a report that goes back to an older state).
+    private var proxy: (text: [Character], caret: Int, selection: Int)?
 
     /// One host turn at `nowMs`: ops due land, and the (possibly late, possibly stale) report comes back.
     mutating func tick() -> FieldQueue.Report {
@@ -98,6 +106,13 @@ struct FakeField {
                 if ProcessInfo.processInfo.environment["LEGATO_STRESS_TRACE"] == "1" { print("        REORDER", item.send.op, "before", pending.filter { $0.seq < item.seq }.map { ($0.send.op, $0.at) }, "now", nowMs) }
             }
             carryOut(item.send)
+            proxy = nil
+        }
+        truthLog.append(text)
+        if truthLog.count > 12 { truthLog.removeFirst() }
+        if var stale = staleShow, stale.left > 0 {
+            stale.left -= 1; staleShow = stale.left > 0 ? stale : nil
+            return Self.report(text: stale.text, caret: min(stale.caret, stale.text.count), selection: 0, window: window, blockEcho: blockEcho)
         }
         history.append(current)
         if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1) }
@@ -107,6 +122,13 @@ struct FakeField {
     /// The keyboard sends an op.
     mutating func send(_ send: Send) {
         guard hostDelays else { carryOut(send); return }
+        defer {
+            var view = self
+            view.hostDelays = false
+            if let proxy { view.text = proxy.text; view.caret = proxy.caret; view.selection = proxy.selection; view.origin = Array(repeating: .initial, count: proxy.text.count) }
+            view.carryOut(Send(op: send.op))
+            proxy = (view.text, view.caret, view.selection)
+        }
         seq += 1
         var delay: Double
         if case .move = send.op {
@@ -173,12 +195,18 @@ struct FakeField {
     }
 
     /// The user taps somewhere (outside the keyboard).
-    mutating func tap(at index: Int) { outsideNow(); caret = max(0, min(text.count, index)); selection = 0; userCaret = caret }
+    mutating func tap(at index: Int) {
+        outsideNow(); caret = max(0, min(text.count, index)); selection = 0; userCaret = caret
+        if staleReportsAfterTap > 0, let old = truthLog.first {
+            // The tap at the same place in the older text (counted from the start: the user tapped there).
+            staleShow = (old, caret, staleReportsAfterTap)
+        }
+    }
     mutating func select(_ range: Range<Int>) { outsideNow(); caret = range.lowerBound; selection = range.count; userCaret = caret }
     /// Another keyboard (a hardware keyboard) types: invisible to the queue except through reports.
     mutating func typeOutside(_ string: String) { outsideNow(); carryOut(Send(op: .insert(string), writer: .outside)) }
     /// Ops already on their way when the user acts outside the keyboard race with it (as on a real host).
-    private mutating func outsideNow() { for i in pending.indices { pending[i].send.racing = true } }
+    private mutating func outsideNow() { for i in pending.indices { pending[i].send.racing = true }; proxy = nil }
 }
 
 /// The keyboard's loop in miniature: steps the queue against a `FakeField` every `tickMs`.

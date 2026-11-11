@@ -20,7 +20,14 @@ import Testing
     /// - 1035: a lagging field and a long flip: deletes of one change now go in one op.
     /// - 2729: an op whose report fit the states before and after it was taken as landed without saying so.
     /// - 4568: a space typed at a block's start hid behind Safari's "\n " echo; the key was judged lost and sent twice.
-    @Test(arguments: [UInt64(230), 265, 398, 615, 856, 1035, 1138, 2251, 2729, 2989, 4568])
+    /// UAT round (Safari echoes edits at once; reports after a tap show older text):
+    /// - 69, 190: a tap while an op was in flight; nothing may follow an unconfirmed op before the host's transit.
+    /// - 241, 3569: repetitive text and an empty side of the window looked like a tap or an older state.
+    /// - 548, 1392: the user's key landed where they tapped and must not be sent again.
+    /// - 1376: the keyboard's own insert landed at the tap and was taken out again.
+    /// - 1121: an edit's scope grew the model at the field's start with no agreeing text (duplicated text).
+    /// - 1615: a lost delete that counted as landed later looked like another keyboard's typing.
+    @Test(arguments: [UInt64(69), 190, 230, 241, 265, 398, 548, 615, 856, 1035, 1121, 1138, 1376, 1392, 1615, 2251, 2729, 2989, 3569, 4568])
     func pinnedSeedsKeepTheInvariants(seed: UInt64) {
         var session = StressSession(seed: seed)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
@@ -80,6 +87,9 @@ struct StressSession {
         field.movesByCharacters = emoji && chance(0.7)
         // Safari's measured timing (optimistic moves, edits landing 5–110 ms later, stale reports after a 0-gap edit).
         field.hostDelays = chance(0.7)
+        // Drawn apart from the session's generator, so earlier seeds replay the same sessions.
+        var extra = SeededGenerator(seed: seed ^ 0x57A1E)
+        if field.hostDelays, Bool.random(using: &extra) { field.staleReportsAfterTap = Int.random(in: 1...4, using: &extra) }
         let clean = chance(0.35)
         var rig = QueueRig(field, config: .init(animated: chance(0.5)))
 
