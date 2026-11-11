@@ -174,6 +174,29 @@ import Testing
         #expect(rig.drops.isEmpty)
     }
 
+    /// UAT F3 on the real path: the app cleans each piece on its own (the keyboard reported where they start), so each
+    /// comes back a sentence of its own. A piece's own sentence end is no joiner: every line keeps it, not only the last.
+    @Test(arguments: [false, true])
+    func piecesCleanedApartKeepTheirOwnSentenceEnds(safari: Bool) {
+        let items = ["buy some milk", "call the plumber tomorrow", "water the plants"]
+        var field = FakeField("")
+        field.hostDelays = safari
+        var rig = QueueRig(field, config: .init(animated: true))
+        for (i, item) in items.enumerated() {
+            type(i == 0 ? "- " : "\n- ", &rig)
+            rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: i + 1, segments: Self.segments(Array(items[...i]))))
+            rig.drain()
+        }
+        #expect(rig.queue.pieceStarts(of: "list") == [1, 2])
+        let pieces = items.map { $0.prefix(1).uppercased() + $0.dropFirst() + "." }
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: 9, segments: pieces.enumerated().map {
+            LiveSegment(id: $0.offset, text: $0.element, cleaned: true, final: true)
+        }, complete: true))
+        rig.drain()
+        #expect(rig.field.string == "- " + pieces.joined(separator: "\n- "))
+        #expect(rig.drops.isEmpty)
+    }
+
     /// The user taps into the middle of a take's text and types a word there; the take's next words go where the
     /// user is, not back to the take's end.
     @Test(arguments: [false, true])

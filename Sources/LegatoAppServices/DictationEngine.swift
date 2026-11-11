@@ -143,7 +143,8 @@ import LegatoVocabulary
             await group.next()
             group.cancelAll()
         }
-        self.finishing = nil
+        // A later take's finish may have replaced it meanwhile: that one is still to be waited for.
+        if self.finishing == finishing { self.finishing = nil }
     }
 
     /// Stop routing and drop the take's unfinished words (surface change, keyboard gone); delivered lines stay

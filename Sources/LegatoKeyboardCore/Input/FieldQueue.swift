@@ -1377,15 +1377,22 @@ public struct FieldQueue: Sendable {
                 }
                 continue
             }
+            // Pieces the app cleaned apart (their words are in different segments, so different cleanup units): what follows
+            // the earlier piece's last word up to the space is its own (a sentence end), not a joiner.
+            var own = lastWordEnd
+            if lastWordEnd > 0, let segA = Self.segment(at: lastWordEnd - 1, in: runs[ri].segmentStarts),
+               let segB = Self.segment(at: firstWord, in: runs[ri].segmentStarts), segA != segB {
+                while own < firstWord, !target[own].isWhitespace { own += 1 }
+            }
             var start = firstWord
-            while start > lastWordEnd, target[start - 1].isWhitespace { start -= 1 }
-            runs[ri].regions[a].tEnd = max(runs[ri].regions[a].tStart, lastWordEnd)
+            while start > own, target[start - 1].isWhitespace { start -= 1 }
+            runs[ri].regions[a].tEnd = max(runs[ri].regions[a].tStart, own)
             if let b {
                 runs[ri].regions[b].tStart = start
                 if let bEnd = runs[ri].regions[b].tEnd { runs[ri].regions[b].tEnd = max(start, bEnd) }
-            } else if start > lastWordEnd {
+            } else if start > own {
                 // The joint before the untyped rest: a placeholder holds it (no span: nothing is typed for it).
-                runs[ri].regions.append(Region(spanID: Self.jointSpanID, tStart: lastWordEnd, tEnd: start, anchor: "", abandoned: true, dropped: true))
+                runs[ri].regions.append(Region(spanID: Self.jointSpanID, tStart: own, tEnd: start, anchor: "", abandoned: true, dropped: true))
             }
         }
         runs[ri].target = target
@@ -1467,6 +1474,11 @@ public struct FieldQueue: Sendable {
             count += text.count; last = text.last
         }
         return starts
+    }
+
+    /// The segment whose text holds target offset `p` (the last one starting at or before it).
+    static func segment(at p: Int, in starts: [Int: Int]) -> Int? {
+        starts.filter { $0.value <= p }.max { ($0.value, $0.key) < ($1.value, $1.key) }?.key
     }
 
     /// The segments of a run where a piece of it starts in the field after the first (a region begins with that

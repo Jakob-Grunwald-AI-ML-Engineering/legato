@@ -101,7 +101,14 @@ import Testing
 /// words; no joiner lands at an item's start.
 struct ListSession {
     private var rng: SeededGenerator
-    init(seed: UInt64) { rng = SeededGenerator(seed: seed ^ 0x115715) }
+    /// The app cleaned the items apart (the keyboard reported the pieces): each is a sentence of its own and keeps its
+    /// period. Drawn on its own, so the other sessions replay as they were.
+    private let apart: Bool
+    init(seed: UInt64) {
+        rng = SeededGenerator(seed: seed ^ 0x115715)
+        var own = SeededGenerator(seed: seed ^ 0xA9A27)
+        apart = Double.random(in: 0..<1, using: &own) < 0.35
+    }
 
     private mutating func chance(_ p: Double) -> Bool { Double.random(in: 0..<1, using: &rng) < p }
     private mutating func pick<T>(_ items: [T]) -> T { items[Int.random(in: 0..<items.count, using: &rng)] }
@@ -110,7 +117,12 @@ struct ListSession {
 
     /// The run's snapshot with its first `count` items cleaned into one sentence (one unit over their segments), the
     /// later ones raw.
-    private static func cleanup(_ items: [String], count: Int, joiner: String, run: String, version: Int) -> LiveDictationSnapshot {
+    private static func cleanup(_ items: [String], count: Int, joiner: String, run: String, version: Int, apart: Bool = false) -> LiveDictationSnapshot {
+        if apart {
+            return LiveDictationSnapshot(runID: run, version: version, segments: items.enumerated().map { i, item in
+                i < count ? LiveSegment(id: i, text: capitalized(item) + ".", cleaned: true, final: true) : LiveSegment(id: i, text: item, final: true)
+            }, complete: true)
+        }
         let text = pieces(Array(items[..<count]), joiner: joiner).joined(separator: joiner) + "."
         return LiveDictationSnapshot(runID: run, version: version, segments: items.enumerated().map { i, item in
             guard i < count else { return LiveSegment(id: i, text: item, final: true) }
@@ -150,7 +162,7 @@ struct ListSession {
         }
         func publishCleanup(_ rig: inout QueueRig) {
             version += 1; cleanedCount = finals.count; pendingCleanup = false
-            rig.queue.enqueue(Self.cleanup(Array(items[..<finals.count]), count: finals.count, joiner: joiner, run: run, version: version))
+            rig.queue.enqueue(Self.cleanup(Array(items[..<finals.count]), count: finals.count, joiner: joiner, run: run, version: version, apart: apart))
         }
 
         for (i, item) in items.enumerated() {
@@ -172,14 +184,14 @@ struct ListSession {
                 for word in item.split(separator: " ") {
                     head += (head.isEmpty ? "" : " ") + word
                     version += 1
-                    let before = cleanedCount > 0 ? Self.cleanup(Array(items[..<finals.count]), count: cleanedCount, joiner: joiner, run: run, version: 0).segments : finals
+                    let before = cleanedCount > 0 ? Self.cleanup(Array(items[..<finals.count]), count: cleanedCount, joiner: joiner, run: run, version: 0, apart: apart).segments : finals
                     rig.queue.enqueue(LiveDictationSnapshot(runID: run, version: version, segments: before + [.init(id: i, text: head, final: false)]))
                     rig.run(ms: Double.random(in: 60...400, using: &rng))
                 }
             }
             finals.append(.init(id: i, text: item, final: true))
             version += 1
-            let segments = cleanedCount > 0 ? Self.cleanup(Array(items[..<finals.count]), count: cleanedCount, joiner: joiner, run: run, version: 0).segments : finals
+            let segments = cleanedCount > 0 ? Self.cleanup(Array(items[..<finals.count]), count: cleanedCount, joiner: joiner, run: run, version: 0, apart: apart).segments : finals
             rig.queue.enqueue(LiveDictationSnapshot(runID: run, version: version, segments: segments, complete: stops || cleanedCount > 0))
             // A cleanup of the items so far (the late whole pass after a stop): now, or while the next line starts.
             if stops, chance(0.6) { if chance(0.5) { publishCleanup(&rig) } else { pendingCleanup = true } }
@@ -188,16 +200,17 @@ struct ListSession {
         publishCleanup(&rig)
         guard rig.drain(limitMs: 60_000) else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
         if rig.field.reorders > 0 || rig.field.staleTriggers > 0 { return "host timing traps: \(rig.field.reorders) reorders, \(rig.field.staleTriggers) stale" }
-        let pieces = Self.pieces(items, joiner: joiner)
-        let expected = initial + "- " + pieces.joined(separator: "\n- ") + "."
+        let pieces = apart ? items.map(Self.capitalized) : Self.pieces(items, joiner: joiner)
+        let expected = initial + "- " + pieces.joined(separator: ".\n- ") + "."
         // Each line holds its own words; the last ends the run. A stopped take's cleanup may have put its period at the
-        // end of an earlier line already: a later cleanup that keeps it there leaves it.
+        // end of an earlier line already: a later cleanup that keeps it there leaves it. Items cleaned apart each keep theirs.
         let lines = String(rig.field.string.dropFirst(initial.count)).components(separatedBy: "\n")
         let fits = rig.field.string.hasPrefix(initial) && lines.count == pieces.count && zip(lines, pieces).enumerated().allSatisfy { i, pair in
-            pair.0 == "- " + pair.1 + (i == pieces.count - 1 ? "." : "") || (stops && i < pieces.count - 1 && pair.0 == "- " + pair.1 + ".")
+            if apart { return pair.0 == "- " + pair.1 + "." }
+            return pair.0 == "- " + pair.1 + (i == pieces.count - 1 ? "." : "") || (stops && i < pieces.count - 1 && pair.0 == "- " + pair.1 + ".")
         }
         if !fits {
-            return "final text \(rig.field.string.debugDescription), expected \(expected.debugDescription) (joiner \(joiner.debugDescription), stops \(stops))"
+            return "final text \(rig.field.string.debugDescription), expected \(apart ? expected.debugDescription : (initial + "- " + pieces.joined(separator: "\n- ") + ".").debugDescription) (joiner \(joiner.debugDescription), stops \(stops), apart \(apart))"
         }
         if !rig.drops.isEmpty { return "dropped \(rig.drops.map(\.reason.rawValue)) with nothing conflicting" }
         return nil

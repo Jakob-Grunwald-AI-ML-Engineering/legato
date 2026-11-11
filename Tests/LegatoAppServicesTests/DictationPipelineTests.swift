@@ -30,9 +30,12 @@ private final class SlowFirstCleaner: SentenceCleaning {
 private final class FnCleaner: SentenceCleaning {
     let inputs = Mutex<[SentenceCleanupInput]>([])
     let transform: @Sendable (SentenceCleanupInput) -> String
-    init(_ transform: @escaping @Sendable (SentenceCleanupInput) -> String) { self.transform = transform }
+    /// The first this many calls take 200 ms.
+    let slowFirst: Int
+    init(slowFirst: Int = 0, _ transform: @escaping @Sendable (SentenceCleanupInput) -> String) { self.slowFirst = slowFirst; self.transform = transform }
     func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
-        inputs.withLock { $0.append(input) }
+        let n = inputs.withLock { $0.append(input); return $0.count }
+        if n <= slowFirst { try await Task.sleep(for: .milliseconds(200)) }
         return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: transform(input))
     }
 }
@@ -340,6 +343,102 @@ extension DictationPipelineTests {
         let texts = cleaner.inputs.withLock { $0.map(\.text) }
         #expect(texts.sorted() == ["buy some milk", "call the plumber tomorrow", "water the plants"])
         #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["BUY SOME MILK", "CALL THE PLUMBER TOMORROW", "WATER THE PLANTS"])
+    }
+
+    /// UAT F3 on the real path: the stop closed the last item's unit (it spans two items) before the keyboard's report
+    /// of the new piece arrived. The pieces are cleaned again apart; the joined cleanup never lands.
+    @Test(arguments: [false, true])
+    func aSplitThatArrivesAfterItsUnitWasSentCleansThePiecesApart(joinedLandsFirst: Bool) async throws {
+        // The joined unit's cleanup (the first call) takes 200 ms when the split is to arrive while it runs.
+        let cleaner = FnCleaner(slowFirst: joinedLandsFirst ? 0 : 1) { input in
+            let text = input.text.replacingOccurrences(of: "tomorrow water", with: "tomorrow, water")
+            return text.prefix(1).uppercased() + text.dropFirst() + "."
+        }
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        var published: [LiveDictationSnapshot?] = []
+        pipeline.onLiveChange = { published.append($0) }
+        await pipeline.receive(routeLine(0, "call the plumber tomorrow"))
+        await pipeline.receive(routeLine(1, "water the plants"))
+        let runID = try #require(pipeline.liveRun?.runID)
+        if joinedLandsFirst {
+            await pipeline.finishTake()
+            #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["Call the plumber tomorrow, water the plants.", ""])
+            await pipeline.livePieces(runID: runID, startingAt: [1])
+        } else {
+            let stop = Task { await pipeline.finishTake() }
+            try await until { cleaner.inputs.withLock { $0.count } >= 1 }
+            await pipeline.livePieces(runID: runID, startingAt: [1])
+            await stop.value
+        }
+        try await until { pipeline.liveRun?.snapshot.segments.map(\.text) == ["Call the plumber tomorrow.", "Water the plants."] }
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["Call the plumber tomorrow.", "Water the plants."])
+        #expect(published.last??.segments.map(\.text) == ["Call the plumber tomorrow.", "Water the plants."])
+        if !joinedLandsFirst {
+            #expect(!published.contains { $0?.segments.first?.text.contains(", water") == true }, "The joined cleanup never shows")
+        }
+    }
+
+    /// UAT F1 on the real path: the user stops, presses Enter and starts the next take at once. The next take is a run of
+    /// its own: none of its words join the previous take's run while that one still ends (it waits for its cleanup).
+    @Test func aTakeStartedWhileThePreviousOneEndsIsARunOfItsOwn() async throws {
+        let cleaner = SlowFirstCleaner()
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        var published: [LiveDictationSnapshot?] = []
+        pipeline.onLiveChange = { published.append($0) }
+        pipeline.beginTake()
+        pipeline.tailChanged("the meeting")
+        await pipeline.receive(routeLine(0, "the meeting is at three"))
+        let first = try #require(pipeline.liveRun?.runID)
+        let stop = Task { await pipeline.finishTake() }
+        try await until { cleaner.inputs.withLock { $0.count } >= 1 }
+        // The mic key again, while the stop still waits for the first take's cleanup: the next words are spoken.
+        pipeline.beginTake()
+        pipeline.tailChanged("bring")
+        pipeline.tailChanged("bring the")
+        await stop.value
+        pipeline.tailChanged("bring the laptop")
+        await pipeline.receive(routeLine(1, "bring the laptop"))
+        await pipeline.finishTake()
+        let firstRun = published.compactMap { $0 }.filter { $0.runID == first }
+        #expect(firstRun.allSatisfy { $0.segments.allSatisfy { !$0.text.lowercased().contains("bring") } }, "The first take holds only its words")
+        #expect(firstRun.last?.complete == true && firstRun.last?.segments.map(\.text) == ["THE MEETING IS AT THREE"])
+        let second = try #require(pipeline.liveRun)
+        #expect(second.runID != first && second.complete)
+        #expect(second.snapshot.segments.map(\.text) == ["BRING THE LAPTOP"])
+        #expect(Set(published.compactMap { $0?.runID }).count == 2, "Two takes, two runs, no third")
+    }
+
+    /// A final right after a stop belongs to the next take once the mic key started it, not to the stopped take (the
+    /// straggler grace is for the stopped take's own words).
+    @Test func speechOfTheNextTakeNeverJoinsTheStoppedTakesRun() async throws {
+        let pipeline = live()
+        pipeline.beginTake()
+        await pipeline.receive(routeLine(0, "the meeting is at three"))
+        await pipeline.finishTake()
+        let first = try #require(pipeline.liveRun)
+        #expect(first.complete)
+        pipeline.beginTake()
+        await pipeline.receive(routeLine(1, "bring the laptop"))
+        #expect(pipeline.liveRun?.runID != first.runID)
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["bring the laptop"])
+    }
+
+    /// The next take is stopped while its speech still waits for the previous take to end: it ends right after it.
+    @Test func aStopOfTheNextTakeWhileItWaitsEndsItAfterThePreviousOne() async throws {
+        let cleaner = SlowFirstCleaner()
+        let pipeline = DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: .milliseconds(500))
+        pipeline.beginTake()
+        await pipeline.receive(routeLine(0, "first take words"))
+        let first = try #require(pipeline.liveRun?.runID)
+        let stop = Task { await pipeline.finishTake() }
+        try await until { cleaner.inputs.withLock { $0.count } >= 1 }
+        pipeline.beginTake()
+        pipeline.tailChanged("second")
+        await pipeline.receive(routeLine(1, "second take"))
+        await pipeline.finishTake()
+        await stop.value
+        try await until { pipeline.liveRun?.runID != first && pipeline.liveRun?.complete == true }
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["SECOND TAKE"])
     }
 
     @Test func anInstructionEndsAndSealsTheRun() async throws {

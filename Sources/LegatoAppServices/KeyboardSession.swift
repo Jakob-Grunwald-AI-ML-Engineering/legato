@@ -81,6 +81,12 @@ import LegatoVocabulary
     @ObservationIgnored private var routeClosedAt: Double?
     /// Waits for the stopped take's last words, then has the sink clean and write the take once.
     @ObservationIgnored private var takeFinish: Task<Void, Never>?
+    /// Counts session closes: a take end still on its way from before one does nothing.
+    @ObservationIgnored private var takeGeneration = 0
+    #if DEBUG || LEGATO_INTERNAL
+    /// Debug bridge: its lines stand for a take since the last stop (the first line after one begins a take).
+    @ObservationIgnored private var debugTakeOpen = false
+    #endif
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-session")
 
     public convenience init(composer: ComposerSession, sink: any DictationRouteSink = DiscardingDictationSink(), instruction: InstructionSession? = nil) {
@@ -192,7 +198,10 @@ import LegatoVocabulary
         if let action = gate.abandon() { await perform(action) }
         isOpen = false; probe.cancel()
         // The take is the keyboard appearance's: closing mid-take drops what was not sent.
-        takeFinish?.cancel(); takeFinish = nil
+        takeFinish?.cancel(); takeFinish = nil; takeGeneration += 1
+        #if DEBUG || LEGATO_INTERNAL
+        debugTakeOpen = false
+        #endif
         cutTimeout?.cancel(); cutTimeout = nil; reportedMagic = .off
         await closeDictation()
         await modeSink.reset()
@@ -253,6 +262,8 @@ import LegatoVocabulary
                 return composer.error == nil
             }
         case .dictation:
+            // A take of its own: its words never join the previous take's run (which may still be ending).
+            modeSink.beginTake()
             await dictation.activate()
             if let failure = composer.takeBufferFailure {
                 await dictation.abandonTake()
@@ -343,12 +354,15 @@ import LegatoVocabulary
     // MARK: Dictation route
 
     private func openDictation() { dictation.open() }
+    /// Ends a take: after its last words (bounded), the sink cleans and writes it. Ends run in take order, and a later
+    /// stop never cancels an earlier take's end (that take would never complete); only closing the session does.
     private func finishDictationTake(waitingForWords: Bool) {
         let dictation = self.dictation, sink = self.sink
-        takeFinish?.cancel()
-        takeFinish = Task {
+        let previous = takeFinish, generation = takeGeneration
+        takeFinish = Task { [weak self] in
             if waitingForWords { await dictation.waitForFinish(timeout: .seconds(3)) }
-            guard !Task.isCancelled else { return }
+            await previous?.value
+            guard !Task.isCancelled, self?.takeGeneration == generation else { return }
             await sink.finishTake()
         }
     }
@@ -362,26 +376,38 @@ import LegatoVocabulary
     #if DEBUG || LEGATO_INTERNAL
     /// Debug bridge: a finalized line enters the dictation route exactly where a Soniox segment does
     /// (the sink), so cleanup, the link and keyboard typing run for real. Requires the open dictation surface.
+    /// The first line or tail after a stop begins a take, as the mic key does before real speech.
     public func debugDictationLine(_ text: String) async throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { throw DebugDictationError.empty }
+        beginDebugTake()
         guard await dictation.debugLine(text) else { throw DebugDictationError.empty }
     }
     /// Debug bridge: sets (or with empty text clears) the dictation route's live partial.
     public func debugDictationTail(_ text: String) throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        if !text.trimmingCharacters(in: .whitespaces).isEmpty { beginDebugTake() }
         dictation.debugTail(text)
     }
     /// Debug bridge: ends the take as the mic key's stop does (no microphone is involved), so the held take is
-    /// cleaned and written now.
+    /// cleaned and written now. The next line begins a new take.
     public func debugDictationStop() throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
         dictation.debugTail("")
+        debugTakeOpen = false
         finishDictationTake(waitingForWords: false)
+    }
+    private func beginDebugTake() {
+        guard !debugTakeOpen else { return }
+        debugTakeOpen = true
+        modeSink.beginTake()
     }
     /// Debug bridge: replays a recorded Soniox token timeline into the dictation route (no microphone), then ends the
     /// take as the mic key's stop does. Returns when the take is written.
     public func debugDictationReplay(_ timeline: DictationReplayTimeline, speed: Double = 1) async throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        modeSink.beginTake()
+        debugTakeOpen = false
         try await dictation.debugReplay(timeline, speed: speed)
         await dictation.waitForFinish(timeout: .seconds(3))
         await sink.finishTake()

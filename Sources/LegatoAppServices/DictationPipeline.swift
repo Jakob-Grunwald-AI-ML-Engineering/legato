@@ -118,8 +118,18 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored public var diagnostics: (@MainActor (_ event: String, _ fields: [String: Any]) -> Void)?
     @ObservationIgnored private var liveSubmitted: [Int: ContinuousClock.Instant] = [:]
     /// Live sentences are cleaned under a counter of their own (a cut-short segment is no sentence): cleanup
-    /// sequence -> the key of the segment that closed the sentence in the run.
-    @ObservationIgnored private var liveKeys: [Int: Int] = [:]
+    /// sequence -> the key of the segment that closed the sentence in the run, and the unit's segments when it was sent
+    /// (a unit the keyboard's split cut since then is cleaned again; this result is stale).
+    @ObservationIgnored private var liveKeys: [Int: (key: Int, range: Range<Int>?)] = [:]
+    /// A take began while the run before it still ends (its stop waits for its last words and cleanup): what the later
+    /// takes bring (their speech, stops and starts) waits here, in order, and goes in once that run is complete, so each
+    /// take is a run of its own. The link carries one run at a time, and a new take's words never join an old run.
+    @ObservationIgnored private var held: [Held]?
+    private enum Held { case tail(String), line(DictationRouteLine), stop, begin }
+    /// A take began and its stop (`finishTake`) has not come yet.
+    @ObservationIgnored private var liveTakeOpen = false
+    /// The stop of the run that `held` waits for is still to come: the next `finishTake` is that run's.
+    @ObservationIgnored private var heldAwaitsStop = false
     @ObservationIgnored private var liveCleanupSequence = 0
     /// When the run's take ended: a segment or cleanup that arrives within `liveStragglerGrace` still belongs to it.
     @ObservationIgnored private var liveFinishedAt: ContinuousClock.Instant?
@@ -174,7 +184,11 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     public func receive(_ line: DictationRouteLine) async {
         let raw = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
-        if mode == .live { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason)); return }
+        if mode == .live {
+            if held != nil { held?.append(.line(line)); return }
+            await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason))
+            return
+        }
         if mode != .lineByLine { bufferLine(raw); return }
         pending += 1
         let pipeline = await current()
@@ -302,7 +316,16 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     }
     public func finishTake() async {
         switch mode {
-        case .live: await finishLive()
+        case .live:
+            // Stops come in take order: while later takes wait, a stop is the waited-for run's when that one's is still to
+            // come, else a waiting take's (it ends once its speech went in).
+            if held != nil {
+                guard heldAwaitsStop else { held?.append(.stop); return }
+                heldAwaitsStop = false
+            } else {
+                liveTakeOpen = false
+            }
+            await finishLive()
         // The last line is still in cleanup: the stop is done when it has been handed to the keyboard.
         case .lineByLine: _ = await settle()
         default: await sendTake()
@@ -314,12 +337,63 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// The speaking head changed (the route's live tail). Words only; the head is empty when nothing is spoken.
     public func tailChanged(_ text: String) {
         guard mode == .live else { return }
+        if held != nil {
+            if case .tail? = held?.last { held?.removeLast() }
+            held?.append(.tail(text))
+            return
+        }
+        liveTail(text)
+    }
+
+    private func liveTail(_ text: String) {
         let head = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if head.isEmpty, liveRun == nil || liveRun?.complete == true { return }
         // Words spoken after the take's end are a new take (late segments come with an empty head).
         var run = currentLiveRun(straggler: false)
         run.setHead(head)
         publishLive(run)
+    }
+
+    /// A take began (the mic key): its speech is a run of its own. A finished run takes no more stragglers; a run that
+    /// still ends (its stop waits for its last words and cleanup) has the new take's speech wait until it is complete.
+    public func beginTake() {
+        guard mode == .live else { return }
+        if held != nil { held?.append(.begin); return }
+        let stopComing = liveTakeOpen
+        liveTakeOpen = true
+        liveFinishedAt = nil
+        guard let run = liveRun, !run.complete else { return }
+        held = []
+        heldAwaitsStop = stopComing
+        diagnostics?("live2.take.wait", ["run": String(run.runID.prefix(8)), "stopComing": stopComing])
+        // A run no take's stop will end (words that came with no take open): it ends now.
+        if !stopComing, liveFinishing == nil { Task { await self.finishLive() } }
+    }
+
+    /// The run before is complete: what waited goes in, in order (what arrives meanwhile waits behind it). A waiting
+    /// take's stop ends its run first, and the rest waits for that.
+    private func releaseHeld() async {
+        guard held != nil, !heldAwaitsStop, liveRun?.complete != false else { return }
+        liveFinishedAt = nil
+        while let item = held?.first {
+            held?.removeFirst()
+            switch item {
+            case .tail(let text): liveTail(text)
+            case .line(let line):
+                let raw = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !raw.isEmpty { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason)) }
+            case .begin:
+                // A take that began while this one ran without a stop: its run ends first.
+                if let run = liveRun, !run.complete { held?.insert(.begin, at: 0); return await finishLive() }
+                liveTakeOpen = true
+                liveFinishedAt = nil
+            case .stop:
+                liveTakeOpen = false
+                if held?.isEmpty == true { held = nil }
+                return await finishLive()
+            }
+        }
+        held = nil
     }
 
     /// Segment reasons that cut a sentence short (`Segmenter.maxWords`, `maxDuration`), not end it.
@@ -370,7 +444,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun) async {
         let id = liveCleanupSequence
         liveCleanupSequence += 1
-        liveKeys[id] = sequence
+        liveKeys[id] = (sequence, run.unitRange(key: sequence))
         pending += 1
         liveSubmitted[id] = .now
         // What stands before this sentence if the run were typed clean: the text before the run, then the sentences so far.
@@ -412,6 +486,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         liveFinishing = task
         await task.value
         liveFinishing = nil
+        await releaseHeld()
     }
 
     private func endLive() async {
@@ -510,9 +585,14 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             let parts = start.duration(to: .now).components
             return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
         }
-        guard var run = liveRun, let key = liveKeys.removeValue(forKey: line.sequence) else { return }
+        guard var run = liveRun, let (key, range) = liveKeys.removeValue(forKey: line.sequence) else { return }
         if run.runID == sealedLiveRunID {
             diagnostics?("live2.cleanup", ["landed": false, "reason": "sealed", "rawChars": line.raw.count, "ms": ms as Any])
+            return
+        }
+        // The keyboard split the unit since it was sent: its parts are cleaned again, this joins them.
+        if let now = run.unitRange(key: key), now != range {
+            diagnostics?("live2.cleanup", ["landed": false, "reason": "split", "rawChars": line.raw.count, "ms": ms as Any])
             return
         }
         if line.status == .cleaned {
@@ -549,6 +629,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 
     private func endLiveRun() {
         liveSubmitted = [:]; liveKeys = [:]; liveFinishedAt = nil
+        held = nil; heldAwaitsStop = false; liveTakeOpen = false
         guard liveRun != nil else { return }
         liveRun = nil
         onLiveChange?(nil)
@@ -735,6 +816,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             state["liveRun"] = String(run.runID.prefix(8)); state["liveVersion"] = run.version
             state["liveSentences"] = run.finalCount; state["liveComplete"] = run.complete
         }
+        if let held { state["liveHeld"] = held.count }
         return state
     }
 

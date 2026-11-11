@@ -203,14 +203,31 @@ public struct LiveDictationRun: Sendable, Equatable {
 
     /// The keyboard started a new piece of the run at segment `index` (the user typed or moved between it and the words
     /// before): a unit never spans the split, so each piece is cleaned on its own. The open unit closes before it (now,
-    /// or when that segment becomes final); the closed part is cleaned (`drainSplitUnits`). True when it was new.
+    /// or when that segment becomes final); the closed part is cleaned (`drainSplitUnits`). A unit already closed (the
+    /// stop closed it before the keyboard's report came) is cut in two and both parts are cleaned again; its cleanup,
+    /// landed or on its way, no longer counts, and neither does a whole-take pass over the split. True when it was new.
     @discardableResult
     public mutating func split(before index: Int) -> Bool {
         guard index > 0, !pieceStarts.contains(index) else { return false }
         pieceStarts.insert(index)
-        if index < finals.count { closeOpenUnit(before: index) }
+        guard index < finals.count, let unit = units.firstIndex(where: { $0.lowerBound < index && index < $0.upperBound }) else { return true }
+        if openUnit, unit == units.count - 1 { closeOpenUnit(before: index); return true }
+        let range = units[unit]
+        units[unit] = range.lowerBound..<index
+        units.insert(index..<range.upperBound, at: unit + 1)
+        // Cleaned text by unit index: the later units move up one; the cut unit's cleanup fits neither part. Nothing is
+        // published for the cut itself (the field keeps what it shows): the parts' cleanups change the target when they land.
+        cleaned = Dictionary(uniqueKeysWithValues: cleaned.compactMap { k, text in k == unit ? nil : (k > unit ? k + 1 : k, text) })
+        if let whole, index < whole.end { self.whole = nil }
+        for part in [unit, unit + 1] {
+            guard let key = keys.filter({ $0.value == units[part].upperBound - 1 }).map(\.key).max() else { continue }
+            splitClosed.append(SplitUnit(key: key, text: rawText(part)))
+        }
         return true
     }
+
+    /// The segments (by index) of the unit `key` belongs to, nil for none: a cleanup sent for another range is stale.
+    public func unitRange(key: Int) -> Range<Int>? { unitIndex(ofKey: key).map { units[$0] } }
 
     /// Units closed by a split since the last call: (key of its last segment, raw text) to clean.
     public mutating func drainSplitUnits() -> [(key: Int, text: String)] {
