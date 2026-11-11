@@ -78,6 +78,9 @@ public final class MacFieldQueue {
     /// A key that did not read back within `keyConfirm` may still land until this long after it went out: nothing is
     /// sent (and the key is not sent again) before it shows or this passes.
     public static let keyLateLimit = Duration.seconds(1)
+    /// Keystroke fields: after the user's real key or click, no key goes out until their input has rested this long.
+    /// A key moves the field's own caret, so a key the user types meanwhile lands wherever the queue's caret is.
+    public static let keyQuiet = Duration.milliseconds(600)
     /// The pause at a transition between moves and edits.
     public static let keySettle = Duration.milliseconds(Int(KeystrokePlanner.settleMs))
 
@@ -186,6 +189,9 @@ public final class MacFieldQueue {
     private var holding = false
     /// Keystroke fields: a key that did not read back in time, and the selection it would leave.
     private var lateKey: (at: ContinuousClock.Instant, selection: UTF16Range)?
+    /// Keystroke fields: the last input mark seen, and when the user's real input last showed.
+    private var lastMark: Int?
+    private var inputAt: ContinuousClock.Instant?
 
     // MARK: Inspection
 
@@ -258,6 +264,7 @@ public final class MacFieldQueue {
     /// The user typed or clicked: the next read takes their caret and text as they are, and the open region closes.
     public func userActed() {
         userActedFlag = true
+        inputAt = now()
         note(.user)
         if hasWork { schedule() }
     }
@@ -377,6 +384,11 @@ public final class MacFieldQueue {
         placeEdits(doc)
         finishEdits()
         let keyed = !target.editsInPlace && target.typesKeys
+        if keyed {
+            if mark != lastMark { if lastMark != nil { inputAt = now() }; lastMark = mark }
+            // The user is typing or clicking: keys wait until they rest (without counting toward `parkLimit`).
+            if let input = inputAt, now() - input < Self.keyQuiet { holding = true; return false }
+        }
         if keyed, let late = lateKey {
             // Never a second key while the last one may still land.
             if selection != late.selection, now() - late.at < Self.keyLateLimit { return false }

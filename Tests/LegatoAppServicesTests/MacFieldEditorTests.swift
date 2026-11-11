@@ -46,6 +46,39 @@ import LegatoMac
     }
 }
 
+/// A Chromium-like field: Accessibility writes are ignored; keys land at once.
+@MainActor private final class KeyTarget: TextTarget {
+    var value: String
+    var selection: UTF16Range
+    var keys: [FieldKey] = []
+    init(_ value: String) { self.value = value; selection = .init(location: value.utf16.count, length: 0) }
+    var editsInPlace: Bool { false }
+    var typesKeys: Bool { true }
+    func isFocused() -> Bool { true }
+    func selectedRange() throws -> UTF16Range { selection }
+    func textLength() throws -> Int { value.utf16.count }
+    func text(in range: UTF16Range) throws -> String {
+        guard range.location >= 0, range.end <= value.utf16.count else { throw TextTargetReadError.unsupported }
+        return (value as NSString).substring(with: NSRange(location: range.location, length: range.length))
+    }
+    func replace(_ range: UTF16Range, with text: String) throws {}
+    func press(_ key: FieldKey, mark: Int, selection planned: UTF16Range) throws {
+        guard planned == selection else { throw FieldKeyRefusal.selectionMoved }
+        keys.append(key)
+        let ns = value as NSString
+        switch key {
+        case .left: selection = .init(location: max(0, selection.location - 1), length: 0)
+        case .right: selection = .init(location: min(ns.length, selection.end + 1), length: 0)
+        case .backspace:
+            value = ns.replacingCharacters(in: NSRange(location: selection.location - 1, length: 1), with: "")
+            selection = .init(location: selection.location - 1, length: 0)
+        case .text(let character):
+            value = ns.replacingCharacters(in: NSRange(location: selection.location, length: 0), with: String(character))
+            selection = .init(location: selection.location + String(character).utf16.count, length: 0)
+        }
+    }
+}
+
 @MainActor private enum SnapshotVersion { static var value = 0 }
 
 @MainActor struct MacFieldEditorTests {
@@ -305,12 +338,13 @@ import LegatoMac
         await editor.finish()
         #expect(inserts == [" there."]) // after the field's own "Hi"
     }
-    @Test func aFieldThatReadsButIgnoresWritesUsesThePanelAndKeepsMagicReads() async throws {
+    @Test func anElementThatReadsButTakesNoWritesOrKeysUsesThePanelAndOnlyCopies() async throws {
         let target = EditorTarget("Some text")
         target.inPlace = false
         let editor = MacFieldEditor(capture: { .target(target) })
-        var inserts: [String] = []
+        var inserts: [String] = [], copied: [String] = []
         editor.insert = { inserts.append($0); return .typed }
+        editor.recover = { copied.append($0) }
         editor.begin()
         #expect(editor.panel.active)
         await editor.applyLive(snapshot("more", complete: true))
@@ -319,7 +353,20 @@ import LegatoMac
         let read = try await editor.read(.contextInPlace, instructionID: "magic", reading: {})
         #expect(read.above == "Some text")
         await editor.finish()
-        #expect(inserts == [" more"])
+        // A page is not a field: its letters could be the site's shortcuts, so nothing is typed.
+        #expect(inserts.isEmpty && copied == ["more"])
+    }
+    @Test func aKeystrokeFieldIsEditedLiveWithoutThePanel() async {
+        let target = KeyTarget("Hi")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.begin()
+        #expect(!editor.panel.active)
+        await editor.applyLive(snapshot("there"))
+        await editor.applyLive(snapshot("There.", complete: true))
+        #expect(target.value == "Hi There.")
+        #expect(target.keys.allSatisfy { $0 != .text("\n") && $0 != .text("\t") })
+        #expect(target.selection == .init(location: 9, length: 0))
     }
     @Test func aStalledPanelTakeWaitsForTheUsersChoiceAndThenTypesOnce() async {
         let editor = MacFieldEditor(capture: { .none })

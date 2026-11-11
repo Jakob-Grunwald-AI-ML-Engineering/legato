@@ -4,7 +4,7 @@ import Foundation
 /// the app once when the take ends. Stored in the Mac app's standard defaults; there is no UI for it yet.
 public enum PanelDictationSetting {
     public enum Mode: String, CaseIterable, Sendable {
-        /// The panel only where the field cannot be edited live: unreadable, or readable without exact writes.
+        /// The panel only where the field cannot be edited live: unreadable, or readable without any way to write.
         case whenNeeded
         /// The panel for every field that is not secure.
         case always
@@ -20,7 +20,7 @@ public enum PanelDictationSetting {
 public enum DictationFieldKind: Sendable, Equatable {
     /// Readable, and Accessibility writes land exactly: live editing works.
     case liveEditable
-    /// Readable (Magic can read it), but the app does not apply Accessibility text writes (Chromium web content).
+    /// Readable (Magic can read it), but it takes neither Accessibility writes nor verified keys.
     case readOnly
     /// Nothing readable: no focused element, or no selection.
     case unreadable

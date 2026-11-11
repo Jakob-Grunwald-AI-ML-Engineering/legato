@@ -48,6 +48,9 @@ import LegatoMac
     private var sessionEnded = false
     /// Real input since the start: the panel's text is copied, never typed.
     private var panelOwned = true
+    /// The focused element reads as text but takes no writes and no keys (a page, not a field): the panel's text is
+    /// copied, never typed (a typed letter could be the site's shortcut).
+    private var panelCopiesOnly = false
     private var target: (any TextTarget)?
     private var documentID = UUID().uuidString
     private var activeInstructionID: String?
@@ -81,6 +84,7 @@ import LegatoMac
         case .secure: field = .secure; report("Secure field: dictation will be copied. Magic cannot edit it.")
         case .none: field = .unreadable
         }
+        panelCopiesOnly = field == .readOnly
         queue = MacFieldQueue(target: target, documentID: documentID)
         queue.paced = { [weak self] in self?.typewriter() ?? true }
         queue.sleep = { [weak self] in await self?.sleep($0) }
@@ -244,9 +248,10 @@ import LegatoMac
            let previous = (try? target.text(in: .init(location: caret.location - 1, length: 1)))?.last {
             text = PanelTake.separator(before: text, after: previous) + text
         }
-        guard panelOwned, let insert else {
+        guard panelOwned, !panelCopiesOnly, let insert else {
             recover(text.trimmingCharacters(in: .whitespaces))
-            report("Dictation copied: the field or app changed. Paste with ⌘V.")
+            report(panelCopiesOnly ? "Dictation copied: this isn't a text field. Paste with ⌘V."
+                                   : "Dictation copied: the field or app changed. Paste with ⌘V.")
             return
         }
         panel.inserting = true

@@ -157,8 +157,14 @@ final class AXTextTarget: TextTarget {
     /// Whether Accessibility writes land exactly in this field. Chromium's web content reports success for an
     /// AXSelectedText write and changes nothing.
     var editsInPlace: Bool { !Self.isChromium(pid: pid) }
-    /// Chromium fields are edited with synthetic keys, each read back (`MacFieldQueue`).
-    var typesKeys: Bool { Self.isChromium(pid: pid) }
+    /// Chromium fields are edited with synthetic keys, each read back (`MacFieldQueue`). Only an editable element
+    /// takes keys: the page itself (AXWebArea) reads as text too, and a letter typed there can be a site's shortcut.
+    var typesKeys: Bool { Self.isChromium(pid: pid) && editable }
+    private lazy var editable: Bool = {
+        var settable: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue { return true }
+        return (try? Self.copyAttribute(element, "AXEditableAncestor")) != nil
+    }()
     var inputMark: Int { RealInput.shared.count }
 
     private enum SecureState { case secure, notSecure, unknown }
