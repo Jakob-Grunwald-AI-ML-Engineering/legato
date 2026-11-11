@@ -17,6 +17,13 @@ import LegatoMac
     public init() {}
 }
 
+/// Whether Legato's own last change in the bound field can be undone or redone (the pill's controls enable by it).
+@MainActor @Observable public final class FieldHistory {
+    public fileprivate(set) var canUndo = false
+    public fileprivate(set) var canRedo = false
+    public init() {}
+}
+
 /// The Mac's dictation and Magic side of the focused field. It binds the field when a session starts and hands every
 /// change to the field's one queue (`MacFieldQueue`): live words and their revisions, cleanup, typed lines, Magic and
 /// its undo, and the panel's final typed insert. It writes nothing itself; Magic's reads come from here.
@@ -42,6 +49,7 @@ import LegatoMac
     /// Where the queue's journal goes (debug and internal builds).
     public var journal: (@MainActor (MacEditJournal.Entry) -> Void)?
     public let panel = DictationPanel()
+    public let history = FieldHistory()
     /// The field's queue; a new one per bound field.
     public private(set) var queue = MacFieldQueue(target: nil)
     /// The session's last words were delivered: finished panel text is typed as soon as it is final.
@@ -90,9 +98,20 @@ import LegatoMac
         queue.sleep = { [weak self] in await self?.sleep($0) }
         queue.journal = journal
         queue.onDrop = { [weak self] drop in self?.dropped(drop) }
+        queue.onHistoryChange = { [weak self] in self?.syncHistory() }
+        syncHistory()
         journal?(.init(kind: .field, field: documentID))
         if PanelDictationPolicy.usesPanel(panelMode(), field: field) { panel.active = true }
     }
+
+    private func syncHistory() {
+        if history.canUndo != queue.canUndo { history.canUndo = queue.canUndo }
+        if history.canRedo != queue.canRedo { history.canRedo = queue.canRedo }
+    }
+
+    /// Takes Legato's last change in the field back (a take, a cleanup or a Magic edit), or puts it back, through the queue.
+    public func undoLast() async { _ = await queue.undo() }
+    public func redoLast() async { _ = await queue.redo() }
 
     /// Work the queue could not place: the take or result is in History; the text goes to the clipboard too.
     private func dropped(_ drop: MacFieldQueue.Drop) {
@@ -137,7 +156,7 @@ import LegatoMac
             if snapshot.complete { copyUnwritable(Self.body(of: snapshot)) }
             return
         }
-        queue.live(runID: snapshot.runID, version: snapshot.version, text: Self.body(of: snapshot))
+        queue.live(runID: snapshot.runID, version: snapshot.version, text: Self.body(of: snapshot), complete: snapshot.complete)
     }
     public func applyLive(_ snapshot: LiveDictationSnapshot?) async {
         enqueueLive(snapshot)
@@ -169,7 +188,7 @@ import LegatoMac
             version += 1
             if state.retracted { _ = retractStreamed(); return false }
             if target == nil { if state.isFinal { copyUnwritable(state.text) }; if state.isFinal || state.stalled { return state.stalled } }
-            else { queue.live(runID: id, version: version, text: state.text) }
+            else { queue.live(runID: id, version: version, text: state.text, complete: state.isFinal) }
             if state.isFinal { return false }
             if state.stalled { return true }
             try? await Task.sleep(for: .milliseconds(30))

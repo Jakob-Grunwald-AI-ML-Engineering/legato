@@ -76,7 +76,7 @@ private func hotkeyTapCallback(
         context.continuation.yield(TapSample(event: nil, time: ProcessInfo.processInfo.systemUptime))
         return Unmanaged.passUnretained(event)
     case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-        if !SyntheticEvent.isLegato(event.getIntegerValueField(.eventSourceUserData)) { RealInput.shared.bump() }
+        if !SyntheticEvent.isLegato(event.getIntegerValueField(.eventSourceUserData)) { RealInput.shared.bump(at: event.location) }
         return Unmanaged.passUnretained(event)
     case .flagsChanged: kind = .flagsChanged
     case .keyDown: kind = .keyDown

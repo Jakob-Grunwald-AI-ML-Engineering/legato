@@ -6,7 +6,7 @@ Right Command turns Magic on. Speak an instruction such as “make this paragrap
 
 Live updates coalesce before touching the host. Corrections replace the changing tail after the stable prefix, so the caret does not jump into a changed word and back on every partial.
 
-The small notch indicator shows what Magic heard, progress and the result. Undo restores the exact changed scope while the field and text still match. Accept keeps the result. Magic saves the original and generated result in History before editing; Copy original is available from the history row’s context menu, including when application could not be confirmed. The indicator never becomes the key window; the editor keeps focus. Typing also accepts a completed result.
+The small notch indicator shows what Magic heard, progress and the result. Undo restores the exact changed scope while the field and text still match. Accept keeps the result. Magic saves the original and generated result in History before editing; Copy original is available from the history row’s context menu, including when application could not be confirmed. The indicator never becomes the key window; the editor keeps focus. While a take types live into the field, the same indicator shows only “Listening…” with Magic, Undo and Redo buttons (Undo and Redo take Legato’s last change in the field back or again; panel mode keeps showing the growing text). Typing also accepts a completed result.
 
 There is no separate Mac composer. The old composer shortcut becomes Magic, including custom bindings. Existing dictation bindings, history, writing model and personal instructions retain their stored settings. Change either shortcut in Settings → Shortcut.
 

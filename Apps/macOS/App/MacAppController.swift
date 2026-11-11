@@ -177,7 +177,14 @@ import Observation
             Task { @MainActor in self?.fieldEditor.relinquish(); self?.fallbackOwner.allowed = false }
         }
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
-        dictationPill = DictationPillController(session: dictation, panel: fieldEditor.panel)
+        // The pill's quick controls act on Legato (Magic as the hotkey; Undo and Redo through the field's queue). The pill
+        // never becomes key or main, so the field keeps focus, and its clicks are not counted as the user's input.
+        dictationPill = DictationPillController(
+            session: dictation, panel: fieldEditor.panel, history: fieldEditor.history,
+            actions: DictationPillActions(
+                magic: { [weak self] in self?.toggleMagic() },
+                undo: { [weak fieldEditor] in Task { await fieldEditor?.undoLast() } },
+                redo: { [weak fieldEditor] in Task { await fieldEditor?.redoLast() } }))
         dictation.ensureWarm()
         meetingIsland = MeetingIslandController(controller: meetings)
         meetings.bootstrap()
