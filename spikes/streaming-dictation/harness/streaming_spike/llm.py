@@ -8,7 +8,8 @@ import anthropic
 
 from .common import LEGATO_PROMPT, LLM_PRICES
 
-SYSTEM = LEGATO_PROMPT.read_text()
+# Marked for caching: every clip sends this prompt to several models back to back.
+SYSTEM = [{"type": "text", "text": LEGATO_PROMPT.read_text(), "cache_control": {"type": "ephemeral"}}]
 
 
 def cost_usd(model: str, in_tok: int, out_tok: int) -> float:
@@ -30,4 +31,6 @@ async def clean(client: anthropic.AsyncAnthropic, model: str, text: str, effort:
     if msg.stop_reason not in ("end_turn", "stop_sequence"):
         raise RuntimeError(f"{model} stop_reason={msg.stop_reason}")
     return {"text": out, "seconds": dt, "in_tok": msg.usage.input_tokens, "out_tok": msg.usage.output_tokens,
+            "cache_read_tok": msg.usage.cache_read_input_tokens or 0,
+            "cache_write_tok": msg.usage.cache_creation_input_tokens or 0,
             "cost_usd": cost_usd(model, msg.usage.input_tokens, msg.usage.output_tokens), "model": model}
