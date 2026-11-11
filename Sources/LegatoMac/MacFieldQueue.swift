@@ -918,7 +918,7 @@ public final class MacFieldQueue {
         }
         if canJump, selection.length == 0, distance > Self.arrowRun,
            let (hop, predicted) = Self.hop(from: selection.location, to: goal.location, in: doc,
-                                             allowed: { memory.allows($0) && !self.missedHops.contains($0) }) {
+                                             allowed: { Self.safeHops.contains($0) && memory.allows($0) && !self.missedHops.contains($0) }) {
             return await hopMove(hop, predicted: predicted, doc: doc, selection: selection, target: target, mark: mark, region: region)
         }
         return await arrows(toward: goal.location, count: min(max(distance, 1), Self.arrowRun), doc: doc, selection: selection,
@@ -1127,6 +1127,10 @@ public final class MacFieldQueue {
     /// field's start or end, Command+Left/Right to the start or end of the caret's own line (each when the goal is
     /// there or a short arrow run from there, on the near side), Option+Left/Right while the next word boundary is not
     /// past the goal. A hop that lands elsewhere is corrected from where it landed.
+    /// Option+arrow only. Command+arrow is Back/Forward or a page scroll in browsers if focus ever slips off the
+    /// field between the guard and the key, which could navigate away from the user's page.
+    static let safeHops: Set<CaretHop> = [.wordLeft, .wordRight]
+
     private static func hop(from caret: Int, to goal: Int, in doc: Document, allowed: (CaretHop) -> Bool) -> (CaretHop, Int)? {
         let before = Array(doc.context(before: caret, 2_000).reversed())
         let after = Array(doc.context(after: caret, 2_000))

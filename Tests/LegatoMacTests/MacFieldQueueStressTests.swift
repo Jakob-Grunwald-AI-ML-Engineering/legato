@@ -553,9 +553,11 @@ private struct SeededRandom {
             #expect(field.selection == .init(location: field.string.utf16.count, length: 0))
             #expect(queue.caretJumps.direct == .refused)
             #expect(field.caretSets == 1)
-            // Command+Up to the start, and back with Command+Down: hops and short arrow runs, never 56 single arrows.
+            // The typing, then Option word hops there and back (Command hops are off for safety): about one key per
+            // word each way plus the edit, never 56 single arrows each way.
             #expect(field.hops >= 1)
-            #expect(field.keysSent < text.count + 8, "\(field.trail.suffix(14).joined(separator: "\n"))")
+            let words = text.split(separator: " ").count
+            #expect(field.keysSent < text.count + 2 * words + 8, "\(field.trail.suffix(14).joined(separator: "\n"))")
         }
     }
 
