@@ -61,12 +61,29 @@ public enum FieldKeyRefusal: Error, Sendable, Equatable {
     case unavailable
 }
 
+/// What `TextTarget.refocus(allowOther:)` found when the bound element no longer read as focused.
+public enum FieldRefocus: Sendable, Equatable {
+    /// Another app is in front, or nothing editable has focus: nothing changed.
+    case lost
+    /// The same app is in front with another editable text element focused that is not this editor, and another field
+    /// was not allowed: nothing changed.
+    case declined
+    /// The target now reads and writes the focused element. `sameEditor`: it is this editor (the same element, a fresh
+    /// element for it, an element inside it or its editable root); false: another editable field of the same app.
+    case rebound(sameEditor: Bool)
+}
+
 /// The text field dictation writes into. Implemented over Accessibility on macOS and by a fake
 /// in tests. Everything is synchronous and main-actor bound, like the AX calls behind it.
 @MainActor
 public protocol TextTarget: AnyObject {
-    /// Whether the element this target was created for still has keyboard focus.
+    /// Whether the element this target is bound to still has keyboard focus.
     func isFocused() -> Bool
+    /// The bound element lost focus: binds the target to the element that has it now when the same app is in front and
+    /// that element is an editable text field of the same kind. A web page recreates elements when its DOM changes (a
+    /// new line, a list item) and moves focus between nested elements, so the editor the user is typing in can be a new
+    /// element. `allowOther`: another field of the same app may be bound too (nothing was written yet).
+    func refocus(allowOther: Bool) -> FieldRefocus
     /// The current selection of the element; a caret is a range of length 0.
     func selectedRange() throws -> UTF16Range
     /// The text in `range`; may be shorter than requested near the end of the field.
@@ -103,6 +120,7 @@ public extension TextTarget {
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     var fieldKey: AnyHashable? { nil }
+    func refocus(allowOther: Bool) -> FieldRefocus { .lost }
     func setSelectedRange(_ range: UTF16Range) throws { throw TextTargetReadError.unsupported }
     func textLength() throws -> Int { throw TextTargetReadError.unsupported }
 }

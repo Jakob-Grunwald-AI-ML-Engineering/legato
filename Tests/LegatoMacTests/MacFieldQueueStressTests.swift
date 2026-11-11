@@ -12,6 +12,11 @@ import LegatoKeyboardCore
 /// also show an empty last line as a placeholder line break (`placeholder`), report the caret of a key typed at a
 /// line start late (`lazyCaret`), take, ignore, delay or only pretend to take an Accessibility caret set (`caretSet`),
 /// land word hops a few characters off (`hopSkew`) and wrap lines (`wrap`, for Command+Left/Right).
+///
+/// Element identity, like Chromium: the field can recreate its element (`recreate`, after Enter or a new line) or move
+/// focus into a nested element whose text starts at its line (`focusChild`), so the bound element no longer reads as
+/// focused until the queue binds the focused one (`refocus`). Another field of the same app can take focus
+/// (`focusOther`), and the app can go to the back (`frontmost`).
 @MainActor private final class FakeAXField: TextTarget {
     enum CaretSet { case takes, ignored, late, phantom }
     var value: [Character] = []
@@ -42,6 +47,14 @@ import LegatoKeyboardCore
     /// Visual line width for Command+Left/Right (0: no wrapping).
     var wrap = 0
     var key: AnyHashable = AnyHashable(UUID())
+    /// The element the target is bound to and the one the app reports focused; `base`: where the bound element's text
+    /// starts in the editor (a nested element), `focusedBase` the focused one's.
+    var boundElement = 0, focusedElement = 0
+    var base = 0, focusedBase = 0
+    var frontmost = true
+    /// Another field of the same app has focus, with its own text (the editor's is kept aside).
+    private var other: (value: [Character], selection: UTF16Range)?
+    var rebinds = 0, recreations = 0
     var trail: [String] = []
     var mark = 0
     var keysSent = 0, keysDropped = 0, keysLate = 0, refusals = 0, caretSets = 0, hops = 0, lazyCarets = 0
@@ -67,9 +80,10 @@ import LegatoKeyboardCore
     func press(_ key: FieldKey, mark: Int, selection planned: UTF16Range) throws {
         settle()
         guard keys else { throw FieldKeyRefusal.unavailable }
+        guard isFocused() else { refusals += 1; throw FieldKeyRefusal.notFocused }
         if rng.chance(blipChance) { refusals += 1; throw FieldKeyRefusal.notFocused }
         guard mark == self.mark else { refusals += 1; throw FieldKeyRefusal.userInput }
-        guard planned == shownCaret else { refusals += 1; throw FieldKeyRefusal.selectionMoved }
+        guard planned.shifted(base) == shownCaret else { refusals += 1; throw FieldKeyRefusal.selectionMoved }
         if case .text(let character) = key { precondition(!character.isNewline && character != "\t", "Return or Tab synthesized") }
         if case .hop = key { hops += 1 }
         keysSent += 1
@@ -83,8 +97,10 @@ import LegatoKeyboardCore
     func setCaret(_ range: UTF16Range, mark: Int, selection planned: UTF16Range) throws {
         settle()
         guard keys else { throw FieldKeyRefusal.unavailable }
+        guard isFocused() else { refusals += 1; throw FieldKeyRefusal.notFocused }
         guard mark == self.mark else { refusals += 1; throw FieldKeyRefusal.userInput }
-        guard planned == shownCaret else { refusals += 1; throw FieldKeyRefusal.selectionMoved }
+        guard planned.shifted(base) == shownCaret else { refusals += 1; throw FieldKeyRefusal.selectionMoved }
+        let range = range.shifted(base)
         caretSets += 1
         switch caretSet {
         case .takes: inFlight.append((clock() + .milliseconds(rng.next(20)), .caret(range)))
@@ -190,21 +206,53 @@ import LegatoKeyboardCore
     var string: String { String(value) }
     /// What Accessibility reads: the value, and a placeholder line break for an empty last line.
     private var shown: String { placeholder && string.hasSuffix("\n") ? string + "\n" : string }
-    func isFocused() -> Bool { true }
-    func selectedRange() throws -> UTF16Range { settle(); return shownCaret }
-    func textLength() throws -> Int { settle(); return shown.utf16.count }
+    func isFocused() -> Bool { frontmost && boundElement == focusedElement }
+    func refocus(allowOther: Bool) -> FieldRefocus {
+        guard frontmost, boundElement != focusedElement else { return .lost }
+        let same = other == nil
+        guard same || allowOther else { return .declined }
+        if !same, let field = other {
+            // The other field becomes the bound one; the editor's text is no longer this target's.
+            value = field.value; selection = field.selection; other = nil; inFlight = []; reported = nil
+        }
+        boundElement = focusedElement; base = focusedBase; rebinds += 1
+        return .rebound(sameEditor: same)
+    }
+    /// A take starts: the target is bound to the element focused now (`AXTextTarget.captureFocused`).
+    func capture() { settle(all: true); boundElement = focusedElement; base = focusedBase }
+    /// The page rewrote the editor's DOM: its element is a new object (same text, same caret).
+    func recreate() { settle(all: true); focusedElement += 1; recreations += 1 }
+    /// Focus moved into the nested element of the caret's line (its text starts at the line start), or back to the root.
+    func focusChild() {
+        settle(all: true)
+        let line = (string as NSString).substring(to: min(selection.location, string.utf16.count)) as NSString
+        let start = line.range(of: "\n", options: .backwards).location
+        focusedBase = start == NSNotFound ? 0 : start + 1
+        focusedElement += 1; recreations += 1
+    }
+    /// The user clicks into another field of the same app, holding `text` with the caret at its end.
+    func focusOther(_ text: String) {
+        settle(all: true)
+        other = (Array(text), UTF16Range(location: text.utf16.count, length: 0))
+        focusedElement += 1; focusedBase = 0; mark += 1
+    }
+    func selectedRange() throws -> UTF16Range { settle(); return shownCaret.shifted(-base) }
+    func textLength() throws -> Int { settle(); return shown.utf16.count - base }
     func text(in range: UTF16Range) throws -> String {
         settle()
         let shown = (lagging ?? self.shown) as NSString
         lagging = nil
-        guard range.location >= 0, range.end <= shown.length else { throw TextTargetReadError.unsupported }
+        let range = range.shifted(base)
+        guard range.location >= base, range.end <= shown.length else { throw TextTargetReadError.unsupported }
         return shown.substring(with: NSRange(location: range.location, length: range.length))
     }
     func setSelectedRange(_ range: UTF16Range) throws {
-        guard range.location >= 0, range.end <= string.utf16.count else { throw TextTargetReadError.unsupported }
+        let range = range.shifted(base)
+        guard range.location >= base, range.end <= string.utf16.count else { throw TextTargetReadError.unsupported }
         selection = range
     }
     func replace(_ range: UTF16Range, with text: String) throws {
+        let range = range.shifted(base)
         // A Chromium field reports success for an Accessibility write and changes nothing.
         guard !keys else { writes += 1; return }
         let before = string
@@ -228,7 +276,13 @@ import LegatoKeyboardCore
         settle(all: true); mark += 1; reported = nil
         let offsets = [0] + value.indices.map { String(value[...$0]).utf16.count }
         selection = .init(location: offsets[rng.next(offsets.count)], length: 0)
+        // A click outside the nested element focuses the editor's root again.
+        if selection.location < focusedBase { focusedBase = 0; focusedElement += 1 }
     }
+}
+
+private extension UTF16Range {
+    func shifted(_ offset: Int) -> UTF16Range { UTF16Range(location: location + offset, length: length) }
 }
 
 private extension Array where Element == Character {
@@ -256,7 +310,7 @@ private struct SeededRandom {
     /// One seeded session: a run grows word by word with revisions, then its cleanup lands; Magic rewrites a word; the
     /// user types digits and clicks in between; reads lag. Invariants: the queue goes idle, never deletes or changes a
     /// digit the user typed, and when the user never acted the field ends exactly as dictated and edited.
-    private struct Stats { var digits = 0, drops = 0, keys = 0, dropped = 0, late = 0, refusals = 0, caretSets = 0, hops = 0, lazy = 0, placeholders = 0 }
+    private struct Stats { var digits = 0, drops = 0, keys = 0, dropped = 0, late = 0, refusals = 0, caretSets = 0, hops = 0, lazy = 0, placeholders = 0, rebinds = 0 }
 
     private func session(seed: UInt64, keys: Bool = false, stats: inout Stats) async -> String? {
         var rng = SeededRandom(seed)
@@ -284,6 +338,18 @@ private struct SeededRandom {
         queue.paced = { true }
         queue.now = { clock }
         var userRng = SeededRandom(seed &+ 7)
+        // Element identity churns in half the sessions, interfering or not (it keeps the text): the element is recreated
+        // (Enter, a new line, a re-render) or focus moves into the caret line's nested element and back, sometimes before
+        // the first word.
+        var churnRng = SeededRandom(seed &+ 13)
+        let churns = churnRng.chance(0.5)
+        // Focus moves into nested elements only while dictating: Magic's result range is checked in the editor's text.
+        var nests = true
+        func churn(_ chance: Double) {
+            guard churns, churnRng.chance(chance) else { return }
+            if !nests || churnRng.chance(0.6) { field.recreate() } else { field.focusChild() }
+        }
+        churn(0.5)
         var drops: [MacFieldQueue.Drop] = []
         var trail: [String] = []
         queue.journal = { entry in
@@ -293,10 +359,11 @@ private struct SeededRandom {
         queue.onDrop = { drops.append($0) }
         queue.sleep = { duration in
             clock += duration
-            guard interferes else { return }
             // Keys read back every few milliseconds: the user acts at the same rate per time as between paced writes.
             let ms = Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
             let scale = keys ? min(1, ms / 40) : 1
+            churn(0.02 * scale)
+            guard interferes else { return }
             if userRng.chance(0.05 * scale) {
                 field.type(Character(String(typedDigits % 10))); typedDigits += 1; queue.userActed()
             } else if userRng.chance(0.02 * scale) {
@@ -317,15 +384,20 @@ private struct SeededRandom {
         version += 1
         queue.live(runID: "run", version: version, text: cleaned)
         await queue.whenIdle()
-        // Magic: the first word of the dictation in capitals, from a read of the field as it is now.
+        // Magic: the first word of the dictation in capitals, from a read of the field as it is now (like the app's read:
+        // the editor bound again if its element changed, then its text as the target shows it).
+        nests = false
         var magicResult: MacFieldQueue.EditResult?
-        let text = field.string as NSString
+        _ = queue.ensureFocused()
+        let text = ((try? field.text(in: UTF16Range(location: 0, length: field.textLength()))) ?? "") as NSString
         let word = cleaned.split(separator: " ").first.map(String.init) ?? ""
         let hit = text.range(of: word)
         if hit.location != NSNotFound, !word.isEmpty {
             let before = text.substring(with: NSRange(location: max(0, hit.location - 8), length: min(8, hit.location)))
             magicResult = await queue.edit(.init(range: .init(location: hit.location, length: hit.length), scope: word,
                                                  before: before, target: word.uppercased(), caretAfter: true))
+            // Its range in the editor's text (the bound element may be a nested one).
+            if case .applied(let range)? = magicResult { magicResult = .applied(range.shifted(field.base)) }
         }
         await queue.whenIdle()
         // Without the user's interference: Magic's edit is taken back and put back through the queue.
@@ -337,14 +409,15 @@ private struct SeededRandom {
         let final = field.string.replacingOccurrences(of: "\u{00A0}", with: " ")
         stats.digits += typedDigits; stats.drops += drops.count
         stats.keys += field.keysSent; stats.dropped += field.keysDropped; stats.late += field.keysLate; stats.refusals += field.refusals
-        stats.caretSets += field.caretSets; stats.hops += field.hops; stats.lazy += field.lazyCarets
+        stats.caretSets += field.caretSets; stats.hops += field.hops; stats.lazy += field.lazyCarets; stats.rebinds += field.rebinds
         if field.placeholder, prefix.hasSuffix("\n") { stats.placeholders += 1 }
         if keys, field.writes > 0 { return "seed \(seed): \(field.writes) Accessibility writes to a keystroke field" }
         // Invariants.
         let digits = final.filter(\.isNumber).count
         if digits != typedDigits { return "seed \(seed): \(typedDigits) digits typed, \(digits) left: \(final)" }
-        // The fake never loses focus: a park-and-drop means the queue could not make progress.
-        if drops.contains(where: { $0.reason == .focusLost || $0.reason == .failed }) {
+        // The fake never loses focus to another field: a park-and-drop means the queue could not make progress, and a
+        // recreated or nested element of the same editor is always found again.
+        if drops.contains(where: { $0.reason == .focusLost || $0.reason == .failed || $0.reason == .cannotPlace && $0.runID != nil }) {
             return "seed \(seed): stalled (keys \(field.keysSent) dropped \(field.keysDropped) late \(field.keysLate) nbsp \(field.nbsp) caretSet \(field.caretSet) lazy \(field.lazyCaret)): \(drops) state=\(queue.debugState) final=\(final)\n\(trail.joined(separator: "\n"))"
         }
         if queue.hasWork { return "seed \(seed): still busy: \(queue.debugState)\n\(trail.joined(separator: "\n"))" }
@@ -373,8 +446,8 @@ private struct SeededRandom {
             if failures.count >= 3 { break }
         }
         #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
-        // The sessions really interfered: the user typed, and some work met text the user changed.
-        if only == nil { #expect(stats.digits > runs, "stats: \(stats)") }
+        // The sessions really interfered: the user typed, and some work met text the user changed; elements churned.
+        if only == nil { #expect(stats.digits > runs && stats.rebinds > runs / 4, "stats: \(stats)") }
     }
 
     /// The same sessions in a field that ignores Accessibility writes and takes verified keys (Chromium): keys lag,
@@ -393,6 +466,7 @@ private struct SeededRandom {
         if only == nil {
             #expect(stats.digits > runs && stats.dropped > 0 && stats.late > 0 && stats.refusals > 0, "stats: \(stats)")
             #expect(stats.caretSets > 0 && stats.hops > 0 && stats.lazy > 0 && stats.placeholders > 0, "stats: \(stats)")
+            #expect(stats.rebinds > runs / 4, "stats: \(stats)")
         }
     }
 
@@ -622,6 +696,158 @@ private struct SeededRandom {
         #expect(field.selection == UTF16Range(location: field.string.utf16.count, length: 0))
         // Every typed key went out once.
         #expect(entries.filter { $0.hasPrefix("sent") && $0.hasSuffix(" key") }.count == "Also, very fast.".count)
+    }
+
+    /// Plays `script` (milliseconds after the start, a run's text) into `queue` on a virtual clock that the queue's sleeps
+    /// advance; `events` run once their time has come (the user's keys, the page rewriting its DOM).
+    private func replay(_ queue: MacFieldQueue, field: FakeAXField, run: String = "take", script: [(ms: Int, text: String)],
+                        events: [(ms: Int, act: () -> Void)] = []) async {
+        var clock = ContinuousClock.now
+        let start = clock
+        field.clock = { clock }
+        queue.now = { clock }
+        var next = 0, nextEvent = 0
+        func feed() {
+            while nextEvent < events.count, clock - start >= .milliseconds(events[nextEvent].ms) {
+                events[nextEvent].act(); nextEvent += 1
+            }
+            while next < script.count, clock - start >= .milliseconds(script[next].ms) {
+                next += 1
+                queue.live(runID: run, version: next, text: script[next - 1].text)
+            }
+        }
+        queue.sleep = { clock += $0; feed() }
+        feed()
+        while next < script.count || nextEvent < events.count {
+            await queue.whenIdle()
+            let due = [next < script.count ? script[next].ms : nil, nextEvent < events.count ? events[nextEvent].ms : nil].compactMap { $0 }.min()
+            if let due, clock - start < .milliseconds(due) { clock = start + .milliseconds(due) }
+            feed()
+        }
+        await queue.whenIdle()
+        field.settle(all: true)
+    }
+
+    /// Jakob's journal (Edge, mobile-code, 2026-11-11, lines 2087–2130): he pressed Enter, typed "- " by hand and dictated
+    /// the next list point. The take was bound, but Chromium had replaced the focused element by the time the first words
+    /// came (and can again mid-take), so the bound element never read as focused: nothing was planned or sent, and every
+    /// version dropped as focusLost. Replayed with the journal's versions and timing, the element recreated right after
+    /// binding (or focus moved into the list line's nested element) and again mid-take: the take types at the caret.
+    @Test(arguments: [false, true], [false, true]) func aTakeWhoseElementWasRecreatedTypesAtTheCaret(keys: Bool, nested: Bool) async {
+        let prefix = "Perfect plan:\n- First point.\n- "
+        let field = FakeAXField(prefix, rng: SeededRandom(17))
+        field.keys = keys
+        field.placeholder = keys
+        field.capture()
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { true }
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        var entries: [String] = []
+        queue.journal = { entries.append("\($0.kind.rawValue) \($0.location.map(String.init) ?? "") \($0.text ?? "") \($0.detail ?? "") \($0.reason ?? "")") }
+        let churn = { nested ? field.focusChild() : field.recreate() }
+        let script: [(ms: Int, text: String)] = [
+            (1912, "Per"), (2026, "Perf"), (2124, "Perfec"), (2257, "Perfect."), (2372, "Perfect. I"), (2489, "Perfect. I don't"),
+            (2607, "Perfect. I don't kn"), (2722, "Perfect. I don't know"), (2972, "Perfect. I don't know that"),
+            (3088, "Perfect. I don't know that y"), (3203, "Perfect. I don't know that you"), (3450, "Perfect. I don't know that you had"),
+            (3567, "Perfect. I don't know that you had alre"), (3683, "Perfect. I don't know that you had already"),
+            (3938, "Perfect. I don't know that you had already cre"), (4176, "Perfect. I don't know that you had already created"),
+            (4410, "Perfect. I don't know that you had already created that"),
+            (4779, "Perfect. I don't know that you had already created that,"),
+            (4888, "Perfect. I don't know that you had already created that, so"),
+            (5256, "Perfect. I don't know that you had already created that, so that"),
+            (5492, "Perfect. I don't know that you had already created that, so that means"),
+            (6211, "Perfect. I don't know that you had already created that, so that means it's,"),
+            (6450, "Perfect. I don't know that you had already created that, so that means it's, it's quite easy."),
+            (8280, "Perfect. I didn't know that you had already created that, so that means it's quite easy.")]
+        await replay(queue, field: field, script: script, events: [(5, churn), (3300, churn), (8300, churn)])
+        let text = field.string.replacingOccurrences(of: "\u{00A0}", with: " ")
+        #expect(text == prefix + script.last!.text, "\(entries.suffix(30).joined(separator: "\n"))")
+        #expect(drops.isEmpty && field.rebinds >= 2, "\(drops) rebinds \(field.rebinds)")
+        #expect(field.selection == UTF16Range(location: field.string.utf16.count, length: 0))
+        #expect(!entries.contains { $0.hasPrefix("dropped") })
+    }
+
+    /// The list Jakob writes: each point a take of its own (a fresh binding), and between takes he presses Enter and types
+    /// "- " by hand, which recreates the editor's element (or moves focus into the new line's element). Every take types
+    /// at the caret he left, in a keystroke field and an Accessibility field.
+    @Test(arguments: [false, true], [false, true]) func enterThenDashThenDictateTypesAtTheCaretEveryTime(keys: Bool, nested: Bool) async {
+        let field = FakeAXField("Notes:\n- ", rng: SeededRandom(23))
+        field.keys = keys
+        field.placeholder = keys
+        let points = ["first point", "second point, with a comma", "third point", "fourth and last point"]
+        var drops: [MacFieldQueue.Drop] = []
+        for (index, point) in points.enumerated() {
+            if index > 0 {
+                // Enter and "- " by hand; Chromium rewrites the list, so the editor's element changes.
+                field.type("\n"); nested ? field.focusChild() : field.recreate()
+                field.type("-"); field.type(" ")
+                if index % 2 == 0 { field.recreate() }
+            }
+            // A new take binds the element focused now; the page may still swap it before the first words.
+            field.capture()
+            if index % 2 == 1 { nested ? field.focusChild() : field.recreate() }
+            let queue = MacFieldQueue(target: field)
+            queue.paced = { true }
+            queue.onDrop = { drops.append($0) }
+            let words = point.split(separator: " ").map(String.init)
+            let script = words.indices.map { (ms: 400 + 150 * $0, text: words[...$0].joined(separator: " ")) }
+                + [(ms: 400 + 150 * words.count + 900, text: point.prefix(1).uppercased() + point.dropFirst() + ".")]
+            await replay(queue, field: field, run: "take\(index)", script: script,
+                         events: [(ms: 400 + 150 * words.count / 2, act: { field.recreate() })])
+        }
+        let expected = "Notes:\n" + points.map { "- " + $0.prefix(1).uppercased() + $0.dropFirst() + "." }.joined(separator: "\n")
+        #expect(field.string.replacingOccurrences(of: "\u{00A0}", with: " ") == expected)
+        #expect(drops.isEmpty, "\(drops)")
+        #expect(field.selection == UTF16Range(location: field.string.utf16.count, length: 0))
+    }
+
+    /// Another app in front for the whole take: the take drops once (History and the clipboard), however many versions
+    /// come after, and its text is the take's newest.
+    @Test func aTakeWhoseFieldIsGoneDropsOnceNotPerVersion() async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(31))
+        field.keys = true
+        field.capture()
+        field.frontmost = false
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { true }
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        var dropped = 0
+        queue.journal = { if $0.kind == .dropped { dropped += 1 } }
+        let script = (1...19).map { (ms: 120 * $0, text: Array(repeating: "word", count: $0).joined(separator: " ")) }
+            + [(ms: 6_000, text: "Words, cleaned.")]
+        await replay(queue, field: field, script: script)
+        #expect(drops.count == 1 && dropped == 1, "\(drops)")
+        #expect(drops.first?.reason == .focusLost && drops.first?.runID == "take")
+        #expect(field.string == "Log: " && !queue.hasWork)
+    }
+
+    /// Another field of the same app takes focus: a take that typed nothing yet types there, at its caret; a take that
+    /// already typed into the editor waits for it, then drops once and leaves the other field alone.
+    @Test func anotherFieldTakesATakeOnlyBeforeItTypedAnything() async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(37))
+        field.keys = true
+        field.capture()
+        field.focusOther("To: ")
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { true }
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        await replay(queue, field: field, script: [(100, "ahoy"), (300, "ahoy there")])
+        #expect(field.string == "To: ahoy there" && drops.isEmpty, "\(field.string) \(drops)")
+
+        let editor = FakeAXField("Log: ", rng: SeededRandom(41))
+        editor.keys = true
+        editor.capture()
+        let second = MacFieldQueue(target: editor)
+        second.paced = { true }
+        var lost: [MacFieldQueue.Drop] = []
+        second.onDrop = { lost.append($0) }
+        await replay(second, field: editor, script: [(100, "sail"), (300, "sail north"), (600, "sail north wind"), (900, "Sail north wind.")],
+                     events: [(450, { editor.focusOther("Search") })])
+        #expect(lost.count == 1 && lost.first?.reason == .focusLost && lost.first?.text == "Sail north wind.", "\(lost)")
+        #expect(editor.string.hasPrefix("Log: sail"), "\(editor.string)")
     }
 
     @Test func aFieldThatTakesCaretSetsJumpsStraightThereAndItIsRememberedForTheField() async {

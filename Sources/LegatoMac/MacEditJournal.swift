@@ -10,8 +10,9 @@ public enum MacEditJournal {
     public static let rotateBytes = 2_000_000
 
     public enum Kind: String, Codable, Sendable {
-        /// A field became the queue's.
-        case field
+        /// A field became the queue's; the bound element lost focus and the queue bound the focused one (`detail`: same
+        /// editor or another field).
+        case field, rebound
         /// A live snapshot, an edit or a typed insert entered the queue.
         case live, edit, typed
         /// The user typed or clicked.

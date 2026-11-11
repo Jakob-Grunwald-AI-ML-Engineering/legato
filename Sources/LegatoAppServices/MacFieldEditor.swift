@@ -134,7 +134,8 @@ import LegatoMac
 
     public func beginInstruction() {
         // A Magic start binds the field in front now when it is not the bound one. A panel session keeps its words.
-        if target?.isFocused() != true {
+        // The same editor shown as a fresh element (a web page re-rendered it) stays bound, with its queue.
+        if !queue.ensureFocused() {
             if panel.active { bind() } else { begin() }
         }
         // An explicit new Magic start owns a fresh result namespace, in the same field too.
@@ -216,7 +217,7 @@ import LegatoMac
     }
 
     public func contextBeforeCursor() -> String {
-        guard let target, target.isFocused(), let cursor = try? target.selectedRange() else { return "" }
+        guard let target, queue.ensureFocused(), let cursor = try? target.selectedRange() else { return "" }
         let length = min(cursor.location, 600)
         return (try? target.text(in: .init(location: cursor.location - length, length: length))) ?? ""
     }
@@ -299,7 +300,7 @@ import LegatoMac
         guard let target else { throw InstructionFailure.unreadable("Magic can't read this field. Nothing was edited.") }
         // Dictation still on its way lands first, all at once, so Magic reads the finished text.
         await queue.flush()
-        guard target.isFocused(), let selection = try? target.selectedRange() else {
+        guard queue.ensureFocused(), let selection = try? target.selectedRange() else {
             throw InstructionFailure.unreadable("The field changed. Nothing was edited.")
         }
         let length = try target.textLength()

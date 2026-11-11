@@ -14,10 +14,13 @@ enum AXTargetError: Error {
 final class AXTextTarget: TextTarget {
     nonisolated static let messagingTimeout: Float = 0.25
 
-    private let element: AXUIElement
+    /// The bound element; `refocus` binds a fresh element of the same editor (or, when allowed, another field).
+    private var element: AXUIElement
     private let appElement: AXUIElement
     private let pid: pid_t
     private var textOperationSupported: Bool?
+    /// What identifies the editor apart from the element object (`Editor`), read at capture and at each rebind.
+    private var editor: Editor?
 
     private init(element: AXUIElement, appElement: AXUIElement) {
         var process: pid_t = 0
@@ -69,6 +72,7 @@ final class AXTextTarget: TextTarget {
         guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { return .none }
         let target = AXTextTarget(element: element, appElement: appElement)
         guard let selection = try? target.selectedRange(), (try? target.text(in: selection)) != nil else { return .none }
+        target.editor = Editor(of: element)
         return .target(target)
     }
 
@@ -160,11 +164,18 @@ final class AXTextTarget: TextTarget {
     /// Chromium fields are edited with synthetic keys, each read back (`MacFieldQueue`). Only an editable element
     /// takes keys: the page itself (AXWebArea) reads as text too, and a letter typed there can be a site's shortcut.
     var typesKeys: Bool { Self.isChromium(pid: pid) && editable }
-    private lazy var editable: Bool = {
+    private var editableCache: Bool?
+    private var editable: Bool {
+        if let editableCache { return editableCache }
+        let value = Self.isEditable(element)
+        editableCache = value
+        return value
+    }
+    private static func isEditable(_ element: AXUIElement) -> Bool {
         var settable: DarwinBoolean = false
         if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue { return true }
-        return (try? Self.copyAttribute(element, "AXEditableAncestor")) != nil
-    }()
+        return (try? copyAttribute(element, "AXEditableAncestor")) != nil
+    }
     var inputMark: Int { RealInput.shared.count }
 
     private enum SecureState { case secure, notSecure, unknown }
@@ -200,6 +211,110 @@ final class AXTextTarget: TextTarget {
               CFGetTypeID(focused) == AXUIElementGetTypeID()
         else { return false }
         return CFEqual(focused, element)
+    }
+
+    /// The bound element lost focus while this app stayed in front: binds the focused element when it is a text field
+    /// with a readable caret (an editable one for a keystroke field) and either belongs to this editor or `allowOther`.
+    /// Chromium recreates a web field's element when the page rewrites its DOM (Enter, a new list line, a re-render) and
+    /// moves focus between nested editable elements, so the editor the user is typing in shows up as a new element.
+    func refocus(allowOther: Bool) -> FieldRefocus {
+        guard !IsSecureEventInputEnabled(), AXIsProcessTrusted(),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let value = (try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute)) ?? nil,
+              CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return .lost }
+        let focused = unsafeDowncast(value, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(focused, Self.messagingTimeout)
+        guard case .notSecure = Self.secureState(of: focused),
+              let rangeValue = (try? Self.copyAttribute(focused, kAXSelectedTextRangeAttribute)) ?? nil,
+              let selection = try? Self.range(from: rangeValue),
+              Self.readable(focused, selection),
+              // A keystroke field binds only an editable element (the page itself reads as text too).
+              !typesKeys || Self.isEditable(focused)
+        else { return .lost }
+        let same = sameEditor(focused)
+        guard same || allowOther else { return .declined }
+        element = focused
+        editableCache = nil; textOperationSupported = nil
+        editor = Editor(of: focused)
+        return .rebound(sameEditor: same)
+    }
+
+    private static func readable(_ element: AXUIElement, _ range: UTF16Range) -> Bool {
+        guard let parameter = try? axValue(for: range) else { return false }
+        var result: CFTypeRef?
+        return AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, parameter, &result) == .success
+            && result is String
+    }
+
+    /// Whether `focused` is the editor this target was bound to: the bound element itself, an element inside it, its
+    /// editable root, an element under the same editable root, or a fresh element in the bound one's place (same window,
+    /// role, DOM id and classes, and horizontal frame: a growing field keeps its x and width).
+    private func sameEditor(_ focused: AXUIElement) -> Bool {
+        if CFEqual(focused, element) { return true }
+        if Self.ancestors(of: focused).contains(where: { CFEqual($0, element) }) { return true }
+        if Self.ancestors(of: element).contains(where: { CFEqual($0, focused) }) { return true }
+        guard let editor else { return false }
+        let candidate = Editor(of: focused)
+        if let root = editor.root, let other = candidate.root, CFEqual(root, other) { return true }
+        if let root = editor.root, CFEqual(root, focused) { return true }
+        return editor.matches(candidate)
+    }
+
+    private static func ancestors(of element: AXUIElement, limit: Int = 16) -> [AXUIElement] {
+        var chain: [AXUIElement] = []
+        var current = element
+        while chain.count < limit, let value = (try? copyAttribute(current, kAXParentAttribute)) ?? nil,
+              CFGetTypeID(value) == AXUIElementGetTypeID() {
+            current = unsafeDowncast(value, to: AXUIElement.self)
+            AXUIElementSetMessagingTimeout(current, messagingTimeout)
+            chain.append(current)
+        }
+        return chain
+    }
+
+    /// What identifies an editor besides its element object. Chromium keeps the window and the editable root's DOM
+    /// attributes when it recreates the element objects.
+    @MainActor private struct Editor {
+        let window: AXUIElement?
+        /// The outermost editable element around it (Chromium: AXHighestEditableAncestor), or the nearest one.
+        let root: AXUIElement?
+        let role: String?
+        let subrole: String?
+        let domID: String?
+        let domClasses: [String]?
+        /// The frame's x and width, rounded: a field that grows with its text keeps both.
+        let x: Int?
+        let width: Int?
+
+        init(of element: AXUIElement) {
+            func string(_ attribute: String) -> String? { (try? AXTextTarget.copyAttribute(element, attribute)) as? String }
+            func ref(_ attribute: String) -> AXUIElement? {
+                guard let value = (try? AXTextTarget.copyAttribute(element, attribute)) ?? nil,
+                      CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+                return unsafeDowncast(value, to: AXUIElement.self)
+            }
+            window = ref(kAXWindowAttribute)
+            root = ref("AXHighestEditableAncestor") ?? ref("AXEditableAncestor")
+            role = string(kAXRoleAttribute)
+            subrole = string(kAXSubroleAttribute)
+            domID = string("AXDOMIdentifier").flatMap { $0.isEmpty ? nil : $0 }
+            domClasses = ((try? AXTextTarget.copyAttribute(element, "AXDOMClassList")) as? [String]).flatMap { $0.isEmpty ? nil : $0 }
+            var point = CGPoint.zero, size = CGSize.zero
+            if let value = (try? AXTextTarget.copyAttribute(element, kAXPositionAttribute)) ?? nil, CFGetTypeID(value) == AXValueGetTypeID(),
+               AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgPoint, &point) { x = Int(point.x.rounded()) } else { x = nil }
+            if let value = (try? AXTextTarget.copyAttribute(element, kAXSizeAttribute)) ?? nil, CFGetTypeID(value) == AXValueGetTypeID(),
+               AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgSize, &size) { width = Int(size.width.rounded()) } else { width = nil }
+        }
+
+        /// A fresh element in the same place: same window, role and subrole, DOM id and classes, x and width. Something
+        /// beyond the role must be known, so two plain fields of one window never match by role alone.
+        func matches(_ other: Editor) -> Bool {
+            guard let window, let otherWindow = other.window, CFEqual(window, otherWindow), role != nil else { return false }
+            guard domID != nil || domClasses != nil || (x != nil && width != nil) else { return false }
+            return role == other.role && subrole == other.subrole && domID == other.domID && domClasses == other.domClasses
+                && x == other.x && width == other.width
+        }
     }
 
     func selectedRange() throws -> UTF16Range {

@@ -26,7 +26,11 @@ import LegatoKeyboardCore
 ///   owns) are found again at their place or uniquely elsewhere, and pending work is replanned there. A key or click
 ///   closes the open dictation region; later words start a new region at the user's caret, and revisions of closed
 ///   regions still land while their text is unchanged. Only work whose text the user changed, or that cannot be
-///   placed, is dropped (`onDrop`); a field that loses focus waits up to `parkLimit`.
+///   placed, is dropped (`onDrop`).
+/// - Focus by editor, not by element: when the bound element no longer reads as focused, the queue binds the element
+///   that has focus if it is the same editor (a web page recreates elements and moves focus between nested ones as its
+///   DOM changes), or any text field of the app while nothing was typed yet (`TextTarget.refocus`), and finds its work
+///   there again. Otherwise it waits up to `parkLimit`, then each take drops once, whole.
 @MainActor
 public final class MacFieldQueue {
     public enum Reason: String, Sendable, Equatable { case userChanged, cannotPlace, focusLost, cancelled, failed }
@@ -182,13 +186,15 @@ public final class MacFieldQueue {
         /// Run text after the last region that still needs a region of its own.
         var remainder: [Character] = []
         var retracted = false
+        /// The run was dropped as a whole (its field went away): its later versions are not placed and not dropped again.
+        var abandoned = false
         /// The run's last words were delivered (it can be undone as a whole).
         var complete = false
         /// Typed at the fast end of the pace (a panel take's one insert at its end).
         var fast = false
         /// Words past the last region wait for a region of their own (whitespace alone waits for more words).
         var needsRegion: Bool {
-            !retracted && remainder.contains { !$0.isWhitespace || $0.isNewline }
+            !retracted && !abandoned && remainder.contains { !$0.isWhitespace || $0.isNewline }
         }
     }
     private struct PendingEdit {
@@ -240,6 +246,13 @@ public final class MacFieldQueue {
     /// Keystroke fields: the last input mark seen, and when the user's real input last showed.
     private var lastMark: Int?
     private var inputAt: ContinuousClock.Instant?
+    /// The target was bound to a newly focused element: the next read finds the work in it again (`adoptRebind`). The
+    /// value is the caret the user expected in the element before.
+    private var rebindPending: UTF16Range??
+    /// The field's length at the last read.
+    private var lastLength: Int?
+    /// Why the field could not take an op, journaled once per blocked stretch.
+    private var blockedNote: String?
 
     // MARK: Inspection
 
@@ -282,7 +295,7 @@ public final class MacFieldQueue {
             ledger.append(.run(runID))
             return runs.count - 1
         }()
-        guard !runs[index].retracted, version > runs[index].version else { return }
+        guard !runs[index].retracted, !runs[index].abandoned, version > runs[index].version else { return }
         if complete, !runs[index].complete { runs[index].complete = true; historyChanged() }
         // A new run closes the open region of earlier runs: its words start where the user's caret is.
         if runs[index].regions.isEmpty, runs[index].version < 0 {
@@ -479,12 +492,14 @@ public final class MacFieldQueue {
 
     private func drain() async {
         var idleSteps = 0
+        // A park window never carries over from an earlier stretch of work.
+        blockedSince = nil; blockedNote = nil
         while hasWork, !exclusive {
             defer { finishEdits() }
             let sent = opsSent
             // Steps that only re-plan (no op) are bounded: past a few, the queue waits like a blocked field.
             if await step(), opsSent > sent || idleSteps < 8 {
-                if opsSent > sent { idleSteps = 0; blockedSince = nil } else { idleSteps += 1 }
+                if opsSent > sent { idleSteps = 0; blockedSince = nil; blockedNote = nil } else { idleSteps += 1 }
             } else if holding {
                 // Keys wait for the user's modifier to come up; that is not a field that went away.
                 idleSteps = 0; blockedSince = nil
@@ -493,7 +508,12 @@ public final class MacFieldQueue {
                 idleSteps = 0
                 let started = blockedSince ?? now()
                 blockedSince = started
-                if now() - started >= Self.parkLimit { dropAll(.focusLost); break }
+                if now() - started >= Self.parkLimit {
+                    // Everything waiting drops once; later work gets a park window of its own.
+                    dropAll(.focusLost)
+                    blockedSince = nil; blockedNote = nil
+                    break
+                }
                 await sleep(Self.waitTick)
             }
         }
@@ -563,7 +583,13 @@ public final class MacFieldQueue {
         guard let target else { return false }
         // Real input after this mark refuses a key planned from this read.
         let mark = target.inputMark
-        guard target.isFocused(), let (doc, selection) = read(target).map({ ($0.0, $0.1) }) else { return false }
+        guard focus(target) else { return false }
+        guard let (doc, selection) = read(target).map({ ($0.0, $0.1) }) else { blocked("unreadable"); return false }
+        if let caret = rebindPending {
+            rebindPending = nil
+            adoptRebind(doc, selection: selection, caret: caret)
+        }
+        lastLength = doc.length
         let keyed = !target.editsInPlace && target.typesKeys
         // A caret that moved with no real input while a key of ours may still land is that key's, not the user's.
         noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark))
@@ -600,6 +626,146 @@ public final class MacFieldQueue {
         if keyed, caretOwed { return await restoreCaret(doc: doc, selection: selection, target: target, mark: mark) }
         caretOwed = false
         return false
+    }
+
+    // MARK: Focus
+
+    /// Whether the field the work is for has focus now, binding the editor's fresh element if the page replaced it, for a
+    /// caller about to read the field (Magic). `allowOther`: another field of the same app may be bound.
+    public func ensureFocused(allowOther: Bool = false) -> Bool {
+        guard let target else { return false }
+        return focus(target, allowOther: allowOther)
+    }
+
+    /// Whether anything of this queue's work is in the field (or about to be): then only the same editor is bound again.
+    private var wroteAnything: Bool {
+        !edits.isEmpty || !editRegions.isEmpty
+            || runs.contains { run in run.regions.contains { !$0.lost && (!$0.current.isEmpty || !$0.original.isEmpty) } }
+    }
+
+    /// The bound element has focus, or the target was bound to the element that has it now: the same editor (a web page
+    /// recreates elements and moves focus between nested ones as its DOM changes), or, while nothing was written yet,
+    /// whichever text field the user is in. Work then goes on there (`adoptRebind` on the next read). Anything else
+    /// waits (and drops once after `parkLimit`).
+    private func focus(_ target: any TextTarget, allowOther: Bool? = nil) -> Bool {
+        if target.isFocused() { return true }
+        switch target.refocus(allowOther: allowOther ?? !wroteAnything) {
+        case .rebound(let same):
+            note(.rebound, detail: same ? "same editor" : "other field")
+            if rebindPending == nil { rebindPending = .some(userCaret) }
+            // A move under way is planned again from the new element's caret.
+            jumpGoal = nil; jumpsSpent = 0; missedHops = []
+            blockedNote = nil
+            return true
+        case .declined: blocked("otherField"); return false
+        case .lost: blocked("notFocused"); return false
+        }
+    }
+
+    private func blocked(_ why: String) {
+        guard blockedNote != why else { return }
+        blockedNote = why
+        note(.waiting, reason: why)
+    }
+
+    /// The first read of a newly bound element: work that typed nothing yet starts again at its caret; typed work moves by
+    /// the one shift under which all of it shows (a nested element's text starts elsewhere), and the carets with it.
+    /// Work that does not show is found again, or not, like on any read (`locate`).
+    private enum ShiftPass: CaseIterable { case fitted, landed, any }
+
+    private func adoptRebind(_ doc: Document, selection: UTF16Range, caret old: UTF16Range?) {
+        for index in runs.indices {
+            while let last = runs[index].regions.last, !last.lost, last.current.isEmpty, last.original.isEmpty {
+                runs[index].regions.removeLast()
+                runs[index].remainder = last.source + runs[index].remainder
+            }
+        }
+        let followed = allRegions.filter { !$0.lost && !$0.current.isEmpty }
+        let anchored = allRegions.filter { !$0.lost }
+        /// The region's text at `start`, or what an op of its that may land late leaves; empty text only by the text around
+        /// it. A text before or after one op can also show a character off inside the other, so passes: `.fitted` wants the
+        /// text around it as it was too (a nested element may cut it at its start), `.landed` takes the late op's text when
+        /// there is one (it usually landed), `.any` takes either.
+        func shows(_ region: Region, at start: Int, _ pass: ShiftPass) -> Bool {
+            let texts = pass == .landed ? [region.landing ?? region.current] : [region.current] + (region.landing.map { [$0] } ?? [])
+            return texts.contains { text in
+                let length = String(text).utf16.count
+                guard text.isEmpty || doc.string(start, length) == String(text) else { return false }
+                return pass != .fitted && !text.isEmpty || fits(region, at: start, length: length)
+            }
+        }
+        /// The text around the region (`before` ending at `start`, `after` following its text) is what it was. Before it:
+        /// all the element's text there ends what was before it (a nested element starts later), or the same full context.
+        func fits(_ region: Region, at start: Int, length: Int? = nil) -> Bool {
+            let end = start + (length ?? String(region.current).utf16.count)
+            guard start >= 0, end <= doc.length else { return false }
+            let before = doc.context(before: start, region.before.utf16.count), after = doc.context(after: end, region.after.utf16.count)
+            let full = region.before.utf16.count >= Self.contextChars
+            return region.before.hasSuffix(before) && (before.utf16.count == start || full && before == region.before)
+                && (after == region.after || Self.tailMatches(old: region.after, oldAtEnd: region.afterAtEnd, new: after,
+                                                              newAtEnd: end + after.utf16.count == doc.length))
+        }
+        // The element's text can start elsewhere (focus went into a nested element or out to its root): one shift for all,
+        // the first candidate under which all the typed work shows. Candidates: the change in length, the caret (where the
+        // user had it, or where a late key of ours put it), the unique place of the longest typed text or of an edit's scope.
+        var candidates: [Int] = []
+        if let lastLength { candidates.append(doc.length - lastLength) }
+        if selection.length == 0 {
+            if let old, old.length == 0 { candidates.append(selection.location - old.location) }
+            if let late = lateKey { candidates.append(selection.location - late.selection.location) }
+        }
+        // Typed text found once: long enough, or short with the text around it as it was.
+        for region in followed.sorted(by: { $0.current.count > $1.current.count }) {
+            let hits = doc.find(String(region.current))
+            if hits.count == 1, region.current.count >= Self.relocateMinimum || fits(region, at: hits[0]) {
+                candidates.append(hits[0] - region.start)
+            }
+        }
+        for pending in edits {
+            let hits = doc.find(pending.edit.scope)
+            if hits.count == 1 { candidates.append(hits[0] - pending.edit.range.location) }
+        }
+        // A fresh element for the same text, the most common case, when nothing above showed it.
+        candidates.append(0)
+        // Edits not placed yet were read in the old element: their scope shows under the same shift.
+        func placed(_ edit: Edit, _ delta: Int) -> Bool { doc.string(edit.range.location + delta, edit.range.length) == edit.scope }
+        func holds(_ delta: Int, _ pass: ShiftPass) -> Bool {
+            anchored.allSatisfy { shows($0, at: $0.start + delta, pass) } && edits.allSatisfy { placed($0.edit, delta) }
+        }
+        let shift = anchored.isEmpty && edits.isEmpty ? nil
+            : ShiftPass.allCases.lazy.compactMap { pass in candidates.first { holds($0, pass) } }.first
+        if let shift {
+            for index in edits.indices {
+                edits[index].edit.range.location += shift
+                // The context before it may start before the new element's text.
+                let before = edits[index].edit.before as NSString, room = edits[index].edit.range.location
+                if before.length > room { edits[index].edit.before = before.substring(from: before.length - max(0, room)) }
+            }
+        }
+        for region in allRegions where !region.lost {
+            guard let shift, shows(region, at: region.start + shift, .any) else { continue }
+            region.start += shift
+            // The context after it stays as it was (a late key's landing is judged by it on the next locate); the context
+            // before it may start before the new element's text.
+            let before = doc.context(before: region.start, region.before.utf16.count)
+            if before != region.before, region.before.hasSuffix(before) { region.before = before }
+        }
+        note(.rebound, selection: selection, detail: shift.map { "shift \($0)" } ?? "unanchored")
+        guard let shift else {
+            // Nothing typed to go by: the element's caret is where the work goes.
+            userCaret = selection; expectedSelections = [selection]
+            caretOwed = false; lateKey = nil; staleCaret = nil; probeAt = nil
+            for index in runs.indices { close(&runs[index], cause: "rebind") }
+            return
+        }
+        // Every caret the queue knows moves with the text. Whether the caret read now is the user's is decided as on any
+        // read (`noteUser`): a key or click of theirs, or a caret none of the queue's ops left.
+        func moved(_ range: UTF16Range) -> UTF16Range { UTF16Range(location: range.location + shift, length: range.length) }
+        userCaret = userCaret.map(moved)
+        expectedSelections = expectedSelections.map(moved)
+        if let late = lateKey { lateKey?.selection = moved(late.selection) }
+        if let stale = staleCaret { staleCaret = (moved(stale.reported), stale.believed.map(moved)) }
+        probeAt = probeAt.map { $0 + shift }
     }
 
     private func noteUser(selection: UTF16Range, doc: Document, ownKey: Bool = false) {
@@ -662,8 +828,10 @@ public final class MacFieldQueue {
             return
         }
         region.lost = true
-        // An empty run region is placed again (`locateAll`); anything else was changed under it.
+        // An empty run region is placed again (`locateAll`); anything else was changed under it. The run's later words
+        // start a region of their own at the user's caret.
         if region.runID != nil, region.current.isEmpty, region.original.isEmpty { return }
+        region.open = false
         if region.current != region.desired { drop(region, .userChanged) }
     }
 
@@ -1476,7 +1644,7 @@ public final class MacFieldQueue {
             let last = index == run.regions.count - 1
             var upper = last && region.open ? text.count : min(text.count, max(lower, map(cursor, inclusive: !last)))
             // A word the user's key or click cut short is finished in its region first.
-            if last, !region.open, upper > lower, !text[upper - 1].isWhitespace {
+            if last, !region.open, !region.lost, upper > lower, !text[upper - 1].isWhitespace {
                 while upper < text.count, !text[upper].isWhitespace { upper += 1 }
             }
             let slice = Array(text[lower..<upper])
@@ -1518,15 +1686,23 @@ public final class MacFieldQueue {
             entry.done.resume(returning: .dropped(reason))
         }
         editRegions = []
-        for index in runs.indices {
-            for region in runs[index].regions where region.pending { drop(region, reason) }
-            if !runs[index].remainder.isEmpty {
-                let text = String(runs[index].remainder)
-                note(.dropped, run: runs[index].id, text: text, reason: reason.rawValue)
-                onDrop?(Drop(id: runs[index].id, runID: runs[index].id, reason: reason, text: text))
-                runs[index].remainder = []
-            }
+        for index in runs.indices { abandon(index, reason) }
+    }
+
+    /// A run whose field went away drops once, as a whole: its newest text goes to the owner (History and the clipboard),
+    /// and its later versions are neither placed nor dropped again. A run with nothing left to place stays as it is.
+    private func abandon(_ index: Int, _ reason: Reason) {
+        guard !runs[index].abandoned, runs[index].regions.contains(where: \.pending) || runs[index].needsRegion else { return }
+        for region in runs[index].regions {
+            if region.pending { region.dropReason = reason; region.desired = region.current }
+            region.open = false
         }
+        runs[index].remainder = []
+        runs[index].abandoned = true
+        // A retracted run's text is not wanted: nothing to recover.
+        let text = runs[index].retracted ? "" : String(runs[index].target)
+        note(.dropped, run: runs[index].id, text: text, reason: reason.rawValue)
+        onDrop?(Drop(id: runs[index].id, runID: runs[index].id, reason: reason, text: text))
     }
 
     // MARK: Journal
