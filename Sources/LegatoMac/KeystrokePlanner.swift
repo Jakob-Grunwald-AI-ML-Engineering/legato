@@ -11,7 +11,7 @@ import LegatoKeyboardCore
 ///   block delete and its new text typed, whichever costs less; a tie keeps the minimal edits. A caret move costs one
 ///   key per grapheme up to the price of a jump (`jumpMs`): the queue jumps straight to a far change.
 /// - Pace: one grapheme per key. The gap between typed graphemes spreads the work over about `budgetMs`, no slower than
-///   `calmMs` and no faster than `floorMs`.
+///   `calmMs` and no faster than `floorMs`; a backlog of `behindOps` or more goes at the floor.
 public enum KeystrokePlanner {
     /// A change of `old[start..<end]` into `text` (grapheme offsets into the old text).
     public struct Hunk: Sendable, Equatable {
@@ -58,11 +58,16 @@ public enum KeystrokePlanner {
     // MARK: Pace
 
     /// A short change types at this calm pace.
-    public static let calmMs = 65.0
-    /// Typed graphemes are never closer than this (each key also waits for its read-back).
-    public static let floorMs = 12.0
+    public static let calmMs = 30.0
+    /// Typed graphemes in a keystroke field are never closer than this (each key also waits for its read-back).
+    public static let floorMs = 5.0
+    /// The same for an Accessibility-writable field: a write and its read-back already take a few milliseconds.
+    public static let writeFloorMs = 3.0
     /// What a change, or the backlog, aims to take.
-    public static let budgetMs = 1_200.0
+    public static let budgetMs = 700.0
+    /// This many graphemes still to type (a change's, plus what dictation has queued behind it) mean typing has fallen
+    /// behind speech (about 15 characters a second): the pace goes straight to the floor.
+    public static let behindOps = 14
     /// About what one verified key costs (send, the host applies it, the read-back shows it).
     public static let keyMs = 15.0
     /// The pause at a transition between moves and edits (the host may apply either late).
@@ -77,10 +82,12 @@ public enum KeystrokePlanner {
     }
 
     /// The gap between typed graphemes for `ops` of them still to go, after `fixedMs` of keys and settles the work
-    /// needs anyway: spread over the budget, between the floor and the calm pace.
-    public static func paceMs(ops: Int, fixedMs: Double = 0) -> Double {
+    /// needs anyway: spread over the budget, between the floor and the calm pace; straight to the floor once `ops`
+    /// reaches `behindOps`.
+    public static func paceMs(ops: Int, fixedMs: Double = 0, floor: Double = floorMs) -> Double {
         guard ops > 0 else { return calmMs }
-        return min(calmMs, max(floorMs, (budgetMs - fixedMs) / Double(ops)))
+        guard ops < behindOps else { return floor }
+        return min(calmMs, max(floor, (budgetMs - fixedMs) / Double(ops)))
     }
 
     // MARK: Spans

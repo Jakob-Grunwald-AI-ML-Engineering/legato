@@ -87,6 +87,12 @@ public final class MacFieldQueue {
     /// Keystroke fields: after the user's real key or click, no key goes out until their input has rested this long.
     /// A key moves the field's own caret, so a key the user types meanwhile lands wherever the queue's caret is.
     public static let keyQuiet = Duration.milliseconds(600)
+    /// Typed graphemes of one change go out in runs of at most this many, each key verified by the caret alone and the run
+    /// by one read of the text; `pipelineRunBehind` while typing is behind speech.
+    public static let pipelineRun = 4
+    public static let pipelineRunBehind = 8
+    /// How long a run's key may take to show its caret before the run is verified whole (and the key is waited for).
+    public static let pipelineWait = Duration.milliseconds(120)
     /// The pause at a transition between moves and edits.
     public static let keySettle = Duration.milliseconds(Int(KeystrokePlanner.settleMs))
     /// How long an edit key whose text already shows may wait for the caret before it counts as landed with a lagging
@@ -730,7 +736,13 @@ public final class MacFieldQueue {
              selection: wanted)
         if pacedNow, !insertion.isEmpty {
             let remaining = ShadowEditPlanner.changes(from: region.current, to: region.desired).reduce(0) { $0 + $1.text.count }
-            await sleep(isFast(region) ? .milliseconds(Int(KeystrokePlanner.floorMs)) : TypewriterPlan.interval(steps: remaining + 2))
+            let ops = remaining + typedBacklog(besides: region)
+            // Nothing more to type: no wait after the last grapheme.
+            if ops > 0 {
+                let pace = isFast(region) ? KeystrokePlanner.writeFloorMs
+                    : KeystrokePlanner.paceMs(ops: ops, floor: KeystrokePlanner.writeFloorMs)
+                await sleep(.milliseconds(pace))
+            }
         }
         return true
     }
@@ -760,7 +772,7 @@ public final class MacFieldQueue {
         let typed = steps.reduce(0) { if case .type = $1.key { $0 + 1 } else { $0 } }
         let fixed = Double(steps.count - typed) * KeystrokePlanner.keyMs
         let unit = KeyUnit(desired: region.desired, steps: steps,
-                           paceMs: fast ? KeystrokePlanner.floorMs : KeystrokePlanner.paceMs(ops: typed, fixedMs: fixed))
+                           paceMs: fast ? KeystrokePlanner.floorMs : KeystrokePlanner.paceMs(ops: typed + typedBacklog(besides: region), fixedMs: fixed))
         region.keys = unit
         note(.planned, id: region.id, run: region.runID, location: region.start, text: String(region.desired),
              detail: "keys=\(steps.count) typed=\(typed) pace=\(Int(unit.paceMs))")
@@ -772,8 +784,8 @@ public final class MacFieldQueue {
     /// followed it still after it, and the field's length. A caret that lags behind a landed key is waited for.
     private func performKey(_ region: Region, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int) async -> Bool {
         guard let unit = keyUnit(for: region, doc: doc) else { return true }
-        let step = unit.steps[unit.index]
-        let caret = region.start + String(step.before[..<step.caret]).utf16.count
+        var step = unit.steps[unit.index]
+        var caret = region.start + String(step.before[..<step.caret]).utf16.count
         // The field still reports the caret an earlier key left before it showed moving: one arrow makes it report
         // afresh before anything is typed, or planned, from a caret that may not be the real one.
         if let stale = staleCaret, stale.reported == selection {
@@ -790,93 +802,136 @@ public final class MacFieldQueue {
             return await probe(doc: doc, selection: selection, target: target, mark: mark, region: region)
         }
         if await settle(before: .edit) { return true }
-        let after = step.after
-        let range: UTF16Range, inserted: String, key: FieldKey
-        switch step.key {
-        case .backspace:
-            let removed = String(step.before[step.caret - 1]).utf16.count
-            range = UTF16Range(location: caret - removed, length: removed); inserted = ""; key = .backspace
-        case .type(let character):
-            range = UTF16Range(location: caret, length: 0); inserted = String(character); key = .text(character)
-        }
-        let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
-        note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: inserted,
-             read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40), detail: "key")
-        guard sendKey(key, target: target, mark: mark, selection: selection) == nil else { return false }
-        let sentAt = now()
-        lastKey = (.edit, sentAt)
-        probeAt = nil
-        let delta = inserted.utf16.count - range.length
-        let expected = UTF16Range(location: range.location + inserted.utf16.count, length: 0)
-        let window = UTF16Range(location: region.start, length: String(after).utf16.count)
         let oldTail = doc.context(after: region.end, Self.contextChars)
         let oldAtEnd = region.end + oldTail.utf16.count == doc.length
-        let lengthNow = doc.length + delta
-        var valueAt: ContinuousClock.Instant?
-        var caretSeen = false, transformed = false
-        var lastSelection = selection
-        _ = await poll(Self.keyConfirm) {
-            guard let length = try? target.textLength(), let shown = try? target.text(in: window) else { return false }
-            let current = try? target.selectedRange()
-            if let current { lastSelection = current }
-            let textShows = Self.folded(shown, keyed: true) == String(after)
-            if textShows, Self.tailHolds(target, at: window.end, length: length, old: oldTail, oldAtEnd: oldAtEnd, lengthNow: lengthNow) {
-                if current == expected { caretSeen = true; return true }
-                // The key's text is there: it landed. The caret may follow late; it gets a short wait here.
-                let since = valueAt ?? now()
-                valueAt = since
-                return now() - since >= Self.caretWait
+        var docLength = doc.length
+        var piped = 1
+        // Typed graphemes go out in runs of a few, more while typing is behind speech.
+        let maxRun = unit.typedLeft + typedBacklog(besides: region) >= KeystrokePlanner.behindOps ? Self.pipelineRunBehind : Self.pipelineRun
+        while true {
+            let after = step.after
+            let range: UTF16Range, inserted: String, key: FieldKey
+            switch step.key {
+            case .backspace:
+                let removed = String(step.before[step.caret - 1]).utf16.count
+                range = UTF16Range(location: caret - removed, length: removed); inserted = ""; key = .backspace
+            case .type(let character):
+                range = UTF16Range(location: caret, length: 0); inserted = String(character); key = .text(character)
             }
-            // The caret and length are the key's, the text is not: the host changed what the key typed.
-            if !textShows, current == expected, length == lengthNow { transformed = true; return true }
-            return false
-        }
-        if transformed, target.inputMark == mark {
-            // Typing again would only repeat the host's change: the region's work stops (its text is recovered).
-            note(.mismatch, id: region.id, run: region.runID, reason: "transformed")
-            region.lost = true
-            drop(region, .failed)
-            expectedSelections = [expected]
-            return true
-        }
-        guard valueAt != nil || caretSeen, !transformed else {
-            expectedSelections.append(expected)
-            if target.inputMark != mark {
-                // The user typed or clicked meanwhile: not the key's failure. The next read takes their input and
-                // finds the key's text where it landed.
-                region.landing = after
-                userActedFlag = true
-                note(.mismatch, id: region.id, run: region.runID, reason: "user", detail: "failures=\(region.failures)")
+            let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
+            note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: inserted,
+                 read: piped == 1 ? doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40) : nil,
+                 detail: piped == 1 ? "key" : "piped key")
+            // Every key goes through the guards: focus, no real input since the mark, no modifier, and the caret where
+            // this key was planned (for a piped key, where the one before it was seen to leave it).
+            guard sendKey(key, target: target, mark: mark, selection: piped == 1 ? selection : UTF16Range(location: caret, length: 0)) == nil
+            else { return piped > 1 }
+            let sentAt = now()
+            lastKey = (.edit, sentAt)
+            probeAt = nil
+            let delta = inserted.utf16.count - range.length
+            let expected = UTF16Range(location: range.location + inserted.utf16.count, length: 0)
+            let window = UTF16Range(location: region.start, length: String(after).utf16.count)
+            let lengthNow = docLength + delta
+
+            /// The key's text and caret showed: the region takes it.
+            func land(caretSeen: Bool, lastSelection: UTF16Range) {
+                apply(region, landed: after, at: range, delta: delta, inserted: inserted.utf16.count)
+                unit.index += 1
+                revision += 1
+                if follows || (region.current == region.desired && region.caretAfter) { userCaret = UTF16Range(location: region.end, length: 0) }
+                caretOwed = userCaret != expected
+                if caretSeen {
+                    expectedSelections = [expected]
+                } else {
+                    // The value shows the key, the caret does not yet: nothing goes out until it does or the window passes.
+                    expectedSelections = [expected, lastSelection]
+                    lateKey = (sentAt, expected, Self.keyLateLimit, true)
+                    lateKeyLanded = true
+                    staleCaret = (lastSelection, expected)
+                }
+                note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start,
+                     text: String(region.current), selection: expected,
+                     detail: caretSeen ? nil : "caretLag \(lastSelection.location)+\(lastSelection.length)")
+            }
+
+            // A run of typed graphemes is verified by the caret alone, one read per key; the region's text, and the field's
+            // length and tail, are read once after the run's last key (the window covers the whole run).
+            if piped < maxRun, canPipeline(after: step, unit: unit, region: region, mark: mark, target: target),
+               await poll(Self.pipelineWait, { (try? target.selectedRange()) == expected }) {
+                land(caretSeen: true, lastSelection: expected)
+                docLength = lengthNow
+                let pace = min(unit.paceMs, KeystrokePlanner.paceMs(ops: unit.typedLeft + typedBacklog(besides: region)))
+                let gap = Duration.milliseconds(pace) - (now() - sentAt)
+                if gap > .zero { await sleep(gap) }
+                step = unit.steps[unit.index]
+                caret = region.start + String(step.before[..<step.caret]).utf16.count
+                piped += 1
+                continue
+            }
+
+            var valueAt: ContinuousClock.Instant?
+            var caretSeen = false, transformed = false
+            var lastSelection = selection
+            _ = await poll(Self.keyConfirm) {
+                guard let length = try? target.textLength(), let shown = try? target.text(in: window) else { return false }
+                let current = try? target.selectedRange()
+                if let current { lastSelection = current }
+                let textShows = Self.folded(shown, keyed: true) == String(after)
+                if textShows, Self.tailHolds(target, at: window.end, length: length, old: oldTail, oldAtEnd: oldAtEnd, lengthNow: lengthNow) {
+                    if current == expected { caretSeen = true; return true }
+                    // The key's text is there: it landed. The caret may follow late; it gets a short wait here.
+                    let since = valueAt ?? now()
+                    valueAt = since
+                    return now() - since >= Self.caretWait
+                }
+                // The caret and length are the key's, the text is not: the host changed what the key typed.
+                if !textShows, current == expected, length == lengthNow { transformed = true; return true }
+                return false
+            }
+            if transformed, target.inputMark == mark {
+                // Typing again would only repeat the host's change: the region's work stops (its text is recovered).
+                note(.mismatch, id: region.id, run: region.runID, reason: "transformed")
+                region.lost = true
+                drop(region, .failed)
+                expectedSelections = [expected]
                 return true
             }
-            // The value does not show the key (yet): it may still land, and it is never sent again before it shows or
-            // its window passes. Its caret is ours too, and the next read takes its text as landed late.
-            lateKey = (sentAt, expected, Self.keyLateLimit, true)
-            lateKeyLanded = false
-            return await failed(region, after: after, reason: "key")
+            guard valueAt != nil || caretSeen, !transformed else {
+                expectedSelections.append(expected)
+                if target.inputMark != mark {
+                    // The user typed or clicked meanwhile: not the key's failure. The next read takes their input and
+                    // finds the key's text where it landed.
+                    region.landing = after
+                    userActedFlag = true
+                    note(.mismatch, id: region.id, run: region.runID, reason: "user", detail: "failures=\(region.failures)")
+                    return true
+                }
+                // The value does not show the key (yet): it may still land, and it is never sent again before it shows or
+                // its window passes. Its caret is ours too, and the next read takes its text as landed late.
+                lateKey = (sentAt, expected, Self.keyLateLimit, true)
+                lateKeyLanded = false
+                return await failed(region, after: after, reason: "key")
+            }
+            land(caretSeen: caretSeen, lastSelection: lastSelection)
+            if case .type = step.key, pacedNow {
+                // The faster of the change's own pace and the backlog's, counted from when the key went out.
+                let pace = min(unit.paceMs, KeystrokePlanner.paceMs(ops: unit.typedLeft + typedBacklog(besides: region)))
+                let gap = Duration.milliseconds(pace) - (now() - sentAt)
+                // Nothing more to type: no wait after the last grapheme.
+                if unit.typedLeft + typedBacklog(besides: region) > 0, gap > .zero { await sleep(gap) }
+            }
+            return true
         }
-        apply(region, landed: after, at: range, delta: delta, inserted: inserted.utf16.count)
-        unit.index += 1
-        revision += 1
-        if follows || (region.current == region.desired && region.caretAfter) { userCaret = UTF16Range(location: region.end, length: 0) }
-        caretOwed = userCaret != expected
-        if caretSeen {
-            expectedSelections = [expected]
-        } else {
-            // The value shows the key, the caret does not yet: nothing goes out until it does or the window passes.
-            expectedSelections = [expected, lastSelection]
-            lateKey = (sentAt, expected, Self.keyLateLimit, true)
-            lateKeyLanded = true
-            staleCaret = (lastSelection, expected)
-        }
-        note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start,
-             text: String(region.current), selection: expected, detail: caretSeen ? nil : "caretLag \(lastSelection.location)+\(lastSelection.length)")
-        if case .type = step.key, pacedNow {
-            // The faster of the change's own pace and the backlog's, counted from when the key went out.
-            let pace = min(unit.paceMs, KeystrokePlanner.paceMs(ops: unit.typedLeft + typedBacklog(besides: region)))
-            let gap = Duration.milliseconds(pace) - (now() - sentAt)
-            if gap > .zero { await sleep(gap) }
-        }
+    }
+
+    /// Whether the key just sent may be verified by the caret alone, so the next typed grapheme goes straight after it:
+    /// both are typed graphemes at one place, the change is still the one planned, and nothing else wants the field.
+    private func canPipeline(after step: KeystrokePlanner.Step, unit: KeyUnit, region: Region, mark: Int, target: any TextTarget) -> Bool {
+        guard pacedNow, !exclusive, !userActedFlag, !region.lost, unit.desired == region.desired, target.inputMark == mark,
+              case .type = step.key, unit.index + 1 < unit.steps.count else { return false }
+        let next = unit.steps[unit.index + 1]
+        guard case .type = next.key, next.caret == step.caretAfter, next.before == step.after else { return false }
         return true
     }
 

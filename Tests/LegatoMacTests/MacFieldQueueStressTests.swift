@@ -391,6 +391,48 @@ private struct SeededRandom {
         }
     }
 
+    /// Characters per second typed for dictation appends (virtual clock): one word of dictation arriving into an idle
+    /// field (calm), and a long text arriving at once (a backlog). Keys lag 0 to 30 ms in the fake.
+    private func typingRates(keys: Bool) async -> (calm: Double, backlog: Double) {
+        let field = FakeAXField("", rng: SeededRandom(9))
+        var clock = ContinuousClock.now
+        field.keys = keys
+        field.clock = { clock }
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { true }
+        queue.sleep = { clock += $0 }
+        queue.now = { clock }
+        var text = ""
+        var typing = Duration.zero
+        let words = ["harbor", "squall", "anchor", "north", "wind", "tide", "calm", "rope"]
+        for (index, word) in words.enumerated() {
+            text += (index == 0 ? "" : " ") + word
+            let start = clock
+            queue.live(runID: "r", version: index + 1, text: text)
+            await queue.whenIdle()
+            typing += clock - start
+            clock += .milliseconds(400)
+        }
+        field.settle(all: true)
+        let calmSeconds = Double(typing.components.seconds) + Double(typing.components.attoseconds) / 1e18
+        let calm = Double(text.count) / calmSeconds
+        let long = Array(repeating: "sail north wind harbor", count: 8).joined(separator: " ")
+        let start = clock
+        queue.live(runID: "r", version: 100, text: text + " " + long)
+        await queue.whenIdle()
+        let elapsed = clock - start
+        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        field.settle(all: true)
+        return (calm, Double(long.count + 1) / seconds)
+    }
+
+    @Test func typingKeepsUpWithSpeech() async {
+        for keys in [false, true] {
+            let rates = await typingRates(keys: keys)
+            print("TYPING RATE keys=\(keys): calm \(Int(rates.calm)) chars/s, backlog \(Int(rates.backlog)) chars/s")
+        }
+    }
+
     @Test func aRevisionAwayFromTheCaretIsAJumpUnitThatReturnsTheCaret() async {
         let field = FakeAXField("", rng: SeededRandom(1))
         let queue = MacFieldQueue(target: field)
