@@ -44,6 +44,9 @@ struct FakeField {
     var userCaret: Int
     /// For every user insert as it lands: the field's caret and the user's caret.
     var userInserts: [(caret: Int, userCaret: Int, racing: Bool)] = []
+    /// A keyboard op on its way replaced a selection the user made meanwhile: the field now holds text no report showed
+    /// the keyboard before (what was selected is gone), so where the user's caret is cannot be known from then on.
+    var clobberedSelection = false
 
     /// How one op is to be carried out and accounted for.
     struct Send {
@@ -139,7 +142,18 @@ struct FakeField {
             if nowMs - lastMoveSentMs < 30 { stuck = current; staleTriggers += 1 }
             delay = Double.random(in: 5...110, using: &rng)
         }
-        pending.append((seq, nowMs + delay, send))
+        // Ops of one kind in a row land in the order sent (the spike: 20 chained moves at 30 ms all in order; no
+        // insert/insert reordering in the UAT journals); ops of different kinds can overtake each other.
+        var at = nowMs + delay
+        if let last = pending.max(by: { $0.seq < $1.seq }), Self.sameKind(last.send.op, send.op) { at = max(at, last.at + 1) }
+        pending.append((seq, at, send))
+    }
+
+    static func sameKind(_ a: ShadowOp, _ b: ShadowOp) -> Bool {
+        switch (a, b) {
+        case (.move, .move), (.insert, .insert), (.deleteBackward, .deleteBackward): true
+        default: false
+        }
     }
 
     /// Applies an op right away (the in-process harness, or tests that drive the field by hand).
@@ -164,13 +178,19 @@ struct FakeField {
             if send.writer == .user { userCaret = caret }
         case .deleteBackward(let count):
             for _ in 0..<count {
-                if selection > 0 { remove(caret..<(caret + selection), send); selection = 0; continue }
+                if selection > 0 {
+                    if send.racing, send.writer != .outside { clobberedSelection = true }
+                    remove(caret..<(caret + selection), send); selection = 0; continue
+                }
                 guard caret > 0 else { break }
                 remove((caret - 1)..<caret, send); caret -= 1
             }
         case .insert(let string):
             if send.writer == .user { userInserts.append((caret, userCaret, send.racing)) }
-            if selection > 0 { remove(caret..<(caret + selection), send); selection = 0 }
+            if selection > 0 {
+                if send.racing, send.writer != .outside { clobberedSelection = true }
+                remove(caret..<(caret + selection), send); selection = 0
+            }
             let chars = Array(string)
             text.insert(contentsOf: chars, at: caret)
             var origins = Array(repeating: send.writer, count: chars.count)

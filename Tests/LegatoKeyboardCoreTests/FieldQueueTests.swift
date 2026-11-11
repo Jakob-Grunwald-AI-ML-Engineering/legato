@@ -211,8 +211,8 @@ import Testing
         #expect(rig.field.reorders == 0)
         #expect(rig.field.staleTriggers == 0)
         #expect(rig.field.string.contains("!"))
-        // Every op went out at least the send gap after the one before.
-        #expect(zip(rig.sent, rig.sent.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.sendGapMs - 0.001 })
+        // Same-kind ops at the typewriter pace; a change of kind after an edit only after the host's transit.
+        #expect(zip(rig.sent, rig.sent.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.gap(after: $0.op, before: $1.op) - 0.001 })
     }
 
     @Test func aLostOpIsSeenAndTheUsersKeyGoesOnceMore() {
@@ -274,5 +274,108 @@ import Testing
         rig.drain()
         #expect(rig.field.reorders == 0)
         #expect(rig.field.string == "alpha bravo charlie delta echoxy")
+    }
+}
+
+/// Speed under Safari's measured timing: one grapheme per op, at a pace that finishes the backlog in about a second.
+@Suite struct FieldQueueSpeedTests {
+    private func rig(_ text: String = "") -> QueueRig {
+        var field = FakeField(text)
+        field.hostDelays = true
+        return QueueRig(field, config: .init(animated: true))
+    }
+
+    private func inserts(_ rig: QueueRig, from: Int = 0) -> [(ms: Double, text: String)] {
+        rig.sent[from...].compactMap { if case .insert(let s) = $0.op { ($0.ms, s) } else { nil } }
+    }
+
+    @Test func aBacklogGoesOneGraphemePerOpAtTheFloorThenCalms() {
+        var rig = rig()
+        let line = "we need slides for the meeting tomorrow at three, and the budget numbers from last week; "
+            + "anna checks whether the room is free in the afternoon"
+        rig.queue.enqueue(snap(1, line))
+        rig.drain()
+        let typed = inserts(rig)
+        let gaps = zip(typed, typed.dropFirst()).map { $1.ms - $0.ms }
+        let floor = gaps.prefix(40).reduce(0, +) / 40
+        print("speed: floor \(Int(floor)) ms an op (\(line.count) chars backlog), last gaps \(gaps.suffix(5).map { Int($0) })")
+        #expect(rig.field.string == line)
+        #expect(typed.allSatisfy { $0.text.count == 1 })
+        #expect(floor < 60, "a long backlog goes at the confirmation floor")
+        #expect(gaps.suffix(5).allSatisfy { $0 >= SpanPlanner.calmMs - 0.001 }, "the last few at the calm pace")
+        #expect(rig.field.reorders == 0)
+    }
+
+    @Test func dictationAtSpeechRateKeepsUp() {
+        var rig = rig()
+        // About 14 characters a second, a word every ~0.4 s.
+        let words = "we need slides for the meeting tomorrow at three and the budget numbers from last week".split(separator: " ")
+        var text = ""
+        for (i, word) in words.enumerated() {
+            text += (text.isEmpty ? "" : " ") + word
+            rig.queue.enqueue(snap(i + 1, text))
+            rig.run(ms: 400)
+        }
+        let spoken = rig.clockMs
+        rig.drain()
+        let lag = rig.sent.last.map { $0.ms - spoken } ?? 0
+        print("speed: dictation of \(text.count) chars at speech rate, last op \(Int(lag)) ms after the last word")
+        #expect(rig.field.string == text)
+        #expect(lag < 1_500, "the typewriter trails speech by the backlog's budget at most")
+    }
+
+    @Test func aOneWordSonioxFixMidTextIsOneDeleteAndTheWordTyped() {
+        var rig = rig()
+        rig.queue.enqueue(snap(1, "I will meet you on Thursday at noon in the lobby"))
+        rig.drain()
+        let from = rig.sent.count
+        let start = rig.clockMs
+        rig.queue.enqueue(snap(2, "I will meet you on Friday at noon in the lobby"))
+        rig.drain()
+        let took = (rig.sent.last?.ms ?? start) - start
+        print("speed: one-word Soniox fix mid-text took \(Int(took)) ms (\(rig.sent.count - from) ops)")
+        #expect(rig.field.string == "I will meet you on Friday at noon in the lobby")
+        #expect(rig.sent[from...].map(\.op) == [.move(-21), .deleteBackward(8)] + "Friday".map { .insert(String($0)) } + [.move(21)])
+        #expect(took < 1_500)
+    }
+
+    @Test func magicUppercasingASentenceIsOneBlockDeleteAndRetyped() {
+        let sentence = "the meeting is at three pm tomorrow, we need the slides"
+        var rig = rig(sentence)
+        rig.run(ms: 100)
+        let from = rig.sent.count
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: sentence, target: sentence.uppercased(), cursorAtEnd: false, paced: true))
+        let start = rig.clockMs
+        rig.drain()
+        let took = (rig.sent.last?.ms ?? start) - start
+        print("speed: uppercase Magic of \(sentence.count) chars took \(Int(took)) ms, \(Int(took / Double(sentence.count))) ms a character")
+        #expect(rig.field.string == sentence.uppercased())
+        let ops = rig.sent[from...].map(\.op)
+        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(sentence.count)])
+        #expect(inserts(rig, from: from).count == sentence.count)
+        #expect(rig.field.reorders == 0)
+        #expect(took < 3_000)
+    }
+
+    @Test func aCleanupOfTwentyScatteredChangesInThreeHundredCharacters() {
+        let raw = "so i think we should meet on thursday to talk about the budget and then maybe go over the slides for the "
+            + "client meeting next week because last time we ran out of time and nobody had seen the numbers yet so it would "
+            + "be good to send them around before and also check with anna whether the room is free in the afternoon ok"
+        let cleaned = "So, I think we should meet on Thursday to talk about the budget, and then maybe go over the slides for the "
+            + "client meeting next week. Last time, we ran out of time and nobody had seen the numbers yet, so it would "
+            + "be good to send them around before. Also, check with Anna whether the room is free in the afternoon. OK."
+        var rig = rig()
+        rig.queue.enqueue(snap(1, raw))
+        rig.drain()
+        let from = rig.sent.count
+        let start = rig.clockMs
+        rig.queue.enqueue(snap(2, cleaned, complete: true))
+        rig.drain()
+        let took = (rig.sent.last?.ms ?? start) - start
+        let moves = rig.sent[from...].filter { if case .move = $0.op { true } else { false } }.count
+        print("speed: cleanup of \(raw.count) chars, \(moves - 1) jumps, took \(Int(took)) ms (\(rig.sent.count - from) ops)")
+        #expect(rig.field.string == cleaned)
+        #expect(rig.field.reorders == 0)
+        #expect(took < 15_000)
     }
 }

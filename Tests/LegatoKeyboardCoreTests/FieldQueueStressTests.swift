@@ -27,7 +27,11 @@ import Testing
     /// - 1376: the keyboard's own insert landed at the tap and was taken out again.
     /// - 1121: an edit's scope grew the model at the field's start with no agreeing text (duplicated text).
     /// - 1615: a lost delete that counted as landed later looked like another keyboard's typing.
-    @Test(arguments: [UInt64(69), 190, 230, 241, 265, 398, 548, 615, 856, 1035, 1121, 1138, 1376, 1392, 1615, 2251, 2729, 2989, 3569, 4568])
+    /// Spans and pace round:
+    /// - 1555: an emptied block ("\n " then a space) fit only past the model's end; the echo reading counts too.
+    /// - 1886 (exempt, unknowable): the user selected text while the keyboard's insert was on its way; the insert
+    ///   replaced the selection, so the field holds text no report showed. Key placement is not asserted after that.
+    @Test(arguments: [UInt64(69), 190, 230, 241, 265, 398, 548, 615, 856, 1035, 1121, 1138, 1376, 1392, 1555, 1615, 1886, 2251, 2729, 2989, 3569, 4568])
     func pinnedSeedsKeepTheInvariants(seed: UInt64) {
         var session = StressSession(seed: seed)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
@@ -39,6 +43,8 @@ import Testing
         var failures = 0
         for i in 0..<(Self.environment["LEGATO_STRESS_SEED"] == nil ? runs : 1) {
             let seed = first &+ UInt64(i)
+            // Names each seed before it runs, so a crash says which one to replay.
+            if Self.environment["LEGATO_STRESS_PROGRESS"] == "1" { print("stress seed \(seed)") }
             var session = StressSession(seed: seed)
             if let failure = session.run() {
                 Issue.record("seed \(seed) (replay: LEGATO_STRESS_SEED=\(seed)): \(failure)")
@@ -65,8 +71,10 @@ struct SeededGenerator: RandomNumberGenerator {
 struct StressSession {
     let seed: UInt64
     private var rng: SeededGenerator
+    /// Choices added later draw from here, so earlier seeds replay the same sessions.
+    private var extra: SeededGenerator
 
-    init(seed: UInt64) { self.seed = seed; rng = SeededGenerator(seed: seed) }
+    init(seed: UInt64) { self.seed = seed; rng = SeededGenerator(seed: seed); extra = SeededGenerator(seed: seed ^ 0x57A1E) }
 
     private mutating func chance(_ p: Double) -> Bool { Double.random(in: 0..<1, using: &rng) < p }
     private mutating func pick<T>(_ items: [T]) -> T { items[Int.random(in: 0..<items.count, using: &rng)] }
@@ -88,7 +96,6 @@ struct StressSession {
         // Safari's measured timing (optimistic moves, edits landing 5–110 ms later, stale reports after a 0-gap edit).
         field.hostDelays = chance(0.7)
         // Drawn apart from the session's generator, so earlier seeds replay the same sessions.
-        var extra = SeededGenerator(seed: seed ^ 0x57A1E)
         if field.hostDelays, Bool.random(using: &extra) { field.staleReportsAfterTap = Int.random(in: 1...4, using: &extra) }
         let clean = chance(0.35)
         var rig = QueueRig(field, config: .init(animated: chance(0.5)))
@@ -122,8 +129,10 @@ struct StressSession {
         }
         // A selection holds dictation and edits (typing would replace it): the user taps it away at the end.
         if rig.field.selection > 0 { rig.field.tap(at: rig.field.caret); rig.outsidePending = true }
-        let drained = rig.drain(limitMs: 30_000 + 100 * Double(rig.field.text.count))
-        return check(rig, drained: drained, clean: clean, initial: initial, caret: caret, target: dictated.joined(separator: " "), keys: keys)
+        // One grapheme an op, each waiting for the (perhaps lagging) field: the time it may take grows with the text.
+        let target = dictated.joined(separator: " ")
+        let drained = rig.drain(limitMs: 30_000 + 150 * Double(rig.field.text.count + target.count))
+        return check(rig, drained: drained, clean: clean, initial: initial, caret: caret, target: target, keys: keys)
     }
 
     private mutating func userActs(_ rig: inout QueueRig, _ keys: inout [String]) {
@@ -143,7 +152,8 @@ struct StressSession {
             let scope = before + after
             if let range = scope.range(of: pick(["alpha", "beta", "river", "stone", "a", "e"])) {
                 rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: before, after: after,
-                                                  target: scope.replacingCharacters(in: range, with: "MAGIC"), cursorAtEnd: false, paced: true))
+                                                  target: Bool.random(using: &extra) ? scope.uppercased() // a whole-scope rewrite
+                                                      : scope.replacingCharacters(in: range, with: "MAGIC"), cursorAtEnd: false, paced: true))
             }
         }
     }
@@ -174,7 +184,7 @@ struct StressSession {
         }
         if userInserts.count != keys.count { return "keys sent \(userInserts.count) of \(keys.count)" }
         for (sent, key) in zip(userInserts, keys) where !sent.hasSuffix(key) { return "key \(key.debugDescription) went out as \(sent.debugDescription)" }
-        if let miss = rig.field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }) {
+        if let miss = rig.field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }), !rig.field.clobberedSelection {
             return "a key landed at \(miss.caret), the user's caret was at \(miss.userCaret)"
         }
         guard clean else { return nil }

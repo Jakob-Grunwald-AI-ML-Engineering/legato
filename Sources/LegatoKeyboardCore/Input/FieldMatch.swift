@@ -20,11 +20,26 @@ public enum FieldMatch {
     /// trimmed part of it, or goes on past it; nothing reported after it fits anywhere.
     ///
     /// A block-based host's window that starts at a block's start begins with "\n " (`FieldReader.trusted(before:)`):
-    /// when the report fits nowhere as it is, its trusted part counts, at positions where a line break precedes it.
+    /// when the report fits nowhere as it is (or only past the known text's end), its trusted part counts, at positions
+    /// where a line break precedes it.
     public static func positions(in text: [Character], reportedBefore: String, reportedAfter: String) -> [Int] {
         let exact = fits(in: text, reportedBefore: Array(reportedBefore), reportedAfter: Array(reportedAfter))
         let trusted = Array(FieldReader.trusted(before: reportedBefore))
-        guard exact.isEmpty, trusted.count < reportedBefore.count, reportedBefore.first?.isNewline == true else { return exact }
+        guard trusted.count < reportedBefore.count, reportedBefore.first?.isNewline == true else { return exact }
+        // Exact fits whose report after the cursor runs past the known text's end say little: the echo reading counts
+        // as well (an emptied block, "\n " then a space, also fits a model that knows nothing past it).
+        if !exact.isEmpty {
+            guard exact.allSatisfy({ $0 + reportedAfter.count > text.count }) else { return exact }
+            let echoed = echoPositions(in: text, reportedBefore: reportedBefore, reportedAfter: reportedAfter)
+                .filter { $0 + reportedAfter.count <= text.count }
+            return Array(Set(exact + echoed)).sorted()
+        }
+        return echoPositions(in: text, reportedBefore: reportedBefore, reportedAfter: reportedAfter)
+    }
+
+    /// Where the report fits when its start is a block's echo ("\n "): its trusted part, after a line break.
+    private static func echoPositions(in text: [Character], reportedBefore: String, reportedAfter: String) -> [Int] {
+        let trusted = Array(FieldReader.trusted(before: reportedBefore))
         // The echo is the line break and one space: spaces after it are the block's own (a space typed at its start).
         let echo = reportedBefore.drop(while: \.isNewline)
         let ownSpaces = Array(echo.first == " " ? echo.dropFirst() : echo)
