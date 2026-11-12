@@ -3,6 +3,7 @@ import SwiftUI
 import LegatoAppServices
 import LegatoClaude
 import LegatoAgent
+import LegatoMac
 
 struct SettingsView: View {
     private enum Page: String, CaseIterable, Identifiable {
@@ -20,7 +21,7 @@ struct SettingsView: View {
         }
         var subtitle: String {
             switch self {
-            case .voice: "Quietly reduce background voices while you dictate."
+            case .voice: "Choose the microphone and quietly reduce background voices."
             case .overview: "Your voice, ready to write."
             case .writing: "Shape text where you write."
             case .meetings: "Record, transcribe and summarize your calls."
@@ -35,6 +36,7 @@ struct SettingsView: View {
     @AppStorage(InstructionSendSetting.modeKey) private var instructionSend = InstructionSendSetting.Mode.manual.rawValue
     @AppStorage(InstructionSendSetting.pauseKey) private var instructionPause = InstructionSendSetting.defaultPause
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
+    @AppStorage(PanelDictationSetting.key) private var panelMode = PanelDictationSetting.defaultMode.rawValue
     @State private var enrollment = VoiceEnrollmentController.shared
     @State private var page: Page? = .overview
     @State private var claudeKey = ""
@@ -70,7 +72,7 @@ struct SettingsView: View {
                         Text(currentPage.subtitle).foregroundStyle(.secondary)
                     }
                     switch currentPage {
-                    case .voice: voice
+                    case .voice: VStack(alignment: .leading, spacing: 20) { DictationMicrophoneCard(); voice }
                     case .overview: overview
                     case .writing: writing
                     case .meetings: SettingsMeetingsPage()
@@ -221,9 +223,13 @@ struct SettingsView: View {
                         Text("Pause before sending: \(Int(DictationSendSetting.clampedPause(settings.dictationPause))) s")
                     }
                 }
+                Picker("Where words appear", selection: $panelMode) {
+                    Text("Type into the field as I speak (panel only when needed)").tag(PanelDictationSetting.Mode.whenNeeded.rawValue)
+                    Text("Always dictate in the panel, insert when done").tag(PanelDictationSetting.Mode.always.rawValue)
+                }.pickerStyle(.radioGroup)
                 Toggle("Typewriter for paste-only editors", isOn: $settings.typewriter)
                 Toggle("Restore clipboard after a paste", isOn: $settings.restoreClipboard)
-                Text("Live puts words into your field as you speak and revises them after cleanup. On stop waits for the whole take. After a pause also sends when you stop speaking; line by line sends finished sentences.")
+                Text("Live puts words into your field as you speak and revises them after cleanup. On stop waits for the whole take. After a pause also sends when you stop speaking; line by line sends finished sentences. In the panel, the take grows in the notch and goes into the field once it is final.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }

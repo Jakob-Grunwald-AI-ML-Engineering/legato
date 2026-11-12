@@ -59,13 +59,11 @@ private struct MenuBarLabel: View {
             : controller.isDictating || controller.dictation.isActive ? "waveform.circle.fill" : "waveform")
             .onChange(of: controller.onboardingRequests, initial: true) { _, count in
                 guard count > 0 else { return }
-                NSApp.activate()
-                openWindow(id: MacAppController.onboardingWindowID)
+                WindowPresenter.present(.window(id: MacAppController.onboardingWindowID)) { openWindow(id: MacAppController.onboardingWindowID) }
             }
             .onChange(of: controller.meetings.windowRequests) { _, count in
                 guard count > 0 else { return }
-                NSApp.activate()
-                openWindow(id: MeetingController.windowID)
+                WindowPresenter.present(.window(id: MeetingController.windowID)) { openWindow(id: MeetingController.windowID) }
             }
 
     }

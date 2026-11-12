@@ -48,7 +48,7 @@ final class PasteService {
         item.setData(Data(), forType: Self.transientType)
         pasteboard.writeObjects([item])
         let ours = pasteboard.changeCount
-        postCommandV()
+        Self.postCommandV()
 
         if let snapshot {
             Task { [pasteboard] in
@@ -66,24 +66,25 @@ final class PasteService {
         case typed
         /// Typing stopped (the app changed, or the user pressed a key); the untyped rest is on the pasteboard.
         case interrupted(remainder: String)
-        /// Typing was not possible because an initial guard failed; nothing was typed.
-        case unavailable
+        /// Typing was not possible because a guard failed before the first character; nothing was typed.
+        case unavailable(CopyReason)
     }
 
-    /// Types one grapheme at a time. Controls and graphemes larger than a key event use individual
-    /// clipboard pastes; Return/Tab are never synthesized. One snapshot spans the sequence.
-    func type(_ text: String, targetPID: pid_t?, secureField: Bool, restoreClipboard: Bool = true,
+    /// Types one grapheme at a time (`paced` false: without the pauses). Controls and graphemes larger than a key
+    /// event use individual clipboard pastes; Return/Tab are never synthesized. One snapshot spans the sequence.
+    func type(_ text: String, targetPID: pid_t?, secureField: Bool, restoreClipboard: Bool = true, paced: Bool = true,
               realKeyDowns: @MainActor () -> Int, stillOwned: @MainActor () -> Bool = { true }) async -> TypeOutcome {
         let released = await waitForModifiersReleased()
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let route = FallbackRoute.route(
             axTrusted: AXIsProcessTrusted(), frontmostIsTarget: frontmost != nil && frontmost == targetPID && stillOwned(),
             secureField: secureField || IsSecureEventInputEnabled(), modifiersReleased: released)
-        guard !Task.isCancelled, route == .pasteKeystroke, let targetPID else { return .unavailable }
+        if case .copyOnly(let reason) = route { return .unavailable(reason) }
+        guard !Task.isCancelled, let targetPID else { return .unavailable(.appChanged) }
         let baseline = realKeyDowns()
         var snapshot: Snapshot?
         var clipboardCount: Int?
-        let result = await Typewriter.run(text, sleep: { try? await Task.sleep(for: $0) }, writeAsync: { [self] step in
+        let result = await Typewriter.run(text, sleep: { if paced { try? await Task.sleep(for: $0) } }, writeAsync: { [self] step in
             let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
             guard !Task.isCancelled,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
@@ -100,7 +101,7 @@ final class PasteService {
             item.setData(Data(), forType: Self.transientType)
             guard pasteboard.writeObjects([item]) else { return false }
             clipboardCount = pasteboard.changeCount
-            postCommandV()
+            Self.postCommandV()
             // The target consumes the paste asynchronously. Keep this control on the clipboard
             // until it has had the same consumption window as an ordinary guarded paste.
             try? await Task.sleep(for: .milliseconds(500))
@@ -116,26 +117,15 @@ final class PasteService {
             if let snapshot, let clipboardCount, pasteboard.changeCount == clipboardCount {
                 snapshot.restore(to: pasteboard)
             }
-            return .unavailable
+            return .unavailable(.appChanged)
         }
         copy(remainder)
         return .interrupted(remainder: remainder)
     }
 
     /// One step as key events of at most 20 UTF-16 units each: key down and up, no modifiers, tagged as ours.
-    private static func postUnicode(_ text: String) -> Bool {
-        let source = CGEventSource(stateID: .hidSystemState)
-        for chunk in TypewriterPlan.eventChunks(text) {
-            let units = Array(chunk.utf16)
-            for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { return false }
-                event.flags = []
-                event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-                event.setIntegerValueField(.eventSourceUserData, value: SyntheticEvent.userData)
-                event.post(tap: .cghidEventTap)
-            }
-        }
-        return true
+    static func postUnicode(_ text: String) -> Bool {
+        TypewriterPlan.eventChunks(text).allSatisfy { SyntheticKeys.type($0) }
     }
 
     // MARK: Keystroke
@@ -147,21 +137,13 @@ final class PasteService {
         return await ModifierWait.untilReleased(held: { !CGEventSource.flagsState(.hidSystemState).intersection(mask).isEmpty })
     }
 
-    private func postCommandV() {
-        let source = CGEventSource(stateID: .hidSystemState)
-        let keyV: CGKeyCode = 9 // kVK_ANSI_V
-        for down in [true, false] {
-            guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyV, keyDown: down) else { continue }
-            event.flags = .maskCommand
-            event.setIntegerValueField(.eventSourceUserData, value: SyntheticEvent.userData)
-            event.post(tap: .cghidEventTap)
-        }
-    }
+    /// ⌘V, paired (`SyntheticKeys.commandV`).
+    static func postCommandV() { SyntheticKeys.commandV() }
 
     // MARK: Snapshot
 
     /// Every item with every type it offers, read eagerly (promised data is forced now).
-    private struct Snapshot {
+    struct Snapshot {
         let items: [[NSPasteboard.PasteboardType: Data]]
 
         init(of pasteboard: NSPasteboard) {

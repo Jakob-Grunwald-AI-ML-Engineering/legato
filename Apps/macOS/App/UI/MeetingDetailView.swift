@@ -147,7 +147,7 @@ struct MeetingDetailView: View {
                     Banner(text: failure, symbol: "exclamationmark.triangle.fill", tint: .orange)
                     HStack {
                         Button("Try again") { controller.summarize(meeting.id) }
-                        Button("Open Settings") { NSApp.activate(); openSettings() }
+                        Button("Open Settings") { WindowPresenter.present(.settings) { openSettings() } }
                     }
                 }
             }

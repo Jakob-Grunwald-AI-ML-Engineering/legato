@@ -51,11 +51,22 @@ extension AutomaticInputHardware {
             AVAudioSession.sharedInstance().currentRoute.inputs.contains { $0.uid == candidate.id }
         }
         #else
-        platformInputs().contains { $0.id == candidate.id && $0.isUsable }
+        platformInputs().contains { $0.id == candidate.id && $0.isSelectable }
         #endif
     }, fallbackFromCombined: { reason in
         #if os(iOS)
         try AudioSessionController.fallbackFromCombinedCapture(reason: reason)
+        #endif
+    }, defaultInputID: {
+        #if os(macOS)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var device = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
+              device != 0 else { return nil }
+        return String(device)
+        #else
+        return nil
         #endif
     })
 
@@ -110,7 +121,7 @@ extension AutomaticInputHardware {
             let alive: UInt32 = scalar(device, kAudioDevicePropertyDeviceIsAlive) ?? 0
             let rate: Double = scalar(device, kAudioDevicePropertyNominalSampleRate) ?? 0
             return .init(id: String(device), name: name(device) ?? "Microphone", kind: kind,
-                available: alive != 0, channels: inputs, sampleRate: rate)
+                available: alive != 0, channels: inputs, sampleRate: rate, uid: string(device, kAudioDevicePropertyDeviceUID))
         }
         #endif
     }
@@ -124,8 +135,9 @@ extension AutomaticInputHardware {
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, storage) == noErr else { return nil }
         return storage.load(as: T.self)
     }
-    private static func name(_ device: AudioObjectID) -> String? {
-        var address = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal,
+    private static func name(_ device: AudioObjectID) -> String? { string(device, kAudioObjectPropertyName) }
+    private static func string(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var value: Unmanaged<CFString>?, size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }

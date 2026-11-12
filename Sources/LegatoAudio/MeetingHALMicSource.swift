@@ -127,9 +127,8 @@ private final class HALInputLease: MeetingHALInputLease, @unchecked Sendable {
             var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
             try Self.check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &native, &size), "read input format")
             guard native.mSampleRate.isFinite, native.mSampleRate > 0, native.mChannelsPerFrame > 0,
-                  let inputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: native.mSampleRate,
-                      channels: native.mChannelsPerFrame, interleaved: false),
-                  let converter = BufferConverter(from: inputFormat, to: format) else { throw MicSourceError.invalidInputFormat }
+                  let inputFormat = BufferConverter.deinterleavedFloat(sampleRate: native.mSampleRate, channels: native.mChannelsPerFrame),
+                  let converter = BufferConverter.forInput(inputFormat, to: format) else { throw MicSourceError.invalidInputFormat }
             var client = inputFormat.streamDescription.pointee
             try set(kAudioUnitProperty_StreamFormat, scope: kAudioUnitScope_Output, bus: 1, &client)
             try Self.check(AudioUnitInitialize(unit), "initialize")
