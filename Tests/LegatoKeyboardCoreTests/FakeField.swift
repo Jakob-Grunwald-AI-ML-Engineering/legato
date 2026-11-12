@@ -25,6 +25,10 @@ struct FakeField {
     /// After a tap, this many reports show the field's text as it was a few host turns ago (before the edits the keyboard
     /// confirmed last) with the caret where the user tapped: a stale report that reverts confirmed edits (UAT, Safari).
     var staleReportsAfterTap = 0
+    /// Safari after a switch to another field of the page (measured in the simulator, 2026-11-11): no callback, and the
+    /// proxy goes on showing the old field with the keyboard's own edits applied to it, while they land in the new one.
+    /// Only the host's answer to a move shows the field again.
+    var deadReckoned: (text: [Character], caret: Int)?
     private var truthLog: [[Character]] = []
     private var staleShow: (text: [Character], caret: Int, left: Int)?
     var nowMs = 0.0
@@ -94,7 +98,7 @@ struct FakeField {
 
     /// The report as the proxy shows it now: the field, with moves not applied yet already in it.
     var current: FieldQueue.Report {
-        let shown = proxy ?? (text, caret, selection)
+        let shown = deadReckoned.map { (text: $0.text, caret: $0.caret, selection: 0) } ?? proxy ?? (text, caret, selection)
         return Self.report(text: shown.text, caret: shown.caret, selection: shown.selection, window: window, blockEcho: blockEcho)
     }
 
@@ -108,6 +112,8 @@ struct FakeField {
         let due = pending.filter { $0.at <= nowMs }.sorted { $0.at < $1.at }
         for item in due {
             pending.removeAll { $0.seq == item.seq }
+            // (A zero-offset move goes unanswered.)
+            if case .move(let n) = item.send.op, n != 0 { deadReckoned = nil }
             // An op sent earlier is still on its way: this one lands before it.
             if pending.contains(where: { $0.seq < item.seq }) {
                 reorders += 1
@@ -120,15 +126,38 @@ struct FakeField {
         if truthLog.count > 12 { truthLog.removeFirst() }
         if var stale = staleShow, stale.left > 0 {
             stale.left -= 1; staleShow = stale.left > 0 ? stale : nil
+            unseenOutside = false
             return Self.report(text: stale.text, caret: min(stale.caret, stale.text.count), selection: 0, window: window, blockEcho: blockEcho)
         }
-        history.append(current)
-        if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1) }
+        history.append(current); historyGen.append(outsideGen)
+        if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1); historyGen.removeFirst(historyGen.count - lagTicks - 1) }
+        if stuck == nil, historyGen.first == outsideGen { unseenOutside = false }
         return stuck ?? history.first!
     }
+    private var historyGen: [Int] = []
+    /// Outside actions so far, and whether the last one has not shown in a report yet (lag).
+    private var outsideGen = 0
+    private var unseenOutside = false
 
     /// The keyboard sends an op.
     mutating func send(_ send: Send) {
+        // Sent before any report showed the user's last outside action: it lands where the user put the caret.
+        if unseenOutside { raced = true }
+        if var view = deadReckoned {
+            switch send.op {
+            case .move(let n):
+                if n != 0, !hostDelays { deadReckoned = nil }
+                if n != 0, hostDelays {
+                    // The proxy moves its own view at once (the host's answer replaces it when the move lands).
+                    view.caret = max(0, min(view.text.count, view.caret + n)); deadReckoned = view
+                }
+            case .insert(let string):
+                view.text.insert(contentsOf: Array(string), at: view.caret); view.caret += string.count; deadReckoned = view
+            case .deleteBackward(let count):
+                let n = min(count, view.caret)
+                view.text.removeSubrange((view.caret - n)..<view.caret); view.caret -= n; deadReckoned = view
+            }
+        }
         guard hostDelays else { carryOut(send); return }
         defer {
             var view = self
@@ -238,7 +267,28 @@ struct FakeField {
     /// Another keyboard (a hardware keyboard) types: invisible to the queue except through reports.
     mutating func typeOutside(_ string: String) { outsideNow(); carryOut(Send(op: .insert(string), writer: .outside)) }
     /// Ops already on their way when the user acts outside the keyboard race with it (as on a real host).
-    private mutating func outsideNow() { for i in pending.indices { pending[i].send.racing = true }; proxy = nil }
+    private mutating func outsideNow() {
+        if !pending.isEmpty { raced = true }
+        outsideGen += 1; unseenOutside = true
+        for i in pending.indices { pending[i].send.racing = true }; proxy = nil; deadReckoned = nil
+    }
+    /// The user acted (a tap, a selection, another keyboard) while ops of the keyboard's were on their way: they land
+    /// where the user put the caret, which no keyboard can know until a report shows it.
+    private(set) var raced = false
+
+    /// Ops still on their way land now (the user is leaving: what was sent before goes to this field).
+    mutating func landPending() {
+        for item in pending.sorted(by: { $0.at < $1.at }) { carryOut(item.send) }
+        pending = []
+        proxy = nil
+    }
+
+    /// The text and caret the proxy shows now (what a field the user switches to unseen goes on showing).
+    var shownState: (text: [Character], caret: Int) {
+        if let deadReckoned { return deadReckoned }
+        let shown = proxy ?? (text, caret, selection)
+        return (shown.text, shown.caret)
+    }
 }
 
 /// The keyboard's loop in miniature: steps the queue against a `FakeField` every `tickMs`.
@@ -257,6 +307,22 @@ struct QueueRig {
     /// The user moved to another field (the queue is not told): ops on their way race with it, but the user's caret is
     /// known, where they tapped, so the queue's choice does not become the expectation.
     mutating func fieldSwitched() { outsideAtMs = clockMs; switchedAtMs = clockMs }
+
+    /// The user moves to another field and Safari says nothing (`FakeField.deadReckoned`): the new field's reports show
+    /// the old one until the host answers a move. What was on its way lands in the old field. Returns the old field.
+    @discardableResult
+    mutating func silentSwitch(to text: String, caret: Int? = nil) -> FakeField {
+        let shown = field.shownState
+        field.landPending()
+        let old = field
+        var new = FakeField(text, caret: caret)
+        new.hostDelays = old.hostDelays; new.window = old.window; new.blockEcho = old.blockEcho; new.lagTicks = old.lagTicks
+        new.movesByCharacters = old.movesByCharacters; new.staleReportsAfterTap = old.staleReportsAfterTap; new.nowMs = clockMs
+        new.deadReckoned = shown
+        field = new
+        fieldSwitched()
+        return old
+    }
     private var switchedAtMs = -1_000_000.0
     private var switching: Bool { clockMs - switchedAtMs < FieldQueue.confirmLimitMs + 200 }
     /// An op sent now races with an outside action: the queue has not resynced since, or it was a moment ago (an

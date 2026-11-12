@@ -85,11 +85,15 @@ import Testing
             if Self.environment["LEGATO_STRESS_PROGRESS"] == "1" { print("stress seed \(seed)") }
             var session = StressSession(seed: seed, fieldSwitches: Self.environment["LEGATO_STRESS_NO_SWITCH"] == nil)
             var list = ListSession(seed: seed)
+            var backlog = BacklogSession(seed: seed)
             let lists = Self.environment["LEGATO_STRESS_NO_LIST"] == nil
-            if let failure = session.run() ?? (lists ? list.run().map({ "list session: \($0)" }) : nil) {
+            let backlogs = Self.environment["LEGATO_STRESS_NO_BACKLOG"] == nil
+            let main = Self.environment["LEGATO_STRESS_ONLY_BACKLOG"] == nil
+            if let failure = (main ? session.run() : nil) ?? (lists && main ? list.run().map({ "list session: \($0)" }) : nil)
+                ?? (backlogs ? backlog.run().map({ "backlog session: \($0)" }) : nil) {
                 Issue.record("seed \(seed) (replay: LEGATO_STRESS_SEED=\(seed)): \(failure)")
                 failures += 1
-                if failures >= 5 { break }
+                if failures >= (Self.environment["LEGATO_STRESS_MAX_FAILURES"].flatMap(Int.init) ?? 5) { break }
             }
         }
     }
@@ -217,6 +221,165 @@ struct ListSession {
     }
 }
 
+/// A take's backlog (spoken, not typed yet: a whole take, or speech running ahead of the typewriter) while the user presses
+/// keys, taps anywhere in the field and moves to another field, reported or not (Safari: `silentSwitch`), at any moment
+/// (#268). The keys land once at the caret; the keyboard deletes only its own text; the take's words are all typed, in
+/// order: in its own text in the field it typed into, and after a switch the rest in the new field (none away from the
+/// caret there). After a switch the take's cleanup lands in neither field; a later take goes to the field the user is in.
+struct BacklogSession {
+    private var rng: SeededGenerator
+    init(seed: UInt64) { rng = SeededGenerator(seed: seed ^ 0xBAC106) }
+
+    private mutating func chance(_ p: Double) -> Bool { Double.random(in: 0..<1, using: &rng) < p }
+    private mutating func pick<T>(_ items: [T]) -> T { items[Int.random(in: 0..<items.count, using: &rng)] }
+
+    /// The take's words and a later take's, apart, so the fields show whose text is whose.
+    private static let takeWords = ["water", "plants", "balcony", "parcel", "office", "before", "closes", "renew", "passport", "council"]
+    private static let laterWords = ["oat", "milk", "bananas", "plumber", "tomorrow"]
+
+    /// The live run's characters in a field, in order (the keyboard's dictation, whoever's keys stand between).
+    private static func live(_ field: FakeField) -> String {
+        String(zip(field.text, field.origin).filter { $0.1 == .live }.map(\.0))
+    }
+
+    private static func words(_ text: String) -> [String] {
+        text.lowercased().split { !$0.isLetter }.map(String.init)
+    }
+
+    mutating func run() -> String? {
+        let initial = pick(["", "- ", "Notes:\n- ", "Dear Anna, "])
+        var field = FakeField(initial)
+        field.hostDelays = chance(0.7)
+        field.lagTicks = chance(0.2) ? Int.random(in: 1...2, using: &rng) : 0
+        field.window = Int.random(in: 20...80, using: &rng)
+        field.blockEcho = chance(0.2)
+        var rig = QueueRig(field, config: .init(animated: true))
+        let words = (0..<Int.random(in: 6...14, using: &rng)).map { _ in pick(Self.takeWords) }
+        let take = words.joined(separator: " ")
+        let speaking = chance(0.4)
+        var heard = 0
+        if !speaking { rig.queue.enqueue(snap(1, take, run: "a", complete: true)) }
+        var keys: [String] = []
+        var old: FakeField?
+        var tappedUnseen = false
+        var switchedAtEvent: Int?
+        var switchRaced = false
+        // Speech runs ahead of the typewriter: every word is heard before the user acts (words heard after a key follow
+        // the caret, the main session's ground).
+        while speaking, heard < words.count {
+            heard += 1
+            rig.queue.enqueue(snap(heard, words[..<heard].joined(separator: " "), run: "a", complete: heard == words.count))
+            rig.run(ms: Double.random(in: 20...120, using: &rng))
+        }
+        let switchAt = chance(0.5) ? Int.random(in: 0...60, using: &rng) : nil
+        let silent = chance(0.7)
+        for tick in 0..<Int.random(in: 30...120, using: &rng) {
+            if tick == switchAt {
+                let text = pick(["", "Subject: ", "Hello there"])
+                let caret = chance(0.7) ? text.count : Int.random(in: 0...text.count, using: &rng)
+                if rig.trace { print("        SWITCH", silent ? "silent" : "reported", "to", text.debugDescription, "caret", caret) }
+                switchedAtEvent = rig.events.count
+                // An op of the keyboard's on its way as the user leaves lands in the old field, but the report that confirms
+                // it can come from the new one (Safari's proxy goes on showing the old field): the next move may land in
+                // the new field and take the caret along. So can the rest of a jump unit under way (its delete, its way
+                // back), sent blind. No keyboard can tell.
+                if silent, rig.queue.hasOpInFlight || !rig.field.settled || rig.queue.isInUnit { switchRaced = true }
+                if silent { old = rig.silentSwitch(to: text, caret: caret) } else {
+                    rig.field.landPending()
+                    old = rig.field
+                    var new = FakeField(text, caret: caret)
+                    new.hostDelays = rig.field.hostDelays; new.window = rig.field.window; new.blockEcho = rig.field.blockEcho
+                    new.lagTicks = rig.field.lagTicks; new.nowMs = rig.clockMs
+                    rig.field = new; rig.fieldSwitched()
+                }
+            }
+            if chance(0.06) { let key = pick(["\n", "-", " ", ",", "k"]); keys.append(key); rig.queue.enqueue(.insert(key)) }
+            if chance(0.02) {
+                // (Before any report showed a field the user moved to unseen, the keyboard's text that went there is where
+                // the caret was; no keyboard can tell where that is once the user taps elsewhere.)
+                if silent, let from = switchedAtEvent, !rig.events[from...].contains(where: { $0.event == .resync(.reseeded) }) { tappedUnseen = true }
+                // (A tap while a move of the keyboard's waits for its report: which of the two the report shows is
+                // unknowable.)
+                if rig.queue.hasOpInFlight, case .move? = rig.sent.last?.op { tappedUnseen = true }
+                rig.field.tap(at: Int.random(in: 0...rig.field.text.count, using: &rng)); rig.outsidePending = true
+            }
+            rig.tick()
+        }
+        guard rig.drain(limitMs: 60_000) else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
+        let cleanup = chance(0.6)
+        if cleanup {
+            let cleaned = take.prefix(1).uppercased() + take.dropFirst() + "."
+            rig.queue.enqueue(LiveDictationSnapshot(runID: "a", version: 100, segments: [.init(id: 0, text: cleaned, cleaned: true, final: true)], complete: true))
+            guard rig.drain(limitMs: 60_000) else { return "no stall after the cleanup (text \(rig.field.string.debugDescription))" }
+        }
+        let later = (0..<3).map { _ in pick(Self.laterWords) }
+        rig.queue.enqueue(snap(1, later.joined(separator: " "), run: "b", complete: true))
+        guard rig.drain(limitMs: 60_000) else { return "no stall after the later take (text \(rig.field.string.debugDescription))" }
+
+        let fields = (old.map { [$0] } ?? []) + [rig.field]
+        if fields.contains(where: { $0.reorders > 0 || $0.staleTriggers > 0 }) { return "host timing traps (reorders or stale reports)" }
+        var open = false
+        for (ms, event) in rig.events {
+            switch event {
+            case .sent: if open { return "two ops in flight at \(Int(ms)) ms" }; open = true
+            case .confirmed, .resync: open = false
+            default: break
+            }
+        }
+        // (Unless the user acted while the keyboard's ops were on their way: they landed where the user put the caret.)
+        let raced = fields.contains(where: \.raced) || tappedUnseen || switchRaced
+        // Every key went out exactly once, at the user's caret.
+        let userInserts = rig.events.compactMap { e -> String? in if case .sent(.insert(let s), .user) = e.event { s } else { nil } }
+        if userInserts.count != keys.count, !switchRaced { return "keys sent \(userInserts.count) of \(keys.count)" }
+        for (sent, key) in zip(userInserts, keys) where !sent.hasSuffix(key) { return "key \(key.debugDescription) went out as \(sent.debugDescription)" }
+        for (i, field) in fields.enumerated() {
+            if let miss = field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }), !(raced && i > 0) {
+                return "a key landed at \(miss.caret), the user's caret was at \(miss.userCaret) (text \(field.string.debugDescription), field \(i), raced \(raced), lag \(field.lagTicks), delays \(field.hostDelays))"
+            }
+            if let bad = field.deletions.first(where: { $0.by == .live && $0.origin != .live && !$0.racing }) {
+                return "the keyboard deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue) (text \(field.string.debugDescription))"
+            }
+        }
+        if let old, !raced, rig.field.liveInserts.contains(where: { !$0.atUserCaret && !$0.touchesOwn && !$0.racing }) {
+            return "the keyboard typed into the new field away from the caret (text \(rig.field.string.debugDescription), old \(old.string.debugDescription))"
+        }
+        // The take's words, all of them, in order: in its field, then (after a switch) the rest in the new field.
+        // Letters only: the later take starts at the user's caret, which may stand inside one of the take's words (with a
+        // space before and after it), and a switch can cut a word between the fields.
+        let laterLetters = later.joined().lowercased()
+        var takeLive = fields.map { Self.live($0) }.joined().lowercased().filter(\.isLetter)
+        if let range = takeLive.range(of: laterLetters) { takeLive.removeSubrange(range) }
+        let typed = takeLive, expected = words.joined()
+        let state = "(text \(rig.field.string.debugDescription)\(old.map { ", old \($0.string.debugDescription)" } ?? ""))"
+        // A word the user typed into is theirs: the rest of it, not typed yet, is dropped (`FieldMerge`).
+        let typedIntoWord = fields.contains { f in
+            f.text.indices.dropFirst().dropLast().contains { i in
+                f.origin[i] == .user && f.origin[i - 1] == .live && f.origin[i + 1] == .live && f.text[i - 1].isLetter && f.text[i + 1].isLetter
+            }
+        }
+        func inOrder(_ a: String, within b: String) -> Bool {
+            var rest = Substring(b)
+            for c in a { guard let i = rest.firstIndex(of: c) else { return false }; rest = rest[rest.index(after: i)...] }
+            return true
+        }
+        // A report the queue could not place (another field, or too little text to find a tap in: `FieldMatch`) starts the
+        // model over: the rest of the take goes on at the caret. Every letter is still typed, once.
+        let lostTrack = rig.events.contains { $0.event == .resync(.reseeded) }
+        if lostTrack, !typedIntoWord, !raced, typed.sorted() != expected.sorted() {
+            return "the take's letters are \(typed.debugDescription), expected those of \(expected.debugDescription) \(state)"
+        }
+        if !lostTrack, typedIntoWord ? !inOrder(typed, within: expected) : typed != expected, !raced { return "the take reads \(typed.debugDescription), expected \(expected.debugDescription) \(state)" }
+        // (That the take's cleanup is dropped after a switch is `FieldQueueBacklogTests`': here the new field can hold the
+        // take's own words, typed there unseen, which the model then finds again as the take's.)
+        // The later take is in the field the user is in, whole.
+        if !Self.live(rig.field).lowercased().filter(\.isLetter).contains(later.joined()) {
+            return "the later take \(later) is not whole in the field the user is in \(state)"
+        }
+        if old == nil, !raced, rig.drops.contains(where: { $0.reason == .unplaceable }) { return "dropped to History without a switch \(state)" }
+        return nil
+    }
+}
+
 /// SplitMix64: a small, stable generator, so a seed replays the same session on every platform.
 struct SeededGenerator: RandomNumberGenerator {
     var state: UInt64
@@ -243,6 +406,8 @@ struct StressSession {
     private let fieldSwitches: Bool
     /// Fields the user left (Safari gives every field of a page one identity: the queue is not told).
     private var retired: [FakeField] = []
+    /// A switch came while a move of the keyboard's was on its way.
+    private var movedAtSwitch = false
 
     /// `lateCleanups`, `fieldSwitches`: off for the pinned seeds, which replay their sessions as they were when they failed.
     init(seed: UInt64, lateCleanups: Bool = true, fieldSwitches: Bool = true) {
@@ -284,6 +449,7 @@ struct StressSession {
         field.staleReportsAfterTap = old.staleReportsAfterTap; field.nowMs = rig.clockMs
         if rig.trace { print("        SWITCH to", String(text).debugDescription, "caret", caret) }
         retired.append(old)
+        if rig.queue.hasOpInFlight, case .move? = rig.sent.last?.op { movedAtSwitch = true }
         rig.field = field
         rig.fieldSwitched()
     }
@@ -441,8 +607,11 @@ struct StressSession {
         }
         if userInserts.count != keys.count { return "keys sent \(userInserts.count) of \(keys.count)" }
         for (sent, key) in zip(userInserts, keys) where !sent.hasSuffix(key) { return "key \(key.debugDescription) went out as \(sent.debugDescription)" }
-        for field in fields {
-            if let miss = field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }), !field.clobberedSelection {
+        for (i, field) in fields.enumerated() {
+            // (A switch while a move of the keyboard's was on its way: it landed in the old field or the new one, and the
+            // caret with it. No keyboard can tell which.)
+            if let miss = field.userInserts.first(where: { $0.caret != $0.userCaret && !$0.racing }), !field.clobberedSelection,
+               !(i > 0 && movedAtSwitch) {
                 return "a key landed at \(miss.caret), the user's caret was at \(miss.userCaret)"
             }
         }
