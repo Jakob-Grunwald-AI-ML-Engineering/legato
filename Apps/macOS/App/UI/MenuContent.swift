@@ -25,9 +25,9 @@ struct MenuContent: View {
                     .controlSize(.large)
                     .menuAction("menu.meeting") { controller.toggleMeeting() }
                     .disabled(controller.meetings.phase == .starting || controller.meetings.phase == .stopping)
-                Button("Meetings…") { showMeetings() }
+                Button("Meetings…") { NSApp.activate(); openWindow(id: MeetingController.windowID) }
                     .controlSize(.large)
-                    .menuAction("menu.meetings") { showMeetings() }
+                    .menuAction("menu.meetings") { NSApp.activate(); openWindow(id: MeetingController.windowID) }
             }
             Label("Magic \(controller.settings.hotkey?.displayName ?? "not set")", systemImage: "command")
                 .font(.caption).foregroundStyle(.secondary)
@@ -40,8 +40,8 @@ struct MenuContent: View {
             })
             Divider()
             HStack {
-                Button("Settings…") { showSettings() }
-                    .menuAction("menu.settings") { showSettings() }
+                Button("Settings…") { NSApp.activate(); openSettings() }
+                    .menuAction("menu.settings") { NSApp.activate(); openSettings() }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
                     .menuAction("menu.quit") { NSApplication.shared.terminate(nil) }
@@ -50,9 +50,6 @@ struct MenuContent: View {
             // Reloads on open and whenever the composer or backfill stores a new revision.
             .task(id: controller.dictation.instruction.historyRevision + controller.dictation.pipeline.historyRevision) { await controller.refreshRecent() }
     }
-
-    private func showMeetings() { WindowPresenter.present(.window(id: MeetingController.windowID)) { openWindow(id: MeetingController.windowID) } }
-    private func showSettings() { WindowPresenter.present(.settings) { openSettings() } }
 }
 
 private extension View {

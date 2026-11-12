@@ -18,7 +18,7 @@ enum CalendarAccess {
 
     /// Asks for full access (the system dialog). A menu-bar app has to come forward first or the dialog stays hidden.
     @MainActor static func request() async {
-        WindowPresenter.forceActivate()
+        NSApp.activate()
         _ = try? await EKEventStore().requestFullAccessToEvents()
     }
 
