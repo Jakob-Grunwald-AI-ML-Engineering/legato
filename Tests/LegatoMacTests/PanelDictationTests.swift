@@ -159,6 +159,9 @@ import Testing
         // A revision changed typed words: they stand for as many words of the newest text.
         #expect(MacFieldQueue.typedPrefix(current: Array("sail north"), desired: Array("sail wind harbor")) == 9)
         #expect(MacFieldQueue.typedPrefix(current: Array("sail nor"), desired: Array("sail north")) == 8)
+        // Cleanup capitalized typed words; the last one was typed part-way.
+        #expect(MacFieldQueue.typedPrefix(current: Array("wind harbor ha"), desired: Array("Wind harbor harbor.")) == 14)
+        #expect(MacFieldQueue.typedPrefix(current: Array("anchor harbor win"), desired: Array("tide harbor wind")) == 15)
         let region = MacFieldQueue.TypedRegion(current: Array(" deck t"), desired: Array(" deck tide"), source: Array("deck tide"),
                                                separator: [" "], original: [])
         #expect(MacFieldQueue.typedCount([region]) == 6)

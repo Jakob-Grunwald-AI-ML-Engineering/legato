@@ -1794,14 +1794,21 @@ public final class MacFieldQueue {
         var common = 0
         while common < current.count, common < desired.count, current[common] == desired[common] { common += 1 }
         if common == current.count { return common }
-        let words = current.split(whereSeparator: \.isWhitespace).count
+        let words = current.split(whereSeparator: \.isWhitespace)
         var index = 0, seen = 0
-        while index < desired.count, seen < words {
+        while index < desired.count, seen < words.count {
             while index < desired.count, desired[index].isWhitespace { index += 1 }
             guard index < desired.count else { break }
             seen += 1
+            let start = index
             while index < desired.count, !desired[index].isWhitespace { index += 1 }
+            // A word typed part-way that the newest one goes on from (a capital or a stop added) stands for its start.
+            if seen == words.count, let last = words.last, current.last?.isWhitespace == false,
+               String(desired[start..<index]).lowercased().hasPrefix(String(last).lowercased()) {
+                return start + last.count
+            }
         }
+        if current.last?.isWhitespace == true, index < desired.count, desired[index].isWhitespace { index += 1 }
         return index
     }
 
