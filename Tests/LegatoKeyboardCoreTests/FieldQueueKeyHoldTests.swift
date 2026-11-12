@@ -219,16 +219,15 @@ import Testing
     }
 }
 
-/// The Mac's rhythm (`KeystrokePlanner.paceMs` on macOS), bounded below by Safari's confirmation.
+/// The 5 ms trial's cosmetic rhythm; queue safety checks separately cover host confirmation.
 @Suite struct TypingRhythmTests {
-    @Test func theCurveIsTheMacs() {
-        // The Mac's values: calm 30 ms for a short change, its 5 ms floor once 14 or more wait, the budget between.
-        #expect(SpanPlanner.macPaceMs(ops: 0) == 30)
-        #expect(SpanPlanner.macPaceMs(ops: 5) == 30)
-        #expect(SpanPlanner.macPaceMs(ops: 13) == 30)
-        #expect(SpanPlanner.macPaceMs(ops: 14) == 5)
-        #expect(SpanPlanner.macPaceMs(ops: 10, fixedMs: 600) == 10)
-        #expect(SpanPlanner.macPaceMs(ops: 10, fixedMs: 690) == 5)
+    @Test func theTrialUsesFiveMillisecondsForEveryBacklog() {
+        for ops in [0, 5, 13, 14, 100] {
+            for fixed in [0.0, 600, 690] {
+                #expect(SpanPlanner.macPaceMs(ops: ops, fixedMs: fixed) == 5)
+                #expect(SpanPlanner.paceMs(ops: ops, fixedMs: fixed) == 5)
+            }
+        }
     }
 
     @Test func iOSNeverGoesFasterThanTheConfirmation() {
@@ -243,11 +242,13 @@ import Testing
 
     @Test func noPauseBetweenWords() {
         var rig = QueueRig(FakeField(""), config: .init(animated: true))
+        // An immediate host and a fine clock isolate pacing from proxy latency and timer quantization.
+        rig.tickMs = 1
         rig.queue.enqueue(snap(1, "ab cd"))
         do { let drained = rig.drain(); #expect(drained) }
         let inserts = rig.sent.compactMap { if case .insert(let s) = $0.op { ($0.ms, s) } else { nil } }
         #expect(inserts.map(\.1) == ["a", "b", " ", "c", "d"])
         let gaps = zip(inserts, inserts.dropFirst()).map { $1.0 - $0.0 }
-        #expect(gaps.allSatisfy { $0 < 2 * SpanPlanner.floorMs })
+        #expect(gaps == [5, 5, 5, 5], "spaces add no delay to the 5 ms character pace")
     }
 }
