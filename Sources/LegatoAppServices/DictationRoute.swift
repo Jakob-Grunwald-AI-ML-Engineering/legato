@@ -17,6 +17,9 @@ public struct DictationRouteLine: Sendable, Equatable {
 /// The keyboard session calls `reset` when it closes; a surface switch leaves delivered lines alone.
 @MainActor public protocol DictationRouteSink: AnyObject {
     func receive(_ line: DictationRouteLine) async
+    /// A take begins (the mic key opened the route): the speech from now on is a take of its own, never part of the
+    /// previous take. Every take that began is ended by `finishTake` (stop or abandon), unless the session resets.
+    func beginTake()
     func reset() async
     /// The dictation surface is about to be used: warm whatever cleaning needs (connection, prompt cache).
     func warm() async
@@ -34,6 +37,7 @@ public struct DictationRouteLine: Sendable, Equatable {
 }
 public extension DictationRouteSink {
     func warm() async {}
+    func beginTake() {}
     var backgroundText: String { "" }
     func speechActivity() {}
     func tailChanged(_ text: String) {}

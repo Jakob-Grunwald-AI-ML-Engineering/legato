@@ -682,12 +682,21 @@ final class KeyboardController {
     private func syncQueueField() {
         let id = document.documentID
         if id != queueDocumentID {
+            // A take still going that typed nothing yet goes to the field the user is in now, at its caret (as on the Mac).
+            var rebound: LiveDictationSnapshot?
             if queueDocumentID != nil {
-                if let snapshot = liveSnapshot, liveDocumentID != id { blockLiveRun(snapshot) }
+                if let snapshot = liveSnapshot, liveDocumentID != id {
+                    if !liveTypedRunIDs.contains(snapshot.runID), !snapshot.complete { rebound = snapshot } else { blockLiveRun(snapshot) }
+                }
                 resetQueue(reason: "field")
             }
             queueDocumentID = id
             journal.write(.init(t: Self.uptimeMs, kind: .field, field: id))
+            if let rebound {
+                liveDocumentID = id
+                trace?("live run rebound to the focused field")
+                enqueue(rebound)
+            }
         }
         queue.config.animated = !UIAccessibility.isReduceMotionEnabled
         queue.config.movesByCharacters = charactersField != nil && charactersField == id
@@ -820,7 +829,8 @@ final class KeyboardController {
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
                 liveAckedVersion = version
                 writeLiveAck(version: version, complete: complete)
-            case .regionStarted(_, let anchor):
+            case .regionStarted(let runID, let anchor):
+                liveTypedRunIDs.insert(runID)
                 liveStats.lastStart = "anchor=\(anchor)"
                 writeLiveAck(version: nil, complete: false)
             case .regionClosed(_, let cause):
@@ -931,6 +941,8 @@ final class KeyboardController {
     @ObservationIgnored private var liveStats = LiveDictationStats()
     @ObservationIgnored private var liveAckedVersion: Int?
     @ObservationIgnored private var blockedLiveRunID: String?
+    /// Runs that began typing into a field: such a run never follows the user into another field.
+    @ObservationIgnored private var liveTypedRunIDs: Set<String> = []
     @ObservationIgnored private var blockedLiveCompleted = false
     @ObservationIgnored private var liveRecoveryDismissed = false
     /// A live run is being typed (the word row says "Listening…" instead of the words).
@@ -966,9 +978,11 @@ final class KeyboardController {
         }
         liveSnapshot = snapshot
         setLiveRunning(!snapshot.complete)
-        guard document.documentID == liveDocumentID else {
-            // A late final or cleanup belongs to the field the take started in: it is recovered from History.
-            return blockLiveRun(snapshot)
+        if document.documentID != liveDocumentID {
+            // A late final or cleanup belongs to the field the take started in: it is recovered from History. A take
+            // still going that typed nothing yet goes to the field the user is in now.
+            guard !liveTypedRunIDs.contains(snapshot.runID), !snapshot.complete else { return blockLiveRun(snapshot) }
+            liveDocumentID = document.documentID
         }
         guard isVisible, !document.isSecureTextEntry else { return }
         enqueue(snapshot)
@@ -1011,7 +1025,9 @@ final class KeyboardController {
 
     private func writeLiveAck(version: Int?, complete: Bool) {
         guard let runID = liveSnapshot?.runID else { return }
-        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats))
+        // Where the user split the run (a line typed between its words): the app cleans the pieces apart.
+        let pieces = queue.pieceStarts(of: runID)
+        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats, pieces: pieces.isEmpty ? nil : pieces))
     }
 
     private static func milliseconds(_ duration: Duration) -> Double {

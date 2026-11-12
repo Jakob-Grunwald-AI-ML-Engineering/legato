@@ -23,6 +23,10 @@ import Foundation
 ///   short by a key is finished first); later raw words start a new region at the user's cursor. Revisions and
 ///   cleanups of the run's text land in its regions as jump units (text added at the take's end goes to its last
 ///   region); in a region the user edited, only the changes that touch the user's words are dropped (`FieldMerge`).
+///   Regions split by the user are pieces: a joint a cleanup changes between them belongs to neither (`pieceStarts`
+///   tells the app, which cleans the pieces apart). A segment never seen is new speech, also after the take ended.
+/// - Field switches look like taps (Safari gives a page's fields one identity): a jump counts only when a report pins
+///   it, and one that went nowhere or stopped short drops its work once and reseeds the model (`Resync.jumpFailed`).
 /// - Instruction edits carry the read they came from (`markRead`): their scope is found through every change since,
 ///   and only the user's changes in it cancel them.
 public struct FieldQueue: Sendable {
@@ -104,6 +108,9 @@ public struct FieldQueue: Sendable {
         /// A fresh report kept showing an older state: the host lost what followed. The model goes back to it and the
         /// lost edits are made again (the user's lost keys go once more).
         case reverted
+        /// A jump of the keyboard's own went nowhere (the report kept showing the caret where it was): the text it was
+        /// for is not in this field. Its work drops and the model starts over from the report (`reseeded` follows).
+        case jumpFailed
     }
     public enum CloseCause: String, Sendable, Codable { case keystroke, cursor, resync, selection, newRun, edit }
 
@@ -147,25 +154,28 @@ public struct FieldQueue: Sendable {
 
     /// How long an op may go unconfirmed before the queue resyncs.
     public static let confirmLimitMs = 600.0
-    /// How long user input waits behind the op in flight.
-    public static let userBoundMs = 150.0
+    /// How long user input waits behind the op in flight: by then the host has applied it (`transitMs`).
+    public static let userBoundMs = transitMs
     /// A new region starts only once the report held still this long.
     public static let stableMs = 150.0
     /// The closest two typed graphemes (or two deletes) follow each other: the field's confirmation floor.
     public static let charMs = SpanPlanner.floorMs
-    /// Measured on Safari (no field puts its caret back after a move): the proxy reports a move at once, before the
-    /// host applied it (25–50 ms later), so a move is confirmed only by a report at least `moveSettleMs` after it. An
-    /// edit the proxy has not reported after `nudgeAfterMs` gets a zero-offset move (its report can stay stale until a
-    /// move).
-    public static let moveSettleMs = 60.0
+    /// Safari as measured (no field puts its caret back after a move): the proxy reports a move at once, but the host
+    /// applies it 25–50 ms later, and an edit no sooner than 5 ms after it is sent. A move is confirmed only by a report
+    /// at least `moveSettleMs` after it, so the edit that follows cannot land before it. An edit the proxy has not
+    /// reported after `nudgeAfterMs` gets a zero-offset move (its report can stay stale until a move).
+    public static let moveSettleMs = 45.0
     public static let nudgeAfterMs = 250.0
-    /// An op whose result the report cannot tell from the state before it (a delete with nothing known before the
-    /// cursor, a collapsing move) is taken as landed only after the host's longest measured transit.
-    public static let transitMs = 150.0
-    /// The proxy shows an insert or delete at once too, before the host applied it (up to about 110 ms later; in UAT a
-    /// move sent 70 ms after an insert landed before it, and the insert was lost). An op of another kind follows an
-    /// edit only this long after it; edits of one kind follow each other at the pace (they land in order).
-    public static let editSettleMs = 115.0
+    /// The host applies an insert or delete up to about 110 ms after it was sent (in UAT a move sent 70 ms after an
+    /// insert landed before it, and the insert was lost). An op that never confirmed, or one whose result the report
+    /// cannot tell from the state before it (a delete with nothing known before the cursor, a collapsing move), is
+    /// taken as landed only after this transit.
+    public static let transitMs = 115.0
+    /// An edit of another kind follows an edit only this long after it (it lands no sooner than 5 ms after it is sent);
+    /// edits of one kind follow each other at the pace (they land in order).
+    public static let editSettleMs = 110.0
+    /// A move follows an edit only this long after it (a move lands no sooner than 25 ms after it is sent).
+    public static let editMoveSettleMs = 90.0
     /// Confirmed states kept to recognise a late report of one of them (lag), and how long.
     static let historyCount = 24
     static let historyMs = 3_000.0
@@ -297,19 +307,35 @@ public struct FieldQueue: Sendable {
         var abandoned = false
         /// The text the region last held as the run wanted it: a user edit with no newer revision drops nothing.
         var landed: [Character] = []
+        /// A revision the region could not take was reported: it drops once, not once per version.
+        var dropped = false
     }
     struct LiveRun: Sendable, Equatable {
         var runID: String
         var version: Int?
         var complete = false
         var pending: LiveDictationSnapshot?
+        /// Snapshots that bring new speech (a segment past every one seen) are never coalesced away: a later cleanup
+        /// that joins those words with earlier ones could not tell them apart. They go in before `pending`, in order.
+        var held: [LiveDictationSnapshot] = []
+        /// Each segment's text as last applied (a unit's later segments empty): what a cleanup joining unseen speech
+        /// falls back to (`unjoinUnseen`).
+        var segmentTexts: [Int: String] = [:]
+        /// Where each segment's text starts in `target` (`pieceStarts`).
+        var segmentStarts: [Int: Int] = [:]
         var target: [Character] = []
         var regions: [Region] = []
         var ackedVersion: Int?
         /// The highest segment id seen so far: a cleaned segment up to it is a rewrite of known words, not new speech.
         var lastSegmentID = -1
+        /// Every segment is cleaned: no later cleanup is coming.
+        var cleaned = false
     }
     private(set) var runs: [LiveRun] = []
+    /// Finished runs kept for a cleanup still to come (the newest run aside).
+    static let keptRuns = 4
+    /// Runs no longer kept: a late version of one is ignored (it is in History), never typed at the caret.
+    private var retiredRunIDs: [String] = []
 
     /// A read of the field for an instruction (`markRead`): the model then, and every change since, so the edit that
     /// comes back finds its scope through them and tells the keyboard's own changes from the user's.
@@ -365,7 +391,9 @@ public struct FieldQueue: Sendable {
                 case .insert, .insertBehind: kind = .insert
                 case .setUserCursorToCursor, .startRegion: continue
                 }
-                if let previous, previous != kind { fixedMs += previous == .move ? FieldQueue.moveSettleMs : FieldQueue.editSettleMs }
+                if let previous, previous != kind {
+                    fixedMs += previous == .move ? FieldQueue.moveSettleMs : kind == .move ? FieldQueue.editMoveSettleMs : FieldQueue.editSettleMs
+                }
                 if kind == .insert { inserts += 1 }
                 previous = kind
             }
@@ -394,6 +422,8 @@ public struct FieldQueue: Sendable {
         /// the old state for a while) before the older state is believed.
         var staleCheck = false
         var lastReport: Report?
+        /// A jump of the keyboard's own to this span (a region's or an edit's).
+        var jumpSpan: Int?
     }
     private var inFlight: InFlight?
     private var sinceSendMs = 1_000.0
@@ -442,7 +472,7 @@ public struct FieldQueue: Sendable {
     }
     public var hasOpInFlight: Bool { inFlight != nil }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
-    public var isHome: Bool { inFlight == nil && cursor == userCursor && sinceSendMs >= Self.editSettleMs }
+    public var isHome: Bool { inFlight == nil && cursor == userCursor && sinceSendMs >= Self.transitMs }
     public var isInUnit: Bool { unit != nil }
     public var modelText: String { String(text) }
     /// The text before the user's cursor once pending at-cursor edits landed: what typed lines and host text plan against.
@@ -503,9 +533,14 @@ public struct FieldQueue: Sendable {
     public mutating func enqueue(_ snapshot: LiveDictationSnapshot) {
         if let index = runs.firstIndex(where: { $0.runID == snapshot.runID }) {
             if let latest = runs[index].pending?.version ?? runs[index].version, snapshot.version <= latest, snapshot.complete == runs[index].complete { return }
+            if let pending = runs[index].pending {
+                let seen = ([runs[index].lastSegmentID] + runs[index].held.flatMap { $0.segments.map(\.id) }).max() ?? -1
+                if (pending.segments.map(\.id).max() ?? -1) > seen { runs[index].held.append(pending) }
+            }
             runs[index].pending = snapshot
             return
         }
+        guard !retiredRunIDs.contains(snapshot.runID) else { return }
         closeOpenRegions(.newRun)
         var run = LiveRun(runID: snapshot.runID)
         run.pending = snapshot
@@ -518,6 +553,7 @@ public struct FieldQueue: Sendable {
         if case .region(let r)? = unit?.owner, r == runID { unit = nil }
         dropRun(at: index, reason: .reset)
         runs.remove(at: index)
+        retiredRunIDs.append(runID)
     }
 
     /// The field is read now for an instruction (the queue home): an edit carrying `id` as its `readID` is placed
@@ -630,7 +666,12 @@ public struct FieldQueue: Sendable {
                     events.append(.nudged)
                     return .send(.move(0))
                 }
-                if !userLane.isEmpty, flight.waitedMs >= Self.userBoundMs, pinsPre {
+                if !userLane.isEmpty, flight.waitedMs >= Self.userBoundMs, pinsPre, let target = flight.jumpSpan, !consistent(report) {
+                    // A jump the report still shows at its start after the host's transit (the proxy shows a move at
+                    // once) went nowhere. Taken as landed, the way back would send the user's caret past where it is.
+                    inFlight = nil
+                    jumpFailed(to: target, flight: flight, report: report, caret: flight.pre.cursor)
+                } else if !userLane.isEmpty, flight.waitedMs >= Self.userBoundMs, pinsPre {
                     // The host lags: the op counts as landed so the user's input can go. Its state before stays a candidate
                     // older state: if the host lost it, a later report shows that state (and the op is made again).
                     inFlight = nil
@@ -682,6 +723,7 @@ public struct FieldQueue: Sendable {
         switch (last, op) {
         case (.insert, .insert), (.deleteBackward, .deleteBackward): return charMs
         case (.move, _): return 0 // a move counts only after its settle (`moveSettleMs`) anyway
+        case (_, .move): return editMoveSettleMs
         default: return editSettleMs
         }
     }
@@ -707,7 +749,7 @@ public struct FieldQueue: Sendable {
                 findLostUser()
             } else {
                 // Nothing starts at a cursor the queue does not know: the caret goes back the way it came, once.
-                lost.homed = true; userLost = lost
+                lost.homed = true; lost.from = cursor; userLost = lost
                 abortUnit()
                 return send(.move(lost.units), lane: .edit, anywhere: true) { _ in }
             }
@@ -739,8 +781,20 @@ public struct FieldQueue: Sendable {
             guard inFlight == nil, reportStableMs >= Self.quietMs, let report = lastReport, consistent(report) else { return .wait }
             quietAfterMove = false
         }
-        if unit != nil { return nextInUnit() }
+        // Nothing of the keyboard's own starts, and no jump goes out, on a model the field's report does not show at the
+        // caret (another field's report can fit it elsewhere): it waits, and a report that holds still so reseeds.
+        let shown = lastReport.map(consistent) ?? true
+        if let current = unit {
+            if !shown, let op = current.ops.first {
+                switch op {
+                case .moveInSpan, .moveToSpanEnd, .moveToUser: return .wait
+                default: break
+                }
+            }
+            return nextInUnit()
+        }
         if selection > 0 { return .idle }
+        guard shown else { return .wait }
         if let action = nextEdit() { return action }
         if let action = nextLive() { return action }
         return .idle
@@ -935,14 +989,34 @@ public struct FieldQueue: Sendable {
             : SpanPlanner.spans(from: current, to: target, leaveTailAppend: leaveTailAppend, paceMs: paced ? SpanPlanner.calmMs : 0,
                                 moveSettleMs: Self.moveSettleMs, editSettleMs: Self.editSettleMs)
                 .map { $0.block ? [SpanPlanner.Hunk(start: $0.start, end: $0.end, text: $0.text)] : $0.hunks }
+        let base = spans[spanID]!.start
         for hunks in groups.reversed() {
             for hunk in hunks.reversed() {
+                if emptiesLine(base + hunk.start, base + hunk.end), !hunk.text.isEmpty {
+                    // Never an empty line mid-replacement: a rich editor puts a placeholder line break into a line that
+                    // becomes empty (and may drop the line's list or block). The line's last old grapheme stays until the
+                    // new text stands before it.
+                    ops.append(.moveInSpan(spanID, offset: hunk.end - 1))
+                    if hunk.end - 1 > hunk.start { ops.append(.delete(hunk.end - 1 - hunk.start, owner: spanID)) }
+                    ops += typed(hunk.text)
+                    ops.append(.moveInSpan(spanID, offset: hunk.start + hunk.text.count + 1))
+                    ops.append(.delete(1, owner: spanID))
+                    continue
+                }
                 ops.append(.moveInSpan(spanID, offset: hunk.end))
                 if hunk.end > hunk.start { ops.append(.delete(hunk.end - hunk.start, owner: spanID)) }
                 ops += typed(hunk.text)
             }
         }
         return ops
+    }
+
+    /// Deleting the model's `a..<b` leaves its line empty: a line break (or the known text's edge) on both sides, and a
+    /// real line break on at least one. A single-line field (or text the model knows no line break around) has no line
+    /// for a rich editor to fill, so a whole replacement there goes as one block.
+    private func emptiesLine(_ a: Int, _ b: Int) -> Bool {
+        let breakBefore = a > 0 && text[a - 1].isNewline, breakAfter = b < text.count && text[b].isNewline
+        return b > a && (a == 0 || breakBefore) && (b == text.count || breakAfter) && (breakBefore || breakAfter)
     }
 
     /// Typed graphemes still to come besides the unit's: the open region's append, and the queued edits' estimates.
@@ -980,13 +1054,13 @@ public struct FieldQueue: Sendable {
                 current.ops.removeFirst(); unit = current
                 guard let span = spans[id], !span.parked else { unit = nil; requeue(current.owner); return .wait }
                 let target = min(max(0, span.start + offset), text.count)
-                if target != cursor { return send(.move(units(to: target)), lane: lane(of: current.owner), moveTo: target) }
+                if target != cursor { return jump(to: target, span: id, lane: lane(of: current.owner)) }
             case .moveToUser:
                 current.ops.removeFirst(); unit = current
                 if userCursor != cursor { return send(.move(units(to: userCursor)), lane: lane(of: current.owner), moveTo: userCursor) }
             case .moveToSpanEnd(let id):
                 current.ops.removeFirst(); unit = current
-                if let end = spans[id]?.end, end != cursor { return send(.move(units(to: end)), lane: lane(of: current.owner), moveTo: end) }
+                if let end = spans[id]?.end, end != cursor { return jump(to: end, span: id, lane: lane(of: current.owner)) }
             case .setUserCursorToCursor:
                 current.ops.removeFirst(); unit = current
                 userCursor = cursor
@@ -1021,6 +1095,13 @@ public struct FieldQueue: Sendable {
             }
         }
         return next()
+    }
+
+    /// A move to a span's place: if it goes nowhere, the span is not in this field (`jumpFailed`).
+    private mutating func jump(to target: Int, span id: Int, lane: Lane) -> Action {
+        let action = send(.move(units(to: target)), lane: lane, moveTo: target)
+        inFlight?.jumpSpan = id
+        return action
     }
 
     private func lane(of owner: UnitOwner) -> Lane {
@@ -1076,7 +1157,7 @@ public struct FieldQueue: Sendable {
     // MARK: Live
 
     private func runNeedsWork(_ run: LiveRun) -> Bool {
-        if run.pending != nil { return true }
+        if run.pending != nil || !run.held.isEmpty { return true }
         for region in run.regions where !region.abandoned {
             guard let span = spans[region.spanID], !span.parked, !span.edited else { continue }
             let desired = Array(desiredText(region, in: run)), current = chars(of: span)
@@ -1109,9 +1190,12 @@ public struct FieldQueue: Sendable {
                 let current = chars(of: span)
                 if region.abandoned || span.edited || (span.userChanged && span.cells == nil) {
                     runs[ri].regions[gi].abandoned = true
-                    // Only a revision the region had not shown yet is lost (once each); the user's own change is no drop.
+                    // Only a revision the region had not shown yet is lost; the user's own change is no drop. The region
+                    // drops once, not once per version.
                     guard desired != region.landed else { continue }
                     runs[ri].regions[gi].landed = desired
+                    guard !region.dropped else { continue }
+                    runs[ri].regions[gi].dropped = true
                     events.append(.dropped(Drop(id: "\(runs[ri].runID)#\(gi)", runID: runs[ri].runID, kind: nil,
                                                 reason: span.userChanged ? .userEdited : .changed,
                                                 text: String(desired), partial: String(current))))
@@ -1121,7 +1205,8 @@ public struct FieldQueue: Sendable {
                     // The user edited the region: their words stay, the run's changes elsewhere in it still land.
                     if desired != region.landed, merged.dropped > 0 || merged.text == current {
                         runs[ri].regions[gi].landed = desired
-                        if merged.dropped > 0 {
+                        if merged.dropped > 0, !region.dropped {
+                            runs[ri].regions[gi].dropped = true
                             events.append(.dropped(Drop(id: "\(runs[ri].runID)#\(gi)", runID: runs[ri].runID, kind: nil, reason: .userEdited,
                                                         text: String(desired), partial: String(current))))
                         }
@@ -1173,8 +1258,14 @@ public struct FieldQueue: Sendable {
             ack(ri)
         }
         let newest = runs.last?.runID
-        let settled = runs.filter { $0.runID != newest && !runNeedsWork($0) && $0.ackedVersion == $0.version && $0.complete }.map(\.runID)
+        // A finished run stays while its cleanup may still come (it lands in the run's own text, never at the caret),
+        // up to the last few runs. A retired run's later versions are ignored.
+        let finished = runs.filter { $0.runID != newest && !runNeedsWork($0) && $0.ackedVersion == $0.version && $0.complete }
+        let keptFrom = runs.count - Self.keptRuns
+        let settled = finished.filter { run in run.cleaned || (runs.firstIndex { $0.runID == run.runID } ?? 0) < keptFrom }.map(\.runID)
         runs.removeAll { settled.contains($0.runID) }
+        retiredRunIDs += settled
+        if retiredRunIDs.count > 32 { retiredRunIDs.removeFirst(retiredRunIDs.count - 32) }
         return nil
     }
 
@@ -1187,45 +1278,221 @@ public struct FieldQueue: Sendable {
 
     private static let closingMarks: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "%", "…", "\u{2019}", "\u{201D}"]
 
-    /// The newest snapshot of a run becomes its target: region bounds move with the text diff.
+    /// The newest snapshot of a run becomes its target (snapshots that brought new speech first, in order).
     private mutating func applyPending(_ ri: Int) {
-        guard let snapshot = runs[ri].pending else { return }
+        guard runs[ri].pending != nil || !runs[ri].held.isEmpty else { return }
         if case .region(let r)? = unit?.owner, r == runs[ri].runID { return }
-        runs[ri].pending = nil
+        while !runs[ri].held.isEmpty { apply(runs[ri].held.removeFirst(), to: ri) }
+        if let snapshot = runs[ri].pending { runs[ri].pending = nil; apply(snapshot, to: ri) }
+    }
+
+    /// A snapshot becomes the run's target: region bounds move with the text diff.
+    private mutating func apply(_ snapshot: LiveDictationSnapshot, to ri: Int) {
+        var snapshot = snapshot
         runs[ri].version = snapshot.version
         let wasComplete = runs[ri].complete
         runs[ri].complete = snapshot.complete
+        runs[ri].cleaned = snapshot.complete && !snapshot.segments.isEmpty && snapshot.segments.allSatisfy { $0.final && $0.cleaned }
         let lastSegmentID = runs[ri].lastSegmentID
         runs[ri].lastSegmentID = max(lastSegmentID, snapshot.segments.map(\.id).max() ?? -1)
+        Self.unjoinUnseen(&snapshot, seen: lastSegmentID, shown: runs[ri].segmentTexts)
+        runs[ri].segmentTexts = Dictionary(snapshot.segments.map { ($0.id, $0.text) }, uniquingKeysWith: { _, last in last })
+        runs[ri].segmentStarts = Self.segmentStarts(of: snapshot)
         let target = Array(Self.target(of: snapshot))
         let dropsAll = snapshot.complete && !snapshot.segments.isEmpty && snapshot.segments.allSatisfy { $0.final && $0.cleaned }
         guard !target.isEmpty || dropsAll else { return }
         let old = runs[ri].target
         guard old != target else { return }
-        let hunks = ShadowEditPlanner.diff(old, target)
-        // Text added at the end is new speech only while the take goes on and its words are raw: a cleanup or rewrite of
-        // words already heard (punctuation, a trailing word) belongs to the region that ends the run, wherever the user is.
-        let tail = snapshot.segments.last { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
-        let rewritesTail = wasComplete || (tail.map { $0.cleaned && $0.id <= lastSegmentID } ?? false)
+        // New speech (segments never seen) follows the known words: only those are diffed against the old target, so
+        // a repeated word in the new speech cannot pull the regions' bounds onto it.
+        var hunks: [ShadowEditPlanner.Hunk]
+        var known = snapshot
+        known.segments = snapshot.segments.filter { $0.id <= lastSegmentID }
+        let knownTarget = Array(Self.target(of: known))
+        let fresh = lastSegmentID >= 0 && known.segments.count < snapshot.segments.count && knownTarget.count < target.count
+            && target.starts(with: knownTarget)
+        if fresh {
+            hunks = ShadowEditPlanner.diff(old, knownTarget)
+            hunks.append(.init(start: old.count, end: old.count, text: Array(target[knownTarget.count...])))
+        } else {
+            hunks = ShadowEditPlanner.diff(old, target)
+        }
+        // Text added at the end of the known words is a rewrite of words already heard (punctuation, a trailing word)
+        // when their segment is cleaned now, or the take had ended: it belongs to the region that ends them, wherever the
+        // user is. A segment never seen is new speech, also after the take ended: it starts at the user's caret.
+        let tail = (fresh ? known : snapshot).segments.last { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+        let rewritesTail = tail.map { $0.id <= lastSegmentID && (wasComplete || $0.cleaned) } ?? wasComplete
+        let knownEnd = fresh ? knownTarget.count : target.count
         let lastRegion = rewritesTail ? runs[ri].regions.lastIndex(where: { $0.tEnd == old.count && $0.tStart < old.count }) : nil
-        func map(_ x: Int) -> Int {
+        func map(_ x: Int, pastInsertions: Bool = false) -> Int {
             var shift = 0
             // Text inserted right at a boundary belongs to what follows it (a closed region keeps its words; growth
             // at the end goes to the open or the next region).
             for h in hunks {
-                if h.end < x || (h.end == x && h.start < h.end) { shift += h.text.count - (h.end - h.start) }
+                if h.end < x || (h.end == x && (h.start < h.end || pastInsertions)) { shift += h.text.count - (h.end - h.start) }
                 else if h.start < x { return h.start + shift + h.text.count }
                 else { break }
             }
             return x + shift
         }
+        let oldRegions = runs[ri].regions
         for gi in runs[ri].regions.indices {
-            runs[ri].regions[gi].tStart = min(target.count, map(runs[ri].regions[gi].tStart))
-            if let end = runs[ri].regions[gi].tEnd {
-                runs[ri].regions[gi].tEnd = gi == lastRegion ? target.count : max(runs[ri].regions[gi].tStart, min(target.count, map(end)))
+            let region = oldRegions[gi]
+            runs[ri].regions[gi].tStart = min(target.count, map(region.tStart))
+            if let end = region.tEnd {
+                runs[ri].regions[gi].tEnd = gi == lastRegion ? knownEnd : max(runs[ri].regions[gi].tStart, min(target.count, map(end)))
+            }
+        }
+        // Text the user typed stands between two regions that meet in the target: they are separate pieces. A joint the
+        // snapshot changes there (", " for " ", "," for ".", " and ") belongs to neither: the earlier region ends at its
+        // last word, the later one starts at its first. A joint that stays as it was is left alone.
+        // The words after the last region, not typed yet, start at the user's caret: a piece of their own too.
+        let restFrom = oldRegions.contains { $0.tEnd == nil } ? nil : oldRegions.compactMap(\.tEnd).max()
+        var words: (old: [Range<Int>], new: [Range<Int>], matches: [Int: Int])?
+        for (a, earlier) in oldRegions.enumerated() where a != lastRegion {
+            guard let end = earlier.tEnd else { continue }
+            let b = oldRegions.firstIndex { $0 != earlier && $0.tStart == end }
+            guard b != nil || end == restFrom,
+                  let joint = Self.joint(old, from: earlier.tStart, at: end, to: b.map { oldRegions[$0].tEnd ?? old.count } ?? old.count) else { continue }
+            // Where the earlier piece's last word and the later one's first word went: matched as words (a repeated
+            // word cannot pull a joiner to the wrong side), else through the text diff.
+            if words == nil { let o = Self.words(old), n = Self.words(target); words = (o, n, Self.wordMatches(old, o, target, n)) }
+            var lastWordEnd: Int, firstWord: Int
+            if let w = words, let i = w.old.firstIndex(where: { $0.upperBound == joint.lowerBound }), i + 1 < w.old.count,
+               w.old[i + 1].lowerBound == joint.upperBound, let mi = w.matches[i], let mj = w.matches[i + 1], mi < mj {
+                lastWordEnd = w.new[mi].upperBound; firstWord = w.new[mj].lowerBound
+            } else {
+                lastWordEnd = min(target.count, map(joint.lowerBound))
+                while lastWordEnd < target.count, Self.isWord(target[lastWordEnd]) { lastWordEnd += 1 }
+                firstWord = max(lastWordEnd, min(target.count, map(joint.upperBound, pastInsertions: true)))
+                while firstWord > lastWordEnd, Self.isWord(target[firstWord - 1]) { firstWord -= 1 }
+            }
+            if target[lastWordEnd..<firstWord].elementsEqual(old[joint]) {
+                // The joint stays: the boundary keeps its place in it.
+                let at = lastWordEnd + (end - joint.lowerBound)
+                runs[ri].regions[a].tEnd = max(runs[ri].regions[a].tStart, at)
+                if let b {
+                    runs[ri].regions[b].tStart = at
+                    if let bEnd = runs[ri].regions[b].tEnd { runs[ri].regions[b].tEnd = max(at, bEnd) }
+                }
+                continue
+            }
+            // Pieces the app cleaned apart (their words are in different segments, so different cleanup units): what follows
+            // the earlier piece's last word up to the space is its own (a sentence end), not a joiner.
+            var own = lastWordEnd
+            if lastWordEnd > 0, let segA = Self.segment(at: lastWordEnd - 1, in: runs[ri].segmentStarts),
+               let segB = Self.segment(at: firstWord, in: runs[ri].segmentStarts), segA != segB {
+                while own < firstWord, !target[own].isWhitespace { own += 1 }
+            }
+            var start = firstWord
+            while start > own, target[start - 1].isWhitespace { start -= 1 }
+            runs[ri].regions[a].tEnd = max(runs[ri].regions[a].tStart, own)
+            if let b {
+                runs[ri].regions[b].tStart = start
+                if let bEnd = runs[ri].regions[b].tEnd { runs[ri].regions[b].tEnd = max(start, bEnd) }
+            } else if start > own {
+                // The joint before the untyped rest: a placeholder holds it (no span: nothing is typed for it).
+                runs[ri].regions.append(Region(spanID: Self.jointSpanID, tStart: own, tEnd: start, anchor: "", abandoned: true, dropped: true))
             }
         }
         runs[ri].target = target
+    }
+
+    private static func isWord(_ c: Character) -> Bool { c.isLetter || c.isNumber }
+
+    /// A text's words (runs of letters and numbers).
+    static func words(_ text: [Character]) -> [Range<Int>] {
+        var result: [Range<Int>] = []
+        var i = 0
+        while i < text.count {
+            guard isWord(text[i]) else { i += 1; continue }
+            let start = i
+            while i < text.count, isWord(text[i]) { i += 1 }
+            result.append(start..<i)
+        }
+        return result
+    }
+
+    /// The longest common subsequence of two texts' words, ignoring case: old word index to new word index.
+    static func wordMatches(_ old: [Character], _ oldWords: [Range<Int>], _ new: [Character], _ newWords: [Range<Int>]) -> [Int: Int] {
+        let a = oldWords.map { String(old[$0]).lowercased() }, b = newWords.map { String(new[$0]).lowercased() }
+        guard !a.isEmpty, !b.isEmpty else { return [:] }
+        var table = [[Int]](repeating: [Int](repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in stride(from: a.count - 1, through: 0, by: -1) {
+            for j in stride(from: b.count - 1, through: 0, by: -1) {
+                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        var matches: [Int: Int] = [:]
+        var i = 0, j = 0
+        while i < a.count, j < b.count {
+            if a[i] == b[j] { matches[i] = j; i += 1; j += 1 }
+            else if table[i + 1][j] >= table[i][j + 1] { i += 1 } else { j += 1 }
+        }
+        return matches
+    }
+
+    /// The span id of a joint's placeholder region (`apply`): no span has it.
+    private static let jointSpanID = -1
+
+    /// The text between a region's last word and the next region's first word (old target offsets), when both have one.
+    private static func joint(_ text: [Character], from start: Int, at boundary: Int, to end: Int) -> Range<Int>? {
+        func isWord(_ c: Character) -> Bool { c.isLetter || c.isNumber }
+        guard start < boundary, boundary < end, end <= text.count,
+              let last = text[start..<boundary].lastIndex(where: isWord),
+              let first = text[boundary..<end].firstIndex(where: isWord) else { return nil }
+        return (last + 1)..<first
+    }
+
+    /// A cleaned unit that takes in a segment the keyboard never saw (the app published its raw words and the cleanup
+    /// between two reads of the link) cannot be told apart: the seen segments keep the text they showed (`shown`), the
+    /// unseen ones take their raw words, which are new speech and start at the user's caret.
+    static func unjoinUnseen(_ snapshot: inout LiveDictationSnapshot, seen: Int, shown: [Int: String]) {
+        guard seen >= 0 else { return }
+        let units = Dictionary(grouping: snapshot.segments.filter { $0.unit != nil }, by: { $0.unit! })
+        let unjoined = Set(units.filter { _, segments in
+            segments.contains { $0.id > seen } && segments.contains { $0.id <= seen } && segments.allSatisfy { $0.raw != nil }
+        }.keys)
+        guard !unjoined.isEmpty else { return }
+        for i in snapshot.segments.indices {
+            let segment = snapshot.segments[i]
+            guard let unit = segment.unit, unjoined.contains(unit), let raw = segment.raw else { continue }
+            snapshot.segments[i].text = segment.id <= seen ? shown[segment.id] ?? raw : raw
+            snapshot.segments[i].cleaned = false; snapshot.segments[i].unit = nil
+        }
+    }
+
+    /// Where each non-empty segment's text starts in `target(of:)`.
+    static func segmentStarts(of snapshot: LiveDictationSnapshot) -> [Int: Int] {
+        var starts: [Int: Int] = [:], count = 0
+        var last: Character?
+        for segment in snapshot.segments {
+            let text = segment.text.trimmingCharacters(in: .whitespaces)
+            guard let first = text.first else { continue }
+            if let last, !last.isWhitespace, !first.isNewline { count += 1 }
+            starts[segment.id] = count
+            count += text.count; last = text.last
+        }
+        return starts
+    }
+
+    /// The segment whose text holds target offset `p` (the last one starting at or before it).
+    static func segment(at p: Int, in starts: [Int: Int]) -> Int? {
+        starts.filter { $0.value <= p }.max { ($0.value, $0.key) < ($1.value, $1.key) }?.key
+    }
+
+    /// The segments of a run where a piece of it starts in the field after the first (a region begins with that
+    /// segment's words): the user typed or moved between it and the words before. The app cleans the pieces apart.
+    public func pieceStarts(of runID: String) -> [Int] {
+        guard let run = runs.first(where: { $0.runID == runID }) else { return [] }
+        let starts = run.segmentStarts.sorted { $0.value < $1.value }
+        var ids: Set<Int> = []
+        for region in run.regions where region.spanID != Self.jointSpanID && region.tStart > 0 {
+            guard let (id, start) = starts.first(where: { $0.value >= region.tStart }), id > 0, start <= run.target.count,
+                  run.target[region.tStart..<start].allSatisfy(\.isWhitespace) else { continue }
+            ids.insert(id)
+        }
+        return ids.sorted()
     }
 
     /// A snapshot's text: its segments, trimmed, joined by a space (none before a line break).
@@ -1294,7 +1561,8 @@ public struct FieldQueue: Sendable {
             let desired = desiredText(region, in: run)
             guard let span = spans[region.spanID] else { continue }
             let current = String(chars(of: span))
-            if desired != current {
+            // A region that dropped already is not reported again.
+            if desired != current, !region.dropped {
                 events.append(.dropped(Drop(id: "\(run.runID)#\(gi)", runID: run.runID, kind: nil, reason: span.parked ? .unplaceable : reason,
                                             text: desired, partial: span.parked ? nil : current)))
             }
@@ -1395,6 +1663,7 @@ public struct FieldQueue: Sendable {
         record(.grow(n))
         text.insert(contentsOf: chars, at: 0)
         cursor += n; userCursor += n
+        if let from = userLost?.from { userLost?.from = from + n }
         for (id, var span) in spans { span.start += n; span.end += n; spans[id] = span }
     }
 
@@ -1514,6 +1783,19 @@ public struct FieldQueue: Sendable {
             if found.count > 1 { events.append(.resync(.ambiguous)) } else if flight != nil { events.append(.resync(.assumed)) }
             return
         }
+        // A jump of the keyboard's own that the report, its whole confirm window long, shows went nowhere: the caret is
+        // still where it was. The text it jumped for is not in this field (Safari gives every field of a page the same
+        // identity, so a switch looks like a tap), and it is never tried again: its work drops, the model starts over.
+        // A jump is never taken as landed on a report that fits several places and not its own: nothing pins the
+        // region, so nothing is edited there. One that stopped short on its way (the field ended before the region)
+        // failed too: the caret is where it stopped.
+        if let flight, let target = flight.jumpSpan {
+            let short = found.count == 1 && min(flight.pre.cursor, cursor) < found[0] && found[0] < max(flight.pre.cursor, cursor)
+            if short || flight.waitedMs >= Self.confirmLimitMs && fits(report, in: flight.pre) || found.count > 1 && !fits(report, in: flight.pre) {
+                jumpFailed(to: target, flight: flight, report: report, caret: short ? found[0] : flight.pre.cursor)
+                return
+            }
+        }
         // A late report of the state before the op, which fits there among other places: the op counts as landed.
         if let flight, !pins(report, in: flight.pre), fits(report, in: flight.pre) {
             events.append(.resync(.ambiguous))
@@ -1538,10 +1820,11 @@ public struct FieldQueue: Sendable {
             }
         }
         // Moving the user's cursor takes a report that fits wholly inside known text: at the model's end any text
-        // after the cursor fits, which says nothing about where the cursor is.
+        // after the cursor fits, which says nothing about where the cursor is. It also takes as much agreeing text as
+        // finding text again: an empty field's report pins the start of any text, which may be another field's.
         let after = selected.count + report.after.count
         let inside = found.filter { after <= text.count - $0 }
-        if found.count == 1, inside == found, fitsSelection(found[0], selected) {
+        if found.count == 1, inside == found, fitsSelection(found[0], selected), hasEvidence(report) {
             abortUnit()
             // Reports of the state before the user moved, still on their way, are lag from now on.
             lagging.append((ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans), 0))
@@ -1549,6 +1832,9 @@ public struct FieldQueue: Sendable {
             cursor = found[0]; userCursor = cursor; selection = selected.count
             closeOpenRegions(selected.isEmpty ? .cursor : .selection)
             quietAfterMove = true
+            // As after a tap: the ops on their way may still land where the user moved the caret (a window too short
+            // to tell a tap shows only now).
+            if selected.isEmpty, !recentSends.isEmpty { tapRace = (recentSends, 0) }
             events.append(.resync(.cursorMoved))
             merge(report)
             return
@@ -1568,7 +1854,42 @@ public struct FieldQueue: Sendable {
             events.append(.resync(.outsideInsert))
             return
         }
-        // The text around the cursor changed: the report is the new model; spans are found again by their text.
+        reseed(report, flight: flight)
+    }
+
+    /// The report shows this much known text around a place (`relocateChars`, or all the model knows).
+    private func hasEvidence(_ report: Report) -> Bool {
+        FieldReader.trusted(before: report.before).count + (report.selected ?? "").count + report.after.count >= min(Self.relocateChars, text.count)
+    }
+
+    /// A jump to `target` did not get there (`Resync.jumpFailed`): the caret is at `caret` (where it was, or where it
+    /// stopped short). The region or edit it was for drops once and the model starts over from the report, so no other
+    /// jump goes out on the old field's text; spans found again there (long, unique text with its context) are this
+    /// field's. The user's cursor keeps its distance from the caret (the caret goes back with the next op).
+    private mutating func jumpFailed(to target: Int, flight: InFlight, report: Report, caret: Int) {
+        events.append(.resync(.jumpFailed))
+        cursor = caret
+        abortUnit()
+        for ri in runs.indices {
+            for gi in runs[ri].regions.indices where runs[ri].regions[gi].spanID == target && !runs[ri].regions[gi].abandoned {
+                runs[ri].regions[gi].abandoned = true
+                let region = runs[ri].regions[gi], desired = desiredText(region, in: runs[ri])
+                let current = spans[target].map { String(chars(of: $0)) }
+                guard !region.dropped, desired != current else { continue }
+                runs[ri].regions[gi].dropped = true
+                events.append(.dropped(Drop(id: "\(runs[ri].runID)#\(gi)", runID: runs[ri].runID, kind: nil, reason: .unplaceable,
+                                            text: desired, partial: nil)))
+            }
+        }
+        var gone: [EditState] = []
+        userLane.removeAll { if case .edit(let s) = $0, s.spanID == target { gone.append(s); return true }; return false }
+        editLane.removeAll { if $0.spanID == target { gone.append($0); return true }; return false }
+        for state in gone { drop(state, .unplaceable) }
+        reseed(report, flight: flight)
+    }
+
+    /// The text around the cursor changed: the report is the new model; spans are found again by their text.
+    private mutating func reseed(_ report: Report, flight: InFlight?) {
         abortUnit()
         closeOpenRegions(.resync)
         for (id, var span) in spans where !span.parked {
@@ -1585,7 +1906,10 @@ public struct FieldQueue: Sendable {
         if flight?.lane == .user { userLost = nil }
         // Already searching (the homing move's landing is unknown to the model): the search alone decides. A carry that
         // fails after the user acted at the caret (a selection appeared) leaves the caret as the user's.
-        else if userLost == nil, !carryUserCursor(from: oldText, cursor: oldCursor, user: oldUser), !userActed {
+        // A report that shares nothing with the old text around the caret is another field (or text replaced whole): the
+        // caret is where the user put it, and nothing goes back the old field's distance.
+        else if userLost == nil, Self.shares(report, with: oldText, around: oldCursor),
+                !carryUserCursor(from: oldText, cursor: oldCursor, user: oldUser), !userActed {
             // The text between the caret and the user's cursor changed in a way the model did not know: the user's
             // cursor is found again by the text around it, else the caret goes back the distance it came and looks there.
             let before = Array(oldText[max(0, oldUser - Self.relocateChars)..<oldUser])
@@ -1598,6 +1922,15 @@ public struct FieldQueue: Sendable {
         userActed = false
         events.append(.resync(.reseeded))
         unparkSpans()
+    }
+
+    /// The report's text next to the caret (`contextChars` on a side, as a span's found again) stands in the old text
+    /// near the old caret.
+    static func shares(_ report: Report, with old: [Character], around cursor: Int) -> Bool {
+        let window = String(old[max(0, cursor - 2 * relocateChars)..<min(old.count, cursor + 2 * relocateChars)])
+        let before = FieldReader.trusted(before: report.before), after = report.after
+        return (before.count >= contextChars && window.contains(String(before.suffix(contextChars))))
+            || (after.count >= contextChars && window.contains(String(after.prefix(contextChars))))
     }
 
     /// A resync while a unit had the caret away from the user: the user's cursor keeps its distance from the caret when
@@ -1629,6 +1962,8 @@ public struct FieldQueue: Sendable {
         /// From the caret to the user's cursor, in the field's units, as the model last knew it.
         var units: Int
         var homed: Bool
+        /// Where the caret was when it went back (model offset).
+        var from: Int?
     }
     private(set) var userLost: LostUser?
     private var userActed = false
@@ -1647,8 +1982,14 @@ public struct FieldQueue: Sendable {
         }
         if lost.homed {
             // The caret went back the distance it came: that physical place is the user's (the remembered text around
-            // it may be stale, it is what the model got wrong).
+            // it may be stale, it is what the model got wrong). A way back cut short by the field's edge (another field
+            // took the keyboard, where the user tapped) leaves the user where the caret was before it.
             userCursor = cursor; userLost = nil
+            if let from = lost.from, from >= 0, from <= text.count {
+                let a = min(from, cursor), b = max(from, cursor)
+                let moved = config.movesByCharacters ? b - a : String(text[a..<b]).utf16.count
+                if moved < abs(lost.units) { userCursor = from }
+            }
         } else if hits.count == 1, let p = hits.first {
             userCursor = p; userLost = nil
         }
@@ -1664,7 +2005,8 @@ public struct FieldQueue: Sendable {
               // A recent state at its own caret, late: lag, not a tap.
               !confirmedHistory.contains(where: { fitsInside(report, in: $0.state) }),
               !lagging.contains(where: { fits(report, in: $0.state) }),
-              report.before.count + report.after.count >= Self.relocateChars || report.before.isEmpty || report.after.isEmpty else { return nil }
+              // As much agreeing text as finding text again: a short window at an edge may be another field's.
+              hasEvidence(report) else { return nil }
         // Older states only when the report fits the current text nowhere (old text shown at the tap); repetitive text
         // that fits here several times says nothing.
         let fitsNow = !FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: report.after).isEmpty
@@ -1836,6 +2178,9 @@ public struct FieldQueue: Sendable {
     private mutating func absorbOutsideInsert(_ report: Report) -> Bool {
         guard selection == 0, report.selected == nil else { return false }
         let before = Array(FieldReader.trusted(before: report.before)), after = Array(report.after)
+        // Text the model knows after the caret shows after it: a report with nothing after it is the field's end (a tap
+        // there, where an op on its way may have landed), not typing at the caret.
+        guard !after.isEmpty || cursor == text.count else { return false }
         let n = min(after.count, text.count - cursor)
         guard n == after.count || cursor + n == text.count, text[cursor..<(cursor + n)].elementsEqual(after[..<n]) else { return false }
         for k in 1...max(1, min(Self.contextChars * 2, before.count - Self.extendOverlapChars)) where before.count - k >= Self.extendOverlapChars {

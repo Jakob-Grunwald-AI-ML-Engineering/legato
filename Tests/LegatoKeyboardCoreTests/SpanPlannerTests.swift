@@ -61,7 +61,7 @@ import Testing
 
     @Test func aTailAppendIsLeftToTheTypewriter() {
         let old = Array("we need slides fr"), new = Array("we need slides for the meeting")
-        let result = SpanPlanner.spans(from: old, to: new, leaveTailAppend: true, moveSettleMs: 60, editSettleMs: 115)
+        let result = SpanPlanner.spans(from: old, to: new, leaveTailAppend: true, moveSettleMs: FieldQueue.moveSettleMs, editSettleMs: FieldQueue.editSettleMs)
         #expect(result.isEmpty || result.allSatisfy { $0.end < old.count || $0.start < $0.end })
     }
 
@@ -80,7 +80,8 @@ import Testing
     @Test func thePaceSpreadsTheBacklogBetweenTheFloorAndCalm() {
         #expect(SpanPlanner.paceMs(ops: 0) == SpanPlanner.calmMs)
         #expect(SpanPlanner.paceMs(ops: 5) == SpanPlanner.calmMs, "a short backlog types calmly")
-        #expect(SpanPlanner.paceMs(ops: 24) == 50, "1.2 s over 24 graphemes")
+        #expect(SpanPlanner.paceMs(ops: SpanPlanner.behindOps) == SpanPlanner.floorMs, "behind speech: straight to the floor")
+        #expect(SpanPlanner.calmMs <= 30 && SpanPlanner.budgetMs <= 700, "the Mac's calm pace and budget")
         #expect(SpanPlanner.paceMs(ops: 500) == SpanPlanner.floorMs, "a long backlog goes at the floor")
         #expect(SpanPlanner.paceMs(ops: 10, fixedMs: 1_100) == SpanPlanner.floorMs, "settles use up the budget")
         let paces = (1...100).map { SpanPlanner.paceMs(ops: $0) }

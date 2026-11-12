@@ -157,6 +157,24 @@ import Testing
         #expect(!rig.events.contains { $0.event == .resync(.reseeded) })
     }
 
+    /// A line repeated further down: Safari's window starts at the caret's block ("\n " echo). Reaching back past the
+    /// known text's start, it also fits the first line, so it pins neither (it never pinned the first line alone).
+    @Test func aBlockEchoOfARepeatedLineDoesNotPinTheFirstLine() {
+        let text = Array("- maple light\n- maple ligh")
+        #expect(FieldMatch.positions(in: text, reportedBefore: "\n - maple ligh", reportedAfter: "") == [12, 26])
+        // A repeated line ending the field, typed take by take into a list: it lands whole.
+        var field = FakeField("")
+        field.blockEcho = true
+        var rig = QueueRig(field, config: .init(animated: true))
+        for key in "- " { rig.queue.enqueue(.insert(String(key))); rig.run(ms: 66) }
+        rig.queue.enqueue(snap(1, "maple light", run: "a"))
+        rig.drain()
+        for key in "\n- " { rig.queue.enqueue(.insert(String(key))); rig.run(ms: 66) }
+        rig.queue.enqueue(snap(1, "maple light", run: "b"))
+        rig.drain()
+        #expect(rig.field.string == "- maple light\n- maple light")
+    }
+
     @Test func aTapElsewhereClosesTheRegionAndLaterWordsStartAtTheNewCursor() {
         var rig = QueueRig(FakeField("Start. End."))
         rig.field.tap(at: 6)
@@ -213,6 +231,34 @@ import Testing
         #expect(rig.field.string.contains("!"))
         // Same-kind ops at the typewriter pace; a change of kind after an edit only after the host's transit.
         #expect(zip(rig.sent, rig.sent.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.gap(after: $0.op, before: $1.op) - 0.001 })
+    }
+
+    /// A rich editor puts a placeholder into a line that becomes empty (or drops its list item): a replacement of a whole
+    /// line keeps one old grapheme until the new text stands.
+    @Test(arguments: [false, true])
+    func aWholeLineReplacementNeverLeavesTheLineEmpty(safari: Bool) {
+        var field = FakeField("milk\neggs\nbread", caret: 9)
+        field.hostDelays = safari
+        field.blockEcho = true
+        var rig = QueueRig(field, config: .init(animated: true))
+        rig.run(ms: 100)
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "milk\neggs", after: "\nbread",
+                                          target: "milk\nbutter\nbread", cursorAtEnd: false, paced: true))
+        var emptied = false
+        for _ in 0..<200 {
+            rig.tick()
+            if rig.field.string.contains("\n\n") { emptied = true }
+        }
+        #expect(rig.field.string == "milk\nbutter\nbread")
+        #expect(!emptied)
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "milk\nbutter", after: "\nbread", target: "milk\nbutter\nBREAD",
+                                          cursorAtEnd: false, paced: true))
+        for _ in 0..<200 {
+            rig.tick()
+            if rig.field.string.hasSuffix("\n") { emptied = true }
+        }
+        #expect(rig.field.string == "milk\nbutter\nBREAD")
+        #expect(!emptied)
     }
 
     @Test func aLostOpIsSeenAndTheUsersKeyGoesOnceMore() {
@@ -351,7 +397,10 @@ import Testing
         print("speed: uppercase Magic of \(sentence.count) chars took \(Int(took)) ms, \(Int(took / Double(sentence.count))) ms a character")
         #expect(rig.field.string == sentence.uppercased())
         let ops = rig.sent[from...].map(\.op)
+        // A single-line field has no line for a rich editor to fill: one block delete, no jumps (the empty-line guard
+        // only applies where a real line break bounds the line; it cost Magic about 0.23 s here).
         #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(sentence.count)])
+        #expect(!ops.contains { if case .move = $0 { true } else { false } })
         #expect(inserts(rig, from: from).count == sentence.count)
         #expect(rig.field.reorders == 0)
         #expect(took < 3_000)

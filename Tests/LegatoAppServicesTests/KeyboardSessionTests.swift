@@ -102,6 +102,46 @@ import LegatoSoniox
         await #expect(throws: KeyboardSession.DebugDictationError.self) { try await keyboard.debugDictationLine("x") }
     }
 
+    /// The bridge's lines stand in for real takes: the first line after a stop begins a take, as the mic key would.
+    @Test func theDebugBridgeBeginsATakeAfterEveryStopLikeTheMicKey() async throws {
+        let (_, keyboard) = try await openOnTyping()
+        try await keyboard.debugDictationLine("one")
+        try keyboard.debugDictationTail("tw")
+        try await keyboard.debugDictationLine("two")
+        #expect(sink.begins == 1)
+        try keyboard.debugDictationStop()
+        try await until { sink.finishes == 1 }
+        try keyboard.debugDictationTail("thr")
+        try await keyboard.debugDictationLine("three")
+        #expect(sink.begins == 2)
+        #expect(await keyboard.openGate())
+        #expect(sink.begins == 3, "The mic key begins a take")
+    }
+
+    /// A stop never cancels the end of the take before it (still waiting for its last words): every take is ended.
+    @Test func aStopNeverCancelsTheEndOfTheTakeBeforeIt() async throws {
+        let (_, keyboard) = try await openOnTyping()
+        let first = try #require(sockets.last)
+        #expect(await keyboard.openGate())
+        await mic.emit()
+        await keyboard.closeGate()
+        try await until { await first.sent.contains(.text(#"{"type":"finalize"}"#)) }
+        // The first take still waits for its last words when the second take starts and stops.
+        try await until { sockets.count == 2 }
+        try await until { await sockets.last?.held == true }
+        let second = try #require(sockets.last)
+        #expect(await keyboard.openGate())
+        await mic.emit()
+        await keyboard.closeGate()
+        try await until { await second.sent.contains(.text(#"{"type":"finalize"}"#)) }
+        for socket in [first, second] {
+            await socket.feed(#"{"tokens":[{"text":"<fin>","is_final":true}]}"#)
+            await socket.feed(#"{"finished":true}"#)
+        }
+        try await until { sink.finishes == 2 }
+        #expect(sink.begins == 2)
+    }
+
     @Test func aTapWithoutSonioxKeyStaysClosedAndSaysWhy() async throws {
         let composer = ComposerSession(microphone: mic, activateAudioSession: {})
         await composer.arm()
@@ -242,8 +282,12 @@ import LegatoSoniox
     var resets = 0
     func receive(_ line: DictationRouteLine) async { lines.append(line) }
     var warms = 0
+    var begins = 0
+    var finishes = 0
     func reset() async { resets += 1 }
     func warm() async { warms += 1 }
+    func beginTake() { begins += 1 }
+    func finishTake() async { finishes += 1 }
 }
 
 actor GateMicrophone: AudioSource {
