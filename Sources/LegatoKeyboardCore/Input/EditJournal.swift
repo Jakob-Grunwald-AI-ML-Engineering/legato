@@ -26,6 +26,8 @@ public enum EditJournal {
         case sent, confirmed, resync, nudged, applied, dropped, liveApplied, regionStarted, regionClosed
         /// The queue was reset (field change, keyboard gone).
         case reset
+        /// The host's text or selection callback (`detail`: which, and the field's traits), with the report then.
+        case callback
     }
 
     /// A `ShadowOp` as the journal writes it.

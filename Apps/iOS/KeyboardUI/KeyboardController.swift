@@ -416,6 +416,16 @@ final class KeyboardController {
         reloadHost()
     }
 
+    /// The host's text and selection callbacks, as they come, for the edit journal.
+    func documentCallback(_ name: String) {
+        var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .callback, field: document.documentID)
+        entry.report = currentReport
+        entry.detail = "\(name) busy=\(isFieldBusy ? 1 : 0) pumping=\(pumping ? 1 : 0) hasText=\(document.hasText ? 1 : 0) "
+            + "return=\(document.returnKeyType.rawValue) type=\(document.keyboardType.rawValue) "
+            + "caps=\(document.autocapitalizationType.rawValue) content=\(document.textContentType?.rawValue ?? "-")"
+        journal.write(entry)
+    }
+
     /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
     /// extension's `textDidChange` and `selectionDidChange` both come here.
     func documentDidChange() {
@@ -802,11 +812,8 @@ final class KeyboardController {
             case .confirmed(let waited):
                 if waited > 0 { liveStats.waits += 1 }
             case .resync(let kind):
-                if kind == .reseeded || kind == .cursorMoved {
-                    // The user moved on (or the host changed the field): the typed line stops where it is.
-                    interruptDictation()
-                    sessionSpan.broken()
-                }
+                // The user moved on (or the host changed the field): the session's text no longer ends at the cursor.
+                if kind == .reseeded || kind == .cursorMoved { sessionSpan.broken() }
                 if kind == .reseeded { liveStats.drifts += 1; liveStats.lastDrift = kind.rawValue }
                 trace?("queue resync=\(kind.rawValue)")
             case .nudged, .insertedBehind:
@@ -818,18 +825,26 @@ final class KeyboardController {
                 trace?("queue dropped reason=\(drop.reason.rawValue) kind=\(drop.kind?.rawValue ?? "live")")
                 if let completion = editCompletions.removeValue(forKey: drop.id) { completion(event) }
                 else if drop.id == enqueuedHostEditID { enqueuedHostEditID = nil; hostEditLanded(drop.id, applied: false) }
-                else if drop.runID != nil, drop.reason == .unplaceable {
-                    // Dictated words the field could not take: the take is in History. Text the user edited or deleted
-                    // themselves (or an instruction rewrote) is no drop worth telling.
-                    liveRecoveryDismissed = false
-                    liveRecoveryNotice = "Some dictated words didn't fit. The take is in Legato's History."
-                    syncRowTakeover()
+                else if let runID = drop.runID {
+                    // Dictated words that did not land where the take is (another field has the caret, or the text is
+                    // gone): the take is in History. Text the user edited or deleted themselves (or an instruction
+                    // rewrote) is no drop worth telling.
+                    if drop.reason == .unplaceable {
+                        liveRecoveryDismissed = false
+                        liveRecoveryNotice = "Rest of dictation saved to History."
+                        syncRowTakeover()
+                    }
+                    if DictationLineRuns.isLineRun(runID), drop.reason == .unplaceable || drop.reason == .reset {
+                        lineFinished(lineRuns.dropped(runID: runID, reset: drop.reason == .reset))
+                    }
                 }
             case .liveApplied(let runID, let version, let complete):
+                if DictationLineRuns.isLineRun(runID) { lineFinished(lineRuns.applied(runID: runID, version: version)); break }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
                 liveAckedVersion = version
                 writeLiveAck(version: version, complete: complete)
             case .regionStarted(let runID, let anchor):
+                if DictationLineRuns.isLineRun(runID) { lineRuns.started(runID: runID); break }
                 liveTypedRunIDs.insert(runID)
                 liveStats.lastStart = "anchor=\(anchor)"
                 writeLiveAck(version: nil, complete: false)
@@ -842,7 +857,7 @@ final class KeyboardController {
     }
 
     private func startTickerIfNeeded() {
-        let needed = !queue.isIdle || reveal.needsTicks || typist.needsTicks
+        let needed = !queue.isIdle || reveal.needsTicks
         guard needed, !isTornDown, isVisible else { return stopTicker() }
         guard ticker == nil else { return }
         ticker = Task { [weak self] in
@@ -861,10 +876,9 @@ final class KeyboardController {
 
     private func tick(elapsedMs: Double) {
         if reveal.needsTicks { applyHost(elapsedMs: elapsedMs) }
-        if typist.needsTicks { dictationStep(elapsedMs: elapsedMs) }
         cancelRevokedInstructionEdits()
         pump()
-        if queue.isIdle, !reveal.needsTicks, !typist.needsTicks { stopTicker() }
+        if queue.isIdle, !reveal.needsTicks { stopTicker() }
     }
 
     private func stopTicker() {
@@ -874,59 +888,33 @@ final class KeyboardController {
 
     // MARK: Dictation
 
-    /// Lines the app cleaned, typed one by one (`DictationTypist`, through the queue); acknowledged on the link as they finish.
-    @ObservationIgnored private var typist = DictationTypist()
+    /// Lines the app cleaned (the typed-line modes), each a run of the queue, one at a time (`DictationLineRuns`): a key
+    /// lands at once and the rest of the line finishes in its own text; a field the user moved to gets none of it.
+    /// Acknowledged on the link as they finish.
+    @ObservationIgnored private var lineRuns = DictationLineRuns()
     @ObservationIgnored private var lastDictation: DictationPublication?
 
     /// Called with the composer poll: a new publication of lines joins the queue.
     private func receiveDictation() {
         guard let publication = link.readDictation(), publication != lastDictation else { return }
         lastDictation = publication
-        typist.accept(publication, acknowledged: link.readDictationAck())
-        dictationStep(elapsedMs: 0)
+        guard let snapshot = lineRuns.accept(publication, acknowledged: link.readDictationAck()) else { return }
+        enqueueLine(snapshot)
     }
 
-    /// A key, a completion or a cursor move: the rest of the line being typed is dropped and the following lines go
-    /// in at the new cursor. (A live run's region is closed by the queue itself.)
-    private func interruptDictation() {
-        guard let upTo = typist.interrupt() else { return }
-        acknowledgeDictation(upTo: upTo)
-        trace?("dictation interrupted")
-    }
-
-    private func acknowledgeDictation(upTo: Int) {
-        guard let sessionID = typist.sessionID else { return }
-        link.writeDictationAck(.init(sessionID: sessionID, upTo: upTo))
-    }
-
-    private func dictationStep(elapsedMs: Double, flush: Bool = false) {
-        guard !isTornDown, typist.needsTicks, document.documentID != nil else { return }
-        syncQueueField()
-        // The typist plans against the field as the queue will leave it (its own inserts included), so a cursor move
-        // shows as a context that is not its echo.
-        let context = queueContextBefore
-        let step = flush
-            ? typist.flush(contextBefore: context, capitalization: autocapitalization)
-            : typist.step(contextBefore: context, elapsedMs: elapsedMs, capitalization: autocapitalization,
-                          animated: !UIAccessibility.isReduceMotionEnabled)
-        if step.deletes > 0 {
-            // A failed take's partial text, taken back (the typist saw the field still end with exactly that).
-            let expected = String(context.dropLast(step.deletes))
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            enqueue(FieldQueue.Edit(kind: .typist, before: String(context.suffix(step.deletes)), target: ""))
-            typing.ownEdit(contextBefore: expected)
-            versions = nil
-        }
-        if !step.inserts.isEmpty {
-            let text = step.inserts.joined()
-            let expected = String(context.dropLast(step.deletes)) + text
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            enqueue(FieldQueue.Edit(kind: .typist, target: text, atCursor: true))
-            typing.ownEdit(contextBefore: expected)
-            versions = nil
-        }
-        if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
+    private func enqueueLine(_ snapshot: LiveDictationSnapshot) {
+        guard document.documentID != nil else { return }
+        versions = nil
+        enqueue(snapshot)
         pump()
+    }
+
+    /// A line run landed or dropped: the line is acknowledged and the next one goes in.
+    private func lineFinished(_ outcome: (ack: Int?, next: LiveDictationSnapshot?)) {
+        if let upTo = outcome.ack, let sessionID = lineRuns.sessionID {
+            link.writeDictationAck(.init(sessionID: sessionID, upTo: upTo))
+        }
+        if let next = outcome.next { enqueueLine(next) }
     }
 
     // MARK: Live dictation
@@ -1486,7 +1474,6 @@ final class KeyboardController {
     func type(_ text: String, contextBefore: String? = nil) -> Bool {
         versions = nil // the user moved on from the dictation
         userPreemptsFieldRead()
-        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
@@ -1510,7 +1497,6 @@ final class KeyboardController {
     func deleteBackward(contextBefore: String? = nil) {
         versions = nil
         userPreemptsFieldRead()
-        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
@@ -1538,7 +1524,6 @@ final class KeyboardController {
     /// counts as typed text. `record: false` is for undo and redo, which move the history themselves.
     func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) {
         userPreemptsFieldRead()
-        interruptDictation()
         resolveHeldClear()
         beforeUserEdit()
         let before = typing.contextBefore

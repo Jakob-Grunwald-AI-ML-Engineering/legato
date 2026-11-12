@@ -23,17 +23,19 @@ import Testing
         #expect(ops == [.move(-8), .insert("t"), .move(8)])
     }
 
-    @Test func aFlipIsPacedOneGraphemePerTickWhenAnimated() {
+    /// Animated text goes a word per op (one insert lands in one field: a switch Safari does not report never cuts a word).
+    @Test func aFlipIsPacedOneWordPerOpWhenAnimated() {
         var rig = QueueRig(FakeField(""), config: .init(animated: true))
         rig.queue.enqueue(snap(1, "a cat sat"))
         rig.drain()
         let before = rig.sent.count
-        rig.queue.enqueue(snap(2, "a black cat sat"))
+        rig.queue.enqueue(snap(2, "a big black cat sat"))
         rig.drain()
         let inserts = rig.sent[before...].filter { if case .insert = $0.op { true } else { false } }
-        #expect(inserts.allSatisfy { if case .insert(let s) = $0.op { s.count == 1 } else { false } })
+        #expect(inserts.count == 2)
+        #expect(inserts.allSatisfy { if case .insert(let s) = $0.op { s.trimmingCharacters(in: .whitespaces).split(separator: " ").count == 1 } else { false } })
         #expect(zip(inserts, inserts.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.charMs - 0.001 })
-        #expect(rig.field.string == "a black cat sat")
+        #expect(rig.field.string == "a big black cat sat")
     }
 
     @Test func aUserKeyDuringABusyQueueLandsWithinTheBoundAtTheUsersCursor() {
@@ -124,11 +126,13 @@ import Testing
         #expect(rig.drops.first?.text == "alpha gamma")
     }
 
+    /// The speaking head showed part of a word ("wonder"), the rest is heard ("wonderful") when the user's key comes: the
+    /// word's rest goes in with the key, so the key lands after the whole word.
     @Test func aWordCutShortByAKeyIsFinishedFirst() {
         var rig = QueueRig(FakeField(""), config: .init(animated: true))
-        rig.queue.enqueue(snap(1, "wonderful"))
-        while rig.field.string.count < 3, rig.clockMs < 2_000 { rig.tick() }
-        #expect((1..<"wonderful".count).contains(rig.field.string.count))
+        rig.queue.enqueue(snap(1, "wonder"))
+        rig.drain()
+        rig.queue.enqueue(snap(2, "wonderful"))
         rig.queue.enqueue(.insert("x"))
         rig.drain()
         #expect(rig.field.string == "wonderful x")
@@ -323,7 +327,8 @@ import Testing
     }
 }
 
-/// Speed under Safari's measured timing: one grapheme per op, at a pace that finishes the backlog in about a second.
+/// Speed under Safari's measured timing: one word per op, each after a probe of the field, at a pace that finishes the
+/// backlog in about a second.
 @Suite struct FieldQueueSpeedTests {
     private func rig(_ text: String = "") -> QueueRig {
         var field = FakeField(text)
@@ -335,20 +340,22 @@ import Testing
         rig.sent[from...].compactMap { if case .insert(let s) = $0.op { ($0.ms, s) } else { nil } }
     }
 
-    @Test func aBacklogGoesOneGraphemePerOpAtTheFloorThenCalms() {
+    @Test func aBacklogGoesOneWordPerOpEachAfterAProbe() {
         var rig = rig()
         let line = "we need slides for the meeting tomorrow at three, and the budget numbers from last week; "
             + "anna checks whether the room is free in the afternoon"
+        let start = rig.clockMs
         rig.queue.enqueue(snap(1, line))
         rig.drain()
         let typed = inserts(rig)
-        let gaps = zip(typed, typed.dropFirst()).map { $1.ms - $0.ms }
-        let floor = gaps.prefix(40).reduce(0, +) / 40
-        print("speed: floor \(Int(floor)) ms an op (\(line.count) chars backlog), last gaps \(gaps.suffix(5).map { Int($0) })")
+        let took = (typed.last?.ms ?? start) - (typed.first?.ms ?? start)
+        let perSecond = Double(line.count) / took * 1000
+        print("speed: \(line.count) chars backlog in \(Int(took)) ms, \(Int(perSecond)) chars a second, \(typed.count) word ops")
         #expect(rig.field.string == line)
-        #expect(typed.allSatisfy { $0.text.count == 1 })
-        #expect(floor < 60, "a long backlog goes at the confirmation floor")
-        #expect(gaps.suffix(5).allSatisfy { $0 >= SpanPlanner.calmMs - 0.001 }, "the last few at the calm pace")
+        #expect(typed.map(\.text) == FieldQueue.wordChunks(Array(line)).map { String($0) })
+        // Safari's confirmation capped one grapheme an op at about 20 characters a second; a word an op with a probe
+        // before each keeps above that.
+        #expect(perSecond > 20, "a long backlog keeps up with speech")
         #expect(rig.field.reorders == 0)
     }
 
@@ -381,7 +388,8 @@ import Testing
         let took = (rig.sent.last?.ms ?? start) - start
         print("speed: one-word Soniox fix mid-text took \(Int(took)) ms (\(rig.sent.count - from) ops)")
         #expect(rig.field.string == "I will meet you on Friday at noon in the lobby")
-        #expect(rig.sent[from...].map(\.op) == [.move(-21), .deleteBackward(8)] + "Friday".map { .insert(String($0)) } + [.move(21)])
+        // The word goes in whole (a word an op).
+        #expect(rig.sent[from...].map(\.op) == [.move(-21), .deleteBackward(8), .insert("Friday"), .move(21)])
         #expect(took < 1_500)
     }
 
@@ -400,8 +408,9 @@ import Testing
         // A single-line field has no line for a rich editor to fill: one block delete, no jumps (the empty-line guard
         // only applies where a real line break bounds the line; it cost Magic about 0.23 s here).
         #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(sentence.count)])
-        #expect(!ops.contains { if case .move = $0 { true } else { false } })
-        #expect(inserts(rig, from: from).count == sentence.count)
+        // No jumps: only the probes before the keyboard's own edits.
+        #expect(!ops.contains { if case .move(let n) = $0 { n != 0 } else { false } })
+        #expect(inserts(rig, from: from).map(\.text) == FieldQueue.wordChunks(Array(sentence.uppercased())).map { String($0) })
         #expect(rig.field.reorders == 0)
         #expect(took < 3_000)
     }
