@@ -493,6 +493,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
 
     private func endLive() async {
         let stoppedAt = ContinuousClock.now
+        // The keyboard holds the user's keys until the take is complete (its final words, still on their way, first).
+        if var run = liveRun, run.stop() { publishLive(run) }
         // Words still in the head: their final segment is on its way. It belongs in the units and the whole pass.
         let speakingDeadline = stoppedAt + Self.speakingGrace
         while let run = liveRun, !run.complete, run.isSpeaking, ContinuousClock.now < speakingDeadline {

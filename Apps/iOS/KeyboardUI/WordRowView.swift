@@ -40,6 +40,10 @@ struct WordRowView: View {
                     .transition(.opacity)
             } else if let status = controller.statusText {
                 HStack(spacing: 8) {
+                    if controller.isCleaningUp {
+                        // The take's cleanup is pending or still landing: not time to send yet.
+                        ProgressView().controlSize(.small).accessibilityIdentifier("keyboard.cleanup.spinner")
+                    }
                     Text(status)
                         .font(.system(size: fontSize - 4))
                         .foregroundStyle(Color(uiColor: KeyColors.suggestion))
@@ -48,7 +52,8 @@ struct WordRowView: View {
                         .truncationMode(controller.hint == nil ? .head : .tail)
                         .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
+                        // Beside the spinner the two stay together, centred.
+                        .frame(maxWidth: controller.isCleaningUp ? nil : .infinity)
                         .accessibilityIdentifier("keyboard.hint")
                     if controller.takeFailed {
                         takeButton("Retry", id: "keyboard.take.retry") { controller.retryTake() }

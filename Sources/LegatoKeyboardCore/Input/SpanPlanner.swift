@@ -8,10 +8,10 @@ import Foundation
 /// - Mode: a span goes in as minimal character edits (the differing characters only, with short moves between them)
 ///   or as one block delete and its new text typed, whichever the cost estimate says is quicker; a tie keeps the
 ///   minimal edits.
-/// - Pace: one grapheme per op. The gap between typed graphemes spreads the work over about `budgetMs`, no slower
-///   than `calmMs` and no faster than the field's confirmation (`floorMs`); a backlog of `behindOps` or more goes at the
-///   floor. The same curve as the Mac's keystroke planner; on iOS the calm pace is the floor, so every grapheme goes as
-///   soon as Safari has confirmed the last one.
+/// - Pace: one grapheme per op, the Mac's curve (`macPaceMs`): the gap between typed graphemes spreads the work over
+///   about `budgetMs`, no slower than `calmMs`; a backlog of `behindOps` or more goes at the floor. On iOS it is never
+///   faster than the field's confirmation (`floorMs`), which equals the calm pace, so every grapheme goes as soon as
+///   Safari has confirmed the last one. No pause between words (the Mac has none).
 public enum SpanPlanner {
     /// A change of `old[start..<end]` into `text` (grapheme offsets into the old text).
     public struct Hunk: Sendable, Equatable {
@@ -38,24 +38,32 @@ public enum SpanPlanner {
 
     // MARK: Pace
 
-    /// A short change types at this calm pace (the Mac's).
+    /// The Mac's rhythm (`KeystrokePlanner` on macOS), mirrored: a short change types at the calm pace, a backlog spreads
+    /// over the budget, and `behindOps` or more go at the Mac's floor. No pause between words.
     public static let calmMs = 30.0
-    /// The field's confirmation: the keyboard reads one report per 33 ms tick, and Safari leaves its report stale after
-    /// edits sent back to back (spike), so typed graphemes are never closer than this. In practice Safari confirms an
-    /// insert in about 45 ms.
-    public static let floorMs = 30.0
+    public static let macFloorMs = 5.0
     /// What a change, or the backlog, aims to take.
     public static let budgetMs = 700.0
     /// This many graphemes still to type mean typing has fallen behind speech (about 15 characters a second): the pace
     /// goes straight to the floor.
     public static let behindOps = 14
+    /// The field's confirmation on iOS: the keyboard reads one report per 33 ms tick, and Safari leaves its report stale
+    /// after edits sent back to back (spike), so typed graphemes are never closer than this. In practice Safari confirms
+    /// an insert in about 45 ms.
+    public static let floorMs = 30.0
 
-    /// The gap between typed graphemes for `ops` of them still to go, after `fixedMs` of settles the work needs anyway:
-    /// spread over the budget, between the floor and the calm pace; straight to the floor once `ops` reaches `behindOps`.
-    public static func paceMs(ops: Int, fixedMs: Double = 0) -> Double {
+    /// The Mac's gap between typed graphemes for `ops` of them still to go, after `fixedMs` of settles the work needs
+    /// anyway: spread over the budget, between the Mac's floor and the calm pace; straight to that floor once `ops`
+    /// reaches `behindOps`.
+    public static func macPaceMs(ops: Int, fixedMs: Double = 0) -> Double {
         guard ops > 0 else { return calmMs }
-        guard ops < behindOps else { return floorMs }
-        return min(calmMs, max(floorMs, (budgetMs - fixedMs) / Double(ops)))
+        guard ops < behindOps else { return macFloorMs }
+        return min(calmMs, max(macFloorMs, (budgetMs - fixedMs) / Double(ops)))
+    }
+
+    /// The Mac's curve, never faster than the field's confirmation (`floorMs`).
+    public static func paceMs(ops: Int, fixedMs: Double = 0) -> Double {
+        max(floorMs, macPaceMs(ops: ops, fixedMs: fixedMs))
     }
 
     // MARK: Spans

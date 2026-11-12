@@ -91,6 +91,21 @@ public struct DictationTypist: Sendable, Equatable {
         return typedThrough
     }
 
+    /// A key while a line is being typed (#268): the rest of the line heard so far goes in first (one grapheme an insert;
+    /// the field queue holds the key behind them), then the line ends as with `interrupt`. Nothing is typed when the
+    /// field no longer echoes the line (the user moved on), or for a line being taken back.
+    public mutating func finishLine(contextBefore: String) -> Step {
+        var step = Step()
+        guard let current = active else { return step }
+        if !current.retract, current.revealed < current.text.count, OwnEditEcho.isSame(expected: current.expected, reported: contextBefore) {
+            step.inserts = current.text[current.revealed...].map { String($0) }
+        }
+        active = nil
+        typedThrough = max(typedThrough, current.seq)
+        step.acknowledged = typedThrough
+        return step
+    }
+
     /// Everything still queued goes in now (the keyboard is going away).
     public mutating func flush(contextBefore: String, capitalization: AutoCapitalizationType) -> Step {
         var context = contextBefore, result = Step()

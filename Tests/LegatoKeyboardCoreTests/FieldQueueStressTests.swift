@@ -36,7 +36,7 @@ import Testing
     ///   replaced the selection, so the field holds text no report showed. Key placement is not asserted after that.
     @Test(arguments: [UInt64(69), 190, 230, 241, 265, 398, 548, 615, 856, 1035, 1121, 1138, 1376, 1392, 1555, 1615, 1886, 2251, 2729, 2989, 3569, 4568])
     func pinnedSeedsKeepTheInvariants(seed: UInt64) {
-        var session = StressSession(seed: seed, lateCleanups: false, fieldSwitches: false)
+        var session = StressSession(seed: seed, lateCleanups: false, fieldSwitches: false, takeStops: false)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
     }
 
@@ -52,7 +52,7 @@ import Testing
     ///   caret (the report's empty window after the caret fit anything); the model kept the text after it twice.
     @Test(arguments: [UInt64(165), 944, 1571, 2930, 4167, 4414])
     func pinnedLateCleanupSeedsKeepTheInvariants(seed: UInt64) {
-        var session = StressSession(seed: seed, fieldSwitches: false)
+        var session = StressSession(seed: seed, fieldSwitches: false, takeStops: false)
         if let failure = session.run() { Issue.record("seed \(seed): \(failure)") }
     }
 
@@ -67,9 +67,11 @@ import Testing
     /// - 1638: a unit's way back to the user went out on an unshown model (the new field's report fit it elsewhere).
     /// - 3227: the new field held the old text's end; four agreeing characters sent the caret back the old distance.
     /// - 3066, 1250: a list line repeated further down, under Safari's block echo, pinned the first line.
-    @Test(arguments: [UInt64(206), 444, 1250, 1638, 3066, 3227, 3794, 4687])
+    /// - 921, 2614: after a failed jump's reseed the caret stayed away from the user; a new region put its space there.
+    ///   A region now starts at the user's cursor.
+    @Test(arguments: [UInt64(206), 444, 921, 1250, 1638, 2614, 3066, 3227, 3794, 4687])
     func pinnedFieldSwitchAndListSeedsKeepTheInvariants(seed: UInt64) {
-        var session = StressSession(seed: seed)
+        var session = StressSession(seed: seed, takeStops: false)
         var list = ListSession(seed: seed)
         if let failure = session.run() ?? list.run().map({ "list session: \($0)" }) { Issue.record("seed \(seed): \(failure)") }
     }
@@ -241,12 +243,16 @@ struct StressSession {
     /// Field switches draw from their own generator too (UAT F2).
     private var switches: SeededGenerator
     private let fieldSwitches: Bool
+    /// Some takes are stopped before they complete (the keys then wait for them), from their own generator too.
+    private var stops: SeededGenerator
+    private let takeStops: Bool
     /// Fields the user left (Safari gives every field of a page one identity: the queue is not told).
     private var retired: [FakeField] = []
 
     /// `lateCleanups`, `fieldSwitches`: off for the pinned seeds, which replay their sessions as they were when they failed.
-    init(seed: UInt64, lateCleanups: Bool = true, fieldSwitches: Bool = true) {
-        self.seed = seed; self.lateCleanups = lateCleanups; self.fieldSwitches = fieldSwitches
+    init(seed: UInt64, lateCleanups: Bool = true, fieldSwitches: Bool = true, takeStops: Bool = true) {
+        self.seed = seed; self.lateCleanups = lateCleanups; self.fieldSwitches = fieldSwitches; self.takeStops = takeStops
+        stops = SeededGenerator(seed: seed ^ 0x5709)
         rng = SeededGenerator(seed: seed); extra = SeededGenerator(seed: seed ^ 0x57A1E); late = SeededGenerator(seed: seed ^ 0x1A7E)
         switches = SeededGenerator(seed: seed ^ 0xF1E1D)
     }
@@ -322,6 +328,11 @@ struct StressSession {
         // A field switch with the run's work for the old field pending (its words, flips, cleanup) in some sessions.
         let switchAt = fieldSwitches && Double.random(in: 0..<1, using: &switches) < 0.25
             ? Int.random(in: (ticks / 4)...(ticks - 10), using: &switches) : nil
+        // A stop before the take completes: words still arrive after it (its final words), and the keys wait for them.
+        let stopAt = takeStops && Double.random(in: 0..<1, using: &stops) < 0.5
+            ? Int.random(in: (ticks / 2)...(ticks * 2 / 3), using: &stops) : nil
+        let stopInSnapshot = Bool.random(using: &stops)
+        var stopped = false
         for tick in 0..<ticks {
             if tick == switchAt { switchField(&rig) }
             // Dictation: words arrive, Soniox flips an earlier one now and then, the take ends and is cleaned up.
@@ -332,6 +343,10 @@ struct StressSession {
                 dictated[i] = chance(0.5) ? pick(words) : String(dictated[i].dropLast()) + "s"
                 changed = true
             }
+            if tick == stopAt, !complete {
+                stopped = true
+                if stopInSnapshot { changed = true } else { rig.queue.takeStopped("r") }
+            }
             if !complete, tick > ticks * 2 / 3, !dictated.isEmpty { complete = true; changed = true }
             if complete, tick == ticks - 20, !dictated.isEmpty, !lateCleanup {
                 dictated[0] = dictated[0].prefix(1).uppercased() + dictated[0].dropFirst()
@@ -340,7 +355,9 @@ struct StressSession {
             }
             if changed, !dictated.isEmpty {
                 version += 1
-                rig.queue.enqueue(snap(version, dictated.joined(separator: " "), complete: complete))
+                var snapshot = snap(version, dictated.joined(separator: " "), complete: complete)
+                if stopped, stopInSnapshot, !complete { snapshot.stopped = true }
+                rig.queue.enqueue(snapshot)
             }
             if !clean { userActs(&rig, &keys) }
             rig.tick()
