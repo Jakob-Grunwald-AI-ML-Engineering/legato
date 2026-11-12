@@ -156,11 +156,15 @@ extension DictationPipelineTests {
         try await until { pipeline.pending < 2 }
         #expect(pipeline.liveRun?.snapshot.segments.contains { $0.cleaned } == false)
         #expect(published.allSatisfy { $0?.segments.contains { $0.cleaned } != true })
-        // The stop waits for cleanup (sentence 0 times out: raw), then publishes one target with the cleaned sentences.
+        // The stop says so at once (the keyboard holds the user's keys), waits for cleanup (sentence 0 times out: raw),
+        // then publishes one target with the cleaned sentences.
         let before = published.count
         await pipeline.finishTake()
-        #expect(published.count == before + 1)
+        #expect(published.count == before + 2)
+        let stopped = try #require(published[before])
+        #expect(stopped.stopped == true && !stopped.complete && !stopped.segments.contains { $0.cleaned })
         let last = try #require(published.last ?? nil)
+        #expect(last.stopped == nil)
         #expect(last.complete && last.segments == [.init(id: 0, text: "hello world this is sentence one.", final: true),
                                                    .init(id: 1, text: "And This Is The Second One..", cleaned: true, final: true)])
         #expect(pipeline.outbox.isEmpty, "Live never uses the line outbox")

@@ -11,9 +11,9 @@ import Foundation
 ///   expected cursor in the model at that place and nowhere else, `FieldMatch`).
 /// - Lanes: user input (keys, delete, cursor pans, word-row and undo edits) goes first, behind at most the op in flight
 ///   (bounded by `userBoundMs`, then a resync). Edits (`Edit`: Magic, typed lines, host text) come next, then live
-///   dictation runs (`LiveDictationSnapshot`, coalesced to the newest per run). A key waits (up to `keyHoldMs`) until
-///   the take's text already heard is typed (`flushBeforeKeys`); after a batch of jump units the caret is shown again
-///   at the take's end (`revealCaret`).
+///   dictation runs (`LiveDictationSnapshot`, coalesced to the newest per run). A key waits (bounded, `keyHoldMaxMs`)
+///   until the take's text already heard is typed, and a stopped take until it is complete (`flushBeforeKeys`); after
+///   a batch of jump units the caret is shown again at the take's end (`revealCaret`).
 /// - Planning happens when an item starts, against the model as it is then. A change away from the cursor is a jump
 ///   unit: move to the change, delete and insert only the differing characters (`ShadowEditPlanner.diff`), move back.
 ///   Nothing else goes out while a unit runs; user input ends the unit early (the caret goes back first) and the rest
@@ -147,7 +147,7 @@ public struct FieldQueue: Sendable {
         public var animated: Bool
         public var movesByCharacters: Bool
         public var capitalization: AutoCapitalizationType
-        /// The user's keys wait (up to `keyHoldMs`) until the take's text already heard is typed (`flushBeforeKeys`).
+        /// The user's keys wait (bounded, `keyHoldMaxMs`) until the take's text already heard is typed (`flushBeforeKeys`).
         public var keysWaitForTake: Bool
         public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
                     keysWaitForTake: Bool = true) {
@@ -195,8 +195,13 @@ public struct FieldQueue: Sendable {
     static let contextChars = 8
     /// A report reaching back past a short model must agree with at least this much of it.
     static let extendOverlapChars = 4
-    /// The longest the user's keys wait for the take's text already heard; then they land and the rest follows them.
-    public static let keyHoldMs = 2_000.0
+    /// How long the user's keys wait for the take (`flushBeforeKeys`): the typing still to do at `keyHoldGraphemeMs` a
+    /// grapheme, plus `keyHoldSlackMs` for its final words, never more than `keyHoldMaxMs`. Then they land and the rest
+    /// of the take follows them.
+    public static let keyHoldMaxMs = 8_000.0
+    public static let keyHoldSlackMs = 1_000.0
+    /// Safari confirms an insert in about 45 ms.
+    static let keyHoldGraphemeMs = 45.0
     /// A budget for the app's wait on an edit of `operationCount` ops.
     public static func budgetMs(operationCount: Int) -> Double { max(20_000, Double(max(0, operationCount)) * 150) }
 
@@ -338,7 +343,7 @@ public struct FieldQueue: Sendable {
         var lastSegmentID = -1
         /// Every segment is cleaned: no later cleanup is coming.
         var cleaned = false
-        /// The user stopped the take (`takeStopped`); its complete snapshot comes after its cleanup.
+        /// The user stopped the take (`takeStopped`, or a snapshot says so); its complete snapshot comes after its cleanup.
         var stopped = false
     }
     private(set) var runs: [LiveRun] = []
@@ -466,9 +471,12 @@ public struct FieldQueue: Sendable {
     private var paceCreditMs = 0.0
     private var lastSentLane = Lane.live
     static let quietMs = 250.0
-    /// How long the user's keys have waited (`keyHoldMs`), and whether the first of them cut a dictated word short (the
-    /// key then starts a word of its own after the word is typed).
+    /// How long the user's keys have waited, by when (in that wait) the take's backlog should be typed, and whether the
+    /// first of them cut a dictated word short (the key then starts a word of its own after the word is typed).
     private var keyHeldMs = 0.0
+    private var keyTypedByMs = 0.0
+    /// The keys wait for the take's backlog, then `keyHoldSlackMs` for its final words, at most `keyHoldMaxMs`.
+    private var keyHoldLimitMs: Double { min(Self.keyHoldMaxMs, keyTypedByMs + Self.keyHoldSlackMs) }
     private var keyCutWord = false
     /// A unit took the caret away and brought it back: once the work is done, the caret is shown again at the take's
     /// end (`revealCaret`).
@@ -561,6 +569,7 @@ public struct FieldQueue: Sendable {
     /// A live run's newest snapshot. Snapshots of a run coalesce to the newest; a new run closes the last run's region.
     public mutating func enqueue(_ snapshot: LiveDictationSnapshot) {
         if let index = runs.firstIndex(where: { $0.runID == snapshot.runID }) {
+            if snapshot.stopped == true { runs[index].stopped = true }
             if let latest = runs[index].pending?.version ?? runs[index].version, snapshot.version <= latest, snapshot.complete == runs[index].complete { return }
             if let pending = runs[index].pending {
                 let seen = ([runs[index].lastSegmentID] + runs[index].held.flatMap { $0.segments.map(\.id) }).max() ?? -1
@@ -573,10 +582,12 @@ public struct FieldQueue: Sendable {
         closeOpenRegions(.newRun)
         var run = LiveRun(runID: snapshot.runID)
         run.pending = snapshot
+        run.stopped = snapshot.stopped == true
         runs.append(run)
     }
 
-    /// The user stopped the take (the mic key): no more speech joins it, so keys wait for its text (`flushBeforeKeys`).
+    /// The user stopped the take (the mic key; the app's snapshots say so too, `LiveDictationSnapshot.stopped`): no more
+    /// speech joins it, so keys wait for its text (`flushBeforeKeys`).
     public mutating func takeStopped(_ runID: String) {
         guard let index = runs.firstIndex(where: { $0.runID == runID }) else { return }
         runs[index].stopped = true
@@ -629,7 +640,13 @@ public struct FieldQueue: Sendable {
     public mutating func step(report: Report, elapsedMs: Double) -> Action {
         stepElapsedMs = elapsedMs
         sinceSendMs += elapsedMs
-        if userLane.isEmpty { keyHeldMs = 0; keyCutWord = false } else { keyHeldMs += elapsedMs }
+        if userLane.isEmpty {
+            keyHeldMs = 0; keyTypedByMs = 0; keyCutWord = false
+        } else {
+            keyHeldMs += elapsedMs
+            let backlog = takeBacklog()
+            if backlog > 0 { keyTypedByMs = max(keyTypedByMs, keyHeldMs + Double(backlog) * Self.keyHoldGraphemeMs) }
+        }
         // Only the user selects: a selection the model does not have says the user acted at the caret.
         if report.selected != nil, selection == 0 { userActed = true }
         lagging = lagging.filter { $0.ageMs + elapsedMs < Self.confirmLimitMs }.map { ($0.state, $0.ageMs + elapsedMs) }
@@ -864,16 +881,38 @@ public struct FieldQueue: Sendable {
 
     /// The user's next item is a key (or delete) that still waits for the take's text already heard (#268).
     private var keysWait: Bool {
-        guard config.keysWaitForTake, keyHeldMs < Self.keyHoldMs, selection == 0, !quietAfterMove,
+        guard config.keysWaitForTake, keyHeldMs < keyHoldLimitMs, selection == 0, !quietAfterMove,
               case .input(let input, _)? = userLane.first else { return false }
         if case .move = input { return false }
         return true
     }
 
+    /// Graphemes the keys wait for (`flushBeforeKeys`): typed lines queued at the cursor, then a stopped or complete
+    /// take's untyped end.
+    private func takeBacklog() -> Int {
+        guard config.keysWaitForTake else { return 0 }
+        var count = editLane.prefix { $0.edit.kind == .typist }.reduce(0) { $0 + $1.edit.target.count }
+        if let (ri, gi) = openRegionIndex(), runs[ri].complete || runs[ri].stopped, let span = spans[runs[ri].regions[gi].spanID] {
+            count += heldAppend(runs[ri].regions[gi], in: runs[ri], span: span).count
+        }
+        return count
+    }
+
+    /// What the open region still appends at its end (the cursor) before the keys: its untyped end, also when a cleanup
+    /// already revised the text typed so far (that revision follows the keys, as a jump unit).
+    private func heldAppend(_ region: Region, in run: LiveRun, span: Span) -> [Character] {
+        let desired = Array(desiredText(region, in: run)), current = chars(of: span)
+        if desired.starts(with: current) { return Array(desired[current.count...]) }
+        guard let last = ShadowEditPlanner.diff(current, desired).last, last.start == current.count, last.end == current.count else { return [] }
+        return last.text
+    }
+
     /// Jakob's rule for a key pressed while the take is still being typed: the text already heard goes in first, at
     /// the floor pace, one grapheme an op; the keys then land in order after it. Typed lines queued at the cursor go
     /// first, then the open region's untyped end once the take was stopped (while it is still spoken, keys go at once
-    /// as before: a word cut short is finished, later words follow the keys). Nil: nothing to wait for (the keys go).
+    /// as before: a word cut short is finished, later words follow the keys). A stopped take holds the keys until it is
+    /// complete: its final words, still on their way at the stop, go in before them too. Nil: nothing to wait for (the
+    /// keys go).
     private mutating func flushBeforeKeys() -> Action? {
         if editLane.first?.edit.kind == .typist {
             var state = editLane.removeFirst()
@@ -884,15 +923,18 @@ public struct FieldQueue: Sendable {
             case .done: return flushBeforeKeys()
             }
         }
-        // The run's text as the queue has it (a snapshot still pending came after the key: not heard yet).
-        guard let (ri, gi) = openRegionIndex(), runs[ri].complete || runs[ri].stopped else { return nil }
+        guard let (last, _) = openRegionIndex(), runs[last].complete || runs[last].stopped else { return nil }
+        // A stopped take's later snapshots bring its final words: they are the take's, heard before the key.
+        if !runs[last].complete { applyPending(last) }
+        guard let (ri, gi) = openRegionIndex() else { return nil }
         let region = runs[ri].regions[gi]
         guard !region.abandoned, let span = spans[region.spanID], !span.parked, !span.userChanged, span.end == userCursor else { return nil }
-        let desired = Array(desiredText(region, in: runs[ri])), current = chars(of: span)
-        guard desired.count > current.count, desired.starts(with: current) else { return nil }
+        let rest = heldAppend(region, in: runs[ri], span: span)
+        // All typed: a stopped take still to complete holds the keys (bounded) for its final words.
+        guard !rest.isEmpty else { return !runs[ri].complete && chars(of: span) == Array(desiredText(region, in: runs[ri])) ? .wait : nil }
         // Nothing of the keyboard's own goes on a model the report does not show at the caret (the keys wait, bounded).
         guard lastReport.map(consistent) ?? true else { return .wait }
-        let slice = Array(desired[current.count..<(config.animated ? current.count + 1 : desired.count)])
+        let slice = Array(rest.prefix(config.animated ? 1 : rest.count))
         let spanID = region.spanID
         return send(.insert(String(slice)), lane: .live) { q in
             q.insertAtCursor(slice, owner: spanID)

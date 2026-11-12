@@ -28,8 +28,11 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     public var segments: [LiveSegment]
     /// The take ended: every word is final. Cleanup may still land later (a higher `version`).
     public var complete: Bool
-    public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false) {
-        self.runID = runID; self.version = version; self.segments = segments; self.complete = complete
+    /// The take was stopped (by any route: mic key, Action Button, bridge) and is ending: its final words and cleanup
+    /// are still to come (`complete`). The keyboard holds the user's keys until then (bounded). Nil from older apps.
+    public var stopped: Bool?
+    public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil) {
+        self.runID = runID; self.version = version; self.segments = segments; self.complete = complete; self.stopped = stopped
     }
 }
 
@@ -156,7 +159,7 @@ public struct LiveDictationRun: Sendable, Equatable {
         }
         let speaking = (open + [head]).filter { !$0.isEmpty }.joined(separator: " ")
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
-        return .init(runID: runID, version: version, segments: segments, complete: complete)
+        return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil)
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }
@@ -306,6 +309,17 @@ public struct LiveDictationRun: Sendable, Equatable {
         guard !complete, text != head else { return }
         head = text
         version += 1
+    }
+
+    /// The take was stopped and is ending (its final words and cleanup to come): the keyboard holds the user's keys.
+    public private(set) var stopped = false
+    /// True when this stopped the run now (a new version to publish).
+    @discardableResult
+    public mutating func stop() -> Bool {
+        guard !complete, !stopped else { return false }
+        stopped = true
+        version += 1
+        return true
     }
 
     /// The take ended: the cleaned units go into the target. Words still speaking stay as the keyboard showed

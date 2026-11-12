@@ -2,7 +2,7 @@ import Testing
 @testable import LegatoKeyboardCore
 
 /// Keys pressed while the take is still being typed (#268): they wait until the text already heard is typed (bounded by
-/// `FieldQueue.keyHoldMs`), then land in order. The caret shown again after a jump unit.
+/// `FieldQueue.keyHoldMaxMs`), then land in order. The caret shown again after a jump unit.
 @Suite struct FieldQueueKeyHoldTests {
     private func rig(_ text: String, safari: Bool, keysWait: Bool = true) -> QueueRig {
         var field = FakeField(text)
@@ -12,6 +12,13 @@ import Testing
 
     private func type(_ keys: String, _ rig: inout QueueRig) {
         for key in keys { rig.queue.enqueue(.insert(String(key))); rig.run(ms: 90) }
+    }
+
+    /// Every op of the take went out before the user's first key (none of it jumped back in front of the keys).
+    private func takeWentFirst(_ rig: QueueRig) -> Bool {
+        let lanes = rig.events.compactMap { if case .sent(_, let lane) = $0.event { lane } else { nil } }
+        guard let firstKey = lanes.firstIndex(of: .user) else { return false }
+        return !lanes[firstKey...].contains(.live)
     }
 
     /// The simulator repro: dictate, stop, Enter and "- " at once. On main the item came out as "- Water the plan".
@@ -72,23 +79,111 @@ import Testing
         #expect(rig.field.string == "wonderful x day")
     }
 
-    /// A long backlog holds the keys no longer than the cap: they land, and the rest of the take follows them.
+    /// A backlog longer than the hard cap holds the keys no longer than it: they land, and the rest of the take follows.
     @Test func theWaitIsCappedAndTheRestFollowsTheKeys() {
         var rig = rig("", safari: true)
-        let long = String(repeating: "dictated words keep coming ", count: 6).trimmingCharacters(in: .whitespaces)
+        let long = String(repeating: "dictated words keep coming ", count: 12).trimmingCharacters(in: .whitespaces)
         rig.queue.enqueue(snap(1, long, complete: true))
         rig.run(ms: 300)
         rig.queue.enqueue(.insert("!"))
         let asked = rig.clockMs
-        rig.run(ms: FieldQueue.keyHoldMs + 400)
+        rig.run(ms: FieldQueue.keyHoldMaxMs + 400)
         let keyAt = rig.sent.first { if $0.ms > asked, case .insert(let s) = $0.op { s.hasSuffix("!") } else { false } }?.ms
         #expect(keyAt != nil)
-        #expect((keyAt ?? .infinity) - asked <= FieldQueue.keyHoldMs + FieldQueue.transitMs + 3 * rig.tickMs)
+        #expect((keyAt ?? .infinity) - asked <= FieldQueue.keyHoldMaxMs + FieldQueue.transitMs + 3 * rig.tickMs)
         do { let drained = rig.drain(limitMs: 30_000); #expect(drained) }
         let text = rig.field.string
         #expect(text.filter { $0 == "!" }.count == 1)
         #expect(text.replacingOccurrences(of: "!", with: "").replacingOccurrences(of: "  ", with: " ") == long)
         #expect(!text.hasSuffix("!"), "the rest of the take went on after the key")
+    }
+
+    /// UAT finding 2: a long item is typed whole before the keys, however long that takes (here about 5 s; on a device
+    /// 190 characters take about 7 s), up to the hard cap. A fixed 2 s cap let them land mid-item.
+    @Test func theWaitScalesWithTheTypingStillToDo() {
+        var rig = rig("- ", safari: true)
+        let item = "call the landlord about the heating and ask when the plumber can come by"
+        rig.queue.enqueue(snap(1, item))
+        rig.tick()
+        rig.queue.takeStopped("r")
+        rig.run(ms: 300)
+        let asked = rig.clockMs
+        type("\n- ", &rig)
+        do { let drained = rig.drain(limitMs: 30_000); #expect(drained) }
+        #expect(rig.field.string == "- " + item + "\n- ")
+        let keyAt = rig.sent.first { $0.ms > asked && $0.op == .insert("\n") }?.ms ?? 0
+        #expect(keyAt - asked > 3_000, "the item took longer than the old cap")
+    }
+
+    /// The take's cleanup arrives while the item is still being typed (Claude is quicker than a long item): the keys
+    /// still wait for the item's end; the cleanup's changes to the words already typed follow them.
+    @Test(arguments: [false, true])
+    func aCleanupMidItemStillTypesTheItemsEndBeforeTheKeys(safari: Bool) {
+        var rig = rig("- ", safari: safari)
+        let item = "call the landlord about the heating and ask when the plumber can come by"
+        let cleaned = "Call the landlord about the heating, and ask when the plumber can come by."
+        rig.queue.enqueue(snap(1, item))
+        rig.tick()
+        rig.queue.takeStopped("r")
+        rig.run(ms: 300)
+        rig.queue.enqueue(.insert("\n"))
+        rig.run(ms: 700)
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [.init(id: 0, text: cleaned, cleaned: true, final: true)], complete: true))
+        do { let drained = rig.drain(limitMs: 30_000); #expect(drained) }
+        #expect(rig.field.string == "- " + cleaned + "\n")
+        // Before the key went, the item's end was typed whole.
+        let inserts = rig.events.compactMap { if case .sent(.insert(let s), let lane) = $0.event { (s, lane) } else { nil } }
+        let key = inserts.firstIndex { $0.1 == .user } ?? inserts.endIndex
+        #expect(inserts[..<key].map(\.0).joined().hasSuffix("come by."))
+    }
+
+    /// UAT finding 1: once stopped, the keys wait for the take to complete, so its final words, arriving after the
+    /// text then known was typed, still go in before them.
+    @Test(arguments: [false, true])
+    func aStoppedTakesLateFinalWordsGoBeforeTheKeys(safari: Bool) {
+        var rig = rig("- ", safari: safari)
+        rig.queue.enqueue(snap(1, "third call the landlord about the"))
+        rig.tick()
+        rig.queue.takeStopped("r")
+        while !rig.field.string.hasSuffix("about the"), rig.clockMs < 5_000 { rig.tick() }
+        rig.run(ms: 100)
+        rig.queue.enqueue(.insert("\n"))
+        rig.run(ms: 500)
+        #expect(!rig.field.string.contains("\n"), "the key waits for the take's final words")
+        rig.queue.enqueue(snap(2, "third call the landlord about the heating"))
+        do { let drained = rig.drain(); #expect(drained) }
+        #expect(rig.field.string == "- third call the landlord about the heating\n")
+        #expect(takeWentFirst(rig))
+    }
+
+    /// The app says the take stopped (any route: Action Button, bridge), not only the keyboard's mic key.
+    @Test func aStopTheSnapshotCarriesHoldsTheKeys() {
+        var rig = rig("- ", safari: true)
+        let item = "third call the landlord about the heating"
+        rig.queue.enqueue(snap(1, item))
+        rig.tick()
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [.init(id: 0, text: item, final: true)], stopped: true))
+        while !rig.field.string.hasSuffix("about the"), rig.clockMs < 5_000 { rig.tick() }
+        type("\n- ", &rig)
+        do { let drained = rig.drain(); #expect(drained) }
+        #expect(rig.field.string == "- " + item + "\n- ")
+        #expect(takeWentFirst(rig))
+    }
+
+    /// A stopped take that never completes holds the keys only briefly once its text is typed.
+    @Test func aTakeThatNeverCompletesReleasesTheKeysAfterTheSlack() {
+        var rig = rig("", safari: true)
+        rig.queue.enqueue(snap(1, "all typed"))
+        rig.tick()
+        rig.queue.takeStopped("r")
+        do { let drained = rig.drain(); #expect(drained) }
+        rig.queue.enqueue(.insert("!"))
+        let asked = rig.clockMs
+        rig.drain()
+        let keyAt = rig.sent.first { if $0.ms > asked, case .insert(let s) = $0.op { s == "!" } else { false } }?.ms ?? .infinity
+        #expect(keyAt - asked >= FieldQueue.keyHoldSlackMs - 2 * rig.tickMs)
+        #expect(keyAt - asked <= FieldQueue.keyHoldSlackMs + FieldQueue.transitMs + 3 * rig.tickMs)
+        #expect(rig.field.string == "all typed!")
     }
 
     /// The typed-line path: graphemes of the line already queued go before the key.
