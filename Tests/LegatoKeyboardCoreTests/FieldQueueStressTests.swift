@@ -67,7 +67,9 @@ import Testing
     /// - 1638: a unit's way back to the user went out on an unshown model (the new field's report fit it elsewhere).
     /// - 3227: the new field held the old text's end; four agreeing characters sent the caret back the old distance.
     /// - 3066, 1250: a list line repeated further down, under Safari's block echo, pinned the first line.
-    @Test(arguments: [UInt64(206), 444, 1250, 1638, 3066, 3227, 3794, 4687])
+    /// - 921, 2614: after a failed jump's reseed the caret stayed away from the user; a new region put its space there.
+    ///   A region now starts at the user's cursor.
+    @Test(arguments: [UInt64(206), 444, 921, 1250, 1638, 2614, 3066, 3227, 3794, 4687])
     func pinnedFieldSwitchAndListSeedsKeepTheInvariants(seed: UInt64) {
         var session = StressSession(seed: seed)
         var list = ListSession(seed: seed)

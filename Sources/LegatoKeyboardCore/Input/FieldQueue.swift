@@ -11,7 +11,9 @@ import Foundation
 ///   expected cursor in the model at that place and nowhere else, `FieldMatch`).
 /// - Lanes: user input (keys, delete, cursor pans, word-row and undo edits) goes first, behind at most the op in flight
 ///   (bounded by `userBoundMs`, then a resync). Edits (`Edit`: Magic, typed lines, host text) come next, then live
-///   dictation runs (`LiveDictationSnapshot`, coalesced to the newest per run).
+///   dictation runs (`LiveDictationSnapshot`, coalesced to the newest per run). A key waits (up to `keyHoldMs`) until
+///   the take's text already heard is typed (`flushBeforeKeys`); after a batch of jump units the caret is shown again
+///   at the take's end (`revealCaret`).
 /// - Planning happens when an item starts, against the model as it is then. A change away from the cursor is a jump
 ///   unit: move to the change, delete and insert only the differing characters (`ShadowEditPlanner.diff`), move back.
 ///   Nothing else goes out while a unit runs; user input ends the unit early (the caret goes back first) and the rest
@@ -145,8 +147,12 @@ public struct FieldQueue: Sendable {
         public var animated: Bool
         public var movesByCharacters: Bool
         public var capitalization: AutoCapitalizationType
-        public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none) {
+        /// The user's keys wait (up to `keyHoldMs`) until the take's text already heard is typed (`flushBeforeKeys`).
+        public var keysWaitForTake: Bool
+        public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
+                    keysWaitForTake: Bool = true) {
             self.animated = animated; self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
+            self.keysWaitForTake = keysWaitForTake
         }
     }
 
@@ -189,6 +195,8 @@ public struct FieldQueue: Sendable {
     static let contextChars = 8
     /// A report reaching back past a short model must agree with at least this much of it.
     static let extendOverlapChars = 4
+    /// The longest the user's keys wait for the take's text already heard; then they land and the rest follows them.
+    public static let keyHoldMs = 2_000.0
     /// A budget for the app's wait on an edit of `operationCount` ops.
     public static func budgetMs(operationCount: Int) -> Double { max(20_000, Double(max(0, operationCount)) * 150) }
 
@@ -330,6 +338,8 @@ public struct FieldQueue: Sendable {
         var lastSegmentID = -1
         /// Every segment is cleaned: no later cleanup is coming.
         var cleaned = false
+        /// The user stopped the take (`takeStopped`); its complete snapshot comes after its cleanup.
+        var stopped = false
     }
     private(set) var runs: [LiveRun] = []
     /// Finished runs kept for a cleanup still to come (the newest run aside).
@@ -456,13 +466,20 @@ public struct FieldQueue: Sendable {
     private var paceCreditMs = 0.0
     private var lastSentLane = Lane.live
     static let quietMs = 250.0
+    /// How long the user's keys have waited (`keyHoldMs`), and whether the first of them cut a dictated word short (the
+    /// key then starts a word of its own after the word is typed).
+    private var keyHeldMs = 0.0
+    private var keyCutWord = false
+    /// A unit took the caret away and brought it back: once the work is done, the caret is shown again at the take's
+    /// end (`revealCaret`).
+    private var revealDue = false
 
     public init(config: Config = Config()) { self.config = config }
 
     // MARK: Inspection
 
     public var isIdle: Bool {
-        inFlight == nil && unit == nil && userLane.isEmpty && editLane.isEmpty && !runs.contains(where: { runNeedsWork($0) })
+        inFlight == nil && unit == nil && userLane.isEmpty && editLane.isEmpty && !revealDue && !runs.contains(where: { runNeedsWork($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
@@ -519,7 +536,19 @@ public struct FieldQueue: Sendable {
     // MARK: Enqueue
 
     public mutating func enqueue(_ input: Input) {
+        if userLane.isEmpty, case .insert = input { keyCutWord = openRegionWordRest() != nil }
         userLane.append(.input(input, retried: false))
+    }
+
+    /// The rest of the word the open region's typewriter has shown only part of, at the user's cursor.
+    private func openRegionWordRest() -> [Character]? {
+        guard cursor == userCursor, selection == 0, let (ri, gi) = openRegionIndex(), let span = spans[runs[ri].regions[gi].spanID],
+              !span.parked, span.end == userCursor else { return nil }
+        let desired = Array(desiredText(runs[ri].regions[gi], in: runs[ri]))
+        let current = chars(of: span)
+        guard desired.count > current.count, desired.starts(with: current), let last = current.last,
+              last.isLetter || last.isNumber, let first = desired[current.count...].first, first.isLetter || first.isNumber else { return nil }
+        return Array(desired[current.count...].prefix { !$0.isWhitespace })
     }
 
     /// `user`: an edit the user asked for (word row, undo, version swap): it goes in the user lane.
@@ -545,6 +574,12 @@ public struct FieldQueue: Sendable {
         var run = LiveRun(runID: snapshot.runID)
         run.pending = snapshot
         runs.append(run)
+    }
+
+    /// The user stopped the take (the mic key): no more speech joins it, so keys wait for its text (`flushBeforeKeys`).
+    public mutating func takeStopped(_ runID: String) {
+        guard let index = runs.firstIndex(where: { $0.runID == runID }) else { return }
+        runs[index].stopped = true
     }
 
     /// Ends work for a run: its unfinished text is reported as dropped (the app keeps the take in History).
@@ -594,6 +629,7 @@ public struct FieldQueue: Sendable {
     public mutating func step(report: Report, elapsedMs: Double) -> Action {
         stepElapsedMs = elapsedMs
         sinceSendMs += elapsedMs
+        if userLane.isEmpty { keyHeldMs = 0; keyCutWord = false } else { keyHeldMs += elapsedMs }
         // Only the user selects: a selection the model does not have says the user acted at the caret.
         if report.selected != nil, selection == 0 { userActed = true }
         lagging = lagging.filter { $0.ageMs + elapsedMs < Self.confirmLimitMs }.map { ($0.state, $0.ageMs + elapsedMs) }
@@ -771,8 +807,11 @@ public struct FieldQueue: Sendable {
             }
         }
         if !userLane.isEmpty {
+            // Keys wait for the take's text already heard: a typed line on its way goes on.
+            if keysWait, case .edit(let state, _)? = unit?.owner, state.edit.kind == .typist { return nextInUnit() }
             abortUnit()
             if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
+            if keysWait, let action = flushBeforeKeys() { return action }
             if let action = nextUser() { return action }
         }
         if quietAfterMove {
@@ -793,11 +832,72 @@ public struct FieldQueue: Sendable {
             }
             return nextInUnit()
         }
-        if selection > 0 { return .idle }
+        if selection > 0 { revealDue = false; return .idle }
         guard shown else { return .wait }
         if let action = nextEdit() { return action }
         if let action = nextLive() { return action }
+        if let action = revealCaret() { return action }
         return .idle
+    }
+
+    /// A keyboard cannot scroll the page, and a web field does not follow a caret moved back to the take's end: the
+    /// work done, its last grapheme is deleted and typed again (two confirmed ops), which brings the caret into view.
+    /// Once per batch of jump units, only for a grapheme of the take's own at the user's caret, with no input waiting.
+    private mutating func revealCaret() -> Action? {
+        guard revealDue else { return nil }
+        revealDue = false
+        guard userLane.isEmpty, editLane.isEmpty, unit == nil, inFlight == nil, selection == 0, cursor == userCursor,
+              cursor > 1, cursor <= text.count, !text[cursor - 1].isWhitespace,
+              // Never empty a line: a rich editor drops an emptied list item.
+              !text[cursor - 2].isNewline else { return nil }
+        for run in runs {
+            for region in run.regions {
+                guard let span = spans[region.spanID], !span.parked, !span.userChanged, span.cells == nil, span.end == cursor,
+                      span.end > span.start, String(chars(of: span)) == desiredText(region, in: run) else { continue }
+                let last = String(text[cursor - 1])
+                unit = Unit(ops: [.delete(1, owner: region.spanID), .insert(last, owner: region.spanID)], owner: .region(run: run.runID), paced: false)
+                return nextInUnit()
+            }
+        }
+        return nil
+    }
+
+    /// The user's next item is a key (or delete) that still waits for the take's text already heard (#268).
+    private var keysWait: Bool {
+        guard config.keysWaitForTake, keyHeldMs < Self.keyHoldMs, selection == 0, !quietAfterMove,
+              case .input(let input, _)? = userLane.first else { return false }
+        if case .move = input { return false }
+        return true
+    }
+
+    /// Jakob's rule for a key pressed while the take is still being typed: the text already heard goes in first, at
+    /// the floor pace, one grapheme an op; the keys then land in order after it. Typed lines queued at the cursor go
+    /// first, then the open region's untyped end once the take was stopped (while it is still spoken, keys go at once
+    /// as before: a word cut short is finished, later words follow the keys). Nil: nothing to wait for (the keys go).
+    private mutating func flushBeforeKeys() -> Action? {
+        if editLane.first?.edit.kind == .typist {
+            var state = editLane.removeFirst()
+            switch start(&state, lane: .edit) {
+            case .started: return nextInUnit()
+            case .sent(let action): return action
+            case .wait: editLane.insert(state, at: 0); return .wait
+            case .done: return flushBeforeKeys()
+            }
+        }
+        // The run's text as the queue has it (a snapshot still pending came after the key: not heard yet).
+        guard let (ri, gi) = openRegionIndex(), runs[ri].complete || runs[ri].stopped else { return nil }
+        let region = runs[ri].regions[gi]
+        guard !region.abandoned, let span = spans[region.spanID], !span.parked, !span.userChanged, span.end == userCursor else { return nil }
+        let desired = Array(desiredText(region, in: runs[ri])), current = chars(of: span)
+        guard desired.count > current.count, desired.starts(with: current) else { return nil }
+        // Nothing of the keyboard's own goes on a model the report does not show at the caret (the keys wait, bounded).
+        guard lastReport.map(consistent) ?? true else { return .wait }
+        let slice = Array(desired[current.count..<(config.animated ? current.count + 1 : desired.count)])
+        let spanID = region.spanID
+        return send(.insert(String(slice)), lane: .live) { q in
+            q.insertAtCursor(slice, owner: spanID)
+            q.userCursor = q.cursor
+        }
     }
 
     private mutating func nextUser() -> Action? {
@@ -824,13 +924,17 @@ public struct FieldQueue: Sendable {
 
     private mutating func sendUser(_ input: Input, retried: Bool) -> Action? {
         switch input {
-        case .insert(let key):
+        case .insert(var key):
+            // The key cut a dictated word short and waited for it: it starts a word of its own (as `finishWordBeforeKey`).
+            if keyCutWord, selection == 0, cursor > 0, text[cursor - 1].isLetter || text[cursor - 1].isNumber,
+               key.first.map({ $0.isLetter || $0.isNumber }) ?? false { key = " " + key }
+            keyCutWord = false
             let action = send(.insert(key), lane: .user) { q in
                 if q.selection > 0 { q.removeRange(q.cursor, q.cursor + q.selection, owner: nil); q.selection = 0 }
                 q.insertAtCursor(Array(key), owner: nil)
                 q.userCursor = q.cursor
             }
-            inFlight?.input = input; inFlight?.retried = retried
+            inFlight?.input = .insert(key); inFlight?.retried = retried
             return action
         case .deleteBackward:
             guard selection > 0 || cursor > 0 else {
@@ -866,13 +970,9 @@ public struct FieldQueue: Sendable {
     /// A key at the open region's end while the typewriter has shown only part of a word: the word's rest goes in
     /// with the key, in one insert (with a space when the key starts a word), so the key lands after the word.
     private mutating func finishWordBeforeKey(_ key: String) -> Action? {
-        guard cursor == userCursor, selection == 0, let (ri, gi) = openRegionIndex(), let span = spans[runs[ri].regions[gi].spanID],
-              !span.parked, span.end == userCursor else { return nil }
-        let desired = Array(desiredText(runs[ri].regions[gi], in: runs[ri]))
-        let current = chars(of: span)
-        guard desired.count > current.count, desired.starts(with: current), let last = current.last,
-              last.isLetter || last.isNumber, let first = desired[current.count...].first, first.isLetter || first.isNumber else { return nil }
-        let rest = String(desired[current.count...].prefix { !$0.isWhitespace })
+        guard let restChars = openRegionWordRest(), let (ri, gi) = openRegionIndex() else { return nil }
+        keyCutWord = false
+        let rest = String(restChars)
         let spacer = (key.first.map { $0.isLetter || $0.isNumber } ?? false) ? " " : ""
         let spanID = runs[ri].regions[gi].spanID
         let action = send(.insert(rest + spacer + key), lane: .user) { q in
@@ -1057,7 +1157,10 @@ public struct FieldQueue: Sendable {
                 if target != cursor { return jump(to: target, span: id, lane: lane(of: current.owner)) }
             case .moveToUser:
                 current.ops.removeFirst(); unit = current
-                if userCursor != cursor { return send(.move(units(to: userCursor)), lane: lane(of: current.owner), moveTo: userCursor) }
+                if userCursor != cursor {
+                    if case .region = current.owner { revealDue = true }
+                    return send(.move(units(to: userCursor)), lane: lane(of: current.owner), moveTo: userCursor)
+                }
             case .moveToSpanEnd(let id):
                 current.ops.removeFirst(); unit = current
                 if let end = spans[id]?.end, end != cursor { return jump(to: end, span: id, lane: lane(of: current.owner)) }
@@ -1246,10 +1349,11 @@ public struct FieldQueue: Sendable {
             if let from = untypedRest(of: runs[ri]) {
                 guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
                 let anchor = String(text[max(0, userCursor - 200)..<userCursor])
-                var ops: [QOp] = []
+                // A reseed can leave the caret away from the user's cursor: the region starts at the user's cursor.
+                var ops: [QOp] = cursor == userCursor ? [] : [.moveToUser]
                 if userCursor < text.count, !text[userCursor].isWhitespace, !Self.closingMarks.contains(text[userCursor]) {
                     // The run starts in front of text without a space: one goes in behind it, and the caret stays before it.
-                    ops = [.insertBehind(" "), .moveToUser]
+                    ops += [.insertBehind(" "), .moveToUser]
                 }
                 ops.append(.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor))
                 unit = Unit(ops: ops, owner: .space, paced: false)

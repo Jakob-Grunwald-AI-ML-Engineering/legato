@@ -188,7 +188,42 @@ final class KeyboardController {
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        liveRecoveryNotice ?? hint ?? instructionPresentation?.text ?? meetingNotice ?? takeStatus ?? dictatingStatus ?? dictationStatus
+        liveRecoveryNotice ?? hint ?? instructionPresentation?.text ?? meetingNotice ?? takeStatus
+            ?? (cleanup.isActive ? Self.cleaningUp : nil) ?? dictatingStatus ?? dictationStatus
+    }
+    static let cleaningUp = "Cleaning up…"
+    /// The row says the take's cleanup is pending or still landing: it shows a spinner too.
+    var isCleaningUp: Bool { statusText == Self.cleaningUp }
+
+    /// From a live take's stop until its cleanup landed in the field (`CleanupIndicator`).
+    private(set) var cleanup = CleanupIndicator()
+    @ObservationIgnored private var cleanupExpiry: Task<Void, Never>?
+    private func updateCleanup(_ change: (inout CleanupIndicator) -> Void) {
+        var next = cleanup
+        change(&next)
+        guard next != cleanup else { return }
+        let wasActive = cleanup.isActive, since = cleanup.since
+        cleanup = next
+        if next.isActive, next.since != since {
+            cleanupExpiry?.cancel()
+            cleanupExpiry = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(CleanupIndicator.limit))
+                guard !Task.isCancelled else { return }
+                self?.updateCleanup { $0.expire(now: Date()) }
+            }
+        }
+        if !next.isActive { cleanupExpiry?.cancel(); cleanupExpiry = nil }
+        if wasActive != next.isActive {
+            trace?("cleanup indicator=\(next.isActive ? 1 : 0)")
+            syncRowTakeover()
+        }
+    }
+    /// The user stopped dictating: a live run still being typed has its cleanup to come.
+    private func noteStop() {
+        guard let snapshot = liveSnapshot, !snapshot.complete else { return }
+        updateCleanup { $0.stopped(runID: snapshot.runID, at: Date()) }
+        // Keys pressed from now on wait for the take's text already heard (#268).
+        queue.takeStopped(snapshot.runID)
     }
     func dismissLiveRecovery() {
         liveRecoveryDismissed = true
@@ -211,7 +246,7 @@ final class KeyboardController {
     /// The take's cleanup runs, or failed and holds the raw text: the word row says so.
     private var takeStatus: String? {
         switch takePhase {
-        case "cleaning": return "Cleaning…"
+        case "cleaning": return Self.cleaningUp
         case "failed": return "Couldn't clean up. Text held."
         default: return nil
         }
@@ -303,7 +338,9 @@ final class KeyboardController {
             show(text)
         }
         seenDictationNoticeID = value.dictationNoticeID ?? seenDictationNoticeID
+        let wasOpen = routeOpen
         composer = value; composerLink?.acknowledge(value.snapshot.revision)
+        if wasOpen, !routeOpen { noteStop() }
         syncRowTakeover()
     }
     /// The host published: read now rather than at the next poll tick, and keep the note for the stall check.
@@ -705,6 +742,8 @@ final class KeyboardController {
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.
     private func resetQueue(reason: String) {
+        // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
+        updateCleanup { $0.clear() }
         queue.reset()
         enqueuedHostEditID = nil
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .reset, field: queueDocumentID)
@@ -826,6 +865,7 @@ final class KeyboardController {
                     syncRowTakeover()
                 }
             case .liveApplied(let runID, let version, let complete):
+                updateCleanup { $0.applied(runID: runID, version: version, complete: complete) }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
                 liveAckedVersion = version
                 writeLiveAck(version: version, complete: complete)
@@ -892,6 +932,24 @@ final class KeyboardController {
         guard let upTo = typist.interrupt() else { return }
         acknowledgeDictation(upTo: upTo)
         trace?("dictation interrupted")
+    }
+
+    /// A key while a line is being typed (#268): the rest of the line heard so far goes to the queue first, one grapheme
+    /// an edit (the queue holds the key behind them, bounded); the following lines go in at the new cursor.
+    private func finishDictationLine() {
+        guard typist.needsTicks, document.documentID != nil else { return interruptDictation() }
+        syncQueueField()
+        let context = queueContextBefore
+        let step = typist.finishLine(contextBefore: context)
+        if !step.inserts.isEmpty {
+            let expected = context + step.inserts.joined()
+            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
+            for grapheme in step.inserts { enqueue(FieldQueue.Edit(kind: .typist, target: grapheme, atCursor: true)) }
+            typing.ownEdit(contextBefore: expected)
+            versions = nil
+            trace?("dictation line finished before a key graphemes=\(step.inserts.count)")
+        }
+        if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
     }
 
     private func acknowledgeDictation(upTo: Int) {
@@ -985,6 +1043,7 @@ final class KeyboardController {
             liveDocumentID = document.documentID
         }
         guard isVisible, !document.isSecureTextEntry else { return }
+        updateCleanup { $0.received(snapshot, at: Date()) }
         enqueue(snapshot)
         pump()
     }
@@ -994,6 +1053,7 @@ final class KeyboardController {
         let pending = !snapshot.complete || snapshot.version != liveAckedVersion
         blockedLiveRunID = snapshot.runID
         blockedLiveCompleted = snapshot.complete
+        updateCleanup { $0.clear() }
         queue.cancelRun(snapshot.runID)
         handle(queue.drainEvents())
         liveSnapshot = nil
@@ -1011,6 +1071,7 @@ final class KeyboardController {
 
     /// The live run is no longer this keyboard's to edit: what it typed stays, and nothing more of it is typed.
     private func forgetLiveRun() {
+        updateCleanup { $0.clear() }
         if let runID = liveSnapshot?.runID { queue.cancelRun(runID); handle(queue.drainEvents()) }
         ignoredLiveRunID = liveSnapshot?.runID ?? ignoredLiveRunID
         liveSnapshot = nil; liveSeen = nil
@@ -1486,7 +1547,7 @@ final class KeyboardController {
     func type(_ text: String, contextBefore: String? = nil) -> Bool {
         versions = nil // the user moved on from the dictation
         userPreemptsFieldRead()
-        interruptDictation()
+        finishDictationLine()
         resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
@@ -1510,7 +1571,7 @@ final class KeyboardController {
     func deleteBackward(contextBefore: String? = nil) {
         versions = nil
         userPreemptsFieldRead()
-        interruptDictation()
+        finishDictationLine()
         resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
@@ -1691,7 +1752,7 @@ final class KeyboardController {
     /// The mic key was tapped. In `.openApp` mode the key is a `Link` that opens the app by itself; this
     /// sends the same request over the link, for an app that is already running.
     func micTapped() {
-        if composer.status == "listening" || routeOpen { composerIntent("stop"); return }
+        if composer.status == "listening" || routeOpen { noteStop(); composerIntent("stop"); return }
         reloadHost()
         let mode = micMode
         switch mode {
@@ -1714,6 +1775,7 @@ final class KeyboardController {
             }
         case .remote(let action):
             trace?("mic mode=remote-\(action == .start ? "start" : "stop")")
+            if action == .stop { noteStop() }
             let id = UUID().uuidString
             remoteRequestID = id
             pendingRemoteStartID = action == .start ? id : nil
