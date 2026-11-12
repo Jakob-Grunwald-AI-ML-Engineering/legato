@@ -6,11 +6,6 @@ struct LegatoMacApp: App {
     private let controller = MacAppController.shared
     @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var delegate
 
-    init() {
-        MacAppController.shared.bootstrap()
-
-    }
-
     var body: some Scene {
         MenuBarExtra {
             MenuContent()
@@ -75,6 +70,12 @@ private struct MenuBarLabel: View {
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
     private let launched = ProcessInfo.processInfo.systemUptime
     static let launchGrace: TimeInterval = 2
+
+    /// Bootstrap waits for launch to finish: `App.init()` runs before `NSApp` exists, and a global event monitor
+    /// installed then leaves the process without any mouse events (status item and windows ignore real clicks).
+    @MainActor func applicationDidFinishLaunching(_ notification: Notification) {
+        MacAppController.shared.bootstrap()
+    }
 
     @MainActor func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if ProcessInfo.processInfo.systemUptime - launched > Self.launchGrace { MacAppController.shared.meetings.showWindow() }

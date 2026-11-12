@@ -173,6 +173,8 @@ import Observation
             Task { @MainActor in AXTextTarget.forget(pid: pid) }
         }
         if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier { AXTextTarget.requestTree(pid: pid) }
+        // Only after launch: a global monitor added before `NSApp` exists cuts the process off from every mouse event.
+        assert(NSApp != nil, "Install event monitors after applicationDidFinishLaunching")
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in self?.fieldEditor.relinquish(); self?.fallbackOwner.allowed = false }
         }
