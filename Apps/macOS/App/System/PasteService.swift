@@ -72,13 +72,16 @@ final class PasteService {
 
     /// Types one grapheme at a time (`paced` false: without the pauses). Controls and graphemes larger than a key
     /// event use individual clipboard pastes; Return/Tab are never synthesized. One snapshot spans the sequence.
-    func type(_ text: String, targetPID: pid_t?, secureField: Bool, restoreClipboard: Bool = true, paced: Bool = true,
+    /// `passwordField`: the take was dictated for a password field, where secure event input is expected to be on
+    /// (it hides keys from other apps; posted keys still reach the field). Anywhere else secure input stops typing.
+    func type(_ text: String, targetPID: pid_t?, passwordField: Bool = false, restoreClipboard: Bool = true, paced: Bool = true,
               realKeyDowns: @MainActor () -> Int, stillOwned: @MainActor () -> Bool = { true }) async -> TypeOutcome {
         let released = await waitForModifiersReleased()
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let secureInputBlocks = { !passwordField && IsSecureEventInputEnabled() }
         let route = FallbackRoute.route(
             axTrusted: AXIsProcessTrusted(), frontmostIsTarget: frontmost != nil && frontmost == targetPID && stillOwned(),
-            secureField: secureField || IsSecureEventInputEnabled(), modifiersReleased: released)
+            secureField: secureInputBlocks(), modifiersReleased: released)
         if case .copyOnly(let reason) = route { return .unavailable(reason) }
         guard !Task.isCancelled, let targetPID else { return .unavailable(.appChanged) }
         let baseline = realKeyDowns()
@@ -88,7 +91,7 @@ final class PasteService {
             let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
             guard !Task.isCancelled,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
-                  !IsSecureEventInputEnabled(), stillOwned(), realKeyDowns() == baseline,
+                  !secureInputBlocks(), stillOwned(), realKeyDowns() == baseline,
                   CGEventSource.flagsState(.hidSystemState).intersection(modifiers).isEmpty else { return false }
             guard TypewriterPlan.needsPaste(step) else { return Self.postUnicode(step) }
             // A clipboard changed by the user or another app belongs to them; do not overwrite it

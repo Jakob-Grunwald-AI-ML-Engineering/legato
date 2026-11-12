@@ -76,6 +76,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored public let recentTakes: RecentTakesStore
     /// Keeps every dictated text. A take is saved raw before cleanup starts, so no cleanup outcome can lose it.
     @ObservationIgnored private let history: (any HistoryStore)?
+    /// False while the field is a password field: its takes stay out of History and the recent takes (cleanup context).
+    @ObservationIgnored public var keepsTakes: @MainActor () -> Bool = { true }
     /// The history entry of the last take: a retry of the same text updates it instead of adding another.
     @ObservationIgnored private var takeEntry: (raw: String, id: UUID)?
     @ObservationIgnored private let cleaner: any SentenceCleaning
@@ -755,7 +757,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         streamSeq = nil; streamed = ""
         // The delivery may be gone: the keyboard stopped typing it (the user moved on) and acknowledged.
         if let i = outbox.firstIndex(where: { $0.sequence == seq }) { outbox[i].text = text; outbox[i].final = true }
-        recentTakes.record(raw: raw, cleaned: text, wasCleaned: true)
+        if keepsTakes() { recentTakes.record(raw: raw, cleaned: text, wasCleaned: true) }
         notifyStream(force: true)
     }
 
@@ -794,12 +796,12 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         let sequence = nextTakeSequence
         nextTakeSequence += 1
         outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: text, cleaned: cleaned, isTake: true))
-        recentTakes.record(raw: raw, cleaned: text, wasCleaned: cleaned)
+        if keepsTakes() { recentTakes.record(raw: raw, cleaned: text, wasCleaned: cleaned) }
         onChange?()
     }
 
     private func save(id: UUID, raw: String, text: String, fallback: Bool = false) async {
-        guard let history else { return }
+        guard let history, keepsTakes() else { return }
         try? await history.upsert(DictationEntry(id: id, date: Date(), text: text, rawText: text == raw ? nil : raw,
                                                  localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0,
                                                  cleanupFallback: fallback ? true : nil))

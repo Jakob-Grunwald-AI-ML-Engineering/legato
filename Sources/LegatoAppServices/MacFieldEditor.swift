@@ -60,6 +60,8 @@ import LegatoMac
     /// copied, never typed (a typed letter could be the site's shortcut).
     private var panelCopiesOnly = false
     private var target: (any TextTarget)?
+    /// The bound field is a password field: its takes are not kept in History (the host gates the pipeline's writes).
+    public private(set) var passwordField = false
     private var documentID = UUID().uuidString
     private var activeInstructionID: String?
     private var streamedRunID: String?
@@ -89,9 +91,10 @@ import LegatoMac
         case .target(let value):
             target = value
             field = value.editsInPlace || value.typesKeys ? .liveEditable : .readOnly
-        case .secure: field = .secure; report("Secure field: dictation will be copied. Magic cannot edit it.")
+        case .password: field = .password
         case .none: field = .unreadable
         }
+        passwordField = field == .password
         panelCopiesOnly = field == .readOnly
         queue = MacFieldQueue(target: target, documentID: documentID)
         queue.paced = { [weak self] in self?.typewriter() ?? true }
@@ -164,7 +167,8 @@ import LegatoMac
         await queue.whenIdle()
     }
 
-    /// A secure field (or no field at all outside panel mode): finished text only reaches the clipboard.
+    /// No field outside panel mode (not reached by a fresh bind: every unreadable field uses the panel): finished text
+    /// only reaches the clipboard.
     private func copyUnwritable(_ text: String) {
         guard !text.isEmpty else { return }
         recover(text); report("Dictation copied. The field is unavailable or changed; paste with ⌘V.")
@@ -297,6 +301,7 @@ import LegatoMac
     // MARK: Magic
 
     public func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
+        guard !passwordField else { throw InstructionFailure.unreadable("Magic doesn't edit password fields.") }
         guard let target else { throw InstructionFailure.unreadable("Magic can't read this field. Nothing was edited.") }
         // Dictation still on its way lands first, all at once, so Magic reads the finished text.
         await queue.flush()

@@ -98,10 +98,10 @@ import ApplicationServices
             switch AXTextTarget.captureFocused() {
             case .target(let target): capture = target.editsInPlace ? "readable" : target.typesKeys ? "readable-keys" : "readable-no-writes"
             case .none: capture = "unavailable"
-            case .secure: capture = "secure-or-unverified"
+            case .password: capture = "password"
             }
             let panel = app.fieldEditor.panel
-            return ["capture": capture, "offline": MacDictationSession.offlineFixture,
+            return ["capture": capture, "captureNote": AXTextTarget.lastCaptureNote, "offline": MacDictationSession.offlineFixture,
                     "axTrusted": AXIsProcessTrusted(),
                     "frontmostPID": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
                     "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",

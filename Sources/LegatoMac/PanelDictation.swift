@@ -6,8 +6,8 @@ public enum PanelDictationSetting {
     public enum Mode: String, CaseIterable, Sendable {
         /// The panel only where the field cannot be edited live: unreadable, or readable without any way to write.
         case whenNeeded
-        /// The panel for every field that is not secure: nothing touches the field until the take is final, then it goes
-        /// in once (through the field's queue where the field is readable).
+        /// The panel for every field: nothing touches the field until the take is final, then it goes in once (through
+        /// the field's queue where the field is readable).
         case always
     }
     public static let key = "dictation.panel"
@@ -25,17 +25,18 @@ public enum DictationFieldKind: Sendable, Equatable {
     case readOnly
     /// Nothing readable: no focused element, or no selection.
     case unreadable
-    /// A secure field, or one that could not be ruled out: never typed into, only copied.
-    case secure
+    /// A positively identified password field: the panel, typed once at the end like an unreadable field; its takes
+    /// are not kept in History.
+    case password
 }
 
 public enum PanelDictationPolicy {
-    /// Whether a take into this field goes through the panel. A secure field never does.
+    /// Whether a take into this field goes through the panel: every field that is not edited live does. There are
+    /// only these two modes; no field is copy-only from the start.
     public static func usesPanel(_ mode: PanelDictationSetting.Mode, field: DictationFieldKind) -> Bool {
         switch field {
-        case .secure: false
         case .liveEditable: mode == .always
-        case .readOnly, .unreadable: true
+        case .readOnly, .unreadable, .password: true
         }
     }
 }

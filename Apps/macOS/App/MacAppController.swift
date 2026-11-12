@@ -91,7 +91,7 @@ import Observation
             switch AXTextTarget.captureFocused() {
             case .target(let target): return .target(target)
             case .none: return .none
-            case .secure: return .secure
+            case .password: return .password
             }
         })
         fieldEditor.panelMode = { PanelDictationSetting.mode() }
@@ -101,18 +101,15 @@ import Observation
             let witness = fallbackOwner.witness
             // Same session, no click or real key since it started, the field (when readable) still focused.
             let owned = { @MainActor () -> Bool in
-                guard fallbackOwner.generation == generation, fallbackOwner.allowed, keyPresses.count == keys else { return false }
-                switch witness {
-                case .element(let target): return target.isFocused()
-                case .unreadable: return true
-                case .secure, nil: return false
-                }
+                guard fallbackOwner.generation == generation, fallbackOwner.allowed, keyPresses.count == keys,
+                      let witness else { return false }
+                return witness.stillFocused()
             }
             guard owned() else {
                 paster.copy(text)
                 return .copied(message: "Dictation copied: the field or app changed. Paste with ⌘V.")
             }
-            switch await paster.type(text, targetPID: pid, secureField: false, restoreClipboard: settings.restoreClipboard,
+            switch await paster.type(text, targetPID: pid, passwordField: witness?.isPassword == true, restoreClipboard: settings.restoreClipboard,
                                      paced: settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
                                      realKeyDowns: { keyPresses.count }, stillOwned: owned) {
             case .typed: return .typed
@@ -146,6 +143,7 @@ import Observation
         dictation.deliverStream = { [weak fieldEditor] poll in await fieldEditor?.stream(poll) ?? false }
         dictation.retractStream = { [weak fieldEditor] in fieldEditor?.retractStreamed() }
         pipeline.onLiveChange = { [weak fieldEditor] in fieldEditor?.enqueueLive($0) }
+        pipeline.keepsTakes = { [weak fieldEditor] in fieldEditor?.passwordField != true }
         pipeline.contextBefore = { [weak fieldEditor] in fieldEditor?.contextBeforeCursor() ?? "" }
     }
     private static func meetingsRoot(in root: URL) -> URL {
@@ -165,7 +163,8 @@ import Observation
                 // A Chromium app builds its tree in about a second: ask for it now, before a dictation needs it.
                 if let pid { AXTextTarget.requestTree(pid: pid) }
                 self.fieldEditor.focusChanged()
-                if case .element(let target) = self.fallbackOwner.witness, target.isFocused() {} else { self.fallbackOwner.allowed = false }
+                // An app switch voids a witness that cannot show its field still has focus.
+                if let witness = self.fallbackOwner.witness, witness.verifiesFocus, witness.stillFocused() {} else { self.fallbackOwner.allowed = false }
             }
         }
         terminateObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { note in

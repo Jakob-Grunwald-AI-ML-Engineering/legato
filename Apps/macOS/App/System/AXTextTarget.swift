@@ -34,46 +34,69 @@ final class AXTextTarget: TextTarget {
     enum Capture {
         /// A text element we can write into with Accessibility.
         case target(AXTextTarget)
-        /// No usable element (Accessibility off, our own app in front, nothing focused, no selection
-        /// support). Text is delivered by paste, where that is allowed.
+        /// No usable element (Accessibility off, our own app in front, nothing focused, no selection support, or the
+        /// element stayed unreadable after the warm-up). The take goes through the notch panel.
         case none
-        /// A secure (password) field, or one we could not rule out as secure: no AX writes, no
-        /// synthesized paste, the text is only copied.
-        case secure
+        /// A positively identified password field (`FieldSecurity`): the panel too, without History.
+        case password
     }
 
-    /// The focused text element of the frontmost app. Fails closed: secure event input being on, or
-    /// any failure to read the focused element's role or subrole beyond "the attribute is not there",
-    /// counts as a secure field.
+    /// One read of the focused element; `unknown` when an Accessibility read failed (`prepareFocused` retries those).
+    private enum Read {
+        case capture(Capture)
+        case unknown
+    }
+
+    /// Why the last capture came out as it did (the debug bridge reports it).
+    private(set) static var lastCaptureNote = ""
+
+    /// The focused text element of the frontmost app. Only a positively identified password field is one; a read that
+    /// fails (a timeout, a stale element) is unreadable after `prepareFocused` retried it, and dictates through the panel.
     static func captureFocused() -> Capture {
-        if IsSecureEventInputEnabled() { return .secure }
+        switch readFocused() {
+        case .capture(let capture): return capture
+        case .unknown: return .none
+        }
+    }
+
+    private static func readFocused() -> Read {
+        if IsSecureEventInputEnabled() { lastCaptureNote = "secure-input"; return .capture(.password) }
         guard AXIsProcessTrusted(),
               let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier
-        else { return .none }
+        else { lastCaptureNote = "no-app"; return .capture(.none) }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
         let focused: CFTypeRef?
         do {
             focused = try copyAttribute(appElement, kAXFocusedUIElementAttribute)
         } catch AXTargetError.attribute(let error) where Self.isAbsent(error) {
-            return .none
+            lastCaptureNote = "no-focus"
+            return .capture(.none)
+        } catch AXTargetError.attribute(let error) {
+            lastCaptureNote = "focus-error \(error.rawValue)"
+            return .unknown
         } catch {
-            return .secure
+            lastCaptureNote = "focus-error"
+            return .unknown
         }
-        guard let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return .none }
+        guard let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { lastCaptureNote = "no-focus"; return .capture(.none) }
         let element = unsafeDowncast(focused, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
 
-        switch secureState(of: element) {
-        case .secure, .unknown: return .secure
-        case .notSecure: break
+        switch security(of: element) {
+        case .password: lastCaptureNote = "password"; return .capture(.password)
+        case .unknown: lastCaptureNote = "role-error"; return .unknown
+        case .notPassword: break
         }
-        guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { return .none }
+        guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { lastCaptureNote = "no-selection"; return .capture(.none) }
         let target = AXTextTarget(element: element, appElement: appElement)
-        guard let selection = try? target.selectedRange(), (try? target.text(in: selection)) != nil else { return .none }
+        guard let selection = try? target.selectedRange(), (try? target.text(in: selection)) != nil else {
+            lastCaptureNote = "unreadable-text"; return .capture(.none)
+        }
         target.editor = Editor(of: element)
-        return .target(target)
+        lastCaptureNote = "target"
+        return .capture(.target(target))
     }
 
     /// What a typed insert at the end of a take can rely on in the field it started in.
@@ -82,26 +105,52 @@ final class AXTextTarget: TextTarget {
         case element(AXTextTarget)
         /// No element could be read (nothing focused that Accessibility exposes): the app and the key guards decide.
         case unreadable
-        /// A secure field, or one that could not be ruled out: copy only.
-        case secure
+        /// A password field: the insert goes ahead while its element (when one was read) keeps focus and its length
+        /// (when exposed) is unchanged. Secure input hides the user's keys from Legato's tap, so the length stands in.
+        case password(AXTextTarget?, length: Int?)
+
+        var isPassword: Bool { if case .password = self { true } else { false } }
+        /// An element was read, so focus on it can be checked.
+        var verifiesFocus: Bool {
+            switch self {
+            case .element: true
+            case .unreadable: false
+            case .password(let target, _): target != nil
+            }
+        }
+
+        /// The witnessed field still has focus (an unreadable one: no element to check, the app guard decides).
+        @MainActor func stillFocused() -> Bool {
+            switch self {
+            case .element(let target): return target.isFocused()
+            case .unreadable: return true
+            case .password(let target, let length):
+                guard let target else { return true }
+                return target.hasFocus() && (length == nil || target.characterCount() == length)
+            }
+        }
     }
 
-    /// A focus/security witness for typed inserts. This never reads or replaces the field's contents.
+    /// A focus witness for typed inserts. This never reads or replaces the field's contents.
     static func capturePasteWitness() -> PasteWitness {
-        if IsSecureEventInputEnabled() { return .secure }
+        let secureInput = IsSecureEventInputEnabled()
         guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication,
-              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return .unreadable }
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        else { return secureInput ? .password(nil, length: nil) : .unreadable }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
-        let value: CFTypeRef?
-        do { value = try copyAttribute(appElement, kAXFocusedUIElementAttribute) }
-        catch AXTargetError.attribute(let error) where isAbsent(error) { return .unreadable }
-        catch { return .secure }
-        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return .unreadable }
+        guard let value = (try? copyAttribute(appElement, kAXFocusedUIElementAttribute)) ?? nil,
+              CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return secureInput ? .password(nil, length: nil) : .unreadable }
         let element = unsafeDowncast(value, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
-        guard case .notSecure = secureState(of: element) else { return .secure }
-        return .element(AXTextTarget(element: element, appElement: appElement))
+        let target = AXTextTarget(element: element, appElement: appElement)
+        switch security(of: element) {
+        case .password: return .password(target, length: target.characterCount())
+        case .notPassword: return .element(target)
+        // Unanswered like the capture, which then dictates through the panel: the app and key guards decide.
+        case .unknown: return .unreadable
+        }
     }
 
     // MARK: Chromium
@@ -145,16 +194,42 @@ final class AXTextTarget: TextTarget {
         chromium[pid] = nil
     }
 
-    /// Before a capture: request the frontmost app's tree if it is Chromium, and while that tree is still being
-    /// built (`AccessibilityWarmup.budget` after the request) wait for the focused field to become readable.
+    /// Re-requests a Chromium app's tree although it shows a focused element: the element failed to answer (a stale
+    /// tree after the page or the app's web content was rebuilt). Paced like `requestTree`.
+    private static func refreshTree(pid: pid_t) {
+        guard pid != ProcessInfo.processInfo.processIdentifier, AXIsProcessTrusted(), isChromium(pid: pid),
+              warmup.shouldRequest(pid: pid, now: .now) else { return }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, messagingTimeout)
+        _ = try? copyAttribute(app, kAXRoleAttribute)
+        _ = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
+    /// Before a capture (every take): request the frontmost app's tree if it is Chromium, and while that tree is still
+    /// being built (`AccessibilityWarmup.budget` after the request) wait for the focused field to become readable. A
+    /// read that fails refreshes the tree once and retries for another `budget`; still failing, the capture dictates
+    /// through the panel.
     static func prepareFocused() async {
         guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication else { return }
         let pid = app.processIdentifier
         requestTree(pid: pid)
-        _ = await AccessibilityWarmup.retry(until: warmup.retryDeadline(pid: pid, now: .now)) { () -> Bool? in
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return true }
-            if case .none = captureFocused() { return nil }
-            return true
+        var deadline = warmup.retryDeadline(pid: pid, now: .now)
+        var refreshed = false
+        while !Task.isCancelled {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+            switch readFocused() {
+            case .unknown:
+                if !refreshed {
+                    refreshed = true
+                    refreshTree(pid: pid)
+                    let extended = ContinuousClock.now + AccessibilityWarmup.budget
+                    deadline = max(deadline ?? extended, extended)
+                }
+            case .capture(.none): break
+            case .capture: return
+            }
+            guard let deadline, ContinuousClock.now < deadline else { return }
+            try? await Task.sleep(for: AccessibilityWarmup.interval)
         }
     }
 
@@ -178,35 +253,43 @@ final class AXTextTarget: TextTarget {
     }
     var inputMark: Int { RealInput.shared.count }
 
-    private enum SecureState { case secure, notSecure, unknown }
-
     /// An absent attribute is the normal case for most elements; any other error (a timeout, a dead
     /// element) leaves the question open.
     private static func isAbsent(_ error: AXError) -> Bool {
         error == .noValue || error == .attributeUnsupported
     }
 
-    private static func secureState(of element: AXUIElement) -> SecureState {
-        for attribute in [kAXSubroleAttribute, kAXRoleAttribute] {
-            do {
-                if let value = try copyAttribute(element, attribute) as? String,
-                   value == "AXSecureTextField" || value.localizedCaseInsensitiveContains("secure") {
-                    return .secure
-                }
-            } catch AXTargetError.attribute(let error) where isAbsent(error) {
-                continue
-            } catch {
-                return .unknown
-            }
-        }
-        return .notSecure
+    private static func probe(_ element: AXUIElement, _ attribute: String) -> AXProbe {
+        do { return .value(try copyAttribute(element, attribute) as? String) }
+        catch AXTargetError.attribute(let error) where isAbsent(error) { return .absent }
+        catch { return .failed }
+    }
+
+    /// Secure event input, or the element's subrole or role (`FieldSecurity.classify`).
+    private static func security(of element: AXUIElement) -> FieldSecurity {
+        FieldSecurity.classify(secureInput: IsSecureEventInputEnabled(),
+                               subrole: probe(element, kAXSubroleAttribute), role: probe(element, kAXRoleAttribute))
+    }
+
+    /// This app is in front with this element focused; unlike `isFocused`, also for a password field.
+    func hasFocus() -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let focused = try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute),
+              CFGetTypeID(focused) == AXUIElementGetTypeID()
+        else { return false }
+        return CFEqual(focused, element)
+    }
+
+    /// The field's character count, where it exposes one (a password field's masked length); never its text.
+    func characterCount() -> Int? {
+        (try? Self.copyAttribute(element, kAXNumberOfCharactersAttribute)) as? Int
     }
 
     // MARK: TextTarget
 
     func isFocused() -> Bool {
         guard !IsSecureEventInputEnabled(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-              case .notSecure = Self.secureState(of: element),
+              Self.security(of: element) == .notPassword,
               let focused = try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute),
               CFGetTypeID(focused) == AXUIElementGetTypeID()
         else { return false }
@@ -225,7 +308,7 @@ final class AXTextTarget: TextTarget {
         else { return .lost }
         let focused = unsafeDowncast(value, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(focused, Self.messagingTimeout)
-        guard case .notSecure = Self.secureState(of: focused),
+        guard Self.security(of: focused) == .notPassword,
               let rangeValue = (try? Self.copyAttribute(focused, kAXSelectedTextRangeAttribute)) ?? nil,
               let selection = try? Self.range(from: rangeValue),
               Self.readable(focused, selection),

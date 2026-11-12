@@ -21,8 +21,9 @@ public enum FocusedField {
     case target(any TextTarget)
     /// No usable element: the take goes through the notch panel.
     case none
-    /// A secure field (or one that could not be ruled out): never written, never typed into; copy only.
-    case secure
+    /// A positively identified password field: never read or written live; the panel types its take once at the end,
+    /// and the take is not kept in History.
+    case password
 }
 
 /// One synthetic key the queue sends to a field that takes keystrokes: an arrow without modifiers, Backspace, or one

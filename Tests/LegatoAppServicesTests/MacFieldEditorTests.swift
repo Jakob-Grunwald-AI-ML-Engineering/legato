@@ -212,10 +212,10 @@ import LegatoMac
         #expect(await editor.apply(undo)?.applied == false)
         #expect(target.value == "CRAFT")
     }
-    @Test func secureOrUnreadableTargetsNeverReceiveBlindWrites() async throws {
-        let secure = MacFieldEditor(capture: { .secure })
-        secure.begin(); secure.beginInstruction()
-        await #expect(throws: (any Error).self) { try await secure.read(.context, instructionID: "x", reading: {}) }
+    @Test func passwordOrUnreadableTargetsNeverReceiveBlindWrites() async throws {
+        let password = MacFieldEditor(capture: { .password })
+        password.begin(); password.beginInstruction()
+        await #expect(throws: (any Error).self) { try await password.read(.context, instructionID: "x", reading: {}) }
         let target = EditorTarget("private"); target.readable = false
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.begin(); await editor.applyLive(snapshot("new", complete: true))
@@ -318,17 +318,43 @@ import LegatoMac
         #expect(inserts == ["Ready."])
         #expect(copies == ["Keep this."])
     }
-    @Test func secureFieldsNeverUseThePanel() async {
-        let editor = MacFieldEditor(capture: { .secure })
-        var inserts: [String] = [], copies: [String] = []
-        editor.insert = { inserts.append($0); return .typed }
-        editor.recover = { copies.append($0) }
-        editor.panelMode = { .always }
+    @Test func aPasswordFieldDictatesThroughThePanelLikeAnyUnreadableFieldWithoutANotice() async {
+        for mode in PanelDictationSetting.Mode.allCases {
+            let editor = MacFieldEditor(capture: { .password })
+            var inserts: [String] = [], copies: [String] = [], notices: [String] = []
+            editor.insert = { inserts.append($0); return .typed }
+            editor.recover = { copies.append($0) }
+            editor.report = { notices.append($0) }
+            editor.panelMode = { mode }
+            editor.begin()
+            #expect(editor.panel.active)
+            #expect(editor.passwordField)
+            await editor.applyLive(snapshot("hunter two", complete: true))
+            #expect(editor.panel.take.text == "hunter two")
+            await editor.finish()
+            #expect(inserts == ["hunter two"])
+            #expect(copies.isEmpty)
+            #expect(notices.isEmpty)
+        }
+    }
+    @Test func aPasswordTakeThatCannotBeTypedGoesToTheClipboardWithOneLine() async {
+        let editor = MacFieldEditor(capture: { .password })
+        var copies: [String] = [], notices: [String] = []
+        editor.insert = { text in copies.append(text); return .copied(message: "Dictation copied: the field or app changed. Paste with ⌘V.") }
+        editor.report = { notices.append($0) }
         editor.begin(); await editor.applyLive(snapshot("words", complete: true))
         await editor.finish()
-        #expect(!editor.panel.active)
-        #expect(inserts.isEmpty)
         #expect(copies == ["words"])
+        #expect(notices.count == 1)
+    }
+    @Test func onlyAPasswordBindKeepsTakesOutOfHistory() {
+        var field: FocusedField = .password
+        let editor = MacFieldEditor(capture: { field })
+        editor.begin()
+        #expect(editor.passwordField)
+        field = .none
+        editor.begin()
+        #expect(!editor.passwordField)
     }
     @Test func panelModeAlwaysLeavesAReadableFieldUntouchedUntilTheEndThenInsertsThroughTheQueue() async {
         let target = EditorTarget("Hi")

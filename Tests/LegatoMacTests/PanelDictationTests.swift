@@ -10,22 +10,21 @@ import Testing
         #expect(PanelDictationPolicy.usesPanel(.whenNeeded, field: .unreadable))
     }
 
-    @Test func alwaysCoversEveryFieldExceptASecureOne() {
+    @Test func alwaysCoversEveryFieldAndAPasswordFieldIsAnyUnreadableField() {
         #expect(PanelDictationPolicy.usesPanel(.always, field: .liveEditable))
         #expect(PanelDictationPolicy.usesPanel(.always, field: .unreadable))
-        #expect(!PanelDictationPolicy.usesPanel(.always, field: .secure))
-        #expect(!PanelDictationPolicy.usesPanel(.whenNeeded, field: .secure))
+        #expect(PanelDictationPolicy.usesPanel(.always, field: .password))
+        #expect(PanelDictationPolicy.usesPanel(.whenNeeded, field: .password))
     }
 
     @Test func theLivePillShowsNoWordsAndThePanelModePillShowsThemAll() {
         // Typing straight into the field (the default for a field that can be edited live): listening and controls only.
         #expect(DictationPillContent.forPolicy(.whenNeeded, field: .liveEditable) == .listeningControls)
-        #expect(DictationPillContent.forPolicy(.whenNeeded, field: .secure) == .listeningControls)
-        #expect(DictationPillContent.forPolicy(.always, field: .secure) == .listeningControls)
         // Panel mode (always, or a field that cannot be edited live): the growing text.
         #expect(DictationPillContent.forPolicy(.always, field: .liveEditable) == .growingText)
         #expect(DictationPillContent.forPolicy(.whenNeeded, field: .unreadable) == .growingText)
         #expect(DictationPillContent.forPolicy(.whenNeeded, field: .readOnly) == .growingText)
+        #expect(DictationPillContent.forPolicy(.whenNeeded, field: .password) == .growingText)
         #expect(DictationPillContent.forTake(panelActive: true) == .growingText)
         #expect(DictationPillContent.forTake(panelActive: false) == .listeningControls)
     }
