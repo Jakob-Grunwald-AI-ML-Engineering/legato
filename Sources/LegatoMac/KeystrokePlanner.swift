@@ -57,12 +57,12 @@ public enum KeystrokePlanner {
 
     // MARK: Pace
 
-    /// A short change types at this calm pace.
-    public static let calmMs = 30.0
+    /// The trial types short changes at the same 5 ms pace as queued changes.
+    public static let calmMs = 5.0
     /// Typed graphemes in a keystroke field are never closer than this (each key also waits for its read-back).
     public static let floorMs = 5.0
-    /// The same for an Accessibility-writable field: a write and its read-back already take a few milliseconds.
-    public static let writeFloorMs = 3.0
+    /// The same 5 ms trial for an Accessibility-writable field.
+    public static let writeFloorMs = 5.0
     /// What a change, or the backlog, aims to take.
     public static let budgetMs = 700.0
     /// This many graphemes still to type (a change's, plus what dictation has queued behind it) mean typing has fallen
@@ -71,7 +71,7 @@ public enum KeystrokePlanner {
     /// About what one verified key costs (send, the host applies it, the read-back shows it).
     public static let keyMs = 15.0
     /// The pause at a transition between moves and edits (the host may apply either late).
-    public static let settleMs = 30.0
+    public static let settleMs = 5.0
     /// About what a verified jump costs at any distance: an Accessibility caret set, or a few hops and a short run of
     /// arrows (the default, until the field showed which works).
     public static let jumpMs = 3 * keyMs

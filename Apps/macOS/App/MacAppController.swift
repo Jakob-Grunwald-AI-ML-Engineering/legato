@@ -72,14 +72,14 @@ import Observation
         if offlineFixture {
             pipeline = DictationPipeline(recentTakes: RecentTakesStore(fileURL: root.appending(path: "recent-takes.json")),
                 history: history, cleaner: DebugStreamingCleaner(chunkMilliseconds: 0),
-                sendMode: { DictationSendSetting.mode() }, supportsLive: true)
+                sendMode: { DictationSendSetting.mode() }, supportsLive: true, groupsLiveHistory: true)
             instruction = InstructionSession(runner: MacOfflineInstructionRunner(), history: history)
         } else {
-            pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true)
+            pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true, groupsLiveHistory: true)
             instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
         }
         #else
-        pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true)
+        pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true, groupsLiveHistory: true)
         instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
         #endif
         dictation = MacDictationSession(pipeline: pipeline, instruction: instruction, microphone: AutomaticInputSource(preference: { MicrophonePreference.dictation() }), vocabularyURL: vocabularyURL)
