@@ -24,6 +24,9 @@ public enum MacEditJournal {
         case applied, dropped, waiting, reset
         /// Keystroke fields: a region's keys were planned; a key was refused by its guards (nothing sent).
         case planned, refused
+        /// The field stopped reading: a run went on in the panel (`text`: its newest text, `length`: the characters of it
+        /// the field shows).
+        case panel
     }
 
     public struct Entry: Codable, Sendable, Equatable {

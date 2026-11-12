@@ -22,13 +22,20 @@ final class AXTextTarget: TextTarget {
     /// What identifies the editor apart from the element object (`Editor`), read at capture and at each rebind.
     private var editor: Editor?
 
+    /// Chromium web text reads through this: its value with the selection mapped into it, or its editable root.
+    private var reader: AXFieldReader
+
     private init(element: AXUIElement, appElement: AXUIElement) {
         var process: pid_t = 0
         AXUIElementGetPid(appElement, &process)
         self.pid = process
         self.element = element
         self.appElement = appElement
+        reader = AXFieldReader(element: AXElementText(element))
     }
+
+    /// The field is Chromium web content: its reads go through `reader`.
+    private var chromium: Bool { Self.isChromium(pid: pid) }
 
     /// What `captureFocused` found.
     enum Capture {
@@ -89,10 +96,16 @@ final class AXTextTarget: TextTarget {
         case .unknown: lastCaptureNote = "role-error"; return .unknown
         case .notPassword: break
         }
-        guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { lastCaptureNote = "no-selection"; return .capture(.none) }
         let target = AXTextTarget(element: element, appElement: appElement)
-        guard let selection = try? target.selectedRange(), (try? target.text(in: selection)) != nil else {
-            lastCaptureNote = "unreadable-text"; return .capture(.none)
+        if target.chromium {
+            // A web editor reads through its value or its editable root (`AXFieldReader`); one that does not read whole
+            // dictates through the panel from the start.
+            guard target.reader.readsWhole() else { lastCaptureNote = "unreadable-text"; return .capture(.none) }
+        } else {
+            guard (try? copyAttribute(element, kAXSelectedTextRangeAttribute)) != nil else { lastCaptureNote = "no-selection"; return .capture(.none) }
+            guard let selection = try? target.selectedRange(), (try? target.text(in: selection)) != nil else {
+                lastCaptureNote = "unreadable-text"; return .capture(.none)
+            }
         }
         target.editor = Editor(of: element)
         lastCaptureNote = "target"
@@ -308,16 +321,25 @@ final class AXTextTarget: TextTarget {
         else { return .lost }
         let focused = unsafeDowncast(value, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(focused, Self.messagingTimeout)
-        guard Self.security(of: focused) == .notPassword,
-              let rangeValue = (try? Self.copyAttribute(focused, kAXSelectedTextRangeAttribute)) ?? nil,
-              let selection = try? Self.range(from: rangeValue),
-              Self.readable(focused, selection),
-              // A keystroke field binds only an editable element (the page itself reads as text too).
-              !typesKeys || Self.isEditable(focused)
-        else { return .lost }
+        // A keystroke field binds only an editable element (the page itself reads as text too).
+        guard Self.security(of: focused) == .notPassword, !typesKeys || Self.isEditable(focused) else { return .lost }
+        let focusedReader = AXFieldReader(element: AXElementText(focused))
+        let readable: Bool
+        if chromium {
+            // Through the element's value or its editable root, like every read of a web editor.
+            readable = focusedReader.readsWhole()
+        } else if let rangeValue = (try? Self.copyAttribute(focused, kAXSelectedTextRangeAttribute)) ?? nil,
+                  let selection = try? Self.range(from: rangeValue) {
+            readable = Self.readable(focused, selection)
+        } else {
+            readable = false
+        }
         let same = sameEditor(focused)
+        // This editor has focus but reads neither itself nor through its root: the take goes on in the panel.
+        guard readable else { return same ? .unreadable : .lost }
         guard same || allowOther else { return .declined }
         element = focused
+        reader = focusedReader
         editableCache = nil; textOperationSupported = nil
         editor = Editor(of: focused)
         return .rebound(sameEditor: same)
@@ -401,11 +423,13 @@ final class AXTextTarget: TextTarget {
     }
 
     func selectedRange() throws -> UTF16Range {
+        if chromium { return try reader.selectedRange() }
         guard let value = try Self.copyAttribute(element, kAXSelectedTextRangeAttribute) else { throw AXTargetError.unexpectedValue }
         return try Self.range(from: value)
     }
 
     func text(in range: UTF16Range) throws -> String {
+        if chromium { return try reader.text(in: range) }
         let parameter = try Self.axValue(for: range)
         var result: CFTypeRef?
         let error = AXUIElementCopyParameterizedAttributeValue(
@@ -417,6 +441,7 @@ final class AXTextTarget: TextTarget {
 
     func textLength() throws -> Int {
         guard isFocused() else { throw AXTargetError.unexpectedValue }
+        if chromium { return try reader.textLength() }
         if let number = try Self.copyAttribute(element, kAXNumberOfCharactersAttribute) as? NSNumber { return number.intValue }
         guard let value = try Self.copyAttribute(element, kAXValueAttribute) as? String else { throw AXTargetError.unexpectedValue }
         return value.utf16.count
@@ -424,8 +449,17 @@ final class AXTextTarget: TextTarget {
 
     func setSelectedRange(_ range: UTF16Range) throws {
         guard isFocused() else { throw AXTargetError.unexpectedValue }
+        let (element, range) = try selectionTarget(range)
         let error = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
         guard error == .success else { throw AXTargetError.attribute(error) }
+    }
+
+    /// Where a selection set goes, and `range` as that element counts it: a web editor's read source, in its selection
+    /// space (`AXFieldReader.selectionSpace`).
+    private func selectionTarget(_ range: UTF16Range) throws -> (AXUIElement, UTF16Range) {
+        guard chromium else { return (element, range) }
+        let mapped = try reader.selectionSpace(range)
+        return ((reader.source as? AXElementText)?.element ?? element, mapped)
     }
 
     func replace(_ range: UTF16Range, with text: String) throws {
@@ -489,6 +523,7 @@ final class AXTextTarget: TextTarget {
         guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
         guard (try? selectedRange()) == selection else { throw FieldKeyRefusal.selectionMoved }
         guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        guard let (element, range) = try? selectionTarget(range) else { throw FieldKeyRefusal.unavailable }
         let error = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
         guard error == .success else { throw FieldKeyRefusal.unavailable }
     }
@@ -597,5 +632,60 @@ final class AXTextTarget: TextTarget {
         var cfRange = CFRange(location: range.location, length: range.length)
         guard let value = AXValueCreate(.cfRange, &cfRange) else { throw AXTargetError.unexpectedValue }
         return value
+    }
+}
+
+/// One element's raw text reads over Accessibility (`AXFieldReader` decides how they fit together).
+@MainActor final class AXElementText: AXTextElement {
+    let element: AXUIElement
+    init(_ element: AXUIElement) {
+        self.element = element
+        AXUIElementSetMessagingTimeout(element, AXTextTarget.messagingTimeout)
+    }
+
+    private func copy(_ attribute: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value : nil
+    }
+    private func parameter(_ attribute: String, _ argument: CFTypeRef) -> CFTypeRef? {
+        var value: CFTypeRef?
+        return AXUIElementCopyParameterizedAttributeValue(element, attribute as CFString, argument, &value) == .success ? value : nil
+    }
+
+    var axValue: String? { copy(kAXValueAttribute) as? String }
+    var axCharacterCount: Int? { (copy(kAXNumberOfCharactersAttribute) as? NSNumber)?.intValue }
+    var axSelection: UTF16Range? {
+        guard let value = copy(kAXSelectedTextRangeAttribute), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cfRange, &range) else { return nil }
+        return UTF16Range(location: range.location, length: range.length)
+    }
+    func axString(in range: UTF16Range) -> String? {
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard let argument = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        return parameter(kAXStringForRangeParameterizedAttribute, argument) as? String
+    }
+    var axMarkerText: String? {
+        guard let range = parameter("AXTextMarkerRangeForUIElement", element) else { return nil }
+        return parameter("AXStringForTextMarkerRange", range) as? String
+    }
+    func axAfterHiddenBreak(end: Bool) -> Bool? {
+        guard let value = copy("AXSelectedTextMarkerRange"), CFGetTypeID(value) == AXTextMarkerRangeGetTypeID() else { return nil }
+        let selection = unsafeDowncast(value, to: AXTextMarkerRange.self)
+        let marker = end ? AXTextMarkerRangeCopyEndMarker(selection) : AXTextMarkerRangeCopyStartMarker(selection)
+        // No marker before it: the caret is at the very start, not after a break.
+        guard let previous = parameter("AXPreviousTextMarkerForTextMarker", marker) else { return false }
+        guard let span = parameter("AXTextMarkerRangeForUnorderedTextMarkers", [previous, marker] as CFArray),
+              let text = parameter("AXStringForTextMarkerRange", span) as? String else { return nil }
+        return text.isEmpty
+    }
+    var axEditableRoots: [any AXTextElement] {
+        var roots: [AXUIElement] = []
+        for attribute in ["AXEditableAncestor", "AXHighestEditableAncestor"] {
+            guard let value = copy(attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { continue }
+            let root = unsafeDowncast(value, to: AXUIElement.self)
+            if !CFEqual(root, element), !roots.contains(where: { CFEqual($0, root) }) { roots.append(root) }
+        }
+        return roots.map { AXElementText($0) }
     }
 }

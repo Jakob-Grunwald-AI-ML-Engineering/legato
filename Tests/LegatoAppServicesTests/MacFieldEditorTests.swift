@@ -318,6 +318,41 @@ import LegatoMac
         #expect(inserts == ["Ready."])
         #expect(copies == ["Keep this."])
     }
+    /// Jakob's tight list in Edge: the field bound, then stopped reading. The take is never dropped and shows no notice:
+    /// what went in live stays, the rest grows and is cleaned in the panel, and it is typed once at the end.
+    @Test(arguments: [false, true]) func aFieldThatStopsReadingGoesOnInThePanelWithoutANotice(midTake: Bool) async {
+        let target = EditorTarget("Plan: ")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        var inserts: [String] = [], notices: [String] = [], copies: [String] = []
+        editor.insert = { inserts.append($0); return .typed }
+        editor.report = { notices.append($0) }
+        editor.recover = { copies.append($0) }
+        target.readable = midTake
+        editor.begin()
+        #expect(!editor.panel.active)
+        await editor.applyLive(snapshot("Urgent", run: "take"))
+        if midTake {
+            #expect(target.value == "Plan: Urgent")
+            target.readable = false
+            await editor.applyLive(snapshot("Urgent callback", run: "take"))
+            #expect(editor.panel.active && editor.panel.take.text == " callback")
+        } else {
+            #expect(editor.panel.active && editor.panel.take.text == "Urgent")
+        }
+        await editor.applyLive(snapshot("Urgent callback.", run: "take", complete: true))
+        await editor.finish()
+        #expect(inserts == [midTake ? " callback." : "Urgent callback."])
+        #expect(target.value == (midTake ? "Plan: Urgent" : "Plan: "))
+        #expect(notices.isEmpty && copies.isEmpty, "\(notices) \(copies)")
+        // The next take binds afresh: a readable field is edited live again.
+        target.readable = true
+        editor.begin()
+        #expect(!editor.panel.active)
+        await editor.applyLive(snapshot("Next.", run: "next", complete: true))
+        await editor.finish()
+        #expect(target.value.hasSuffix("Next."))
+    }
     @Test func aPasswordFieldDictatesThroughThePanelLikeAnyUnreadableFieldWithoutANotice() async {
         for mode in PanelDictationSetting.Mode.allCases {
             let editor = MacFieldEditor(capture: { .password })

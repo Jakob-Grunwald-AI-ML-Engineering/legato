@@ -218,6 +218,8 @@ import LegatoKeyboardCore
         boundElement = focusedElement; base = focusedBase; rebinds += 1
         return .rebound(sameEditor: same)
     }
+    /// Another field of the same app has focus.
+    var focusIsOther: Bool { other != nil }
     /// A take starts: the target is bound to the element focused now (`AXTextTarget.captureFocused`).
     func capture() { settle(all: true); boundElement = focusedElement; base = focusedBase }
     /// The page rewrote the editor's DOM: its element is a new object (same text, same caret).
@@ -245,6 +247,14 @@ import LegatoKeyboardCore
         let range = range.shifted(base)
         guard range.location >= base, range.end <= shown.length else { throw TextTargetReadError.unsupported }
         return shown.substring(with: NSRange(location: range.location, length: range.length))
+    }
+    /// The bound element's whole text in one read (`textLength` and `text(in:)` together).
+    func wholeText() throws -> String {
+        settle()
+        let shown = (lagging ?? self.shown) as NSString
+        lagging = nil
+        guard base <= shown.length else { throw TextTargetReadError.unsupported }
+        return shown.substring(from: base)
     }
     func setSelectedRange(_ range: UTF16Range) throws {
         let range = range.shifted(base)
@@ -304,19 +314,139 @@ private struct SeededRandom {
     mutating func chance(_ p: Double) -> Bool { Double(nextRaw() % 10_000) / 10_000 < p }
 }
 
+/// The fake field's text as Chromium exposes a web editor's (`ChromiumElement`): its value has a line break between every
+/// two lines, but its selection and range reads leave out the break between two adjacent non-empty lines. Reads go
+/// through `AXFieldReader`, like `AXTextTarget`'s in a Chromium app.
+@MainActor private final class SplitView: AXTextElement {
+    unowned let field: FakeAXField
+    let readable: () -> Bool
+    var roots: [SplitView] = []
+    init(_ field: FakeAXField, readable: @escaping () -> Bool) { self.field = field; self.readable = readable }
+
+    /// The field's text as this element exposes it: the value, the selection's space without the hidden line breaks, and
+    /// per value offset the hidden breaks before it.
+    private struct View {
+        let value: String
+        let ranged: [unichar]
+        let hiddenBefore: [Int]
+        let hidden: Set<Int>
+        let selection: UTF16Range
+        init(_ value: String, selection: UTF16Range) {
+            let units = Array(value.utf16)
+            var hidden = Set<Int>(), before = [0], ranged: [unichar] = []
+            for (index, unit) in units.enumerated() {
+                let isHidden = unit == 0x0A && index > 0 && index + 1 < units.count && units[index - 1] != 0x0A && units[index + 1] != 0x0A
+                if isHidden { hidden.insert(index) } else { ranged.append(unit) }
+                before.append(before[index] + (isHidden ? 1 : 0))
+            }
+            self.value = value; self.ranged = ranged; hiddenBefore = before; self.hidden = hidden; self.selection = selection
+        }
+        func ranged(_ offset: Int) -> Int { offset - hiddenBefore[max(0, min(offset, hiddenBefore.count - 1))] }
+    }
+    private var memo: View?
+    /// The text and selection as the field shows them now.
+    private var view: View? {
+        guard readable(), let text = try? field.wholeText(), let selection = try? field.selectedRange() else { return nil }
+        if let memo, memo.value == text, memo.selection == selection { return memo }
+        memo = View(text, selection: selection)
+        return memo
+    }
+    private static func string(_ units: [unichar]) -> String { String(utf16CodeUnits: units, count: units.count) }
+
+    var axValue: String? { view?.value }
+    var axCharacterCount: Int? { view?.value.utf16.count }
+    var axSelection: UTF16Range? {
+        guard let view else { return nil }
+        let start = view.ranged(view.selection.location)
+        return UTF16Range(location: start, length: view.ranged(view.selection.end) - start)
+    }
+    func axString(in range: UTF16Range) -> String? {
+        guard let view, range.location >= 0, range.length >= 0, range.end <= view.ranged.count else { return nil }
+        return Self.string(Array(view.ranged[range.location..<range.end]))
+    }
+    var axMarkerText: String? { view.map { Self.string($0.ranged) } }
+    func axAfterHiddenBreak(end: Bool) -> Bool? {
+        guard let view else { return nil }
+        let offset = end ? view.selection.end : view.selection.location
+        return view.hidden.contains(offset - 1)
+    }
+    var axEditableRoots: [any AXTextElement] { roots }
+}
+
+/// A keystroke field read like `AXTextTarget` reads a Chromium editor: through `AXFieldReader` over `SplitView`s. The
+/// focused element may expose nothing (`nestedBroken`: reads go through its editable root), and the whole editor may
+/// stop reading (`unreadable`: the queue hands the take to the panel). Keys, focus and caret sets are the fake field's.
+@MainActor private final class ReaderField: TextTarget {
+    let field: FakeAXField
+    var nestedBroken = false
+    var unreadable = false
+    /// Reads answered by the editable root.
+    var rootReads = 0
+    private var reader: AXFieldReader!
+    init(_ field: FakeAXField) {
+        self.field = field
+        rebuild()
+    }
+    private func rebuild() {
+        let root = SplitView(field) { [unowned self] in
+            if !unreadable { rootReads += 1 }
+            return !unreadable
+        }
+        let element = SplitView(field) { [unowned self] in !unreadable && !nestedBroken }
+        element.roots = [root]
+        reader = AXFieldReader(element: element)
+    }
+    var editsInPlace: Bool { field.editsInPlace }
+    var typesKeys: Bool { field.typesKeys }
+    var inputMark: Int { field.inputMark }
+    var fieldKey: AnyHashable? { field.fieldKey }
+    func isFocused() -> Bool { field.isFocused() }
+    func refocus(allowOther: Bool) -> FieldRefocus {
+        // This editor's own element, unreadable through its root too.
+        if unreadable, field.frontmost, field.boundElement != field.focusedElement, !field.focusIsOther { return .unreadable }
+        let result = field.refocus(allowOther: allowOther)
+        if case .rebound = result { rebuild() }
+        return result
+    }
+    func selectedRange() throws -> UTF16Range { try reader.selectedRange() }
+    func text(in range: UTF16Range) throws -> String { try reader.text(in: range) }
+    func textLength() throws -> Int { try reader.textLength() }
+    func setSelectedRange(_ range: UTF16Range) throws { try field.setSelectedRange(range) }
+    func replace(_ range: UTF16Range, with text: String) throws { try field.replace(range, with: text) }
+    func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws { try field.press(key, mark: mark, selection: selection) }
+    func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws { try field.setCaret(range, mark: mark, selection: selection) }
+}
+
 @MainActor @Suite struct MacFieldQueueStressTests {
     private static let words = ["sail", "north", "wind", "harbor", "tide", "deck", "rope", "calm", "squall", "anchor"]
 
     /// One seeded session: a run grows word by word with revisions, then its cleanup lands; Magic rewrites a word; the
     /// user types digits and clicks in between; reads lag. Invariants: the queue goes idle, never deletes or changes a
     /// digit the user typed, and when the user never acted the field ends exactly as dictated and edited.
-    private struct Stats { var digits = 0, drops = 0, keys = 0, dropped = 0, late = 0, refusals = 0, caretSets = 0, hops = 0, lazy = 0, placeholders = 0, rebinds = 0 }
+    private struct Stats {
+        var digits = 0, drops = 0, keys = 0, dropped = 0, late = 0, refusals = 0, caretSets = 0, hops = 0, lazy = 0, placeholders = 0, rebinds = 0
+        var rootReads = 0, handovers = 0, typedHandovers = 0
+    }
+    /// How the field reads: as it is; like a Chromium editor's tight list (`ReaderField`: hidden line breaks, a focused
+    /// element that sometimes exposes nothing); or like that, with the whole editor unreadable for a while or for good.
+    private enum ReadMode { case direct, split, unreadable }
 
-    private func session(seed: UInt64, keys: Bool = false, stats: inout Stats) async -> String? {
+    private func session(seed: UInt64, keys: Bool = false, read: ReadMode = .direct, stats: inout Stats) async -> String? {
         var rng = SeededRandom(seed)
+        var modeRng = SeededRandom(seed &+ 101)
         // Keystroke fields sometimes start on an empty last line, which a rich editor shows as a placeholder.
-        let prefix = keys && rng.chance(0.4) ? "Log:\n" : "Log: "
-        let field = FakeAXField(prefix, rng: SeededRandom(seed &* 31))
+        var prefix = keys && rng.chance(0.4) ? "Log:\n" : "Log: "
+        var tail = ""
+        if read != .direct {
+            // A tight Markdown list: a new item at the end, the end of an item mid-list, a new item mid-list.
+            switch modeRng.next(3) {
+            case 0: prefix = "Plan:\n1. sail\n2. "
+            case 1: prefix = "Plan:\n1. sail"; tail = "\n2. tide\n3. rope"
+            default: prefix = "Plan:\n1. sail\n2. "; tail = "\n3. rope"
+            }
+        }
+        let field = FakeAXField(prefix + tail, rng: SeededRandom(seed &* 31))
+        field.selection = UTF16Range(location: prefix.utf16.count, length: 0)
         field.lagChance = rng.chance(0.5) ? 0.3 : 0
         let interferes = rng.chance(0.7)
         var typedDigits = 0
@@ -334,9 +464,30 @@ private struct SeededRandom {
             field.hopSkew = rng.chance(0.5) ? 0.3 : 0
             field.wrap = rng.chance(0.3) ? 7 + rng.next(10) : 0
         }
-        let queue = MacFieldQueue(target: field)
+        let reader = read == .direct ? nil : ReaderField(field)
+        if read == .unreadable { field.dropChance = 0 }
+        let queue = MacFieldQueue(target: reader ?? field)
         queue.paced = { true }
         queue.now = { clock }
+        // The whole editor stops reading a while after the take starts: briefly (under the panel grace) or for the rest
+        // of the dictation. Handed-over runs continue in a simulated panel.
+        let unreadFrom = clock + .milliseconds(modeRng.next(800))
+        let unreadUntil: ContinuousClock.Instant? = modeRng.chance(0.5) ? unreadFrom + .milliseconds(80 + modeRng.next(400)) : nil
+        var dictating = true
+        var continuation: PanelContinuation?
+        var handedOver: [MacFieldQueue.Handover] = []
+        if read == .unreadable {
+            queue.onUnreadable = { (handovers: [MacFieldQueue.Handover]) in
+                handedOver += handovers
+                if let run = handovers.first(where: { $0.runID == "run" }) { continuation = PanelContinuation(text: run.text, typed: run.typed) }
+            }
+        }
+        func updateReading() {
+            guard let reader, read == .unreadable else { return }
+            let started = clock >= unreadFrom
+            let ended = unreadUntil.map { clock >= $0 } ?? false
+            reader.unreadable = dictating && started && !ended
+        }
         var userRng = SeededRandom(seed &+ 7)
         // Element identity churns in half the sessions, interfering or not (it keeps the text): the element is recreated
         // (Enter, a new line, a re-render) or focus moves into the caret line's nested element and back, sometimes before
@@ -363,6 +514,9 @@ private struct SeededRandom {
             let ms = Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
             let scale = keys ? min(1, ms / 40) : 1
             churn(0.02 * scale)
+            updateReading()
+            // The focused element stops or starts exposing its text (its editable root still reads).
+            if let reader, modeRng.chance(0.03 * scale) { reader.nestedBroken.toggle() }
             guard interferes else { return }
             if userRng.chance(0.05 * scale) {
                 field.type(Character(String(typedDigits % 10))); typedDigits += 1; queue.userActed()
@@ -373,17 +527,30 @@ private struct SeededRandom {
         // Dictation: grows, revises a word now and then, ends with a cleanup.
         var spoken: [String] = []
         var version = 0
+        func say(_ text: String) {
+            version += 1
+            queue.live(runID: "run", version: version, text: text)
+            // A run the panel took over shows its later versions there.
+            if var panel = continuation { _ = panel.rest(of: text); continuation = panel }        }
+        updateReading()
         for _ in 0..<(3 + rng.next(6)) {
             spoken.append(Self.words[rng.next(Self.words.count)])
             if spoken.count > 1, rng.chance(0.3) { spoken[rng.next(spoken.count - 1)] = Self.words[rng.next(Self.words.count)] }
-            version += 1
-            queue.live(runID: "run", version: version, text: spoken.joined(separator: " "))
+            say(spoken.joined(separator: " "))
             for _ in 0..<rng.next(20) { await Task.yield() }
         }
         let cleaned = spoken.joined(separator: " ").capitalizedFirst + "."
-        version += 1
-        queue.live(runID: "run", version: version, text: cleaned)
+        say(cleaned)
         await queue.whenIdle()
+        // The editor reads again (the rest of the session needs its text).
+        dictating = false; updateReading()
+        if let reader { stats.rootReads += reader.rootReads }
+        stats.handovers += handedOver.count
+        stats.typedHandovers += handedOver.filter { $0.typed > 0 }.count
+        // A run the panel took over was typed only up to the handover: the rest is the panel's, typed at the end.
+        // Keys still on their way land (a late key the handover counted as typed).
+        if !handedOver.isEmpty { field.settle(all: true) }
+        let afterHandover = handedOver.isEmpty ? nil : field.string
         // Magic: the first word of the dictation in capitals, from a read of the field as it is now (like the app's read:
         // the editor bound again if its element changed, then its text as the target shows it).
         nests = false
@@ -413,7 +580,8 @@ private struct SeededRandom {
         if field.placeholder, prefix.hasSuffix("\n") { stats.placeholders += 1 }
         if keys, field.writes > 0 { return "seed \(seed): \(field.writes) Accessibility writes to a keystroke field" }
         // Invariants.
-        let digits = final.filter(\.isNumber).count
+        // The list's own numbers are not the user's digits.
+        let digits = final.filter(\.isNumber).count - (prefix + tail).filter(\.isNumber).count
         if digits != typedDigits { return "seed \(seed): \(typedDigits) digits typed, \(digits) left: \(final)" }
         // The fake never loses focus to another field: a park-and-drop means the queue could not make progress, and a
         // recreated or nested element of the same editor is always found again.
@@ -421,8 +589,25 @@ private struct SeededRandom {
             return "seed \(seed): stalled (keys \(field.keysSent) dropped \(field.keysDropped) late \(field.keysLate) nbsp \(field.nbsp) caretSet \(field.caretSet) lazy \(field.lazyCaret)): \(drops) state=\(queue.debugState) final=\(final)\n\(trail.joined(separator: "\n"))"
         }
         if queue.hasWork { return "seed \(seed): still busy: \(queue.debugState)\n\(trail.joined(separator: "\n"))" }
-        if !interferes, field.lagChance == 0 || keys {
-            let expected = prefix + cleaned.replacingOccurrences(of: word, with: word.uppercased(), options: [], range: cleaned.range(of: word))
+        if let afterHandover {
+            // What the field shows of the take, and the panel's rest typed after it: every word once, the newest last word.
+            let shown = afterHandover.replacingOccurrences(of: "\u{00A0}", with: " ")
+            guard let continuation else { return "seed \(seed): a handover without the take's run: \(handedOver)" }
+            if !interferes {
+                guard shown.hasPrefix(prefix), shown.hasSuffix(tail) else {
+                    return "seed \(seed): the handover changed the field around the take: \(shown) \(handedOver)"
+                }
+                let body = String(shown.dropFirst(prefix.count).dropLast(tail.count))
+                let combined = (body + continuation.rest).split(whereSeparator: \.isWhitespace)
+                let words = cleaned.split(whereSeparator: \.isWhitespace)
+                if combined.count != words.count || combined.last?.lowercased() != words.last?.lowercased() {
+                    return "seed \(seed): field \(body.debugDescription) + panel \(continuation.rest.debugDescription) != \(cleaned) \(handedOver)\n\(trail.joined(separator: "\n"))"
+                }
+            }
+        } else if !interferes, field.lagChance == 0 || keys {
+            // The end of an item mid-list gets a space before the take's words.
+            let expected = prefix + PanelTake.separator(before: cleaned, after: prefix.last)
+                + cleaned.replacingOccurrences(of: word, with: word.uppercased(), options: [], range: cleaned.range(of: word)) + tail
             if final != expected { return "seed \(seed): \(final) != \(expected) drops=\(drops) state=\(queue.debugState)\n\(trail.joined(separator: "\n"))" }
         }
         if case .applied(let range)? = magicResult, (final as NSString).substring(with: NSRange(location: range.location, length: range.length)) != word.uppercased() {
@@ -467,6 +652,27 @@ private struct SeededRandom {
             #expect(stats.digits > runs && stats.dropped > 0 && stats.late > 0 && stats.refusals > 0, "stats: \(stats)")
             #expect(stats.caretSets > 0 && stats.hops > 0 && stats.lazy > 0 && stats.placeholders > 0, "stats: \(stats)")
             #expect(stats.rebinds > runs / 4, "stats: \(stats)")
+        }
+    }
+
+    /// The same keystroke sessions in a Chromium editor's tight list (`ReaderField`): the selection's space hides the line
+    /// breaks between items, and the focused element sometimes exposes nothing, so reads go through its editable root.
+    /// `unreadable`: the whole editor also stops reading, briefly or for the rest of the dictation; a run with words left
+    /// then goes on in the panel, never dropped, and the field's words plus the panel's rest are the take's, each once.
+    /// Reads cost more here, so the gate plays fewer sessions; `LEGATO_STRESS_RUNS` sets a long local run.
+    @Test(arguments: [false, true]) func seededTightListSessionsReadThroughTheEditorAndNeverDrop(unreadable: Bool) async {
+        let runs = Int(ProcessInfo.processInfo.environment["LEGATO_STRESS_RUNS"] ?? "") ?? 50
+        let only = ProcessInfo.processInfo.environment["LEGATO_STRESS_SEED"].flatMap(UInt64.init)
+        var failures: [String] = []
+        var stats = Stats()
+        for seed in only.map({ [$0] }) ?? (1...UInt64(runs)).map({ $0 }) {
+            if let failure = await session(seed: seed, keys: true, read: unreadable ? .unreadable : .split, stats: &stats) { failures.append(failure) }
+            if failures.count >= 3 { break }
+        }
+        #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
+        if only == nil {
+            #expect(stats.digits > runs && stats.rootReads > runs && stats.rebinds > runs / 4, "stats: \(stats)")
+            if unreadable { #expect(stats.handovers > runs / 5 && stats.typedHandovers > runs / 10, "stats: \(stats)") }
         }
     }
 
@@ -821,6 +1027,62 @@ private struct SeededRandom {
         #expect(drops.count == 1 && dropped == 1, "\(drops)")
         #expect(drops.first?.reason == .focusLost && drops.first?.runID == "take")
         #expect(field.string == "Log: " && !queue.hasWork)
+    }
+
+    /// Jakob's journal (Edge, mobile-code, 2026-11-12): dictating into a tight numbered list, every take waited as
+    /// unreadable and dropped as focusLost. Pinned: the focused element exposes nothing and its editable root hides the
+    /// line breaks between the items from its selection; the take reads through the root and types into the item.
+    @Test(arguments: [false, true]) func aTightListTakeReadsThroughTheEditableRoot(midList: Bool) async {
+        let head = midList ? "Plan:\n1. Call the yard" : "Plan:\n1. Call the yard\n2. "
+        let tail = midList ? "\n2. Check the rigging" : ""
+        let field = FakeAXField(head + tail, rng: SeededRandom(41))
+        field.keys = true
+        field.selection = UTF16Range(location: head.utf16.count, length: 0)
+        let reader = ReaderField(field)
+        reader.nestedBroken = true
+        let queue = MacFieldQueue(target: reader)
+        queue.paced = { true }
+        var drops: [MacFieldQueue.Drop] = [], handovers: [MacFieldQueue.Handover] = []
+        queue.onDrop = { drops.append($0) }
+        queue.onUnreadable = { handovers += $0 }
+        let take = midList ? "about the mast" : "Urgent callback."
+        let script = [(ms: 0, text: String(take.prefix(4))), (ms: 300, text: take)]
+        await replay(queue, field: field, script: script)
+        let typed = midList ? " " + take : take
+        #expect(field.string.replacingOccurrences(of: "\u{00A0}", with: " ") == head + typed + tail)
+        #expect(drops.isEmpty && handovers.isEmpty && reader.rootReads > 0, "\(drops) \(handovers)")
+        #expect(field.selection == UTF16Range(location: (head + typed).utf16.count, length: 0))
+    }
+
+    /// Pinned: neither the focused element nor its editable root reads. The take is never dropped: what was typed stays,
+    /// and the rest goes on in the panel (`onUnreadable`) after the grace, whole when nothing was typed yet.
+    @Test(arguments: [false, true]) func aFieldThatReadsNeitherItselfNorItsRootGoesOnInThePanel(midTake: Bool) async {
+        let head = "Plan:\n1. Call the yard\n2. "
+        let field = FakeAXField(head, rng: SeededRandom(43))
+        field.keys = true
+        let reader = ReaderField(field)
+        reader.nestedBroken = true
+        reader.unreadable = !midTake
+        let queue = MacFieldQueue(target: reader)
+        queue.paced = { true }
+        var drops: [MacFieldQueue.Drop] = [], handovers: [MacFieldQueue.Handover] = []
+        queue.onDrop = { drops.append($0) }
+        queue.onUnreadable = { handovers += $0 }
+        let script = [(ms: 0, text: "Urgent"), (ms: 1_500, text: "Urgent callback"), (ms: 1_900, text: "Urgent callback.")]
+        await replay(queue, field: field, script: script, events: midTake ? [(ms: 900, act: { reader.unreadable = true })] : [])
+        #expect(drops.isEmpty, "\(drops)")
+        #expect(handovers.count == 1 && !queue.hasWork, "\(handovers)")
+        guard let handover = handovers.first else { return }
+        var panel = PanelContinuation(text: handover.text, typed: handover.typed)
+        _ = panel.rest(of: "Urgent callback.")
+        if midTake {
+            // "Urgent" went in live and stays; the panel types the rest once at the end.
+            #expect(field.string == head + "Urgent" && handover.typed == 6)
+            #expect(panel.rest == " callback.")
+        } else {
+            #expect(field.string == head && handover.typed == 0 && handover.text == "Urgent")
+            #expect(panel.rest == "Urgent callback.")
+        }
     }
 
     /// Another field of the same app takes focus: a take that typed nothing yet types there, at its caret; a take that

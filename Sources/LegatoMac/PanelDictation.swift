@@ -141,3 +141,60 @@ public struct PanelTake: Sendable, Equatable {
         }
     }
 }
+
+/// A take that went on in the panel after part of it was typed live (`MacFieldQueue.Handover`): the typed characters
+/// stay in the field as they are, and each newer version of the take shows (and is typed at the end) from where they
+/// end. That place follows the take by words: the field's first N words stand for the first N words of the newest text,
+/// however a revision or cleanup changed them (a replaced word, a capital, punctuation), so no word is typed twice and
+/// none is skipped (`MacFieldQueue.typedPrefix` counts the same way).
+public struct PanelContinuation: Sendable, Equatable {
+    private var text: [Character]
+    private var boundary: Int
+
+    public init(text: String, typed: Int) {
+        self.text = Array(text)
+        boundary = min(max(0, typed), self.text.count)
+    }
+
+    /// What of the take's text the field does not show yet.
+    public var rest: String { String(text[boundary...]) }
+
+    /// Takes the take's newest text and returns its rest.
+    public mutating func rest(of newest: String) -> String {
+        let new = Array(newest)
+        boundary = Self.map(boundary, from: text, to: new)
+        text = new
+        return rest
+    }
+
+    /// The words of `text`: their character ranges.
+    private static func words(_ text: [Character]) -> [Range<Int>] {
+        var words: [Range<Int>] = [], index = 0
+        while index < text.count {
+            while index < text.count, text[index].isWhitespace { index += 1 }
+            let start = index
+            while index < text.count, !text[index].isWhitespace { index += 1 }
+            if index > start { words.append(start..<index) }
+        }
+        return words
+    }
+
+    /// Where `boundary` of `old` falls in `new`: in (or right after) the word of the same number, at the same offset from
+    /// its start, inside the new word (or the space after it).
+    static func map(_ boundary: Int, from old: [Character], to new: [Character]) -> Int {
+        let oldWords = words(old), newWords = words(new)
+        guard let word = oldWords.lastIndex(where: { $0.lowerBound < boundary }) else { return min(boundary, newWords.first?.lowerBound ?? new.count) }
+        // Fewer words now: everything the newest text has is shown already.
+        guard newWords.indices.contains(word) else { return new.count }
+        let mapped = word
+        let oldWord = oldWords[word], newWord = newWords[mapped]
+        let offset = boundary - oldWord.lowerBound
+        let next = mapped + 1 < newWords.count ? newWords[mapped + 1].lowerBound : new.count
+        // In the space after the word: as far into the new space.
+        guard offset <= oldWord.count else { return min(newWord.upperBound + offset - oldWord.count, next) }
+        // Inside the word: the new word goes on from the typed letters (a word still being spoken, a capital or a stop
+        // added); a word that changed otherwise stays as typed and stands for the new one.
+        let typed = String(old[oldWord.lowerBound..<boundary]).lowercased()
+        return String(new[newWord]).lowercased().hasPrefix(typed) ? newWord.lowerBound + offset : newWord.upperBound
+    }
+}

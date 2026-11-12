@@ -69,6 +69,9 @@ public enum FieldRefocus: Sendable, Equatable {
     /// The same app is in front with another editable text element focused that is not this editor, and another field
     /// was not allowed: nothing changed.
     case declined
+    /// This editor has focus (an element of it, or a fresh one in its place), but neither the element nor its editable
+    /// root reads: nothing changed, and the queue hands the take to the panel instead of waiting for focus.
+    case unreadable
     /// The target now reads and writes the focused element. `sameEditor`: it is this editor (the same element, a fresh
     /// element for it, an element inside it or its editable root); false: another editable field of the same app.
     case rebound(sameEditor: Bool)

@@ -131,3 +131,39 @@ import Testing
         #expect(!ChromiumHost.matches(executableName: "TextEdit", frameworks: [], fileExists: icu))
     }
 }
+
+/// A take handed to the panel part-way (`MacFieldQueue.Handover`): what the field shows stays, the panel continues it.
+@MainActor @Suite struct PanelContinuationTests {
+    private func rest(_ text: String, typed: Int, _ versions: String...) -> String {
+        var continuation = PanelContinuation(text: text, typed: typed)
+        for version in versions { _ = continuation.rest(of: version) }
+        return continuation.rest
+    }
+
+    @Test func theRestFollowsTheTypedWordsThroughRevisionsAndCleanup() {
+        // A word still being spoken goes on from its typed letters.
+        #expect(rest("Urg", typed: 3, "Urgent callback.") == "ent callback.")
+        #expect(rest("ur", typed: 2, "Urgent callback.") == "gent callback.")
+        // Cleanup capitalizes and adds a stop: the typed words are not typed again.
+        #expect(rest("deck tide", typed: 5, "Deck tide.") == "tide.")
+        // A typed word the revision replaced stays and stands for the new one; the rest starts after as many words.
+        #expect(rest("deck tide", typed: 4, "Squall tide tide sail.") == " tide tide sail.")
+        #expect(rest("deck t", typed: 6, "deck tide", "Squall tide tide sail.") == "ide tide sail.")
+        #expect(rest("wind", typed: 3, "anchor wind", "Anchor wind harbor.") == " wind harbor.")
+        #expect(rest("deck", typed: 0, "Deck tide.") == "Deck tide.")
+        // The newest text has fewer words than the field shows: nothing more to type.
+        #expect(rest("deck tide rope", typed: 14, "Deck tide.") == "")
+    }
+
+    @Test func theFieldShowsWhatItsRegionsTypedOfARun() {
+        // A revision changed typed words: they stand for as many words of the newest text.
+        #expect(MacFieldQueue.typedPrefix(current: Array("sail north"), desired: Array("sail wind harbor")) == 9)
+        #expect(MacFieldQueue.typedPrefix(current: Array("sail nor"), desired: Array("sail north")) == 8)
+        let region = MacFieldQueue.TypedRegion(current: Array(" deck t"), desired: Array(" deck tide"), source: Array("deck tide"),
+                                               separator: [" "], original: [])
+        #expect(MacFieldQueue.typedCount([region]) == 6)
+        let untouched = MacFieldQueue.TypedRegion(current: Array("old"), desired: Array("new words"), source: Array("new words"),
+                                                  separator: [], original: Array("old"))
+        #expect(MacFieldQueue.typedCount([untouched]) == 0)
+    }
+}

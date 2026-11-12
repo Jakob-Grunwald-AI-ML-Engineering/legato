@@ -30,7 +30,8 @@ import LegatoKeyboardCore
 /// - Focus by editor, not by element: when the bound element no longer reads as focused, the queue binds the element
 ///   that has focus if it is the same editor (a web page recreates elements and moves focus between nested ones as its
 ///   DOM changes), or any text field of the app while nothing was typed yet (`TextTarget.refocus`), and finds its work
-///   there again. Otherwise it waits up to `parkLimit`, then each take drops once, whole.
+///   there again. Otherwise it waits up to `parkLimit`, then each take drops once, whole. A field that keeps focus but
+///   stops reading is not gone: after `unreadableGrace` its dictation goes on in the panel (`onUnreadable`).
 @MainActor
 public final class MacFieldQueue {
     public enum Reason: String, Sendable, Equatable { case userChanged, cannotPlace, focusLost, cancelled, failed }
@@ -62,6 +63,15 @@ public final class MacFieldQueue {
         case applied(UTF16Range)
         case dropped(Reason)
     }
+    /// A run handed to the panel because its field stopped reading (`onUnreadable`): `text` is its newest text, of which
+    /// the first `typed` characters stand for what is in the field already. That text stays as it is.
+    public struct Handover: Sendable, Equatable {
+        public var runID: String
+        public var version: Int
+        public var text: String
+        public var typed: Int
+        public var complete: Bool
+    }
 
     // MARK: Tunables
 
@@ -71,8 +81,10 @@ public final class MacFieldQueue {
     /// An edit's scope found away from where it was read must be at least this long when its context is gone.
     public static let relocateChars = 16
     public static let contextChars = 16
-    /// How long work waits for an unfocused or unreadable field before it is dropped.
+    /// How long work waits for an unfocused field before it is dropped (or, without `onUnreadable`, an unreadable one).
     public static let parkLimit = Duration.seconds(3)
+    /// How long dictation waits for a focused field that does not read before it goes on in the panel (`onUnreadable`).
+    public static let unreadableGrace = Duration.milliseconds(600)
     /// How long an edit waits for its text to show before it counts as unplaceable.
     public static let placeGrace = Duration.milliseconds(400)
     /// Ops of one region that failed to verify in a row before its work is dropped.
@@ -124,6 +136,10 @@ public final class MacFieldQueue {
     public var now: @MainActor () -> ContinuousClock.Instant = { .now }
     public var journal: (@MainActor (MacEditJournal.Entry) -> Void)?
     public var onDrop: (@MainActor (Drop) -> Void)?
+    /// The bound field still has focus but stopped reading for `unreadableGrace`: its pending dictation goes on in the
+    /// panel. Each run is handed over once, never dropped; the queue leaves it (and its later versions) alone from then.
+    /// Nil: such work waits and drops after `parkLimit` like work for an unfocused field.
+    public var onUnreadable: (@MainActor ([Handover]) -> Void)?
     /// Counts changes the queue saw land (its own, verified, and the user's).
     public private(set) var revision = 0
 
@@ -253,6 +269,8 @@ public final class MacFieldQueue {
     private var lastLength: Int?
     /// Why the field could not take an op, journaled once per blocked stretch.
     private var blockedNote: String?
+    /// Since when the focused field has not read, without a read in between (`unreadableGrace`).
+    private var unreadableSince: ContinuousClock.Instant?
 
     // MARK: Inspection
 
@@ -508,6 +526,14 @@ public final class MacFieldQueue {
                 idleSteps = 0
                 let started = blockedSince ?? now()
                 blockedSince = started
+                // A focused field that does not read: dictation goes on in the panel, never dropped for focus.
+                if let since = unreadableSince, let onUnreadable, now() - since >= Self.unreadableGrace,
+                   runs.indices.contains(where: handable) {
+                    caretOwed = false
+                    unreadableSince = nil
+                    onUnreadable(handOver())
+                    continue
+                }
                 if now() - started >= Self.parkLimit {
                     // Everything waiting drops once; later work gets a park window of its own.
                     dropAll(.focusLost)
@@ -585,6 +611,7 @@ public final class MacFieldQueue {
         let mark = target.inputMark
         guard focus(target) else { return false }
         guard let (doc, selection) = read(target).map({ ($0.0, $0.1) }) else { blocked("unreadable"); return false }
+        unreadableSince = nil
         if let caret = rebindPending {
             rebindPending = nil
             adoptRebind(doc, selection: selection, caret: caret)
@@ -659,10 +686,12 @@ public final class MacFieldQueue {
             return true
         case .declined: blocked("otherField"); return false
         case .lost: blocked("notFocused"); return false
+        case .unreadable: blocked("unreadable"); return false
         }
     }
 
     private func blocked(_ why: String) {
+        if why == "unreadable" { unreadableSince = unreadableSince ?? now() } else { unreadableSince = nil }
         guard blockedNote != why else { return }
         blockedNote = why
         note(.waiting, reason: why)
@@ -1703,6 +1732,77 @@ public final class MacFieldQueue {
         let text = runs[index].retracted ? "" : String(runs[index].target)
         note(.dropped, run: runs[index].id, text: text, reason: reason.rawValue)
         onDrop?(Drop(id: runs[index].id, runID: runs[index].id, reason: reason, text: text))
+    }
+
+    // MARK: Panel handover
+
+    /// A run with words still to place that was neither given up nor handed over.
+    private func handable(_ index: Int) -> Bool {
+        !runs[index].abandoned && !runs[index].retracted && (runs[index].regions.contains(where: \.pending) || runs[index].needsRegion)
+    }
+
+    /// The field stopped reading: every run with words left goes on in the panel. What it typed stays as it is, nothing
+    /// is dropped, and its later versions are the panel's (`abandoned`, without a drop).
+    private func handOver() -> [Handover] {
+        var handovers: [Handover] = []
+        for index in runs.indices where handable(index) {
+            // A key that went out but did not read back usually landed: it counts as typed, so it is not typed twice.
+            let typed = Self.typedCount(runs[index].regions.map {
+                TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,
+                            original: Array($0.original), trimsLead: $0.trimsLead, lost: $0.lost)
+            })
+            for region in runs[index].regions {
+                if region.pending { region.desired = region.current }
+                region.open = false
+            }
+            runs[index].remainder = []
+            runs[index].abandoned = true
+            let run = runs[index]
+            note(.panel, run: run.id, length: typed, text: String(run.target), reason: "unreadable")
+            handovers.append(Handover(runID: run.id, version: run.version, text: String(run.target), typed: typed, complete: run.complete))
+        }
+        return handovers
+    }
+
+    /// What `typedCount` needs of a region.
+    struct TypedRegion {
+        var current: [Character], desired: [Character], source: [Character], separator: [Character], original: [Character]
+        var trimsLead = false, lost = false
+    }
+
+    /// How many characters of a run's text the field shows: up to the end of what its last region with typed text stands
+    /// for. A dropped region counts whole (it was reported already).
+    static func typedCount(_ regions: [TypedRegion]) -> Int {
+        var covered = 0, typed = 0
+        for region in regions {
+            defer { covered += region.source.count }
+            if region.lost { typed = covered + region.source.count; continue }
+            // Nothing of the run's own went in yet: the region still shows the selection it replaces.
+            if !region.original.isEmpty, region.current == region.original { continue }
+            let lead = region.trimsLead ? region.source.prefix { $0.isWhitespace && !$0.isNewline }.count : 0
+            guard region.current.starts(with: region.separator), region.desired.starts(with: region.separator) else { continue }
+            let body = Array(region.current.dropFirst(region.separator.count))
+            let shown = body.isEmpty ? 0 : typedPrefix(current: body, desired: Array(region.desired.dropFirst(region.separator.count)))
+            if shown > 0 || (!region.separator.isEmpty && lead > 0) { typed = covered + min(region.source.count, lead + shown) }
+        }
+        return typed
+    }
+
+    /// How many characters of `desired` the field's `current` stands for. Usually `current` is the start of `desired`; where
+    /// a revision changed words already typed, those words stay and stand for as many words of `desired`.
+    static func typedPrefix(current: [Character], desired: [Character]) -> Int {
+        var common = 0
+        while common < current.count, common < desired.count, current[common] == desired[common] { common += 1 }
+        if common == current.count { return common }
+        let words = current.split(whereSeparator: \.isWhitespace).count
+        var index = 0, seen = 0
+        while index < desired.count, seen < words {
+            while index < desired.count, desired[index].isWhitespace { index += 1 }
+            guard index < desired.count else { break }
+            seen += 1
+            while index < desired.count, !desired[index].isWhitespace { index += 1 }
+        }
+        return index
     }
 
     // MARK: Journal
