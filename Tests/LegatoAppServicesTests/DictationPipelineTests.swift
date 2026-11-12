@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import Testing
 import LegatoAgent
+import LegatoCore
 import LegatoComposerDoc
 import LegatoKeyboardCore
 @testable import LegatoAppServices
@@ -60,7 +61,73 @@ private func routeLine(_ sequence: Int, _ text: String, reason: String = "endpoi
     if !condition() { Issue.record("Timed out waiting for condition") }
 }
 
+private actor LiveHistory: HistoryStore {
+    private var entries: [DictationEntry] = []
+    func append(_ entry: DictationEntry) { entries.append(entry) }
+    func upsert(_ entry: DictationEntry) {
+        entries.removeAll { $0.id == entry.id }
+        entries.append(entry)
+    }
+    func recent(limit: Int) -> [DictationEntry] { Array(entries.suffix(limit)) }
+    func delete(id: UUID) { entries.removeAll { $0.id == id } }
+}
+
 @MainActor @Suite(.timeLimit(.minutes(1))) struct DictationPipelineTests {
+    @Test func macLiveHistoryKeepsOneEntryForFinalSegmentsAndCleanup() async throws {
+        let history = LiveHistory()
+        let pipeline = DictationPipeline(history: history, cleaner: UnitCleaner(), sendMode: { .live },
+            supportsLive: true, groupsLiveHistory: true)
+        pipeline.beginTake()
+        await pipeline.receive(routeLine(0, "um bring the laptop"))
+        await pipeline.receive(routeLine(1, "and the charger"))
+        pipeline.tailChanged("unfinished words")
+        await pipeline.settleHistory()
+        let checkpoint = try #require(await history.recent(limit: 10).first)
+        #expect(checkpoint.text == "um bring the laptop and the charger")
+        #expect(await history.recent(limit: 10).count == 1)
+        pipeline.tailChanged("")
+        await pipeline.finishTake()
+        await pipeline.settleHistory()
+        let finished = try #require(await history.recent(limit: 10).first)
+        #expect(finished.id == checkpoint.id)
+        #expect(finished.text == "Bring the laptop and the charger")
+        #expect(finished.rawText == "um bring the laptop and the charger")
+        #expect(await history.recent(limit: 10).count == 1)
+
+        pipeline.beginTake()
+        await pipeline.receive(routeLine(2, "second dictation"))
+        await pipeline.finishTake()
+        await pipeline.settleHistory()
+        let entries = await history.recent(limit: 10)
+        #expect(entries.count == 2)
+        #expect(entries.first?.id == checkpoint.id)
+        #expect(entries.last?.text == "Second dictation")
+    }
+
+    @Test func macLiveHistoryCheckpointsSurviveResetWithoutJoiningTheNextTake() async throws {
+        let history = LiveHistory()
+        let pipeline = DictationPipeline(history: history, cleaner: UnitCleaner(), sendMode: { .live },
+            supportsLive: true, groupsLiveHistory: true)
+        await pipeline.receive(routeLine(0, "first raw checkpoint"))
+        await pipeline.reset()
+        await pipeline.receive(routeLine(0, "second raw checkpoint"))
+        await pipeline.settleHistory()
+        let entries = await history.recent(limit: 10)
+        #expect(entries.map(\.text) == ["first raw checkpoint", "second raw checkpoint"])
+        #expect(Set(entries.map(\.id)).count == 2)
+    }
+
+    @Test func macLiveHistoryDoesNotCheckpointSecureSpeech() async {
+        let history = LiveHistory()
+        let pipeline = DictationPipeline(history: history, cleaner: UnitCleaner(), sendMode: { .live },
+            supportsLive: true, groupsLiveHistory: true)
+        pipeline.keepsTakes = { false }
+        await pipeline.receive(routeLine(0, "private words"))
+        await pipeline.finishTake()
+        await pipeline.settleHistory()
+        #expect(await history.recent(limit: 10).isEmpty)
+    }
+
     @Test func cleanedLinesWaitInTheOutboxUntilAcknowledgedAndNeverReturn() async throws {
         let pipeline = DictationPipeline(cleaner: StubCleaner())
         var changes = 0

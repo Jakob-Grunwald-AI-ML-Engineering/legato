@@ -78,6 +78,11 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored private let history: (any HistoryStore)?
     /// False while the field is a password field: its takes stay out of History and the recent takes (cleanup context).
     @ObservationIgnored public var keepsTakes: @MainActor () -> Bool = { true }
+    /// Mac live dictation keeps one checkpoint per run rather than one row per cleanup unit.
+    @ObservationIgnored private let groupsLiveHistory: Bool
+    @ObservationIgnored private var liveHistoryWrite: Task<Void, Never>?
+    @ObservationIgnored private var lastLiveHistory: DictationEntry?
+    @ObservationIgnored private var liveHistoryFallbacks: Set<Int> = []
     /// The history entry of the last take: a retry of the same text updates it instead of adding another.
     @ObservationIgnored private var takeEntry: (raw: String, id: UUID)?
     @ObservationIgnored private let cleaner: any SentenceCleaning
@@ -153,14 +158,14 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// `defaults` holds the send setting: the Mac app's standard defaults, or the App Group on iOS.
     /// `supportsLive`: the iOS keyboard link is there to carry the live mode.
     public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard,
-                            supportsLive: Bool = false) {
+                            supportsLive: Bool = false, groupsLiveHistory: Bool = false) {
         // `UserDefaults` is thread-safe by contract; the model is read on the cleanup call's thread.
         nonisolated(unsafe) let store = defaults
         self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), history: history,
                   cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) }),
                   vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
-                  supportsLive: supportsLive)
+                  supportsLive: supportsLive, groupsLiveHistory: groupsLiveHistory)
     }
     public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
@@ -169,7 +174,8 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil,
                 supportsLive: Bool = false,
-                liveTimeout: Duration = .seconds(6)) {
+                liveTimeout: Duration = .seconds(6), groupsLiveHistory: Bool = false) {
+        self.groupsLiveHistory = groupsLiveHistory
         self.supportsLive = supportsLive; self.liveTimeout = liveTimeout
         self.recentTakes = recentTakes; self.history = history
         self.cleaner = cleaner; self.vocabulary = vocabulary; self.timeout = timeout
@@ -619,6 +625,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         // A segment can reach the sink after the take's end was seen (its event is still on its way): it belongs to the run.
         let late = straggler && liveFinishedAt.map { $0.duration(to: .now) < Self.liveStragglerGrace } == true
         if let run = liveRun, !run.complete || late { return run }
+        liveHistoryFallbacks = []
         let run = LiveDictationRun()
         liveRun = run
         liveAnchor = String(contextBefore().suffix(600))
@@ -629,7 +636,33 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     private func publishLive(_ run: LiveDictationRun) {
         liveRun = run
         onLiveChange?(run.snapshot)
+        checkpointLiveHistory(run)
     }
+
+    /// Capture finalized speech only. Head updates do no disk work, and queued snapshots retain their run's ID
+    /// across a reset or the next take. Serialize writes so an older checkpoint cannot replace a newer cleanup.
+    private func checkpointLiveHistory(_ run: LiveDictationRun) {
+        guard groupsLiveHistory, let history, keepsTakes(), let id = UUID(uuidString: run.runID) else { return }
+        let raw = run.wholeRaw.text
+        guard !raw.isEmpty else { return }
+        let text = run.snapshot.segments.filter(\.final).map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
+        let entry = DictationEntry(id: id, date: lastLiveHistory.flatMap { $0.id == id ? $0.date : nil } ?? Date(),
+            text: text, rawText: text == raw ? nil : raw, localeIdentifier: Locale.current.identifier,
+            engineID: "dictation", duration: 0, cleanupFallback: liveHistoryFallbacks.isEmpty ? nil : true)
+        guard entry != lastLiveHistory else { return }
+        lastLiveHistory = entry
+        let previous = liveHistoryWrite
+        liveHistoryWrite = Task { [weak self] in
+            await previous?.value
+            do {
+                try await history.upsert(entry)
+                self?.historyRevision += 1
+            } catch {}
+        }
+    }
+
+    /// Wait for captured history checkpoints (independent of provider cleanup or field delivery).
+    func settleHistory() async { await liveHistoryWrite?.value }
 
     private func endLiveRun() {
         liveSubmitted = [:]; liveKeys = [:]; liveFinishedAt = nil
@@ -829,7 +862,13 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         if mode == .live {
             landLive(line)
             if let reason = line.reason { fallbacks.append(reason); if fallbacks.count > 20 { fallbacks.removeFirst() } }
-            Task { [weak self] in await self?.save(id: UUID(), raw: line.raw, text: line.text, fallback: line.reason != nil) }
+            if groupsLiveHistory {
+                if line.reason != nil { liveHistoryFallbacks.insert(line.sequence) }
+                else { liveHistoryFallbacks.remove(line.sequence) }
+                if let run = liveRun { checkpointLiveHistory(run) }
+            } else {
+                Task { [weak self] in await self?.save(id: UUID(), raw: line.raw, text: line.text, fallback: line.reason != nil) }
+            }
             return
         }
         outbox.append(.init(lineID: line.lineID, sequence: line.sequence, raw: line.raw, text: line.text, cleaned: line.status == .cleaned))

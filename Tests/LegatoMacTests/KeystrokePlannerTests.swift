@@ -52,9 +52,10 @@ import Testing
     }
 
     @Test func thePaceSpreadsAChangeOverTheBudgetWithinItsBounds() {
-        // Small changes at the calm pace (25 to 35 ms), never slower.
+        // The 5 ms trial does not slow down small changes.
         #expect(KeystrokePlanner.paceMs(ops: 4) == KeystrokePlanner.calmMs)
-        #expect((25.0...35.0).contains(KeystrokePlanner.calmMs))
+        #expect(KeystrokePlanner.calmMs == 5)
+        #expect(KeystrokePlanner.settleMs == 5)
         // A middling change spreads over the budget, between the floor and the calm pace.
         let middling = KeystrokePlanner.paceMs(ops: KeystrokePlanner.behindOps - 1)
         #expect(middling >= KeystrokePlanner.floorMs && middling <= KeystrokePlanner.calmMs)
