@@ -65,6 +65,8 @@ import LegatoKeyboardCore
     @ObservationIgnored public var deliverStream: (@MainActor (_ poll: @MainActor () -> DictationStreamState?) async -> Bool)?
     /// Takes the stalled take's partial text back out of the field (Retry / Insert as-is).
     @ObservationIgnored public var retractStream: (@MainActor () async -> Void)?
+    /// Before a session begins: let the field in front become readable (an app building its Accessibility tree).
+    @ObservationIgnored public var onPrepare: @MainActor () async -> Void = {}
     /// A new session begins (capture the target field).
     @ObservationIgnored public var onBegin: @MainActor () -> Void = {}
     /// The session's last line was delivered (settle anything held back).
@@ -233,6 +235,7 @@ import LegatoKeyboardCore
         engine.resetSequence()
         if notice != nil { notice = nil; noticeID += 1 }
         if !Self.offlineFixture { engine.open() }
+        await onPrepare()
         onBegin()
     }
 

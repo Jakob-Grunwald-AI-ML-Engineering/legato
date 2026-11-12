@@ -11,7 +11,7 @@ public enum CopyReason: Sendable, Equatable {
     public var toast: String {
         switch self {
         case .accessibilityMissing: "Copied to the clipboard. Grant Accessibility to type into fields."
-        case .secureField: "Secure field: copied to the clipboard, not typed."
+        case .secureField: "Dictation copied. Paste with ⌘V."
         case .appChanged: "You switched apps: copied to the clipboard, paste with ⌘V."
         case .modifiersHeld: "Keys were still held: copied to the clipboard, paste with ⌘V."
         }

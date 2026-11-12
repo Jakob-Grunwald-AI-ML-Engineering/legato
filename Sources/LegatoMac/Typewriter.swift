@@ -6,6 +6,32 @@ public enum SyntheticEvent {
     /// "LEGATO" in ASCII.
     public static let userData: Int64 = 0x4C45_4741_544F
     public static func isLegato(_ userData: Int64) -> Bool { userData == Self.userData }
+
+    /// Virtual key codes Legato never synthesizes: Return, Tab and keypad Enter (a chat app would send the message).
+    public static let forbiddenKeys: Set<UInt16> = [0x24, 0x30, 0x4C]
+
+    /// Whether a synthetic key sequence may go out: no forbidden key, every key-down followed by its own key-up, no
+    /// key-up without its down, and nothing left held at the end. Sequences are posted all or nothing.
+    public static func isBalanced(_ strokes: [(key: UInt16, down: Bool)]) -> Bool {
+        var held: [UInt16] = []
+        for stroke in strokes {
+            if forbiddenKeys.contains(stroke.key) { return false }
+            if stroke.down {
+                if held.contains(stroke.key) { return false }
+                held.append(stroke.key)
+            } else {
+                guard let index = held.lastIndex(of: stroke.key) else { return false }
+                held.remove(at: index)
+            }
+        }
+        return held.isEmpty
+    }
+
+    /// Text a Unicode key event may carry: at most `TypewriterPlan.eventUnits` UTF-16 units and no control or line
+    /// separator characters (a line break as a key event is a Return).
+    public static func typeable(_ text: String) -> Bool {
+        !text.isEmpty && !TypewriterPlan.needsPaste(text)
+    }
 }
 
 /// Cuts a dictated text into the steps a typewriter writes and sets the pace. Pure.

@@ -312,3 +312,20 @@ private func automaticInputFallsBackAfterStrongFailureWithoutOpeningTwoDevices(_
     #expect(underlying.domain == original.domain && underlying.code == original.code)
     #expect(failure.localizedDescription == "Open Legato to ready the microphone again.")
 }
+
+@Test func chosenMicrophoneIsOpenedFirstAndAFailingOneFallsBackToAutomatic() async throws {
+    let probe = InputProbe(), inputs = InputInventory([autoCandidate("Built-in", .builtIn), autoCandidate("iPhone", .continuity), autoCandidate("USB", .wired)])
+    let chosen = AutomaticInputSource(hardware: autoHardware(inputs, probe: probe, behavior: { _ in .speech }), timeout: neverReached,
+                                      healthInterval: tick, preference: { .device(uid: "USB") })
+    _ = try await chosen.start(format: autoFormat)
+    #expect(chosen.diagnostics.selected?.id == "USB")
+    await chosen.stop()
+
+    let failing = InputProbe()
+    let fallback = AutomaticInputSource(hardware: autoHardware(inputs, probe: failing, behavior: { $0 == "USB" ? .throwsAtStart : .speech }),
+                                        timeout: neverReached, healthInterval: tick, preference: { .device(uid: "USB") })
+    _ = try await fallback.start(format: autoFormat)
+    #expect(fallback.diagnostics.selected?.id == "Built-in")
+    #expect(failing.state.withLock { $0.attempts } == ["USB", "Built-in"])
+    await fallback.stop()
+}
