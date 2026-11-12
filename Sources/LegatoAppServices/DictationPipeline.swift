@@ -78,7 +78,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     @ObservationIgnored private let history: (any HistoryStore)?
     /// False while the field is a password field: its takes stay out of History and the recent takes (cleanup context).
     @ObservationIgnored public var keepsTakes: @MainActor () -> Bool = { true }
-    /// Mac live dictation keeps one checkpoint per run rather than one row per cleanup unit.
+    /// Hosts opting in keep one checkpoint per live run rather than one row per cleanup unit.
     @ObservationIgnored private let groupsLiveHistory: Bool
     @ObservationIgnored private var liveHistoryWrite: Task<Void, Never>?
     @ObservationIgnored private var lastLiveHistory: DictationEntry?

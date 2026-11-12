@@ -703,9 +703,10 @@ final class KeyboardController {
 
     // MARK: Field queue
 
-    /// How often the ticker runs. Every op is a cross-process call to the host app, so this stays well under the
-    /// display rate; the queue paces its ops itself.
+    /// Animation-only and bounded cursor-read polling retain their existing cadence.
+    /// Active field work checks every 5 ms; confirmations and host settlement remain the queue's responsibility.
     private static let tickInterval = Duration.milliseconds(33)
+    private static let activeQueueTickInterval = Duration.milliseconds(5)
 
     /// The text before the user's cursor as the queue will leave it: what producers (typed lines, host text) plan against.
     private var queueContextBefore: String { queue.seeded ? queue.projectedBefore : shown(document.contextBefore) }
@@ -889,7 +890,8 @@ final class KeyboardController {
             let clock = ContinuousClock()
             var last = clock.now
             while !Task.isCancelled {
-                try? await Task.sleep(for: Self.tickInterval)
+                let interval = self?.queue.isIdle == false ? Self.activeQueueTickInterval : Self.tickInterval
+                try? await Task.sleep(for: interval)
                 guard !Task.isCancelled, let self else { return }
                 let now = clock.now
                 let elapsed = Self.milliseconds(now - last)

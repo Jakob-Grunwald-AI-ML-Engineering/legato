@@ -8,10 +8,8 @@ import Foundation
 /// - Mode: a span goes in as minimal character edits (the differing characters only, with short moves between them)
 ///   or as one block delete and its new text typed, whichever the cost estimate says is quicker; a tie keeps the
 ///   minimal edits.
-/// - Pace: one grapheme per op, the Mac's curve (`macPaceMs`): the gap between typed graphemes spreads the work over
-///   about `budgetMs`, no slower than `calmMs`; a backlog of `behindOps` or more goes at the floor. On iOS it is never
-///   faster than the field's confirmation (`floorMs`), which equals the calm pace, so every grapheme goes as soon as
-///   Safari has confirmed the last one. No pause between words (the Mac has none).
+/// - Pace: one grapheme per op with a 5 ms minimum gap, matching the Mac trial. The queue separately confirms each
+///   operation and preserves the host's move/edit safety windows. No extra pause between words.
 public enum SpanPlanner {
     /// A change of `old[start..<end]` into `text` (grapheme offsets into the old text).
     public struct Hunk: Sendable, Equatable {
@@ -38,19 +36,17 @@ public enum SpanPlanner {
 
     // MARK: Pace
 
-    /// The Mac's rhythm (`KeystrokePlanner` on macOS), mirrored: a short change types at the calm pace, a backlog spreads
-    /// over the budget, and `behindOps` or more go at the Mac's floor. No pause between words.
-    public static let calmMs = 30.0
+    /// The Mac trial's 5 ms typing pace, for short changes and backlogs alike. No pause between words.
+    public static let calmMs = 5.0
     public static let macFloorMs = 5.0
     /// What a change, or the backlog, aims to take.
     public static let budgetMs = 700.0
     /// This many graphemes still to type mean typing has fallen behind speech (about 15 characters a second): the pace
     /// goes straight to the floor.
     public static let behindOps = 14
-    /// The field's confirmation on iOS: the keyboard reads one report per 33 ms tick, and Safari leaves its report stale
-    /// after edits sent back to back (spike), so typed graphemes are never closer than this. In practice Safari confirms
-    /// an insert in about 45 ms.
-    public static let floorMs = 30.0
+    /// The minimum typing gap, independent of the host's confirmation delay. Safari may confirm more slowly;
+    /// the queue still waits for that report and keeps its move/edit safety windows.
+    public static let floorMs = 5.0
 
     /// The Mac's gap between typed graphemes for `ops` of them still to go, after `fixedMs` of settles the work needs
     /// anyway: spread over the budget, between the Mac's floor and the calm pace; straight to that floor once `ops`

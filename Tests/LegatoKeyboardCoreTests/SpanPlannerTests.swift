@@ -81,7 +81,7 @@ import Testing
         #expect(SpanPlanner.paceMs(ops: 0) == SpanPlanner.calmMs)
         #expect(SpanPlanner.paceMs(ops: 5) == SpanPlanner.calmMs, "a short backlog types calmly")
         #expect(SpanPlanner.paceMs(ops: SpanPlanner.behindOps) == SpanPlanner.floorMs, "behind speech: straight to the floor")
-        #expect(SpanPlanner.calmMs <= 30 && SpanPlanner.budgetMs <= 700, "the Mac's calm pace and budget")
+        #expect(SpanPlanner.calmMs == 5 && SpanPlanner.floorMs == 5, "the 5 ms trial applies to short changes and backlogs")
         #expect(SpanPlanner.paceMs(ops: 500) == SpanPlanner.floorMs, "a long backlog goes at the floor")
         #expect(SpanPlanner.paceMs(ops: 10, fixedMs: 1_100) == SpanPlanner.floorMs, "settles use up the budget")
         let paces = (1...100).map { SpanPlanner.paceMs(ops: $0) }
