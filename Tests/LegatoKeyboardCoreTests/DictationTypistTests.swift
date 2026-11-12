@@ -96,6 +96,24 @@ private struct Field {
     #expect(field.text == typed + "! Second line.", "Line 1 goes in after the user's text, capitalised as a sentence start is not met")
 }
 
+@Test func aKeyFinishesTheLineHeardSoFarOneGraphemeAnInsert() {
+    var typist = DictationTypist()
+    var field = Field()
+    typist.accept(publication(line(0, "water the plants."), line(1, "next line.")), acknowledged: nil)
+    _ = field.run(&typist, steps: 5)
+    #expect(!field.text.isEmpty && "Water the plants.".hasPrefix(field.text) && field.text.count < 17)
+    let step = typist.finishLine(contextBefore: field.text)
+    #expect(step.inserts == "Water the plants.".dropFirst(field.text.count).map(String.init))
+    #expect(step.acknowledged == 0)
+    // A field that no longer echoes the line (the user moved on) gets nothing; the line still ends.
+    var moved = DictationTypist()
+    var other = Field()
+    moved.accept(publication(line(0, "water the plants.")), acknowledged: nil)
+    _ = other.run(&moved, steps: 3)
+    let none = moved.finishLine(contextBefore: "elsewhere")
+    #expect(none.inserts.isEmpty && none.acknowledged == 0)
+}
+
 @Test func aCursorMoveInTheFieldIsNotAnEchoAndEndsTheLine() {
     var typist = DictationTypist()
     var field = Field(text: "Start of text. ")

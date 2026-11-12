@@ -19,8 +19,9 @@ import Testing
         rig.drain()
         let ops = rig.sent[before...].map(\.op)
         #expect(rig.field.string == "I think the plant is fine")
-        // Move to the change, insert the one character, move back: nothing is deleted and retyped.
-        #expect(ops == [.move(-8), .insert("t"), .move(8)])
+        // Move to the change, insert the one character, move back: nothing is deleted and retyped. Then the caret is
+        // brought into view at the take's end: its last grapheme deleted and typed again.
+        #expect(ops == [.move(-8), .insert("t"), .move(8), .deleteBackward(1), .insert("e")])
     }
 
     @Test func aFlipIsPacedOneGraphemePerTickWhenAnimated() {
@@ -36,10 +37,11 @@ import Testing
         #expect(rig.field.string == "a black cat sat")
     }
 
+    /// The lane's bound, without the rule that keys wait for the take (`keysWaitForTake`).
     @Test func aUserKeyDuringABusyQueueLandsWithinTheBoundAtTheUsersCursor() {
         var field = FakeField("")
         field.lagTicks = 2
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init(animated: true, keysWaitForTake: false))
         rig.queue.enqueue(snap(1, String(repeating: "dictated words keep coming ", count: 6)))
         rig.run(ms: 600)
         let typedSoFar = rig.field.string
@@ -381,7 +383,7 @@ import Testing
         let took = (rig.sent.last?.ms ?? start) - start
         print("speed: one-word Soniox fix mid-text took \(Int(took)) ms (\(rig.sent.count - from) ops)")
         #expect(rig.field.string == "I will meet you on Friday at noon in the lobby")
-        #expect(rig.sent[from...].map(\.op) == [.move(-21), .deleteBackward(8)] + "Friday".map { .insert(String($0)) } + [.move(21)])
+        #expect(rig.sent[from...].map(\.op) == [.move(-21), .deleteBackward(8)] + "Friday".map { .insert(String($0)) } + [.move(21), .deleteBackward(1), .insert("y")])
         #expect(took < 1_500)
     }
 
@@ -432,9 +434,10 @@ import Testing
 
     private static let line = "please remember to send the quarterly report to the whole team before Friday afternoon"
 
-    /// Types the line, deleting as the UAT did while it typed: the "e" of "whole", all of "Friday", the end of "afternoon".
+    /// Types the line, deleting as the UAT did while it typed: the "e" of "whole", all of "Friday", the end of "afternoon"
+    /// (the deletes go at once, without the rule that keys wait for the take).
     private static func typedWithDeletes() -> QueueRig {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true))
+        var rig = QueueRig(FakeField(""), config: .init(animated: true, keysWaitForTake: false))
         rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 1, segments: [.init(id: 0, text: line, final: true)]))
         func type(until suffix: String, thenDelete count: Int, rig: inout QueueRig) {
             while !rig.field.string.hasSuffix(suffix), rig.clockMs < 30_000 { rig.tick() }
