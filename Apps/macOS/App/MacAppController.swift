@@ -96,27 +96,31 @@ import Observation
         })
         fieldEditor.panelMode = { PanelDictationSetting.mode() }
         fieldEditor.insert = { [weak paster, settings, keyPresses, fallbackOwner] text in
-            guard let paster else { return .copied(message: "") }
+            guard let paster else { return .retained(message: "Dictation is kept in the panel.") }
             let generation = fallbackOwner.generation, pid = fallbackOwner.pid, keys = fallbackOwner.keys
-            let witness = fallbackOwner.witness
+            guard let witness = fallbackOwner.witness, let confirmation = witness.prepareInsertion(text: text) else {
+                return .retained(message: "Insertion cannot be confirmed. Dictation is kept in the panel.")
+            }
             // Same session, no click or real key since it started, the field (when readable) still focused.
             let owned = { @MainActor () -> Bool in
-                guard fallbackOwner.generation == generation, fallbackOwner.allowed, keyPresses.count == keys,
-                      let witness else { return false }
-                return witness.stillFocused()
+                guard fallbackOwner.generation == generation, fallbackOwner.allowed, keyPresses.count == keys else { return false }
+                return confirmation.stillFocused()
             }
             guard owned() else {
-                paster.copy(text)
-                return .copied(message: "Dictation copied: the field or app changed. Paste with ⌘V.")
+                return .retained(message: "The field or app changed. Dictation is kept in the panel.")
             }
-            switch await paster.type(text, targetPID: pid, passwordField: witness?.isPassword == true, restoreClipboard: settings.restoreClipboard,
+            switch await paster.type(text, targetPID: pid, passwordField: witness.isPassword, restoreClipboard: settings.restoreClipboard,
                                      paced: settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
                                      realKeyDowns: { keyPresses.count }, stillOwned: owned) {
-            case .typed: return .typed
-            case .interrupted: return .interrupted(message: "Typing stopped. The rest is on the clipboard; paste with ⌘V.")
+            case .typed:
+                let confirmed = await confirmation.verify()
+                return confirmed && owned() ? .typed : .retained(message: "Insertion could not be confirmed. Dictation is kept in the panel.")
+            case .interrupted:
+                // Posted keys have no per-character readback in this path. Keep the full suggestion when its prefix
+                // could not be confirmed; it is never automatically replayed into another field.
+                return .retained(message: "Insertion stopped before it could be confirmed. Dictation is kept in the panel.")
             case .unavailable(let reason):
-                paster.copy(text)
-                return .copied(message: reason == .appChanged ? "Dictation copied: the field or app changed. Paste with ⌘V." : reason.toast)
+                return .retained(message: reason == .appChanged ? "The field or app changed. Dictation is kept in the panel." : "Insertion is unavailable. Dictation is kept in the panel.")
             }
         }
         // Every change is typed a grapheme at a time; Reduce Motion (or the Typewriter setting off) sends it whole.
@@ -185,7 +189,9 @@ import Observation
             actions: DictationPillActions(
                 magic: { [weak self] in self?.toggleMagic() },
                 undo: { [weak fieldEditor] in Task { await fieldEditor?.undoLast() } },
-                redo: { [weak fieldEditor] in Task { await fieldEditor?.redoLast() } }))
+                redo: { [weak fieldEditor] in Task { await fieldEditor?.redoLast() } },
+                copyRecovery: { [weak fieldEditor] in fieldEditor?.copyRecovery() },
+                dismissRecovery: { [weak fieldEditor] in fieldEditor?.dismissRecovery() }))
         dictation.ensureWarm()
         meetingIsland = MeetingIslandController(controller: meetings)
         meetings.bootstrap()

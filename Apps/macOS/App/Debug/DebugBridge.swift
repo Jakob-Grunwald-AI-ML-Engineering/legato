@@ -108,7 +108,8 @@ import ApplicationServices
                     "magicHotkey": app.settings.hotkey?.displayName ?? "", "dictationHotkey": app.settings.dictationHotkey?.displayName ?? "",
                     "send": app.settings.dictationSend.rawValue, "hotkeysEnabled": app.permissions.hotkeyTapActive,
                     "panelMode": PanelDictationSetting.mode().rawValue, "panelActive": panel.active,
-                    "panelText": panel.take.text, "panelInserting": panel.inserting]
+                    "panelText": panel.take.text, "panelInserting": panel.inserting,
+                    "panelRecoveryText": panel.recoveryText, "panelDeliveryText": panel.deliveryText]
         }
         harness.register("say") { command in
             guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }

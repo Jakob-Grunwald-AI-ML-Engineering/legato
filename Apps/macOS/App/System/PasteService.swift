@@ -64,7 +64,7 @@ final class PasteService {
     enum TypeOutcome {
         /// Every character went in; control characters used individual guarded pastes.
         case typed
-        /// Typing stopped (the app changed, or the user pressed a key); the untyped rest is on the pasteboard.
+        /// Typing stopped (the app changed, or the user pressed a key); the caller retains the untyped rest.
         case interrupted(remainder: String)
         /// Typing was not possible because a guard failed before the first character; nothing was typed.
         case unavailable(CopyReason)
@@ -122,7 +122,9 @@ final class PasteService {
             }
             return .unavailable(.appChanged)
         }
-        copy(remainder)
+        if let snapshot, let clipboardCount, pasteboard.changeCount == clipboardCount {
+            snapshot.restore(to: pasteboard)
+        }
         return .interrupted(remainder: remainder)
     }
 

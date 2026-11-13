@@ -14,6 +14,10 @@ import LegatoMac
     public fileprivate(set) var take = PanelTake()
     /// The finished text is being typed into the app.
     public fileprivate(set) var inserting = false
+    public fileprivate(set) var deliveryText = ""
+    /// Text that could not be delivered. It remains separate from the next take and is never inserted automatically.
+    public fileprivate(set) var recovery = PanelTake()
+    public var recoveryText: String { recovery.text }
     public init() {}
 }
 
@@ -31,10 +35,10 @@ import LegatoMac
     /// How a panel-mode take reached the app.
     public enum InsertOutcome: Sendable, Equatable {
         case typed
-        /// Typing stopped part-way; the rest is on the clipboard.
-        case interrupted(message: String)
-        /// A guard failed before typing; all of it is on the clipboard.
-        case copied(message: String)
+        /// Typing stopped part-way; only the untyped remainder is retained in the panel.
+        case interrupted(remainder: String, message: String)
+        /// A guard failed before typing; all of it stays in the panel.
+        case retained(message: String)
     }
     private let capture: @MainActor () -> FocusedField
     /// Typewriter pacing of the queue (false with Reduce Motion).
@@ -54,16 +58,21 @@ import LegatoMac
     public private(set) var queue = MacFieldQueue(target: nil)
     /// The session's last words were delivered: finished panel text is typed as soon as it is final.
     private var sessionEnded = false
-    /// Real input since the start: the panel's text is copied, never typed.
+    private var sessionGeneration = 0
+    /// Real input since the start: retain the panel's text rather than inserting it automatically.
     private var panelOwned = true
     /// The focused element reads as text but takes no writes and no keys (a page, not a field): the panel's text is
-    /// copied, never typed (a typed letter could be the site's shortcut).
+    /// retained, never typed (a typed letter could be the site's shortcut).
     private var panelCopiesOnly = false
     /// The bound field stopped reading part-way through the take: the rest of it went on in the panel (`fallBack`), and
     /// its text is typed at the end with synthetic keys, not through the queue.
     private var fieldUnreadable = false
     /// Runs handed to the panel after part of them was typed live: what each newer version adds past the typed part.
     private var continuations: [String: PanelContinuation] = [:]
+    private var recoveryContinuations: [String: PanelContinuation] = [:]
+    private var wholeRecoveryRuns: Set<String> = []
+    private var dismissedRecoveryRuns: Set<String> = []
+    private var latestRunTexts: [String: String] = [:]
     /// A handed-over run typed something: the panel's text continues it and brings its own spacing.
     private var continuesTyped = false
     private var target: (any TextTarget)?
@@ -82,9 +91,39 @@ import LegatoMac
     public init(capture: @escaping @MainActor () -> FocusedField) { self.capture = capture }
 
     public func begin() {
+        sessionGeneration += 1
+        retain(panel.take.text)
         panel.active = false; panel.take = PanelTake(); sessionEnded = false; panelOwned = true
         continuations = [:]; continuesTyped = false
+        recoveryContinuations = [:]; wholeRecoveryRuns = []; dismissedRecoveryRuns = []; latestRunTexts = [:]
         bind()
+    }
+
+    /// Copy is a deliberate panel action; delivery failures never change the clipboard.
+    public func copyRecovery() { if !panel.recoveryText.isEmpty { recover(panel.recoveryText) } }
+    public func dismissRecovery() {
+        dismissedRecoveryRuns.formUnion(wholeRecoveryRuns)
+        dismissedRecoveryRuns.formUnion(recoveryContinuations.keys)
+        wholeRecoveryRuns = []; recoveryContinuations = [:]
+        panel.recovery = PanelTake()
+    }
+
+    private func retain(_ text: String, id: String = UUID().uuidString) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            panel.recovery.stream(id: id, text: "", final: true, retracted: true)
+            return
+        }
+        panel.recovery.line(id: id, text)
+    }
+
+    /// Once a run is held for recovery, later cleanup can revise that same text but cannot send it to another field.
+    private func updateRecovery(_ runID: String, text: String) -> Bool {
+        if dismissedRecoveryRuns.contains(runID) { return true }
+        if wholeRecoveryRuns.contains(runID) { retain(text, id: runID); return true }
+        guard var continuation = recoveryContinuations[runID] else { return false }
+        retain(continuation.rest(of: text), id: runID)
+        recoveryContinuations[runID] = continuation
+        return true
     }
 
     /// Binds the focused field to a fresh queue. The panel session (its words and whether it runs) is left to the caller.
@@ -131,6 +170,11 @@ import LegatoMac
         fieldUnreadable = true
         if !panel.active { panel.active = true; panel.take = PanelTake() }
         for handover in handovers {
+            if handover.requiresReview {
+                wholeRecoveryRuns.insert(handover.runID)
+                retain(handover.text, id: handover.runID)
+                continue
+            }
             var continuation = PanelContinuation(text: handover.text, typed: handover.typed)
             let rest = continuation.rest
             continuations[handover.runID] = continuation
@@ -141,13 +185,19 @@ import LegatoMac
         if sessionEnded { scheduleInsert() }
     }
 
-    /// Work the queue could not place: the take or result is in History; the text goes to the clipboard too.
+    /// Work the queue could not place remains visible, without replaying the part already represented in the field.
     private func dropped(_ drop: MacFieldQueue.Drop) {
         guard !drop.text.isEmpty, drop.reason != .cancelled else { return }
-        recover(drop.text)
-        report(drop.runID == nil
-               ? "Magic's result couldn't be placed: the text changed. It's in History."
-               : "Some dictated words couldn't be placed where the text changed. They're in History and on the clipboard.")
+        guard let runID = drop.runID else { retain(drop.text, id: drop.id); return }
+        guard !dismissedRecoveryRuns.contains(runID) else { return }
+        if drop.typed == 0 {
+            wholeRecoveryRuns.insert(runID)
+            recoveryContinuations.removeValue(forKey: runID)
+            retain(latestRunTexts[runID] ?? drop.text, id: runID)
+        } else {
+            recoveryContinuations[runID] = PanelContinuation(text: drop.text, typed: drop.typed)
+            _ = updateRecovery(runID, text: latestRunTexts[runID] ?? drop.text)
+        }
     }
 
     /// The user typed or clicked: the queue takes their caret and text from the next read and replans around them.
@@ -178,11 +228,16 @@ import LegatoMac
     /// Every live snapshot goes to the queue (or the panel); the queue coalesces to the newest per run.
     public func enqueueLive(_ snapshot: LiveDictationSnapshot?) {
         guard let snapshot else { return }
-        if panel.active { showInPanel(snapshot); return }
         guard !retiredRunIDs.contains(snapshot.runID) else { return }
+        seenRunIDs.insert(snapshot.runID)
+        let body = Self.body(of: snapshot)
+        latestRunTexts[snapshot.runID] = body
+        if updateRecovery(snapshot.runID, text: body) { return }
+        if panel.active { showInPanel(snapshot); return }
         seenRunIDs.insert(snapshot.runID); streamedRunID = snapshot.runID
         guard target != nil else {
-            if snapshot.complete { copyUnwritable(Self.body(of: snapshot)) }
+            panel.active = true
+            showInPanel(snapshot)
             return
         }
         queue.live(runID: snapshot.runID, version: snapshot.version, text: Self.body(of: snapshot), complete: snapshot.complete)
@@ -190,13 +245,6 @@ import LegatoMac
     public func applyLive(_ snapshot: LiveDictationSnapshot?) async {
         enqueueLive(snapshot)
         await queue.whenIdle()
-    }
-
-    /// No field outside panel mode (not reached by a fresh bind: every unreadable field uses the panel): finished text
-    /// only reaches the clipboard.
-    private func copyUnwritable(_ text: String) {
-        guard !text.isEmpty else { return }
-        recover(text); report("Dictation copied. The field is unavailable or changed; paste with ⌘V.")
     }
 
     private static func body(of snapshot: LiveDictationSnapshot) -> String {
@@ -216,6 +264,13 @@ import LegatoMac
         var version = 0
         while let state = poll() {
             version += 1
+            latestRunTexts[id] = state.text
+            if state.retracted { _ = retractStreamed(); return false }
+            if updateRecovery(id, text: state.text) {
+                if state.isFinal || state.stalled { return state.stalled }
+                try? await Task.sleep(for: .milliseconds(30))
+                continue
+            }
             // The field stopped reading part-way (`fallBack`): the rest of the stream goes on in the panel.
             if continuations[id] != nil {
                 panel.take.stream(id: id, text: panelText(id, state.text), final: state.isFinal || state.retracted, retracted: state.retracted)
@@ -224,8 +279,11 @@ import LegatoMac
                 try? await Task.sleep(for: .milliseconds(30))
                 continue
             }
-            if state.retracted { _ = retractStreamed(); return false }
-            if target == nil { if state.isFinal { copyUnwritable(state.text) }; if state.isFinal || state.stalled { return state.stalled } }
+            if target == nil {
+                panel.active = true
+                panel.take.stream(id: id, text: state.text, final: state.isFinal, retracted: state.retracted)
+                if state.isFinal || state.stalled { if sessionEnded { scheduleInsert() }; return state.stalled }
+            }
             else { queue.live(runID: id, version: version, text: state.text, complete: state.isFinal) }
             if state.isFinal { return false }
             if state.stalled { return true }
@@ -236,6 +294,12 @@ import LegatoMac
 
     /// Retry / Insert as-is take the last take back out (the queue restores what it replaced).
     @discardableResult public func retractStreamed() -> Bool {
+        if let id = streamedRunID, wholeRecoveryRuns.contains(id) || recoveryContinuations[id] != nil {
+            panel.recovery.stream(id: id, text: "", final: true, retracted: true)
+            wholeRecoveryRuns.remove(id); recoveryContinuations.removeValue(forKey: id)
+            streamedRunID = nil
+            return true
+        }
         if panel.active { panel.take.dropGrowing(); return true }
         guard let id = streamedRunID else { return true }
         streamedRunID = nil
@@ -267,6 +331,7 @@ import LegatoMac
 
     private func showInPanel(_ snapshot: LiveDictationSnapshot) {
         guard snapshot.version > (panelVersions[snapshot.runID] ?? -1) else { return }
+        seenRunIDs.insert(snapshot.runID)
         panelVersions[snapshot.runID] = snapshot.version
         panel.take.live(id: snapshot.runID, text: panelText(snapshot.runID, Self.body(of: snapshot)), complete: snapshot.complete)
         if sessionEnded { scheduleInsert() }
@@ -297,9 +362,11 @@ import LegatoMac
     /// Retry or Insert as-is) holds back what follows it.
     private func scheduleInsert() {
         let previous = insertTask
+        let generation = sessionGeneration
         insertTask = Task { [weak self] in
             await previous?.value
-            await self?.insertFinished()
+            guard let self, self.sessionGeneration == generation else { return }
+            await self.insertFinished()
         }
     }
 
@@ -308,6 +375,8 @@ import LegatoMac
         let first = panel.take.isFirstHandOver
         var text = panel.take.takeFinished()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        panel.deliveryText = text
+        defer { panel.deliveryText = "" }
         // A field the queue edits (Accessibility, or verified keys): the finished text goes in once through the queue,
         // one insert at the user's caret, typed at the fast end of the pace. Input meanwhile only moves where it goes.
         if let target, !panelCopiesOnly, !fieldUnreadable, target.editsInPlace || target.typesKeys {
@@ -325,9 +394,7 @@ import LegatoMac
             text = PanelTake.separator(before: text, after: previous) + text
         }
         guard panelOwned, !panelCopiesOnly, let insert else {
-            recover(text.trimmingCharacters(in: .whitespaces))
-            report(panelCopiesOnly ? "Dictation copied: this isn't a text field. Paste with ⌘V."
-                                   : "Dictation copied: the field or app changed. Paste with ⌘V.")
+            retain(text.trimmingCharacters(in: .whitespaces))
             return
         }
         panel.inserting = true
@@ -335,7 +402,8 @@ import LegatoMac
         // The panel's one op: a typed insert, in the field's queue like every other change.
         switch await queue.exclusive(label: "panel", text: text, { await insert(text) }) {
         case .typed: break
-        case .interrupted(let message), .copied(let message): report(message)
+        case .interrupted(let remainder, _): retain(remainder)
+        case .retained: retain(text)
         }
     }
 

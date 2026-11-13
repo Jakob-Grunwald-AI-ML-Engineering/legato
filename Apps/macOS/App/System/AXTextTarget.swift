@@ -19,6 +19,8 @@ final class AXTextTarget: TextTarget {
     private let appElement: AXUIElement
     private let pid: pid_t
     private var textOperationSupported: Bool?
+    private var writeCapabilitiesCache: FieldWriteCapabilities?
+    private var scopedWriteFailed = false
     /// What identifies the editor apart from the element object (`Editor`), read at capture and at each rebind.
     private var editor: Editor?
 
@@ -116,7 +118,7 @@ final class AXTextTarget: TextTarget {
     enum PasteWitness {
         /// The focused element: the insert goes ahead only while it still has focus.
         case element(AXTextTarget)
-        /// No element could be read (nothing focused that Accessibility exposes): the app and the key guards decide.
+        /// No positively identified typing destination: retain the take in the panel instead of sending blind keys.
         case unreadable
         /// A password field: the insert goes ahead while its element (when one was read) keeps focus and its length
         /// (when exposed) is unchanged. Secure input hides the user's keys from Legato's tap, so the length stands in.
@@ -132,16 +134,86 @@ final class AXTextTarget: TextTarget {
             }
         }
 
-        /// The witnessed field still has focus (an unreadable one: no element to check, the app guard decides).
-        @MainActor func stillFocused() -> Bool {
+        /// Capture observable insertion bounds without reading any previous text. A destination that cannot provide
+        /// enough evidence keeps its take in the panel before any keys are posted.
+        @MainActor func prepareInsertion(text: String) -> InsertConfirmation? {
             switch self {
-            case .element(let target): return target.isFocused()
-            case .unreadable: return true
-            case .password(let target, let length):
-                guard let target else { return true }
-                return target.hasFocus() && (length == nil || target.characterCount() == length)
+            case .element(let target):
+                guard target.witnessFocused(password: false), let selection = try? target.selectedRange(),
+                      let expectation = FieldInsertionExpectation(text: text, selection: selection, length: try? target.textLength()) else { return nil }
+                return InsertConfirmation(target: target, expectation: expectation, password: false, minimumLength: nil, initialLength: nil)
+            case .password(let target, let baseline):
+                guard let target, let baseline, target.witnessFocused(password: true), target.characterCount() == baseline else { return nil }
+                let selection = (try? target.selectedRange()) ?? (baseline == 0 ? UTF16Range(location: 0, length: 0) : nil)
+                guard let selection, let expectation = FieldInsertionExpectation(text: text, selection: selection, length: baseline),
+                      expectation.length != baseline else { return nil }
+                // Equal-length password replacement has no observable proof if the host ignores the keys.
+                return InsertConfirmation(target: target, expectation: expectation, password: true, minimumLength: baseline - selection.length, initialLength: baseline)
+            case .unreadable: return nil
             }
         }
+
+        /// The positively identified typing destination still has focus. An unknown destination never accepts keys.
+        @MainActor func stillFocused() -> Bool {
+            switch self {
+            case .element(let target): return target.editable && target.isFocused()
+            case .unreadable: return false
+            case .password(let target, let length):
+                guard let target else { return false }
+                return target.editable && target.hasFocus() && (length == nil || target.characterCount() == length)
+            }
+        }
+    }
+
+    /// Evidence for one panel insert. Normal fields confirm the inserted range and final caret; passwords confirm
+    /// only the exposed character count, never their value, selected text or range contents.
+    @MainActor struct InsertConfirmation {
+        fileprivate let target: AXTextTarget
+        fileprivate let expectation: FieldInsertionExpectation
+        fileprivate let password: Bool
+        fileprivate let minimumLength: Int?
+        fileprivate let initialLength: Int?
+
+        func stillFocused() -> Bool {
+            guard target.witnessFocused(password: password) else { return false }
+            guard password else { return true }
+            guard let minimumLength, let initialLength, let expected = expectation.length, let count = target.characterCount() else { return false }
+            // Own posted keys may already have changed the masked length; an unexpected change stops further keys.
+            return count >= minimumLength && count <= max(initialLength, expected)
+        }
+
+        func verify() async -> Bool {
+            let deadline = ContinuousClock.now + .milliseconds(500)
+            repeat {
+                guard !Task.isCancelled, target.witnessFocused(password: password) else { return false }
+                if password {
+                    if let expected = expectation.length, target.characterCount() == expected { return true }
+                } else if expectation.matches(selection: try? target.selectedRange(), length: try? target.textLength(),
+                                              insertedText: try? target.text(in: expectation.insertedRange), normalizeSpaces: !target.editsInPlace) {
+                    return true
+                }
+                try? await Task.sleep(for: .milliseconds(20))
+            } while ContinuousClock.now < deadline
+            return false
+        }
+    }
+
+    /// A recreated element may still identify this editor. Rebind a witness only within that identity; no text read
+    /// is required, so an empty unreadable field and a password field can still be positively witnessed.
+    private func witnessFocused(password: Bool) -> Bool {
+        if password ? hasFocus() : isFocused() { return editable }
+        guard AXIsProcessTrusted(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let value = (try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute)) ?? nil,
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
+        let focused = unsafeDowncast(value, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(focused, Self.messagingTimeout)
+        guard Self.security(of: focused) == (password ? .password : .notPassword),
+              sameEditor(focused), Self.isEditable(focused) else { return false }
+        element = focused
+        reader = AXFieldReader(element: AXElementText(focused))
+        editor = Editor(of: focused)
+        editableCache = nil; textOperationSupported = nil; writeCapabilitiesCache = nil
+        return true
     }
 
     /// A focus witness for typed inserts. This never reads or replaces the field's contents.
@@ -158,10 +230,11 @@ final class AXTextTarget: TextTarget {
         let element = unsafeDowncast(value, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
         let target = AXTextTarget(element: element, appElement: appElement)
+        target.editor = Editor(of: element)
         switch security(of: element) {
-        case .password: return .password(target, length: target.characterCount())
-        case .notPassword: return .element(target)
-        // Unanswered like the capture, which then dictates through the panel: the app and key guards decide.
+        case .password: return target.editable ? .password(target, length: target.characterCount()) : .password(nil, length: nil)
+        case .notPassword: return target.editable ? .element(target) : .unreadable
+        // Failed role reads never authorize blind keys; the text remains available in the panel.
         case .unknown: return .unreadable
         }
     }
@@ -246,12 +319,30 @@ final class AXTextTarget: TextTarget {
         }
     }
 
-    /// Whether Accessibility writes land exactly in this field. Chromium's web content reports success for an
-    /// AXSelectedText write and changes nothing.
-    var editsInPlace: Bool { !Self.isChromium(pid: pid) }
-    /// Chromium fields are edited with synthetic keys, each read back (`MacFieldQueue`). Only an editable element
-    /// takes keys: the page itself (AXWebArea) reads as text too, and a letter typed there can be a site's shortcut.
-    var typesKeys: Bool { Self.isChromium(pid: pid) && editable }
+    /// Scoped AX replacements require their own setter (or WebKit's marker operation). A whole-value setter alone
+    /// is insufficient: WhatsApp exposes one while refusing AXSelectedText. Chromium ignores its advertised setter.
+    var editsInPlace: Bool { writeCapabilities.editsInPlace }
+    /// Editable fields without scoped AX writes use synthetic keys, each independently read back by the queue.
+    /// Readable pages do not take keys: a letter typed there could invoke a site shortcut.
+    var typesKeys: Bool { writeCapabilities.typesKeys }
+    private var writeCapabilities: FieldWriteCapabilities {
+        if let writeCapabilitiesCache { return writeCapabilitiesCache }
+        var selectedTextSettable: DarwinBoolean = false
+        let setter = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &selectedTextSettable) == .success
+            && selectedTextSettable.boolValue
+        let capabilities = FieldWriteCapabilities(chromium: chromium, editable: editable, selectedTextSettable: setter,
+                                                  textOperation: supportsTextOperation(), scopedWriteFailed: scopedWriteFailed)
+        writeCapabilitiesCache = capabilities
+        return capabilities
+    }
+    /// An advertised setter that read back unchanged is no longer trusted for this binding. The queue will read
+    /// afresh and plan the remaining edit with guarded keys; no retry is performed inside the adapter.
+    func recoverWriteFailure() -> Bool {
+        guard !scopedWriteFailed, editsInPlace, editable, isFocused() else { return false }
+        scopedWriteFailed = true
+        writeCapabilitiesCache = nil
+        return typesKeys
+    }
     private var editableCache: Bool?
     private var editable: Bool {
         if let editableCache { return editableCache }
@@ -260,9 +351,16 @@ final class AXTextTarget: TextTarget {
         return value
     }
     private static func isEditable(_ element: AXUIElement) -> Bool {
-        var settable: DarwinBoolean = false
-        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue { return true }
-        return (try? copyAttribute(element, "AXEditableAncestor")) != nil
+        let role = (try? copyAttribute(element, kAXRoleAttribute)) as? String
+        var valueSettable: DarwinBoolean = false, selectedTextSettable: DarwinBoolean = false
+        let value = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &valueSettable) == .success && valueSettable.boolValue
+        let selected = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &selectedTextSettable) == .success && selectedTextSettable.boolValue
+        var ancestorRole: String?
+        if let ancestor = (try? copyAttribute(element, "AXEditableAncestor")) ?? nil,
+           CFGetTypeID(ancestor) == AXUIElementGetTypeID() {
+            ancestorRole = (try? copyAttribute(unsafeDowncast(ancestor, to: AXUIElement.self), kAXRoleAttribute)) as? String
+        }
+        return FieldTypingDestination.accepts(role: role, textSettable: value || selected, editableAncestorRole: ancestorRole)
     }
     var inputMark: Int { RealInput.shared.count }
 
@@ -340,7 +438,8 @@ final class AXTextTarget: TextTarget {
         guard same || allowOther else { return .declined }
         element = focused
         reader = focusedReader
-        editableCache = nil; textOperationSupported = nil
+        editableCache = nil; textOperationSupported = nil; writeCapabilitiesCache = nil
+        if !same { scopedWriteFailed = false }
         editor = Editor(of: focused)
         return .rebound(sameEditor: same)
     }
