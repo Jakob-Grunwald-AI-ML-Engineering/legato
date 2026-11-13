@@ -936,7 +936,7 @@ public final class MacFieldQueue {
             return
         }
         if let recovered = recoverTarget(id: region.id, expected: String(region.current), landed: region.landing.map { String($0) },
-                                         before: region.before, after: region.after) {
+                                         before: region.before, after: region.after, observed: doc) {
             switch recovered {
             case .replan(let placement, let fresh):
                 region.start = fresh.base + String((fresh.text as String).prefix(placement.range.lowerBound)).utf16.count
@@ -964,7 +964,8 @@ public final class MacFieldQueue {
 
     /// Accessibility can obtain fresh bounded evidence without moving the user's cursor. The same policy used by
     /// the proxy adapter decides whether the expected target, or a freshly observed late result, still exists.
-    private func recoverTarget(id: String, expected: String, landed: String? = nil, before: String, after: String) -> RecoveryResult? {
+    private func recoverTarget(id: String, expected: String, landed: String? = nil, before: String, after: String,
+                               observed: Document) -> RecoveryResult? {
         guard let target, target.isFocused() else { return nil }
         guard beginOperation(.read) else { return .waiting }
         defer { operations.finishRead() }
@@ -973,7 +974,12 @@ public final class MacFieldQueue {
         let wanted = FieldRecovery.Target(id: id, expected: expected, landed: landed, before: before, after: after)
         guard let request = recovery.begin(generation: generation, revision: requestRevision, targets: [wanted]) else { return nil }
         note(.recovery, id: id, detail: "attempt \(request.id)")
-        guard let oldSelection = try? target.selectedRange(), var (fresh, selected) = read(target, cap: 2 * FieldRecovery.nearbyLimit(for: request)),
+        // The initial queue observation may already contain two indistinguishable candidates. Looking only near
+        // the caret would hide the other one, not prove which is owned. Refresh the full original scope instead.
+        let wasComplete = observed.base == 0 && observed.text.length == observed.length
+        let knownAmbiguity = recovery.hasAmbiguity(request, text: observed.text as String, completeDocument: wasComplete)
+        let cap = knownAmbiguity ? Self.readCap : 2 * FieldRecovery.nearbyLimit(for: request)
+        guard let oldSelection = try? target.selectedRange(), var (fresh, selected) = read(target, cap: cap),
               let restored = try? target.selectedRange(), oldSelection == selected, selected == restored,
               target.isFocused(), target.inputMark == mark,
               now() - start < .milliseconds(FieldRecovery.budgetMs) else {
@@ -1056,7 +1062,7 @@ public final class MacFieldQueue {
                 else if edit.scope.count >= Self.relocateChars, doc.find(edit.scope).count == 1 { start = doc.find(edit.scope)[0] }
             }
             if start == nil, now() - pending.since >= Self.placeGrace,
-               let result = recoverTarget(id: edit.id, expected: edit.scope, before: edit.before, after: edit.after) {
+               let result = recoverTarget(id: edit.id, expected: edit.scope, before: edit.before, after: edit.after, observed: doc) {
                 switch result {
                 case .replan:
                     // Coordinates, anchors and overlap ownership must all come from one observation. Let the next

@@ -21,6 +21,15 @@ public struct FieldRecovery: Sendable {
         }
     }
 
+    /// A narrower reread cannot erase ambiguity that was already visible. Transports use this shared confidence
+    /// decision to retain the broader observation's scope before allowing a fresh unique placement.
+    public func hasAmbiguity(_ request: Request, text: String, completeDocument: Bool = false) -> Bool {
+        resolve(request, text: text, generation: request.generation, revision: request.revision,
+                restored: true, completeDocument: completeDocument).contains {
+            if case .stop(_, .ambiguous) = $0 { return true }; return false
+        }
+    }
+
     public struct Target: Sendable, Equatable {
         public var id: String
         public var expected: String

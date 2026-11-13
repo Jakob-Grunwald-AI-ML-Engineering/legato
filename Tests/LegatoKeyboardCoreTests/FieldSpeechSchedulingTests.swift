@@ -83,6 +83,8 @@ import Testing
                                      targets: [.init(id: "edit", expected: "boat", before: "Keep ", after: " Stay")])!
         #expect(FieldRecovery.nearbyLimit(for: request) < FieldRecovery.lookAroundChars)
         #expect(recovery.canResolve(request, text: "Keep boat Stay"))
+        #expect(!recovery.hasAmbiguity(request, text: "Keep boat Stay"))
+        #expect(recovery.hasAmbiguity(request, text: "Keep boat Stay Keep boat Stay"))
         #expect(!recovery.canResolve(request, text: "Keep boat Stay Keep boat Stay"))
         #expect(!recovery.canResolve(request, text: "Keep ship Stay"))
     }

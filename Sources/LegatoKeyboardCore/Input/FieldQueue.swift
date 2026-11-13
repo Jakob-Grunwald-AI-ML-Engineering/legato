@@ -466,6 +466,12 @@ public struct FieldQueue: Sendable {
     public private(set) var recoveryRevision: UInt64 = 0
     public private(set) var recoveryRequest: FieldRecovery.Request?
     public private(set) var speechRevision: UInt64 = 0
+    /// Positive ambiguity in the known model remains relevant even when the proxy exposes just one nearby copy.
+    /// A model's absence of a match makes no claim about unobserved text elsewhere in the field.
+    public var recoveryHasKnownAmbiguity: Bool {
+        guard let request = recoveryRequest else { return false }
+        return recovery.hasAmbiguity(request, text: String(text))
+    }
     public var recoveryBlocksSpeech: Bool {
         guard let request = recoveryRequest else { return false }
         let ids = Set(request.targets.map(\.id))

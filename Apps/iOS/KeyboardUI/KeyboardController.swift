@@ -1271,7 +1271,8 @@ final class KeyboardController {
                 self.handle(self.queue.drainEvents()); return
             }
             let policy = FieldRecovery()
-            if policy.canResolve(request, text: origin.before + origin.after) {
+            let knownAmbiguity = self.queue.recoveryHasKnownAmbiguity
+            if !knownAmbiguity, policy.canResolve(request, text: origin.before + origin.after) {
                 self.queue.completeRecovery(request, report: origin, restored: true)
                 self.handle(self.queue.drainEvents()); return
             }
@@ -1294,7 +1295,7 @@ final class KeyboardController {
                     && self?.document.selectedText?.isEmpty != false
             }, move: { [weak self] units in self?.dispatch(.move(units), reading: true) })
             var reader = self.reader(for: fieldID)
-            reader.cap = FieldRecovery.nearbyLimit(for: request)
+            reader.cap = knownAmbiguity ? FieldRecovery.lookAroundChars : FieldRecovery.nearbyLimit(for: request)
             reader.blockLimit = reader.cap
             reader.maxRereads = 3
             var up = await reader.readUp(windows, known: "", limit: .cap)
@@ -1317,7 +1318,7 @@ final class KeyboardController {
                 // the same units when it moves and restores, rather than guessing UTF-16 again.
                 if let collapses = above.collapsesBreaks { reader.collapsesBreaks = collapses }
                 if let characters = above.movesByCharacters { reader.movesByCharacters = characters }
-                if policy.canResolve(request, text: above.text + origin.after) {
+                if !knownAmbiguity, policy.canResolve(request, text: above.text + origin.after) {
                     let returned = self.currentReport
                     if FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
                                            reportedBefore: returned.before, reportedAfter: returned.after) {
