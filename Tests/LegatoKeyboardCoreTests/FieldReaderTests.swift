@@ -425,3 +425,34 @@ private extension String {
     }
 }
 
+
+@MainActor private final class StaleEmptyWindows: FieldWindowProxy {
+    var refreshed = false
+    var cancelled = false
+    var moves: [Int] = []
+    var windowBefore: String { refreshed ? "Keep this closing." : "" }
+    var windowAfter: String { "" }
+    var isCancelled: Bool { cancelled }
+    func move(by units: Int) { moves.append(units) }
+    func pause(milliseconds: Int) async { refreshed = true }
+}
+
+@MainActor @Suite struct FieldContextRefreshTests {
+    @Test func staleEmptyContextRefreshesWithoutMovingToAnUnknownPosition() async throws {
+        let proxy = StaleEmptyWindows()
+        let refreshed = await FieldReader.refreshedWindow(proxy, settleMilliseconds: Int(FieldQueue.moveSettleMs))
+        let window = try #require(refreshed)
+        #expect(proxy.moves == [0], "Never probe backward/forward from an unknown empty context")
+        #expect(window.before == "Keep this closing.")
+        let insertion = DictationTypist.prepare("Please bring the charts", contextBefore: window.before, capitalization: .none)
+        #expect(insertion == " Please bring the charts")
+    }
+
+    @Test func cancelledRefreshDoesNotProbeOrReturnAnEmptyInsertionAnchor() async {
+        let proxy = StaleEmptyWindows()
+        proxy.cancelled = true
+        let refreshed = await FieldReader.refreshedWindow(proxy, settleMilliseconds: Int(FieldQueue.moveSettleMs))
+        #expect(refreshed == nil)
+        #expect(proxy.moves.isEmpty)
+    }
+}

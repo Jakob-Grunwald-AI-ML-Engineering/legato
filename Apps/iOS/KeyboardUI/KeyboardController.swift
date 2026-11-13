@@ -743,6 +743,8 @@ final class KeyboardController {
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.
     private func resetQueue(reason: String) {
+        liveContextTask?.cancel(); liveContextTask = nil; liveContextTaskID = nil; liveContextReady = nil
+        cursorReadID = nil
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
         queue.reset()
@@ -1009,6 +1011,9 @@ final class KeyboardController {
     /// The send mode `live`: the app publishes where the run's text should stand (`LiveDictationSnapshot`); the queue
     /// types it at its region's end and lands revisions as minimal edits. A key or a cursor move closes the region and
     /// later words start at the cursor; nothing freezes.
+    @ObservationIgnored private var liveContextTask: Task<Void, Never>?
+    @ObservationIgnored private var liveContextTaskID: UUID?
+    @ObservationIgnored private var liveContextReady: (run: String, field: String?)?
     @ObservationIgnored private var liveSnapshot: LiveDictationSnapshot?
     @ObservationIgnored private var liveSeen: LiveDictationSnapshot?
     @ObservationIgnored private var ignoredLiveRunID: String?
@@ -1045,7 +1050,9 @@ final class KeyboardController {
         guard snapshot.runID != ignoredLiveRunID else { return }
         liveSeen = snapshot
         blockedLiveRunID = nil; blockedLiveCompleted = false
-        if snapshot.runID != liveSnapshot?.runID {
+        let newRun = snapshot.runID != liveSnapshot?.runID
+        if newRun {
+            liveContextTask?.cancel(); liveContextTask = nil; liveContextTaskID = nil; liveContextReady = nil
             dismissLiveRecovery()
             liveStats = LiveDictationStats(); liveAckedVersion = nil
             liveDocumentID = document.documentID
@@ -1061,8 +1068,35 @@ final class KeyboardController {
         }
         guard isVisible, !document.isSecureTextEntry else { return }
         updateCleanup { $0.received(snapshot, at: Date()) }
+        syncQueueField()
+        // External typing/paste can leave both proxy windows stale, including stale-empty. A new take refreshes
+        // once before choosing its anchor; publications received meanwhile coalesce in liveSnapshot.
+        if liveContextReady?.run != snapshot.runID || liveContextReady?.field != document.documentID || liveContextTask != nil {
+            if liveContextTask == nil { refreshBeforeLiveRun(snapshot.runID) }
+            return
+        }
         enqueue(snapshot)
         pump()
+    }
+
+    private func refreshBeforeLiveRun(_ runID: String) {
+        let taskID = UUID(), fieldID = document.documentID
+        liveContextTaskID = taskID
+        liveContextTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.liveContextTaskID == taskID { self.liveContextTask = nil; self.liveContextTaskID = nil }
+            }
+            guard let lease = await self.pauseQueue() else { return }
+            defer { self.resumeQueue(lease) }
+            guard !Task.isCancelled, self.document.documentID == fieldID else { return }
+            let refreshed = await self.refreshContext(probe: false)
+            guard !Task.isCancelled, self.document.documentID == fieldID, self.liveContextTaskID == taskID,
+                  let newest = self.liveSnapshot, newest.runID == runID, self.blockedLiveRunID != runID else { return }
+            guard refreshed else { self.blockLiveRun(newest); return }
+            self.liveContextReady = (run: runID, field: fieldID)
+            self.enqueue(newest)
+        }
     }
 
     /// The run stops here: what it typed stays, nothing more of it is typed, and the take is recovered from History.
@@ -1115,16 +1149,32 @@ final class KeyboardController {
 
     /// Before a walk moves the cursor to read the field: the queue pauses, lands the op in flight and brings the caret
     /// back to the user's cursor (bounded). The walk then has the cursor to itself; `resumeQueue` lets the queue go on.
-    private func pauseQueue(limit: Duration = .milliseconds(2500)) async -> Bool {
+    @ObservationIgnored private var cursorReadID: UUID?
+    private func pauseQueue(limit: Duration = .milliseconds(2500)) async -> UUID? {
+        let clock = ContinuousClock(), start = clock.now, fieldID = document.documentID
+        // Magic and a new take may both need fresh context. A failed waiter never releases the current owner's lease.
+        while cursorReadID != nil || queue.paused || isFieldBusy {
+            guard !Task.isCancelled, !isTornDown, isVisible, document.documentID == fieldID,
+                  clock.now - start < limit else { return nil }
+            try? await Task.sleep(for: Self.tickInterval)
+        }
+        guard !Task.isCancelled, !isTornDown, isVisible, document.documentID == fieldID else { return nil }
+        let id = UUID()
+        cursorReadID = id
         queue.paused = true
-        let clock = ContinuousClock(), start = clock.now
         pump()
-        while !queue.isHome, !isTornDown, isVisible, clock.now - start < limit {
+        while !queue.isHome, !isTornDown, isVisible, !Task.isCancelled,
+              document.documentID == fieldID, clock.now - start < limit {
             try? await Task.sleep(for: Self.tickInterval)
             pump()
         }
-        if !queue.isHome { trace?("queue pause timed out") }
-        return queue.acquireRead()
+        guard cursorReadID == id, document.documentID == fieldID, !Task.isCancelled, isVisible,
+              queue.acquireRead() else {
+            resumeQueue(id)
+            trace?("queue pause timed out or cancelled")
+            return nil
+        }
+        return id
     }
 
     /// Before a read for an instruction: the keyboard's own writes on their way (a cleanup landing) go in first, so the
@@ -1139,7 +1189,9 @@ final class KeyboardController {
         if queue.hasOwnWork { trace?("own work before read timed out") }
     }
 
-    private func resumeQueue() {
+    private func resumeQueue(_ id: UUID) {
+        guard cursorReadID == id else { return }
+        cursorReadID = nil
         queue.releaseRead()
         queue.paused = false
         pump()
@@ -1173,7 +1225,7 @@ final class KeyboardController {
 
     /// A reader that knows what earlier reads found out about this field.
     private func reader(for field: String?) -> FieldReader {
-        FieldReader(settleMilliseconds: 25, collapsesBreaks: field != nil && collapsingField == field ? true : nil,
+        FieldReader(settleMilliseconds: Int(FieldQueue.moveSettleMs), collapsesBreaks: field != nil && collapsingField == field ? true : nil,
                     movesByCharacters: field != nil && charactersField == field ? true : nil)
     }
 
@@ -1191,12 +1243,22 @@ final class KeyboardController {
     /// last reported to the keyboard when text comes in another way (a hardware keyboard, a paste): the windows then
     /// show text that is no longer there. A move of one character and back makes it report afresh; each move is given
     /// the settle gap (the proxy shows a move before the host applied it). Not with a selection (a move would collapse it).
-    @discardableResult private func refreshContext() async -> Bool {
+    @discardableResult private func refreshContext(probe: Bool = true) async -> Bool {
         guard queue.ownsRead, isVisible, !isTornDown, !shouldCancelFieldOperation, !Task.isCancelled else { return false }
         guard document.selectedText?.isEmpty != false else { return true }
         let id = document.documentID
-        let origin = (before: shown(document.contextBefore), after: shown(document.contextAfter))
         guard id != nil else { return false }
+        let windows = DocumentWindows(document, cancelled: { [weak self] in
+            self?.isVisible != true || self?.isTornDown != false || Task.isCancelled
+        }, canMove: { [weak self] in self?.queue.ownsRead == true }, move: { [weak self] units in
+            self?.dispatch(.move(units), reading: true)
+        })
+        guard let fresh = await FieldReader.refreshedWindow(windows, settleMilliseconds: Int(FieldQueue.moveSettleMs)),
+              isVisible, !isTornDown, document.documentID == id, queue.ownsRead, !Task.isCancelled else { return false }
+        let origin = (before: shown(fresh.before), after: shown(fresh.after))
+        // A known nonempty field with no readable context is unknown, never an empty insertion anchor.
+        guard !document.hasText || !origin.before.isEmpty || !origin.after.isEmpty else { return false }
+        guard probe else { return true }
         // An empty report offers no safe position to probe. In particular, never perform a blind back/forward pair.
         guard let character = origin.before.last ?? origin.after.first else { return true }
         isNudging = true
@@ -1351,10 +1413,10 @@ final class KeyboardController {
         // answer: it hears that the read is under way.
         if !queue.isHome || queue.hasOwnWork { link.writeReadReply(FieldReadReply(id: request.id, state: .reading)) }
         if request.kind == .context || request.kind == .contextInPlace { await landOwnWork() }
-        defer { resumeQueue() }
-        guard await pauseQueue() else {
+        guard let readLease = await pauseQueue() else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "The field is busy. Try again in a moment."))
         }
+        defer { resumeQueue(readLease) }
         guard await refreshContext() else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed,
                 error: "This app did not confirm the cursor position. Nothing was edited."))
@@ -2055,7 +2117,7 @@ final class KeyboardController {
     }
     func pause(milliseconds: Int) async {
         // Restoration still needs real host turns when the requesting task was cancelled.
-        await Task.detached { try? await Task.sleep(for: .milliseconds(milliseconds)) }.value
+        await Task.detached { try? await Task.sleep(for: .milliseconds(max(milliseconds, Int(FieldQueue.moveSettleMs)))) }.value
     }
 }
 
@@ -2078,6 +2140,6 @@ final class KeyboardController {
     }
     func pause(milliseconds: Int) async {
         // Restoration still needs real host turns when the requesting task was cancelled.
-        await Task.detached { try? await Task.sleep(for: .milliseconds(milliseconds)) }.value
+        await Task.detached { try? await Task.sleep(for: .milliseconds(max(milliseconds, Int(FieldQueue.moveSettleMs)))) }.value
     }
 }

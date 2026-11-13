@@ -1135,10 +1135,9 @@ public struct FieldQueue: Sendable {
         return .started
     }
 
-    /// Back to front, span by span (`SpanPlanner`): jump to the span's end, then either one delete of it and its new
-    /// text typed, or each change in it (move, delete its old characters, type its new ones). Typed one grapheme per
-    /// op when paced, else in one op. `minimal`: only the differing characters, never a whole word or a block (in a
-    /// region the user edited, those would delete and retype the user's own characters).
+    /// Exact changes, back to front, grouped for cursor jumps. Every unchanged character stays in the host;
+    /// deleting a changed range is still one confirmed grapheme per operation. `minimal` also avoids grouping
+    /// separate changes in regions edited by the user. Insertions animate when paced.
     private func plan(spanID: Int, from current: [Character], to target: [Character], paced: Bool, leaveTailAppend: Bool = false,
                       minimal: Bool = false) -> [QOp] {
         guard spans[spanID] != nil else { return [] }

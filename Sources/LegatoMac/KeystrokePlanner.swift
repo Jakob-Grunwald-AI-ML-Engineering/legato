@@ -4,12 +4,8 @@ import LegatoKeyboardCore
 /// Plans how a change of a region's text goes into a field that takes keystrokes (Chromium web content), and at what
 /// pace. Pure. The same rules as the iOS keyboard's span planner:
 ///
-/// - Spans: the minimal grapheme diff; a word whose graphemes change by at least half is replaced whole ("Thursday" →
-///   "Friday"; "colour" → "color" stays one deleted letter); changes a few unchanged graphemes apart, or in one word,
-///   merge into one span.
-/// - Mode: a span goes in as minimal edits (the differing characters only, with caret moves between them) or as one
-///   block delete and its new text typed, whichever costs less; a tie keeps the minimal edits. A caret move costs one
-///   key per grapheme up to the price of a jump (`jumpMs`): the queue jumps straight to a far change.
+/// - Spans share the exact desktop grapheme diff. Nearby changes share jumps, while unchanged letters, spaces
+///   and punctuation remain in the host. Cost estimates never broaden a replacement into a whole word or block.
 /// - Pace: one grapheme per key. The gap between typed graphemes spreads the work over about `budgetMs`, no slower than
 ///   `calmMs` and no faster than `floorMs`; a backlog of `behindOps` or more goes at the floor.
 public enum KeystrokePlanner {
