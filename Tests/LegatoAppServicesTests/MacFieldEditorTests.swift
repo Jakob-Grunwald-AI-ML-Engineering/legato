@@ -13,6 +13,7 @@ import LegatoMac
     var readable = true
     var ignoreWrites = false
     var throwAfterWrite = false
+    var loseFocusAfterWrites: Int?
     var normalizeTrailingNBSP = false
     var corruptPrefixAfterWrite = false
     var inPlace = true
@@ -42,6 +43,7 @@ import LegatoMac
             value = (value as NSString).replacingCharacters(in: NSRange(location: 0, length: 1), with: "X")
         }
         selection = .init(location: range.location + text.utf16.count, length: 0)
+        if let limit = loseFocusAfterWrites, writes.count >= limit { focused = false }
         if throwAfterWrite { throw TextTargetReadError.unsupported }
     }
 }
@@ -685,7 +687,7 @@ import LegatoMac
         #expect(target.value == "small cat is here")
         #expect(target.selection == .init(location: 17, length: 0))
         #expect(target.selections.last == .init(location: 17, length: 0))
-        #expect(Array(target.writes.suffix(2)) == [.init(location: 8, length: 1), .init(location: 8, length: 0)])
+        #expect(target.writes.last == .init(location: 8, length: 1))
     }
     @Test func aHostWriteThatThrowsButLandedCounts() async throws {
         let target = EditorTarget("draft")
@@ -771,7 +773,7 @@ import LegatoMac
         editor.sleep = { duration in pauses.append(duration); frames.append(target.value) }
         await editor.applyLive(snapshot("aXYc unchanged tail", complete: true))
         #expect(target.value == "aXYc unchanged tail")
-        #expect(target.writes.count == 3)
+        #expect(target.writes.count == 2, "One atomic replacement, then the extra new grapheme")
         #expect(target.writes.allSatisfy { $0.length <= 1 })
         // The trial keeps a 5 ms gap between typed characters, with none after the last one.
         #expect(pauses == [.milliseconds(5)])
@@ -815,9 +817,26 @@ import LegatoMac
         editor.typewriter = { true }
         editor.sleep = { _ in if target.value.hasPrefix("c") { target.value = "Q" + target.value.dropFirst() } }
         await editor.applyLive(snapshot("cXYZ unchanged tail", complete: true))
-        #expect(target.value == "QX unchanged tail")
+        #expect(target.value == "QXb unchanged tail", "The interrupted replacement keeps the unprocessed original b")
         #expect(copied.isEmpty)
         #expect(editor.panel.recoveryText == "cXYZ unchanged tail")
+    }
+
+    @Test func interruptedNativeMagicReportsConfirmedPartialChangesWithoutClaimingNothingWasEdited() async throws {
+        let original = "return before sunset"
+        let target = EditorTarget(original)
+        target.loseFocusAfterWrites = 3
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.sleep = { _ in await Task.yield() }
+        editor.begin(); editor.beginInstruction()
+        let read = try await editor.read(.context, instructionID: "partial", reading: {})
+        let ack = await editor.apply(.init(instructionID: "partial", documentID: read.documentID,
+                                           before: original, after: "", target: original.uppercased()))
+        #expect(ack?.applied == false)
+        #expect(ack?.stopped == true)
+        #expect(ack?.reason?.contains("Some changes may remain") == true)
+        #expect(ack?.reason?.contains("Nothing was edited") == false)
+        #expect(target.value.lowercased() == original)
     }
 
 }

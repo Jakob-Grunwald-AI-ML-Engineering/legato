@@ -64,6 +64,8 @@ public final class MacFieldQueue {
         /// The result's range in the field.
         case applied(UTF16Range)
         case dropped(Reason)
+        /// Confirmed changes were made before editing stopped; the caller must not claim nothing was edited.
+        case stopped(Reason)
     }
     /// A run handed to the panel because its field stopped reading (`onUnreadable`): `text` is its newest text, of which
     /// the first `typed` characters stand for what is in the field already. That text stays as it is.
@@ -184,6 +186,9 @@ public final class MacFieldQueue {
         var landing: [Character]?
         /// Keystroke fields: the planned keys toward `desired`.
         var keys: KeyUnit?
+        var nativePlan: NativeEditPlan?
+        var verifiedWrites = 0
+        var uncertainWrite = false
         init(id: String, runID: String?, start: Int, current: [Character], desired: [Character], open: Bool) {
             self.id = id; self.runID = runID; self.start = start; self.current = current; self.desired = desired; self.open = open
         }
@@ -853,6 +858,7 @@ public final class MacFieldQueue {
             caretOwed = false
             revision += 1
             for index in runs.indices { close(&runs[index], cause: moved ? "cursor" : "input") }
+            for region in allRegions { region.nativePlan = nil }
             note(.user, selection: selection, detail: moved ? "moved" : "acted")
         }
         // A caret past the text (work that did not land after all) is the field's own caret again.
@@ -900,6 +906,7 @@ public final class MacFieldQueue {
         if let found = relocate(region, doc) {
             note(.relocated, id: region.id, run: region.runID, location: found, detail: "from \(region.start)")
             region.start = found
+            region.nativePlan = nil
             refreshContext(region, doc)
             return
         }
@@ -908,7 +915,10 @@ public final class MacFieldQueue {
             switch recovered {
             case .replan(let placement, let fresh):
                 region.start = fresh.base + String((fresh.text as String).prefix(placement.range.lowerBound)).utf16.count
+                if region.current != Array(placement.text) { region.verifiedWrites += 1 }
+                region.uncertainWrite = false
                 region.current = Array(placement.text)
+                region.nativePlan = nil
                 region.keys = nil; region.landing = nil; region.failures = 0
                 refreshContext(region, fresh)
                 recoveredRead = true
@@ -1052,9 +1062,16 @@ public final class MacFieldQueue {
         edits = waiting
     }
 
+    private func stoppedResult(_ region: Region, reason: Reason) -> EditResult {
+        if region.verifiedWrites > 0 { return .stopped(reason) }
+        // An unconfirmed write is uncertain, even if focus loss is what finally stopped the work.
+        if region.uncertainWrite { return .dropped(.failed) }
+        return .dropped(reason)
+    }
+
     private func finishEdits() {
         editRegions.removeAll { entry in
-            if entry.region.lost { entry.done.resume(returning: .dropped(entry.region.dropReason)); return true }
+            if entry.region.lost { entry.done.resume(returning: stoppedResult(entry.region, reason: entry.region.dropReason)); return true }
             guard !entry.region.pending else { return false }
             let range = UTF16Range(location: entry.region.start, length: entry.region.end - entry.region.start)
             note(.applied, id: entry.region.id, location: range.location, length: range.length)
@@ -1100,31 +1117,34 @@ public final class MacFieldQueue {
 
     private var pacedNow: Bool { flushing == 0 && paced() }
 
+    /// Diagnostic count: verified character advances reuse a plan; only a changed target or field rebuilds the diff.
+    private(set) var nativePlanBuilds = 0
+
+    private func nativePlan(for region: Region) -> NativeEditPlan {
+        if let plan = region.nativePlan, plan.matches(current: region.current, desired: region.desired, paced: pacedNow) { return plan }
+        nativePlanBuilds += 1
+        let plan = NativeEditPlan(current: region.current, desired: region.desired, paced: pacedNow)
+        region.nativePlan = plan
+        return plan
+    }
+
     private func perform(_ region: Region, doc: Document, target: any TextTarget) async -> Bool {
         guard beginOperation(.edit) else { return false }
         defer { operations.invalidate() }
-        let changes = FieldEditCoordinator.changes(from: region.current, to: region.desired)
-        guard let change = changes.first else { return true }
-        let whole = !pacedNow
-        var lower = change.start, upper = change.end, insertion: [Character] = []
-        if whole {
-            insertion = change.text
-        } else if upper > lower {
-            lower = upper - 1 // one grapheme at a time, from the end of the deleted span
-        } else {
-            insertion = [change.text[0]]
-        }
+        var plan = nativePlan(for: region)
+        guard let step = plan.next, let after = plan.afterNext else { return true }
+        let lower = step.range.lowerBound, upper = step.range.upperBound
+        let insertion = step.replacement
         let location = region.start + String(region.current[..<lower]).utf16.count
         let removed = String(region.current[lower..<upper])
         let range = UTF16Range(location: location, length: removed.utf16.count)
         let text = String(insertion)
         // The caret follows an open region's end when the user's caret was there.
         let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
-        var after = region.current
-        after.replaceSubrange(lower..<upper, with: insertion)
         note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: text,
              read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40))
         opsSent += 1
+        region.uncertainWrite = true
         do {
             try target.replace(range, with: text)
             operationDispatched()
@@ -1139,7 +1159,8 @@ public final class MacFieldQueue {
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
             return await failed(region, after: after, reason: "readback", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
         }
-        guard confirmOperation(true) else { return false }
+        guard confirmOperation(true), plan.confirm(after) else { region.nativePlan = nil; return false }
+        region.nativePlan = plan
         let delta = text.utf16.count - range.length
         apply(region, landed: after, at: range, delta: delta, inserted: text.utf16.count)
         revision += 1
@@ -1161,7 +1182,7 @@ public final class MacFieldQueue {
         note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start, text: String(region.current),
              selection: wanted)
         if pacedNow, !insertion.isEmpty {
-            let remaining = FieldEditCoordinator.changes(from: region.current, to: region.desired).reduce(0) { $0 + $1.text.count }
+            let remaining = plan.remainingInsertions
             let ops = remaining + typedBacklog(besides: region)
             // Nothing more to type: no wait after the last grapheme.
             if ops > 0 {
@@ -1253,6 +1274,7 @@ public final class MacFieldQueue {
             // this key was planned (for a piped key, where the one before it was seen to leave it).
             guard sendKey(key, target: target, mark: mark, selection: piped == 1 ? selection : UTF16Range(location: caret, length: 0)) == nil
             else { return piped > 1 }
+            region.uncertainWrite = true
             let sentAt = now()
             lastKey = (.edit, sentAt)
             probeAt = nil
@@ -1742,6 +1764,9 @@ public final class MacFieldQueue {
         let pivot = range?.location ?? region.start
         let pivotEnd = range.map { $0.location + $0.length } ?? region.end
         let oldEnd = region.end
+        if region.current != landed { region.verifiedWrites += 1 }
+        region.uncertainWrite = false
+        if let plan = region.nativePlan, plan.expected != landed { region.nativePlan = nil }
         region.current = landed
         region.failures = 0
         // Regions after this one shift; one that overlaps it (a run region under a Magic edit) keeps its place and is
@@ -1763,6 +1788,8 @@ public final class MacFieldQueue {
     }
 
     private func failed(_ region: Region, after: [Character], reason: String, unchanged: Bool = false) async -> Bool {
+        region.nativePlan = nil
+        if unchanged { region.uncertainWrite = false }
         region.failures += 1
         region.landing = unchanged ? region.current : after
         note(.mismatch, id: region.id, run: region.runID, reason: reason, detail: "failures=\(region.failures)")
@@ -1864,7 +1891,7 @@ public final class MacFieldQueue {
         edits = []
         for entry in editRegions {
             if entry.region.pending { drop(entry.region, reason) }
-            entry.done.resume(returning: .dropped(reason))
+            entry.done.resume(returning: stoppedResult(entry.region, reason: reason))
         }
         editRegions = []
         for index in runs.indices { abandon(index, reason) }
