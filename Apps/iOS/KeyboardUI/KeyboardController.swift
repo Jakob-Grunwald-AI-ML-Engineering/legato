@@ -743,7 +743,6 @@ final class KeyboardController {
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.
     private func resetQueue(reason: String) {
-        liveContextTask?.cancel(); liveContextTask = nil; liveContextTaskID = nil; liveContextReady = nil
         cursorReadID = nil
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
@@ -1011,9 +1010,6 @@ final class KeyboardController {
     /// The send mode `live`: the app publishes where the run's text should stand (`LiveDictationSnapshot`); the queue
     /// types it at its region's end and lands revisions as minimal edits. A key or a cursor move closes the region and
     /// later words start at the cursor; nothing freezes.
-    @ObservationIgnored private var liveContextTask: Task<Void, Never>?
-    @ObservationIgnored private var liveContextTaskID: UUID?
-    @ObservationIgnored private var liveContextReady: (run: String, field: String?)?
     @ObservationIgnored private var liveSnapshot: LiveDictationSnapshot?
     @ObservationIgnored private var liveSeen: LiveDictationSnapshot?
     @ObservationIgnored private var ignoredLiveRunID: String?
@@ -1050,9 +1046,7 @@ final class KeyboardController {
         guard snapshot.runID != ignoredLiveRunID else { return }
         liveSeen = snapshot
         blockedLiveRunID = nil; blockedLiveCompleted = false
-        let newRun = snapshot.runID != liveSnapshot?.runID
-        if newRun {
-            liveContextTask?.cancel(); liveContextTask = nil; liveContextTaskID = nil; liveContextReady = nil
+        if snapshot.runID != liveSnapshot?.runID {
             dismissLiveRecovery()
             liveStats = LiveDictationStats(); liveAckedVersion = nil
             liveDocumentID = document.documentID
@@ -1068,35 +1062,8 @@ final class KeyboardController {
         }
         guard isVisible, !document.isSecureTextEntry else { return }
         updateCleanup { $0.received(snapshot, at: Date()) }
-        syncQueueField()
-        // External typing/paste can leave both proxy windows stale, including stale-empty. A new take refreshes
-        // once before choosing its anchor; publications received meanwhile coalesce in liveSnapshot.
-        if liveContextReady?.run != snapshot.runID || liveContextReady?.field != document.documentID || liveContextTask != nil {
-            if liveContextTask == nil { refreshBeforeLiveRun(snapshot.runID) }
-            return
-        }
         enqueue(snapshot)
         pump()
-    }
-
-    private func refreshBeforeLiveRun(_ runID: String) {
-        let taskID = UUID(), fieldID = document.documentID
-        liveContextTaskID = taskID
-        liveContextTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                if self.liveContextTaskID == taskID { self.liveContextTask = nil; self.liveContextTaskID = nil }
-            }
-            guard let lease = await self.pauseQueue() else { return }
-            defer { self.resumeQueue(lease) }
-            guard !Task.isCancelled, self.document.documentID == fieldID else { return }
-            let refreshed = await self.refreshContext(probe: false)
-            guard !Task.isCancelled, self.document.documentID == fieldID, self.liveContextTaskID == taskID,
-                  let newest = self.liveSnapshot, newest.runID == runID, self.blockedLiveRunID != runID else { return }
-            guard refreshed else { self.blockLiveRun(newest); return }
-            self.liveContextReady = (run: runID, field: fieldID)
-            self.enqueue(newest)
-        }
     }
 
     /// The run stops here: what it typed stays, nothing more of it is typed, and the take is recovered from History.
@@ -1243,22 +1210,12 @@ final class KeyboardController {
     /// last reported to the keyboard when text comes in another way (a hardware keyboard, a paste): the windows then
     /// show text that is no longer there. A move of one character and back makes it report afresh; each move is given
     /// the settle gap (the proxy shows a move before the host applied it). Not with a selection (a move would collapse it).
-    @discardableResult private func refreshContext(probe: Bool = true) async -> Bool {
+    @discardableResult private func refreshContext() async -> Bool {
         guard queue.ownsRead, isVisible, !isTornDown, !shouldCancelFieldOperation, !Task.isCancelled else { return false }
         guard document.selectedText?.isEmpty != false else { return true }
         let id = document.documentID
+        let origin = (before: shown(document.contextBefore), after: shown(document.contextAfter))
         guard id != nil else { return false }
-        let windows = DocumentWindows(document, cancelled: { [weak self] in
-            self?.isVisible != true || self?.isTornDown != false || Task.isCancelled
-        }, canMove: { [weak self] in self?.queue.ownsRead == true }, move: { [weak self] units in
-            self?.dispatch(.move(units), reading: true)
-        })
-        guard let fresh = await FieldReader.refreshedWindow(windows, settleMilliseconds: Int(FieldQueue.moveSettleMs)),
-              isVisible, !isTornDown, document.documentID == id, queue.ownsRead, !Task.isCancelled else { return false }
-        let origin = (before: shown(fresh.before), after: shown(fresh.after))
-        // A known nonempty field with no readable context is unknown, never an empty insertion anchor.
-        guard !document.hasText || !origin.before.isEmpty || !origin.after.isEmpty else { return false }
-        guard probe else { return true }
         // An empty report offers no safe position to probe. In particular, never perform a blind back/forward pair.
         guard let character = origin.before.last ?? origin.after.first else { return true }
         isNudging = true

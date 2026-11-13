@@ -37,16 +37,6 @@ public extension FieldWindowProxy {
 /// The read stops at the nearest structural stop above the cursor (the field's start, a quote header, quoted lines,
 /// a signature delimiter), at `cap` characters, or after one block for `read_more`.
 @MainActor public struct FieldReader {
-    /// Ask the proxy to refresh its cached windows without changing the cursor. A returned window is still a
-    /// platform observation, not an independent host acknowledgement. The caller owns the cursor lease throughout.
-    public static func refreshedWindow(_ proxy: any FieldWindowProxy, settleMilliseconds: Int) async -> (before: String, after: String)? {
-        guard !proxy.isCancelled else { return nil }
-        proxy.move(by: 0)
-        await proxy.pause(milliseconds: settleMilliseconds)
-        guard !proxy.isCancelled else { return nil }
-        return (proxy.windowBefore, proxy.windowAfter)
-    }
-
     public enum Limit: Sendable, Equatable {
         /// One block (`read_more`): a paragraph group of at most `blockLimit` new characters.
         case block
